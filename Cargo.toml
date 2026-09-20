@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/fenecdb/fenec"
@@ -24,11 +24,11 @@ categories = ["database", "database-implementations", "wasm"]
 # publish a dependency that has only a path, and keeping them here means a
 # release bumps one number instead of seven.
 [workspace.dependencies]
-fenec-core = { version = "0.1.1", path = "crates/fenec-core" }
-fenec-ql = { version = "0.1.1", path = "crates/fenec-ql" }
-fenec-http = { version = "0.1.1", path = "crates/fenec-http" }
-fenec-pg = { version = "0.1.1", path = "crates/fenec-pg" }
-fenec-import = { version = "0.1.1", path = "crates/fenec-import" }
+fenec-core = { version = "0.1.2", path = "crates/fenec-core" }
+fenec-ql = { version = "0.1.2", path = "crates/fenec-ql" }
+fenec-http = { version = "0.1.2", path = "crates/fenec-http" }
+fenec-pg = { version = "0.1.2", path = "crates/fenec-pg" }
+fenec-import = { version = "0.1.2", path = "crates/fenec-import" }
 
 [profile.release]
 opt-level = 3
