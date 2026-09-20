@@ -4,11 +4,15 @@ description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-fenec-core = { path = "../fenec-core" }
-fenec-ql = { path = "../fenec-ql" }
-fenec-http = { path = "../fenec-http" }
+fenec-core.workspace = true
+fenec-ql.workspace = true
+fenec-http.workspace = true
 
 [[bin]]
 name = "fenec-pg"

@@ -4,7 +4,11 @@ description = "HTTP/JSON endpoint for fenecdb: a REST surface derived from the s
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-fenec-core = { path = "../fenec-core" }
-fenec-ql = { path = "../fenec-ql" }
+fenec-core.workspace = true
+fenec-ql.workspace = true

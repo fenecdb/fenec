@@ -15,6 +15,20 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/fenecdb/fenec"
+readme = "README.md"
+keywords = ["database", "vector", "embedded", "wasm", "postgres"]
+categories = ["database", "database-implementations", "wasm"]
+
+# The internal crates carry a version as well as a path: cargo refuses to
+# publish a dependency that has only a path, and keeping them here means a
+# release bumps one number instead of seven.
+[workspace.dependencies]
+fenec-core = { version = "0.1.0", path = "crates/fenec-core" }
+fenec-ql = { version = "0.1.0", path = "crates/fenec-ql" }
+fenec-http = { version = "0.1.0", path = "crates/fenec-http" }
+fenec-pg = { version = "0.1.0", path = "crates/fenec-pg" }
+fenec-import = { version = "0.1.0", path = "crates/fenec-import" }
 
 [profile.release]
 opt-level = 3

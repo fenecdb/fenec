@@ -4,9 +4,13 @@ description = "FenecQL: fenecdb's minimal query language"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-fenec-core = { path = "../fenec-core", default-features = false }
+fenec-core = { workspace = true, default-features = false }
 
 [features]
 default = []
