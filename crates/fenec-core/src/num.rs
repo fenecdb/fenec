@@ -516,9 +516,27 @@ mod tests {
     #[test]
     fn the_fast_path_is_exact() {
         for text in [
-            "0", "-0", "1", "-1", "1.5", "0.1", "0.2", "0.3", "3.14159265358979", "1e10",
-            "1e-10", "1e22", "1e-22", "123456789.123456789", "-0.04729", "9007199254740992",
-            "0.00000001", "0.000000000000000000001", "2", "1024", "6.02e23",
+            "0",
+            "-0",
+            "1",
+            "-1",
+            "1.5",
+            "0.1",
+            "0.2",
+            "0.3",
+            "3.14159265358979",
+            "1e10",
+            "1e-10",
+            "1e22",
+            "1e-22",
+            "123456789.123456789",
+            "-0.04729",
+            "9007199254740992",
+            "0.00000001",
+            "0.000000000000000000001",
+            "2",
+            "1024",
+            "6.02e23",
         ] {
             same(text);
         }
@@ -528,17 +546,17 @@ mod tests {
     fn the_slow_path_is_exact() {
         for text in [
             // Boundaries and the classic torture cases.
-            "2.2250738585072011e-308",  // the PHP hang
-            "2.2250738585072014e-308",  // smallest normal
-            "4.9406564584124654e-324",  // smallest subnormal
+            "2.2250738585072011e-308", // the PHP hang
+            "2.2250738585072014e-308", // smallest normal
+            "4.9406564584124654e-324", // smallest subnormal
             "1e-323",
-            "1.7976931348623157e308",   // largest finite
-            "1.7976931348623159e308",   // just over -> infinity
+            "1.7976931348623157e308", // largest finite
+            "1.7976931348623159e308", // just over -> infinity
             "1e309",
             "1e-400",
-            "9007199254740993",         // 2^53 + 1, not representable
+            "9007199254740993", // 2^53 + 1, not representable
             "9007199254740995",
-            "1e23",                     // first power of ten off the fast path
+            "1e23", // first power of ten off the fast path
             "1e-23",
             "8.98846567431158e307",
             "0.500000000000000166533453693773481063544750213623046875",
@@ -567,7 +585,10 @@ mod tests {
             same(&format!("{f:e}"));
             checked += 1;
         }
-        assert!(checked * 4 > SAMPLES * 3, "too few finite samples: {checked}");
+        assert!(
+            checked * 4 > SAMPLES * 3,
+            "too few finite samples: {checked}"
+        );
     }
 
     #[test]
@@ -584,7 +605,11 @@ mod tests {
             for k in 0..ndigits {
                 let d = (rng.next() % 10) as u8;
                 // No leading zero, so the digit count means what it says.
-                s.push(if k == 0 && d == 0 { '1' } else { (b'0' + d) as char });
+                s.push(if k == 0 && d == 0 {
+                    '1'
+                } else {
+                    (b'0' + d) as char
+                });
             }
             if rng.next() & 1 == 0 {
                 s.push('.');
@@ -633,7 +658,18 @@ mod tests {
 
     #[test]
     fn accepted_shapes_match_the_reference_on_signs_and_zeros() {
-        for text in ["0", "-0", "0.0", "-0.0", "0e0", "-0e100", "0.000e-99", "+1.5", ".5", "5."] {
+        for text in [
+            "0",
+            "-0",
+            "0.0",
+            "-0.0",
+            "0e0",
+            "-0e100",
+            "0.000e-99",
+            "+1.5",
+            ".5",
+            "5.",
+        ] {
             same(text);
         }
     }
