@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/fenecdb/fenec/discussions
+    about: >
+      For "how do I ...", start a discussion. README is the long-form
+      reference and covers most of the surface.

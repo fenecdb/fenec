@@ -1,0 +1,71 @@
+name: Bug report
+description: Something behaves differently from what the README documents
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: README *Limits* lists what is deliberately out of scope
+        and the fixed limits that error rather than truncate. A query that
+        errors at 10 000 `near` rows or 512 levels of expression depth is
+        working as designed.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      options:
+        - FenecQL (parser / query execution)
+        - PostgreSQL wire protocol (fenec-pg)
+        - HTTP / JSON / SSE (fenec-http)
+        - Browser / WASM (web/fenec.js, fenec-wasm)
+        - CLI (fenec shell, fenec types)
+        - Import (fenec import, SQLite or PostgreSQL)
+        - Storage / file format / recovery
+        - Vector index (HNSW, recall, distance)
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest set of statements that shows it. A schema plus a few rows
+        beats a description of a schema.
+      render: sql
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: A release tag, or the commit you built from.
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: 'OS and architecture; for the browser, which engine. e.g. macOS 15 arm64, or Firefox 130 on Linux'
+    validations:
+      required: true
+
+  - type: textarea
+    id: scale
+    attributes:
+      label: Scale (for anything about performance, recall or memory)
+      description: >
+        Row count, vector dimension, the `ef` you queried with, the file size,
+        and whether the HNSW graph was present on open or rebuilt. Without
+        these a performance report cannot be reproduced.

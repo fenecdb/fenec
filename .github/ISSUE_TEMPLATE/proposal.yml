@@ -1,0 +1,46 @@
+name: Proposal
+description: A new capability, or a change to an existing one
+labels: [proposal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        README *Out of scope* records what was deliberately left out and why --
+        transactions, a page cache, multi-process access, and more. A proposal
+        to add one of those needs to take on the reasoning there, not just
+        restate the feature.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can't you do today? Describe the situation, not the fix.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: >
+        What the surface would look like -- the FenecQL syntax, the endpoint,
+        the flag. Concrete enough to argue with.
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: >
+        CONTRIBUTING.md lists the invariants: zero dependencies, the dependency
+        direction, limits that error instead of truncating, the HNSW graph
+        staying derived data, no threads on wasm32. Which of them does this
+        touch, and what happens to the WASM bundle size?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
