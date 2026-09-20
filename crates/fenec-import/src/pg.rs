@@ -281,6 +281,11 @@ fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value> {
             }
             let mut v = Vec::new();
             for part in inner.split(',') {
+                // `str::parse`, and so still `core`'s 12 KB table of powers
+                // of five -- which is why the default `fenec` binary carries
+                // it while `fenec-pg` and `make small` no longer do. Going
+                // through `num::parse_f64` and narrowing would round twice,
+                // and a component is not worth being slightly wrong about.
                 v.push(part.trim().parse::<f32>().map_err(|_| bad("a vector"))?);
             }
             Value::Vector(v)

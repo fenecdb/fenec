@@ -352,7 +352,15 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
             _ => return Err(bad("a bool")),
         },
         DataType::Int => Value::Int(raw.parse().map_err(|_| bad("an integer"))?),
-        DataType::Float => Value::Float(raw.parse().map_err(|_| bad("a number"))?),
+        // `num::parse_f64`, the same parser the JSON body and FenecQL use,
+        // rather than `str::parse`. It is stricter by exactly one thing --
+        // it has no spelling for infinity -- which makes the query string
+        // agree with the JSON body, where `inf` was never a number either.
+        // It also keeps `core`'s 12 KB table of powers of five out of every
+        // binary that links this crate, `fenec-pg` included.
+        DataType::Float => {
+            Value::Float(fenec_core::num::parse_f64(raw).ok_or_else(|| bad("a number"))?)
+        }
         DataType::Text => Value::Text(raw.to_string()),
         DataType::Bytes => Value::Bytes(raw.as_bytes().to_vec()),
         // Both ISO-8601 and epoch milliseconds are accepted.

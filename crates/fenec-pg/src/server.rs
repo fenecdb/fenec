@@ -1009,6 +1009,35 @@ fn be_i32(b: &[u8], pos: &mut usize) -> i32 {
     v
 }
 
+/// A float as a PostgreSQL client writes it.
+///
+/// `num::parse_f64` is deliberately strict: FenecQL and JSON have no spelling
+/// for infinity, so neither accepts one. PostgreSQL's `float8` input does,
+/// and a client is entitled to send it, so the specials are recognised here
+/// and every actual decimal goes to the shared parser. That way the server
+/// stops linking `str::parse::<f64>()` -- and the 12 KB table of powers of
+/// five behind it -- for the sake of the word `inf`.
+///
+/// The accepted set is exactly what `str::parse` took: an optional sign,
+/// then `inf`, `infinity` or `nan`, case-insensitive, with nothing around
+/// them. `-nan` keeps its sign bit, as negating a NaN does.
+fn parse_float_param(t: &str) -> Option<f64> {
+    let (neg, rest) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let special = if rest.eq_ignore_ascii_case("inf") || rest.eq_ignore_ascii_case("infinity") {
+        f64::INFINITY
+    } else if rest.eq_ignore_ascii_case("nan") {
+        f64::NAN
+    } else {
+        // Not a special: hand the whole thing over, sign included.
+        return fenec_core::num::parse_f64(t);
+    };
+    Some(if neg { -special } else { special })
+}
+
 /// Converts a PG parameter into a fenecdb value. A `[0.1,0.2]` arriving in
 /// text format is recognised as an embedding (the same notation as pgvector).
 fn decode_param(raw: &[u8], binary: bool) -> Value {
@@ -1029,13 +1058,7 @@ fn decode_param(raw: &[u8], binary: bool) -> Value {
     if let Ok(i) = t.parse::<i64>() {
         return Value::Int(i);
     }
-    // Deliberately `str::parse`, not `num::parse_f64` like FenecQL and JSON.
-    // The two agree bit for bit on every decimal; they part only on `inf`,
-    // `Infinity` and `NaN`, which `num` rejects and PostgreSQL's own float8
-    // input accepts. Switching here would silently turn a client's `inf` into
-    // `Text("inf")`, and the table `num` exists to avoid is 12 KB of a wasm
-    // module -- nothing in a 636 KB native binary.
-    if let Ok(f) = t.parse::<f64>() {
+    if let Some(f) = parse_float_param(t) {
         return Value::Float(f);
     }
     match t {
@@ -1381,4 +1404,130 @@ fn execute_into(
         }
     }
     guard.sync_if_needed(cfg.sync);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse_float_param` replaced `str::parse::<f64>()` here, so the only
+    /// thing that matters is that it still answers exactly the same -- values
+    /// and rejections both, bit for bit, NaN's sign bit included.
+    #[track_caller]
+    fn agrees(t: &str) {
+        match (parse_float_param(t), t.parse::<f64>()) {
+            (Some(a), Ok(b)) => assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "{t:?}: {a} ({:#018x}) against {b} ({:#018x})",
+                a.to_bits(),
+                b.to_bits()
+            ),
+            (None, Err(_)) => {}
+            (a, b) => panic!("{t:?}: parse_float_param gave {a:?}, str::parse gave {b:?}"),
+        }
+    }
+
+    #[test]
+    fn the_specials_are_spelt_the_same_way() {
+        for t in [
+            "inf",
+            "INF",
+            "Inf",
+            "+inf",
+            "-inf",
+            "infinity",
+            "Infinity",
+            "INFINITY",
+            "iNfInItY",
+            "+infinity",
+            "-infinity",
+            "nan",
+            "NaN",
+            "NAN",
+            "nAn",
+            "+nan",
+            "-nan",
+        ] {
+            agrees(t);
+        }
+        // The sign bit is the part an `is_nan()` check would miss.
+        assert_eq!(
+            parse_float_param("-nan").unwrap().to_bits(),
+            0xfff8_0000_0000_0000
+        );
+        assert_eq!(
+            parse_float_param("nan").unwrap().to_bits(),
+            0x7ff8_0000_0000_0000
+        );
+    }
+
+    #[test]
+    fn near_misses_are_still_refused() {
+        for t in [
+            "infi",
+            "in",
+            "nanana",
+            " inf",
+            "inf ",
+            "∞",
+            "infinit",
+            "infinityy",
+            "na",
+            "n",
+            "-",
+            "+",
+            "",
+            "inf1",
+            "1inf",
+            "--inf",
+            "inf-",
+        ] {
+            agrees(t);
+        }
+    }
+
+    #[test]
+    fn ordinary_decimals_go_to_the_shared_parser() {
+        for t in [
+            "0",
+            "-0",
+            "1.5",
+            "-0.04729",
+            "1e10",
+            "1e-300",
+            "9007199254740993",
+            "1.7976931348623157e308",
+            "4.9406564584124654e-324",
+            "2.2250738585072011e-308",
+            "1e400",
+            "-1e400",
+            "+1.5",
+            "0.1",
+        ] {
+            agrees(t);
+        }
+    }
+
+    #[test]
+    fn random_decimals_agree() {
+        // The same xorshift the parser's own tests use, so a failure here is
+        // reproducible the same way.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            x
+        };
+        for _ in 0..20_000 {
+            let f = f64::from_bits(next());
+            if !f.is_finite() {
+                continue;
+            }
+            agrees(&format!("{f}"));
+            agrees(&format!("{f:e}"));
+        }
+    }
 }
