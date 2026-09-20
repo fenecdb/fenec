@@ -287,6 +287,12 @@ def prev_next(active, base):
 # A miss is a warning locally -- a rebuild that moves the module by forty bytes
 # should not stop you working -- and an error under CI, which is the build that
 # ships the number.
+#
+# Not everything measured is in here. The container image's size is written
+# into four files and cannot be checked from a site build, which has neither a
+# daemon nor the registry; it drifted from 1.25 MB to a claimed 1.55 before
+# anyone noticed. `docker image inspect ghcr.io/fenecdb/fenec-pg:<v>` is the
+# way to settle it by hand.
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
     ("README.md", r"(\d+) KB of WebAssembly, no wasm-bindgen", "kb", 0),
