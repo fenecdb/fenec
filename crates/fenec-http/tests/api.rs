@@ -643,3 +643,54 @@ fn raw_query_needs_the_token_too() {
     );
     assert_eq!(r.status, 200);
 }
+
+#[test]
+fn a_float_in_the_query_string_is_read_like_every_other_number() {
+    let mut db = Database::new();
+    for stmt in fenec_ql::parse(
+        r#"create collection readings (label text, value float)
+           put readings [
+             {label: "a", value: 0.1},
+             {label: "b", value: 1.5},
+             {label: "c", value: -0.04729},
+             {label: "d", value: 1e-300}
+           ]"#,
+    )
+    .expect("parse")
+    {
+        db.execute(&stmt).expect("execute");
+    }
+    let h = start_with(Config::default(), db);
+
+    // The point of the equalities: the query string and the FenecQL literal
+    // that wrote the row go through the same parser, so `0.1` has to come
+    // back as the very same f64 -- an equality is the cheapest way to say
+    // "these two paths agree bit for bit".
+    assert_eq!(rows(&get(h.port, "/readings?value=0.1").body), 1);
+    assert_eq!(rows(&get(h.port, "/readings?value=-0.04729").body), 1);
+    assert_eq!(rows(&get(h.port, "/readings?value=1e-300").body), 1);
+    assert_eq!(rows(&get(h.port, "/readings?value=gte.1.5").body), 1);
+    assert_eq!(rows(&get(h.port, "/readings?value=lt.1").body), 3);
+
+    // Infinity has no spelling here, the same as in a JSON body and in
+    // FenecQL itself. It used to be accepted only because the query string
+    // reached for `str::parse` while everything else did not.
+    for bad in ["inf", "Infinity", "-inf", "nan", "NaN"] {
+        let r = get(h.port, &format!("/readings?value={bad}"));
+        assert_eq!(r.status, 400, "{bad} should not be a number: {}", r.body);
+        assert!(
+            r.body.contains("expects a number"),
+            "{bad}: {}",
+            r.body.trim()
+        );
+    }
+
+    // And the ordinary rejections still read the same way.
+    for bad in ["abc", "1.2.3", "", "1e", "--1"] {
+        assert_eq!(
+            get(h.port, &format!("/readings?value={bad}")).status,
+            400,
+            "{bad:?} should not be a number"
+        );
+    }
+}
