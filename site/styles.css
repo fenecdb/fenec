@@ -134,8 +134,8 @@ a:hover { color: var(--sun-hot); }
   --dune-h: clamp(190px, 27svh, 330px);
   position: relative; isolation: isolate;
   min-height: var(--fold);
-  display: flex; flex-direction: column; justify-content: flex-start;
-  padding: clamp(46px, 7vh, 104px) var(--gutter) clamp(120px, 15vw, 210px);
+  display: flex; flex-direction: column; justify-content: center;
+  padding: clamp(40px, 6vh, 92px) var(--gutter) clamp(130px, 16vw, 230px);
   overflow: hidden;
 }
 
@@ -157,12 +157,14 @@ a:hover { color: var(--sun-hot); }
 .sandfield { z-index: 2; }
 
 /* The sun sits just under the ridge: the light is there, the disc is not. */
+/* The glow sits low, inside the dune band. Any higher and it rises behind the
+   right-hand column and washes the copy out. */
 .sunrise {
-  position: absolute; left: 64%;
-  top: calc(var(--fold) - var(--dune-h) * 0.5);
-  width: min(50vw, 620px); aspect-ratio: 1; transform: translate(-50%, -50%);
+  position: absolute; left: 58%;
+  top: calc(var(--fold) - var(--dune-h) * 0.18);
+  width: min(44vw, 560px); aspect-ratio: 1; transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255,206,115,.8) 0%, rgba(255,122,61,.4) 38%, rgba(255,122,61,0) 70%);
+  background: radial-gradient(circle, rgba(255,206,115,.72) 0%, rgba(255,122,61,.34) 38%, rgba(255,122,61,0) 70%);
   animation: breathe 9s ease-in-out infinite;
   will-change: opacity, transform;
 }
@@ -209,11 +211,20 @@ a:hover { color: var(--sun-hot); }
 
 /* ----------------------------------------------------------- hero content */
 
-.hero-in { position: relative; z-index: 5; max-width: 1180px; margin: 0 auto; width: 100%; }
+/* Two columns: the claim reads first, the query stands beside it. The hero
+   was otherwise a tall stack with nothing but sky on the right. */
+.hero-in {
+  position: relative; z-index: 5; max-width: 1240px; margin: 0 auto; width: 100%;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.04fr);
+  gap: clamp(30px, 4.5vw, 76px); align-items: center;
+}
+@media (max-width: 940px) {
+  .hero-in { grid-template-columns: 1fr; gap: clamp(24px, 5vw, 40px); align-items: start; }
+}
 
 .hero-q {
   margin: 0; position: relative;
-  font: 500 clamp(15px, 2.4vw, 29px)/1.46 var(--mono);
+  font: 500 clamp(15px, 2.1vw, 27px)/1.5 var(--mono);
   letter-spacing: -.03em; white-space: pre;
   overflow-x: auto; overscroll-behavior-x: contain;
   padding-bottom: 4px;
@@ -233,15 +244,16 @@ a:hover { color: var(--sun-hot); }
 @keyframes fadeout { to { opacity: 0; } }
 
 .hero-say {
-  margin: clamp(20px, 2.8vw, 34px) 0 0; max-width: 21ch;
-  font: 700 clamp(31px, 4.9vw, 62px)/1.04 var(--sans);
+  margin: 0; max-width: 15ch;
+  font: 700 clamp(31px, 4.4vw, 58px)/1.03 var(--sans);
   letter-spacing: -.04em;
   background: linear-gradient(168deg, var(--star) 8%, var(--sun-hot) 48%, var(--ember) 96%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  filter: drop-shadow(0 6px 30px rgba(255,122,61,.28));
+  filter: drop-shadow(0 4px 26px rgba(0,0,0,.55));
 }
 .hero-sub {
-  margin: 18px 0 0; max-width: 64ch; color: var(--sand-2); font-size: 18.5px;
+  margin: 20px 0 0; max-width: 46ch; color: var(--sand-2); font-size: 18px;
+  text-shadow: 0 2px 18px rgba(7,10,24,.85);
 }
 .hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 28px; }
 

@@ -45,22 +45,26 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   </div>
 
   <div class="hero-in">
+    <div class="hero-col">
+      <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
+      <p class="hero-sub reveal">302 KB of WebAssembly with no dependencies.
+        Vectors are a type, <code>near</code> is a clause, and the HNSW index is
+        built in the same tab that asks the question. The same engine runs as a
+        process that speaks the PostgreSQL protocol.</p>
+
+      <p class="hero-cta reveal">
+        <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
+        <a class="btn btn-line" href="docs/">Read the docs</a>
+      </p>
+    </div>
+
+    <div class="hero-col">
 <pre class="hero-q" data-lang="fenecql" data-bare>get articles
   where year >= 2024
     and tags has "rust"
   near embed $1
   limit 10</pre>
-
-    <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
-    <p class="hero-sub reveal">302 KB of WebAssembly with no dependencies. Vectors
-      are a type, <code>near</code> is a clause, and the HNSW index is built in
-      the same tab that asks the question. The same engine runs as a process
-      that speaks the PostgreSQL protocol.</p>
-
-    <p class="hero-cta reveal">
-      <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
-      <a class="btn btn-line" href="docs/">Read the docs</a>
-    </p>
+    </div>
   </div>
 </section>
 
