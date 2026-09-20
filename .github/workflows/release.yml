@@ -1,0 +1,153 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built against musl so the artifacts are static: the same
+          # reason the Dockerfile does it, i.e. no libc to match on the host.
+          - name: x86_64-linux
+            os: ubuntu-24.04
+            targets: x86_64-unknown-linux-musl
+          - name: aarch64-linux
+            os: ubuntu-24.04-arm
+            targets: aarch64-unknown-linux-musl
+          # One macOS runner covers both architectures: Apple's clang
+          # cross-compiles to x86_64 from an arm64 host without extra tooling.
+          - name: macos
+            os: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # rust-toolchain.toml also asks for wasm32, which this job does not need
+      # but which costs one small download; the channel pin is worth keeping.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          for t in ${{ matrix.targets }}; do rustup target add "$t"; done
+
+      - name: Install musl tooling
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          version="${tag#v}"
+          mkdir -p dist
+          for t in ${{ matrix.targets }}; do
+            # `fenec` takes the cli profile (panic = abort): a single process
+            # with nothing to recover from, and ~12% smaller without the
+            # unwind tables. `fenec-pg` stays on release, where a panicking
+            # connection thread unwinds and drops only its own session.
+            cargo build --profile cli --target "$t" -p fenec-cli
+            cargo build --release   --target "$t" -p fenec-pg
+
+            stage="fenec-v${version}-${t}"
+            mkdir -p "$stage"
+            cp "target/$t/cli/fenec" "target/$t/release/fenec-pg" "$stage/"
+            cp LICENSE README.md CONTRIBUTING.md "$stage/"
+            tar -czf "dist/${stage}.tar.gz" "$stage"
+            rm -rf "$stage"
+            echo "${stage}.tar.gz  $(wc -c < "dist/${stage}.tar.gz") bytes"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  wasm:
+    name: wasm bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - name: Build
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          version="${tag#v}"
+          make wasm
+          mkdir -p dist "fenec-web-v${version}"
+          # What a page actually needs: the module, the bundle and the types.
+          cp web/fenec.js web/fenec.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
+          tar -czf "dist/fenec-web-v${version}.tar.gz" "fenec-web-v${version}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wasm
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [binaries, wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          # Drafted, not published: the notes get a read before the release
+          # goes out. `gh release edit --draft=false` publishes it.
+          gh release create "$tag" dist/* \
+            --draft \
+            --title "$tag" \
+            --generate-notes
