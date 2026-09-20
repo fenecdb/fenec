@@ -1029,6 +1029,12 @@ fn decode_param(raw: &[u8], binary: bool) -> Value {
     if let Ok(i) = t.parse::<i64>() {
         return Value::Int(i);
     }
+    // Deliberately `str::parse`, not `num::parse_f64` like FenecQL and JSON.
+    // The two agree bit for bit on every decimal; they part only on `inf`,
+    // `Infinity` and `NaN`, which `num` rejects and PostgreSQL's own float8
+    // input accepts. Switching here would silently turn a client's `inf` into
+    // `Text("inf")`, and the table `num` exists to avoid is 12 KB of a wasm
+    // module -- nothing in a 636 KB native binary.
     if let Ok(f) = t.parse::<f64>() {
         return Value::Float(f);
     }
