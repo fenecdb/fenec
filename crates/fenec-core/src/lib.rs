@@ -32,6 +32,7 @@ pub mod codec;
 pub mod engine;
 pub mod error;
 pub mod json;
+pub mod num;
 pub mod plugin;
 pub mod query;
 pub mod schema;

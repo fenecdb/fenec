@@ -253,7 +253,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                 }
                 let text: String = b[s..i].iter().filter(|c| **c != '_').collect();
                 if is_float {
-                    Tok::Float(text.parse().map_err(|_| {
+                    Tok::Float(fenec_core::num::parse_f64(&text).ok_or_else(|| {
                         Error::Query(format!("position {s}: invalid decimal number `{text}`"))
                     })?)
                 } else {

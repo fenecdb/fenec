@@ -262,9 +262,9 @@ fn parse_value(b: &[char], i: &mut usize) -> Result<Value> {
             }
             let text: String = b[s..*i].iter().collect();
             if is_float {
-                text.parse::<f64>()
+                crate::num::parse_f64(&text)
                     .map(Value::Float)
-                    .map_err(|_| Error::Query(format!("invalid number `{text}`")))
+                    .ok_or_else(|| Error::Query(format!("invalid number `{text}`")))
             } else {
                 text.parse::<i64>()
                     .map(Value::Int)
