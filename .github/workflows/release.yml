@@ -216,7 +216,16 @@ jobs:
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           # Drafted, not published: the notes get a read before the release
           # goes out. `gh release edit --draft=false` publishes it.
-          gh release create "$tag" dist/* \
-            --draft \
-            --title "$tag" \
-            --generate-notes
+          #
+          # Re-running a release has to work -- a tag gets moved, or a job is
+          # retried after a runner failure -- and `gh release create` refuses
+          # when one already exists, so an existing release is updated in
+          # place instead.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --draft \
+              --title "$tag" \
+              --generate-notes
+          fi
