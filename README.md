@@ -1,5 +1,7 @@
 # fenecdb
 
+[![ci](https://github.com/fenecdb/fenec/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenec/actions/workflows/ci.yml)
+
 Minimal, vector-native, browser-resident embedded database. Written in Rust,
 compiles to WebAssembly, has its own query language (**FenecQL**) and speaks the
 PostgreSQL protocol.
@@ -1661,3 +1663,12 @@ container memory is a sensible start: it covers both this 60–75% ratio and
 - An import that stops halfway cannot be rolled back (no transactions). If
   `fenec import` created the file itself it deletes it; when writing into an
   existing file the collection can be left half done.
+
+## Contributing
+
+`CONTRIBUTING.md` has the setup, the narrower test invocations and the
+invariants a change must not break.
+
+## License
+
+Apache-2.0. See `LICENSE`.
