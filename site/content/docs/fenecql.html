@@ -38,7 +38,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=..)</code></td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
-<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains, <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
+<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>

@@ -1,7 +1,8 @@
 # Contributing to fenecdb
 
 Thanks for taking an interest. This file is the short version of what a change
-has to respect; `README.md` carries the long-form reasoning behind each rule.
+has to respect; the docs under `site/content/docs/` carry the long-form
+reasoning behind each rule.
 
 ## Getting set up
 
@@ -86,9 +87,9 @@ empty.
 ## Performance claims
 
 `make bench`, `make sweep`, `make memory` and `make compare` are the harnesses
-behind the numbers in the README. If a change moves any of them, say by how much
-in the PR description and on what hardware — the README quotes measurements, not
-estimates.
+behind the numbers in `site/content/docs/benchmarks.html`. If a change moves any
+of them, say by how much in the PR description and on what hardware — the docs
+quote measurements, not estimates.
 
 ## Pull requests
 

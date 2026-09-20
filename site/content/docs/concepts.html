@@ -139,7 +139,10 @@ create index on docs (embed) @hnsw(cosine)
 <h2>Zero dependencies</h2>
 
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
-own JSON, its own HNSW, its own lexer and parser, its own SCRAM. The reason is
+own JSON, its own HNSW, its own lexer and parser, its own SCRAM, even its own
+decimal-to-<code>f64</code> — <code>str::parse</code> reaches for a 12 KB table
+of powers of five, which is a twelfth of the module and incompressible. The
+reason is
 the WebAssembly output — it has to stay small and auditable.</p>
 
 <p>The rule covers <code>fenec-core</code>, <code>fenec-ql</code>,
@@ -155,7 +158,7 @@ means they test each other.</p>
 <h2>Straight into the browser</h2>
 
 <p><code>fenec-wasm</code> exposes a C ABI and there is no
-<code>wasm-bindgen</code>. The glue is about 165 lines of JavaScript inside
+<code>wasm-bindgen</code>. The glue is about 175 lines of JavaScript inside
 <code>web/fenec.js</code>, alongside the query builder, the HTTP client and the
 sync layer — one dependency-free ES module.</p>
 
