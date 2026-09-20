@@ -306,7 +306,7 @@ def build():
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         open(dest, "w", encoding="utf-8").write(page)
 
-    for name in ("styles.css", "site.js"):
+    for name in ("styles.css", "site.js", "engine-worker.js"):
         shutil.copy(os.path.join(ROOT, name), os.path.join(OUT, name))
 
     # The live console on the home page runs the real engine, not a recording.

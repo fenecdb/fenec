@@ -383,23 +383,11 @@ async function runDemo(el) {
   const note = el.querySelector('.rig-note');
   const cap = el.querySelector('.field-cap');
   const field = vectorField(el.querySelector('.field'));
-  const stat = (k) => el.querySelector(`[data-stat="${k}"]`);
-
-  const N = 2000, DIM = 128, CLUSTERS = 16, PROBES = 40;
 
   const lines = [];
-  const say = (t, tag = '') => {
-    lines.push(tag ? `<${tag}>${t}</${tag}>` : t);
-    log.innerHTML = lines.join('\n');
-    log.scrollTop = log.scrollHeight;
-  };
-  const amend = (t) => {
-    lines[lines.length - 1] += t;
-    log.innerHTML = lines.join('\n');
-    log.scrollTop = log.scrollHeight;
-  };
+  const paint = () => { log.innerHTML = lines.join('\n'); log.scrollTop = log.scrollHeight; };
   const put = (k, v, unit) => {
-    const dd = stat(k);
+    const dd = el.querySelector(`[data-stat="${k}"]`);
     if (!dd) return;
     countUp(dd, v, unit);
     const row = dd.closest('.stat');
@@ -407,141 +395,80 @@ async function runDemo(el) {
     void row.offsetWidth;
     row.classList.add('lit');
   };
-  const breathe = (ms = 16) => new Promise((r) => setTimeout(r, ms));
 
   el.dataset.state = 'running';
   note.textContent = 'running in this tab';
+  lines.push('<i>starting the engine in a worker</i>');
+  paint();
 
-  let Fenec;
-  try { ({ Fenec } = await import('./fenec.js')); }
-  catch { return offline('the client module could not be loaded'); }
-
+  let worker;
   try {
-    say('<i>booting fenec.wasm</i> ');
-    const t0 = performance.now();
-    const db = await Fenec.open('./fenec.wasm');
-    const boot = performance.now() - t0;
-    amend(`<b>ok</b> <i>in ${boot.toFixed(0)} ms</i>`);
-    put('boot', boot.toFixed(0), 'ms');
-    await breathe();
+    worker = new Worker(new URL('./engine-worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    return offline(el, field, 'this browser cannot start a module worker');
+  }
+  worker.onerror = () => offline(el, field, 'the engine worker failed to load');
 
-    say('');
-    say('<em>create collection</em> notes (body text, topic int @hash,');
-    say('       embed <span style="color:#C79BF2">vector&lt;128&gt;</span>)');
-    db.run(`create collection notes (body text, topic int @hash, embed vector<${DIM}>)`);
-    await breathe();
-
-    // Clustered, the way an embedding model actually outputs. Uniformly random
-    // vectors are the pathological case for any ANN index and would
-    // misrepresent recall in both directions.
-    say('');
-    say(`<i>generating ${N.toLocaleString()} vectors in ${CLUSTERS} clusters</i> `);
-    await breathe();
-    const rand = mulberry32(0x5eed);
-    const centres = Array.from({ length: CLUSTERS }, () => unit(DIM, rand));
-    const docs = new Array(N);
-    for (let i = 0; i < N; i++) {
-      const c = i % CLUSTERS;
-      docs[i] = { body: `note ${i}`, topic: c, embed: jitter(centres[c], 0.55, rand) };
-    }
-    amend('<b>ok</b>');
-
-    // A real 2D shadow of the 128-dimensional data: two fixed random
-    // directions, orthonormalised. Nothing is laid out by hand.
-    const project = makeProjection(DIM, mulberry32(0xd17e));
-    const raw = docs.map((d) => project(d.embed));
-    const pts = normalise(raw).map((p, i) => ({ ...p, c: i % CLUSTERS }));
-    field.seed(pts);
-    cap.textContent = `${N.toLocaleString()} vectors · projected to 2D`;
-    await breathe();
-
-    say('');
-    say('<em>put</em> notes [ … ] ');
-    const t1 = performance.now();
-    const scattering = field.scatter(1400);
-    for (let i = 0; i < N; i += 1000) {
-      await db.from('notes').insert(docs.slice(i, i + 1000));
-      amend('.');
-      await breathe();
-    }
-    const write = performance.now() - t1;
-    amend(` <b>${N.toLocaleString()} rows</b> <i>in ${write.toFixed(0)} ms</i>`);
-    put('rows', String(N), ` × ${DIM}`);
-    await scattering;
-
-    say('');
-    say('<i>the tab pauses here — the hnsw build is synchronous</i>');
-    say('<em>create index on</em> notes (embed) <span style="color:#C79BF2">@hnsw</span>(cosine) ');
-    cap.textContent = 'building the hnsw graph';
-    await breathe(60);
-    const t2 = performance.now();
-    db.run('create index on notes (embed) @hnsw(cosine)');
-    const build = performance.now() - t2;
-    amend(`<b>ok</b> <i>in ${(build / 1000).toFixed(2)} s</i>`);
-    put('build', (build / 1000).toFixed(2), 's');
-    await field.build(900);
-
-    say('');
-    say('<em>get</em> notes <em>near</em> embed $1 <em>limit</em> 10');
-    cap.textContent = 'the 10 nearest to the query, lit';
-
-    const probes = Array.from({ length: PROBES }, () =>
-      jitter(centres[Math.floor(rand() * CLUSTERS)], 0.55, rand));
-
-    const times = [];
-    let hit = 0, total = 0, last = null;
-    for (let i = 0; i < PROBES; i++) {
-      const t = performance.now();
-      const ann = db.run('get notes select body near embed $1 limit 10', [probes[i]]);
-      times.push(performance.now() - t);
-      if (i % 5 === 0) {
-        const exact = db.run('get notes select body near embed $1 exact limit 10', [probes[i]]);
-        const truth = new Set(exact.rows.map((r) => r.body));
-        hit += ann.rows.filter((r) => truth.has(r.body)).length;
-        total += truth.size;
+  worker.onmessage = async (e) => {
+    const m = e.data;
+    switch (m.t) {
+      case 'log': lines.push(m.html); paint(); break;
+      case 'amend': lines[lines.length - 1] += m.html; paint(); break;
+      case 'stat': put(m.k, m.v, m.unit); break;
+      case 'points': {
+        const pts = new Array(m.n);
+        for (let i = 0; i < m.n; i++) {
+          pts[i] = { x: m.xy[i * 2], y: m.xy[i * 2 + 1], nx: m.xy[i * 2], c: m.cl[i] };
+        }
+        field.seed(pts);
+        cap.textContent = `${m.n.toLocaleString()} vectors · projected to 2D`;
+        break;
       }
-      last = { probe: probes[i], rows: ann.rows };
+      case 'phase':
+        if (m.name === 'scatter') field.scatter(1600);
+        if (m.name === 'build') { cap.textContent = 'building the hnsw graph'; field.build(1200); }
+        break;
+      case 'query':
+        cap.textContent = 'the 10 nearest to the query, lit';
+        field.ask({ x: m.x, y: m.y }, m.idx);
+        break;
+      case 'done':
+        el.dataset.state = 'done';
+        note.textContent = m.note;
+        worker.terminate();
+        break;
+      case 'failed':
+        worker.terminate();
+        offline(el, field, m.message);
+        break;
     }
-    times.sort((a, b) => a - b);
-    const p50 = times[Math.floor(times.length / 2)];
-    const recall = total ? (hit / total) * 100 : 0;
-    amend(`  <b>10 rows</b> <i>· p50 ${p50.toFixed(3)} ms over ${PROBES} queries</i>`);
-    put('query', p50.toFixed(3), 'ms');
-    put('recall', recall.toFixed(recall === 100 ? 0 : 1), '%');
+  };
 
-    // Draw the last query for real: its own point, its own ten neighbours.
-    const qp = normaliseOne(project(last.probe), raw);
-    const idx = last.rows
-      .map((r) => Number(String(r.body).replace('note ', '')))
-      .filter((i) => Number.isInteger(i) && i >= 0 && i < N);
-    await field.ask(qp, idx);
+  worker.postMessage({ cmd: 'demo' });
+}
 
-    say('');
-    say(`<i>recall@10 against an exact scan: </i><b>${recall.toFixed(recall === 100 ? 0 : 1)}%</b>`);
-    say('<i>nothing left this tab. no server was contacted.</i>');
-
-    el.dataset.state = 'done';
-    note.textContent = `${N.toLocaleString()} × ${DIM}, clustered`;
-    db.close?.();
-  } catch (err) {
-    offline(String(err && err.message ? err.message : err));
-  }
-
-  function offline(reason) {
-    el.dataset.state = 'failed';
-    note.textContent = 'published measurements';
-    cap.textContent = 'the live run did not start';
-    say('');
-    say(`<i>the live run stopped: ${escapeHtml(reason)}</i>`);
-    say('<i>WebAssembly needs an http origin — a page opened from disk cannot</i>');
-    say('<i>stream the module. the numbers beside this are the measured ones</i>');
-    say('<i>from the benchmark harness: Apple M-series, 100 000 × 128.</i>');
-    put('boot', '110', 'ms');
-    put('rows', '100000', ' × 128');
-    put('build', '10.2', 's');
-    put('query', '0.139', 'ms');
-    put('recall', '100', '%');
-  }
+/* Without the engine the panel still has something true to show: the numbers
+   the benchmark harness measured, clearly labelled as such. */
+function offline(el, field, reason) {
+  const log = el.querySelector('.rig-log');
+  el.dataset.state = 'failed';
+  el.querySelector('.rig-note').textContent = 'published measurements';
+  el.querySelector('.field-cap').textContent = 'the live run did not start';
+  log.innerHTML = [
+    `<i>the live run stopped: ${escapeHtml(reason)}</i>`,
+    '<i>WebAssembly needs an http origin — a page opened from disk cannot</i>',
+    '<i>stream the module. the numbers beside this are the measured ones</i>',
+    '<i>from the benchmark harness: Apple M-series, 100 000 × 128.</i>',
+  ].join('\n');
+  const put = (k, v, u) => {
+    const dd = el.querySelector(`[data-stat="${k}"]`);
+    if (dd) countUp(dd, v, u);
+  };
+  put('boot', '110', 'ms');
+  put('rows', '100000', ' × 128');
+  put('build', '10.2', 's');
+  put('query', '0.139', 'ms');
+  put('recall', '100', '%');
 }
 
 /* ============================================================== the race */
@@ -553,27 +480,17 @@ if (race) {
     for (const lane of lanes) {
       const ms = +lane.dataset.ms;
       const fill = lane.querySelector('.lane-fill');
-      const runner = lane.querySelector('.lane-runner');
-      const dust = lane.querySelector('.lane-dust');
       const out = lane.querySelector('.lane-time');
       lane.classList.remove('done');
       // The scale is compressed: at true ratio the slowest lane would take
       // nearly three minutes to cross. The label carries the real number.
       const fastest = Math.min(...lanes.map((l) => +l.dataset.ms));
       const dur = still ? 0 : 700 * Math.pow(ms / fastest, 0.28);
-      for (const el of [fill, runner, dust]) {
-        el.style.transition = 'none';
-        if (el === fill) el.style.right = '100%';
-        else el.style.left = '0';
-      }
+      fill.style.transition = 'none';
+      fill.style.right = '100%';
       void lane.offsetWidth;
-      const ease = 'cubic-bezier(.3,.05,.2,1)';
-      fill.style.transition = `right ${dur}ms ${ease}`;
-      runner.style.transition = `left ${dur}ms ${ease}`;
-      dust.style.transition = `left ${dur}ms ${ease}`;
+      fill.style.transition = `right ${dur}ms cubic-bezier(.3,.05,.2,1)`;
       fill.style.right = '0%';
-      runner.style.left = '100%';
-      dust.style.left = '100%';
       setTimeout(() => {
         lane.classList.add('done');
         countUp(out, lane.dataset.value, lane.dataset.unit, 420);
@@ -598,84 +515,160 @@ function escapeHtml(s) {
   return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 }
 
-/* A seeded generator keeps every visitor's run comparable to every other's. */
-function mulberry32(a) {
-  return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
-function gauss(rand) {
-  const u = Math.max(rand(), 1e-9), v = rand();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
+/* ============================================================= playground */
 
-function unit(dim, rand) {
-  const v = new Array(dim);
-  let n = 0;
-  for (let i = 0; i < dim; i++) { const g = gauss(rand); v[i] = g; n += g * g; }
-  n = Math.sqrt(n) || 1;
-  for (let i = 0; i < dim; i++) v[i] /= n;
-  return v;
-}
+const pg = document.getElementById('pg');
+if (pg) playground(pg);
 
-function jitter(centre, spread, rand) {
-  const d = centre.length, v = new Array(d);
-  let n = 0;
-  for (let i = 0; i < d; i++) {
-    const g = centre[i] + gauss(rand) * spread / Math.sqrt(d);
-    v[i] = g; n += g * g;
+function playground(el) {
+  const sqlBox = el.querySelector('#pg-sql');
+  const runBtn = el.querySelector('#pg-run');
+  const status = el.querySelector('#pg-status');
+  const out = el.querySelector('#pg-out');
+  const schemaBox = el.querySelector('#pg-schema');
+
+  const EXAMPLES = [
+    ['a filter', 'get notes select body, topic, year\n  where year >= 2023 and topic = "vectors"\n  limit 10'],
+    ['counting', 'get notes where year >= 2023 count'],
+    ['nearest ten', 'get notes select body, topic\n  near embed $1\n  limit 10'],
+    ['filter + vector', 'get notes select body, year\n  where topic = "storage"\n  near embed $1\n  limit 5'],
+    ['text contains', 'get notes select body where body ~ "sync" limit 10'],
+    ['ordering', 'get notes select body, year order year desc, body asc limit 10'],
+    ['describe', 'describe notes'],
+    ['write one', 'put notes {body: "a note of my own", topic: "wasm", year: 2026}'],
+  ];
+  el.querySelector('#pg-egs').innerHTML = EXAMPLES
+    .map(([name], i) => `<li><button type="button" data-eg="${i}">${name}</button></li>`).join('');
+  el.querySelector('#pg-egs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-eg]');
+    if (!b) return;
+    sqlBox.value = EXAMPLES[+b.dataset.eg][1];
+    sqlBox.focus();
+    run();
+  });
+
+  let worker, seq = 0, pending = new Map(), probe = null;
+  const say = (text, cls = '') => { status.className = 'pg-status ' + cls; status.textContent = text; };
+  const ask = (cmd, extra = {}) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ cmd, id, ...extra });
+  });
+
+  try {
+    worker = new Worker(new URL('./engine-worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    el.dataset.state = 'failed';
+    say('this browser cannot start a module worker', 'err');
+    return;
   }
-  n = Math.sqrt(n) || 1;
-  for (let i = 0; i < d; i++) v[i] /= n;
-  return v;
-}
-
-/* Two random directions, Gram-Schmidt'ed: an honest linear projection of the
-   real vectors rather than a layout invented for the picture. */
-function makeProjection(dim, rand) {
-  const a = unit(dim, rand);
-  let b = unit(dim, rand);
-  let dot = 0;
-  for (let i = 0; i < dim; i++) dot += a[i] * b[i];
-  let n = 0;
-  for (let i = 0; i < dim; i++) { b[i] -= dot * a[i]; n += b[i] * b[i]; }
-  n = Math.sqrt(n) || 1;
-  for (let i = 0; i < dim; i++) b[i] /= n;
-  return (v) => {
-    let x = 0, y = 0;
-    for (let i = 0; i < dim; i++) { x += v[i] * a[i]; y += v[i] * b[i]; }
-    return { x, y };
+  worker.onerror = () => { el.dataset.state = 'failed'; say('the engine worker failed to load', 'err'); };
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.t === 'schema') return drawSchema(m.schema);
+    if (m.t !== 'result') return;
+    const p = pending.get(m.id);
+    pending.delete(m.id);
+    if (!p) return;
+    if (m.error) p.reject(new Error(m.error));
+    else p.resolve(m);
   };
-}
 
-function bounds(raw) {
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const p of raw) {
-    if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
-    if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+  (async () => {
+    try {
+      const o = await ask('open');
+      say(`engine ready in ${o.ms.toFixed(0)} ms · seeding…`);
+      const s = await ask('seed', { n: 400, dim: 64 });
+      // A query vector that actually sits in the data, so `near` means something.
+      probe = null;
+      el.dataset.state = 'ready';
+      runBtn.disabled = false;
+      say(`${s.n} notes × ${s.dim} dims seeded in ${s.ms.toFixed(0)} ms`, 'ok');
+      out.innerHTML = '<p class="pg-muted">Ready. Run the query above, or pick one on the left.</p>';
+    } catch (err) {
+      el.dataset.state = 'failed';
+      say(String(err.message || err), 'err');
+    }
+  })();
+
+  function drawSchema(list) {
+    if (!list || !list.length) { schemaBox.innerHTML = '<p class="pg-muted">no collections</p>'; return; }
+    schemaBox.innerHTML = list.map((c) => `
+      <div><span class="pg-coll">${escapeHtml(c.name)}</span>
+        <ul class="pg-fields">${(c.fields || []).map((f) => `<li><b>${escapeHtml(String(f.name ?? ''))}</b>
+          ${escapeHtml(String(f.type ?? ''))}${f.index && f.index !== 'none'
+            ? `<i>@${escapeHtml(String(f.index))}</i>` : ''}</li>`).join('')}
+        </ul></div>`).join('');
   }
-  return { x0, x1, y0, y1 };
-}
 
-function normalise(raw) {
-  const b = bounds(raw);
-  const sx = (b.x1 - b.x0) || 1, sy = (b.y1 - b.y0) || 1;
-  return raw.map((p) => ({
-    x: 0.06 + ((p.x - b.x0) / sx) * 0.88,
-    y: 0.08 + ((p.y - b.y0) / sy) * 0.8,
-    nx: (p.x - b.x0) / sx,
-  }));
-}
+  /* `near` needs a vector. Rather than make the visitor paste 64 numbers, a
+     row's own embedding is read back and bound to $1. */
+  async function vectorParam() {
+    if (probe) return probe;
+    const r = await ask('exec', { sql: 'get notes select embed limit 1' });
+    probe = r.rows && r.rows[0] ? Object.values(r.rows[0])[0] : null;
+    return probe;
+  }
 
-function normaliseOne(p, raw) {
-  const b = bounds(raw);
-  const sx = (b.x1 - b.x0) || 1, sy = (b.y1 - b.y0) || 1;
-  return {
-    x: Math.min(Math.max(0.06 + ((p.x - b.x0) / sx) * 0.88, 0.02), 0.98),
-    y: Math.min(Math.max(0.08 + ((p.y - b.y0) / sy) * 0.8, 0.02), 0.98),
-  };
+  async function run() {
+    if (runBtn.disabled) return;
+    const sql = sqlBox.value.trim();
+    if (!sql) return;
+    runBtn.disabled = true;
+    el.dataset.state = 'busy';
+    say('running…');
+    try {
+      const params = /\$1/.test(sql) ? [await vectorParam()] : [];
+      const r = await ask('exec', { sql, params });
+      draw(r);
+      say(`${r.ms.toFixed(3)} ms`, 'ok');
+    } catch (err) {
+      out.innerHTML = `<p class="pg-err">${escapeHtml(String(err.message || err))}</p>`;
+      say('query error', 'err');
+    } finally {
+      runBtn.disabled = false;
+      el.dataset.state = 'ready';
+    }
+  }
+
+  function draw(r) {
+    if (r.kind === 'schemas') return drawTable(
+      ['collection', 'field', 'type', 'index'],
+      (r.collections || []).flatMap((c) => (c.fields || []).map((f, i) => ({
+        collection: i ? '' : c.name, field: f.name, type: f.type,
+        index: f.index && f.index !== 'none' ? '@' + f.index : '',
+      }))));
+
+    if (r.rows && r.rows.length) {
+      const cols = r.columns && r.columns.length ? r.columns : Object.keys(r.rows[0]);
+      return drawTable(cols, r.rows);
+    }
+    if (r.rows) return void (out.innerHTML = '<p class="pg-note">0 rows</p>');
+    if (r.count != null) {
+      out.innerHTML = `<p class="pg-note">${r.count} ${r.count === 1 ? 'row' : 'rows'} affected</p>`;
+      return;
+    }
+    out.innerHTML = '<p class="pg-note">ok</p>';
+  }
+
+  function drawTable(cols, rows) {
+    if (!rows.length) { out.innerHTML = '<p class="pg-note">0 rows</p>'; return; }
+    const cell = (v) => {
+      if (v == null) return '<td class="pg-muted">null</td>';
+      if (Array.isArray(v)) {
+        return `<td class="vec">[${v.slice(0, 3).map((n) => (+n).toFixed(3)).join(', ')}` +
+               `${v.length > 3 ? `, … ${v.length} values` : ''}]</td>`;
+      }
+      if (typeof v === 'number') return `<td class="num">${v}</td>`;
+      return `<td>${escapeHtml(String(v))}</td>`;
+    };
+    out.innerHTML = `<table><thead><tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map((row) => `<tr>${cols.map((c) => cell(row[c])).join('')}</tr>`).join('')}</tbody></table>`;
+  }
+
+  runBtn.addEventListener('click', run);
+  sqlBox.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+  });
 }
