@@ -64,17 +64,30 @@ export class Fenec {
     return this.#readString(this.#wasm.fenec_version());
   }
 
+  /** The length prefix of a returned buffer. */
+  #len(ptr) {
+    return new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
+  }
+
   /** Reads the returned buffer and frees it. */
   #readBytes(ptr) {
-    const mem = new Uint8Array(this.#wasm.memory.buffer);
-    const len = new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
-    const out = mem.slice(ptr + 4, ptr + 4 + len);
+    const len = this.#len(ptr);
+    // Copies, and has to: the array outlives the buffer freed on the next
+    // line, and a view into wasm memory would read whatever lands there next.
+    const out = new Uint8Array(this.#wasm.memory.buffer, ptr + 4, len).slice();
     this.#wasm.fenec_free(ptr, 4 + len);
     return out;
   }
 
+  // Decodes straight out of wasm memory. A string does not need the copy
+  // `#readBytes` makes -- the decode is itself the copy -- and going through
+  // it first meant every result was copied twice, which on a large result set
+  // is megabytes of pure waste. The decode must finish before the free.
   #readString(ptr) {
-    return dec.decode(this.#readBytes(ptr));
+    const len = this.#len(ptr);
+    const out = dec.decode(new Uint8Array(this.#wasm.memory.buffer, ptr + 4, len));
+    this.#wasm.fenec_free(ptr, 4 + len);
+    return out;
   }
 
   /** Copies a string into WASM memory. */
