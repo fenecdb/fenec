@@ -10,6 +10,7 @@ across a dozen files and drift.
     python3 site/build.py --serve    # build, then serve on :8788
 """
 
+import hashlib
 import html
 import os
 import re
@@ -258,6 +259,29 @@ def build():
 
     template = open(os.path.join(ROOT, "template.html"), encoding="utf-8").read()
 
+    # Content-hashed asset names. Without them a deploy serves new HTML beside
+    # whatever CSS and JS the visitor already had cached — not merely stale but
+    # broken, since the two no longer agree. Hashed names make a deploy atomic
+    # and let the files be cached forever.
+    assets = {}
+
+    def emit(name, body):
+        stem, ext = os.path.splitext(name)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:10]
+        out_name = f"{stem}.{digest}{ext}"
+        open(os.path.join(OUT, out_name), "w", encoding="utf-8").write(body)
+        assets[name] = out_name
+        return out_name
+
+    worker = open(os.path.join(ROOT, "engine-worker.js"), encoding="utf-8").read()
+    worker_name = emit("engine-worker.js", worker)
+
+    script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
+    script = script.replace("./engine-worker.js", "./" + worker_name)
+    emit("site.js", script)
+
+    emit("styles.css", open(os.path.join(ROOT, "styles.css"), encoding="utf-8").read())
+
     pages = []
     for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
         for name in sorted(files):
@@ -300,14 +324,13 @@ def build():
             shell = f'<main id="content">{body}</main>'
         page = page.replace("{{content}}", shell)
 
+        for plain, hashed in assets.items():
+            page = page.replace(plain, hashed)
         page = clean_links(page)
 
         dest = os.path.join(OUT, key + ".html")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         open(dest, "w", encoding="utf-8").write(page)
-
-    for name in ("styles.css", "site.js", "engine-worker.js"):
-        shutil.copy(os.path.join(ROOT, name), os.path.join(OUT, name))
 
     # The live console on the home page runs the real engine, not a recording.
     for name in ("fenec.js", "fenec.wasm"):
@@ -318,24 +341,20 @@ def build():
             print(f"  note: web/{name} missing — run `make wasm` for the live demo")
 
     # Cloudflare reads this from the asset directory; it is not served itself.
-    # fenec.wasm is revalidated rather than frozen, because the filename is
-    # stable across builds and a stale module would silently be the wrong
-    # engine. At most 100 rules and 2000 characters per line.
-    open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write(
-        "/*\n"
-        "  X-Content-Type-Options: nosniff\n"
-        "  Referrer-Policy: strict-origin-when-cross-origin\n"
-        "  X-Frame-Options: DENY\n"
-        "\n"
-        "/*.css\n"
-        "  Cache-Control: public, max-age=3600, stale-while-revalidate=86400\n"
-        "\n"
-        "/*.js\n"
-        "  Cache-Control: public, max-age=3600, stale-while-revalidate=86400\n"
-        "\n"
-        "/fenec.wasm\n"
-        "  Cache-Control: public, max-age=3600, must-revalidate\n"
-    )
+    # Hashed assets can be cached forever because a change gives a new name.
+    # fenec.js and fenec.wasm keep stable names, so they revalidate instead —
+    # a stale engine would silently be the wrong one.
+    rules = ["/*",
+             "  X-Content-Type-Options: nosniff",
+             "  Referrer-Policy: strict-origin-when-cross-origin",
+             "  X-Frame-Options: DENY",
+             ""]
+    for hashed in sorted(assets.values()):
+        rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
+    for stable in ("fenec.js", "fenec.wasm"):
+        rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
+    open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
+
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
 
 
