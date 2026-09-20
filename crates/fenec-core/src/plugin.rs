@@ -183,6 +183,8 @@ pub mod builtins {
     pub fn install(r: &mut Registry) {
         reg!(r, "lower", 1, Some(1), "lowercases text", |a| {
             Ok(match &a[0] {
+                // Unicode, not ASCII: see the note on `query::like_match`
+                // for what the cheaper mapping was measured to cost.
                 Value::Text(s) => Value::Text(s.to_lowercase()),
                 v => v.clone(),
             })

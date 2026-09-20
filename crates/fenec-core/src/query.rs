@@ -159,6 +159,39 @@ pub struct EvalCtx<'a> {
     pub registry: &'a crate::plugin::Registry,
 }
 
+/// Case-insensitive substring test, the `~` operator.
+///
+/// `~` never reaches an index, so this runs once per row of a full scan. The
+/// obvious `hay.to_lowercase().contains(&needle.to_lowercase())` allocated
+/// two Strings for every one of those rows and folded the needle again each
+/// time, though the needle is the same on every row.
+///
+/// Unicode default case mapping agrees with ASCII over U+0000..U+007F, so
+/// when both sides are ASCII the in-place comparison below is the same
+/// answer, only without the allocations; anything else still folds. The
+/// trade is that the ASCII path is a naive scan rather than the two-way
+/// search behind `contains` -- quadratic in theory, but the needle is a
+/// search term and not allocating beats the better asymptote at these sizes.
+///
+/// Dropping the folding path altogether was measured and turned down. It only
+/// pays together with `lower`/`upper` in `plugin.rs`, which reach for the same
+/// Unicode tables: ASCII here alone changes the wasm by nothing at all, and
+/// both together by 5 200 bytes of brotli. That is not worth losing `ÇALIŞMA
+/// ~ çalişma`, which every non-English corpus depends on.
+fn like_match(hay: &str, needle: &str) -> bool {
+    if !(hay.is_ascii() && needle.is_ascii()) {
+        return hay.to_lowercase().contains(&needle.to_lowercase());
+    }
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value> {
     Ok(match expr {
         Expr::Lit(v) => v.clone(),
@@ -214,9 +247,7 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             let l = eval(a, row, ctx)?;
             let r = eval(b, row, ctx)?;
             match (l.as_text(), r.as_text()) {
-                (Some(hay), Some(needle)) => {
-                    Value::Bool(hay.to_lowercase().contains(&needle.to_lowercase()))
-                }
+                (Some(hay), Some(needle)) => Value::Bool(like_match(hay, needle)),
                 _ => Value::Bool(false),
             }
         }
@@ -452,5 +483,59 @@ pub fn projection_columns(schema: &Schema, project: &Option<Vec<String>>) -> Vec
             c.extend(schema.fields.iter().map(|f| f.name.clone()));
             c
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `~` folded to before the ASCII fast path existed. The fast path is
+    /// only allowed to be cheaper, never to answer differently.
+    fn folding(hay: &str, needle: &str) -> bool {
+        hay.to_lowercase().contains(&needle.to_lowercase())
+    }
+
+    #[test]
+    fn like_matches_regardless_of_case() {
+        for (hay, needle, want) in [
+            ("Rust and WASM", "rust", true),
+            ("Rust and WASM", "WASM", true),
+            ("Rust and WASM", "and w", true),
+            ("Rust and WASM", "python", false),
+            ("Rust", "", true),
+            ("", "rust", false),
+            ("ab", "abc", false),
+            ("aaab", "aab", true),
+        ] {
+            assert_eq!(like_match(hay, needle), want, "{hay:?} ~ {needle:?}");
+        }
+    }
+
+    #[test]
+    fn the_ascii_path_agrees_with_folding() {
+        // Unicode default case mapping and ASCII case mapping are the same
+        // over U+0000..U+007F, so every ASCII pair must give the same answer
+        // on both paths -- that equality is what lets the fast path exist.
+        let words = ["Vector", "vector", "VECTOR", "tor", "ToR", "x", "", "or v"];
+        for hay in words {
+            for needle in words {
+                assert_eq!(
+                    like_match(hay, needle),
+                    folding(hay, needle),
+                    "{hay:?} ~ {needle:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_ascii_still_folds() {
+        // Anything outside ASCII takes the folding path, so case-insensitive
+        // matching keeps working for text the fast path cannot handle.
+        assert!(like_match("ÉCOLE", "école"));
+        assert!(like_match("Straße", "STRASSE") == folding("Straße", "STRASSE"));
+        assert!(like_match("ÇALIŞMA raporu", "çalişma"));
+        assert!(!like_match("ÉCOLE", "schule"));
     }
 }
