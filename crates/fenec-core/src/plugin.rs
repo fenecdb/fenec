@@ -70,7 +70,9 @@ impl Registry {
 
     pub fn register_fn(&mut self, name: &str, f: Arc<dyn ScalarFn>) -> Result<()> {
         if self.functions.contains_key(name) {
-            return Err(Error::Exists(format!("function `{name}` is already registered")));
+            return Err(Error::Exists(format!(
+                "function `{name}` is already registered"
+            )));
         }
         self.functions.insert(name.to_ascii_lowercase(), f);
         Ok(())
@@ -100,7 +102,10 @@ impl Registry {
 
     pub fn install(&mut self, p: &dyn Plugin) -> Result<()> {
         if self.plugins.iter().any(|(n, _)| n == p.name()) {
-            return Err(Error::Exists(format!("plugin `{}` is already installed", p.name())));
+            return Err(Error::Exists(format!(
+                "plugin `{}` is already installed",
+                p.name()
+            )));
         }
         p.init(self)?;
         self.plugins
@@ -197,9 +202,19 @@ pub mod builtins {
                 _ => 0,
             }))
         });
-        reg!(r, "coalesce", 1, None, "returns the first non-null value", |a| {
-            Ok(a.iter().find(|v| !v.is_null()).cloned().unwrap_or(Value::Null))
-        });
+        reg!(
+            r,
+            "coalesce",
+            1,
+            None,
+            "returns the first non-null value",
+            |a| {
+                Ok(a.iter()
+                    .find(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or(Value::Null))
+            }
+        );
         reg!(
             r,
             "cosine",
@@ -215,13 +230,20 @@ pub mod builtins {
                 Ok(Value::Float(vector::dot(&nx, &ny) as f64))
             }
         );
-        reg!(r, "l2", 2, Some(2), "euclidean distance between two vectors", |a| {
-            let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
-            if x.len() != y.len() {
-                return Err(Error::Type("vector dimensions do not match".into()));
+        reg!(
+            r,
+            "l2",
+            2,
+            Some(2),
+            "euclidean distance between two vectors",
+            |a| {
+                let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
+                if x.len() != y.len() {
+                    return Err(Error::Type("vector dimensions do not match".into()));
+                }
+                Ok(Value::Float(vector::l2_sq(&x, &y).sqrt() as f64))
             }
-            Ok(Value::Float(vector::l2_sq(&x, &y).sqrt() as f64))
-        });
+        );
         reg!(r, "dot", 2, Some(2), "inner product", |a| {
             let (x, y) = (vec_arg(&a[0])?, vec_arg(&a[1])?);
             if x.len() != y.len() {
@@ -238,9 +260,7 @@ pub mod builtins {
             1,
             Some(1),
             "converts text or epoch milliseconds into a timestamp",
-            |a| {
-                a[0].clone().coerce(&crate::value::DataType::Timestamp)
-            }
+            |a| { a[0].clone().coerce(&crate::value::DataType::Timestamp) }
         );
         reg!(r, "norm", 1, Some(1), "vector length (L2 norm)", |a| {
             Ok(Value::Float(vector::norm(&vec_arg(&a[0])?) as f64))

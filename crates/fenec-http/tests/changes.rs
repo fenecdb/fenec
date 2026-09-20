@@ -4,12 +4,12 @@
 //! The client is raw TCP: the assertions are on the real SSE byte stream,
 //! not on a library's leniency.
 
+use fenec_core::prelude::*;
+use fenec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use fenec_core::prelude::*;
-use fenec_http::{Config, Server};
 
 fn seeded() -> Database {
     let mut db = Database::new();
@@ -63,7 +63,8 @@ impl Sub {
 
     fn open_with(port: u16, target: &str, headers: &[(&str, &str)]) -> Sub {
         let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-        sock.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
         let mut req = format!("GET {target} HTTP/1.1\r\nHost: t\r\nAccept: text/event-stream\r\n");
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
@@ -121,7 +122,8 @@ impl Sub {
     fn next_within(&mut self, budget: Duration) -> Option<(String, String)> {
         let deadline = Instant::now() + budget;
         loop {
-            let block = self.read_until("\n\n", deadline.saturating_duration_since(Instant::now()))?;
+            let block =
+                self.read_until("\n\n", deadline.saturating_duration_since(Instant::now()))?;
             let block = block.trim_start_matches(['\r', '\n']);
             if block.starts_with(':') {
                 continue; // keep-alive
@@ -233,7 +235,11 @@ fn seed_carries_the_whole_shape() {
     let h = start(Config::default());
     let mut s = Sub::open(h.port, "/tasks/changes");
     assert_eq!(s.status, 200);
-    assert!(s.head_line().contains("text/event-stream"), "{}", s.head_line());
+    assert!(
+        s.head_line().contains("text/event-stream"),
+        "{}",
+        s.head_line()
+    );
     let (name, data) = s.next().expect("event");
     assert_eq!(name, "seed");
     assert_eq!(count(&data, "rows"), 3);
@@ -286,7 +292,10 @@ fn leaving_the_shape_arrives_as_a_delete() {
     let (name, data) = s.next().expect("change");
     assert_eq!(name, "change");
     assert_eq!(count(&data, "puts"), 0, "{data}");
-    assert!(!data.contains("\"dels\":[]"), "leaving the shape must be a delete: {data}");
+    assert!(
+        !data.contains("\"dels\":[]"),
+        "leaving the shape must be a delete: {data}"
+    );
 }
 
 #[test]
@@ -372,7 +381,10 @@ fn projection_is_honoured_and_keeps_id() {
     let h = start(Config::default());
     let mut s = Sub::open(h.port, "/tasks/changes?select=title");
     let (_, data) = s.next().expect("seed");
-    assert!(data.contains("\"id\""), "the id must always be carried: {data}");
+    assert!(
+        data.contains("\"id\""),
+        "the id must always be carried: {data}"
+    );
     assert!(!data.contains("\"status\""), "{data}");
 }
 

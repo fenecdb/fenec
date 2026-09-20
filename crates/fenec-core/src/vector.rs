@@ -12,8 +12,8 @@ use crate::codec::{get_uvarint, put_uvarint};
 use crate::schema::{Metric, VectorIndexSpec};
 use crate::value::{DocId, VecPrec};
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 // -------------------------------------------------------------- metrics
@@ -419,7 +419,6 @@ impl Scratch {
     }
 }
 
-
 /// Read-only view of the graph.
 ///
 /// Why a separate type: `VectorIndex` carries `RefCell` buffers and is
@@ -477,9 +476,6 @@ impl<'a> GraphView<'a> {
             }
         }
     }
-
-
-
 
     /// Greedy descent through the upper layers.
     fn descend(&self, q: &[f32], from: u32, from_level: usize, to_level: usize) -> u32 {
@@ -843,7 +839,11 @@ impl VectorIndex {
             self.l0_len[node as usize] = (n + 1) as u16;
             true
         } else {
-            match self.upper.get_mut(node as usize).and_then(|u| u.get_mut(level - 1)) {
+            match self
+                .upper
+                .get_mut(node as usize)
+                .and_then(|u| u.get_mut(level - 1))
+            {
                 Some(slot) => {
                     if slot.len() >= max_deg {
                         return false;
@@ -904,7 +904,6 @@ impl VectorIndex {
         let r = self.rng.next_f32().max(f32::MIN_POSITIVE);
         (-r.ln() * self.level_mult) as usize
     }
-
 
     /// Opens storage for a new node and writes the vector into the arena.
     /// With cosine the normalisation is done in place on the arena -- there
@@ -971,7 +970,13 @@ impl VectorIndex {
         let mut sc = Scratch::new();
         pending
             .iter()
-            .map(|&(node, level)| (node, level, view.candidates_for(&mut sc, node, level, efc, m)))
+            .map(|&(node, level)| {
+                (
+                    node,
+                    level,
+                    view.candidates_for(&mut sc, node, level, efc, m),
+                )
+            })
             .collect()
     }
 
@@ -993,7 +998,11 @@ impl VectorIndex {
                     let mut sc = Scratch::new();
                     part.iter()
                         .map(|&(node, level)| {
-                            (node, level, view.candidates_for(&mut sc, node, level, efc, m))
+                            (
+                                node,
+                                level,
+                                view.candidates_for(&mut sc, node, level, efc, m),
+                            )
                         })
                         .collect::<Vec<_>>()
                 }));
@@ -1032,7 +1041,9 @@ impl VectorIndex {
             // whole batch onto the serial path -- exactly when it should
             // parallelise as the graph grows.
             if threads < 2 || self.doc_ids.len() < 1024 {
-                let take = rest.len().min(1024_usize.saturating_sub(self.doc_ids.len()).max(1));
+                let take = rest
+                    .len()
+                    .min(1024_usize.saturating_sub(self.doc_ids.len()).max(1));
                 for (doc, v) in &rest[..take] {
                     self.insert(*doc, v);
                 }
@@ -1040,7 +1051,9 @@ impl VectorIndex {
                 continue;
             }
 
-            let chunk_len = (self.doc_ids.len() / 16).clamp(64, MAX_BATCH).min(rest.len());
+            let chunk_len = (self.doc_ids.len() / 16)
+                .clamp(64, MAX_BATCH)
+                .min(rest.len());
             let (chunk, tail) = rest.split_at(chunk_len);
             rest = tail;
 
@@ -1170,12 +1183,16 @@ impl VectorIndex {
         }
     }
 
-
-
     /// k nearest neighbours. The `accept` predicate is applied to the result
     /// set; traversal keeps running over every node, so the filter does not
     /// break the connectivity of the graph.
-    pub fn search<F>(&self, query: &[f32], k: usize, ef: Option<usize>, accept: F) -> Vec<(DocId, f32)>
+    pub fn search<F>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        accept: F,
+    ) -> Vec<(DocId, f32)>
     where
         F: Fn(DocId) -> bool,
     {
@@ -1395,8 +1412,7 @@ impl VectorIndex {
     /// scanning it directly is both cheaper and exact; the threshold is
     /// therefore derived from the index's own parameters, not hand-picked.
     pub fn probe_budget(&self, ef: Option<usize>) -> usize {
-        ef.unwrap_or(self.spec.ef_search)
-            .saturating_mul(self.m0)
+        ef.unwrap_or(self.spec.ef_search).saturating_mul(self.m0)
     }
 
     pub fn search_exact<F>(&self, query: &[f32], k: usize, accept: F) -> Vec<(DocId, f32)>
@@ -1516,10 +1532,21 @@ mod tests {
             vecs.push(v);
         }
         let q = &vecs[123];
-        let approx: Vec<u64> = ix.search(q, 10, Some(128), |_| true).into_iter().map(|x| x.0).collect();
-        let exact: Vec<u64> = ix.search_exact(q, 10, |_| true).into_iter().map(|x| x.0).collect();
+        let approx: Vec<u64> = ix
+            .search(q, 10, Some(128), |_| true)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
+        let exact: Vec<u64> = ix
+            .search_exact(q, 10, |_| true)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
         let hit = approx.iter().filter(|d| exact.contains(d)).count();
-        assert!(hit >= 8, "recall too low: {hit}/10 ({approx:?} vs {exact:?})");
+        assert!(
+            hit >= 8,
+            "recall too low: {hit}/10 ({approx:?} vs {exact:?})"
+        );
     }
 
     #[test]
@@ -1545,9 +1572,21 @@ mod tests {
         let mut par_hits = 0usize;
         let mut total = 0usize;
         for (_, q) in items.iter().step_by(250) {
-            let exact: Vec<u64> = seq.search_exact(q, 10, |_| true).into_iter().map(|x| x.0).collect();
-            let a: Vec<u64> = seq.search(q, 10, None, |_| true).into_iter().map(|x| x.0).collect();
-            let b: Vec<u64> = par.search(q, 10, None, |_| true).into_iter().map(|x| x.0).collect();
+            let exact: Vec<u64> = seq
+                .search_exact(q, 10, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            let a: Vec<u64> = seq
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            let b: Vec<u64> = par
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
             seq_hits += a.iter().filter(|d| exact.contains(d)).count();
             par_hits += b.iter().filter(|d| exact.contains(d)).count();
             total += exact.len();
@@ -1575,8 +1614,16 @@ mod tests {
         let a = build();
         let b = build();
         for (_, q) in items.iter().step_by(300) {
-            let ra: Vec<u64> = a.search(q, 10, None, |_| true).into_iter().map(|x| x.0).collect();
-            let rb: Vec<u64> = b.search(q, 10, None, |_| true).into_iter().map(|x| x.0).collect();
+            let ra: Vec<u64> = a
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            let rb: Vec<u64> = b
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
             assert_eq!(ra, rb, "the parallel build is not deterministic");
         }
     }
@@ -1591,7 +1638,11 @@ mod tests {
             ix.insert(i, &v);
             vecs.push(v);
         }
-        let before: Vec<u64> = ix.search(&vecs[42], 10, None, |_| true).into_iter().map(|x| x.0).collect();
+        let before: Vec<u64> = ix
+            .search(&vecs[42], 10, None, |_| true)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
 
         let bytes = ix.serialize_graph();
         let fetch = |d: u64, out: &mut Vec<f32>| match vecs.get(d as usize) {
@@ -1602,19 +1653,31 @@ mod tests {
             }
             None => false,
         };
-        let restored = VectorIndex::restore_graph(&bytes, 8, fetch)
-            .expect("restore failed");
+        let restored = VectorIndex::restore_graph(&bytes, 8, fetch).expect("restore failed");
         assert_eq!(restored.len(), 300);
-        let after: Vec<u64> = restored.search(&vecs[42], 10, None, |_| true).into_iter().map(|x| x.0).collect();
-        assert_eq!(before, after, "the restored graph must give the same results");
+        let after: Vec<u64> = restored
+            .search(&vecs[42], 10, None, |_| true)
+            .into_iter()
+            .map(|x| x.0)
+            .collect();
+        assert_eq!(
+            before, after,
+            "the restored graph must give the same results"
+        );
 
         // A wrong dimension must be rejected
         assert!(VectorIndex::restore_graph(&bytes, 16, fetch).is_none());
         // A missing document must be rejected
-        assert!(VectorIndex::restore_graph(&bytes, 8, |d: u64, out: &mut Vec<f32>| {
-            if d == 7 { false } else { fetch(d, out) }
-        })
-        .is_none());
+        assert!(
+            VectorIndex::restore_graph(&bytes, 8, |d: u64, out: &mut Vec<f32>| {
+                if d == 7 {
+                    false
+                } else {
+                    fetch(d, out)
+                }
+            })
+            .is_none()
+        );
     }
 
     #[test]

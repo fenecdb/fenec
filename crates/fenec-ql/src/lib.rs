@@ -35,8 +35,14 @@ mod tests {
             panic!()
         };
         assert_eq!(schema.fields.len(), 4);
-        assert_eq!(schema.field("embed").unwrap().ty, DataType::Vector(384, fenec_core::value::VecPrec::F32));
-        assert_eq!(schema.field("tags").unwrap().ty, DataType::List(Box::new(DataType::Text)));
+        assert_eq!(
+            schema.field("embed").unwrap().ty,
+            DataType::Vector(384, fenec_core::value::VecPrec::F32)
+        );
+        assert_eq!(
+            schema.field("tags").unwrap().ty,
+            DataType::List(Box::new(DataType::Text))
+        );
         assert_eq!(schema.field("year").unwrap().index, IndexKind::Hash);
         let IndexKind::Vector(spec) = schema.field("embed").unwrap().index else {
             panic!()
@@ -49,7 +55,9 @@ mod tests {
     #[test]
     fn put_batch() {
         let s = parse_one(r#"put docs [ {title: "a"}, {title: "b", embed: [0.1, 0.2]} ]"#).unwrap();
-        let Statement::Put { docs, .. } = s else { panic!() };
+        let Statement::Put { docs, .. } = s else {
+            panic!()
+        };
         assert_eq!(docs.len(), 2);
         assert_eq!(docs[1][1].1, Expr::Lit(Value::Vector(vec![0.1, 0.2])));
     }
@@ -109,7 +117,9 @@ mod tests {
     fn functions_and_is_null() {
         let s = parse_one("get t where lower(title) = \"x\" and body is not null").unwrap();
         let Statement::Select(sel) = s else { panic!() };
-        let Expr::And(l, r) = sel.filter.unwrap() else { panic!() };
+        let Expr::And(l, r) = sel.filter.unwrap() else {
+            panic!()
+        };
         assert!(matches!(*l, Expr::Cmp(CmpOp::Eq, _, _)));
         assert!(matches!(*r, Expr::Not(_)));
     }
@@ -150,7 +160,9 @@ mod tests {
 
         // A chain is depth too: `a or b or c` is a left-leaning tree, and
         // even though parsing is a loop, evaluation recurses to that depth.
-        let chain: Vec<String> = (0..MAX_EXPR_DEPTH * 2).map(|i| format!("n = {i}")).collect();
+        let chain: Vec<String> = (0..MAX_EXPR_DEPTH * 2)
+            .map(|i| format!("n = {i}"))
+            .collect();
         let e = parse_one(&format!("get t where {}", chain.join(" or ")))
             .unwrap_err()
             .to_string();

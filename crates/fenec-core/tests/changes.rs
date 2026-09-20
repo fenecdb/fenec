@@ -1,8 +1,8 @@
 //! Engine-level behaviour of the change feed.
 
+use fenec_core::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use fenec_core::prelude::*;
 
 fn run(db: &mut Database, sql: &str) {
     for stmt in fenec_ql::parse(sql).expect("parse") {
@@ -78,7 +78,10 @@ fn delete_then_reinsert_is_a_put() {
     let mut db = seeded();
     let cursor = db.change_seq();
     run(&mut db, r#"del tasks where key = "a""#);
-    run(&mut db, r#"put tasks {key: "a", title: "new", status: "open"}"#);
+    run(
+        &mut db,
+        r#"put tasks {key: "a", title: "new", status: "open"}"#,
+    );
     let b = batch(&db, cursor, None);
     // The old id was deleted and a new one added: both are visible.
     assert_eq!(b.puts.rows.len(), 1);
@@ -93,7 +96,10 @@ fn row_leaving_the_shape_arrives_as_a_delete() {
     run(&mut db, r#"set tasks {status: "closed"} where key = "a""#);
 
     let b = batch(&db, cursor, Some(r#"status = "open""#));
-    assert!(b.puts.rows.is_empty(), "the row no longer matches the shape");
+    assert!(
+        b.puts.rows.is_empty(),
+        "the row no longer matches the shape"
+    );
     assert_eq!(b.dels.len(), 1, "leaving the shape shows up as a delete");
 }
 
@@ -247,7 +253,8 @@ fn a_truncated_tail_still_loads() {
         let mut trimmed = full.clone();
         trimmed.truncate(full.len() - cut);
         let mut back = Database::new();
-        back.load(&trimmed).expect("a truncated tail must not break opening");
+        back.load(&trimmed)
+            .expect("a truncated tail must not break opening");
         assert_eq!(back.change_seq(), db.change_seq());
     }
 }

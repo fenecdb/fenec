@@ -101,8 +101,10 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
     };
     // The brands are structural: they are identical to the definitions in
     // `web/fenec.d.ts`, so values pass freely between the two with no import.
-    if used(|t| matches!(t, DataType::Timestamp) || matches!(t, DataType::List(i) if **i == DataType::Timestamp))
-    {
+    if used(|t| {
+        matches!(t, DataType::Timestamp)
+            || matches!(t, DataType::List(i) if **i == DataType::Timestamp)
+    }) {
         out.push_str(
             "/** `timestamp`: ISO-8601 text when read; a Date/number is accepted when writing. */\n\
              export type Timestamp = string & { readonly __fenec: 'timestamp' };\n",
@@ -114,8 +116,9 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
              export type Vector = number[] & { readonly __fenec: 'vector' };\n",
         );
     }
-    if used(|t| matches!(t, DataType::Bytes) || matches!(t, DataType::List(i) if **i == DataType::Bytes))
-    {
+    if used(|t| {
+        matches!(t, DataType::Bytes) || matches!(t, DataType::List(i) if **i == DataType::Bytes)
+    }) {
         out.push_str(
             "/** `bytes`: an array of bytes in JSON. */\n\
              export type Bytes = number[] & { readonly __fenec: 'bytes' };\n",
@@ -182,7 +185,9 @@ fn index_note(k: &IndexKind) -> Option<String> {
         IndexKind::Hash => Some(" @hash".into()),
         IndexKind::Vector(spec) => Some(format!(
             " @hnsw({}, m={}, ef_search={})",
-            spec.metric.name(), spec.m, spec.ef_search
+            spec.metric.name(),
+            spec.m,
+            spec.ef_search
         )),
     }
 }

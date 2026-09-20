@@ -163,8 +163,7 @@ pub fn parse(text: &str) -> Result<i64> {
     if civil_from_days(day) != (y, mo, d) {
         return Err(bad());
     }
-    Ok((day * 86_400_000) + h * 3_600_000 + mi * 60_000 + s * 1000 + milli
-        - offset_min * 60_000)
+    Ok((day * 86_400_000) + h * 3_600_000 + mi * 60_000 + s * 1000 + milli - offset_min * 60_000)
 }
 
 /// Current time (epoch ms).
@@ -233,7 +232,10 @@ mod tests {
         assert_eq!(parse("2026-09-19T15:34:56+03:00").unwrap(), t);
         assert_eq!(parse("2026-09-19T15:34:56+0300").unwrap(), t);
         assert_eq!(parse("2026-09-19T09:34:56-03").unwrap(), t);
-        assert_eq!(parse("2026-09-19").unwrap(), t - 12 * 3_600_000 - 34 * 60_000 - 56_000);
+        assert_eq!(
+            parse("2026-09-19").unwrap(),
+            t - 12 * 3_600_000 - 34 * 60_000 - 56_000
+        );
         // Fractional seconds are aligned to 3 digits.
         assert_eq!(parse("2026-09-19T00:00:00.5Z").unwrap() % 1000, 500);
         assert_eq!(parse("2026-09-19T00:00:00.123456Z").unwrap() % 1000, 123);

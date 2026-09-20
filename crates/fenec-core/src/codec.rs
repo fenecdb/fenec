@@ -6,7 +6,7 @@
 //! pool) is needed -- a read decodes straight off the arena slice.
 
 use crate::error::{Error, Result};
-use crate::value::{DataType, VecPrec, Value};
+use crate::value::{DataType, Value, VecPrec};
 
 pub const TAG_NULL: u8 = 0;
 pub const TAG_BOOL: u8 = 1;
@@ -410,7 +410,9 @@ mod tests {
     #[test]
     fn half_precision_roundtrip() {
         // Exactly representable values must round-trip losslessly.
-        for v in [0.0f32, -0.0, 1.0, -1.0, 0.5, 2.0, 0.25, 1024.0, 65504.0, -65504.0] {
+        for v in [
+            0.0f32, -0.0, 1.0, -1.0, 0.5, 2.0, 0.25, 1024.0, 65504.0, -65504.0,
+        ] {
             let back = f32_from_f16(f16_from_f32(v));
             assert_eq!(back, v, "{v} did not round-trip, got {back}");
         }

@@ -56,7 +56,10 @@ fn crud_and_filters() {
     let r = run(&mut db, "get docs");
     assert_eq!(r.rows().unwrap().rows.len(), 4);
 
-    let r = run(&mut db, r#"get docs select title where year >= 2021 order year desc"#);
+    let r = run(
+        &mut db,
+        r#"get docs select title where year >= 2021 order year desc"#,
+    );
     let rows = &r.rows().unwrap().rows;
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].values[0], Value::Text("vector search".into()));
@@ -76,7 +79,10 @@ fn crud_and_filters() {
 
     // update
     assert_eq!(
-        run(&mut db, r#"set docs {year: 2025} where title ~ "rust book""#),
+        run(
+            &mut db,
+            r#"set docs {year: 2025} where title ~ "rust book""#
+        ),
         Response::Affected(1)
     );
     let r = run(&mut db, "get docs where year = 2025");
@@ -94,7 +100,10 @@ fn crud_and_filters() {
 fn vector_search_is_native() {
     let mut db = setup();
 
-    let r = run(&mut db, "get docs select title near embed [1.0, 0.0, 0.0, 0.0] limit 2");
+    let r = run(
+        &mut db,
+        "get docs select title near embed [1.0, 0.0, 0.0, 0.0] limit 2",
+    );
     let rows = &r.rows().unwrap().rows;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].values[0], Value::Text("rust book".into()));
@@ -132,11 +141,7 @@ fn parameters_bind() {
         Value::Text("vector search".into())
     );
 
-    let r = run_with(
-        &mut db,
-        "get docs where year = $1",
-        &[Value::Int(2023)],
-    );
+    let r = run_with(&mut db, "get docs where year = $1", &[Value::Int(2023)]);
     assert_eq!(r.rows().unwrap().rows.len(), 1);
 }
 
@@ -158,7 +163,10 @@ fn snapshot_roundtrip_preserves_vector_index() {
     db2.load(&image).expect("load");
     assert_eq!(db2.collection_names(), vec!["docs".to_string()]);
 
-    let r = run(&mut db2, "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1");
+    let r = run(
+        &mut db2,
+        "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1",
+    );
     assert_eq!(
         r.rows().unwrap().rows[0].values[0],
         Value::Text("vector search".into())
@@ -176,7 +184,10 @@ fn compaction_reclaims_space() {
     let after = db.stats()[0].dead_bytes;
     assert_eq!(after, 0);
     // the vector index still works after compaction
-    let r = run(&mut db, "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1");
+    let r = run(
+        &mut db,
+        "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1",
+    );
     assert_eq!(
         r.rows().unwrap().rows[0].values[0],
         Value::Text("vector search".into())
@@ -204,7 +215,10 @@ fn read_only_path_rejects_writes() {
     ] {
         let stmt = &parse(sql).unwrap()[0];
         assert!(!stmt.is_read_only(), "{sql} must not count as read-only");
-        assert!(db.query(stmt, &[]).is_err(), "{sql} passed on the read path");
+        assert!(
+            db.query(stmt, &[]).is_err(),
+            "{sql} passed on the read path"
+        );
         // It works on the write path.
         assert!(db.execute(stmt).is_ok(), "{sql} failed on the write path");
     }
@@ -277,7 +291,10 @@ fn filtered_vector_search_is_not_starved() {
             r.rows().unwrap().rows[0].values[0].as_f64().unwrap()
         })
         .collect();
-    assert!(groups.iter().all(|g| *g == 0.0), "the setup broke: {groups:?}");
+    assert!(
+        groups.iter().all(|g| *g == 0.0),
+        "the setup broke: {groups:?}"
+    );
 
     // Short cut: the filter set is smaller than the ANN budget -> direct scan.
     let hnsw = ids(run_with(
@@ -349,7 +366,10 @@ fn persisted_graph_is_used_and_validated() {
 
     let mut db2 = Database::new();
     db2.load(&image).expect("load");
-    let r = run(&mut db2, "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1");
+    let r = run(
+        &mut db2,
+        "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1",
+    );
     assert_eq!(
         r.rows().unwrap().rows[0].values[0],
         Value::Text("vector search".into())
@@ -362,8 +382,12 @@ fn persisted_graph_is_used_and_validated() {
         *b = 0xff;
     }
     let mut db3 = Database::new();
-    db3.load(&corrupted).expect("a corrupt graph must not block loading");
-    let r = run(&mut db3, "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1");
+    db3.load(&corrupted)
+        .expect("a corrupt graph must not block loading");
+    let r = run(
+        &mut db3,
+        "get docs select title near embed [0.0, 1.0, 0.0, 0.0] limit 1",
+    );
     assert_eq!(
         r.rows().unwrap().rows[0].values[0],
         Value::Text("vector search".into())
@@ -372,13 +396,22 @@ fn persisted_graph_is_used_and_validated() {
     // A stale graph (a write after the image) must be ignored as well.
     let mut db4 = Database::new();
     db4.load(&image).unwrap();
-    run(&mut db4, r#"put docs {title: "new", embed: [0.5, 0.5, 0.0, 0.0]}"#);
+    run(
+        &mut db4,
+        r#"put docs {title: "new", embed: [0.5, 0.5, 0.0, 0.0]}"#,
+    );
     let image2 = db4.snapshot();
     let mut db5 = Database::new();
     db5.load(&image2).unwrap();
     assert_eq!(run(&mut db5, "get docs").rows().unwrap().rows.len(), 5);
-    let r = run(&mut db5, "get docs select title near embed [0.5, 0.5, 0.0, 0.0] limit 1");
-    assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Text("new".into()));
+    let r = run(
+        &mut db5,
+        "get docs select title near embed [0.5, 0.5, 0.0, 0.0] limit 1",
+    );
+    assert_eq!(
+        r.rows().unwrap().rows[0].values[0],
+        Value::Text("new".into())
+    );
 }
 
 #[test]
@@ -419,16 +452,28 @@ fn near_beyond_row_cap_is_rejected() {
 fn hash_index_used_inside_conjunction() {
     let mut db = setup();
     // `year` is hash indexed; the equality sits inside an `and` chain
-    let r = run(&mut db, r#"get docs select title where year = 2023 and title ~ "wasm""#);
+    let r = run(
+        &mut db,
+        r#"get docs select title where year = 2023 and title ~ "wasm""#,
+    );
     assert_eq!(r.rows().unwrap().rows.len(), 1);
     // reversed order
-    let r = run(&mut db, r#"get docs select title where title ~ "wasm" and year = 2023"#);
+    let r = run(
+        &mut db,
+        r#"get docs select title where title ~ "wasm" and year = 2023"#,
+    );
     assert_eq!(r.rows().unwrap().rows.len(), 1);
     // a non-matching equality must come back empty (empty candidate set)
-    let r = run(&mut db, r#"get docs select title where year = 1999 and title ~ "wasm""#);
+    let r = run(
+        &mut db,
+        r#"get docs select title where year = 1999 and title ~ "wasm""#,
+    );
     assert_eq!(r.rows().unwrap().rows.len(), 0);
     // an equality under `or` must NOT be used as an index, and the result must still be right
-    let r = run(&mut db, r#"get docs select title where year = 2023 or year = 2019"#);
+    let r = run(
+        &mut db,
+        r#"get docs select title where year = 2023 or year = 2019"#,
+    );
     assert_eq!(r.rows().unwrap().rows.len(), 2);
 }
 
@@ -451,7 +496,11 @@ fn create_index_after_bulk_load() {
 
     // With no index `near` must be rejected
     let stmts = fenec_ql::parse("get n near embed [1.0,0,0,0] limit 1").unwrap();
-    assert!(db.execute(&stmts[0]).unwrap_err().to_string().contains("has no vector index"));
+    assert!(db
+        .execute(&stmts[0])
+        .unwrap_err()
+        .to_string()
+        .contains("has no vector index"));
 
     // Build the index afterwards
     assert!(matches!(
@@ -464,14 +513,23 @@ fn create_index_after_bulk_load() {
     ));
 
     // Was it filled from the existing documents?
-    let r = run(&mut db, "get n select title near embed [0.0,1.0,0.0,0.0] limit 1");
+    let r = run(
+        &mut db,
+        "get n select title near embed [0.0,1.0,0.0,0.0] limit 1",
+    );
     assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Text("b".into()));
     let r = run(&mut db, r#"get n select title where topic = "x""#);
     assert_eq!(r.rows().unwrap().rows.len(), 2);
 
     // Writes after the index must be indexed as well
-    run(&mut db, r#"put n {title: "d", topic: "x", embed: [0.0, 0.0, 0.0, 1.0]}"#);
-    let r = run(&mut db, "get n select title near embed [0.0,0.0,0.0,1.0] limit 1");
+    run(
+        &mut db,
+        r#"put n {title: "d", topic: "x", embed: [0.0, 0.0, 0.0, 1.0]}"#,
+    );
+    let r = run(
+        &mut db,
+        "get n select title near embed [0.0,0.0,0.0,1.0] limit 1",
+    );
     assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Text("d".into()));
 
     // Building it a second time errors, and is silent with `if not exists`
@@ -479,7 +537,10 @@ fn create_index_after_bulk_load() {
         .execute(&fenec_ql::parse("create index on n (embed) @hnsw(cosine)").unwrap()[0])
         .is_err());
     assert!(matches!(
-        run(&mut db, "create index if not exists on n (embed) @hnsw(cosine)"),
+        run(
+            &mut db,
+            "create index if not exists on n (embed) @hnsw(cosine)"
+        ),
         Response::Ok(_)
     ));
 
@@ -487,7 +548,10 @@ fn create_index_after_bulk_load() {
     let image = db.snapshot();
     let mut db2 = Database::new();
     db2.load(&image).unwrap();
-    let r = run(&mut db2, "get n select title near embed [0.0,1.0,0.0,0.0] limit 1");
+    let r = run(
+        &mut db2,
+        "get n select title near embed [0.0,1.0,0.0,0.0] limit 1",
+    );
     assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Text("b".into()));
     let r = run(&mut db2, r#"get n select title where topic = "x""#);
     assert_eq!(r.rows().unwrap().rows.len(), 3);
@@ -522,14 +586,14 @@ fn hash_index_agrees_with_scan() {
     }
 
     for filter in [
-        "where price = 10",        // int literal   -> float field
+        "where price = 10", // int literal   -> float field
         "where price = 10.0",
-        "where price = 11",        // no match
+        "where price = 11", // no match
         "where year = 2024",
-        "where year = 2024.0",     // float literal -> int field
-        "where year = 2024.5",     // not a whole number: nothing may match
-        r#"where label = "x""#,    // text literal  -> bytes field
-        r#"where year = "abc""#,   // literal that does not fit the type
+        "where year = 2024.0",   // float literal -> int field
+        "where year = 2024.5",   // not a whole number: nothing may match
+        r#"where label = "x""#,  // text literal  -> bytes field
+        r#"where year = "abc""#, // literal that does not fit the type
         r#"where year = 2024 and label = "x""#,
     ] {
         let a = run(&mut db, &format!("get ix {filter}"))
@@ -562,7 +626,11 @@ fn mismatched_types_are_not_equal() {
         0
     );
     assert_eq!(
-        run(&mut db, "get docs where title = 5").rows().unwrap().rows.len(),
+        run(&mut db, "get docs where title = 5")
+            .rows()
+            .unwrap()
+            .rows
+            .len(),
         0
     );
 
@@ -580,7 +648,10 @@ fn mismatched_types_are_not_equal() {
 #[test]
 fn json_number_array_fills_list_fields() {
     let mut db = Database::new();
-    run(&mut db, "create collection j (numbers [int], ratios [float])");
+    run(
+        &mut db,
+        "create collection j (numbers [int], ratios [float])",
+    );
 
     let params = fenec_core::json::parse_params("[[1,2,3]]").expect("json params");
     assert_eq!(params[0].type_name(), "vector");
@@ -605,7 +676,10 @@ fn json_number_array_fills_list_fields() {
 #[test]
 fn hash_index_pushdown_resolves_params() {
     let mut db = Database::new();
-    run(&mut db, "create collection ix (year int @hash, price float @hash)");
+    run(
+        &mut db,
+        "create collection ix (year int @hash, price float @hash)",
+    );
     run(&mut db, "create collection sc (year int, price float)");
     for c in ["ix", "sc"] {
         run(
@@ -688,7 +762,11 @@ fn f16_vectors_halve_storage_and_survive_reload() {
             .map(|v| v.arena_bytes)
             .sum()
     };
-    assert_eq!(arena(&db, "a") * 2, arena(&db, "b"), "the f16 arena must be half");
+    assert_eq!(
+        arena(&db, "a") * 2,
+        arena(&db, "b"),
+        "the f16 arena must be half"
+    );
     assert_eq!(
         db.stats()
             .iter()
@@ -699,9 +777,8 @@ fn f16_vectors_halve_storage_and_survive_reload() {
         VecPrec::F16
     );
     // The records are smaller too: the f16 collection holds fewer bytes.
-    let bytes = |db: &Database, name: &str| {
-        db.stats().iter().find(|s| s.name == name).unwrap().bytes
-    };
+    let bytes =
+        |db: &Database, name: &str| db.stats().iter().find(|s| s.name == name).unwrap().bytes;
     assert!(bytes(&db, "a") < bytes(&db, "b"));
 
     // Query results must be in the same order as f32 (an exact overlap for this data).
@@ -724,7 +801,12 @@ fn f16_vectors_halve_storage_and_survive_reload() {
     let mut db2 = Database::new();
     db2.load(&image).unwrap();
     assert_eq!(
-        db2.collection("a").unwrap().schema.field("embed").unwrap().ty,
+        db2.collection("a")
+            .unwrap()
+            .schema
+            .field("embed")
+            .unwrap()
+            .ty,
         DataType::Vector(64, VecPrec::F16)
     );
     assert_eq!(ids(&db2, "a"), ids(&db, "a"));
@@ -744,7 +826,10 @@ fn unknown_vector_precision_is_rejected() {
 #[test]
 fn timestamps_accept_text_and_epoch() {
     let mut db = Database::new();
-    run(&mut db, "create collection event (name text, t timestamp @hash)");
+    run(
+        &mut db,
+        "create collection event (name text, t timestamp @hash)",
+    );
     run(
         &mut db,
         r#"put event [
@@ -757,10 +842,13 @@ fn timestamps_accept_text_and_epoch() {
 
     // Two different spellings of the same instant must be equal.
     let ts = |db: &mut Database, name: &str| -> Value {
-        run(&mut db_ref(db), &format!(r#"get event select t where name = "{name}""#))
-            .rows()
-            .unwrap()
-            .rows[0]
+        run(
+            &mut db_ref(db),
+            &format!(r#"get event select t where name = "{name}""#),
+        )
+        .rows()
+        .unwrap()
+        .rows[0]
             .values[0]
             .clone()
     };
@@ -811,8 +899,16 @@ fn timestamps_accept_text_and_epoch() {
         "where t = 0",
         r#"where t = "none""#,
     ] {
-        let a = run(&mut db, &format!("get event {filter}")).rows().unwrap().rows.len();
-        let b = run(&mut db, &format!("get copy {filter}")).rows().unwrap().rows.len();
+        let a = run(&mut db, &format!("get event {filter}"))
+            .rows()
+            .unwrap()
+            .rows
+            .len();
+        let b = run(&mut db, &format!("get copy {filter}"))
+            .rows()
+            .unwrap()
+            .rows
+            .len();
         assert!(a >= b, "`{filter}`: indexed {a}, unindexed {b}");
         if filter.contains("none") {
             assert_eq!((a, b), (0, 0));
@@ -827,11 +923,19 @@ fn timestamps_accept_text_and_epoch() {
         r#"put times [{t: "1970-01-01"}, {t: "2024-02-29"}, {t: "2999-12-31"}]"#,
     );
     assert_eq!(
-        run(&mut db, "get times where t < now()").rows().unwrap().rows.len(),
+        run(&mut db, "get times where t < now()")
+            .rows()
+            .unwrap()
+            .rows
+            .len(),
         2
     );
     assert_eq!(
-        run(&mut db, "get times where t > now()").rows().unwrap().rows.len(),
+        run(&mut db, "get times where t > now()")
+            .rows()
+            .unwrap()
+            .rows
+            .len(),
         1
     );
 
@@ -844,7 +948,12 @@ fn timestamps_accept_text_and_epoch() {
     let mut db2 = Database::new();
     db2.load(&image).unwrap();
     assert_eq!(
-        db2.collection("event").unwrap().schema.field("t").unwrap().ty,
+        db2.collection("event")
+            .unwrap()
+            .schema
+            .field("t")
+            .unwrap()
+            .ty,
         DataType::Timestamp
     );
     assert_eq!(ts(&mut db2, "a"), ts(&mut db, "a"));
@@ -878,8 +987,11 @@ fn near_accepts_pgvector_text() {
     }
 
     // Text that is not a vector does not silently become a zero vector.
-    let e = try_run(&mut db, r#"get docs select title near embed "hello" limit 1"#)
-        .expect_err("unparseable text was accepted");
+    let e = try_run(
+        &mut db,
+        r#"get docs select title near embed "hello" limit 1"#,
+    )
+    .expect_err("unparseable text was accepted");
     assert!(e.to_string().contains("unparseable text"), "{e}");
 
     // A non-numeric component errors too; it used to silently become 0.0.
@@ -891,8 +1003,11 @@ fn near_accepts_pgvector_text() {
     assert!(e.to_string().contains("non-numeric"), "{e}");
 
     // The dimension check works on the text path as well.
-    let e = try_run(&mut db, r#"get docs select title near embed "[1,0]" limit 1"#)
-        .expect_err("a wrong dimension was accepted");
+    let e = try_run(
+        &mut db,
+        r#"get docs select title near embed "[1,0]" limit 1"#,
+    )
+    .expect_err("a wrong dimension was accepted");
     assert!(e.to_string().contains("dimensions"), "{e}");
 }
 
@@ -961,7 +1076,10 @@ fn sql_order_projection() {
 
     // `select * from t` gives all the fields.
     let star = run(&mut db, "select * from docs");
-    assert_eq!(star.rows().unwrap().columns, run(&mut db, "get docs").rows().unwrap().columns);
+    assert_eq!(
+        star.rows().unwrap().columns,
+        run(&mut db, "get docs").rows().unwrap().columns
+    );
 
     // It works with `get` too; `from` is optional for both verbs.
     assert_eq!(

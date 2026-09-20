@@ -5,12 +5,12 @@
 //! own assumptions. When the binary is missing the tests are skipped --
 //! fenec-import does not need `sqlite3` at runtime, only these tests do.
 
+use fenec_core::prelude::*;
+use fenec_core::query::Statement as Stmt;
+use fenec_import::sqlite::Reader;
+use fenec_import::{load, map, IdSource, Options, Source};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use fenec_core::prelude::*;
-use fenec_import::sqlite::Reader;
-use fenec_core::query::Statement as Stmt;
-use fenec_import::{load, map, IdSource, Options, Source};
 
 fn dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!("fenecimport-{}", std::process::id()));
@@ -155,7 +155,9 @@ fn overflow_chain_is_followed() {
     let Value::Text(s) = &got[0][0] else { panic!() };
     assert_eq!(s.len(), 40000, "the overflowing text was truncated");
     assert!(s.chars().all(|c| c == 'x'));
-    let Value::Bytes(b) = &got[0][1] else { panic!() };
+    let Value::Bytes(b) = &got[0][1] else {
+        panic!()
+    };
     assert_eq!(b.len(), 50000);
     assert!(b.iter().all(|&x| x == 0));
 }
@@ -332,7 +334,9 @@ fn decimal_column_demands_cast() {
     );
     let mut src = Reader::open(&db, "t").unwrap();
     let cols = src.columns().unwrap();
-    let e = map::plan(&cols, &Options::new("m")).unwrap_err().to_string();
+    let e = map::plan(&cols, &Options::new("m"))
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("--cast price="), "{e}");
 
     // Asked for as a float, it is parsed from the text value.

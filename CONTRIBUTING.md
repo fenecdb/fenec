@@ -80,8 +80,8 @@ empty.
 - Unit tests go inline in `#[cfg(test)] mod tests`. Cross-crate and protocol
   tests go in `crates/*/tests/`. Measurement programs are
   `crates/fenec-core/examples/` and are wired to `make`, not to CI.
-- The tree is not `cargo fmt`-clean and is not meant to be reformatted
-  wholesale; match the formatting of the code around your change.
+- Run `cargo fmt --all` before you push; CI checks it. rustfmt settles
+  formatting so that review can be about the change itself.
 
 ## Performance claims
 

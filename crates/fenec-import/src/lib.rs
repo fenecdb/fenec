@@ -24,11 +24,11 @@ pub mod map;
 pub mod pg;
 pub mod sqlite;
 
-use std::time::Duration;
 use fenec_core::error::Result;
 use fenec_core::query::Expr;
 use fenec_core::schema::IndexKind;
 use fenec_core::value::{DataType, Value};
+use std::time::Duration;
 
 /// A single column of the source table and its fenecdb counterpart.
 #[derive(Debug, Clone, PartialEq)]

@@ -11,11 +11,11 @@
 //! Every returned buffer is `[u32 length (LE)][contents]`. Once the caller
 //! has read the contents it must call `fenec_free(ptr, 4 + length)`.
 
-use std::alloc::{alloc, dealloc, Layout};
-use std::cell::RefCell;
 use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_ql::parse;
+use std::alloc::{alloc, dealloc, Layout};
+use std::cell::RefCell;
 
 thread_local! {
     static HANDLES: RefCell<Vec<Option<Database>>> = const { RefCell::new(Vec::new()) };
@@ -304,7 +304,8 @@ mod tests {
             let mut len = [0u8; 4];
             std::ptr::copy_nonoverlapping(ptr, len.as_mut_ptr(), 4);
             let len = u32::from_le_bytes(len) as usize;
-            let s = String::from_utf8_lossy(std::slice::from_raw_parts(ptr.add(4), len)).into_owned();
+            let s =
+                String::from_utf8_lossy(std::slice::from_raw_parts(ptr.add(4), len)).into_owned();
             fenec_free(ptr, 4 + len);
             s
         }

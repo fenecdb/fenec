@@ -137,13 +137,9 @@ impl Value {
             // Epoch milliseconds directly; arithmetic results such as
             // `now() - 86400000` also pass through here.
             (DataType::Timestamp, Value::Int(ms)) => Ok(Value::Timestamp(ms)),
-            (DataType::Timestamp, Value::Text(s)) => {
-                Ok(Value::Timestamp(crate::time::parse(&s)?))
-            }
+            (DataType::Timestamp, Value::Text(s)) => Ok(Value::Timestamp(crate::time::parse(&s)?)),
             (DataType::Int, Value::Timestamp(ms)) => Ok(Value::Int(ms)),
-            (DataType::Text, Value::Timestamp(ms)) => {
-                Ok(Value::Text(crate::time::format_iso(ms)))
-            }
+            (DataType::Text, Value::Timestamp(ms)) => Ok(Value::Text(crate::time::format_iso(ms))),
             (DataType::Vector(dim, _), Value::Vector(v)) => check_dim(v, *dim),
             (DataType::Vector(dim, _), Value::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());

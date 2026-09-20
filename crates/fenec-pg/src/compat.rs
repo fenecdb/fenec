@@ -71,9 +71,7 @@ pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
             let name = lower.strip_prefix("show").unwrap_or("").trim();
             let val = match name {
                 "server_version" => cfg.server_version.clone(),
-                "transaction_isolation" | "transaction isolation level" => {
-                    "read committed".into()
-                }
+                "transaction_isolation" | "transaction isolation level" => "read committed".into(),
                 "standard_conforming_strings" => "on".into(),
                 "client_encoding" | "server_encoding" => "UTF8".into(),
                 "search_path" => "public".into(),

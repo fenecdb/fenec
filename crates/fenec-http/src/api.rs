@@ -132,12 +132,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
 /// easy to do by accident and impossible to undo: we require an explicit
 /// path (`/<name>/all`). It is a separate *path* because a key like
 /// `?all=true` would clash with a field named `all`.
-fn require_filter(
-    schema: &Schema,
-    req: &Request,
-    all: bool,
-    verb: &str,
-) -> Result<Option<Expr>> {
+fn require_filter(schema: &Schema, req: &Request, all: bool, verb: &str) -> Result<Option<Expr>> {
     let filter = filter_from_query(schema, req)?;
     match (&filter, all) {
         (Some(_), true) => Err(Error::Query(format!(
@@ -240,7 +235,9 @@ fn filter_with(schema: &Schema, req: &Request, reserved: &[&str]) -> Result<Opti
         }
         parts.push(condition(schema, key, raw)?);
     }
-    Ok(parts.into_iter().reduce(|a, b| Expr::And(Box::new(a), Box::new(b))))
+    Ok(parts
+        .into_iter()
+        .reduce(|a, b| Expr::And(Box::new(a), Box::new(b))))
 }
 
 /// `where=` is a free FenecQL expression, so that conditions which do not fit
@@ -250,7 +247,9 @@ fn parse_expr(collection: &str, raw: &str) -> Result<Expr> {
     let stmt = fenec_ql::parse_one(&format!("get {collection} where {raw}"))
         .map_err(|e| Error::Query(format!("`where` could not be parsed: {e}")))?;
     let Statement::Select(sel) = stmt else {
-        return Err(Error::Query("`where` must be a condition expression".into()));
+        return Err(Error::Query(
+            "`where` must be a condition expression".into(),
+        ));
     };
     if sel.project.is_some()
         || sel.near.is_some()
@@ -458,7 +457,9 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
         match get(name) {
             None | Some(Value::Null) => Ok(None),
             Some(Value::Int(i)) if *i >= 0 => Ok(Some(*i as usize)),
-            Some(_) => Err(Error::Query(format!("`{name}` must be a non-negative integer"))),
+            Some(_) => Err(Error::Query(format!(
+                "`{name}` must be a non-negative integer"
+            ))),
         }
     };
 
@@ -521,12 +522,7 @@ fn default_vector_field(schema: &Schema) -> Result<String> {
             found = Some(f.name.clone());
         }
     }
-    found.ok_or_else(|| {
-        Error::Query(format!(
-            "collection `{}` has no vector field",
-            schema.name
-        ))
-    })
+    found.ok_or_else(|| Error::Query(format!("collection `{}` has no vector field", schema.name)))
 }
 
 // ---------------------------------------------------------- subscription
@@ -558,9 +554,10 @@ pub fn subscription(db: &Database, req: &Request) -> Result<Subscription> {
     for (k, v) in &req.query {
         match k.as_str() {
             "since" => {
-                since = Some(v.trim().parse::<u64>().map_err(|_| {
-                    Error::Query(format!("`since` expects a number, got `{v}`"))
-                })?)
+                since =
+                    Some(v.trim().parse::<u64>().map_err(|_| {
+                        Error::Query(format!("`since` expects a number, got `{v}`"))
+                    })?)
             }
             "select" => {
                 // The id is always carried: deletions are applied by id, and
@@ -654,8 +651,7 @@ pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
             continue;
         }
         out.push(
-            parse_query(line)
-                .map_err(|e| Error::Query(format!("batch line {}: {e}", i + 1)))?,
+            parse_query(line).map_err(|e| Error::Query(format!("batch line {}: {e}", i + 1)))?,
         );
     }
     if out.is_empty() {

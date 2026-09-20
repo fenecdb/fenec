@@ -10,7 +10,7 @@
 
 use crate::{Column, Source};
 use fenec_core::error::{Error, Result};
-use fenec_core::value::{DataType, VecPrec, Value};
+use fenec_core::value::{DataType, Value, VecPrec};
 use fenec_pg::client::{Client, CopyOut, FieldDesc};
 
 /// The connection string. Passed through from `fenec_pg::client` as is.
@@ -77,7 +77,11 @@ fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
         } else {
             VecPrec::F32
         };
-        let tyname = if prec == VecPrec::F16 { "halfvec" } else { "vector" };
+        let tyname = if prec == VecPrec::F16 {
+            "halfvec"
+        } else {
+            "vector"
+        };
         // pgvector carries the dimension in typmod; when it is not declared
         // the column is defined as `vector` and the dimension can vary per row.
         return if f.typmod > 0 {
@@ -115,7 +119,8 @@ fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
         TIMESTAMP => (col(DataType::Timestamp, "timestamp"), Kind::Text),
         TIMESTAMPTZ => (col(DataType::Timestamp, "timestamptz"), Kind::Text),
         UUID => (
-            col(DataType::Text, "uuid").note("uuid taken as `text`; it can be indexed with `@hash`"),
+            col(DataType::Text, "uuid")
+                .note("uuid taken as `text`; it can be indexed with `@hash`"),
             Kind::Text,
         ),
         INT2_ARRAY | INT4_ARRAY | INT8_ARRAY => (
@@ -147,11 +152,7 @@ fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
             Kind::Text,
         ),
         other => (
-            Column::unsupported(
-                name,
-                format!("oid {other}"),
-                "unrecognised PostgreSQL type",
-            ),
+            Column::unsupported(name, format!("oid {other}"), "unrecognised PostgreSQL type"),
             Kind::Text,
         ),
     }
@@ -165,13 +166,7 @@ fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
 /// splitting on a raw tab is safe. `\N` means NULL.
 fn split_line(line: &[u8]) -> Vec<Option<Vec<u8>>> {
     line.split(|&b| b == b'\t')
-        .map(|f| {
-            if f == b"\\N" {
-                None
-            } else {
-                Some(unescape(f))
-            }
-        })
+        .map(|f| if f == b"\\N" { None } else { Some(unescape(f)) })
         .collect()
 }
 
@@ -492,7 +487,8 @@ pub fn count_rows(url: &Url, query: &Query) -> Result<u64> {
 
 /// Learns the OIDs of the pgvector types when the extension is installed.
 pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
-    let r = client.query("select typname, oid from pg_type where typname in ('vector', 'halfvec')")?;
+    let r =
+        client.query("select typname, oid from pg_type where typname in ('vector', 'halfvec')")?;
     let mut out = VectorOids::default();
     for row in &r.rows {
         let (Some(name), Some(oid)) = (row.first(), row.get(1)) else {
@@ -559,7 +555,10 @@ mod tests {
         assert_eq!(ty(BYTEA), Some(DataType::Bytes));
         assert_eq!(ty(TIMESTAMPTZ), Some(DataType::Timestamp));
         assert_eq!(ty(UUID), Some(DataType::Text));
-        assert_eq!(ty(INT4_ARRAY), Some(DataType::List(Box::new(DataType::Int))));
+        assert_eq!(
+            ty(INT4_ARRAY),
+            Some(DataType::List(Box::new(DataType::Int)))
+        );
         assert_eq!(
             ty(TEXT_ARRAY),
             Some(DataType::List(Box::new(DataType::Text)))
@@ -595,7 +594,11 @@ mod tests {
         assert_eq!(cells[1].as_deref(), Some(&b"line\nend"[..]));
         assert_eq!(cells[2].as_deref(), Some(&b"\\back"[..]));
         assert_eq!(cells[3], None, "\\N must be NULL");
-        assert_eq!(cells[4].as_deref(), Some(&b""[..]), "an empty string is not NULL");
+        assert_eq!(
+            cells[4].as_deref(),
+            Some(&b""[..]),
+            "an empty string is not NULL"
+        );
     }
 
     #[test]
@@ -613,7 +616,10 @@ mod tests {
         assert_eq!(p(b"f", Kind::Bool), Value::Bool(false));
         assert_eq!(p(b"-42", Kind::Int), Value::Int(-42));
         assert_eq!(p(b"2.5", Kind::Float), Value::Float(2.5));
-        assert_eq!(p(b"\\x48690a", Kind::Bytea), Value::Bytes(vec![0x48, 0x69, 0x0a]));
+        assert_eq!(
+            p(b"\\x48690a", Kind::Bytea),
+            Value::Bytes(vec![0x48, 0x69, 0x0a])
+        );
         assert_eq!(
             p(b"[0.5,-1,2]", Kind::Vector),
             Value::Vector(vec![0.5, -1.0, 2.0])
@@ -662,7 +668,9 @@ mod tests {
 
     #[test]
     fn bad_cells_name_the_column() {
-        let e = parse_cell(b"abc", &Kind::Int, "score").unwrap_err().to_string();
+        let e = parse_cell(b"abc", &Kind::Int, "score")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("`score`"), "{e}");
     }
 

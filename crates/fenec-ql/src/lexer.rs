@@ -149,7 +149,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                     i += 1;
                     Tok::Ne
                 } else {
-                    return Err(Error::Query(format!("position {start}: `!` alone is invalid")));
+                    return Err(Error::Query(format!(
+                        "position {start}: `!` alone is invalid"
+                    )));
                 }
             }
             '<' => {
@@ -180,7 +182,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                     i += 1;
                 }
                 if s == i {
-                    return Err(Error::Query(format!("position {start}: expected a number after `$`")));
+                    return Err(Error::Query(format!(
+                        "position {start}: expected a number after `$`"
+                    )));
                 }
                 let n: usize = b[s..i].iter().collect::<String>().parse().unwrap();
                 if n == 0 {
@@ -194,7 +198,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                 let mut s = String::new();
                 loop {
                     if i >= b.len() {
-                        return Err(Error::Query(format!("position {start}: unterminated string")));
+                        return Err(Error::Query(format!(
+                            "position {start}: unterminated string"
+                        )));
                     }
                     if b[i] == '\\' && i + 1 < b.len() {
                         i += 1;
@@ -217,7 +223,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                 }
                 Tok::Str(s)
             }
-            c if c.is_ascii_digit() || (c == '-' && i + 1 < b.len() && b[i + 1].is_ascii_digit()) => {
+            c if c.is_ascii_digit()
+                || (c == '-' && i + 1 < b.len() && b[i + 1].is_ascii_digit()) =>
+            {
                 let s = i;
                 if b[i] == '-' {
                     i += 1;

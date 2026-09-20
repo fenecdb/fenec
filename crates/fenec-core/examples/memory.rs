@@ -49,11 +49,8 @@ fn main() {
             "s",
             vec![
                 Field::new("category", DataType::Text).indexed(IndexKind::Hash),
-                Field::new(
-                    "embed",
-                    DataType::Vector(dim, VecPrec::F32),
-                )
-                .indexed(IndexKind::Vector(VectorIndexSpec::default())),
+                Field::new("embed", DataType::Vector(dim, VecPrec::F32))
+                    .indexed(IndexKind::Vector(VectorIndexSpec::default())),
             ],
         )
         .unwrap(),
@@ -90,7 +87,10 @@ fn main() {
     println!("{n} documents x {dim} dimensions");
     println!("  segment bytes      {}", mb(st.bytes));
     println!("  vector arena       {}", mb(arena));
-    println!("  measured footprint {}   <- memory_bytes()", mb(db.memory_bytes()));
+    println!(
+        "  measured footprint {}   <- memory_bytes()",
+        mb(db.memory_bytes())
+    );
     println!();
     println!("Measure peak RSS from outside. The ratio measured on this machine:");
     println!("the footprint is 60-75% of peak RSS (the gap is HNSW build buffers");

@@ -4,12 +4,12 @@
 //! TCP, so the assertions are on the real byte stream -- not on the
 //! leniency of an HTTP library.
 
+use fenec_core::prelude::*;
+use fenec_http::{Config, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use fenec_core::prelude::*;
-use fenec_http::{Config, Server};
 
 struct Harness {
     port: u16,
@@ -206,12 +206,21 @@ fn select_filter_order_limit() {
 
     // Multi-key ordering and pagination.
     let r = get(h.port, "/articles?select=year&order=year.desc");
-    assert_eq!(r.body.trim(), "[{\"year\":2024},{\"year\":2023},{\"year\":1999}]");
-    let r = get(h.port, "/articles?select=year&order=year.asc&limit=2&offset=1");
+    assert_eq!(
+        r.body.trim(),
+        "[{\"year\":2024},{\"year\":2023},{\"year\":1999}]"
+    );
+    let r = get(
+        h.port,
+        "/articles?select=year&order=year.asc&limit=2&offset=1",
+    );
     assert_eq!(r.body.trim(), "[{\"year\":2023},{\"year\":2024}]");
 
     // id is not a schema field but can be filtered and ordered.
-    assert_eq!(rows(&get(h.port, "/articles?id=gte.0&order=id.desc").body), 3);
+    assert_eq!(
+        rows(&get(h.port, "/articles?id=gte.0&order=id.desc").body),
+        3
+    );
 }
 
 #[test]
@@ -224,7 +233,10 @@ fn count_and_free_where() {
     assert_eq!(r.body.trim(), "{\"count\":2}");
 
     // `where` is a free FenecQL expression -- `or` and function calls pass too.
-    let r = get(h.port, "/articles?where=year%20%3D%201999%20or%20year%20%3D%202024");
+    let r = get(
+        h.port,
+        "/articles?where=year%20%3D%201999%20or%20year%20%3D%202024",
+    );
     assert_eq!(rows(&r.body), 2);
     let r = get(h.port, "/articles?where=lower(title)%20~%20%22rust%22");
     assert_eq!(rows(&r.body), 1);
@@ -335,7 +347,12 @@ fn unfiltered_writes_need_an_explicit_path() {
     let r = call(h.port, "DELETE", "/articles/all?year=eq.1999", None);
     assert_eq!(r.status, 400);
 
-    let r = call(h.port, "PATCH", "/articles/all", Some(r#"{"summary":"all"}"#));
+    let r = call(
+        h.port,
+        "PATCH",
+        "/articles/all",
+        Some(r#"{"summary":"all"}"#),
+    );
     assert_eq!(r.body.trim(), "{\"updated\":3}");
     let r = call(h.port, "DELETE", "/articles/all", None);
     assert_eq!(r.body.trim(), "{\"deleted\":3}");
@@ -353,7 +370,10 @@ fn errors_carry_useful_status_codes() {
     assert_eq!(get(h.port, "/articles?limit=lots").status, 400);
     assert_eq!(get(h.port, "/articles?tags=eq.rust").status, 400);
     assert_eq!(get(h.port, "/articles/near").status, 404);
-    assert_eq!(call(h.port, "POST", "/articles", Some("{broken")).status, 400);
+    assert_eq!(
+        call(h.port, "POST", "/articles", Some("{broken")).status,
+        400
+    );
     assert_eq!(
         call(h.port, "POST", "/articles", Some(r#"{"nofield":1}"#)).status,
         400
@@ -378,10 +398,22 @@ fn bearer_token_is_required_when_set() {
     assert_eq!(r.status, 401);
     assert_eq!(r.header("WWW-Authenticate"), Some("Bearer"));
 
-    let r = call_with(h.port, "GET", "/articles", None, &[("Authorization", "Bearer wrong")]);
+    let r = call_with(
+        h.port,
+        "GET",
+        "/articles",
+        None,
+        &[("Authorization", "Bearer wrong")],
+    );
     assert_eq!(r.status, 401);
 
-    let r = call_with(h.port, "GET", "/articles", None, &[("Authorization", "Bearer secret")]);
+    let r = call_with(
+        h.port,
+        "GET",
+        "/articles",
+        None,
+        &[("Authorization", "Bearer secret")],
+    );
     assert_eq!(r.status, 200);
 }
 
@@ -394,7 +426,12 @@ fn read_only_refuses_writes_before_routing() {
 
     assert_eq!(get(h.port, "/articles").status, 200);
     // `near`, which is a read, works too.
-    let r = call(h.port, "POST", "/articles/near", Some(r#"{"vector":[1.0,0.0,0.0]}"#));
+    let r = call(
+        h.port,
+        "POST",
+        "/articles/near",
+        Some(r#"{"vector":[1.0,0.0,0.0]}"#),
+    );
     assert_eq!(r.status, 200, "{}", r.body);
 
     for (m, t, b) in [
@@ -504,12 +541,17 @@ fn oversized_and_chunked_bodies_are_refused() {
 #[test]
 fn percent_encoded_values_survive() {
     let mut db = seeded();
-    for stmt in fenec_ql::parse(r#"put articles {title: "inner space & symbol", year: 2020}"#).unwrap() {
+    for stmt in
+        fenec_ql::parse(r#"put articles {title: "inner space & symbol", year: 2020}"#).unwrap()
+    {
         db.execute(&stmt).unwrap();
     }
     let h = start_with(Config::default(), db);
 
-    let r = get(h.port, "/articles?title=eq.inner%20space%20%26%20symbol&select=year");
+    let r = get(
+        h.port,
+        "/articles?title=eq.inner%20space%20%26%20symbol&select=year",
+    );
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.body.trim(), "[{\"year\":2020}]");
 
@@ -533,7 +575,9 @@ fn raw_fenecql_endpoint() {
     assert_eq!(r.body.trim(), "[{\"title\":\"rust book\"}]");
 
     // A vector parameter arrives as a nested array.
-    let r = q(r#"{"query":"get articles select title near embed $1 limit 1","params":[[1.0,0.0,0.0]]}"#);
+    let r = q(
+        r#"{"query":"get articles select title near embed $1 limit 1","params":[[1.0,0.0,0.0]]}"#,
+    );
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(r.body.contains("rust book"), "{}", r.body);
 
@@ -580,7 +624,16 @@ fn raw_query_needs_the_token_too() {
         token: Some("secret".into()),
         ..Config::default()
     });
-    assert_eq!(call(h.port, "POST", "/query", Some(r#"{"query":"get articles"}"#)).status, 401);
+    assert_eq!(
+        call(
+            h.port,
+            "POST",
+            "/query",
+            Some(r#"{"query":"get articles"}"#)
+        )
+        .status,
+        401
+    );
     let r = call_with(
         h.port,
         "POST",

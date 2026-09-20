@@ -70,7 +70,11 @@ fn compaction_keeps_the_id_watermark() {
 
     let mut db = reload(&db);
     run(&mut db, r#"put t {a: "four"}"#);
-    assert_eq!(ids(&mut db, "t"), vec![1, 2, 4], "id 3 was handed out again");
+    assert_eq!(
+        ids(&mut db, "t"),
+        vec![1, 2, 4],
+        "id 3 was handed out again"
+    );
 }
 
 /// An externally supplied sparse id raises the watermark too, and survives
@@ -122,7 +126,11 @@ fn images_without_the_counter_record_still_load() {
     let mut db = fenec_core::fs::open(&path).expect("reopen");
     assert_eq!(ids(&mut db, "t"), vec![1]);
     run(&mut db, r#"put t {a: "three"}"#);
-    assert_eq!(ids(&mut db, "t"), vec![1, 3], "the tombstone must carry the counter");
+    assert_eq!(
+        ids(&mut db, "t"),
+        vec![1, 3],
+        "the tombstone must carry the counter"
+    );
     cleanup(dir, path);
 }
 

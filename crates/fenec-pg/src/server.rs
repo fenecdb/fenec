@@ -21,17 +21,17 @@
 use crate::compat;
 use crate::proto::*;
 use crate::scram;
+use fenec_core::json;
+use fenec_core::prelude::*;
+use fenec_core::query::projection_columns;
+use fenec_core::value::DataType;
+use fenec_ql::parse;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Duration;
-use fenec_core::json;
-use fenec_core::prelude::*;
-use fenec_core::query::projection_columns;
-use fenec_core::value::DataType;
-use fenec_ql::parse;
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(1);
 
@@ -226,7 +226,7 @@ impl Server {
     /// It stands apart from `serve` so the caller can learn the port
     /// *before* serving starts: binding `127.0.0.1:0` and reading
     /// `local_addr()` is safer than picking a fixed port in tests and in
-/// embedded use.
+    /// embedded use.
     pub fn bind(&self) -> io::Result<TcpListener> {
         let remote = is_remote(&self.cfg.addr);
         if remote && self.cfg.auth.is_trust() && !self.cfg.insecure {
@@ -320,7 +320,10 @@ impl Server {
                 .stack_size(SESSION_STACK)
                 .spawn(move || {
                     let _guard = guard;
-                    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+                    let peer = stream
+                        .peer_addr()
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
                     if let Err(e) = session(stream, db, cfg, backends) {
                         // Neither an idle connection that timed out nor a
                         // client that closed is noise.
@@ -448,7 +451,10 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
 
 /// A read timeout. Unix reports `EAGAIN`, Windows `TimedOut`.
 fn is_timeout(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 fn read_lock(db: &RwLock<Database>) -> RwLockReadGuard<'_, Database> {
@@ -821,8 +827,8 @@ fn session(
                 // repeat it (the protocol says so); when Describe was skipped
                 // it is sent anyway, so the client is not left without column
                 // names.
-                let already = described_portals.contains(&portal)
-                    || described_stmts.contains(&p.stmt_name);
+                let already =
+                    described_portals.contains(&portal) || described_stmts.contains(&p.stmt_name);
                 be.busy.store(true, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
                 execute_into(&db, &cfg, &be, &p.sql, &p.params, &mut out, already);

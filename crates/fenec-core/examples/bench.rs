@@ -6,8 +6,8 @@
 //!   * recall against an exact scan (recall@10)
 //!   * size of the out-of-memory byte image and the time to reopen it
 
-use std::time::Instant;
 use fenec_core::prelude::*;
+use std::time::Instant;
 
 struct Rng(u64);
 impl Rng {
@@ -69,13 +69,13 @@ fn main() {
             vec![
                 Field::new("category", DataType::Text).indexed(IndexKind::Hash),
                 Field::new("score", DataType::Int),
-                Field::new("embed", DataType::Vector(dim, VecPrec::F32)).indexed(IndexKind::Vector(
-                    VectorIndexSpec {
+                Field::new("embed", DataType::Vector(dim, VecPrec::F32)).indexed(
+                    IndexKind::Vector(VectorIndexSpec {
                         ef_construction: efc,
                         ef_search,
                         ..VectorIndexSpec::default()
-                    },
-                )),
+                    }),
+                ),
             ],
         )
         .unwrap(),
@@ -110,7 +110,10 @@ fn main() {
                     "category".to_string(),
                     Expr::Lit(Value::Text(categories[i % 4].to_string())),
                 ),
-                ("score".to_string(), Expr::Lit(Value::Int((i % 1000) as i64))),
+                (
+                    "score".to_string(),
+                    Expr::Lit(Value::Int((i % 1000) as i64)),
+                ),
                 ("embed".to_string(), Expr::Lit(Value::Vector(v))),
             ]);
         }

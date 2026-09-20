@@ -14,9 +14,9 @@
 //! half against *real* PostgreSQL.
 
 use fenec_core::prelude::*;
+use fenec_core::query::Statement as Stmt;
 use fenec_core::value::VecPrec;
 use fenec_import::pg::{Query, Reader, Url};
-use fenec_core::query::Statement as Stmt;
 use fenec_import::{load, map, Options, Source};
 use fenec_pg::client::Client;
 
@@ -116,10 +116,7 @@ fn every_mapped_type_round_trips() {
     // Quoted array items: comma and quote escapes must be decoded.
     assert_eq!(
         rows[0][7],
-        Value::List(vec![
-            Value::Text("a,b".into()),
-            Value::Text("c\"d".into())
-        ])
+        Value::List(vec![Value::Text("a,b".into()), Value::Text("c\"d".into())])
     );
     assert_eq!(rows[0][9], Value::Bytes(b"Hello".to_vec()));
     // The timestamp passes through as text; `coerce` parses it.
@@ -131,9 +128,17 @@ fn every_mapped_type_round_trips() {
     // The second row is full of NULLs.
     assert_eq!(rows[1][1], Value::Null);
     assert_eq!(rows[1][6], Value::Bool(false));
-    assert_eq!(rows[1][7], Value::List(vec![]), "an empty array is not NULL");
+    assert_eq!(
+        rows[1][7],
+        Value::List(vec![]),
+        "an empty array is not NULL"
+    );
     assert_eq!(rows[1][8], Value::Null);
-    assert_eq!(rows[1][9], Value::Bytes(vec![]), "an empty bytea is not NULL");
+    assert_eq!(
+        rows[1][9],
+        Value::Bytes(vec![]),
+        "an empty bytea is not NULL"
+    );
 }
 
 /// pgvector's OID belongs to an extension type; the dimension comes from `typmod`.
@@ -194,13 +199,18 @@ fn pgvector_columns_become_vectors() {
 #[ignore]
 fn numeric_demands_cast_and_text_is_exact() {
     let t = "fenec_test_money";
-    setup(t, &format!("create table {t} (id bigint, price numeric(10,2))"));
+    setup(
+        t,
+        &format!("create table {t} (id bigint, price numeric(10,2))"),
+    );
     let mut c = Client::connect(&url()).unwrap();
     c.query(&format!("insert into {t} values (1, 19.99), (2, 29.50)"))
         .unwrap();
 
     let (cols, _) = read_all(t);
-    let e = map::plan(&cols, &Options::new("m")).unwrap_err().to_string();
+    let e = map::plan(&cols, &Options::new("m"))
+        .unwrap_err()
+        .to_string();
     assert!(e.contains("--cast price="), "{e}");
 
     let mut src = Reader::open(&url(), &Query::table(t)).unwrap();
@@ -313,7 +323,10 @@ fn missing_table_is_reported() {
 #[ignore]
 fn source_filter_and_local_filter_compose() {
     let t = "fenec_test_two_filters";
-    setup(t, &format!("create table {t} (id bigint, category text, score int)"));
+    setup(
+        t,
+        &format!("create table {t} (id bigint, category text, score int)"),
+    );
     let mut c = Client::connect(&url()).unwrap();
     c.query(&format!(
         "insert into {t} select i,
@@ -342,7 +355,10 @@ fn source_filter_and_local_filter_compose() {
     o.filter = sel.filter;
     let s = load::run(&mut src, &mut db, &o).unwrap();
     assert_eq!(s.rows, 5, "92, 94, 96, 98, 100");
-    assert_eq!(s.skipped, 45, "45 of the 50 rows from the server were dropped");
+    assert_eq!(
+        s.skipped, 45,
+        "45 of the 50 rows from the server were dropped"
+    );
 }
 
 /// The count must see the same narrowing as `--source-where` and `--limit`;
@@ -367,7 +383,10 @@ fn count_respects_filter_and_limit() {
         filter: Some("k = 'four'".into()),
         limit: None,
     };
-    assert_eq!(fenec_import::pg::count_rows(&url(), &filtered).unwrap(), 250);
+    assert_eq!(
+        fenec_import::pg::count_rows(&url(), &filtered).unwrap(),
+        250
+    );
 
     let capped = Query {
         table: t.into(),

@@ -7,7 +7,7 @@ use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Schema};
 use crate::store::{Store, OP_DEL, OP_PUT};
-use crate::value::{DataType, DocId, Document, VecPrec, Value};
+use crate::value::{DataType, DocId, Document, Value, VecPrec};
 use crate::vector::VectorIndex;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -147,8 +147,10 @@ impl Collection {
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
-                    self.vectors
-                        .insert(f.name.clone(), VectorIndex::with_precision(*dim, *spec, *prec));
+                    self.vectors.insert(
+                        f.name.clone(),
+                        VectorIndex::with_precision(*dim, *spec, *prec),
+                    );
                 }
                 (IndexKind::Hash, _) => {
                     self.hashes.insert(f.name.clone(), HashMap::new());
@@ -790,10 +792,7 @@ impl Database {
         self.rebuild_indexes_with(&HashMap::new())
     }
 
-    fn rebuild_indexes_with(
-        &mut self,
-        graphs: &HashMap<(String, String), Vec<u8>>,
-    ) -> Result<()> {
+    fn rebuild_indexes_with(&mut self, graphs: &HashMap<(String, String), Vec<u8>>) -> Result<()> {
         for name in self.order.clone() {
             let c = self.collections.get_mut(&name).unwrap();
             // `ids()` comes back ascending; no extra sorting needed.
@@ -918,12 +917,11 @@ impl Database {
                     .map(|n| self.collections[n].schema.clone())
                     .collect(),
             )),
-            Statement::Describe(name) => {
-                Ok(Response::Schemas(vec![self.collection(name)?.schema.clone()]))
-            }
-            _ => Err(Error::Query(
-                "this statement requires write access".into(),
-            )),
+            Statement::Describe(name) => Ok(Response::Schemas(vec![self
+                .collection(name)?
+                .schema
+                .clone()])),
+            _ => Err(Error::Query("this statement requires write access".into())),
         }
     }
 
@@ -969,9 +967,10 @@ impl Database {
                     .map(|n| self.collections[n].schema.clone())
                     .collect(),
             )),
-            Statement::Describe(name) => {
-                Ok(Response::Schemas(vec![self.collection(name)?.schema.clone()]))
-            }
+            Statement::Describe(name) => Ok(Response::Schemas(vec![self
+                .collection(name)?
+                .schema
+                .clone()])),
             Statement::Compact(which) => self.compact(which.as_deref()),
         }
     }
@@ -1104,9 +1103,9 @@ impl Database {
                 };
                 continue;
             }
-            let f = schema
-                .field(k)
-                .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
+            let f = schema.field(k).ok_or_else(|| {
+                Error::NotFound(format!("field `{k}` in collection `{}`", schema.name))
+            })?;
             doc.set(k, v.coerce(&f.ty)?);
         }
         for f in &schema.fields {
@@ -1175,7 +1174,12 @@ impl Database {
     }
 
     /// Finds the ids of the documents matching the filter.
-    fn matching_ids(&self, collection: &str, filter: &Option<Expr>, params: &[Value]) -> Result<Vec<DocId>> {
+    fn matching_ids(
+        &self,
+        collection: &str,
+        filter: &Option<Expr>,
+        params: &[Value],
+    ) -> Result<Vec<DocId>> {
         let c = self.collection(collection)?;
         let ctx = EvalCtx {
             params,
@@ -1192,7 +1196,9 @@ impl Database {
         f.conjunct_equalities(params, &mut eqs);
         let mut candidates: Option<Vec<DocId>> = None;
         for (field, val) in eqs {
-            let Some(map) = c.hashes.get(field) else { continue };
+            let Some(map) = c.hashes.get(field) else {
+                continue;
+            };
             // The bucket key is produced on the write path from the value
             // coerced to the field's type (`10` -> `10.0`), so the lookup has
             // to go through the same conversion. Otherwise `price = 10` on
@@ -1200,10 +1206,18 @@ impl Database {
             // return 0 rows -- the mere presence of the index would change the
             // query's answer. A literal that cannot be coerced (`year = "abc"`)
             // skips the index and leaves the decision to the eval path.
-            let Some(fd) = c.schema.field(field) else { continue };
-            let Ok(key) = val.clone().coerce(&fd.ty) else { continue };
+            let Some(fd) = c.schema.field(field) else {
+                continue;
+            };
+            let Ok(key) = val.clone().coerce(&fd.ty) else {
+                continue;
+            };
             let bucket = map.get(&hash_key(&key)).cloned().unwrap_or_default();
-            if candidates.as_ref().map(|c| bucket.len() < c.len()).unwrap_or(true) {
+            if candidates
+                .as_ref()
+                .map(|c| bucket.len() < c.len())
+                .unwrap_or(true)
+            {
                 candidates = Some(bucket);
             }
         }
@@ -1248,7 +1262,9 @@ impl Database {
         // `count` sends the filter down the same path but never decodes the
         // rows: it returns a single row with a single column.
         if sel.count {
-            let n = self.matching_ids(&sel.collection, &sel.filter, params)?.len();
+            let n = self
+                .matching_ids(&sel.collection, &sel.filter, params)?
+                .len();
             return Ok(ResultSet {
                 columns: vec![COUNT_COLUMN.to_string()],
                 rows: vec![Row {
@@ -1274,7 +1290,8 @@ impl Database {
             // rejected explicitly rather than ignored silently.
             if !sel.order.is_empty() {
                 return Err(Error::Query(
-                    "`near` cannot be combined with `order`: near orders results by similarity".into(),
+                    "`near` cannot be combined with `order`: near orders results by similarity"
+                        .into(),
                 ));
             }
             let ix = c.vectors.get(&near.field).ok_or_else(|| {

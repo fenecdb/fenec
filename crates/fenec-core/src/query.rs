@@ -123,7 +123,11 @@ impl Expr {
     /// top node misses the hash index; the selective equality can sit in any
     /// branch of the `and`. It does not descend under `or` -- even if one
     /// branch were indexed there, the other still requires the whole table.
-    pub fn conjunct_equalities<'a>(&'a self, params: &'a [Value], out: &mut Vec<(&'a str, &'a Value)>) {
+    pub fn conjunct_equalities<'a>(
+        &'a self,
+        params: &'a [Value],
+        out: &mut Vec<(&'a str, &'a Value)>,
+    ) {
         match self {
             Expr::And(a, b) => {
                 a.conjunct_equalities(params, out);
@@ -210,9 +214,9 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             let l = eval(a, row, ctx)?;
             let r = eval(b, row, ctx)?;
             match (l.as_text(), r.as_text()) {
-                (Some(hay), Some(needle)) => Value::Bool(
-                    hay.to_lowercase().contains(&needle.to_lowercase()),
-                ),
+                (Some(hay), Some(needle)) => {
+                    Value::Bool(hay.to_lowercase().contains(&needle.to_lowercase()))
+                }
                 _ => Value::Bool(false),
             }
         }
@@ -382,17 +386,12 @@ impl Statement {
     /// Number of parameters the statement expects: the highest `$n` used.
     pub fn max_param(&self) -> usize {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
-        let pairs = |v: &Vec<(String, Expr)>| {
-            v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0)
-        };
+        let pairs =
+            |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
             Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
             Statement::Select(sel) => {
-                let near = sel
-                    .near
-                    .as_ref()
-                    .map(|n| n.vector.max_param())
-                    .unwrap_or(0);
+                let near = sel.near.as_ref().map(|n| n.vector.max_param()).unwrap_or(0);
                 opt(&sel.filter).max(near)
             }
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),

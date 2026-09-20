@@ -10,9 +10,9 @@
 //! there to show the shape of the trade-off. For the quotable per-query
 //! numbers use `--example bench -- N DIM --ef E`, which reports p50/p95/p99.
 
-use std::time::Instant;
 use fenec_core::schema::{Metric, VectorIndexSpec};
 use fenec_core::vector::VectorIndex;
+use std::time::Instant;
 
 struct Rng(u64);
 impl Rng {
@@ -87,7 +87,10 @@ fn main() {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let dim: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(128);
 
-    for (label, clustered) in [("uniform random", false), ("clustered (embedding-like)", true)] {
+    for (label, clustered) in [
+        ("uniform random", false),
+        ("clustered (embedding-like)", true),
+    ] {
         println!("\n=== {label} — {n} × {dim} ===");
         for efc in [100usize, 200] {
             let (ix, queries, secs) = build(n, dim, clustered, efc);

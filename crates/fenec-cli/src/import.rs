@@ -1,9 +1,9 @@
 //! `fenec import` -- builds a collection from a SQLite file or a PostgreSQL
 //! server.
 
-use std::io::{IsTerminal, Write};
 use fenec_core::prelude::*;
 use fenec_import::{load, map, pg, sqlite, IdSource, Options, Source};
+use std::io::{IsTerminal, Write};
 
 pub const USAGE: &str = r#"
 usage: fenec import <source> --table <name> [options]
@@ -143,7 +143,16 @@ pub fn main(args: &[String]) -> i32 {
     opts.into = into.unwrap_or_else(|| table.clone());
     let target = file.unwrap_or_else(|| format!("{}.fenec", opts.into));
 
-    match run(&source, &table, &target, &source_where, sample, dry_run, count, &opts) {
+    match run(
+        &source,
+        &table,
+        &target,
+        &source_where,
+        sample,
+        dry_run,
+        count,
+        &opts,
+    ) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("error: {e}");
@@ -180,7 +189,10 @@ fn run(
                 None
             },
         };
-        println!("source   {}@{}:{}/{} -> {table}", url.user, url.host, url.port, url.database);
+        println!(
+            "source   {}@{}:{}/{} -> {table}",
+            url.user, url.host, url.port, url.database
+        );
         if count {
             total = Some(pg::count_rows(&url, &query)?);
         }
@@ -301,7 +313,11 @@ fn print_plan(plan: &map::Plan, columns: &[fenec_import::Column], target: &str, 
         println!("  id  <- {} ({})", c.name, c.source_type);
     }
     for (field, kind) in &plan.indexes {
-        println!("create index on {} ({field}) {}", plan.schema.name, index_name(kind));
+        println!(
+            "create index on {} ({field}) {}",
+            plan.schema.name,
+            index_name(kind)
+        );
     }
     println!();
     for w in &plan.warnings {
@@ -309,9 +325,7 @@ fn print_plan(plan: &map::Plan, columns: &[fenec_import::Column], target: &str, 
     }
     match rows {
         Some(n) => println!("{n} rows will be read; nothing was written (--dry-run)"),
-        None => println!(
-            "nothing was written (--dry-run); use --count for the row count"
-        ),
+        None => println!("nothing was written (--dry-run); use --count for the row count"),
     }
 }
 
@@ -390,9 +404,9 @@ fn parse_cast(s: &str) -> std::result::Result<(String, DataType), String> {
 
 /// `field@hash` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=..)]`
 fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
-    let (name, spec) = s.split_once('@').ok_or_else(|| {
-        format!("--index expects `field@hash` or `field@hnsw(...)`, got `{s}`")
-    })?;
+    let (name, spec) = s
+        .split_once('@')
+        .ok_or_else(|| format!("--index expects `field@hash` or `field@hnsw(...)`, got `{s}`"))?;
     if name.is_empty() {
         return Err(format!("invalid --index: `{s}`"));
     }

@@ -4,16 +4,16 @@
 //! hand-coded here, so the assertions are on the real byte stream (not on
 //! the leniency of a client library).
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 use fenec_core::engine::Database;
 use fenec_core::value::Value;
 use fenec_pg::crypto::*;
 use fenec_pg::server::{Auth, SyncPolicy};
 use fenec_pg::{Config, PgPlugin, Server};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------ test server
 
@@ -189,7 +189,8 @@ impl Client {
                         3 => {
                             let mut b = Vec::new();
                             cstr(&mut b, password.unwrap_or(""));
-                            c.s.write_all(&framed(b'p', &b)).map_err(|e| e.to_string())?;
+                            c.s.write_all(&framed(b'p', &b))
+                                .map_err(|e| e.to_string())?;
                         }
                         10 => c.scram(password.ok_or("a password is required")?)?,
                         11 | 12 => {}
@@ -261,7 +262,10 @@ impl Client {
         }
         let v = String::from_utf8_lossy(&m.body[4..]).into_owned();
         let server_key = hmac_sha256(&salted, b"Server Key");
-        let expected = format!("v={}", b64_encode(&hmac_sha256(&server_key, auth.as_bytes())));
+        let expected = format!(
+            "v={}",
+            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
+        );
         if v != expected {
             return Err("the server signature could not be verified".into());
         }
@@ -274,10 +278,7 @@ impl Client {
         let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
         let mut body = vec![0u8; len - 4];
         self.s.read_exact(&mut body)?;
-        Ok(Msg {
-            tag: head[0],
-            body,
-        })
+        Ok(Msg { tag: head[0], body })
     }
 
     /// Reads until ReadyForQuery arrives.
@@ -381,9 +382,12 @@ fn simple_query_roundtrip() {
 
     c.simple("create collection t (name text, year int @hash, e vector<3> @hnsw(cosine))");
     assert_eq!(
-        find(&c.simple("put t {name: \"a\", year: 2024, e: [1,0,0]}"), b'C')
-            .unwrap()
-            .tag_text(),
+        find(
+            &c.simple("put t {name: \"a\", year: 2024, e: [1,0,0]}"),
+            b'C'
+        )
+        .unwrap()
+        .tag_text(),
         "INSERT 0 1"
     );
 
@@ -561,10 +565,7 @@ fn reads_share_the_lock() {
         "the client's read blocked while a read lock was held"
     );
     let r = t.join().unwrap();
-    assert_eq!(
-        find(&r, b'D').unwrap().cells(),
-        vec![Some("a".to_string())]
-    );
+    assert_eq!(find(&r, b'D').unwrap().cells(), vec![Some("a".to_string())]);
     drop(held);
 }
 
@@ -647,10 +648,7 @@ fn sync_always_persists_every_write() {
     // Open the same file independently and check the contents (as after a crash).
     let reopened = fenec_core::fs::open(&path).unwrap();
     let rows = reopened
-        .query(
-            &fenec_ql::parse("get t select name").unwrap()[0],
-            &[],
-        )
+        .query(&fenec_ql::parse("get t select name").unwrap()[0], &[])
         .unwrap();
     let rs = rows.rows().unwrap();
     assert_eq!(rs.rows.len(), 1);
@@ -689,8 +687,14 @@ fn interval_sync_flushes_in_background() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(size > 8, "the periodic syncer did not push the writes to disk");
-    assert!(!h.db.read().unwrap().is_dirty(), "still dirty after the sync");
+    assert!(
+        size > 8,
+        "the periodic syncer did not push the writes to disk"
+    );
+    assert!(
+        !h.db.read().unwrap().is_dirty(),
+        "still dirty after the sync"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -731,7 +735,9 @@ fn remote_bind_without_auth_is_refused() {
 fn concurrent_vector_search_matches_serial() {
     let h = trust_server();
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
-    c.simple("create collection v (name text, e vector<8> @hnsw(cosine, m=16, ef_construction=100))");
+    c.simple(
+        "create collection v (name text, e vector<8> @hnsw(cosine, m=16, ef_construction=100))",
+    );
     let mut seed = 1u64;
     let mut rnd = || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -782,7 +788,10 @@ fn concurrent_vector_search_matches_serial() {
     assert_eq!(serial.len(), parallel.len());
     for (i, (s, p)) in serial.iter().zip(&parallel).enumerate() {
         assert!(!s.is_empty(), "query {i} returned nothing");
-        assert_eq!(s, p, "query {i}: the parallel search differs from the serial one");
+        assert_eq!(
+            s, p,
+            "query {i}: the parallel search differs from the serial one"
+        );
     }
 }
 
@@ -810,15 +819,16 @@ fn timestamps_use_pg_oid_and_text_format() {
     );
 
     // The parameter arrives as text and is parsed at the schema boundary.
-    let r = c.extended("put event {name: $1, t: $2}", &["b", "2020-01-02 03:04:05+02"], true);
+    let r = c.extended(
+        "put event {name: $1, t: $2}",
+        &["b", "2020-01-02 03:04:05+02"],
+        true,
+    );
     assert!(find(&r, b'E').is_none(), "the parameterised write errored");
 
     // A range query against a text literal.
     let r = c.simple("get event select name where t < \"2021-01-01\"");
-    assert_eq!(
-        find(&r, b'D').unwrap().cells(),
-        vec![Some("b".to_string())]
-    );
+    assert_eq!(find(&r, b'D').unwrap().cells(), vec![Some("b".to_string())]);
 
     // Describe must report the same OID.
     let r = c.extended("get event select t where name = $1", &["a"], true);
@@ -889,7 +899,9 @@ fn idle_timeout_closes_the_session() {
     );
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
 
-    let m = c.read_msg().expect("the server closed without giving a reason");
+    let m = c
+        .read_msg()
+        .expect("the server closed without giving a reason");
     assert_eq!(m.tag, b'E');
     assert_eq!(m.sqlstate().as_deref(), Some("57P05"), "{:?}", m.message());
 }
@@ -928,14 +940,12 @@ fn oversized_startup_packet_is_rejected() {
     s.write_all(&pkt).unwrap();
 
     let mut head = [0u8; 5];
-    s.read_exact(&mut head).expect("the server waited for the body");
+    s.read_exact(&mut head)
+        .expect("the server waited for the body");
     let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
     let mut body = vec![0u8; len - 4];
     s.read_exact(&mut body).unwrap();
-    let m = Msg {
-        tag: head[0],
-        body,
-    };
+    let m = Msg { tag: head[0], body };
     assert_eq!(m.tag, b'E');
     assert_eq!(m.sqlstate().as_deref(), Some("54000"), "{:?}", m.message());
 }
@@ -973,7 +983,10 @@ fn memory_cap_stops_writes_and_leaves_a_way_out() {
     // again.
     assert!(find(&c.simple("del t"), b'E').is_none());
     assert!(find(&c.simple("compact"), b'E').is_none());
-    assert!(find(&c.simple(&row), b'E').is_none(), "room was freed but writes are still refused");
+    assert!(
+        find(&c.simple(&row), b'E').is_none(),
+        "room was freed but writes are still refused"
+    );
 }
 
 /// A deep expression does not take the server down. A stack overflow is not

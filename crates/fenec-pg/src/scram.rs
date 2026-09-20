@@ -75,7 +75,8 @@ impl<'a> Exchange<'a> {
 
     /// `client-first-message` -> `server-first-message`.
     pub fn client_first(&mut self, msg: &[u8]) -> ScramResult<String> {
-        let msg = std::str::from_utf8(msg).map_err(|_| "the SCRAM message is not UTF-8".to_string())?;
+        let msg =
+            std::str::from_utf8(msg).map_err(|_| "the SCRAM message is not UTF-8".to_string())?;
 
         // gs2-header: "n,," | "y,," | "p=<type>,," ; an authzid is allowed: "n,a=x,"
         let mut parts = msg.splitn(3, ',');
@@ -114,7 +115,8 @@ impl<'a> Exchange<'a> {
 
     /// `client-final-message` -> `server-final-message`. Errors on a bad proof.
     pub fn client_final(&mut self, msg: &[u8]) -> ScramResult<String> {
-        let msg = std::str::from_utf8(msg).map_err(|_| "the SCRAM message is not UTF-8".to_string())?;
+        let msg =
+            std::str::from_utf8(msg).map_err(|_| "the SCRAM message is not UTF-8".to_string())?;
         let without_proof = msg
             .rsplit_once(",p=")
             .map(|(head, _)| head)
@@ -193,7 +195,10 @@ mod tests {
         let server_final = ex.client_final(final_msg.as_bytes()).unwrap();
 
         let server_key = hmac_sha256(&salted, b"Server Key");
-        let expected = format!("v={}", b64_encode(&hmac_sha256(&server_key, auth.as_bytes())));
+        let expected = format!(
+            "v={}",
+            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
+        );
         assert_eq!(server_final, expected);
     }
 
@@ -203,7 +208,12 @@ mod tests {
         let v = Verifier::with_salt("right", salt.clone(), 4096);
         let mut ex = Exchange::new(&v);
         let server_first = ex.client_first(b"n,,n=user,r=abcdefghijkl").unwrap();
-        let snonce = server_first.strip_prefix("r=").unwrap().split(',').next().unwrap();
+        let snonce = server_first
+            .strip_prefix("r=")
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap();
         let without_proof = format!("c=biws,r={snonce}");
         let auth = format!("n=user,r=abcdefghijkl,{server_first},{without_proof}");
         let salted = pbkdf2_sha256(b"wrong", &salt, 4096);
@@ -245,6 +255,9 @@ mod tests {
         let snonce = sf.strip_prefix("r=").unwrap().split(',').next().unwrap();
         // "y,," is expected; if the client sends "n,," (biws) it is dropped.
         let msg = format!("c=biws,r={snonce},p={}", b64_encode(&[0u8; 32]));
-        assert!(ex.client_final(msg.as_bytes()).unwrap_err().contains("channel"));
+        assert!(ex
+            .client_final(msg.as_bytes())
+            .unwrap_err()
+            .contains("channel"));
     }
 }

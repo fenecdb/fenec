@@ -118,8 +118,8 @@ pub fn read_request(
         (Some(m), Some(t), Some(v)) => (m, t, v),
         _ => return Err(BadRequest(400, "malformed request line".into())),
     };
-    let method =
-        Method::parse(method).ok_or_else(|| BadRequest(501, format!("`{method}` is not supported")))?;
+    let method = Method::parse(method)
+        .ok_or_else(|| BadRequest(501, format!("`{method}` is not supported")))?;
 
     let mut headers = Vec::new();
     for line in lines {

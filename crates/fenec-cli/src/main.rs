@@ -11,9 +11,9 @@
 mod import;
 mod types;
 
-use std::io::{self, BufRead, IsTerminal, Write};
 use fenec_core::prelude::*;
 use fenec_ql::parse;
+use std::io::{self, BufRead, IsTerminal, Write};
 
 const HELP: &str = r#"
 FenecQL summary
@@ -135,7 +135,14 @@ fn main() {
     let mut buffer = String::new();
     loop {
         if interactive {
-            print!("{}", if buffer.is_empty() { "fenec> " } else { "  ... " });
+            print!(
+                "{}",
+                if buffer.is_empty() {
+                    "fenec> "
+                } else {
+                    "  ... "
+                }
+            );
             let _ = io::stdout().flush();
         }
         let mut line = String::new();
@@ -240,7 +247,11 @@ fn meta(db: &mut Database, cmd: &str) -> bool {
                         v.field,
                         v.count,
                         v.dim,
-                        if v.precision == VecPrec::F16 { "f16" } else { "f32" },
+                        if v.precision == VecPrec::F16 {
+                            "f16"
+                        } else {
+                            "f32"
+                        },
                         human(v.arena_bytes)
                     );
                 }
@@ -257,7 +268,10 @@ fn meta(db: &mut Database, cmd: &str) -> bool {
             }
             println!("functions:");
             for n in r.function_names() {
-                let doc = r.function(&n).map(|f| f.doc().to_string()).unwrap_or_default();
+                let doc = r
+                    .function(&n)
+                    .map(|f| f.doc().to_string())
+                    .unwrap_or_default();
                 println!("  {n:<14} {doc}");
             }
         }
@@ -371,7 +385,14 @@ fn print_response(r: &Response, took: std::time::Duration) {
                     .collect();
                 println!("{}", line.join("  ").trim_end());
                 if ri == 0 {
-                    println!("{}", widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  "));
+                    println!(
+                        "{}",
+                        widths
+                            .iter()
+                            .map(|w| "-".repeat(*w))
+                            .collect::<Vec<_>>()
+                            .join("  ")
+                    );
                 }
             }
             println!("({} rows, {:.2?})", rs.rows.len(), took);
@@ -390,7 +411,15 @@ fn cell(v: &Value) -> String {
         Value::Bytes(b) => format!("<{} bytes>", b.len()),
         Value::Vector(x) => {
             let head: Vec<String> = x.iter().take(3).map(|f| format!("{f:.3}")).collect();
-            format!("[{}{}]", head.join(", "), if x.len() > 3 { format!(", … ×{}", x.len()) } else { String::new() })
+            format!(
+                "[{}{}]",
+                head.join(", "),
+                if x.len() > 3 {
+                    format!(", … ×{}", x.len())
+                } else {
+                    String::new()
+                }
+            )
         }
         Value::List(items) => format!(
             "[{}]",

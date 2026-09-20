@@ -9,21 +9,24 @@
 //! The client in `tests/wire.rs` is deliberately independent and keeps
 //! verifying the server; the subject of the tests here is the client.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::{Arc, RwLock};
 use fenec_core::prelude::Database;
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::Auth;
 use fenec_pg::{Config, PgPlugin, Server};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, RwLock};
 
 fn start(auth: Auth) -> u16 {
     let mut db = Database::new();
     db.install_plugin(&PgPlugin).unwrap();
     db.execute(&fenec_ql::parse_one("create collection t (name text, score int)").unwrap())
         .unwrap();
-    db.execute(&fenec_ql::parse_one(r#"put t [{name: "one", score: 1}, {name: "two", score: 2}]"#).unwrap())
-        .unwrap();
+    db.execute(
+        &fenec_ql::parse_one(r#"put t [{name: "one", score: 1}, {name: "two", score: 2}]"#)
+            .unwrap(),
+    )
+    .unwrap();
 
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
@@ -141,7 +144,8 @@ fn copy_server(chunks: Vec<Vec<u8>>) -> u16 {
         // Query -> the COPY stream.
         let mut head = [0u8; 5];
         s.read_exact(&mut head).unwrap();
-        let mut q = vec![0u8; i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4];
+        let mut q =
+            vec![0u8; i32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4];
         s.read_exact(&mut q).unwrap();
 
         let mut out = Vec::new();

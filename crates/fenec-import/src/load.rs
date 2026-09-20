@@ -8,12 +8,12 @@
 
 use crate::map::{self, Plan, Target};
 use crate::{Options, Source, Summary};
-use std::time::Instant;
 use fenec_core::error::{Error, Result};
 use fenec_core::plugin::Registry;
 use fenec_core::prelude::*;
 use fenec_core::query::{eval, truthy, EvalCtx, RowAccess};
 use fenec_core::value::DataType;
+use std::time::Instant;
 
 /// Reads the source, derives the schema and loads it.
 pub fn run(src: &mut dyn Source, db: &mut Database, opts: &Options) -> Result<Summary> {
@@ -130,9 +130,7 @@ fn document(
                 let v = match ty {
                     // The position is exact here: known before entering the batch.
                     Some(ty) => adapt(value, ty).map_err(|e| match e {
-                        Error::Type(m) => {
-                            Error::Type(format!("row {row_no}, field `{name}`: {m}"))
-                        }
+                        Error::Type(m) => Error::Type(format!("row {row_no}, field `{name}`: {m}")),
                         other => other,
                     })?,
                     None => value,
@@ -145,12 +143,7 @@ fn document(
 }
 
 /// Applies the filter to one row.
-fn keep(
-    filter: &Expr,
-    doc: &[(String, Expr)],
-    ctx: &EvalCtx,
-    row_no: u64,
-) -> Result<bool> {
+fn keep(filter: &Expr, doc: &[(String, Expr)], ctx: &EvalCtx, row_no: u64) -> Result<bool> {
     let mut row = ImportedRow { doc };
     let v = eval(filter, &mut row, ctx).map_err(|e| match e {
         Error::NotFound(m) => Error::NotFound(format!(
@@ -318,7 +311,11 @@ mod tests {
 
     /// Document count in a collection. `Collection` gives stats, not a counter.
     fn count(db: &Database, name: &str) -> usize {
-        db.stats().iter().find(|s| s.name == name).unwrap().documents
+        db.stats()
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .documents
     }
 
     fn source(rows: Vec<Vec<Value>>) -> Rows {
@@ -486,9 +483,7 @@ mod tests {
     /// batch an error without a position is useless.
     #[test]
     fn unparseable_value_reports_row_window() {
-        let cols = vec![
-            Column::new("score", DataType::Int, "INTEGER"),
-        ];
+        let cols = vec![Column::new("score", DataType::Int, "INTEGER")];
         let mut src = Rows::new(
             cols,
             vec![
@@ -628,7 +623,12 @@ mod tests {
         o.id = IdSource::Generated;
         run(&mut src, &mut db, &o).unwrap();
         // id now stands as an ordinary field.
-        assert!(db.collection("m").unwrap().schema.field("source_id").is_some());
+        assert!(db
+            .collection("m")
+            .unwrap()
+            .schema
+            .field("source_id")
+            .is_some());
     }
 
     #[test]

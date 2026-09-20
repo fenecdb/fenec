@@ -367,7 +367,12 @@ impl Store {
     ///
     /// Allocating a `Vec<f32>` per node while restoring the graph was a
     /// noticeable part of the startup time; here a single buffer is reused.
-    pub fn read_vector_into(&self, id: DocId, field_pos: usize, out: &mut Vec<f32>) -> Result<bool> {
+    pub fn read_vector_into(
+        &self,
+        id: DocId,
+        field_pos: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<bool> {
         let Some(loc) = self.index.get(id) else {
             return Ok(false);
         };
@@ -471,7 +476,10 @@ mod tests {
             ],
         };
         st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc));
-        assert_eq!(st.read(&sc, id).unwrap().unwrap().get("b"), Some(&Value::Int(7)));
+        assert_eq!(
+            st.read(&sc, id).unwrap().unwrap().get("b"),
+            Some(&Value::Int(7))
+        );
         // field-level read
         assert_eq!(st.read_field(id, 1).unwrap(), Some(Value::Int(7)));
 
@@ -490,7 +498,10 @@ mod tests {
         let mut st = Store::new();
         let mk = |i: i64| Document {
             id: 0,
-            fields: vec![("a".into(), Value::Text(format!("v{i}"))), ("b".into(), Value::Int(i))],
+            fields: vec![
+                ("a".into(), Value::Text(format!("v{i}"))),
+                ("b".into(), Value::Int(i)),
+            ],
         };
         // dense range
         for i in 1..=100u64 {
@@ -506,7 +517,10 @@ mod tests {
         assert!(st.contains(9_000_000_000));
         assert!(!st.contains(150));
         assert_eq!(st.read_field(200, 1).unwrap(), Some(Value::Int(200)));
-        assert_eq!(st.read_field(9_000_000_000, 1).unwrap(), Some(Value::Int(-1)));
+        assert_eq!(
+            st.read_field(9_000_000_000, 1).unwrap(),
+            Some(Value::Int(-1))
+        );
         assert_eq!(st.read_field(150, 1).unwrap(), None);
 
         // ids must come back in ascending order (dense + sparse merged)
@@ -536,7 +550,10 @@ mod tests {
             let id = st.allocate_id();
             let doc = Document {
                 id,
-                fields: vec![("a".into(), Value::Text(format!("v{i}"))), ("b".into(), Value::Int(i))],
+                fields: vec![
+                    ("a".into(), Value::Text(format!("v{i}"))),
+                    ("b".into(), Value::Int(i)),
+                ],
             };
             st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc));
         }
@@ -574,7 +591,10 @@ mod tests {
         st.append(OP_PUT, big, &Store::encode_doc(&sc, &doc(big, 2)));
         assert!(st.contains(big));
         assert_eq!(st.len(), 2);
-        assert_eq!(st.read(&sc, big).unwrap().unwrap().get("a"), Some(&Value::Int(2)));
+        assert_eq!(
+            st.read(&sc, big).unwrap().unwrap().get("a"),
+            Some(&Value::Int(2))
+        );
         // The dense part must not have grown: an array of 2^52 entries could
         // not be allocated in the first place.
         assert!(st.index_bytes() < 4096);

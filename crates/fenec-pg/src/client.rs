@@ -12,10 +12,10 @@
 
 use crate::crypto::{b64_decode, b64_encode, hmac_sha256, nonce, pbkdf2_sha256, sha256};
 use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
+use fenec_core::error::{Error, Result};
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
-use fenec_core::error::{Error, Result};
 
 /// The timeout used while connecting and while waiting for a message.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -362,7 +362,9 @@ impl Client {
         let server_first = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
         let (mut snonce, mut salt, mut iters) = (String::new(), Vec::new(), 0u32);
         for kv in server_first.split(',') {
-            let Some((k, v)) = kv.split_once('=') else { continue };
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
             match k {
                 "r" => snonce = v.to_string(),
                 "s" => salt = b64_decode(v).ok_or_else(bad)?,
@@ -396,7 +398,10 @@ impl Client {
         }
         let got = String::from_utf8_lossy(m.body.get(4..).ok_or_else(bad)?).into_owned();
         let server_key = hmac_sha256(&salted, b"Server Key");
-        let want = format!("v={}", b64_encode(&hmac_sha256(&server_key, auth.as_bytes())));
+        let want = format!(
+            "v={}",
+            b64_encode(&hmac_sha256(&server_key, auth.as_bytes()))
+        );
         if got != want {
             return Err(Error::Query(
                 "postgres: the server signature could not be verified".into(),
@@ -459,7 +464,8 @@ impl Client {
                 }
                 b'Z' => {
                     return Err(Error::Query(
-                        "postgres: the COPY stream did not start (the query may return no rows)".into(),
+                        "postgres: the COPY stream did not start (the query may return no rows)"
+                            .into(),
                     ))
                 }
                 _ => {}
@@ -563,7 +569,10 @@ mod tests {
     #[test]
     fn bad_urls_are_refused() {
         assert!(Url::parse("mysql://x@y/z").is_err());
-        assert!(Url::parse("postgres://alice@localhost").is_err(), "no database");
+        assert!(
+            Url::parse("postgres://alice@localhost").is_err(),
+            "no database"
+        );
         assert!(Url::parse("postgres://alice@localhost:abc/t").is_err());
         // It must not be swallowed silently.
         assert!(Url::parse("postgres://alice@localhost/t?sslmode=require").is_err());
@@ -599,10 +608,7 @@ mod tests {
         body.extend_from_slice(&(-1i32).to_be_bytes()); // NULL
         body.extend_from_slice(&0i32.to_be_bytes()); // empty string
         let cells = data_row(&Message { tag: b'D', body }).unwrap();
-        assert_eq!(
-            cells,
-            vec![Some("hi".into()), None, Some(String::new())]
-        );
+        assert_eq!(cells, vec![Some("hi".into()), None, Some(String::new())]);
     }
 
     #[test]

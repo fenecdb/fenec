@@ -46,15 +46,14 @@ pub mod fs;
 pub mod prelude {
     pub use crate::changes::{ChangeLog, Since};
     pub use crate::engine::{
-        ChangeBatch, Changes, Collection, CollectionStats, Database, Sink, VectorIndexStats, Watcher,
+        ChangeBatch, Changes, Collection, CollectionStats, Database, Sink, VectorIndexStats,
+        Watcher,
     };
     pub use crate::error::{Error, Result};
     pub use crate::plugin::{Hook, Plugin, Registry, ScalarFn, WriteOp};
-    pub use crate::query::{
-        CmpOp, Expr, Near, ResultSet, Response, Row, Select, Statement,
-    };
+    pub use crate::query::{CmpOp, Expr, Near, Response, ResultSet, Row, Select, Statement};
     pub use crate::schema::{Field, IndexKind, Metric, Schema, VectorIndexSpec};
-    pub use crate::value::{DataType, DocId, Document, VecPrec, Value};
+    pub use crate::value::{DataType, DocId, Document, Value, VecPrec};
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

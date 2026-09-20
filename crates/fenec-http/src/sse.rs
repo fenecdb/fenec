@@ -31,12 +31,12 @@
 use crate::api;
 use crate::http::Request;
 use crate::Config;
+use fenec_core::prelude::*;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
-use fenec_core::prelude::*;
 
 /// The point that announces writes to waiting subscribers.
 ///
@@ -136,7 +136,12 @@ pub fn serve(
     let sub = match sub {
         Ok(s) => s,
         Err(e) => {
-            let _ = write_head(out, cfg, api::status_of(&e), "application/json; charset=utf-8");
+            let _ = write_head(
+                out,
+                cfg,
+                api::status_of(&e),
+                "application/json; charset=utf-8",
+            );
             let mut body = String::from("{\"error\":");
             fenec_core::json::escape_into(&mut body, &e.to_string());
             body.push('}');
@@ -200,7 +205,8 @@ pub fn serve(
         // Keep-alive: proxies and NAT tables drop silent connections. A
         // comment line is valid in SSE and produces no event on the client
         // side.
-        if hub.wait(cursor, cfg.stream_keepalive) <= cursor && out.write_all(b": keepalive\n\n").is_err()
+        if hub.wait(cursor, cfg.stream_keepalive) <= cursor
+            && out.write_all(b": keepalive\n\n").is_err()
         {
             return;
         }

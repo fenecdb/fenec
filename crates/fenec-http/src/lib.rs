@@ -23,6 +23,7 @@ pub mod api;
 pub mod http;
 pub mod sse;
 
+use fenec_core::prelude::*;
 use http::{Method, Request, Response};
 use sse::Hub;
 use std::io::BufReader;
@@ -30,7 +31,6 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use fenec_core::prelude::*;
 
 pub struct Config {
     pub addr: String,
@@ -205,10 +205,7 @@ fn unauthorized(cfg: &Config, req: &Request) -> Option<Response> {
     if constant_eq(given.as_bytes(), token.as_bytes()) {
         return None;
     }
-    Some(
-        Response::error(401, "invalid or missing token")
-            .header("WWW-Authenticate", "Bearer"),
-    )
+    Some(Response::error(401, "invalid or missing token").header("WWW-Authenticate", "Bearer"))
 }
 
 fn is_remote(addr: &str) -> bool {
@@ -429,8 +426,14 @@ fn cors(resp: Response, cfg: &Config) -> Response {
         None => resp,
         Some(origin) => resp
             .header("Access-Control-Allow-Origin", origin)
-            .header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-            .header("Access-Control-Allow-Headers", "content-type, authorization")
+            .header(
+                "Access-Control-Allow-Methods",
+                "GET, POST, PATCH, DELETE, OPTIONS",
+            )
+            .header(
+                "Access-Control-Allow-Headers",
+                "content-type, authorization",
+            )
             .header("Access-Control-Max-Age", "600")
             .header("Vary", "Origin"),
     }

@@ -8,11 +8,11 @@
 //! Referans: <https://www.sqlite.org/fileformat2.html>
 
 use crate::{Column, Source};
+use fenec_core::error::{Error, Result};
+use fenec_core::value::{DataType, Value};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use fenec_core::error::{Error, Result};
-use fenec_core::value::{DataType, Value};
 
 const MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
@@ -120,7 +120,8 @@ struct Pager {
 
 impl Pager {
     fn open(path: &Path) -> Result<Pager> {
-        let mut file = File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+        let mut file =
+            File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
         let mut head = [0u8; 100];
         file.read_exact(&mut head)
             .map_err(|_| Error::Corrupt(format!("{}: not a SQLite file", path.display())))?;
@@ -426,8 +427,7 @@ fn parse_create(sql: &str) -> Result<Vec<Decl>> {
             continue;
         }
         let (ty, tail) = take_type(rest);
-        let rowid_alias =
-            ty.trim().eq_ignore_ascii_case("INTEGER") && has_primary_key(&tail);
+        let rowid_alias = ty.trim().eq_ignore_ascii_case("INTEGER") && has_primary_key(&tail);
         decls.push(Decl {
             name,
             ty: ty.trim().to_string(),
@@ -947,7 +947,10 @@ mod tests {
         let names: Vec<&str> = d.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, vec!["id", "head line", "price", "embed", "untyped"]);
         assert_eq!(d[1].ty, "VARCHAR(255)");
-        assert_eq!(d[2].ty, "DECIMAL(10,2)", "a parenthesised type must not be split");
+        assert_eq!(
+            d[2].ty, "DECIMAL(10,2)",
+            "a parenthesised type must not be split"
+        );
         assert_eq!(d[4].ty, "", "an untyped column carries an empty type");
         assert!(d[0].rowid_alias);
         assert!(!d[3].rowid_alias);
@@ -966,8 +969,10 @@ mod tests {
 
     #[test]
     fn quoted_identifiers_survive() {
-        let d = parse_create(r#"CREATE TABLE "t" ([with space] TEXT, `back` INT, "double""quote" INT)"#)
-            .unwrap();
+        let d = parse_create(
+            r#"CREATE TABLE "t" ([with space] TEXT, `back` INT, "double""quote" INT)"#,
+        )
+        .unwrap();
         let names: Vec<&str> = d.iter().map(|x| x.name.as_str()).collect();
         assert_eq!(names, vec!["with space", "back", "double\"quote"]);
     }

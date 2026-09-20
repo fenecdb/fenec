@@ -17,7 +17,7 @@ use crate::lexer::{tokenize, Tok, Token};
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
 use fenec_core::schema::{Field, IndexKind, Metric, Schema, VectorIndexSpec};
-use fenec_core::value::{DataType, VecPrec, Value};
+use fenec_core::value::{DataType, Value, VecPrec};
 
 /// The maximum nesting level of an expression.
 ///
@@ -131,10 +131,7 @@ impl Parser {
         if self.eat_kw(kw) {
             Ok(())
         } else {
-            self.err(format!(
-                "expected `{kw}`, found {}",
-                self.peek().describe()
-            ))
+            self.err(format!("expected `{kw}`, found {}", self.peek().describe()))
         }
     }
 
@@ -341,8 +338,9 @@ impl Parser {
                         "f32" => VecPrec::F32,
                         "f16" => VecPrec::F16,
                         other => {
-                            return self
-                                .err(format!("vector precision must be `f32` or `f16`, found `{other}`"))
+                            return self.err(format!(
+                                "vector precision must be `f32` or `f16`, found `{other}`"
+                            ))
                         }
                     }
                 } else {
@@ -427,11 +425,11 @@ impl Parser {
 
     fn get(&mut self) -> Result<Statement> {
         self.next(); // get / select
-        // The classic SQL order: `select title, year from articles`. fenecdb's
-        // own order is valid in the same position (`get articles select
-        // title`), so the decision is made by backtracking: if the name list
-        // is followed by `from` it is a projection, otherwise the first name
-        // is the collection.
+                     // The classic SQL order: `select title, year from articles`. fenecdb's
+                     // own order is valid in the same position (`get articles select
+                     // title`), so the decision is made by backtracking: if the name list
+                     // is followed by `from` it is a projection, otherwise the first name
+                     // is the collection.
         let mut project = None;
         if !self.peek_kw("from") {
             let save = self.i;
@@ -543,7 +541,11 @@ impl Parser {
     fn projection_before_from(&mut self) -> Result<Option<Option<Vec<String>>>> {
         if matches!(self.peek(), Tok::Star) {
             self.next();
-            return Ok(if self.eat_kw("from") { Some(None) } else { None });
+            return Ok(if self.eat_kw("from") {
+                Some(None)
+            } else {
+                None
+            });
         }
         let mut cols = Vec::new();
         loop {
@@ -756,9 +758,9 @@ impl Parser {
                 // If every element is a constant number, produce a vector
                 // directly, so embedding lists become Value::Vector in one go.
                 if !items.is_empty()
-                    && items.iter().all(|e| {
-                        matches!(e, Expr::Lit(Value::Int(_)) | Expr::Lit(Value::Float(_)))
-                    })
+                    && items
+                        .iter()
+                        .all(|e| matches!(e, Expr::Lit(Value::Int(_)) | Expr::Lit(Value::Float(_))))
                 {
                     let v: Vec<f32> = items
                         .iter()

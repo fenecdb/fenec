@@ -223,7 +223,10 @@ fn parse_value(b: &[char], i: &mut usize) -> Result<Value> {
         '[' => {
             let items = parse_array(b, i)?;
             // If every item is a number, read it as a vector (embedding transfer)
-            if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
             {
                 return Ok(Value::Vector(
                     items.iter().map(|v| v.as_f64().unwrap() as f32).collect(),
@@ -244,7 +247,13 @@ fn parse_value(b: &[char], i: &mut usize) -> Result<Value> {
                 *i += 1;
             }
             let mut is_float = false;
-            while *i < b.len() && (b[*i].is_ascii_digit() || b[*i] == '.' || b[*i] == 'e' || b[*i] == 'E' || b[*i] == '+' || b[*i] == '-')
+            while *i < b.len()
+                && (b[*i].is_ascii_digit()
+                    || b[*i] == '.'
+                    || b[*i] == 'e'
+                    || b[*i] == 'E'
+                    || b[*i] == '+'
+                    || b[*i] == '-')
             {
                 if b[*i] == '.' || b[*i] == 'e' || b[*i] == 'E' {
                     is_float = true;
@@ -323,9 +332,10 @@ fn parse_string(b: &[char], i: &mut usize) -> Result<String> {
                     'b' => s.push('\u{8}'),
                     'f' => s.push('\u{c}'),
                     'u' => {
-                        let hex: String = b.get(*i..*i + 4).map(|c| c.iter().collect()).ok_or_else(|| {
-                            Error::Query("truncated \\u escape".into())
-                        })?;
+                        let hex: String = b
+                            .get(*i..*i + 4)
+                            .map(|c| c.iter().collect())
+                            .ok_or_else(|| Error::Query("truncated \\u escape".into()))?;
                         *i += 4;
                         let code = u32::from_str_radix(&hex, 16)
                             .map_err(|_| Error::Query("invalid \\u escape".into()))?;
@@ -385,7 +395,11 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
             docs
         }
         Some('{') => vec![parse_object_at(&b, &mut i)?],
-        _ => return Err(Error::Query("expected a JSON object or array of objects".into())),
+        _ => {
+            return Err(Error::Query(
+                "expected a JSON object or array of objects".into(),
+            ))
+        }
     };
     skip_ws(&b, &mut i);
     if i != b.len() {
@@ -408,7 +422,9 @@ fn parse_object_at(b: &[char], i: &mut usize) -> Result<Vec<(String, Value)>> {
             break;
         }
         if b.get(*i) != Some(&'"') {
-            return Err(Error::Query("expected a field name in the JSON object".into()));
+            return Err(Error::Query(
+                "expected a field name in the JSON object".into(),
+            ));
         }
         let key = parse_string(b, i)?;
         skip_ws(b, i);
@@ -430,7 +446,11 @@ fn parse_object_at(b: &[char], i: &mut usize) -> Result<Vec<(String, Value)>> {
                 *i += 1;
                 break;
             }
-            _ => return Err(Error::Query("expected `,` or `}` in the JSON object".into())),
+            _ => {
+                return Err(Error::Query(
+                    "expected `,` or `}` in the JSON object".into(),
+                ))
+            }
         }
     }
     Ok(out)

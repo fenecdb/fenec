@@ -24,11 +24,11 @@
 //!
 //! `cargo run --release -p fenec-bench -- [N] [DIM]`
 
+use fenec_core::prelude::*;
+use fenec_core::vector::{dot, normalized};
 use postgres::{Client, NoTls};
 use rusqlite::{params, Connection};
 use std::time::Instant;
-use fenec_core::prelude::*;
-use fenec_core::vector::{dot, normalized};
 
 struct Rng(u64);
 impl Rng {
@@ -244,7 +244,13 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
         lat.push(ms(t.elapsed()));
         let e = db.execute(&Statement::Select(mk(q, true))).unwrap();
         let ids: Vec<u64> = e.rows().unwrap().rows.iter().map(|r| r.id).collect();
-        hits += a.rows().unwrap().rows.iter().filter(|r| ids.contains(&r.id)).count();
+        hits += a
+            .rows()
+            .unwrap()
+            .rows
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .count();
         total += ids.len();
     }
     let ann_p50 = p50(&mut lat);
@@ -252,7 +258,8 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
 
     let t = Instant::now();
     let mut db2 = fenec_core::fs::open(path).unwrap();
-    db2.execute(&Statement::Select(mk(&queries[0], false))).unwrap();
+    db2.execute(&Statement::Select(mk(&queries[0], false)))
+        .unwrap();
     let reopen_ms = ms(t.elapsed());
 
     Result_ {
@@ -356,7 +363,9 @@ fn run_sqlite(path: &str, rows: &[Row], queries: &[Vec<f32>]) -> Result_ {
     let t = Instant::now();
     let conn2 = Connection::open(path).unwrap();
     let _: i64 = conn2
-        .query_row("SELECT count(*) FROM docs WHERE category = 'a'", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM docs WHERE category = 'a'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let reopen_ms = ms(t.elapsed());
 
@@ -391,13 +400,17 @@ fn pgvec(v: &[f32]) -> String {
 
 type BoxErr = Box<dyn std::error::Error>;
 
-fn run_postgres(url: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> std::result::Result<Result_, BoxErr> {
+fn run_postgres(
+    url: &str,
+    rows: &[Row],
+    queries: &[Vec<f32>],
+    dim: usize,
+) -> std::result::Result<Result_, BoxErr> {
     let mut cl = Client::connect(url, NoTls)?;
     cl.batch_execute(
         "CREATE EXTENSION IF NOT EXISTS vector;
          DROP TABLE IF EXISTS docs;",
-    )
-    ?;
+    )?;
     cl.batch_execute(&format!(
         "CREATE TABLE docs (
            id       bigserial PRIMARY KEY,
@@ -405,8 +418,7 @@ fn run_postgres(url: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> st
            score    bigint NOT NULL,
            embed    vector({dim}) NOT NULL
          );"
-    ))
-    ?;
+    ))?;
 
     // Empty round trip: every measurement below includes it.
     let mut r = Vec::new();
@@ -451,61 +463,51 @@ fn run_postgres(url: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> st
     let insert_ms = ms(t.elapsed());
 
     let bytes: i64 = cl
-        .query_one(
-            "SELECT pg_total_relation_size('docs')::bigint",
-            &[],
-        )
-?
+        .query_one("SELECT pg_total_relation_size('docs')::bigint", &[])?
         .get(0);
 
     let mut lat = Vec::new();
     for _ in 0..20 {
         let t = Instant::now();
-        let rows_out = cl
-            .query(
-                "SELECT id FROM docs WHERE category = $1 AND score > $2",
-                &[&"a", &500i64],
-            )
-            ?;
+        let rows_out = cl.query(
+            "SELECT id FROM docs WHERE category = $1 AND score > $2",
+            &[&"a", &500i64],
+        )?;
         lat.push(ms(t.elapsed()));
         assert!(!rows_out.is_empty());
     }
     let scalar_p50 = p50(&mut lat);
 
     // Exact: index scans are turned off to force a full scan.
-    cl.batch_execute("SET enable_indexscan = off; SET enable_indexonlyscan = off;")
-        ?;
+    cl.batch_execute("SET enable_indexscan = off; SET enable_indexonlyscan = off;")?;
     let mut lat = Vec::new();
     let mut exact_ids: Vec<Vec<i64>> = Vec::new();
     for q in queries {
         let v = pgvec(q);
         let t = Instant::now();
-        let out = cl
-            .query(
-                "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
-                &[&v],
-            )
-            ?;
+        let out = cl.query(
+            "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
+            &[&v],
+        )?;
         lat.push(ms(t.elapsed()));
         exact_ids.push(out.iter().map(|r| r.get::<_, i64>(0)).collect());
     }
     let exact_p50 = p50(&mut lat);
 
     // ANN: the same ef_search as fenecdb
-    cl.batch_execute("SET enable_indexscan = on; SET enable_indexonlyscan = on; SET hnsw.ef_search = 64;")
-        ?;
+    cl.batch_execute(
+        "SET enable_indexscan = on; SET enable_indexonlyscan = on; SET hnsw.ef_search = 64;",
+    )?;
     let mut lat = Vec::new();
     let mut hits = 0usize;
     let mut total = 0usize;
     for (i, q) in queries.iter().enumerate() {
         let v = pgvec(q);
         let t = Instant::now();
-        let out = cl
-            .query(
-                "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
-                &[&v],
-            )
-            ?;
+        let out = cl.query(
+            "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
+            &[&v],
+        )?;
         lat.push(ms(t.elapsed()));
         let ids: Vec<i64> = out.iter().map(|r| r.get::<_, i64>(0)).collect();
         hits += ids.iter().filter(|id| exact_ids[i].contains(id)).count();
@@ -532,7 +534,11 @@ fn main() {
     let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let dim: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(128);
 
-    println!("fenecdb {} vs SQLite {}", fenec_core::VERSION, rusqlite::version());
+    println!(
+        "fenecdb {} vs SQLite {}",
+        fenec_core::VERSION,
+        rusqlite::version()
+    );
     println!("{n} rows × {dim} dims, clustered embedding distribution\n");
 
     let (rows, queries) = generate(n, dim);
@@ -542,8 +548,9 @@ fn main() {
 
     let v = run_fenecdb(vpath.to_str().unwrap(), &rows, &queries, dim);
     let s = run_sqlite(spath.to_str().unwrap(), &rows, &queries);
-    let pg_url = std::env::var("FENECBENCH_PG")
-        .unwrap_or_else(|_| "host=127.0.0.1 port=55432 user=postgres password=fenec dbname=fenecbench".into());
+    let pg_url = std::env::var("FENECBENCH_PG").unwrap_or_else(|_| {
+        "host=127.0.0.1 port=55432 user=postgres password=fenec dbname=fenecbench".into()
+    });
     let p = match run_postgres(&pg_url, &rows, &queries, dim) {
         Ok(r) => Some(r),
         Err(e) => {
@@ -558,10 +565,12 @@ fn main() {
     let v = Some(v);
     let s = Some(s);
 
-    let row = |label: &str, a: String, b: String, c: String| {
-        println!("{label:<30}{a:>13}{b:>13}{c:>15}")
-    };
-    println!("{:<30}{:>13}{:>13}{:>15}", "", "fenecdb", "SQLite", "PG+pgvector");
+    let row =
+        |label: &str, a: String, b: String, c: String| println!("{label:<30}{a:>13}{b:>13}{c:>15}");
+    println!(
+        "{:<30}{:>13}{:>13}{:>15}",
+        "", "fenecdb", "SQLite", "PG+pgvector"
+    );
     println!("{}", "-".repeat(71));
     let secs = |x: &Result_| format!("{:.2} s", x.insert_ms / 1000.0);
     let rate = move |x: &Result_| format!("{:.0}", n as f64 / (x.insert_ms / 1000.0));
@@ -569,24 +578,66 @@ fn main() {
     let sc = |x: &Result_| format!("{:.2} ms", x.scalar_p50);
     let _ = &rate;
     let ex = |x: &Result_| format!("{:.2} ms", x.exact_p50);
-    let an = |x: &Result_| x.ann_p50.map(|a| format!("{a:.3} ms")).unwrap_or("none".into());
+    let an = |x: &Result_| {
+        x.ann_p50
+            .map(|a| format!("{a:.3} ms"))
+            .unwrap_or("none".into())
+    };
     let rc = |x: &Result_| x.recall.map(|a| format!("{a:.1}%")).unwrap_or("-".into());
-    let ro = |x: &Result_| x.reopen_ms.map(|a| format!("{a:.1} ms")).unwrap_or("server".into());
-    let rt = |x: &Result_| x.rtt.map(|a| format!("{a:.3} ms")).unwrap_or("0 (embedded)".into());
+    let ro = |x: &Result_| {
+        x.reopen_ms
+            .map(|a| format!("{a:.1} ms"))
+            .unwrap_or("server".into())
+    };
+    let rt = |x: &Result_| {
+        x.rtt
+            .map(|a| format!("{a:.3} ms"))
+            .unwrap_or("0 (embedded)".into())
+    };
 
     let ing = move |x: &Result_| format!("{:.0} k/s", n as f64 / (x.ingest_ms / 1000.0) / 1000.0);
     let idx = |x: &Result_| format!("{:.2} s", x.index_ms / 1000.0);
-    row("data write (no index)", col(&v,&ing), col(&s,&ing), col(&p,&ing));
-    row("index build", col(&v,&idx), col(&s,&idx), col(&p,&idx));
-    row("total", col(&v,&secs), col(&s,&secs), col(&p,&secs));
-    row("  -> rows/s", col(&v,&rate), col(&s,&rate), col(&p,&rate));
-    row("on-disk size", col(&v,&mb), col(&s,&mb), col(&p,&mb));
-    row("scalar filter (indexed)", col(&v,&sc), col(&s,&sc), col(&p,&sc));
-    row("vector top-10, EXACT", col(&v,&ex), col(&s,&ex), col(&p,&ex));
-    row("vector top-10, ANN", col(&v,&an), col(&s,&an), col(&p,&an));
-    row("  -> recall@10", col(&v,&rc), col(&s,&rc), col(&p,&rc));
-    row("reopen", col(&v,&ro), col(&s,&ro), col(&p,&ro));
-    row("empty-query round trip", col(&v,&rt), col(&s,&rt), col(&p,&rt));
+    row(
+        "data write (no index)",
+        col(&v, &ing),
+        col(&s, &ing),
+        col(&p, &ing),
+    );
+    row("index build", col(&v, &idx), col(&s, &idx), col(&p, &idx));
+    row("total", col(&v, &secs), col(&s, &secs), col(&p, &secs));
+    row(
+        "  -> rows/s",
+        col(&v, &rate),
+        col(&s, &rate),
+        col(&p, &rate),
+    );
+    row("on-disk size", col(&v, &mb), col(&s, &mb), col(&p, &mb));
+    row(
+        "scalar filter (indexed)",
+        col(&v, &sc),
+        col(&s, &sc),
+        col(&p, &sc),
+    );
+    row(
+        "vector top-10, EXACT",
+        col(&v, &ex),
+        col(&s, &ex),
+        col(&p, &ex),
+    );
+    row(
+        "vector top-10, ANN",
+        col(&v, &an),
+        col(&s, &an),
+        col(&p, &an),
+    );
+    row("  -> recall@10", col(&v, &rc), col(&s, &rc), col(&p, &rc));
+    row("reopen", col(&v, &ro), col(&s, &ro), col(&p, &ro));
+    row(
+        "empty-query round trip",
+        col(&v, &rt),
+        col(&s, &rt),
+        col(&p, &rt),
+    );
     println!("{}", "-".repeat(71));
 
     let v = v.unwrap();

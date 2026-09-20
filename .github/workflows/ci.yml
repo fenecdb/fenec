@@ -10,6 +10,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup component add rustfmt
+
+      - run: cargo fmt --all --check
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

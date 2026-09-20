@@ -5,12 +5,12 @@
 //! psql -h 127.0.0.1 -p 5433 -U fenec
 //! ```
 
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use fenec_core::prelude::*;
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::{Auth, SyncPolicy};
 use fenec_pg::{Config, PgPlugin, Server};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 const USAGE: &str = "\
 usage: fenec-pg [options]
@@ -159,15 +159,15 @@ fn main() {
             "--no-checkpoint" => cfg.checkpoint_on_exit = false,
             "--max-connections" => {
                 let v = next(&mut i, "--max-connections");
-                cfg.max_connections = v
-                    .parse()
-                    .unwrap_or_else(|_| fail(&format!("--max-connections expects a number, got `{v}`")))
+                cfg.max_connections = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--max-connections expects a number, got `{v}`"))
+                })
             }
             "--idle-timeout" => {
                 let v = next(&mut i, "--idle-timeout");
-                let secs: u64 = v
-                    .parse()
-                    .unwrap_or_else(|_| fail(&format!("--idle-timeout expects seconds, got `{v}`")));
+                let secs: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--idle-timeout expects seconds, got `{v}`"))
+                });
                 cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-memory" => {
@@ -193,15 +193,15 @@ fn main() {
             "--http-read-only" => http_cfg.read_only = true,
             "--http-max-streams" => {
                 let v = next(&mut i, "--http-max-streams");
-                http_cfg.max_streams = v
-                    .parse()
-                    .unwrap_or_else(|_| fail(&format!("--http-max-streams expects a number, got `{v}`")))
+                http_cfg.max_streams = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--http-max-streams expects a number, got `{v}`"))
+                })
             }
             "--http-keepalive" => {
                 let v = next(&mut i, "--http-keepalive");
-                let secs: u64 = v
-                    .parse()
-                    .unwrap_or_else(|_| fail(&format!("--http-keepalive expects seconds, got `{v}`")));
+                let secs: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--http-keepalive expects seconds, got `{v}`"))
+                });
                 if secs == 0 {
                     fail("--http-keepalive cannot be zero");
                 }
@@ -225,7 +225,11 @@ fn main() {
     }
 
     if ping {
-        std::process::exit(health_check(&cfg.addr, cfg.user.as_deref(), password.as_deref()));
+        std::process::exit(health_check(
+            &cfg.addr,
+            cfg.user.as_deref(),
+            password.as_deref(),
+        ));
     }
 
     cfg.auth = match &password {

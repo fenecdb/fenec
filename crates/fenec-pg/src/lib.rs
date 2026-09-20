@@ -34,10 +34,10 @@ pub mod server;
 
 pub use server::{to_pg_text, Config, Server};
 
-use std::sync::Arc;
 use fenec_core::error::{Error, Result};
 use fenec_core::plugin::{Plugin, Registry, ScalarFn};
 use fenec_core::value::Value;
+use std::sync::Arc;
 
 /// PostgreSQL compatibility plugin.
 pub struct PgPlugin;
@@ -144,7 +144,11 @@ mod tests {
             "[1,2.5]"
         );
         assert_eq!(
-            to_pg_text(&Value::List(vec![Value::Text("a".into()), Value::Text("b".into())])).unwrap(),
+            to_pg_text(&Value::List(vec![
+                Value::Text("a".into()),
+                Value::Text("b".into())
+            ]))
+            .unwrap(),
             "{\"a\",\"b\"}"
         );
     }

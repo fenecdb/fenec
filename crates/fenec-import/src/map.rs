@@ -79,7 +79,9 @@ pub fn plan(columns: &[Column], opts: &Options) -> Result<Plan> {
     // reports the error before writing; `CreateIndex` performs the same check again.
     for (field, kind) in &opts.indexes {
         let f = fields.iter().find(|f| &f.name == field).ok_or_else(|| {
-            Error::NotFound(format!("there is no `{field}` field, the index cannot be built"))
+            Error::NotFound(format!(
+                "there is no `{field}` field, the index cannot be built"
+            ))
         })?;
         if matches!(kind, IndexKind::Vector(_)) && !matches!(f.ty, DataType::Vector(..)) {
             return Err(Error::Type(format!(
@@ -150,7 +152,8 @@ fn resolve_type(c: &Column, opts: &Options, warnings: &mut Vec<String>) -> Resul
     if let Some((_, dim)) = opts.vectors.iter().find(|(n, _)| *n == c.name) {
         match &c.ty {
             // Bytes: an f32 little-endian array. List/vector: already numeric.
-            None | Some(DataType::Bytes) | Some(DataType::List(_)) | Some(DataType::Vector(..)) => {}
+            None | Some(DataType::Bytes) | Some(DataType::List(_)) | Some(DataType::Vector(..)) => {
+            }
             Some(other) => {
                 return Err(Error::Type(format!(
                     "field `{}` is {}; `--vector` only applies to bytes, list or vector columns",
@@ -304,10 +307,8 @@ mod tests {
     #[test]
     fn index_on_non_vector_field_fails_in_plan() {
         let mut o = Options::new("m");
-        o.indexes.push((
-            "title".into(),
-            IndexKind::Vector(Default::default()),
-        ));
+        o.indexes
+            .push(("title".into(), IndexKind::Vector(Default::default())));
         let e = plan(&cols(), &o).unwrap_err().to_string();
         assert!(e.contains("--vector title:<N>"), "{e}");
     }

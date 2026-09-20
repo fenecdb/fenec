@@ -5,10 +5,10 @@
 //! So the test runs the `fenec-pg` binary, sends SIGTERM and inspects the file
 //! left behind -- exactly what `docker stop` does.
 
+use fenec_pg::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
-use fenec_pg::client::{Client, Url};
 
 // libc's `kill`; `server.rs` declares `signal` the same way (to avoid
 // adding a dependency).
@@ -110,7 +110,10 @@ fn sigterm_flushes_pending_writes() {
     let (code, log) = server.terminate();
 
     assert_eq!(code, 0, "expected a clean exit\n{log}");
-    assert!(log.contains("shutting down"), "the shutdown hook did not run\n{log}");
+    assert!(
+        log.contains("shutting down"),
+        "the shutdown hook did not run\n{log}"
+    );
     let after = std::fs::metadata(&path).unwrap().len();
     assert!(
         after > before,
@@ -135,7 +138,11 @@ fn checkpoint_on_exit_writes_the_graph() {
 
     let mut size = [0u64; 2];
     for (i, extra) in [Vec::new(), vec!["--no-checkpoint"]].iter().enumerate() {
-        let path = tmp(if i == 0 { "cp-on.fenec" } else { "cp-off.fenec" });
+        let path = tmp(if i == 0 {
+            "cp-on.fenec"
+        } else {
+            "cp-off.fenec"
+        });
         let server = start(&path, extra);
         let mut c = server.client();
         c.query("create collection t (name text, e vector<4> @hnsw(cosine))")
