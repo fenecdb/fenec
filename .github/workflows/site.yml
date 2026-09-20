@@ -39,6 +39,14 @@ jobs:
           key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: site-cargo-
 
+      # build.py minifies the JS and CSS through esbuild when it finds it on
+      # PATH and ships the readable source when it does not, so this step is
+      # what decides whether the deploy is minified. Pinned for the same
+      # reason wrangler is below: a silent major bump would change the output
+      # of every asset hash.
+      - name: Install esbuild
+        run: npm install -g esbuild@0.28.2
+
       - name: Build the wasm module and the site
         run: make site
 

@@ -9,6 +9,12 @@ The generator (`build.py`) is standard library only, in keeping with the repo's
 zero-dependency rule; it exists so that page chrome lives in one place instead
 of being copied into fifteen files and drifting.
 
+JS and CSS go through `esbuild` when it is on `PATH`, and ship as written when
+it is not — the generator keeps no dependency of its own, it just uses the tool
+if it finds it. Worth having: the four assets are 38 KB gzipped as written and
+23 KB minified. `.github/workflows/site.yml` installs a pinned version, so the
+deploy is always the minified one.
+
 ```bash
 make site          # -> site/dist
 make site-serve    # build, then http://localhost:8788
@@ -19,6 +25,15 @@ All three depend on `make wasm`: the console on the home page runs the real
 engine, so `build.py` copies `web/fenec.js` and `web/fenec.wasm` into the
 output. Without them the console falls back to the published measurements and
 says so on screen.
+
+Because it has the module in hand, `build.py` also checks the numbers the prose
+puts on it. The module's size is written into eight files and had drifted by
+13 KB across all of them before this existed; `CLAIMS` at the top of the
+generator lists every place, with the pattern that finds it. A mismatch is a
+warning locally — a rebuild moving the module by forty bytes should not stop
+you working — and an error when `CI` is set, which is the build that would ship
+the wrong number. Reword one of those sentences and the check says it could not
+find its pattern: update the entry, do not delete it.
 
 ## Deployment
 
@@ -45,9 +60,17 @@ session locally and from the environment in CI.
 Locally, `wrangler login` once, then `make site-deploy`.
 
 `site/dist/_headers` is written by `build.py` on every build: security headers
-for everything, an hour of caching for CSS and JS, and revalidation for
-`fenec.wasm` — the filename is stable across builds, and a stale module would
-silently be the wrong engine.
+for everything, and a year of immutable caching for every content-hashed asset.
+That now includes the engine — the site loads `fenec.<hash>.js` and
+`fenec.<hash>.wasm`, so a returning visitor pays no revalidation round trip for
+the two largest files on the page.
+
+Both also ship under their plain names, because `./fenec.js` is what the docs
+tell people to import and those links have to keep resolving. Only the plain
+pair revalidates: a stale module under a stable name would silently be the
+wrong engine. They are deliberately not run through the page-wide asset rename
+either, or the `./fenec.js` inside every docs code sample would be rewritten
+into a hashed name that means nothing to a reader.
 
 ## Layout
 
@@ -57,6 +80,7 @@ site/
   template.html   the page shell; {{placeholders}} are filled per page
   styles.css      the whole design system
   site.js         the scene, the live console, the race, docs navigation
+  engine-worker.js  the engine off the main thread: home console, playground
   content/
     index.html    the home page
     404.html      served by not_found_handling
