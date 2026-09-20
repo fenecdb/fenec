@@ -44,5 +44,10 @@ jobs:
 
       - uses: cloudflare/wrangler-action@v3
         with:
+          # The action defaults to wrangler 3, which predates Workers static
+          # assets and rejects this config outright ("Missing entry-point")
+          # because an assets-only worker has no `main`. Keep this in step with
+          # the version the site is tested against locally.
+          wranglerVersion: "4.135.0"
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
