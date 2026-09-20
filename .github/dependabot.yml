@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # The shipped crates take no external crates at all, so there is nothing to
+  # update there. The action versions in .github/workflows are the real moving
+  # parts -- they are the only third-party code in this repository's CI.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ''
+
+  # fenec-bench is the one crate allowed external dependencies (rusqlite,
+  # postgres). It is `publish = false` and never enters a product build, so
+  # these are grouped into a single PR rather than raised one at a time.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ''
+    groups:
+      bench:
+        patterns: ['*']
