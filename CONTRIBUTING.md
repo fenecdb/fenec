@@ -95,3 +95,12 @@ estimates.
 Keep the diff to one concern. Say what you measured, and name the invariant
 above that the change touches if it touches one. CI runs `make test` on Linux
 and macOS plus a release build; it has to be green.
+
+## Conduct and security
+
+Participation is covered by `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1).
+
+Do not open a public issue for a vulnerability — `SECURITY.md` has the private
+reporting form and says what counts as one. Notably, the absence of TLS and the
+fact that two processes opening the same file corrupts it are documented
+design, not bugs.
