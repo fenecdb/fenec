@@ -1,0 +1,7 @@
+target/
+pkg/
+Cargo.lock
+*.fenec
+.DS_Store
+node_modules/
+web/fenec-schema.d.ts

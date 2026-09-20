@@ -1,0 +1,22 @@
+[package]
+name = "fenec-cli"
+description = "fenecdb command line shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fenec-core = { path = "../fenec-core" }
+fenec-ql = { path = "../fenec-ql" }
+# The `fenec import` subcommand. The SQLite reader + PostgreSQL client grow the
+# binary by ~190 KB; it is unnecessary for embedded/browser use and can be
+# turned off: `cargo build --release -p fenec-cli --no-default-features`.
+fenec-import = { path = "../fenec-import", optional = true }
+
+[features]
+default = ["import"]
+import = ["dep:fenec-import"]
+
+[[bin]]
+name = "fenec"
+path = "src/main.rs"

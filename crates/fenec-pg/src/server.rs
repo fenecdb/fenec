@@ -1,0 +1,1372 @@
+//! PostgreSQL-compatible session server.
+//!
+//! Any PostgreSQL client (psql, psycopg, node-postgres, JDBC) can connect to
+//! fenecdb and run **FenecQL**. The language is not PostgreSQL SQL; what is
+//! compatible is the *transport layer*. That lets existing connection pools,
+//! proxies and tool chains be used unchanged.
+//!
+//! The session model:
+//!
+//! - One thread per connection.
+//! - Read-only statements run *at the same time* under a shared lock; writes
+//!   take the exclusive lock ([`Database::query`] / [`Database::execute_with`]).
+//! - Writes are pushed to disk periodically by the background syncer; on a
+//!   shutdown signal a final `sync` runs ([`SyncPolicy`]). After that -- when
+//!   there is a vector index -- a checkpoint is written, otherwise every
+//!   restart would rebuild the HNSW graph from scratch
+//!   ([`Config::checkpoint_on_exit`]).
+//! - `CancelRequest` is a real cancellation: the pending lock is released and
+//!   the remaining statements are dropped with `57014`.
+
+use crate::compat;
+use crate::proto::*;
+use crate::scram;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::time::Duration;
+use fenec_core::json;
+use fenec_core::prelude::*;
+use fenec_core::query::projection_columns;
+use fenec_core::value::DataType;
+use fenec_ql::parse;
+
+static NEXT_PID: AtomicI32 = AtomicI32::new(1);
+
+/// Whether a shutdown signal arrived. The signal handler writes only this
+/// atomic; the syncer thread sees it and performs the final `sync`.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Sleep step for checking cancellation while waiting on a lock.
+const LOCK_POLL: Duration = Duration::from_millis(1);
+
+/// Wait after an accept error: a transient failure like EMFILE must not turn
+/// into a hot loop.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Stack of the session thread. `thread::spawn`'s default is 2 MiB; the
+/// deepest accepted expression (`fenec_ql::MAX_EXPR_DEPTH` = 512) needs
+/// ~750 KiB in release and ~5 MiB in a debug build. So the default is tight
+/// in the first case (2.7x) and insufficient in the second -- and a stack
+/// overflow is not a catchable panic but an `abort` of the process: a single
+/// deep query would take the whole server down. 8 MiB is *virtual* space;
+/// untouched pages are never resident (measured: RSS 5.2 MB over 100 idle
+/// connections, i.e. ~36 KiB per connection -- independent of the stack size).
+const SESSION_STACK: usize = 8 << 20;
+
+/// After this many consecutive accept errors the listener is given up on.
+/// A single successful accept resets the counter; the aim is to tolerate a
+/// transient failure without turning a permanent one (EBADF, EINVAL) into an
+/// infinite loop.
+const ACCEPT_GIVE_UP: u32 = 64;
+
+// ------------------------------------------------------------ configuration
+
+/// The authentication method.
+pub enum Auth {
+    /// No authentication.
+    Trust,
+    /// The password is sent in plain text. Readable on the network without
+    /// TLS; only for clients that cannot speak SCRAM.
+    Cleartext(String),
+    /// SCRAM-SHA-256: the password never travels the wire (recommended).
+    Scram(Arc<scram::Verifier>),
+}
+
+impl Auth {
+    pub fn parse(method: &str, password: &str) -> std::result::Result<Auth, String> {
+        match method {
+            "scram" | "scram-sha-256" => Ok(Auth::Scram(Arc::new(scram::Verifier::new(password)))),
+            "cleartext" | "password" => Ok(Auth::Cleartext(password.to_string())),
+            other => Err(format!("unknown authentication method: {other}")),
+        }
+    }
+
+    fn is_trust(&self) -> bool {
+        matches!(self, Auth::Trust)
+    }
+}
+
+/// When writes are pushed to disk.
+///
+/// fenecdb does not `fsync` on every write; writes accumulate in a 1 MB
+/// buffer. On the server side that has to be tied to a *policy*, otherwise
+/// nothing reaches the disk until the buffer fills.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SyncPolicy {
+    /// Only on shutdown. The fastest, the least durable.
+    Off,
+    /// `fsync` after every write statement. The most durable, the slowest.
+    Always,
+    /// Periodic: at most one interval's worth of writes is at risk.
+    Interval(Duration),
+}
+
+impl SyncPolicy {
+    /// `off` | `always` | `<ms>`
+    pub fn parse(s: &str) -> std::result::Result<SyncPolicy, String> {
+        match s {
+            "off" | "none" => Ok(SyncPolicy::Off),
+            "always" | "on" => Ok(SyncPolicy::Always),
+            ms => ms
+                .parse::<u64>()
+                .map(|n| SyncPolicy::Interval(Duration::from_millis(n)))
+                .map_err(|_| format!("--sync expects off | always | <ms>, got `{ms}`")),
+        }
+    }
+}
+
+pub struct Config {
+    pub addr: String,
+    pub auth: Auth,
+    /// When set, only this user name is accepted.
+    pub user: Option<String>,
+    pub server_version: String,
+    pub sync: SyncPolicy,
+    /// Since there is no TLS, binding openly outside loopback is refused by
+    /// default; this flag removes that protection.
+    pub insecure: bool,
+    /// Rewrite the file image on shutdown. The HNSW graph lands in the file
+    /// and the next open does not rebuild it (100k x 128: 9.9 s -> 110 ms).
+    /// It is meaningless without a file (in-memory).
+    pub checkpoint_on_exit: bool,
+    /// Ceiling on concurrent connections (0 = unlimited). Every connection is
+    /// an OS thread: leaving it unbounded hands the ceiling of stack memory
+    /// to the client.
+    pub max_connections: usize,
+    /// A session that stays silent this long while waiting for the next
+    /// message is closed (`None` = off). It applies mid-message too: both are
+    /// signs of a dropped connection.
+    pub idle_timeout: Option<Duration>,
+    /// Ceiling of a single protocol message. The protocol allows up to 1 GiB;
+    /// in a memory-limited container, letting one client force an allocation
+    /// that large is a free OOM.
+    pub max_message: usize,
+    /// Data footprint ceiling (bytes, 0 = off). Above it, statements that
+    /// *grow* the data are refused with `53200`.
+    ///
+    /// The point is to get ahead of the cgroup OOM: nobody warns you when
+    /// `SIGKILL` lands, and both the final `sync` and the checkpoint are
+    /// lost. The measured value is [`Database::memory_bytes`] -- not RSS, so
+    /// pick it with headroom (`compact` peaks at ~3x the file).
+    pub max_memory: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            addr: "127.0.0.1:5433".into(),
+            auth: Auth::Trust,
+            user: None,
+            server_version: format!("16.0 (fenecdb {})", fenec_core::VERSION),
+            sync: SyncPolicy::Interval(Duration::from_millis(250)),
+            insecure: false,
+            checkpoint_on_exit: true,
+            max_connections: 100,
+            idle_timeout: None,
+            max_message: 64 << 20,
+            max_memory: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------- cancellation
+
+/// The cancellation state of a connection. Since `CancelRequest` arrives on
+/// a separate TCP connection, the session state lives in a shared record.
+struct Backend {
+    secret: i32,
+    /// Whether a query is being processed right now. Needed so that a
+    /// cancellation landing in an idle moment does not kill the next
+    /// innocent query.
+    busy: AtomicBool,
+    canceled: AtomicBool,
+}
+
+impl Backend {
+    /// Consumes the flag when a cancellation was requested.
+    fn take_cancel(&self) -> bool {
+        self.canceled.swap(false, Ordering::SeqCst)
+    }
+}
+
+type Backends = Arc<Mutex<HashMap<i32, Arc<Backend>>>>;
+
+// ------------------------------------------------------------------ server
+
+pub struct Server {
+    db: Arc<RwLock<Database>>,
+    cfg: Arc<Config>,
+    backends: Backends,
+    /// Number of live sessions. Incremented on accept, decremented via
+    /// [`ConnGuard`] as the session thread ends.
+    live: Arc<AtomicUsize>,
+}
+
+impl Server {
+    pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
+        Server {
+            db,
+            cfg: Arc::new(cfg),
+            backends: Arc::new(Mutex::new(HashMap::new())),
+            live: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Starts listening and opens a thread per connection.
+    pub fn serve(&self) -> io::Result<()> {
+        let listener = self.bind()?;
+        self.serve_on(listener)
+    }
+
+    /// Sets up the listener and performs the security checks.
+    ///
+    /// It stands apart from `serve` so the caller can learn the port
+    /// *before* serving starts: binding `127.0.0.1:0` and reading
+    /// `local_addr()` is safer than picking a fixed port in tests and in
+/// embedded use.
+    pub fn bind(&self) -> io::Result<TcpListener> {
+        let remote = is_remote(&self.cfg.addr);
+        if remote && self.cfg.auth.is_trust() && !self.cfg.insecure {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a loopback address and authentication is off.\n\
+                     fenec-pg does not speak TLS; listening without auth on an \n\
+                     open network exposes the whole database to everyone. Use \n\
+                     SCRAM with `--password` (or --insecure if deliberate).",
+                    self.cfg.addr
+                ),
+            ));
+        }
+
+        TcpListener::bind(&self.cfg.addr)
+    }
+
+    /// Serves on an already-prepared listener.
+    pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
+        eprintln!(
+            "fenec-pg {} listening on: postgres://localhost:{}/fenec  [{}, sync={}]",
+            fenec_core::VERSION,
+            listener.local_addr()?.port(),
+            match &self.cfg.auth {
+                Auth::Trust => "no auth",
+                Auth::Cleartext(_) => "password: plain text",
+                Auth::Scram(_) => "parola: SCRAM-SHA-256",
+            },
+            match self.cfg.sync {
+                SyncPolicy::Off => "on shutdown".to_string(),
+                SyncPolicy::Always => "every write".to_string(),
+                SyncPolicy::Interval(d) => format!("{} ms", d.as_millis()),
+            }
+        );
+
+        install_signal_handlers();
+        spawn_syncer(
+            Arc::clone(&self.db),
+            self.cfg.sync,
+            self.cfg.checkpoint_on_exit,
+        );
+
+        let mut failures = 0u32;
+        for stream in listener.incoming() {
+            // An accept error is not fatal on its own. There used to be a `?`
+            // here: a single EMFILE (descriptor exhaustion) or a half-open
+            // connection would take the whole server down. A transient error
+            // is tolerated; a permanent one ends at ACCEPT_GIVE_UP.
+            let mut stream = match stream {
+                Ok(s) => {
+                    failures = 0;
+                    s
+                }
+                Err(e) => {
+                    failures += 1;
+                    eprintln!("accept error ({failures}): {e}");
+                    if failures >= ACCEPT_GIVE_UP {
+                        return Err(e);
+                    }
+                    std::thread::sleep(ACCEPT_BACKOFF);
+                    continue;
+                }
+            };
+            // The counter is incremented on accept; as a single `fetch_add`
+            // there is no race between the check and the increment. `Drop`
+            // handles the decrement: whether the session ends normally or
+            // panics, and even when `spawn` fails and drops the closure.
+            let (guard, live) = ConnGuard::acquire(&self.live);
+            if self.cfg.max_connections > 0 && live > self.cfg.max_connections {
+                drop(guard);
+                refuse(
+                    &mut stream,
+                    "53300",
+                    &format!(
+                        "too many connections (ceiling {})",
+                        self.cfg.max_connections
+                    ),
+                );
+                continue;
+            }
+
+            let db = Arc::clone(&self.db);
+            let cfg = Arc::clone(&self.cfg);
+            let backends = Arc::clone(&self.backends);
+            // A second descriptor for the refusal path: if `spawn` fails it
+            // swallows the closure and with it the stream.
+            let refused = stream.try_clone().ok();
+            let spawned = std::thread::Builder::new()
+                .name("fenec-pg session".to_string())
+                .stack_size(SESSION_STACK)
+                .spawn(move || {
+                    let _guard = guard;
+                    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+                    if let Err(e) = session(stream, db, cfg, backends) {
+                        // Neither an idle connection that timed out nor a
+                        // client that closed is noise.
+                        let quiet = matches!(
+                            e.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::WouldBlock
+                                | io::ErrorKind::TimedOut
+                        );
+                        if !quiet {
+                            eprintln!("session error ({peer}): {e}");
+                        }
+                    }
+                });
+            // The thread could not be created: RLIMIT_NPROC, the pids cgroup
+            // or memory for the stack. `thread::spawn` panics in that case,
+            // and the panic would land in the accept loop -- that is, in the
+            // server itself. Now only that connection drops; the client gets
+            // PostgreSQL's "too many clients" code.
+            if let Err(e) = spawned {
+                eprintln!("could not create a thread: {e}");
+                if let Some(mut s) = refused {
+                    refuse(&mut s, "53300", "could not create a thread");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether the address is open outside loopback.
+fn is_remote(addr: &str) -> bool {
+    match addr.to_socket_addrs() {
+        Ok(mut it) => it.any(|a| !a.ip().is_loopback()),
+        // An unresolvable address errors in bind anyway; do not block it here.
+        Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------- durability
+
+/// Catches `SIGINT`/`SIGTERM`. The handler only writes an atomic
+/// (signal-safe); the real `sync` happens in the syncer thread.
+fn install_signal_handlers() {
+    // libc's `signal` function, declared directly so as not to add a
+    // dependency. SIGINT=2, SIGTERM=15, SIGHUP=1.
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    extern "C" fn on_signal(_sig: i32) {
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    }
+    unsafe {
+        for sig in [1, 2, 15] {
+            signal(sig, on_signal as *const () as usize);
+        }
+    }
+}
+
+/// The periodic syncer + the shutdown hook.
+fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool) {
+    let tick = match policy {
+        SyncPolicy::Interval(d) if !d.is_zero() => d,
+        // A loop is needed even with Off/Always, to notice the shutdown signal.
+        _ => Duration::from_millis(200),
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(tick);
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            shutdown(&db, checkpoint);
+        }
+        if !matches!(policy, SyncPolicy::Interval(_)) {
+            continue;
+        }
+        // No need to take the lock when nothing is dirty: idle passes must
+        // not block the readers.
+        if read_lock(&db).is_dirty() {
+            if let Err(e) = write_lock(&db).sync() {
+                eprintln!("sync error: {e}");
+            }
+        }
+    });
+}
+
+/// The final `sync`, an optional checkpoint, exit.
+///
+/// The exclusive lock is *held until exit*. Releasing it before exiting
+/// meant a write accepted between `sync` and `exit` could look successful to
+/// the client and never reach the disk; the window was small but silent.
+/// Sessions waiting on the lock do not wait for nothing: [`acquire`] sees
+/// the shutdown flag and returns `57P01`.
+fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+    let mut g = write_lock(db);
+    let dirty = g.is_dirty();
+    if dirty {
+        if let Err(e) = g.sync() {
+            eprintln!("sync error: {e}");
+        }
+    }
+    eprintln!(
+        "\nshutting down: {}",
+        if dirty {
+            "writes were pushed to disk"
+        } else {
+            "no pending writes"
+        }
+    );
+
+    // The checkpoint comes *after* the `sync` and only buys anything when
+    // there is a vector index. Since the whole image is built in memory,
+    // peak memory is ~3x the file and shutdown takes longer on a large
+    // database; if we are killed meanwhile (docker stop timeout, cgroup
+    // OOM) the data is already on disk and only the graph is lost, to be
+    // rebuilt on open. Because `rewrite` writes to a side file and renames,
+    // a half-written checkpoint cannot corrupt the file.
+    if checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
+        match g.checkpoint() {
+            Ok(()) => eprintln!("checkpoint written: the HNSW graph is persisted"),
+            Err(e) => eprintln!("could not write the checkpoint: {e}"),
+        }
+    }
+    std::process::exit(0);
+}
+
+/// A read timeout. Unix reports `EAGAIN`, Windows `TimedOut`.
+fn is_timeout(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
+fn read_lock(db: &RwLock<Database>) -> RwLockReadGuard<'_, Database> {
+    db.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_lock(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
+    db.write().unwrap_or_else(|e| e.into_inner())
+}
+
+// -------------------------------------------------------------------- locks
+
+/// Either a shared or an exclusive lock. Read-only statement sets run under
+/// the shared lock, so reads do not block each other.
+enum Guard<'a> {
+    Read(RwLockReadGuard<'a, Database>),
+    Write(RwLockWriteGuard<'a, Database>),
+}
+
+impl Guard<'_> {
+    fn db(&self) -> &Database {
+        match self {
+            Guard::Read(g) => g,
+            Guard::Write(g) => g,
+        }
+    }
+
+    fn run(&mut self, stmt: &Statement, params: &[Value]) -> fenec_core::error::Result<Response> {
+        match self {
+            Guard::Read(g) => g.query(stmt, params),
+            Guard::Write(g) => g.execute_with(stmt, params),
+        }
+    }
+
+    fn sync_if_needed(&mut self, policy: SyncPolicy) {
+        if policy == SyncPolicy::Always {
+            if let Guard::Write(g) = self {
+                if let Err(e) = g.sync() {
+                    eprintln!("sync error: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Takes the lock in a *cancellable* way. A `CancelRequest` arriving while
+/// waiting behind a long query is seen in this loop; otherwise a
+/// cancellation would only take effect after the query finished.
+fn acquire<'a>(db: &'a RwLock<Database>, write: bool, be: &Backend) -> Option<Guard<'a>> {
+    loop {
+        if write {
+            match db.try_write() {
+                Ok(g) => return Some(Guard::Write(g)),
+                Err(TryLockError::Poisoned(g)) => return Some(Guard::Write(g.into_inner())),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        } else {
+            match db.try_read() {
+                Ok(g) => return Some(Guard::Read(g)),
+                Err(TryLockError::Poisoned(g)) => return Some(Guard::Read(g.into_inner())),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        if be.take_cancel() {
+            return None;
+        }
+        // Once shutdown has begun there is no point waiting for the lock:
+        // the syncer will take the exclusive lock and exit shortly. The
+        // waiting session is released here so shutdown is not delayed behind
+        // the queue.
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return None;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+}
+
+// ------------------------------------------------------------------ session
+
+#[derive(Default, Clone)]
+struct Prepared {
+    sql: String,
+}
+
+#[derive(Default, Clone)]
+struct Portal {
+    sql: String,
+    stmt_name: String,
+    params: Vec<Value>,
+}
+
+fn session(
+    stream: TcpStream,
+    db: Arc<RwLock<Database>>,
+    cfg: Arc<Config>,
+    backends: Backends,
+) -> io::Result<()> {
+    stream.set_nodelay(true).ok();
+    // This is the only way to close an idle session: the read timeout works
+    // both while waiting for the next message and in the middle of a
+    // half-received one -- both are signs of a dropped connection.
+    stream.set_read_timeout(cfg.idle_timeout).ok();
+    let peer_is_remote = stream
+        .peer_addr()
+        .map(|a| !a.ip().is_loopback())
+        .unwrap_or(false);
+    let mut r = BufReader::new(stream.try_clone()?);
+    let mut w = BufWriter::new(stream);
+    let mut out = Writer::new();
+
+    // ---- startup: refuse SSL/GSSAPI, cancel request, then StartupMessage
+    let params = loop {
+        let len = read_i32(&mut r)?;
+        if len < 8 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "short startup"));
+        }
+        // The ceiling comes *before the allocation*: since the body is sized
+        // from `len`, leaving it unbounded meant an arbitrarily large
+        // allocation before authentication.
+        if len > MAX_STARTUP {
+            out.error("54000", "the startup packet is too large");
+            out.flush_to(&mut w)?;
+            return Ok(());
+        }
+        let code = read_i32(&mut r)?;
+        match code {
+            SSL_REQUEST | GSSENC_REQUEST => {
+                // Encryption is not supported: refuse with 'N', the client continues in plain.
+                w.write_all(b"N")?;
+                w.flush()?;
+                continue;
+            }
+            CANCEL_REQUEST => {
+                // Body: target pid + secret key.
+                let pid = read_i32(&mut r)?;
+                let secret = read_i32(&mut r)?;
+                if let Some(be) = backends.lock().ok().and_then(|m| m.get(&pid).cloned()) {
+                    // Ignore silently when the secret does not match (PostgreSQL does the same).
+                    if be.secret == secret && be.busy.load(Ordering::SeqCst) {
+                        be.canceled.store(true, Ordering::SeqCst);
+                    }
+                }
+                return Ok(());
+            }
+            PROTOCOL_V3 => {
+                let mut body = vec![0u8; (len - 8) as usize];
+                r.read_exact(&mut body)?;
+                let mut pos = 0;
+                let mut map = HashMap::new();
+                loop {
+                    let k = take_cstr(&body, &mut pos);
+                    if k.is_empty() {
+                        break;
+                    }
+                    let v = take_cstr(&body, &mut pos);
+                    map.insert(k, v);
+                }
+                break map;
+            }
+            other => {
+                out.error("0A000", &format!("unsupported protocol {other}"));
+                out.flush_to(&mut w)?;
+                return Ok(());
+            }
+        }
+    };
+
+    // ---- authentication
+    let user = params.get("user").cloned().unwrap_or_default();
+    if user.is_empty() {
+        out.error("28000", "the connection request has no user name");
+        out.flush_to(&mut w)?;
+        return Ok(());
+    }
+    if let Some(expected) = &cfg.user {
+        if &user != expected {
+            out.error("28000", &format!("user `{user}` is not accepted"));
+            out.flush_to(&mut w)?;
+            return Ok(());
+        }
+    }
+    if let Err(msg) = authenticate(&cfg.auth, &user, &mut r, &mut w, &mut out) {
+        out.error("28P01", &msg);
+        out.flush_to(&mut w)?;
+        return Ok(());
+    }
+
+    // ---- session record (for cancellation)
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let secret = i32::from_le_bytes(
+        crate::crypto::random_bytes(4)
+            .try_into()
+            .unwrap_or([0, 0, 0, 1]),
+    );
+    let be = Arc::new(Backend {
+        secret,
+        busy: AtomicBool::new(false),
+        canceled: AtomicBool::new(false),
+    });
+    if let Ok(mut m) = backends.lock() {
+        m.insert(pid, Arc::clone(&be));
+    }
+    let _guard = BackendGuard {
+        pid,
+        backends: Arc::clone(&backends),
+    };
+
+    out.auth_ok();
+    out.parameter_status("server_version", &cfg.server_version);
+    out.parameter_status("server_encoding", "UTF8");
+    out.parameter_status("client_encoding", "UTF8");
+    out.parameter_status("DateStyle", "ISO, MDY");
+    out.parameter_status("TimeZone", "UTC");
+    out.parameter_status("standard_conforming_strings", "on");
+    out.parameter_status("integer_datetimes", "on");
+    out.parameter_status("session_authorization", &user);
+    out.parameter_status(
+        "application_name",
+        params
+            .get("application_name")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    out.backend_key_data(pid, secret);
+    if peer_is_remote {
+        // No TLS: a client connecting remotely should know.
+        out.notice(
+            "01000",
+            "the connection is not encrypted: fenec-pg does not speak TLS, traffic is plain text",
+        );
+    }
+    out.ready(b'I');
+    out.flush_to(&mut w)?;
+
+    // ---- main loop
+    let mut prepared: HashMap<String, Prepared> = HashMap::new();
+    let mut portals: HashMap<String, Portal> = HashMap::new();
+    let mut described_stmts: HashSet<String> = HashSet::new();
+    let mut described_portals: HashSet<String> = HashSet::new();
+
+    loop {
+        let m = match read_message_max(&mut r, cfg.max_message) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            // Timeout: the client is silent. We say why and close;
+            // PostgreSQL's `idle_session_timeout` also uses 57P05.
+            Err(e) if is_timeout(&e) => {
+                out.error("57P05", "the session went idle, closing the connection");
+                let _ = out.flush_to(&mut w);
+                return Ok(());
+            }
+            // A message over the ceiling: its body was never read, so the
+            // stream is no longer in sync and closing is mandatory. Say why first.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                out.error("54000", &e.to_string());
+                let _ = out.flush_to(&mut w);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        match m.tag {
+            // ------------------------------------------------ simple query
+            b'Q' => {
+                let mut pos = 0;
+                let sql = take_cstr(&m.body, &mut pos);
+                be.busy.store(true, Ordering::SeqCst);
+                be.canceled.store(false, Ordering::SeqCst);
+                execute_into(&db, &cfg, &be, &sql, &[], &mut out, false);
+                be.busy.store(false, Ordering::SeqCst);
+                be.canceled.store(false, Ordering::SeqCst);
+                out.ready(b'I');
+                out.flush_to(&mut w)?;
+            }
+
+            // ------------------------------------------------ extended
+            b'P' => {
+                let mut pos = 0;
+                let name = take_cstr(&m.body, &mut pos);
+                let sql = take_cstr(&m.body, &mut pos);
+                described_stmts.remove(&name);
+                prepared.insert(name, Prepared { sql });
+                out.parse_complete();
+            }
+            b'B' => {
+                let mut pos = 0;
+                let portal = take_cstr(&m.body, &mut pos);
+                let stmt = take_cstr(&m.body, &mut pos);
+                let sql = prepared
+                    .get(&stmt)
+                    .map(|p| p.sql.clone())
+                    .unwrap_or_default();
+
+                // parameter format codes
+                let nfmt = be_i16(&m.body, &mut pos);
+                let mut fmts = Vec::new();
+                for _ in 0..nfmt {
+                    fmts.push(be_i16(&m.body, &mut pos));
+                }
+                // parameter values
+                let nparams = be_i16(&m.body, &mut pos);
+                let mut values = Vec::new();
+                for i in 0..nparams {
+                    let len = be_i32(&m.body, &mut pos);
+                    if len < 0 {
+                        values.push(Value::Null);
+                        continue;
+                    }
+                    let raw = &m.body[pos..pos + len as usize];
+                    pos += len as usize;
+                    let binary = fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
+                    values.push(decode_param(raw, binary));
+                }
+                described_portals.remove(&portal);
+                portals.insert(
+                    portal,
+                    Portal {
+                        sql,
+                        stmt_name: stmt,
+                        params: values,
+                    },
+                );
+                out.bind_complete();
+            }
+            // ------------------------------------------------ Describe
+            b'D' => {
+                let mut pos = 0;
+                let kind = m.body.first().copied().unwrap_or(b'S');
+                pos += 1;
+                let name = take_cstr(&m.body, &mut pos);
+                let sql = if kind == b'S' {
+                    prepared.get(&name).map(|p| p.sql.clone())
+                } else {
+                    portals.get(&name).map(|p| p.sql.clone())
+                };
+                let sql = sql.unwrap_or_default();
+                be.busy.store(true, Ordering::SeqCst);
+                let shape = describe(&db, &cfg, &sql, &be);
+                be.busy.store(false, Ordering::SeqCst);
+                be.canceled.store(false, Ordering::SeqCst);
+                let shape = match shape {
+                    Some(s) => s,
+                    None => {
+                        out.error("57014", "the query was cancelled");
+                        out.ready(b'I');
+                        out.flush_to(&mut w)?;
+                        continue;
+                    }
+                };
+                if kind == b'S' {
+                    out.parameter_description(&shape.params);
+                }
+                match &shape.columns {
+                    Some(cols) => {
+                        out.row_description(cols);
+                        if kind == b'S' {
+                            described_stmts.insert(name);
+                        } else {
+                            described_portals.insert(name);
+                        }
+                    }
+                    None => out.no_data(),
+                }
+            }
+            b'E' => {
+                let mut pos = 0;
+                let portal = take_cstr(&m.body, &mut pos);
+                let p = portals.get(&portal).cloned().unwrap_or_default();
+                // If RowDescription was already sent with Describe we do not
+                // repeat it (the protocol says so); when Describe was skipped
+                // it is sent anyway, so the client is not left without column
+                // names.
+                let already = described_portals.contains(&portal)
+                    || described_stmts.contains(&p.stmt_name);
+                be.busy.store(true, Ordering::SeqCst);
+                be.canceled.store(false, Ordering::SeqCst);
+                execute_into(&db, &cfg, &be, &p.sql, &p.params, &mut out, already);
+                be.busy.store(false, Ordering::SeqCst);
+                be.canceled.store(false, Ordering::SeqCst);
+            }
+            b'C' => {
+                let mut pos = 0;
+                let kind = m.body.first().copied().unwrap_or(b'S');
+                pos += 1;
+                let name = take_cstr(&m.body, &mut pos);
+                if kind == b'S' {
+                    prepared.remove(&name);
+                    described_stmts.remove(&name);
+                } else {
+                    portals.remove(&name);
+                    described_portals.remove(&name);
+                }
+                out.close_complete();
+            }
+            b'S' => {
+                out.ready(b'I');
+                out.flush_to(&mut w)?;
+            }
+            b'H' => {
+                out.flush_to(&mut w)?;
+            }
+            b'X' => return Ok(()),
+            other => {
+                out.error("0A000", &format!("unsupported message `{}`", other as char));
+                out.ready(b'I');
+                out.flush_to(&mut w)?;
+            }
+        }
+    }
+}
+
+/// Cleans the record up when the session ends (on a panic too).
+/// Whether the data ceiling is exceeded. Only statements that *grow* the
+/// data are stopped: `del` and `compact` are deliberately left out, because
+/// they are the way out of a database that has hit the ceiling. Reads are
+/// unaffected anyway.
+fn over_memory_cap(cfg: &Config, db: &Database, stmt: &Statement) -> Option<String> {
+    let grows = matches!(
+        stmt,
+        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
+    );
+    if cfg.max_memory == 0 || !grows {
+        return None;
+    }
+    let used = db.memory_bytes();
+    if used < cfg.max_memory {
+        return None;
+    }
+    Some(format!(
+        "data ceiling exceeded: {} / {}. Writes have stopped; run `del` + \
+         `compact` to make room, or raise --max-memory",
+        human(used),
+        human(cfg.max_memory)
+    ))
+}
+
+/// Write KiB rather than saying `0 MiB` for small values.
+fn human(bytes: usize) -> String {
+    if bytes >= 1 << 20 {
+        format!("{} MiB", bytes >> 20)
+    } else {
+        format!("{} KiB", bytes >> 10)
+    }
+}
+
+/// Closes the connection with an `ErrorResponse`. PostgreSQL does the same:
+/// the client sees the reason instead of "connection reset".
+fn refuse(stream: &mut TcpStream, code: &str, msg: &str) {
+    let mut out = Writer::new();
+    out.error(code, msg);
+    let _ = out.flush_to(stream);
+}
+
+/// Counter of live sessions. Incremented on accept, decremented in `Drop`.
+struct ConnGuard(Arc<AtomicUsize>);
+
+impl ConnGuard {
+    /// Increments the counter and returns the new value.
+    fn acquire(live: &Arc<AtomicUsize>) -> (ConnGuard, usize) {
+        let n = live.fetch_add(1, Ordering::SeqCst) + 1;
+        (ConnGuard(Arc::clone(live)), n)
+    }
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct BackendGuard {
+    pid: i32,
+    backends: Backends,
+}
+
+impl Drop for BackendGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.backends.lock() {
+            m.remove(&self.pid);
+        }
+    }
+}
+
+// ------------------------------------------------------------ authentication
+
+fn authenticate(
+    auth: &Auth,
+    user: &str,
+    r: &mut impl Read,
+    w: &mut impl Write,
+    out: &mut Writer,
+) -> std::result::Result<(), String> {
+    match auth {
+        Auth::Trust => Ok(()),
+        Auth::Cleartext(expected) => {
+            out.auth_cleartext();
+            out.flush_to(w).map_err(|e| e.to_string())?;
+            let m = read_message(r).map_err(|e| e.to_string())?;
+            let mut pos = 0;
+            let got = take_cstr(&m.body, &mut pos);
+            if m.tag != b'p' || !crate::crypto::ct_eq(got.as_bytes(), expected.as_bytes()) {
+                return Err("password verification failed".into());
+            }
+            Ok(())
+        }
+        Auth::Scram(v) => {
+            out.auth_sasl(&["SCRAM-SHA-256"]);
+            out.flush_to(w).map_err(|e| e.to_string())?;
+
+            // SASLInitialResponse: mechanism name + length + initial response
+            let m = read_message(r).map_err(|e| e.to_string())?;
+            if m.tag != b'p' {
+                return Err("expected a SASL response".into());
+            }
+            let mut pos = 0;
+            let mech = take_cstr(&m.body, &mut pos);
+            if mech != "SCRAM-SHA-256" {
+                return Err(format!("unsupported SASL mechanism: {mech}"));
+            }
+            let len = be_i32(&m.body, &mut pos);
+            if len < 0 || pos + len as usize > m.body.len() {
+                return Err("the initial SASL response is truncated".into());
+            }
+            let first = &m.body[pos..pos + len as usize];
+
+            let mut ex = scram::Exchange::new(v);
+            let server_first = ex.client_first(first)?;
+            out.auth_sasl_continue(&server_first);
+            out.flush_to(w).map_err(|e| e.to_string())?;
+
+            let m = read_message(r).map_err(|e| e.to_string())?;
+            if m.tag != b'p' {
+                return Err("expected the final SASL response".into());
+            }
+            let server_final = ex.client_final(&m.body)?;
+            out.auth_sasl_final(&server_final);
+            let _ = user;
+            Ok(())
+        }
+    }
+}
+
+fn be_i16(b: &[u8], pos: &mut usize) -> i16 {
+    let v = i16::from_be_bytes([b[*pos], b[*pos + 1]]);
+    *pos += 2;
+    v
+}
+
+fn be_i32(b: &[u8], pos: &mut usize) -> i32 {
+    let v = i32::from_be_bytes([b[*pos], b[*pos + 1], b[*pos + 2], b[*pos + 3]]);
+    *pos += 4;
+    v
+}
+
+/// Converts a PG parameter into a fenecdb value. A `[0.1,0.2]` arriving in
+/// text format is recognised as an embedding (the same notation as pgvector).
+fn decode_param(raw: &[u8], binary: bool) -> Value {
+    if binary {
+        return match raw.len() {
+            8 => Value::Int(i64::from_be_bytes(raw.try_into().unwrap())),
+            4 => Value::Int(i32::from_be_bytes(raw.try_into().unwrap()) as i64),
+            _ => Value::Bytes(raw.to_vec()),
+        };
+    }
+    let s = String::from_utf8_lossy(raw);
+    let t = s.trim();
+    if t.starts_with('[') {
+        if let Ok(v) = json::parse(t) {
+            return v;
+        }
+    }
+    if let Ok(i) = t.parse::<i64>() {
+        return Value::Int(i);
+    }
+    if let Ok(f) = t.parse::<f64>() {
+        return Value::Float(f);
+    }
+    match t {
+        "t" | "true" => Value::Bool(true),
+        "f" | "false" => Value::Bool(false),
+        _ => Value::Text(s.into_owned()),
+    }
+}
+
+fn pg_oid(ty: &DataType) -> i32 {
+    match ty {
+        DataType::Bool => OID_BOOL,
+        DataType::Int => OID_INT8,
+        DataType::Float => OID_FLOAT8,
+        DataType::Bytes => OID_BYTEA,
+        DataType::Timestamp => OID_TIMESTAMPTZ,
+        // vectors and lists travel as text (pgvector notation)
+        _ => OID_TEXT,
+    }
+}
+
+/// Converts a fenecdb value into PostgreSQL's text representation.
+pub fn to_pg_text(v: &Value) -> Option<String> {
+    Some(match v {
+        Value::Null => return None,
+        Value::Bool(b) => (if *b { "t" } else { "f" }).to_string(),
+        Value::Int(i) => i.to_string(),
+        // PostgreSQL's own output format; client parsers can reject the
+        // ISO-8601 form that uses `T`/`Z`.
+        Value::Timestamp(ms) => fenec_core::time::format_pg(*ms),
+        Value::Float(f) => format!("{f}"),
+        Value::Text(s) => s.clone(),
+        Value::Bytes(b) => {
+            let mut s = String::from("\\x");
+            for x in b {
+                s.push_str(&format!("{x:02x}"));
+            }
+            s
+        }
+        // the same text notation as pgvector: [1,2,3]
+        Value::Vector(v) => {
+            let mut s = String::from("[");
+            for (i, x) in v.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&format!("{x}"));
+            }
+            s.push(']');
+            s
+        }
+        Value::List(items) => {
+            // PostgreSQL array notation: {a,b,c}
+            let mut s = String::from("{");
+            for (i, x) in items.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                match x {
+                    Value::Text(t) => s.push_str(&format!("\"{}\"", t.replace('"', "\\\""))),
+                    other => s.push_str(&to_pg_text(other).unwrap_or_else(|| "NULL".into())),
+                }
+            }
+            s.push('}');
+            s
+        }
+    })
+}
+
+/// The fixed columns of `collections` / `describe` output.
+fn schema_columns() -> Vec<(String, i32)> {
+    vec![
+        ("collection".into(), OID_TEXT),
+        ("field".into(), OID_TEXT),
+        ("type".into(), OID_TEXT),
+        ("index".into(), OID_TEXT),
+    ]
+}
+
+/// The column list of a `Select` -- from the schema, without running the query.
+fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<(String, i32)>> {
+    let coll = db.collection(&sel.collection).ok()?;
+    if sel.count {
+        return Some(vec![(
+            fenec_core::query::COUNT_COLUMN.to_string(),
+            OID_INT8,
+        )]);
+    }
+    let mut cols: Vec<(String, i32)> = projection_columns(&coll.schema, &sel.project)
+        .into_iter()
+        .map(|c| {
+            let oid = coll
+                .schema
+                .field(&c)
+                .map(|f| pg_oid(&f.ty))
+                .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
+            (c, oid)
+        })
+        .collect();
+    if sel.near.is_some() {
+        cols.push(("_score".to_string(), OID_FLOAT8));
+    }
+    Some(cols)
+}
+
+// ------------------------------------------------------------------ Describe
+
+/// The `Describe` response: expected parameters and (when there are rows) the row format.
+struct Shape {
+    params: Vec<i32>,
+    /// `None` -> `NoData`
+    columns: Option<Vec<(String, i32)>>,
+}
+
+/// Works out the shape *without running* the query.
+///
+/// The previous version answered every Describe with `NoData` + an empty
+/// parameter list; that misleads clients which learn parameter types from
+/// the server (JDBC, psycopg's server-side binding mode). The columns can be
+/// derived from the schema and the parameter count from the largest `$n` in
+/// the statement.
+/// `None` -> the query was cancelled while waiting for the lock.
+fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Option<Shape> {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return Some(Shape {
+            params: Vec::new(),
+            columns: None,
+        });
+    }
+    // Compatibility-layer queries are pure and fixed; the shape is read from there.
+    if let Some(shim) = compat::handle(trimmed, cfg) {
+        return Some(Shape {
+            params: Vec::new(),
+            columns: match shim {
+                compat::Shim::Rows { columns, .. } => {
+                    Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect())
+                }
+                compat::Shim::Tag(_) => None,
+            },
+        });
+    }
+    let stmts = match parse(trimmed) {
+        Ok(s) => s,
+        // A syntax error is reported during Execute; we do not branch
+        // Describe off with a second error message.
+        Err(_) => {
+            return Some(Shape {
+                params: Vec::new(),
+                columns: None,
+            })
+        }
+    };
+    let nparams = stmts.iter().map(|s| s.max_param()).max().unwrap_or(0);
+    // Types are not resolved: seeing `unspecified`, the client sends the
+    // value as text and `decode_param` infers it.
+    let params = vec![OID_UNSPECIFIED; nparams];
+
+    let columns = match stmts.last() {
+        Some(Statement::Select(sel)) => {
+            // Reading the schema needs a shared lock; a cancellation arriving
+            // while waiting behind a long write has to be seen here too.
+            let guard = acquire(db, false, be)?;
+            // When the collection does not exist yet we cannot know the
+            // shape; rather than erroring we say NoData and let Execute speak.
+            select_columns(guard.db(), sel)
+        }
+        Some(Statement::ListCollections) | Some(Statement::Describe(_)) => Some(schema_columns()),
+        _ => None,
+    };
+    Some(Shape { params, columns })
+}
+
+// ---------------------------------------------------------------- execution
+
+/// Runs the query and writes the PG messages into `out`.
+///
+/// `row_desc_sent`: when the column description was already sent with
+/// Describe it is not repeated.
+fn execute_into(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    be: &Backend,
+    sql: &str,
+    params: &[Value],
+    out: &mut Writer,
+    row_desc_sent: bool,
+) {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        out.empty_query();
+        return;
+    }
+
+    // The standard queries PostgreSQL clients send at startup
+    if let Some(shim) = compat::handle(trimmed, cfg) {
+        match shim {
+            compat::Shim::Rows { columns, rows, tag } => {
+                if !row_desc_sent {
+                    let cols: Vec<(String, i32)> =
+                        columns.iter().map(|c| (c.clone(), OID_TEXT)).collect();
+                    out.row_description(&cols);
+                }
+                for row in &rows {
+                    let cells: Vec<Option<String>> = row.iter().map(|c| Some(c.clone())).collect();
+                    out.data_row(&cells);
+                }
+                out.command_complete(&format!("{tag} {}", rows.len()));
+            }
+            compat::Shim::Tag(tag) => out.command_complete(&tag),
+        }
+        return;
+    }
+
+    let stmts = match parse(trimmed) {
+        Ok(s) => s,
+        Err(e) => {
+            out.error("42601", &e.to_string());
+            return;
+        }
+    };
+
+    // A shared lock suffices when everything is read-only: reads flow in parallel.
+    let needs_write = stmts.iter().any(|s| !s.is_read_only());
+    let mut guard = match acquire(db, needs_write, be) {
+        Some(g) => g,
+        // `acquire` returns `None` both on cancellation and on shutdown; the
+        // two differ for the client: one can be retried, the other means the
+        // connection is over.
+        None if SHUTDOWN.load(Ordering::Relaxed) => {
+            out.error("57P01", "the server is shutting down");
+            return;
+        }
+        None => {
+            out.error("57014", "the query was cancelled");
+            return;
+        }
+    };
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        // A cancellation arriving mid-batch drops the rest.
+        if be.take_cancel() {
+            out.error("57014", "the query was cancelled");
+            return;
+        }
+        // The memory ceiling is checked *before* the statement: the overshoot
+        // is at most one statement, whose body is capped by `--max-message`.
+        if let Some(msg) = over_memory_cap(cfg, guard.db(), stmt) {
+            out.error("53200", &msg);
+            return;
+        }
+        let last = i == stmts.len() - 1;
+        match guard.run(stmt, params) {
+            Err(e) => {
+                let code = match e {
+                    Error::NotFound(_) => "42P01",
+                    Error::Type(_) => "42804",
+                    Error::Query(_) => "42601",
+                    Error::Exists(_) => "42P07",
+                    _ => "XX000",
+                };
+                // An error does not undo the statements written before it
+                // (there are no transactions): the `always` policy must push
+                // those to disk as well.
+                guard.sync_if_needed(cfg.sync);
+                out.error(code, &e.to_string());
+                return;
+            }
+            Ok(resp) => {
+                if !last {
+                    continue;
+                }
+                match resp {
+                    Response::Rows(rs) => {
+                        let cols = match stmt {
+                            Statement::Select(sel) => select_columns(guard.db(), sel),
+                            _ => None,
+                        }
+                        .unwrap_or_else(|| {
+                            rs.columns
+                                .iter()
+                                .map(|c| (c.clone(), OID_TEXT))
+                                .collect::<Vec<_>>()
+                        });
+                        if !row_desc_sent {
+                            out.row_description(&cols);
+                        }
+                        let with_score = cols.last().map(|(n, _)| n == "_score").unwrap_or(false);
+                        for row in &rs.rows {
+                            let mut cells: Vec<Option<String>> =
+                                row.values.iter().map(to_pg_text).collect();
+                            if with_score {
+                                cells.push(row.score.map(|s| format!("{s}")));
+                            }
+                            out.data_row(&cells);
+                        }
+                        out.command_complete(&format!("SELECT {}", rs.rows.len()));
+                    }
+                    Response::Affected(n) => {
+                        let tag = match stmt {
+                            Statement::Put { .. } => format!("INSERT 0 {n}"),
+                            Statement::Update { .. } => format!("UPDATE {n}"),
+                            Statement::Delete { .. } => format!("DELETE {n}"),
+                            _ => format!("OK {n}"),
+                        };
+                        out.command_complete(&tag);
+                    }
+                    Response::Ok(_) => {
+                        let tag = match stmt {
+                            Statement::CreateCollection { .. } => "CREATE TABLE",
+                            Statement::DropCollection { .. } => "DROP TABLE",
+                            Statement::Compact(_) => "VACUUM",
+                            _ => "OK",
+                        };
+                        out.command_complete(tag);
+                    }
+                    Response::Schemas(schemas) => {
+                        if !row_desc_sent {
+                            out.row_description(&schema_columns());
+                        }
+                        let mut n = 0;
+                        for s in &schemas {
+                            for f in &s.fields {
+                                out.data_row(&[
+                                    Some(s.name.clone()),
+                                    Some(f.name.clone()),
+                                    Some(f.ty.name()),
+                                    Some(match &f.index {
+                                        IndexKind::None => "-".to_string(),
+                                        IndexKind::Hash => "hash".to_string(),
+                                        IndexKind::Vector(sp) => {
+                                            format!("hnsw({}, m={})", sp.metric.name(), sp.m)
+                                        }
+                                    }),
+                                ]);
+                                n += 1;
+                            }
+                        }
+                        out.command_complete(&format!("SELECT {n}"));
+                    }
+                }
+            }
+        }
+    }
+    guard.sync_if_needed(cfg.sync);
+}

@@ -1,0 +1,1782 @@
+// fenecdb browser client.
+//
+// No dependencies, no build step, no npm. All it needs is `fenec.wasm`.
+//
+// Two layers, both taking the same path:
+//
+//   raw FenecQL -- synchronous, a single call
+//     import { Fenec } from './fenec.js';
+//     const db = await Fenec.open('./fenec.wasm');
+//     db.run('create collection docs (title text, embed vector<3> @hnsw(cosine))');
+//     const r = db.run('get docs near embed $1 limit 5', [vec]);
+//
+//   query builder -- dynamic filters, every value bound to a parameter
+//     const rows = await db.from('docs')
+//       .where('year', '>=', 2024)
+//       .near('embed', vec, { ef: 128 })
+//       .limit(10)
+//       .rows();
+//
+// The builder hides nothing: `toFenecQL()` hands back the generated text
+// and the parameters verbatim. Types: `fenec types data.fenec > fenec-schema.d.ts`.
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+export class FenecError extends Error {}
+
+export class Fenec {
+  #wasm; #handle;
+
+  constructor(wasm, handle) {
+    this.#wasm = wasm;
+    this.#handle = handle;
+  }
+
+  /**
+   * Loads the WASM module and opens an empty database.
+   * @param {string|BufferSource} src  A URL, or the module bytes themselves.
+   *   The bytes are for Node: `fetch` cannot resolve a relative path there,
+   *   so the file is read with `readFile` and handed over directly.
+   */
+  static async open(src = './fenec.wasm') {
+    let mod;
+    if (typeof src !== 'string') {
+      mod = await WebAssembly.instantiate(src, {});
+    } else {
+      try {
+        mod = await WebAssembly.instantiateStreaming(fetch(src), {});
+      } catch {
+        // Fallback for servers that return the wrong MIME type.
+        mod = await WebAssembly.instantiate(await (await fetch(src)).arrayBuffer(), {});
+      }
+    }
+    const wasm = mod.instance.exports;
+    return new Fenec(wasm, wasm.fenec_open());
+  }
+
+  /** Connects to a remote HTTP endpoint: `Fenec.connect('http://host:8080')`. */
+  static connect(url, opts = {}) {
+    return connect(url, opts);
+  }
+
+  get version() {
+    return this.#readString(this.#wasm.fenec_version());
+  }
+
+  /** Reads the returned buffer and frees it. */
+  #readBytes(ptr) {
+    const mem = new Uint8Array(this.#wasm.memory.buffer);
+    const len = new DataView(this.#wasm.memory.buffer).getUint32(ptr, true);
+    const out = mem.slice(ptr + 4, ptr + 4 + len);
+    this.#wasm.fenec_free(ptr, 4 + len);
+    return out;
+  }
+
+  #readString(ptr) {
+    return dec.decode(this.#readBytes(ptr));
+  }
+
+  /** Copies a string into WASM memory. */
+  #write(str) {
+    const bytes = enc.encode(str);
+    const ptr = this.#wasm.fenec_alloc(bytes.length || 1);
+    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+    return [ptr, bytes.length];
+  }
+
+  /**
+   * Runs FenecQL.
+   * @param {string} sql
+   * @param {Array} params  values for `$1`, `$2`...
+   * @returns {{kind:string, ...}} `{columns, rows}` for row results
+   */
+  run(sql, params = []) {
+    const [sp, sl] = this.#write(sql);
+    const [pp, pl] = this.#write(JSON.stringify(params));
+    let out;
+    try {
+      out = this.#readString(this.#wasm.fenec_query(this.#handle, sp, sl, pp, pl));
+    } finally {
+      this.#wasm.fenec_free(sp, sl || 1);
+      this.#wasm.fenec_free(pp, pl || 1);
+    }
+    const res = JSON.parse(out);
+    if (res.kind === 'error') throw new FenecError(res.message);
+    return res.kind === 'rows' ? res.result : res;
+  }
+
+  /** Returns the query result as a plain array of objects. */
+  rows(sql, params = []) {
+    const r = this.run(sql, params);
+    return r.rows ?? [];
+  }
+
+  /**
+   * Query builder. Validates the collection name and binds the query to
+   * this connection.
+   * @param {string} name
+   * @returns {Query}
+   */
+  from(name) {
+    return new Query({
+      collection: ident(name, 'collection'),
+      exec: (sql, params) => this.run(sql, params),
+    });
+  }
+
+  /**
+   * What changed since `since`: `{seq, horizon, collections}`.
+   *
+   * When `collections === null` the cursor has fallen behind the change
+   * ring and there is no telling which collection changed -- the caller
+   * must treat everything as stale. Live queries are built on this.
+   */
+  changes(since = 0) {
+    return JSON.parse(
+      this.#readString(this.#wasm.fenec_changes(this.#handle, since)),
+    );
+  }
+
+  /** Current value of the change counter. */
+  get changeSeq() {
+    // `since` is ahead of the counter: the Rust side never scans the ring.
+    return this.changes(Number.MAX_SAFE_INTEGER).seq;
+  }
+
+  /**
+   * Entry count of the change ring. Locally its only effect is how far
+   * behind a live query may fall and still catch up; on overflow the
+   * answer is simply "everything is stale" -- no data is lost.
+   */
+  setChangeCapacity(n) {
+    this.#wasm.fenec_set_change_capacity(this.#handle, whole(n, 'capacity'));
+  }
+
+  /** Collection schemas (the `collections` output). */
+  schemas() {
+    return this.run('collections').collections ?? [];
+  }
+
+  /** Collection statistics. */
+  stats() {
+    return JSON.parse(this.#readString(this.#wasm.fenec_stats(this.#handle)));
+  }
+
+  /** Byte image of the whole database (to write into IndexedDB/OPFS). */
+  snapshot() {
+    return this.#readBytes(this.#wasm.fenec_snapshot(this.#handle));
+  }
+
+  /** Restores from a byte image. */
+  load(bytes) {
+    const ptr = this.#wasm.fenec_alloc(bytes.length);
+    new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+    try {
+      if (this.#wasm.fenec_load(this.#handle, ptr, bytes.length) !== 0) {
+        throw new FenecError('could not load image (corrupt or incompatible version)');
+      }
+    } finally {
+      this.#wasm.fenec_free(ptr, bytes.length);
+    }
+  }
+
+  close() {
+    this.#wasm.fenec_close(this.#handle);
+  }
+}
+
+// ----------------------------------------------------------- HTTP endpoint
+//
+// The same query builder, against a remote server. The builder produces
+// FenecQL text and `POST /query` takes it as is, so query code moves between
+// wasm and HTTP unchanged. The REST surface (`GET /<name>?year=gte.2024`)
+// is for driverless clients; the builder does not use it.
+
+export class FenecHttp {
+  #url;
+  #token;
+  #fetch;
+
+  constructor(url, opts = {}) {
+    this.#url = String(url).replace(/\/+$/, '');
+    this.#token = opts.token ?? null;
+    this.#fetch = opts.fetch ?? globalThis.fetch;
+    if (typeof this.#fetch !== 'function') {
+      throw new FenecError('fetch not found: pass one via opts.fetch');
+    }
+  }
+
+  /** Runs FenecQL. The return shape matches `run` on the wasm path. */
+  async run(sql, params = []) {
+    const headers = { 'content-type': 'application/json' };
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await this.#fetch(`${this.#url}/query`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) }),
+    });
+    const text = await res.text();
+    let body;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
+    }
+    if (!res.ok) {
+      throw new FenecError(body?.error ?? `HTTP ${res.status}`);
+    }
+    // The endpoint returns rows as a plain array; the builder expects `{rows}`.
+    if (Array.isArray(body)) return { rows: body };
+    if (body && typeof body.affected === 'number') {
+      return { kind: 'affected', count: body.affected };
+    }
+    return body;
+  }
+
+  async rows(sql, params = []) {
+    return (await this.run(sql, params)).rows ?? [];
+  }
+
+  /** Query builder -- identical to the one on the wasm path. */
+  from(name) {
+    return new Query({
+      collection: ident(name, 'collection'),
+      exec: (sql, params) => this.run(sql, params),
+    });
+  }
+
+  /** Collection schemas. */
+  async schemas() {
+    return this.run('collections');
+  }
+}
+
+/** Connects to a remote fenecdb HTTP endpoint (`fenec-pg --http`). */
+export function connect(url, opts = {}) {
+  return new FenecHttp(url, opts);
+}
+
+// ----------------------------------------------------------- query builder
+//
+// Why it exists: every interface with conditional filters forced manual
+// string concatenation and manual `$n` bookkeeping. The builder produces
+// the same FenecQL -- but every leaf value is bound to a parameter, the only
+// injection boundary is name validation, and the generated text can be
+// inspected with `toFenecQL()`.
+//
+// The builder is transport independent: `from('docs')` works on its own and
+// `bind()` attaches it to any executor (wasm, HTTP, fenec-pg).
+
+/** Operator names -- both symbols and words are accepted. */
+const OPS = {
+  '=': '=', eq: '=',
+  '!=': '!=', ne: '!=', neq: '!=',
+  '<': '<', lt: '<',
+  '<=': '<=', lte: '<=', le: '<=',
+  '>': '>', gt: '>',
+  '>=': '>=', gte: '>=', ge: '>=',
+  '~': '~', like: '~', contains: '~',
+  has: 'has',
+  in: 'in',
+};
+
+// FenecQL identifier: the same rule as the lexer (starts with a Unicode
+// letter or `_`, then letters/digits/`_`). Names cannot be parameterised,
+// so this is exactly where the injection boundary sits.
+const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
+
+function ident(name, what = 'field') {
+  if (typeof name !== 'string' || !IDENT.test(name)) {
+    throw new FenecError(`invalid ${what} name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
+/** `limit`, `offset`, `ef` cannot be parameterised: FenecQL wants a literal. */
+function whole(n, what) {
+  if (!Number.isSafeInteger(n) || n < 0) {
+    throw new FenecError(`${what} must be a non-negative integer: ${n}`);
+  }
+  return n;
+}
+
+/**
+ * Coerces a JS value into the shape fenecdb understands, before it reaches
+ * JSON. `Float32Array` is the natural type for shipping embeddings, but
+ * `JSON.stringify` turns it into an object -- which fenecdb would reject
+ * with "a JSON object is not supported as a fenecdb value".
+ */
+function normalize(v, what = 'value') {
+  if (v === undefined) {
+    throw new FenecError(`${what} is undefined -- did you mean 'null'?`);
+  }
+  if (v === null || typeof v !== 'object') return v;
+  if (v instanceof Date) return v.toISOString();
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
+  if (Array.isArray(v)) return v.map((x) => normalize(x, what));
+  throw new FenecError(`an object cannot be used as a fenecdb value (${what})`);
+}
+
+function isSpec(v) {
+  return (
+    v !== null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    !(v instanceof Date) &&
+    !ArrayBuffer.isView(v)
+  );
+}
+
+// ---------------------------------------------------------- condition tree
+
+/** `or(a, b)` / `or([a, b])` -- joins conditions with `or`. */
+export function or(...conds) {
+  return { t: 'or', items: conds.flat().map(toCond) };
+}
+
+/** `and(a, b)` -- `where` already ands; this is only needed inside `or`. */
+export function and(...conds) {
+  return { t: 'and', items: conds.flat().map(toCond) };
+}
+
+/** `not(condition)` */
+export function not(cond) {
+  return { t: 'not', item: toCond(cond) };
+}
+
+/**
+ * Escape hatch: everything the builder cannot express (function calls).
+ * `?` placeholders are bound to parameters in order.
+ *
+ *   .where(raw('cosine(embed, ?) > ?', vec, 0.5))
+ *
+ * Every `?` in the fragment counts as a placeholder: if you need a literal
+ * one, bind it as a parameter too (`raw('title ~ ?', "?")`), do not quote it.
+ */
+export function raw(sql, ...params) {
+  if (typeof sql !== 'string') throw new FenecError('raw() expects text');
+  return { t: 'raw', sql, params };
+}
+
+const NODES = new Set(['and', 'or', 'not', 'raw', 'cmp', 'in', 'null']);
+
+function toCond(x) {
+  if (isSpec(x) && typeof x.t === 'string' && NODES.has(x.t)) return x;
+  if (isSpec(x)) return objectCond(x);
+  throw new FenecError(`expected an object as a condition: ${JSON.stringify(x)}`);
+}
+
+/** `{ year: {gte: 2024}, tags: {has: 'rust'} }` -> an `and` tree */
+function objectCond(obj) {
+  const items = Object.entries(obj).map(([field, spec]) =>
+    fieldCond(ident(field), spec),
+  );
+  if (items.length === 0) return { t: 'and', items: [] };
+  return items.length === 1 ? items[0] : { t: 'and', items };
+}
+
+/** One field's condition: a raw value is equality, an object an operator map. */
+function fieldCond(field, spec) {
+  if (spec === null) return { t: 'null', field, negated: false };
+  if (!isSpec(spec)) return cmp(field, '=', spec);
+
+  const items = [];
+  for (const [k, v] of Object.entries(spec)) {
+    if (k === 'not') {
+      items.push(v === null
+        ? { t: 'null', field, negated: true }
+        : { t: 'not', item: fieldCond(field, v) });
+      continue;
+    }
+    const op = OPS[k];
+    if (!op) {
+      throw new FenecError(`unknown operator \`${k}\` (field: ${field})`);
+    }
+    items.push(op === 'in' ? inCond(field, v) : cmp(field, op, v));
+  }
+  if (items.length === 0) {
+    throw new FenecError(`empty condition object (field: ${field})`);
+  }
+  return items.length === 1 ? items[0] : { t: 'and', items };
+}
+
+function inCond(field, values) {
+  if (!Array.isArray(values)) {
+    throw new FenecError(`\`in\` expects an array (field: ${field})`);
+  }
+  if (values.length === 0) {
+    throw new FenecError(`\`in\` does not accept an empty array (field: ${field})`);
+  }
+  return { t: 'in', field, values };
+}
+
+// `= null` is always false in FenecQL; the intent is `is null`. Rather than
+// silently returning an empty result, we generate the right expression.
+function cmp(field, op, value) {
+  if (value === null) {
+    if (op === '=') return { t: 'null', field, negated: false };
+    if (op === '!=') return { t: 'null', field, negated: true };
+    throw new FenecError(`\`${op}\` cannot be used with null (field: ${field})`);
+  }
+  return { t: 'cmp', field, op, value };
+}
+
+/**
+ * Flattens empty and single-child junctions. The parenthesis decision looks
+ * at the child count, so pruning has to happen before rendering: `bind` has
+ * side effects, and rendering a node twice only to drop one copy would
+ * corrupt the parameter list.
+ */
+function prune(c) {
+  if (c.t === 'and' || c.t === 'or') {
+    const items = c.items.map(prune).filter(Boolean);
+    if (items.length === 0) return null;
+    return items.length === 1 ? items[0] : { t: c.t, items };
+  }
+  if (c.t === 'not') {
+    const item = prune(c.item);
+    return item ? { t: 'not', item } : null;
+  }
+  return c;
+}
+
+/** Renders the condition tree as FenecQL text; values go through `bind`. */
+function render(c, bind, parent = null) {
+  switch (c.t) {
+    case 'and':
+    case 'or': {
+      const s = c.items.map((x) => render(x, bind, c.t)).join(` ${c.t} `);
+      // `and` binds tighter than `or`: nesting different kinds needs parens.
+      return parent && parent !== c.t ? `(${s})` : s;
+    }
+    case 'not':
+      return `not (${render(c.item, bind, null)})`;
+    case 'null':
+      return `${c.field} is ${c.negated ? 'not ' : ''}null`;
+    case 'in':
+      return `${c.field} in [${c.values.map((v) => bind(v, c.field)).join(', ')}]`;
+    case 'cmp':
+      return `${c.field} ${c.op} ${bind(c.value, c.field)}`;
+    case 'raw': {
+      let i = 0;
+      const out = c.sql.replace(/\?/g, () => {
+        if (i >= c.params.length) {
+          throw new FenecError('raw(): more `?` placeholders than parameters');
+        }
+        return bind(c.params[i++], 'raw');
+      });
+      if (i !== c.params.length) {
+        throw new FenecError('raw(): too many parameters given');
+      }
+      return out;
+    }
+    default:
+      throw new FenecError(`unknown condition node \`${c.t}\``);
+  }
+}
+
+// ------------------------------------------------------------------- query
+
+/**
+ * Immutable query builder: every call returns a new `Query`, so a query
+ * body can be shared and branched from safely.
+ */
+export class Query {
+  #s;
+
+  constructor(state) {
+    this.#s = { cond: [], order: [], offset: 0, ...state };
+  }
+
+  // Cloned through `this.constructor`: subclasses such as `FenecSync.from()`
+  // keep their own behaviour along the chain (`.where(...).update(...)`
+  // still goes through the optimistic write path).
+  #with(patch) {
+    return new this.constructor({ ...this.#s, ...patch });
+  }
+
+  /** The query's collection. */
+  get collection() {
+    return this.#s.collection;
+  }
+
+  /**
+   * The opaque context passed in with `bind`. The builder never interprets
+   * it, it only carries it along the chain; subclasses keep their state here.
+   */
+  get context() {
+    return this.#s.context;
+  }
+
+  /**
+   * The same body as a **plain** `Query`, for bypassing a subclass's write
+   * behaviour: the optimistic layer has to run the same filter locally and
+   * then on the server, and must not call back into itself while doing so.
+   */
+  plain() {
+    return new Query({ ...this.#s });
+  }
+
+  /** Binds the query to an executor: a `Fenec` instance or a `(sql, params)` fn. */
+  bind(exec) {
+    const fn = typeof exec === 'function' ? exec : (s, p) => exec.run(s, p);
+    return this.#with({ exec: fn });
+  }
+
+  /** `select a, b` -- no arguments, or `'*'`, means every field. */
+  select(...cols) {
+    const flat = cols.flat();
+    if (flat.length === 0 || flat.includes('*')) return this.#with({ project: null });
+    return this.#with({ project: flat.map((c) => ident(c)) });
+  }
+
+  /**
+   * `where(field, op, value)` | `where(field, value)` | `where(object)`
+   * Successive calls are joined with `and`.
+   */
+  where(...args) {
+    return this.#with({ cond: [...this.#s.cond, condOf(args)] });
+  }
+
+  /** Joins everything conditioned so far to a new condition with `or`. */
+  orWhere(...args) {
+    const right = condOf(args);
+    const left = this.#s.cond;
+    if (left.length === 0) return this.#with({ cond: [right] });
+    return this.#with({
+      cond: [{ t: 'or', items: [{ t: 'and', items: left }, right] }],
+    });
+  }
+
+  /** `near field $n [ef N] [exact]` */
+  near(field, vector, opts = {}) {
+    return this.#with({
+      near: {
+        field: ident(field),
+        vector,
+        ef: opts.ef === undefined ? null : whole(opts.ef, 'ef'),
+        exact: !!opts.exact,
+      },
+    });
+  }
+
+  /**
+   * `order field asc|desc`. Successive calls add keys: when the first key
+   * ties, the second decides.
+   */
+  order(field, dir = 'asc') {
+    const d = String(dir).toLowerCase();
+    if (d !== 'asc' && d !== 'desc') {
+      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
+    }
+    return this.#with({
+      order: [...this.#s.order, { field: ident(field), asc: d === 'asc' }],
+    });
+  }
+
+  limit(n) {
+    return this.#with({ limit: whole(n, 'limit') });
+  }
+
+  offset(n) {
+    return this.#with({ offset: whole(n, 'offset') });
+  }
+
+  /**
+   * The generated FenecQL and its parameters: `[sql, params]`.
+   * This is the builder's only output -- it can be inspected before running,
+   * logged, or handed to another transport.
+   */
+  toFenecQL() {
+    const { collection, project, near, order, limit, offset, count } = this.#s;
+    if (count) this.#assertCountable();
+    const params = [];
+    const bind = binder(params);
+
+    let sql = `get ${collection}`;
+    if (project) sql += ` select ${project.join(', ')}`;
+    const where = this.#where(bind);
+    if (where) sql += ` where ${where}`;
+    if (near) {
+      sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
+      if (near.ef !== null) sql += ` ef ${near.ef}`;
+      if (near.exact) sql += ' exact';
+    }
+    for (const [i, o] of order.entries()) {
+      sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+    }
+    if (limit !== undefined) sql += ` limit ${limit}`;
+    if (offset) sql += ` offset ${offset}`;
+    if (count) sql += ' count';
+    return [sql, params];
+  }
+
+  /** The raw response (`{columns, rows}`). */
+  async run() {
+    const [sql, params] = this.toFenecQL();
+    return this.#exec(sql, params);
+  }
+
+  /** Rows: an array of objects keyed by field name. */
+  async rows() {
+    return (await this.run()).rows ?? [];
+  }
+
+  /** The first row, or `null`. */
+  async first() {
+    const r = await this.limit(1).rows();
+    return r.length ? r[0] : null;
+  }
+
+  /**
+   * Number of matching rows (`get ... count`). Rows are not decoded, only
+   * the filter runs.
+   */
+  async count() {
+    const r = await this.#with({ count: true }).run();
+    return r.rows?.[0]?.count ?? 0;
+  }
+
+  // The text of the write statements, **without running them**. The write
+  // side counterpart of `toFenecQL()`: inspectable, loggable, handable to
+  // another transport -- and synchronous. The optimistic layer depends on
+  // that: there must be no `await` between applying locally and sending to
+  // the server, or the "visible immediately" promise would be a lie, even
+  // if only by a microtask.
+
+  /** The `put` text. */
+  toInsert(docs) {
+    this.#assertPlain('insert');
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) throw new FenecError('cannot write an empty document list');
+    const params = [];
+    const bind = binder(params);
+    const body = list.map((d) => renderDoc(d, bind)).join(', ');
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}`, params];
+  }
+
+  /** The `set` text. */
+  toUpdate(patch, opts = {}) {
+    this.#assertPlain('update');
+    const params = [];
+    const bind = binder(params);
+    const body = renderDoc(patch, bind);
+    const where = this.#requireFilter('update', opts, bind);
+    return [`set ${this.#s.collection} ${body}${where}`, params];
+  }
+
+  /** The `del` text. */
+  toDelete(opts = {}) {
+    this.#assertPlain('delete');
+    const params = [];
+    const bind = binder(params);
+    const where = this.#requireFilter('delete', opts, bind);
+    return [`del ${this.#s.collection}${where}`, params];
+  }
+
+  /** `put` -- a single document or an array. Returns: documents written. */
+  async insert(docs) {
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) return 0;
+    return (await this.#exec(...this.toInsert(list))).count ?? 0;
+  }
+
+  /** `set` -- updates the rows matching the filter. Returns: rows affected. */
+  async update(patch, opts = {}) {
+    return (await this.#exec(...this.toUpdate(patch, opts))).count ?? 0;
+  }
+
+  /** `del` -- deletes the rows matching the filter. Returns: rows deleted. */
+  async delete(opts = {}) {
+    return (await this.#exec(...this.toDelete(opts))).count ?? 0;
+  }
+
+  // `near`/`order`/`limit` only mean something on the read path; silently
+  // ignoring them in a write statement would invite the "limit(1) deletes a
+  // single row" misconception.
+  #assertPlain(verb) {
+    const extra = this.#extraClause();
+    if (extra) throw new FenecError(`${verb} cannot be used with \`${extra}\``);
+    if (verb === 'insert' && this.#s.cond.length) {
+      throw new FenecError('insert cannot be used with `where`');
+    }
+  }
+
+  // `count` does not combine with projection, ordering or pagination: they
+  // are meaningless over a count, and `near` truncates to its own ceiling.
+  // The engine checks the same thing; failing here never sends the query.
+  #assertCountable() {
+    const extra = this.#extraClause();
+    if (extra) throw new FenecError(`count cannot be used with \`${extra}\``);
+  }
+
+  #extraClause() {
+    const { near, order, limit, offset, project } = this.#s;
+    return near ? 'near'
+      : order.length ? 'order'
+      : limit !== undefined ? 'limit'
+      : offset ? 'offset'
+      : project ? 'select'
+      : null;
+  }
+
+  // An unfiltered `update`/`delete` covers the whole collection. That is far
+  // too easy to do by accident and impossible to undo: we want it spelled out.
+  #requireFilter(verb, opts, bind) {
+    const where = this.#where(bind);
+    if (where) return ` where ${where}`;
+    if (opts && opts.all === true) return '';
+    throw new FenecError(
+      `an unfiltered ${verb} covers the whole collection; if you mean it, ` +
+        `${verb}({ all: true })`,
+    );
+  }
+
+  /** Renders the condition list as one `where` body; `null` when empty. */
+  #where(bind) {
+    const root = prune({ t: 'and', items: this.#s.cond });
+    return root ? render(root, bind, null) : null;
+  }
+
+  #exec(sql, params) {
+    if (!this.#s.exec) {
+      throw new FenecError(
+        'query is not bound to a connection: use db.from(...) or q.bind(db) ' +
+          '(toFenecQL() if you only want the text)',
+      );
+    }
+    return this.#s.exec(sql, params);
+  }
+}
+
+/** Turns the `where` arguments into a single condition. */
+function condOf(args) {
+  if (args.length === 1) return toCond(args[0]);
+  if (args.length === 2) return fieldCond(ident(args[0]), args[1]);
+  if (args.length === 3) {
+    const op = OPS[args[1]];
+    if (!op) throw new FenecError(`unknown operator \`${args[1]}\``);
+    const field = ident(args[0]);
+    return op === 'in' ? inCond(field, args[2]) : cmp(field, op, args[2]);
+  }
+  throw new FenecError('where(field, op, value) | where(field, value) | where(object)');
+}
+
+function binder(params) {
+  return (v, what) => {
+    params.push(normalize(v, what));
+    return `$${params.length}`;
+  };
+}
+
+function renderDoc(doc, bind) {
+  if (!isSpec(doc)) throw new FenecError('expected a document object');
+  const pairs = Object.entries(doc)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${ident(k)}: ${bind(v, k)}`);
+  if (pairs.length === 0) throw new FenecError('cannot write an empty document');
+  return `{${pairs.join(', ')}}`;
+}
+
+/**
+ * Unbound query builder. For handing the generated text to another
+ * transport, or comparing it in a test: `from('docs').where(...).toFenecQL()`.
+ */
+export function from(name) {
+  return new Query({ collection: ident(name, 'collection') });
+}
+
+// ------------------------------------------------------------- persistence
+// fenecdb's byte image is a single blob; it goes into IndexedDB under one key.
+
+const DB_NAME = 'fenecdb';
+const STORE = 'images';
+
+function idb() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+/** Writes a snapshot into IndexedDB. */
+export async function persist(fenec, key = 'default') {
+  const db = await idb();
+  const bytes = fenec.snapshot();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(bytes, key);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+  return bytes.length;
+}
+
+/** Free-form state (cursors): next to the image, under a separate key. */
+export async function putState(key, value) {
+  const db = await idb();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(value, key);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+/** Reads back what `putState` wrote; `undefined` when absent. */
+export async function getState(key) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).get(key);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+/** Restores from IndexedDB; returns false when there is no record. */
+export async function restore(fenec, key = 'default') {
+  const db = await idb();
+  const bytes = await new Promise((res, rej) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).get(key);
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+  if (!bytes) return false;
+  fenec.load(bytes);
+  return true;
+}
+
+// -------------------------------------------------------------------- sync
+//
+// Local replica + server: reads come from the local side (no network),
+// writes go to the server, the feedback arrives over the subscription.
+// TanStack DB's model, with two differences:
+//
+// 1. **No incremental dataflow.** There a collection is a `Map`, and
+//    re-running a filter over 50k rows on every keystroke is unacceptable,
+//    which is why differential dataflow is needed. Here the local side is
+//    an indexed database -- running the query from scratch is already
+//    sub-millisecond. And incremental maintenance would not even be
+//    *correct* for `near`: a single insert can reorder the whole top-k.
+//
+// 2. **Shapes are mandatory.** The whole database lives in memory and the
+//    WASM32 address space is 4 GB; a client cannot pull an entire
+//    collection. A subscription is a *subset*, filtered server side.
+//
+// One collection per shape: a seed has to be able to say "this is the whole
+// collection", otherwise the cleanup step becomes ambiguous.
+
+/// Identity base for optimistic rows. Server ids run consecutively from 1;
+/// 2^52 is both far away from them and below `Number.MAX_SAFE_INTEGER`, so
+/// it survives JSON intact. Ids in this range land in a sparse map in the
+/// store -- the right trade for a handful of pending rows.
+const TEMP_BASE = 2 ** 52;
+
+/** Operator spellings in a REST filter. */
+const REST_OPS = {
+  '=': 'eq', eq: 'eq',
+  '!=': 'neq', ne: 'neq', neq: 'neq',
+  '<': 'lt', lt: 'lt',
+  '<=': 'lte', lte: 'lte', le: 'lte',
+  '>': 'gt', gt: 'gt',
+  '>=': 'gte', gte: 'gte', ge: 'gte',
+  '~': 'like', like: 'like', contains: 'like',
+  has: 'has',
+  in: 'in',
+};
+
+/**
+ * Turns a shape condition into REST query-string pairs.
+ *
+ * Why not the builder's condition tree: the builder emits `$1` parameters,
+ * and a query string has no parameters. A free-form `?where=` would fall
+ * back to string concatenation -- exactly what the builder avoids.
+ * The `?field=op.value` form leaves escaping to the transport
+ * (`URLSearchParams`) and type resolution to the server: no injection surface.
+ *
+ * The price: a shape has no `or` groups and no function calls. A shape is a
+ * subset definition; once it gets complicated, a separate collection (or a
+ * view) on the server is the right answer.
+ */
+function shapeParams(where) {
+  const out = [];
+  if (where == null) return out;
+  if (!isSpec(where)) throw new FenecError('a shape condition must be an object');
+  for (const [field, spec] of Object.entries(where)) {
+    ident(field);
+    if (spec === null) {
+      out.push([field, 'is.null']);
+      continue;
+    }
+    if (!isSpec(spec)) {
+      out.push([field, `eq.${restValue(spec, field)}`]);
+      continue;
+    }
+    for (const [k, v] of Object.entries(spec)) {
+      if (k === 'not') {
+        out.push([field, v === null ? 'not.is.null' : `not.${restOp(k2(v), field)}`]);
+        continue;
+      }
+      out.push([field, restOp([k, v], field)]);
+    }
+  }
+  return out;
+
+  // `{not: {gte: 3}}` -> `['gte', 3]`
+  function k2(v) {
+    if (!isSpec(v)) return ['eq', v];
+    const e = Object.entries(v);
+    if (e.length !== 1) throw new FenecError('`not` takes a single condition');
+    return e[0];
+  }
+  function restOp([k, v], field) {
+    const op = REST_OPS[k];
+    if (!op) throw new FenecError(`unknown operator \`${k}\` in shape (field: ${field})`);
+    if (op === 'in') {
+      if (!Array.isArray(v) || v.length === 0) {
+        throw new FenecError(`\`in\` expects a non-empty array (field: ${field})`);
+      }
+      return `in.(${v.map((x) => restValue(x, field)).join(',')})`;
+    }
+    return `${op}.${restValue(v, field)}`;
+  }
+}
+
+function restValue(v, field) {
+  if (v === null || v === undefined) {
+    throw new FenecError(`a shape value cannot be empty (field: ${field})`);
+  }
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'object') {
+    throw new FenecError(`a shape value must be a scalar (field: ${field})`);
+  }
+  return String(v);
+}
+
+/**
+ * Turns the SSE stream into events.
+ *
+ * `fetch` rather than `EventSource` because of one header: `EventSource`
+ * cannot carry `Authorization`, so the token would have to travel in the
+ * query string -- which means into the logs and into `Referer`.
+ */
+async function* sseEvents(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        let name = '';
+        let data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) name = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (name) yield { name, data };
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+/** `create collection` text from a schema: field name, type and index as is. */
+function schemaDDL(schema) {
+  const fields = schema.fields.map(
+    (f) =>
+      `${ident(f.name)} ${f.type}` +
+      (f.required ? ' required' : '') +
+      (f.index ? ` @${f.index}` : ''),
+  );
+  return `create collection if not exists ${ident(schema.name, 'collection')} (${fields.join(', ')})`;
+}
+
+function newKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// The backoff wait must not hold up process exit: on Node the timer is
+// unreferenced (browsers have no `unref`, so it is a no-op).
+/**
+ * Fallback that runs the tick after at most this long when no frame
+ * arrives. In a visible tab the frame lands in ~16 ms and cancels it; in a
+ * hidden tab this bound is the ceiling on the delay.
+ */
+const TICK_FALLBACK_MS = 50;
+
+const sleep = (ms) =>
+  new Promise((r) => {
+    setTimeout(r, ms).unref?.();
+  });
+
+/**
+ * Query builder that goes through the optimistic write path.
+ *
+ * Because `Query` clones through `this.constructor`, every step of the
+ * chain stays this class: `db.from('x').where(...).delete()` still goes
+ * local first, server second.
+ */
+class SyncQuery extends Query {
+  insert(docs) {
+    return this.context.write('insert', this, docs, null);
+  }
+  update(patch, opts = {}) {
+    return this.context.write('update', this, patch, opts);
+  }
+  delete(opts = {}) {
+    return this.context.write('delete', this, null, opts);
+  }
+}
+
+/**
+ * Local replica + server connection.
+ *
+ * ```js
+ * const db = await sync({
+ *   url: 'http://127.0.0.1:8080',
+ *   shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
+ * });
+ * await db.ready();
+ *
+ * const rows = await db.from('tasks').where('priority', '>=', 3).rows(); // local
+ * const stop = db.live(db.from('tasks'), (rows) => render(rows));        // live
+ * await db.from('tasks').insert({ title: 'new', status: 'open' });       // optimistic
+ * ```
+ */
+export class FenecSync {
+  #local;
+  #remote;
+  #url;
+  #token;
+  #fetch;
+  #shapes = new Map();
+  #subs = [];
+  #liveCursor = 0;
+  #scheduled = null;
+  #flushers = [];
+  #pending = new Map();
+  #nextTemp = TEMP_BASE;
+  #queue = null;
+  #closed = false;
+  #abort = null;
+  #ready;
+  #resolveReady;
+  #persistKey = null;
+  #chan = null;
+  #leader = true;
+  #leaderMode = 'auto';
+  #locks = null;
+  #onError;
+  #persistTimer = null;
+  #pendingTick = null;
+
+  constructor(local, opts) {
+    this.#local = local;
+    this.#url = String(opts.url).replace(/\/+$/, '');
+    this.#token = opts.token ?? null;
+    this.#fetch = opts.fetch ?? globalThis.fetch;
+    if (typeof this.#fetch !== 'function') {
+      throw new FenecError('fetch not found: pass one via opts.fetch');
+    }
+    this.#fetch = this.#fetch.bind(globalThis);
+    this.#remote = new FenecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
+    this.#persistKey = opts.persist ?? null;
+    this.#onError = opts.onError ?? null;
+    this.#leaderMode = opts.leader ?? 'auto';
+    // The lock manager can be supplied from outside: the default is the Web
+    // Locks API, but making it injectable keeps this testable and leaves
+    // room for another coordination mechanism.
+    this.#locks = opts.locks ?? globalThis.navigator?.locks ?? null;
+    this.#abort = new AbortController();
+    this.#liveCursor = local.changeSeq;
+
+    for (const raw of opts.shapes ?? []) {
+      const shape = normalizeShape(raw);
+      if (this.#shapes.has(shape.collection)) {
+        throw new FenecError(
+          `two shapes for \`${shape.collection}\`: one collection per shape ` +
+            '(a seed has to say "this is the whole collection")',
+        );
+      }
+      this.#shapes.set(shape.collection, shape);
+      this.#pending.set(shape.collection, new Map());
+    }
+    if (this.#shapes.size === 0) throw new FenecError('at least one shape is required');
+
+    this.#ready = new Promise((res) => {
+      this.#resolveReady = res;
+    });
+  }
+
+  /** The local database. For raw FenecQL: `db.local.run(...)`. */
+  get local() {
+    return this.#local;
+  }
+
+  /** The remote endpoint (`FenecHttp`). For queries outside the shapes. */
+  get remote() {
+    return this.#remote;
+  }
+
+  /** Resolves once the first seed of every shape has landed. */
+  ready() {
+    return this.#ready;
+  }
+
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error}`. */
+  status() {
+    return [...this.#shapes.values()].map((s) => ({
+      collection: s.collection,
+      cursor: s.cursor,
+      seeded: s.seeded,
+      connected: s.connected,
+      pending: this.#pending.get(s.collection).size,
+      error: s.error ? String(s.error.message ?? s.error) : null,
+      leader: this.#leader,
+    }));
+  }
+
+  /**
+   * Query builder. Reads are **local** (no network); a write goes local
+   * first, then to the server.
+   */
+  from(name) {
+    const collection = ident(name, 'collection');
+    if (!this.#shapes.has(collection)) {
+      throw new FenecError(
+        `no shape for \`${collection}\`: that collection is not in the local ` +
+          'replica. To ask the server, use db.remote.from(...)',
+      );
+    }
+    return new SyncQuery({
+      collection,
+      context: this,
+      exec: (sql, params) => this.#local.run(sql, params),
+    });
+  }
+
+  /**
+   * Live query: re-run after every local change.
+   *
+   * **No** incremental maintenance, deliberately: the local query is
+   * indexed and already returns in under a millisecond. An incremental
+   * diff could not give the right answer for `near` anyway -- a single
+   * insert can reorder the whole top-k.
+   *
+   * Returns: the function that ends the subscription.
+   */
+  live(query, cb, opts = {}) {
+    const entry = {
+      collection: query.collection,
+      query: query.plain().bind((sql, params) => this.#local.run(sql, params)),
+      cb,
+      onError: opts.onError ?? this.#onError,
+    };
+    this.#subs.push(entry);
+    // The first value right away: a subscriber should not start on a blank screen.
+    this.#runLive(entry);
+    return () => {
+      const i = this.#subs.indexOf(entry);
+      if (i >= 0) this.#subs.splice(i, 1);
+    };
+  }
+
+  /**
+   * Sends several writes in **a single round trip**.
+   *
+   * **Not a transaction.** fenecdb has no transactions and this batch does
+   * not invent one. The local side is rolled back exactly; the server side
+   * cannot be: it stops at the first error and reports how many were
+   * applied in that error. The gain is twofold -- one round trip instead
+   * of N, and no other writer slipping in between.
+   */
+  async batch(fn) {
+    if (this.#queue) throw new FenecError('nested batches are not supported');
+    const q = { ops: [], undo: [] };
+    this.#queue = q;
+    try {
+      await fn(this);
+    } catch (e) {
+      this.#queue = null;
+      this.#rollback(q.undo);
+      throw e;
+    }
+    this.#queue = null;
+    if (q.ops.length === 0) return 0;
+    try {
+      const out = await this.#post('/batch', q.ops.map(ndjson).join('\n'), 'application/x-ndjson');
+      return out.ok ?? q.ops.length;
+    } catch (e) {
+      this.#rollback(q.undo);
+      throw e;
+    }
+  }
+
+  /** Finishes any pending live-query runs (for tests). */
+  async flush() {
+    // When a tick is scheduled, wait for its *run* first: once the timer
+    // fires `#pendingTick` is set, and that is what finishes the live queries.
+    while (this.#scheduled || this.#pendingTick) {
+      if (this.#pendingTick) {
+        await this.#pendingTick;
+        continue;
+      }
+      await new Promise((r) => this.#flushers.push(r));
+    }
+  }
+
+  /** Closes the subscriptions. The local database stays open. */
+  close() {
+    this.#closed = true;
+    this.#abort.abort();
+    this.#chan?.close();
+    this.#subs.length = 0;
+  }
+
+  // ------------------------------------------------------------ writes
+
+  /**
+   * `SyncQuery`'s write hook. Three steps, always in the same order:
+   * **first collect what it takes to undo the local change**, then apply
+   * it locally, then send it to the server. If the server rejects it the
+   * local side is rolled back exactly -- without the network, because the
+   * undo information is already in hand.
+   *
+   * Everything up to the first `await` is **synchronous**. An `async`
+   * function runs its body synchronously up to the first `await`, so the
+   * optimistic row is in the local store before the caller even awaits the
+   * promise. A single microtask in between would break the "visible
+   * immediately" promise.
+   */
+  async write(verb, q, arg, opts) {
+    const collection = q.collection;
+    const shape = this.#shapes.get(collection);
+    const base = q.plain();
+
+    let undo;
+    let count;
+    let stmt;
+
+    if (verb === 'insert') {
+      const list = Array.isArray(arg) ? arg : [arg];
+      if (list.length === 0) return 0;
+      const docs = list.map((d) => {
+        const doc = { ...d };
+        if (shape.key && doc[shape.key] === undefined) doc[shape.key] = newKey();
+        return doc;
+      });
+      stmt = base.toInsert(docs);
+      count = docs.length;
+
+      if (shape.key) {
+        // An optimistic row's id is temporary: the server will hand out its
+        // own. What matches the two is the business key -- which is why an
+        // insert into a keyless shape is *not* applied optimistically (see
+        // below), or the server's row would leave two copies locally.
+        const temps = docs.map(() => this.#nextTemp++);
+        this.#local.run(...base.toInsert(docs.map((d, i) => ({ ...d, id: temps[i] }))));
+        const pend = this.#pending.get(collection);
+        docs.forEach((d, i) => pend.set(String(d[shape.key]), temps[i]));
+        undo = () => {
+          docs.forEach((d) => pend.delete(String(d[shape.key])));
+          this.#deleteLocal(collection, temps);
+        };
+      } else {
+        // No key: the optimistic apply is skipped and the row arrives over
+        // the subscription. One round trip of delay beats a silent duplicate.
+        undo = () => {};
+      }
+    } else {
+      // Update and delete work by id, and reading the previous state is
+      // enough -- `update` creates no rows and `delete` deletes none it
+      // created, so this id set is the whole of the change.
+      // `select()` drops the projection: writing back needs every field.
+      const before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
+      stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
+      count = this.#local.run(...stmt).count ?? 0;
+      undo = () => {
+        // An unconditional builder: `before` already carries *which* rows
+        // changed, by id. Re-applying the filter (and running into
+        // `insert`'s ban on filters) would be wrong.
+        if (before.length) this.#local.run(...from(collection).toInsert(before));
+      };
+    }
+
+    this.#touch();
+
+    if (this.#queue) {
+      this.#queue.ops.push(stmt);
+      this.#queue.undo.push(undo);
+      return count;
+    }
+    try {
+      const r = await this.#remote.run(...stmt);
+      return r.count ?? count;
+    } catch (e) {
+      undo();
+      this.#touch();
+      throw e;
+    }
+  }
+
+  #rollback(undos) {
+    for (const u of undos.reverse()) {
+      try {
+        u();
+      } catch (e) {
+        this.#onError?.(e);
+      }
+    }
+    this.#touch();
+  }
+
+  get #localExec() {
+    return (sql, params) => this.#local.run(sql, params);
+  }
+
+  #deleteLocal(collection, ids) {
+    if (ids.length === 0) return 0;
+    const q = from(collection).where('id', 'in', ids);
+    return this.#local.run(...q.toDelete()).count ?? 0;
+  }
+
+  // ---------------------------------------------------------- applying
+
+  /**
+   * The seed: "this is the whole collection". It clears first -- the one
+   * collection per shape rule exists precisely to make that possible.
+   */
+  async #applySeed(shape, msg) {
+    const rows = msg.rows ?? [];
+    this.#local.run(...from(shape.collection).toDelete({ all: true }));
+    this.#pending.get(shape.collection).clear();
+    await this.#insertChunked(shape.collection, rows);
+    shape.cursor = msg.seq ?? 0;
+    shape.seeded = true;
+    this.#afterApply(shape);
+  }
+
+  async #applyChange(shape, msg) {
+    const puts = msg.puts ?? [];
+    const dels = msg.dels ?? [];
+    await this.#reconcile(shape, puts);
+    this.#deleteLocal(shape.collection, dels);
+    await this.#insertChunked(shape.collection, puts);
+    shape.cursor = msg.seq ?? shape.cursor;
+    this.#afterApply(shape);
+  }
+
+  /**
+   * When a row from the server carries the same key as a pending
+   * optimistic row, the one with the temporary id is dropped. The
+   * counterpart of TanStack DB's `txid`; here the handle is a **business
+   * key**, because the id space belongs to the server and the client
+   * cannot know it in advance.
+   */
+  async #reconcile(shape, rows) {
+    if (!shape.key || rows.length === 0) return;
+    const pend = this.#pending.get(shape.collection);
+    if (pend.size === 0) return;
+    const drop = [];
+    for (const r of rows) {
+      const k = r[shape.key];
+      if (k === undefined || k === null) continue;
+      const temp = pend.get(String(k));
+      if (temp === undefined) continue;
+      pend.delete(String(k));
+      if (temp !== r.id) drop.push(temp);
+    }
+    this.#deleteLocal(shape.collection, drop);
+  }
+
+  /**
+   * A large seed fits in a single statement, but the generated text runs
+   * into megabytes; writing in chunks keeps peak memory low.
+   */
+  async #insertChunked(collection, rows, size = 500) {
+    for (let i = 0; i < rows.length; i += size) {
+      await from(collection).bind(this.#localExec).insert(rows.slice(i, i + size));
+    }
+  }
+
+  #afterApply(shape) {
+    shape.error = null;
+    this.#touch();
+    this.#schedulePersist();
+    if (!this.#allSeeded) return;
+    this.#resolveReady();
+  }
+
+  get #allSeeded() {
+    return [...this.#shapes.values()].every((s) => s.seeded);
+  }
+
+  // -------------------------------------------------------------- live
+
+  /**
+   * Schedules the next tick; changes arriving back to back collapse into
+   * a single run.
+   *
+   * Frame alignment is **not enough on its own**: `requestAnimationFrame`
+   * never runs in a hidden tab. Tied to it alone, a backgrounded tab would
+   * keep receiving data while its live queries silently stopped -- the
+   * worst kind of silently wrong state. So the two **race**: in a visible
+   * tab the frame arrives first and cancels the timer, in a hidden tab the
+   * timer takes over.
+   */
+  #touch() {
+    if (this.#scheduled) return;
+    const raf = globalThis.requestAnimationFrame;
+    const fire = () => {
+      if (!this.#scheduled) return;
+      clearTimeout(this.#scheduled.timer);
+      if (this.#scheduled.frame !== undefined) {
+        globalThis.cancelAnimationFrame?.(this.#scheduled.frame);
+      }
+      this.#scheduled = null;
+      this.#pendingTick = this.#tick().finally(() => {
+        this.#pendingTick = null;
+      });
+      // Anyone waiting in `flush()`: the tick has *started*, so from here
+      // on it can be awaited through `#pendingTick`.
+      for (const f of this.#flushers.splice(0)) f();
+    };
+    this.#scheduled = {
+      timer: setTimeout(fire, TICK_FALLBACK_MS),
+      frame: raf ? raf.call(globalThis, fire) : undefined,
+    };
+    this.#scheduled.timer.unref?.();
+  }
+
+  /**
+   * Which live queries get re-run: collection granularity. Anything finer
+   * (intersecting id sets) would cost more than the local query itself.
+   */
+  async #tick() {
+    const info = this.#local.changes(this.#liveCursor);
+    this.#liveCursor = info.seq;
+    const dirty = info.collections === null ? null : new Set(info.collections);
+    for (const entry of [...this.#subs]) {
+      if (dirty && !dirty.has(entry.collection)) continue;
+      await this.#runLive(entry);
+    }
+  }
+
+  async #runLive(entry) {
+    try {
+      entry.cb(await entry.query.rows());
+    } catch (e) {
+      if (entry.onError) entry.onError(e);
+      else throw e;
+    }
+  }
+
+  // ------------------------------------------------------------ stream
+
+  async start() {
+    for (const shape of this.#shapes.values()) {
+      await this.#ensureSchema(shape.collection);
+    }
+    await this.#loadPersist();
+    this.#elect();
+    return this;
+  }
+
+  /**
+   * The schema is fetched from the server and recreated locally **exactly**
+   * as is: field order is part of the record encoding, and rows cannot be
+   * decoded if the two sides drift apart. That is also precisely why
+   * writing the schema out a second time by hand is not wanted.
+   */
+  async #ensureSchema(collection) {
+    if (this.#local.schemas().some((s) => s.name === collection)) return;
+    const all = await this.#get('/collections');
+    const schema = all.find((s) => s.name === collection);
+    if (!schema) throw new FenecError(`the server has no \`${collection}\` collection`);
+    this.#local.run(schemaDDL(schema));
+  }
+
+  /**
+   * Multiple tabs: each tab would have its own WASM instance and its own
+   * subscription -- N copies, N connections. `navigator.locks` picks a
+   * **single leader**; the others take the same batches over
+   * `BroadcastChannel` and apply them to their own local copy. The apply
+   * path is the same either way, only the transport differs.
+   *
+   * Writes do not go through the leader: every tab sends its own writes
+   * straight to the server. Leadership only concerns the *read* stream.
+   */
+  #elect() {
+    const name = `fenecdb:${this.#url}:${[...this.#shapes.keys()].join(',')}`;
+    if (this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks) {
+      // A single tab (or Node): no leader election needed.
+      this.#startStreams();
+      return;
+    }
+    this.#leader = false;
+    this.#chan = new BroadcastChannel(name);
+    this.#chan.onmessage = (e) => {
+      this.#onRelay(e.data).catch((err) => this.#onError?.(err));
+    };
+    // Ask an existing leader for a seed, so we can work without waiting
+    // for our turn at the lock. **Repeated**, because the leader may be
+    // downloading its own seed at that moment; it ignores the request then,
+    // and a one-shot hello would go unanswered forever.
+    this.#hello();
+    this.#locks.request(name, { mode: 'exclusive' }, () => {
+      if (this.#closed) return;
+      this.#leader = true;
+      this.#startStreams();
+      // The lock stays with us until the tab closes: a promise that never settles.
+      return new Promise(() => {});
+    });
+  }
+
+  /** Repeats the hello until the leader is seeded. */
+  #hello() {
+    if (this.#closed || this.#leader || this.#allSeeded) return;
+    this.#chan?.postMessage({ t: 'hello' });
+    const t = setTimeout(() => this.#hello(), 400);
+    t.unref?.();
+  }
+
+  #startStreams() {
+    for (const shape of this.#shapes.values()) {
+      this.#loop(shape).catch((e) => this.#onError?.(e));
+    }
+  }
+
+  async #loop(shape) {
+    let delay = 250;
+    while (!this.#closed) {
+      try {
+        const res = await this.#fetch(this.#streamUrl(shape), {
+          headers: this.#headers(),
+          signal: this.#abort.signal,
+        });
+        if (!res.ok || !res.body) {
+          const text = await res.text().catch(() => '');
+          throw new FenecError(`could not open subscription (${res.status}): ${text.slice(0, 200)}`);
+        }
+        shape.connected = true;
+        shape.error = null;
+        delay = 250;
+        for await (const ev of sseEvents(res)) {
+          if (this.#closed) break;
+          await this.#onEvent(shape, ev);
+        }
+      } catch (e) {
+        if (this.#closed || e?.name === 'AbortError') return;
+        shape.error = e;
+        this.#onError?.(e);
+      }
+      shape.connected = false;
+      if (this.#closed) return;
+      // Exponential backoff + jitter: when the server restarts, not every
+      // client should come back at the same instant.
+      await sleep(delay + Math.random() * delay * 0.3);
+      delay = Math.min(delay * 2, 15000);
+    }
+  }
+
+  async #onEvent(shape, ev) {
+    const msg = ev.data ? JSON.parse(ev.data) : {};
+    if (ev.name === 'seed') {
+      await this.#applySeed(shape, msg);
+      this.#relay({ t: 'seed', c: shape.collection, ...msg });
+    } else if (ev.name === 'change') {
+      await this.#applyChange(shape, msg);
+      this.#relay({ t: 'change', c: shape.collection, ...msg });
+    } else if (ev.name === 'error') {
+      throw new FenecError(msg.error ?? 'subscription error');
+    }
+  }
+
+  #streamUrl(shape) {
+    const p = new URLSearchParams();
+    for (const [k, v] of shape.params) p.append(k, v);
+    if (shape.select) p.set('select', shape.select.join(','));
+    // If we already have a seed, resume where we left off: the server
+    // reseeds on its own when the cursor is too old.
+    if (shape.seeded) p.set('since', String(shape.cursor));
+    const qs = p.toString();
+    return `${this.#url}/${encodeURIComponent(shape.collection)}/changes${qs ? `?${qs}` : ''}`;
+  }
+
+  #headers() {
+    const h = { accept: 'text/event-stream' };
+    if (this.#token) h.authorization = `Bearer ${this.#token}`;
+    return h;
+  }
+
+  async #get(path) {
+    return this.#call('GET', path, null, null);
+  }
+
+  async #post(path, body, type) {
+    return this.#call('POST', path, body, type);
+  }
+
+  async #call(method, path, body, type) {
+    const headers = {};
+    if (type) headers['content-type'] = type;
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await this.#fetch(`${this.#url}${path}`, {
+      method,
+      headers,
+      body,
+      signal: this.#abort.signal,
+    });
+    const text = await res.text();
+    let out;
+    try {
+      out = text ? JSON.parse(text) : null;
+    } catch {
+      throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
+    }
+    if (!res.ok) {
+      const e = new FenecError(out?.error ?? `HTTP ${res.status}`);
+      // A half-finished batch: how many were applied rides on the error.
+      if (typeof out?.completed === 'number') e.completed = out.completed;
+      throw e;
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------- tabs
+
+  #relay(msg) {
+    if (this.#chan && this.#leader) this.#chan.postMessage(msg);
+  }
+
+  async #onRelay(msg) {
+    if (msg.t === 'hello') {
+      if (!this.#leader) return;
+      // Hand the new tab what we have: it does not need to open its own
+      // subscription.
+      for (const shape of this.#shapes.values()) {
+        if (!shape.seeded) continue;
+        const rows = await from(shape.collection).bind(this.#localExec).rows();
+        this.#chan.postMessage({ t: 'seed', c: shape.collection, rows, seq: shape.cursor });
+      }
+      return;
+    }
+    if (this.#leader) return; // the leader is fed by its own stream
+    const shape = this.#shapes.get(msg.c);
+    if (!shape) return;
+    if (msg.t === 'seed') {
+      await this.#applySeed(shape, msg);
+      return;
+    }
+    // An incremental diff cannot be applied to an unseeded copy: we would
+    // be left with the changed rows only, the rest missing. It is skipped
+    // until the seed arrives, and the cursor is not advanced either.
+    if (msg.t === 'change' && shape.seeded) await this.#applyChange(shape, msg);
+  }
+
+  // ------------------------------------------------------- persistence
+
+  #schedulePersist() {
+    if (!this.#persistKey || this.#persistTimer) return;
+    this.#persistTimer = setTimeout(() => {
+      this.#persistTimer = null;
+      this.#savePersist().catch((e) => this.#onError?.(e));
+    }, 2000);
+    this.#persistTimer.unref?.();
+  }
+
+  async #savePersist() {
+    if (!this.#persistKey || !globalThis.indexedDB) return;
+    await persist(this.#local, this.#persistKey);
+    await putState(`${this.#persistKey}:cursors`, {
+      cursors: Object.fromEntries(
+        [...this.#shapes.values()].map((s) => [s.collection, s.cursor]),
+      ),
+    });
+  }
+
+  /**
+   * Restores the previous session's image. The cursor is stored alongside
+   * the image, so the client is not reseeded from scratch but resumes
+   * where it stopped -- as long as the cursor is not behind the server's horizon.
+   */
+  async #loadPersist() {
+    if (!this.#persistKey || !globalThis.indexedDB) return;
+    try {
+      if (!(await restore(this.#local, this.#persistKey))) return;
+      const state = await getState(`${this.#persistKey}:cursors`);
+      for (const shape of this.#shapes.values()) {
+        const cursor = state?.cursors?.[shape.collection];
+        if (typeof cursor === 'number') {
+          shape.cursor = cursor;
+          shape.seeded = true;
+        }
+      }
+      this.#liveCursor = this.#local.changeSeq;
+      if (this.#allSeeded) this.#resolveReady();
+    } catch (e) {
+      // A corrupt or incompatible cache: reseed from scratch, not an error.
+      this.#onError?.(e);
+    }
+  }
+
+}
+
+/** A batch line: each line is exactly a `POST /query` body. */
+function ndjson([sql, params]) {
+  return JSON.stringify({ query: sql, params });
+}
+
+function normalizeShape(raw) {
+  const spec = raw instanceof Query ? { collection: raw.collection } : raw;
+  if (!isSpec(spec) || typeof spec.collection !== 'string') {
+    throw new FenecError('a shape must be `{ collection, where?, select?, key? }`');
+  }
+  const collection = ident(spec.collection, 'collection');
+  const select = spec.select ? [...new Set(['id', ...spec.select.map((c) => ident(c))])] : null;
+  return {
+    collection,
+    key: spec.key ? ident(spec.key) : null,
+    select,
+    params: shapeParams(spec.where),
+    cursor: 0,
+    seeded: false,
+    connected: false,
+    error: null,
+  };
+}
+
+/**
+ * Opens the local replica and starts the subscriptions.
+ *
+ * - `url`      server root (`fenec-pg --http`)
+ * - `shapes`   `[{ collection, where?, select?, key? }]`
+ * - `local`    an existing `Fenec`; otherwise opened from the `wasm` path
+ * - `token`    `Authorization: Bearer`
+ * - `persist`  IndexedDB key: the image **and the cursors** are stored
+ * - `leader`   `false` turns off multi-tab leader election
+ * - `locks`    lock manager (defaults to `navigator.locks`)
+ */
+export async function sync(opts = {}) {
+  if (!opts.url) throw new FenecError('sync(): `url` is required');
+  const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec.wasm'));
+  return new FenecSync(local, opts).start();
+}
+

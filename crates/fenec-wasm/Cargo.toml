@@ -1,0 +1,13 @@
+[package]
+name = "fenec-wasm"
+description = "fenecdb's browser (WASM) binding -- raw ABI, no wasm-bindgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fenec-core = { path = "../fenec-core", default-features = false }
+fenec-ql = { path = "../fenec-ql" }

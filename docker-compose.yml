@@ -1,0 +1,56 @@
+# fenecdb -- one version, one file, one writer.
+#
+#   FENECPG_PASSWORD=secret docker compose up -d
+#   psql -h 127.0.0.1 -p 5433 -U fenec
+#
+# The password is mandatory and `down`/`ps`/`logs` want it too; for lasting
+# use it is easier to keep an `.env` file beside it:  FENECPG_PASSWORD=secret
+#
+# `replicas` cannot be raised: two processes loading the same file into
+# memory and writing to it corrupt it. Scale vertically, not horizontally.
+
+services:
+  fenecdb:
+    build: .
+    image: fenecdb
+    container_name: fenecdb
+
+    # Published only on the host's loopback. fenec-pg speaks no TLS; put a TLS
+    # terminator (nginx stream, stunnel) in front of it for an open network.
+    ports:
+      - "127.0.0.1:5433:5433"
+
+    environment:
+      # Password required: listening on 0.0.0.0 without auth is refused.
+      FENECPG_PASSWORD: "${FENECPG_PASSWORD:?set a password first, e.g. FENECPG_PASSWORD=secret docker compose up -d}"
+
+    volumes:
+      - fenecdata:/data
+
+    # To override the defaults (the whole CMD from the image must be spelled out):
+    # command: ["--listen", "0.0.0.0:5433", "--file", "/data/data.fenec",
+    #           "--sync", "250", "--max-connections", "50",
+    #           "--idle-timeout", "300", "--max-memory", "340"]
+    #
+    # --max-memory is chosen as a third of the mem_limit below: once it is
+    # exceeded writes stop with 53200, and you get a clean error instead of a
+    # cgroup OOM (SIGKILL, lost sync, lost checkpoint).
+
+    # The whole database lives in memory; there is no page cache and no knob
+    # to tune. Ceiling: ~2x the file at startup, ~3x on compact/checkpoint.
+    # If the limit drops below the data size the cgroup sends SIGKILL and one
+    # --sync interval of writes is lost. Grow this value as the file grows.
+    mem_limit: 1g
+    memswap_limit: 1g
+
+    restart: unless-stopped
+
+    # The shutdown signal is caught: first sync, then -- if a vector index
+    # exists -- a checkpoint. The latter builds the whole file image in
+    # memory and writes it out, so it takes longer as the data grows. On a
+    # timeout the data is still on disk, only the graph is lost
+    # (--no-checkpoint turns it off).
+    stop_grace_period: 30s
+
+volumes:
+  fenecdata:

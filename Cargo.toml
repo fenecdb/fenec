@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fenec-core",
+    "crates/fenec-ql",
+    "crates/fenec-wasm",
+    "crates/fenec-pg",
+    "crates/fenec-http",
+    "crates/fenec-import",
+    "crates/fenec-cli",
+    "crates/fenec-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Small binary for the `fenec` shell: abort instead of panic unwinding.
+# The shell is a single process with no scenario for recovering from a panic;
+# the unwind tables, meanwhile, take ~12% of the binary. `fenec-pg` does *not*
+# use this profile: there a panicking connection thread unwinds and only
+# drops its own session, leaving the server up.
+[profile.cli]
+inherits = "release"
+panic = "abort"
+
+# On WASM, size comes first.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
+
+# For profiling: release speed plus symbols
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -1,0 +1,11 @@
+# Build outputs stay out of the image: the local `target/` holds another
+# platform's objects, and copying it only bloats the build context.
+target/
+web/fenec.wasm
+pkg/
+node_modules/
+
+# Data and local leftovers
+*.fenec
+.DS_Store
+.git/

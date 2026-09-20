@@ -1,0 +1,12 @@
+[package]
+name = "fenec-ql"
+description = "FenecQL: fenecdb's minimal query language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fenec-core = { path = "../fenec-core", default-features = false }
+
+[features]
+default = []

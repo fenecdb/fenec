@@ -1,0 +1,19 @@
+[package]
+name = "fenec-bench"
+description = "Benchmark harness -- NOT a library dependency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fenec-core = { path = "../fenec-core" }
+# For benchmarking only. SQLite is built from source so the version and the
+# compile flags stay fixed.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# For the PostgreSQL + pgvector comparison (only in this harness).
+postgres = "0.19"
+
+[[bin]]
+name = "fenec-bench"
+path = "src/main.rs"

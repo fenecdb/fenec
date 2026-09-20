@@ -1,0 +1,123 @@
+# fenecdb
+
+# The wasm32 target comes with rustup. Homebrew's cargo has no wasm32 std
+# library, so ~/.cargo/bin is preferred when it is present.
+CARGO ?= $(shell test -x $(HOME)/.cargo/bin/cargo && echo $(HOME)/.cargo/bin/cargo || echo cargo)
+PORT ?= 8787
+WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
+
+.PHONY: all test test-js types wasm web serve pg small bench sweep compare import-test \
+	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean
+
+all: test wasm
+
+## Rust first: `cargo test` also builds the `fenec-pg` binary, and the sync
+## tests on the JS side run against it (they skip themselves without it).
+test:
+	$(CARGO) test
+	@$(MAKE) --no-print-directory test-js
+
+## JS tests. node's own runner; no dependencies.
+##   fenec.test.js       query builder (end-to-end too when wasm is present)
+##   fenec.sync.test.js  sync layer -- against a real `fenec-pg --http` server;
+##                     skipped when `web/fenec.wasm` or the binary is missing
+test-js:
+	@if command -v node >/dev/null 2>&1; then \
+		node --test web/fenec.test.js web/fenec.sync.test.js; \
+	else \
+		echo "node not found -- JS tests skipped"; \
+	fi
+
+## TypeScript declarations from the schema: make types FILE=data.fenec
+types:
+	@test -n "$(FILE)" || (echo "usage: make types FILE=data.fenec"; exit 1)
+	@$(CARGO) run -q --release -p fenec-cli -- types $(FILE) -o web/fenec-schema.d.ts
+
+## Builds WASM for the browser and copies it under web/
+wasm:
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm 2>&1 | tail -2 || \
+		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)
+	@cp $(WASM_OUT) web/fenec.wasm
+	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
+
+## Serves the browser demo locally
+serve: wasm
+	@echo ""
+	@echo "  ->  http://localhost:$(PORT)"
+	@echo ""
+	@cd web && python3 -m http.server $(PORT)
+
+## PostgreSQL protocol server (for a password: make pg PGPASS=secret)
+## For the HTTP/JSON endpoint: make pg HTTP=127.0.0.1:8080
+pg:
+	$(CARGO) run --release -p fenec-pg -- --listen 127.0.0.1:5433 --file data.fenec \
+	  --sync 250 $(if $(PGPASS),--password $(PGPASS),) $(if $(HTTP),--http $(HTTP),)
+
+## When size comes first: no import, abort instead of panic unwinding.
+small:
+	@$(CARGO) build --profile cli -p fenec-cli --no-default-features
+	@echo "target/cli/fenec  $$(wc -c < target/cli/fenec) bytes"
+
+## Scale measurement (clustered embedding distribution). --uniform gives
+## the pathological case.
+bench:
+	$(CARGO) run --release -p fenec-core --example bench -- 100000 128
+
+## Comparison against SQLite and PostgreSQL.
+## For the PostgreSQL arm, first: make pgvector-up
+compare:
+	$(CARGO) run --release -p fenec-bench -- 100000 128
+
+## Verifies the import's PostgreSQL arm against a live server
+import-test: pgvector-up
+	@$(CARGO) test -p fenec-import --test pg -- --ignored; \
+	  status=$$?; $(MAKE) pgvector-down; exit $$status
+
+## Starts PostgreSQL with pgvector for the comparison
+pgvector-up:
+	docker run -d --name fenecbench-pg --rm \
+	  -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
+	  -p 55432:5432 --shm-size=1g pgvector/pgvector:pg17 \
+	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
+	  -c max_parallel_workers_per_gather=0
+	@echo "waiting for it to become ready..."
+	@until docker exec fenecbench-pg pg_isready -U postgres -d fenecbench >/dev/null 2>&1; do sleep 1; done
+	@echo "postgres://postgres:fenec@127.0.0.1:55432/fenecbench"
+
+pgvector-down:
+	-docker rm -f fenecbench-pg
+
+## Builds the server image (static with musl, ~4 MB)
+docker:
+	docker build -t fenecdb .
+
+## Starts the container: make docker-run PGPASS=secret
+## The memory limit must be at least 3x the data file (compact peak).
+docker-run: docker
+	@test -n "$(PGPASS)" || (echo "password required: make docker-run PGPASS=secret"; exit 1)
+	docker run -d --name fenecdb --restart unless-stopped \
+	  -p 127.0.0.1:5433:5433 -v fenecdata:/data \
+	  -e FENECPG_PASSWORD=$(PGPASS) --memory 1g --memory-swap 1g fenecdb
+	@echo "postgres://fenec@127.0.0.1:5433"
+
+## Writes the graph to the file. fenec-pg writes no checkpoint on shutdown:
+## without this call every restart rebuilds the HNSW index from scratch.
+docker-compact:
+	@test -n "$(PGPASS)" || (echo "password required: make docker-compact PGPASS=secret"; exit 1)
+	docker run --rm --network container:fenecdb -e PGPASSWORD=$(PGPASS) \
+	  postgres:16-alpine psql -h 127.0.0.1 -p 5433 -U fenec -c 'compact'
+
+docker-down:
+	-docker rm -f fenecdb
+
+## Memory footprint (for calibrating --max-memory)
+memory:
+	$(CARGO) run --release -p fenec-core --example memory -- 100000 128
+
+## ef / recall trade-off
+sweep:
+	$(CARGO) run --release -p fenec-core --example sweep -- 50000 128
+
+clean:
+	$(CARGO) clean
+	rm -f web/fenec.wasm

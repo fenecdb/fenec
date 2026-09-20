@@ -1,0 +1,15 @@
+[package]
+name = "fenec-pg"
+description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fenec-core = { path = "../fenec-core" }
+fenec-ql = { path = "../fenec-ql" }
+fenec-http = { path = "../fenec-http" }
+
+[[bin]]
+name = "fenec-pg"
+path = "src/main.rs"

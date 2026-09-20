@@ -1,0 +1,16 @@
+[package]
+name = "fenec-import"
+description = "Import for fenecdb: SQLite files and PostgreSQL servers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# No external dependencies. The SQLite file format is read by hand; the
+# PostgreSQL wire protocol is spoken through fenec-pg's client.
+fenec-core = { path = "../fenec-core" }
+fenec-pg = { path = "../fenec-pg" }
+
+[dev-dependencies]
+# For building `--where` expressions with the real parser in tests.
+fenec-ql = { path = "../fenec-ql" }

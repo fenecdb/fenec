@@ -1,0 +1,19 @@
+[package]
+name = "fenec-core"
+description = "fenecdb storage engine: zero-buffer-pool segments, native vectors, plugin registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# deliberately zero dependencies: keeps the WASM bundle small and auditable
+
+[dev-dependencies]
+# For writing queries in tests. Cargo allows a cycle through a dev
+# dependency; it is not a product dependency and never enters the WASM output.
+fenec-ql = { path = "../fenec-ql" }
+
+[features]
+default = ["std-fs"]
+# File support (native). The WASM build is made without this feature.
+std-fs = []
