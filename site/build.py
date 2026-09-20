@@ -295,6 +295,7 @@ def prev_next(active, base):
 # way to settle it by hand.
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
+    ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
     ("README.md", r"(\d+) KB of WebAssembly, no wasm-bindgen", "kb", 0),
     ("site/content/index.html", r"compiles to (\d+) KB of WebAssembly", "kb", 0),
     ("site/content/index.html", r"(\d+) KB of WebAssembly with no", "kb", 0),
@@ -317,14 +318,29 @@ def glue_lines():
     return end - start + 1
 
 
+def workspace_version():
+    """`version` under [workspace.package] in the root Cargo.toml."""
+    body = open(os.path.join(REPO, "Cargo.toml"), encoding="utf-8").read()
+    return re.search(r'^version = "([^"]+)"', body, re.MULTILINE).group(1)
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     wasm = os.path.join(REPO, "web", "fenec.wasm")
     if not os.path.exists(wasm):
         return []  # the copy step above already said so
     size = os.path.getsize(wasm)
-    truth = {"bytes": size, "kb": round(size / 1024), "glue": glue_lines()}
-    unit = {"bytes": " bytes", "kb": " KB", "glue": " lines"}
+    truth = {
+        "bytes": size,
+        "kb": round(size / 1024),
+        "glue": glue_lines(),
+        # The tag the docs tell people to pull. It follows the workspace
+        # version rather than the last release, so a version bump that
+        # forgets the README is caught at the bump rather than after it
+        # has shipped.
+        "version": workspace_version(),
+    }
+    unit = {"bytes": " bytes", "kb": " KB", "glue": " lines", "version": ""}
 
     problems = []
     for rel, pattern, fact, tol in CLAIMS:
@@ -337,8 +353,12 @@ def check_claims():
             problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")
             continue
         for m in found:
-            said, want = int(m.group(1)), truth[fact]
-            if abs(said - want) > tol:
+            said, want = m.group(1), truth[fact]
+            if fact == "version":
+                drifted = said != want
+            else:
+                said, drifted = int(said), abs(int(said) - want) > tol
+            if drifted:
                 line = body.count("\n", 0, m.start()) + 1
                 problems.append(
                     f"{rel}:{line}: says {said}{unit[fact]}, "
