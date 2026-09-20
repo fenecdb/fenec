@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown;
+      # `rustup show` is what installs both before the first cargo call.
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # The browser bundle comes first: web/fenec.sync.test.js and the
+      # end-to-end half of web/fenec.test.js skip themselves when
+      # web/fenec.wasm is missing, so without this the JS side is a no-op.
+      - name: Build WASM
+        run: make wasm
+
+      # Rust first, then the JS tests -- `cargo test` is also what builds the
+      # fenec-pg binary that the sync tests run against.
+      - name: Test
+        run: make test
+
+  build:
+    name: build (release + cli profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-build-
+
+      # `make small` is the smallest shell binary and also the only build that
+      # exercises --no-default-features, i.e. fenec-core without std-fs.
+      - name: Build the CLI (cli profile, no default features)
+        run: make small
+
+      - name: Build the server (release)
+        run: cargo build --release -p fenec-pg
