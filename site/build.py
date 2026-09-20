@@ -15,6 +15,7 @@ import html
 import os
 import re
 import shutil
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,32 @@ REPO = os.path.dirname(ROOT)
 OUT = os.path.join(ROOT, "dist")
 
 REPO_URL = "https://github.com/fenecdb/fenec"
+
+# esbuild, when it happens to be on PATH. The generator itself stays
+# stdlib-only -- the repo's zero-dependency rule -- so a missing esbuild is a
+# note, not an error, and the readable source ships instead. It is worth
+# wiring up: the four JS/CSS assets are 38 KB gzipped as written and 23 KB
+# minified, and every page waits on them.
+ESBUILD = shutil.which("esbuild")
+_ESBUILD_NOTED = []
+
+
+def minify(body, ext):
+    if ESBUILD is None:
+        if not _ESBUILD_NOTED:
+            print("  note: esbuild not on PATH -- shipping JS/CSS unminified")
+            _ESBUILD_NOTED.append(True)
+        return body
+    loader = "js" if ext == ".js" else "css"
+    args = [ESBUILD, f"--loader={loader}", "--minify"]
+    if loader == "js":
+        # Everything here is an ES module; without this esbuild is free to
+        # pick a different module syntax for the output.
+        args += ["--format=esm", "--target=es2022"]
+    run = subprocess.run(args, input=body, capture_output=True, text=True)
+    if run.returncode != 0:
+        raise SystemExit(f"esbuild failed on a {loader} asset:\n{run.stderr}")
+    return run.stdout
 
 # Ordered docs navigation. Groups are rendered as the sidebar sections.
 NAV = [
@@ -252,6 +279,68 @@ def prev_next(active, base):
     return f'<nav class="pagenav">{"".join(out)}</nav>' if out else ""
 
 
+# Measured numbers end up copied into prose, and prose does not recompile. Every
+# place one is written down is listed here, with the pattern that finds it: the
+# module's size alone had drifted across eight files by 13 KB before this
+# existed. `tol` is for the figures written as approximate ("~175 lines").
+#
+# A miss is a warning locally -- a rebuild that moves the module by forty bytes
+# should not stop you working -- and an error under CI, which is the build that
+# ships the number.
+CLAIMS = [
+    ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
+    ("README.md", r"(\d+) KB of WebAssembly, no wasm-bindgen", "kb", 0),
+    ("site/content/index.html", r"compiles to (\d+) KB of WebAssembly", "kb", 0),
+    ("site/content/index.html", r"(\d+) KB of WebAssembly with no", "kb", 0),
+    ("site/content/index.html", r"WebAssembly output is (\d+) KB", "kb", 0),
+    ("site/content/playground.html", r"the same (\d+) KB WebAssembly module", "kb", 0),
+    ("site/content/docs/index.html", r"(\d+) KB wasm", "kb", 0),
+    ("site/content/docs/benchmarks.html",
+     r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
+    ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
+    ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
+    ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
+]
+
+
+def glue_lines():
+    """Lines in the `Fenec` class -- the wasm glue the docs put a number on."""
+    src = open(os.path.join(REPO, "web", "fenec.js"), encoding="utf-8").read().splitlines()
+    start = next(i for i, ln in enumerate(src) if ln.startswith("export class Fenec {"))
+    end = next(i for i in range(start + 1, len(src)) if src[i] == "}")
+    return end - start + 1
+
+
+def check_claims():
+    """Compares every number in CLAIMS against the thing it describes."""
+    wasm = os.path.join(REPO, "web", "fenec.wasm")
+    if not os.path.exists(wasm):
+        return []  # the copy step above already said so
+    size = os.path.getsize(wasm)
+    truth = {"bytes": size, "kb": round(size / 1024), "glue": glue_lines()}
+    unit = {"bytes": " bytes", "kb": " KB", "glue": " lines"}
+
+    problems = []
+    for rel, pattern, fact, tol in CLAIMS:
+        path = os.path.join(REPO, rel)
+        if not os.path.exists(path):
+            continue  # AGENTS.md is optional
+        body = open(path, encoding="utf-8").read()
+        found = list(re.finditer(pattern, body, re.MULTILINE))
+        if not found:
+            problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")
+            continue
+        for m in found:
+            said, want = int(m.group(1)), truth[fact]
+            if abs(said - want) > tol:
+                line = body.count("\n", 0, m.start()) + 1
+                problems.append(
+                    f"{rel}:{line}: says {said}{unit[fact]}, "
+                    f"it is {want}{unit[fact]}"
+                )
+    return problems
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -267,13 +356,45 @@ def build():
 
     def emit(name, body):
         stem, ext = os.path.splitext(name)
+        if ext in (".js", ".css"):
+            body = minify(body, ext)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:10]
         out_name = f"{stem}.{digest}{ext}"
         open(os.path.join(OUT, out_name), "w", encoding="utf-8").write(body)
         assets[name] = out_name
         return out_name
 
+    # The engine ships twice. The stable names are what the docs tell people
+    # to import, so they have to keep resolving; the hashed copies are what
+    # the site itself loads, and those can be cached forever. Only the hashed
+    # pair is minified -- whoever follows a link from the docs gets readable
+    # source. They are deliberately kept out of `assets`: that dict drives a
+    # page-wide replace and the docs are full of `./fenec.js` inside code
+    # examples, which must not be rewritten.
+    engine = {}
+    for name in ("fenec.js", "fenec.wasm"):
+        src = os.path.join(REPO, "web", name)
+        if not os.path.exists(src):
+            print(f"  note: web/{name} missing -- run `make wasm` for the live demo")
+            continue
+        shutil.copy(src, os.path.join(OUT, name))
+        if name.endswith(".js"):
+            blob = minify(open(src, encoding="utf-8").read(), ".js").encode("utf-8")
+        else:
+            blob = open(src, "rb").read()
+        stem, ext = os.path.splitext(name)
+        hashed = f"{stem}.{hashlib.sha256(blob).hexdigest()[:10]}{ext}"
+        open(os.path.join(OUT, hashed), "wb").write(blob)
+        engine[name] = hashed
+
     worker = open(os.path.join(ROOT, "engine-worker.js"), encoding="utf-8").read()
+    # Point the worker at the immutable copies. The exact quoted paths are
+    # matched, so the `booting fenec.wasm` log line is left alone.
+    if "fenec.js" in engine:
+        worker = worker.replace("from './fenec.js'", f"from './{engine['fenec.js']}'")
+    if "fenec.wasm" in engine:
+        worker = worker.replace("Fenec.open('./fenec.wasm')",
+                                f"Fenec.open('./{engine['fenec.wasm']}')")
     worker_name = emit("engine-worker.js", worker)
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
@@ -332,30 +453,32 @@ def build():
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         open(dest, "w", encoding="utf-8").write(page)
 
-    # The live console on the home page runs the real engine, not a recording.
-    for name in ("fenec.js", "fenec.wasm"):
-        src = os.path.join(REPO, "web", name)
-        if os.path.exists(src):
-            shutil.copy(src, os.path.join(OUT, name))
-        else:
-            print(f"  note: web/{name} missing — run `make wasm` for the live demo")
-
     # Cloudflare reads this from the asset directory; it is not served itself.
-    # Hashed assets can be cached forever because a change gives a new name.
-    # fenec.js and fenec.wasm keep stable names, so they revalidate instead —
-    # a stale engine would silently be the wrong one.
+    # Hashed assets can be cached forever because a change gives a new name --
+    # that now includes the engine the live console and the playground load.
+    # The stable `fenec.js` / `fenec.wasm` names exist for the docs links, and
+    # those revalidate: a stale engine would silently be the wrong one.
     rules = ["/*",
              "  X-Content-Type-Options: nosniff",
              "  Referrer-Policy: strict-origin-when-cross-origin",
              "  X-Frame-Options: DENY",
              ""]
-    for hashed in sorted(assets.values()):
+    for hashed in sorted(list(assets.values()) + list(engine.values())):
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
     for stable in ("fenec.js", "fenec.wasm"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
+
+    problems = check_claims()
+    if problems:
+        print("\n  the docs disagree with what was just built:")
+        for p in problems:
+            print(f"    {p}")
+        if os.environ.get("CI"):
+            raise SystemExit("\n  refusing to ship stale numbers (CI)")
+        print("  (a warning here, an error under CI)")
 
 
 if __name__ == "__main__":
