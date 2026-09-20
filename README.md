@@ -103,12 +103,13 @@ two processes opening one file would corrupt it.
 [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
 [HTTP endpoint](https://fenecdb.com/docs/http).
 
-**Container.** The `Dockerfile` is two-stage: static musl build into `scratch`,
-so the runtime image holds the binary and nothing else — no shell, no package
-manager, no libc.
+**Container.** 1.25 MB, and the `Dockerfile` is two-stage: static musl build
+into `scratch`, so the runtime image holds the binary and nothing else — no
+shell, no package manager, no libc.
 
 ```bash
-make docker && make docker-run PGPASS=secret
+docker pull ghcr.io/fenecdb/fenec-pg:0.1.2     # published, multi-arch
+make docker && make docker-run PGPASS=secret   # or build it yourself
 ```
 
 **Embedded in Rust.** `fenec-core` is the engine as a library:
@@ -126,7 +127,7 @@ make docker && make docker-run PGPASS=secret
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 289 KB wasm · 636–863 KB binary · 1.55 MB container image |
+| **Runtime size** | 289 KB wasm · 636–863 KB binary · 1.25 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
