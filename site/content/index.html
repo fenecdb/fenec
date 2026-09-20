@@ -1,0 +1,339 @@
+<!--
+title: fenecdb — a vector database that fits in a browser tab
+description: Minimal, vector-native embedded database. Written in Rust, compiles to 302 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
+-->
+
+<section class="hero">
+  <div class="scene" aria-hidden="true">
+    <div class="sky"></div>
+    <canvas class="stars"></canvas>
+    <div class="sunrise"></div>
+    <canvas class="sandfield"></canvas>
+    <svg class="dunes" viewBox="0 0 1440 420" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="d4" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#5E2F57"/><stop offset="1" stop-color="#37192F"/>
+        </linearGradient>
+        <linearGradient id="d3" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#8B3C48"/><stop offset="1" stop-color="#4E2130"/>
+        </linearGradient>
+        <linearGradient id="d2" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#B0522C"/><stop offset=".55" stop-color="#7C3626"/><stop offset="1" stop-color="#48201F"/>
+        </linearGradient>
+        <linearGradient id="d1" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#2B1742"/><stop offset="1" stop-color="#150F26"/>
+        </linearGradient>
+        <!-- The sun grazes the ridges it is standing behind. -->
+        <radialGradient id="kiss" cx=".64" cy="0" r=".55">
+          <stop offset="0" stop-color="#FFCE73" stop-opacity=".75"/>
+          <stop offset="1" stop-color="#FFCE73" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <g class="ridge r4"><g class="ridge-in"><path d="M0 170 C 160 120 320 195 480 150 C 640 105 800 180 980 140 C 1140 105 1300 165 1440 130 L1440 420 L0 420 Z" fill="url(#d4)"/></g></g>
+      <g class="ridge r3"><g class="ridge-in"><path d="M0 235 C 180 195 300 265 470 225 C 660 180 790 255 960 215 C 1150 170 1290 240 1440 205 L1440 420 L0 420 Z" fill="url(#d3)"/></g></g>
+      <g class="ridge r2"><g class="ridge-in">
+        <path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275 L1440 420 L0 420 Z" fill="url(#d2)"/>
+        <path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275" fill="none" stroke="url(#kiss)" stroke-width="3"/>
+      </g></g>
+      <g class="ridge r1"><g class="ridge-in">
+        <path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350 L1440 420 L0 420 Z" fill="url(#d1)"/>
+        <path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350" fill="none" stroke="url(#kiss)" stroke-width="2.5"/>
+      </g></g>
+    </svg>
+    <div class="shimmer"></div>
+    <div class="floor"></div>
+  </div>
+
+  <div class="hero-in">
+<pre class="hero-q" data-lang="fenecql" data-bare>get articles
+  where year >= 2024
+    and tags has "rust"
+  near embed $1
+  limit 10</pre>
+
+    <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
+    <p class="hero-sub reveal">302 KB of WebAssembly with no dependencies. Vectors
+      are a type, <code>near</code> is a clause, and the HNSW index is built in
+      the same tab that asks the question. The same engine runs as a process
+      that speaks the PostgreSQL protocol.</p>
+
+    <p class="hero-cta reveal">
+      <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
+      <a class="btn btn-line" href="docs/">Read the docs</a>
+    </p>
+  </div>
+</section>
+
+<div class="rig" id="rig" data-state="idle">
+  <div class="rig-bar">
+    <span class="rig-dot" aria-hidden="true"></span>
+    <span>fenec.wasm</span>
+    <span class="rig-note">waiting</span>
+  </div>
+  <div class="rig-main">
+    <div class="field-wrap">
+      <canvas class="field"></canvas>
+      <p class="field-cap">waiting to run</p>
+    </div>
+    <dl class="rig-stats">
+      <div class="stat"><dt>open</dt><dd class="idle" data-stat="boot">—</dd></div>
+      <div class="stat"><dt>documents</dt><dd class="idle" data-stat="rows">—</dd></div>
+      <div class="stat"><dt>index build</dt><dd class="idle" data-stat="build">—</dd></div>
+      <div class="stat"><dt>ann top-10, p50</dt><dd class="idle" data-stat="query">—</dd></div>
+      <div class="stat"><dt>recall@10</dt><dd class="idle" data-stat="recall">—</dd></div>
+    </dl>
+  </div>
+  <div class="rig-log" role="log" aria-live="polite"><i>waiting for this panel to come into view</i></div>
+</div>
+
+<section class="band">
+  <div class="band-in">
+    <h2 class="rise">Crossing the same ground</h2>
+    <p class="lede rise">One vector search, top ten of a hundred thousand, on the
+      same data in the same process with the same distance kernel. Watch them
+      run.</p>
+
+    <div class="race">
+      <div class="lane fenec" data-ms="0.18" data-value="0.18" data-unit=" ms">
+        <div class="lane-name"><b>fenecdb</b>hnsw · 1×</div>
+        <div class="lane-track">
+          <div class="lane-fill"></div><div class="lane-dust"></div><div class="lane-runner"></div>
+        </div>
+        <div class="lane-time idle">—</div>
+      </div>
+      <div class="lane" data-ms="0.91" data-value="0.91" data-unit=" ms">
+        <div class="lane-name"><b>pgvector</b>hnsw · 5.1× slower</div>
+        <div class="lane-track">
+          <div class="lane-fill"></div><div class="lane-dust"></div><div class="lane-runner"></div>
+        </div>
+        <div class="lane-time idle">—</div>
+      </div>
+      <div class="lane" data-ms="31.3" data-value="31.3" data-unit=" ms">
+        <div class="lane-name"><b>SQLite</b>full scan · 174× slower</div>
+        <div class="lane-track">
+          <div class="lane-fill"></div><div class="lane-dust"></div><div class="lane-runner"></div>
+        </div>
+        <div class="lane-time idle">—</div>
+      </div>
+    </div>
+
+    <p class="race-foot">The scale is compressed — run at the true ratio, the
+      last lane would take nearly three minutes to cross. The times beside each
+      lane are the measured ones. SQLite has no ANN index in core, so its lane
+      is a full scan; pgvector runs the same <code>m</code> and
+      <code>ef_construction</code> as fenecdb, and its figure carries a 0.40 ms
+      TCP round trip that no embedded engine pays.</p>
+    <button class="race-replay" type="button">Run it again</button>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit">
+  <div class="band-in">
+    <h2 class="rise">Five decisions, and what each one costs</h2>
+    <p class="lede rise">fenecdb is small because it gave things up. Here is what
+      it dropped, what that bought, and where the bill arrives.</p>
+
+    <div class="strata">
+      <div class="stratum">
+        <div class="stratum-k">no page cache</div>
+        <div class="stratum-v">
+          <p>The bytes on disk and the bytes in memory are the same format, so a
+            read decodes directly over the arena. No eviction policy, no dirty
+            pages, no warm-up.</p>
+          <p class="bill"><b>The bill:</b> the whole file is resident. Your data
+            has to fit in memory.</p>
+        </div>
+      </div>
+
+      <div class="stratum">
+        <div class="stratum-k">vectors in the core</div>
+        <div class="stratum-v">
+          <p><code>vector&lt;768&gt;</code> is a type, <code>@hnsw</code> is an
+            index, <code>near</code> is a clause. The planner knows about all
+            three, so a filter and a vector search are planned together rather
+            than stacked.</p>
+          <p class="bill"><b>The bill:</b> no JOINs, no subqueries, no
+            transactions. One collection at a time.</p>
+        </div>
+      </div>
+
+      <div class="stratum">
+        <div class="stratum-k">zero dependencies</div>
+        <div class="stratum-v">
+          <p>Own codec, own JSON, own HNSW, own lexer and parser, own SCRAM. The
+            core is <code>std</code> and nothing else, which is why the
+            WebAssembly output is 302 KB and auditable in an afternoon.</p>
+          <p class="bill"><b>The bill:</b> every bug is ours.</p>
+        </div>
+      </div>
+
+      <div class="stratum">
+        <div class="stratum-k">single writer</div>
+        <div class="stratum-v">
+          <p>Reads take a shared lock, writes the exclusive one. That is what
+            removes MVCC row headers, the WAL and the visibility map — and why
+            the file is 2.5× smaller than the same data under pgvector.</p>
+          <p class="bill"><b>The bill:</b> one process per file. Two writers
+            corrupt it.</p>
+        </div>
+      </div>
+
+      <div class="stratum">
+        <div class="stratum-k">limits error</div>
+        <div class="stratum-v">
+          <p>A <code>near</code> result caps at 10 000 rows and expression depth
+            at 512 levels. Both return a query error rather than a shortened
+            result, because a silently cut answer is a wrong answer believed
+            right.</p>
+          <p class="bill"><b>The bill:</b> you will meet an error where another
+            engine would have handed you something.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="band-in">
+    <h2 class="rise">Everything else, measured</h2>
+    <p class="lede rise">100 000 rows × 128 dimensions, clustered embeddings,
+      Apple M-series. All three engines bulk load first and index after, which is
+      the recommended order for each.</p>
+
+    <div class="tbl rise">
+      <table>
+        <thead>
+          <tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite 3.46</th><th class="n">PostgreSQL 17 + pgvector</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>data write, no index</td><td class="n"><b>900 k rows/s</b></td><td class="n">415 k/s</td><td class="n">64 k/s</td></tr>
+          <tr><td>index build</td><td class="n"><b>10.2 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">14.2 s HNSW</td></tr>
+          <tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
+          <tr><td>scalar filter, indexed</td><td class="n"><b>4.3 ms</b></td><td class="n">14.5 ms</td><td class="n">7.8 ms</td></tr>
+          <tr><td>vector top-10, exact</td><td class="n"><b>4.0 ms</b></td><td class="n">31.3 ms</td><td class="n">14.8 ms</td></tr>
+          <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n">100%</td></tr>
+          <tr><td>reopen</td><td class="n">117 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server stays open</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="split rise">
+      <div>
+        <h3>Where it loses</h3>
+        <p>SQLite reopens in 1 ms because it loads nothing and reads pages on
+          demand. fenecdb pulls the vector arena into memory and validates the
+          graph, which takes 117 ms. That is the same coin, other side: it is
+          why the queries are 3–171× faster. The break-even is four vector
+          queries.</p>
+      </div>
+      <div>
+        <h3>How to read the rest</h3>
+        <p>SQLite's 0.03 s is a single-column B-tree, not an ANN index. The cost
+          does not vanish, it moves to query time. PostgreSQL's disk figure is
+          MVCC row headers, WAL and the visibility map — the price paid for
+          concurrent transactions, which the single-writer model does not
+          need.</p>
+      </div>
+    </div>
+    <p><a href="docs/benchmarks.html">Full method, hardware and the ef/recall sweep</a></p>
+  </div>
+</section>
+
+<svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M0 40 C 180 72 320 26 490 52 C 670 80 800 32 980 58 C 1170 84 1300 40 1440 66 L1440 90 L0 90 Z" fill="#1B1233"/>
+</svg>
+
+<section class="band lit">
+  <div class="band-in">
+    <h2 class="rise">The query does not change when the transport does</h2>
+    <p class="lede rise"><code>db.from('notes')</code> builds the same FenecQL
+      wherever it is bound: to <a href="docs/javascript.html">WebAssembly in the
+      page</a>, to the <a href="docs/http.html">HTTP endpoint</a>, to a
+      <a href="docs/postgres.html">PostgreSQL client</a>, or to a
+      <a href="docs/sync.html">local replica</a> syncing with a server.</p>
+
+    <div class="split rise">
+      <div>
+        <h3>In the browser</h3>
+        <p>Two files, no npm, no build step, no bundler.</p>
+<pre data-lang="js" data-label="page.html">import { Fenec, persist } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');
+db.run(`create collection notes (
+          body text,
+          embed vector<384> @hnsw(cosine))`);
+
+await db.from('notes').insert({ body, embed });
+
+const near = await db.from('notes')
+  .near('embed', queryVector)
+  .limit(5)
+  .rows();
+
+await persist(db);     // into IndexedDB
+</pre>
+      </div>
+
+      <div>
+        <h3>On a server</h3>
+        <p>One process, one file, both listeners.</p>
+<pre data-lang="bash" data-label="shell">fenec-pg --file data.fenec \
+         --listen 127.0.0.1:5433 \
+         --http   127.0.0.1:8080
+
+psql -h 127.0.0.1 -p 5433 -c 'get notes limit 5'
+
+curl 'http://127.0.0.1:8080/notes?year=gte.2024&limit=10'
+
+curl -N 'http://127.0.0.1:8080/notes/changes'
+# event: seed
+# data: {"seq":12,"rows":[...]}
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="band-in">
+    <h2 class="rise">Whether this is the right database for you</h2>
+    <div class="strata">
+      <div class="stratum">
+        <div class="stratum-k">reach for it</div>
+        <div class="stratum-v">
+          <p>When vector search has to be first-class and the database should run
+            on the user's machine: local semantic search, offline retrieval,
+            agent memory in the browser, an embedded recommender that ships
+            inside the app.</p>
+        </div>
+      </div>
+      <div class="stratum">
+        <div class="stratum-k">reach for SQLite</div>
+        <div class="stratum-v">
+          <p>When you need relational data, JOINs, transactional safety and a
+            mature toolchain. Also for very short-lived processes: a tool that
+            runs four queries and exits never amortises fenecdb's open cost.</p>
+        </div>
+      </div>
+      <div class="stratum">
+        <div class="stratum-k">reach for PostgreSQL</div>
+        <div class="stratum-v">
+          <p>When several writers share the data over a network and need ACID. On
+            maturity, concurrency and ecosystem the comparison is not worth
+            making. That is exactly why <code>fenec-pg</code> exists — not to
+            replace PostgreSQL, but to let you reach fenecdb with the same
+            tools.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="hero-cta rise" style="margin-top:52px">
+      <a class="btn btn-fill" href="docs/quickstart.html">Quickstart</a>
+      <a class="btn btn-line" href="docs/fenecql.html">The query language</a>
+    </p>
+  </div>
+</section>

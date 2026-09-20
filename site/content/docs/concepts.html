@@ -1,0 +1,207 @@
+<!--
+title: How it works — fenecdb
+description: Segments, the offset index, HNSW with a filter, half precision, and why fenecdb has no page cache and exactly one writer.
+-->
+
+<h1>How it works</h1>
+<p class="kicker">Six decisions carry the whole engine. Each one bought
+something and cost something, and both halves are written down here.</p>
+
+<h2>No page cache</h2>
+
+<p>Classic databases cut the disk into pages and copy those pages into a cache
+in user space. The eviction policy, dirty-page tracking, checkpoints and most
+of the locking cost all follow from that one structure.</p>
+
+<p>fenecdb skips the layer:</p>
+
+<ul>
+  <li>Segments are <b>immutable</b>. A write only appends to the active one,
+    which is sealed at 8 MiB.</li>
+  <li>The byte sequence on disk and the byte sequence in memory are <b>the same
+    format</b>, so there is no caching stage — a read decodes directly over the
+    arena slice.</li>
+  <li>The only helper structure is the <code>HashMap&lt;DocId, Loc&gt;</code>
+    offset index.</li>
+  <li>Projection and filters decode a single field; the fields in front of it
+    are skipped without allocating.</li>
+</ul>
+
+<p>No eviction policy, no dirty pages, no warm-up. Dead bytes are reclaimed by
+<code>compact</code>.</p>
+
+<p><b>What it costs.</b> The whole file is resident — not just the vector
+arena. Open peak is about 2× the file, and <code>compact</code> or
+<code>checkpoint</code> peaks at about 3×. Scale is bounded by memory, and the
+numbers are in <a href="limits.html#memory-and-scale">Limits</a>.</p>
+
+<h2>Vectors are first-class</h2>
+
+<p><code>vector&lt;N&gt;</code> is a type, <code>@hnsw</code> is an index,
+<code>near</code> is a clause. Not a plugin — the language itself.</p>
+
+<pre data-lang="fenecql">get articles where year >= 2024 near embed $1 ef 200 limit 10
+get articles near embed $1 exact limit 10        -- exact scan, for verification
+</pre>
+
+<ul>
+  <li>HNSW is written in-house. Every vector lives in one contiguous arena.</li>
+  <li>Under the cosine metric vectors are normalised inside the index, so the
+    query reduces to a dot product.</li>
+  <li>Neighbour selection uses the diversity heuristic (Malkov &amp; Yashunin,
+    Algorithm 4). Taking only the <code>m</code> nearest candidates trapped the
+    graph in local clusters and lowered recall.</li>
+  <li>The read-only part of the build — descent, beam search, neighbour
+    selection — runs in parallel over a batch; only writing the links is
+    serial. The result is independent of thread count and
+    <b>deterministic</b>.</li>
+  <li>The graph is written to the file, but only <b>the links, not the
+    vectors</b>: the vectors are already in the document records, and the
+    expensive part is the build.</li>
+</ul>
+
+<h3>A filter and a vector together</h3>
+
+<p>The filter set is extracted first. Then one of two paths runs:</p>
+
+<ul>
+  <li>if the set is smaller than the candidate count an ANN walk would measure
+    anyway (<code>ef × m0</code>), that set is scanned directly — cheaper, and
+    exact;</li>
+  <li>otherwise the ANN runs and candidates go through a membership test. If
+    the result lands under the limit, the filter set is scanned in full.</li>
+</ul>
+
+<div class="note">
+  <p><b>The fallback is not an optimisation, it is required.</b> The membership
+  test is applied <i>after</i> the candidates are gathered. When the filter
+  field correlates with the vector, every one of the <code>ef</code> nearest
+  neighbours can be eliminated and the query would return empty while thousands
+  of documents match.</p>
+</div>
+
+<h3>Half precision</h3>
+
+<p>Precision is part of the type, not of the index — the same choice pgvector
+makes with <code>halfvec</code>. That shrinks the record and the arena
+together; as an index option only the arena would shrink, and in the browser
+the file image is in memory too.</p>
+
+<pre data-lang="fenecql">create collection docs (embed vector&lt;768, f16&gt; @hnsw(cosine))
+</pre>
+
+<p>The runtime representation does not change: values are <code>f32</code>
+everywhere and conversion happens only at the storage boundary. Same data,
+100 000 × 128:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">vector&lt;128&gt;</th><th class="n">vector&lt;128, f16&gt;</th></tr></thead>
+<tbody>
+<tr><td>vector arena</td><td class="n">51.2 MB</td><td class="n"><b>25.6 MB</b></td></tr>
+<tr><td>file image</td><td class="n">57.9 MB</td><td class="n"><b>32.3 MB</b></td></tr>
+<tr><td>index build</td><td class="n"><b>10.4 s</b></td><td class="n">12.5 s</td></tr>
+<tr><td>ANN p50</td><td class="n"><b>0.127 ms</b></td><td class="n">0.147 ms</td></tr>
+<tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">99.6%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The cost is arithmetic: distance over an f16 arena unpacks inside the loop.
+Two things were measured and fixed. The expansion has to be branchless — the
+first version called the exact conversion in <code>codec</code>, whose
+subnormal branch killed auto-vectorisation and made the build five times slower
+(52 s); the branchless version is one multiply and is bit-identical over all
+65 536 values. And the fixed side of the diversity loop is unpacked once
+rather than per comparison: 22.6 s down to 12.4 s.</p>
+
+<p>The win is at the memory boundary. One million 768-dimension vectors take
+about 3 GB as <code>f32</code> and about 1.5 GB as <code>f16</code>. In
+WASM32's 4 GB address space that is the difference between fitting and not.
+Embedding model output sits comfortably inside the f16 range (±65 504, roughly
+three decimal digits) and the measured recall loss is 0.3 points.</p>
+
+<h2 id="bulk-load-first-index-after">Bulk load first, index after</h2>
+
+<p>Writing the index during the load makes every insert a graph mutation.
+Building it afterwards turns the write path into a pure append and builds the
+graph in one parallel pass.</p>
+
+<pre data-lang="fenecql">create collection docs (title text, embed vector&lt;768&gt;)
+put docs [ ... 100 000 documents ... ]
+create index on docs (embed) @hnsw(cosine)
+</pre>
+
+<p>This is already the recommended order for SQLite and PostgreSQL. In fenecdb
+<code>create index</code> exists for exactly this reason, and the comparison in
+<a href="benchmarks.html">Benchmarks</a> uses that order for all three engines.</p>
+
+<h2>Zero dependencies</h2>
+
+<p>The core uses <code>std</code> and nothing else: its own binary codec, its
+own JSON, its own HNSW, its own lexer and parser, its own SCRAM. The reason is
+the WebAssembly output — it has to stay small and auditable.</p>
+
+<p>The rule covers <code>fenec-core</code>, <code>fenec-ql</code>,
+<code>fenec-wasm</code>, <code>fenec-http</code>, <code>fenec-pg</code> and
+<code>fenec-import</code>. <code>fenec-core</code> does dev-depend on
+<code>fenec-ql</code>, which Cargo permits through a dev dependency, so tests
+can be written as real queries.</p>
+
+<p><b>What it costs.</b> Every bug is ours, and so is every protocol detail.
+The server and client halves of SCRAM are both hand-written, which at least
+means they test each other.</p>
+
+<h2>Straight into the browser</h2>
+
+<p><code>fenec-wasm</code> exposes a C ABI and there is no
+<code>wasm-bindgen</code>. The glue is about 165 lines of JavaScript inside
+<code>web/fenec.js</code>, alongside the query builder, the HTTP client and the
+sync layer — one dependency-free ES module.</p>
+
+<p><code>persist(db)</code> and <code>restore(db)</code> move the snapshot in
+and out of IndexedDB.</p>
+
+<div class="note">
+  <p><b>Threads are compiled out of wasm32.</b> The parallel HNSW build path
+  must not enter that target. <code>now()</code> errors there too —
+  wasm32-unknown-unknown has no clock, so time is passed in as a parameter.</p>
+</div>
+
+<h2>Single writer</h2>
+
+<p>Reads take a shared lock (<code>Database::query</code>), writes take the
+exclusive one (<code>execute_with</code>). There are no transactions;
+<code>BEGIN</code> and <code>COMMIT</code> are accepted and do nothing.</p>
+
+<p>That is what removes MVCC row headers, the WAL and the visibility map, and
+it is why the file is 2.5× smaller than the same data under pgvector.</p>
+
+<div class="note trap">
+  <p><b>Two processes opening the same file corrupts it.</b> This is why the
+  HTTP endpoint is a second listener inside <code>fenec-pg</code> and never its
+  own binary — one process, one file, one sync policy, one shutdown signal.</p>
+</div>
+
+<p>Concurrency still exists on the read side. HNSW search buffers are kept
+thread-locally so the same index can be searched in parallel; eight concurrent
+full scans on eight cores measured a 4.3× speed-up.</p>
+
+<h2>The replica is an endpoint, not a library</h2>
+
+<p>Because the same engine runs in the browser and on the server, the
+local-copy architecture needed no new layer — only two things: the server being
+able to say "these changed", and the client being able to choose where to bind
+a query. <code>bind()</code> already existed, and the first was sitting in the
+file format, because the file is already a change log.</p>
+
+<pre data-lang="js">const db = await sync({ url, shapes: [{ collection: 'tasks', key: 'key' }] });
+await db.from('tasks').where('priority', '>=', 3).rows();   // local, no network
+</pre>
+
+<p>It is TanStack DB's model with two differences. There is <b>no incremental
+dataflow</b>: there a collection is a <code>Map</code>, and re-running a filter
+on every keystroke over a large set is unacceptable — here the local side is
+indexed and the query is already under a millisecond. And <b>a shape is
+mandatory</b>: the whole database is in memory, so the client cannot pull all
+of it. Details in <a href="sync.html">Sync</a>.</p>

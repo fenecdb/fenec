@@ -1,0 +1,226 @@
+<!--
+title: Benchmarks — fenecdb
+description: fenecdb against SQLite and pgvector on the same data in the same process, the method behind the numbers, and the ef/recall trade-off.
+-->
+
+<h1>Benchmarks</h1>
+<p class="kicker">Every number here comes from <code>crates/fenec-bench</code>
+and can be reproduced with a make target. The method is written out below the
+table, because a number without one is a claim, not a measurement.</p>
+
+<h2>Against SQLite and pgvector</h2>
+
+<p>Same data, same process, same distance kernel. SQLite 3.46 and PostgreSQL
+17 with pgvector 0.8.6, on an Apple M-series, 100 000 rows × 128 dimensions
+with clustered embeddings.</p>
+
+<pre data-lang="bash">make pgvector-up      # start PostgreSQL + pgvector in Docker
+make compare          # without it, that arm is skipped
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<tbody>
+<tr><td>data write, no index</td><td class="n"><b>900 k rows/s</b></td><td class="n">415 k/s</td><td class="n">64 k/s</td></tr>
+<tr><td>index build</td><td class="n"><b>10.2 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">14.2 s HNSW</td></tr>
+<tr><td>total</td><td class="n">10.3 s</td><td class="n"><b>0.27 s</b>, no ANN</td><td class="n">15.7 s</td></tr>
+<tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
+<tr><td>scalar filter, indexed</td><td class="n"><b>4.3 ms</b></td><td class="n">14.5 ms</td><td class="n">7.8 ms</td></tr>
+<tr><td>vector top-10, <b>exact</b></td><td class="n"><b>4.0 ms</b></td><td class="n">31.3 ms</td><td class="n">14.8 ms</td></tr>
+<tr><td>vector top-10, <b>approximate</b></td><td class="n"><b>0.18 ms</b></td><td class="n">none</td><td class="n">0.91 ms</td></tr>
+<tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n"><b>100%</b></td></tr>
+<tr><td>reopen</td><td class="n">117 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server, always open</td></tr>
+<tr><td>empty query round trip</td><td class="n">0, embedded</td><td class="n">0, embedded</td><td class="n">0.49 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Method</h2>
+
+<ul>
+  <li>All three follow the same workflow: <b>bulk load first, index after</b>.
+    That is already the recommended order for SQLite and PostgreSQL; in fenecdb
+    <code>create index</code> exists for exactly this.</li>
+  <li><b>SQLite</b>: WAL with <code>synchronous=NORMAL</code>, the bulk write
+    in one transaction, the index built afterwards. fenecdb does not
+    <code>fsync</code> per write.</li>
+  <li><b>PostgreSQL</b>: in Docker, bulk load with COPY, then
+    <code>hnsw (m=16, ef_construction=200)</code> — the same parameters as
+    fenecdb. At query time <code>hnsw.ef_search = 64</code>, again matching
+    fenecdb's setting.</li>
+  <li>Vector distance is computed by the same code in all three. What is
+    measured is the engine's cost of <i>fetching the data</i>, not the
+    arithmetic.</li>
+  <li>SQLite's core has no ANN index, so a vector search there is a full scan.
+    The comparison is therefore <b>exact against exact</b> first, with ANN on a
+    separate row.</li>
+  <li>The write is split in two stages, rows and index. A single "total" would
+    weigh an engine that builds an ANN index and one that does not on the same
+    scale.</li>
+  <li>The PostgreSQL figures include a 0.40 ms TCP round trip, about 40% of its
+    ANN time. That is not a measurement flaw, it is the client-server
+    architecture.</li>
+</ul>
+
+<h2>How to read the numbers</h2>
+
+<p><b>fenecdb leads on raw write speed:</b> 900 k rows/s, more than twice
+SQLite's. The append-only segment store reduces a write to appending to an
+arena — no B-tree rebalancing, no page splits.</p>
+
+<p><b>It leads on index build too</b>, 10.2 s against pgvector's 14.2 s at the
+same <code>m</code> and <code>ef_construction</code>. SQLite's 0.03 s is not an
+ANN index but a single-column B-tree; that cost does not vanish, it is deferred
+to query time, where a vector search takes 31.3 ms — 171× slower than fenecdb's
+ANN.</p>
+
+<p><b>The one real loss is reopen.</b> SQLite opens in 1 ms because it loads
+nothing, reading pages as it needs them. fenecdb pulls the vector arena into
+memory and validates the graph: 117 ms. That is not a shortcoming but the other
+side of the same coin — it is why queries are 3–171× faster. The measured
+break-even is <b>four vector queries</b>; after that fenecdb is ahead on the
+total.</p>
+
+<p><b>fenecdb leads on disk as well</b>, 2.5× smaller than pgvector.
+PostgreSQL's extra is MVCC row headers, WAL and the visibility map: the price
+of concurrent transactions. The single-writer model does not need it.</p>
+
+<h2>Scale measurement</h2>
+
+<p>Apple M-series, single thread, <code>--release</code>. 100 000 documents ×
+128 dimensions, clustered embedding distribution.</p>
+
+<pre data-lang="bash">make bench
+cargo run --release -p fenec-core --example bench
+</pre>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td>write</td><td class="n"><b>9 478 documents/s</b> (10.6 s), HNSW indexing included, 8 cores</td></tr>
+<tr><td>storage</td><td class="n">52.7 MB · 527 bytes/document · 7 segments · no page cache</td></tr>
+<tr><td>ANN k=10</td><td class="n">p50 <b>0.139 ms</b> · p95 0.202 ms · p99 0.226 ms</td></tr>
+<tr><td>ANN with a filter</td><td class="n">p50 <b>0.239 ms</b>, candidate set n/4</td></tr>
+<tr><td>recall@10</td><td class="n"><b>100%</b> against an exact scan</td></tr>
+<tr><td>snapshot</td><td class="n">38 ms, producing 58.4 MB with the graph, +11%</td></tr>
+<tr><td>reopen</td><td class="n"><b>110 ms</b>, the graph validated and restored</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Without a persisted graph, reopening the same data takes 10.2 seconds —
+the index is rebuilt from scratch, which would make a page refresh in the
+browser unusable. The graph record makes that roughly 90× faster and costs 11%
+more space in the image, 52.1 MB to 57.9 MB.</p>
+
+<h2>The ef and recall trade-off</h2>
+
+<pre data-lang="bash">cargo run --release -p fenec-core --example bench -- 100000 128 --ef 200
+make sweep      # walks the trade-off on both distributions
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th class="n">ef (search)</th><th class="n">recall@10</th><th class="n">ANN p50</th></tr></thead>
+<tbody>
+<tr><td class="n">64</td><td class="n">99.0%</td><td class="n">0.100 ms</td></tr>
+<tr><td class="n"><b>100</b> (default)</td><td class="n"><b>100%</b></td><td class="n">0.131 ms</td></tr>
+<tr><td class="n">128</td><td class="n">100%</td><td class="n">0.169 ms</td></tr>
+<tr><td class="n">160</td><td class="n">100%</td><td class="n">0.172 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The default is 100: recall is complete and it is still roughly 7× faster
+than the engines compared above. It is tunable per query —
+<code>get docs near embed $1 ef 200 limit 10</code> — and
+<code>exact</code> performs a full scan when you want ground truth.</p>
+
+<div class="note">
+  <p><code>--example sweep</code> walks the same trade-off on both
+  distributions, but its latency column is the mean over 50 cold queries, so
+  the two tables are not directly comparable.</p>
+</div>
+
+<p>On uniformly random vectors — the pathological case for any ANN index, where
+in 128 dimensions all distances converge and no neighbourhood structure
+survives — recall at the same <code>ef</code> is around 82%. Real embedding
+models output clustered data. <code>--uniform</code> measures that worst case
+deliberately.</p>
+
+<h3>Build-side tuning</h3>
+
+<p>100 000 × 128, single-threaded measurement:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th class="n">ef_construction</th><th class="n">build</th><th class="n">recall@10</th></tr></thead>
+<tbody>
+<tr><td class="n">64</td><td class="n">6 450 rows/s</td><td class="n">94.0%</td></tr>
+<tr><td class="n">100</td><td class="n">5 849 rows/s</td><td class="n">98.5%</td></tr>
+<tr><td class="n"><b>200</b> (default)</td><td class="n">4 929 rows/s</td><td class="n"><b>99.0%+</b></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>If write speed matters more than the last point of recall,
+<code>@hnsw(cosine, ef_construction=100)</code> gains 19%.</p>
+
+<h2>Half precision</h2>
+
+<p>Same data, 100 000 × 128, clustered. The trade is explained in
+<a href="concepts.html#half-precision">How it works</a>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">vector&lt;128&gt;</th><th class="n">vector&lt;128, f16&gt;</th></tr></thead>
+<tbody>
+<tr><td>vector arena</td><td class="n">51.2 MB</td><td class="n"><b>25.6 MB</b></td></tr>
+<tr><td>file image</td><td class="n">57.9 MB</td><td class="n"><b>32.3 MB</b></td></tr>
+<tr><td>index build</td><td class="n"><b>10.4 s</b></td><td class="n">12.5 s</td></tr>
+<tr><td>ANN p50</td><td class="n"><b>0.127 ms</b></td><td class="n">0.147 ms</td></tr>
+<tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">99.6%</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Memory</h2>
+
+<pre data-lang="bash">make memory       # for calibrating --max-memory
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">measured footprint</th><th class="n">peak RSS</th><th class="n">ratio</th></tr></thead>
+<tbody>
+<tr><td>100 000 × 128</td><td class="n">128.2 MB</td><td class="n">172.9 MB</td><td class="n">74%</td></tr>
+<tr><td>200 000 × 4</td><td class="n">57.6 MB</td><td class="n">97.2 MB</td><td class="n">59%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The footprint is an early warning rather than a guarantee. A third of the
+container memory is a sensible <code>--max-memory</code>: it covers both this
+60–75% ratio and <code>compact</code>'s 3× peak. Details in
+<a href="limits.html#memory-and-scale">Limits</a>.</p>
+
+<h2>Binary size</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Build</th><th class="n">Size</th></tr></thead>
+<tbody>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">863 KB</td></tr>
+<tr><td><code>--no-default-features</code>, no import</td><td class="n">717 KB</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>636 KB</b></td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>302 KB</b></td></tr>
+<tr><td>container image, scratch + musl</td><td class="n">1.55 MB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>fenec-pg</code> stays on the <code>release</code> profile on purpose:
+a connection thread that panics unwinds and takes down only its own session,
+and the server stays up. The <code>cli</code> profile turns panic unwinding
+into abort, which is right for a single process with nothing to recover.</p>

@@ -6,6 +6,12 @@ Minimal, vector-native, browser-resident embedded database. Written in Rust,
 compiles to WebAssembly, has its own query language (**FenecQL**) and speaks the
 PostgreSQL protocol.
 
+**[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
+home page boots the real WebAssembly module and builds an HNSW index in your
+browser, then races the result against the measured SQLite and pgvector numbers.
+Source in [`site/`](site/): `make site-serve` runs it locally, `make site-deploy`
+publishes it to Cloudflare Workers.
+
 ```
 create collection articles (
   title     text,

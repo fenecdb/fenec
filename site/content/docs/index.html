@@ -1,0 +1,114 @@
+<!--
+title: fenecdb documentation
+description: A minimal, vector-native embedded database written in Rust. What it is, what it gave up, and where to start.
+-->
+
+<h1>Documentation</h1>
+<p class="kicker">fenecdb stores rows and embeddings in one file, indexes them
+with HNSW, and answers queries from inside a browser tab — or from a process
+that speaks the PostgreSQL wire protocol.</p>
+
+<p>Everything below describes the engine as it is built today. Where something
+costs you a capability, that cost is stated next to the feature rather than at
+the bottom of the page.</p>
+
+<ul class="cards">
+  <li><a href="quickstart.html">Quickstart</a>
+    <p>Build it, open a file, write a vector query. Five minutes from clone.</p></li>
+  <li><a href="concepts.html">How it works</a>
+    <p>Segments, the offset index, HNSW, and why there is no page cache.</p></li>
+  <li><a href="fenecql.html">FenecQL</a>
+    <p>The language: statements, types, operators, indexes, parameters.</p></li>
+  <li><a href="javascript.html">JavaScript</a>
+    <p>The browser client, the query builder and generated TypeScript types.</p></li>
+  <li><a href="http.html">HTTP endpoint</a>
+    <p>A REST surface derived from the schema, plus a subscription stream.</p></li>
+  <li><a href="sync.html">Sync</a>
+    <p>A local replica that reads without the network and writes optimistically.</p></li>
+  <li><a href="postgres.html">PostgreSQL server</a>
+    <p>Wire-protocol compatibility, authentication, durability, cancellation.</p></li>
+  <li><a href="benchmarks.html">Benchmarks</a>
+    <p>Numbers against SQLite and pgvector, with the method that produced them.</p></li>
+</ul>
+
+<h2>What it is</h2>
+
+<p>One file. Records are appended to immutable 8 MiB segments and the byte
+sequence on disk is the byte sequence in memory, so a read decodes directly
+over the arena. A <code>HashMap&lt;DocId, Loc&gt;</code> offset index is the
+only helper structure in the whole store.</p>
+
+<p>Vectors are not bolted on. <code>vector&lt;N&gt;</code> is a type,
+<code>@hnsw</code> is an index, <code>near</code> is a query clause, and the
+planner knows about all three — so a scalar filter and a vector search are
+planned together rather than stacked on each other.</p>
+
+<pre data-lang="fenecql">create collection articles (
+  title     text,
+  tags      [text],
+  year      int   @hash,
+  embed     vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
+)
+
+get articles select title
+  where year >= 2024 and tags has "rust"
+  near embed $1
+  limit 10
+</pre>
+
+<h2>What it gave up</h2>
+
+<p>The list is short and none of it is coming back. These are consequences of
+the design, not a roadmap.</p>
+
+<ul>
+  <li><b>No transactions.</b> <code>BEGIN</code> and <code>COMMIT</code> are
+    accepted and do nothing. There is one writer.</li>
+  <li><b>No JOIN and no subqueries.</b> A query reads one collection.</li>
+  <li><b>No SQL.</b> <code>fenec-pg</code> is compatible at the transport
+    layer, not the language.</li>
+  <li><b>No schema migration</b> and no multi-writer replication.</li>
+  <li><b>No decimal type.</b> <code>float</code> is binary floating point and
+    unfit for money; the answer is an <code>int</code> in cents.</li>
+  <li><b>No nested objects.</b> A list is homogeneous and an object value is
+    refused. A field you want to filter on should be a field.</li>
+</ul>
+
+<p>The full accounting, including every hard-coded ceiling, is in
+<a href="limits.html">Limits</a>.</p>
+
+<h2>Where it runs</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
+<tbody>
+<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">302 KB wasm</td></tr>
+<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code></td><td class="n">636–863 KB</td></tr>
+<tr><td>Server</td><td><code>fenec-pg</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">1.55 MB image</td></tr>
+<tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>How the crates fit together</h2>
+
+<p>Dependencies point one way. Nothing points back up.</p>
+
+<pre data-lang="text">fenec-core   storage, HNSW, plan executor, plugins, JSON, calendar, changes
+     |       std only, zero dependencies
+fenec-ql     FenecQL lexer and parser              fenec-wasm   browser ABI
+     |                                                          (no wasm-bindgen)
+fenec-http   REST/JSON surface and SSE subscriptions
+     |
+fenec-pg     PostgreSQL v3 wire protocol — server and client
+     |
+fenec-import SQLite file reader, PostgreSQL COPY source
+     |
+fenec-cli    the `fenec` shell
+</pre>
+
+<p><code>fenec-bench</code> is a measurement harness and the only crate allowed
+external dependencies — that is where <code>rusqlite</code> and
+<code>postgres</code> live, so the comparisons in
+<a href="benchmarks.html">Benchmarks</a> can run against the real engines.</p>

@@ -1,0 +1,130 @@
+<!--
+title: Import — fenecdb
+description: Build a collection from SQLite or a live PostgreSQL server in one command. Schema derivation, vector columns, type mapping and filtering.
+-->
+
+<h1>Import</h1>
+<p class="kicker">One command turns an existing database into a fenecdb
+collection: it derives the schema, recognises vector columns and follows the
+bulk-load-then-index order by itself.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
+    --vector embed:384 --index "embed@hnsw(cosine)"
+
+fenec import postgres://user@host:5432/database --table docs \
+    --into articles --index "embed@hnsw(cosine)"
+</pre>
+
+<h2>Look before you write</h2>
+
+<p><code>--dry-run</code> prints the derived schema and any warnings, and
+writes nothing.</p>
+
+<pre data-lang="text">$ fenec import data.sqlite --table docs --into articles --vector embed:3 --dry-run
+source   data.sqlite -> docs
+target   articles.fenec -> articles
+
+create collection articles (
+  title     text           &lt;- text
+  category  text           &lt;- text
+  score     int            &lt;- int
+  published timestamp      &lt;- datetime
+  embed     vector&lt;3&gt;      &lt;- blob
+)
+  id  &lt;- id (INTEGER PRIMARY KEY)
+create index on articles (embed) @hnsw(cosine, m=16, ef_construction=200, ef_search=100)
+</pre>
+
+<p><code>--count</code> also prints how many rows will be read. It is a
+separate flag because counting means a full scan: SQLite keeps the row count
+nowhere and <code>count(*)</code> in PostgreSQL reads the table from the start.
+Silently reading everything twice would be a bad default.</p>
+
+<h2>Sources</h2>
+
+<h3>SQLite</h3>
+
+<p>The file format is read directly — neither the <code>sqlite3</code> library
+nor the binary is needed. <code>INTEGER PRIMARY KEY</code> becomes the document
+id, <code>--vector field:N</code> turns little-endian <code>f32</code> BLOBs
+into <code>vector&lt;N&gt;</code>, and untyped columns are resolved from the
+first 1000 rows.</p>
+
+<h3>PostgreSQL</h3>
+
+<p>It connects to the live server and streams
+<code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
+<code>pg_dump</code>. Authentication is SCRAM-SHA-256, using
+<code>fenec-pg</code>'s own crypto in the client direction. pgvector's
+<code>vector</code> and <code>halfvec</code> columns are recognised along with
+their dimensions.</p>
+
+<h2>Type mapping</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Source</th><th>fenecdb</th></tr></thead>
+<tbody>
+<tr><td><code>integer</code> <code>bigint</code> <code>int2/4/8</code></td><td><code>int</code></td></tr>
+<tr><td><code>real</code> <code>double</code> <code>float4/8</code></td><td><code>float</code></td></tr>
+<tr><td><code>text</code> <code>varchar</code> <code>char</code> <code>clob</code></td><td><code>text</code></td></tr>
+<tr><td><code>blob</code> <code>bytea</code></td><td><code>bytes</code></td></tr>
+<tr><td><code>boolean</code></td><td><code>bool</code></td></tr>
+<tr><td><code>date</code> <code>datetime</code> <code>timestamp(tz)</code></td><td><code>timestamp</code></td></tr>
+<tr><td><code>int[]</code> <code>float[]</code> <code>text[]</code></td><td><code>[int]</code> <code>[float]</code> <code>[text]</code></td></tr>
+<tr><td><code>vector(N)</code> <code>halfvec(N)</code></td><td><code>vector&lt;N&gt;</code> <code>vector&lt;N, f16&gt;</code></td></tr>
+<tr><td><code>uuid</code></td><td><code>text</code></td></tr>
+<tr><td><b><code>numeric</code> <code>decimal</code></b></td><td>no equivalent — <code>--cast</code> required</td></tr>
+<tr><td><b><code>json</code> <code>jsonb</code></b></td><td>no equivalent — <code>--cast</code> required</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Types without an equivalent are not silently rounded: say what you want with
+<code>--cast &lt;field&gt;=&lt;type&gt;</code>. On PostgreSQL,
+<code>--cast price=text</code> preserves a decimal exactly. In SQLite a
+<code>decimal</code> is already stored as an <code>int</code> or a
+<code>float</code> at the source, so the exact value is gone before the import
+starts.</p>
+
+<h2>Filtering</h2>
+
+<p><code>--where</code> is a <b>FenecQL expression</b> and behaves identically
+on both sources: it is applied after the row becomes a document and before it
+is written. The field names are the target schema's — the same expression you
+would later write with <code>get</code>.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
+    --where 'category = "book" and score >= 10 and tags has "rust"'
+</pre>
+
+<p>On PostgreSQL there is also <code>--source-where</code>, which goes into the
+<code>SELECT</code> inside the <code>COPY</code> so non-matching rows never
+travel over the wire. That one is <b>SQL, not FenecQL</b>. They are separate
+flags on purpose: one is a portable expression, the other a win pushed down to
+the source. Both can be used together.</p>
+
+<pre data-lang="bash">fenec import postgres://... --table docs --into articles \
+    --source-where "year >= 2024" --where 'tags has "rust"'
+</pre>
+
+<div class="note">
+  <p>With a local <code>--where</code> in place, <code>--limit</code> is not
+  pushed to the source: cutting on the server first and filtering locally
+  afterwards would yield fewer rows than asked for. <code>--limit</code> always
+  counts rows that <i>pass</i> the filter.</p>
+</div>
+
+<h2>Speed and testing</h2>
+
+<p>100 000 rows × 3 dimensions, index build included: about 3.1 s from either
+source. Every option is in <code>fenec import --help</code>.</p>
+
+<pre data-lang="bash">make import-test        # the PostgreSQL arm — needs Docker
+cargo test -p fenec-import --test pg -- --ignored
+</pre>
+
+<p>Import is a default feature of the <code>fenec</code> binary and accounts
+for 146 KB of it. <code>--no-default-features</code> removes it; with the
+<code>cli</code> profile as well, the binary drops from 863 KB to 636 KB
+(<code>make small</code>).</p>

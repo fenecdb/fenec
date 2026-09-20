@@ -1,0 +1,48 @@
+name: site
+
+# The website and docs deploy to Cloudflare Workers. The home page runs the
+# real engine, so the wasm module is built here and shipped with the assets.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'web/fenec.js'
+      - 'wrangler.jsonc'
+      - 'crates/fenec-wasm/**'
+      - 'crates/fenec-core/**'
+      - 'crates/fenec-ql/**'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins stable and asks for wasm32-unknown-unknown.
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: site-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: site-cargo-
+
+      - name: Build the wasm module and the site
+        run: make site
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -1,0 +1,264 @@
+<!--
+title: Limits — fenecdb
+description: What fenecdb deliberately does not do, every ceiling baked into the code, memory and scale characteristics, and the behaviour worth knowing before it surprises you.
+-->
+
+<h1>Limits</h1>
+<p class="kicker">Nothing on this page is a roadmap item. These are
+consequences of the design, hard-coded ceilings, and behaviours it is cheaper
+to read about than to discover.</p>
+
+<h2>Out of scope</h2>
+
+<p>Deliberately not done: transactions, JOIN, subqueries, schema migration,
+multi-writer replication, SQL.</p>
+
+<p>Replication exists in <b>one direction only</b>: the server is
+authoritative and clients read it. Multi-writer merging, CRDTs and a long-lived
+offline write queue are out of scope — that is what fits the single-writer
+model, and the other would be a different database.</p>
+
+<p>There are deliberate gaps in the type system too:</p>
+
+<ul>
+  <li><b>No decimal.</b> <code>float</code> is binary floating point and unfit
+    for money. The answer is an <code>int</code> in cents.</li>
+  <li><b>No UUID type.</b> <code>text @hash</code> is functionally
+    enough.</li>
+  <li><b>No nested objects.</b> A list is homogeneous and an object value is
+    refused on purpose. A field you want to filter on should be a field.</li>
+</ul>
+
+<h2>Fixed limits</h2>
+
+<p>Ceilings baked into the code. Exceeding the first two makes the query
+<b>error</b>, because a silently cut result is a wrong answer believed
+right.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Limit</th><th class="n">Value</th><th>Note</th></tr></thead>
+<tbody>
+<tr><td><code>near</code> result (<code>limit + offset</code>)</td><td class="n"><b>10 000 rows</b></td><td>a query error when exceeded; without <code>limit</code>, the default top-k applies</td></tr>
+<tr><td>expression depth</td><td class="n"><b>512 levels</b></td><td>parentheses <i>and</i> <code>and</code>/<code>or</code> chains count</td></tr>
+<tr><td>session stack (<code>fenec-pg</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
+<tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
+<tr><td>document payload, segment offset</td><td class="n">4 GiB</td><td>the location record is a <code>u32</code></td></tr>
+<tr><td>vector index node count</td><td class="n">2<sup>32</sup></td><td>the node id is a <code>u32</code>; memory runs out first in practice</td></tr>
+<tr><td>level-0 degree (<code>m0 = 2m</code>)</td><td class="n">65 535</td><td><code>u16</code> counter, so <code>m</code> ≤ 32 767</td></tr>
+<tr><td>bulk insert batch</td><td class="n">64–512 vectors</td><td><code>graph/16</code>, clamped to this range</td></tr>
+<tr><td>parallel build threshold</td><td class="n">1024 vectors</td><td>below it, the serial path</td></tr>
+<tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>
+<tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
+<tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
+<tr><td><code>fenec-pg</code> message size</td><td class="n">64 MiB</td><td><code>--max-message</code>; the protocol ceiling is 1 GiB</td></tr>
+<tr><td><code>fenec-pg</code> startup packet</td><td class="n">10 000 B</td><td>same as PostgreSQL; the only allocation before authentication</td></tr>
+<tr><td><code>fenec-pg</code> column / parameter count</td><td class="n">32 767</td><td>the protocol's <code>i16</code> counters</td></tr>
+<tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>
+<tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>; each is a connection and a thread</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Memory and scale</h2>
+
+<p><b>The whole database is in memory</b>, not just the vector arena: the
+segment bytes sit in RAM in their on-file form. That is the other side of
+saying there is no page cache, and it has three consequences.</p>
+
+<ul>
+  <li><b>Open peaks at about 2× the file.</b> The file is read in one go, then
+    copied into segments. Measured: a 30.5 MB vector-free file reaches 65.5 MB
+    peak RSS.</li>
+  <li><b><code>checkpoint</code> and <code>compact</code> peak at about 3×.</b>
+    The whole image is produced in memory and written to a side file. On the
+    same file: 95.8 MB.</li>
+  <li><b>Open cost is proportional to data size, not constant.</b> 100 000 ×
+    128 with the graph in the file takes about 110 ms. In a process that runs
+    fewer than five vector queries, SQLite gives the faster total.</li>
+</ul>
+
+<p>The vector arena is the largest item: one million 768-dimension vectors is
+about 3 GB, or 1.5 GB with <code>f16</code>. In the browser the WASM32 address
+space of 4 GB is the upper bound, and the 2–3× factors above come out of it
+too, so the real ceiling is lower.</p>
+
+<p><code>Database::memory_bytes()</code> sums the segment bytes, the offset
+indexes, the vector arenas and the graph links from counters, and
+<code>--max-memory</code> uses it. It is not RSS: allocator slack, HNSW build
+buffers, upper-level neighbour allocations (~3% of level 0) and the transient
+peaks all sit outside it.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">measured footprint</th><th class="n">peak RSS</th><th class="n">ratio</th></tr></thead>
+<tbody>
+<tr><td>100 000 × 128</td><td class="n">128.2 MB</td><td class="n">172.9 MB</td><td class="n">74%</td></tr>
+<tr><td>200 000 × 4</td><td class="n">57.6 MB</td><td class="n">97.2 MB</td><td class="n">59%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>So the ceiling is an early warning, not a guarantee. A third of the
+container memory is a sensible start: it covers both this 60–75% ratio and
+<code>compact</code>'s 3× peak.</p>
+
+<h2 id="index-build-open-and-maintenance">Index build, open and maintenance</h2>
+
+<ul>
+  <li><b>The graph is derived data and is written only during
+    <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code></b>
+    — never on the write path. Without it in the file it is rebuilt on open:
+    0.90 s every open at 20 000 × 32, against 0.01 s with it.</li>
+  <li>Who writes a checkpoint: the <code>fenec</code> shell when leaving an
+    interactive or piped session, and <code>fenec-pg</code> on the shutdown
+    signal — both only if a vector index exists.
+    <b>A one-shot <code>fenec file.fenec -c '...'</code> does not.</b> Neither
+    does <code>kill -9</code> or a cgroup OOM; the graph is then rebuilt on the
+    next open, so what is lost is derived data.</li>
+  <li><b><code>compact</code> is a full rebuild, not a garbage collection.</b>
+    Even with zero dead bytes every index is built from scratch and writes
+    block throughout: 20 000 × 32 takes 0.94 s, against 0.05 s on a
+    vector-free text collection of the same size.</li>
+  <li>A delete is a tombstone and the graph node stays in memory until
+    <code>compact</code>. Updating a document also marks the old node deleted
+    and adds a new one, so in collections whose vectors change, the graph grows
+    until compaction.</li>
+  <li>Documents inside one batch cannot see each other as neighbours. The batch
+    is 1/16 of the graph size (64–512), so there is no measured recall loss —
+    but very small collections fall to the serial path below 1024 vectors.</li>
+  <li>The build is parallel within a batch, and because writing links is serial
+    the speed-up is not linear in core count: about 1.9× on eight cores.</li>
+  <li>File writes are buffered. If the process crashes before
+    <code>sync</code> or <code>checkpoint</code>, the last writes can be lost.
+    In embedded use calling <code>sync</code> is the caller's job.</li>
+</ul>
+
+<h2>Query behaviour</h2>
+
+<ul>
+  <li><b>Only <code>@hash</code> equalities in an <code>and</code> chain reach
+    an index.</b> <code>&gt;=</code>, <code>~</code>, <code>has</code>,
+    <code>in</code> and anything under an <code>or</code> is a full scan: every
+    matching row is decoded and evaluated. There is no text index.</li>
+  <li>The cost of a filtered <code>near</code> is dominated by extracting the
+    filter set, not by the vector search. Of the ~6.5 ms measured on 100 000
+    documents, nearly all is the filter scan — an unfiltered ANN is 0.2 ms.
+    With a selective filter the exact-scan path is taken, so recall is
+    10/10.</li>
+  <li><b>There is no top-k for <code>order</code>.</b> The key of every
+    matching row is extracted and sorted, then <code>limit</code> applies. The
+    cost depends on the number of matches, not on <code>limit</code>.</li>
+  <li><code>near</code> and <code>order</code> cannot be used together;
+    <code>near</code> determines the ordering by similarity.</li>
+  <li>A query vector can be given three ways: a vector, a list, or pgvector's
+    text form (<code>near embed '[1,0,0]'</code>), which is the natural one
+    when typing by hand in psql. None of the three fails silently — unparsable
+    text and a non-numeric component both error.</li>
+  <li><b><code>put</code> does not check that a vector is finite.</b> A NaN or
+    infinite component enters the index and makes distances meaningless; the
+    check exists only on the <code>fenec import</code> path. In a
+    <code>vector&lt;N, f16&gt;</code> field an out-of-range value silently
+    becomes <code>inf</code> or drops to zero below about 6×10<sup>-8</sup>.</li>
+  <li><code>now()</code> does not work in the browser: wasm32-unknown-unknown
+    has no clock and the call errors. Pass the time as a parameter with
+    <code>Date.now()</code>.</li>
+</ul>
+
+<h2>fenec-pg</h2>
+
+<ul>
+  <li><b>No TLS.</b> The password is protected by SCRAM but the data flows in
+    the clear. Non-loopback plus unauthenticated listening is refused without
+    <code>--insecure</code>.</li>
+  <li><b>No transactions.</b> <code>BEGIN</code> and <code>COMMIT</code> are
+    accepted and do nothing. The single-writer model gives per-statement
+    atomicity.</li>
+  <li>A cancellation is seen while waiting on the lock and between batched
+    statements. A running statement, such as a long <code>compact</code>, is
+    not cut in the middle.</li>
+  <li><b>A ceiling, not a pool.</b> Every connection is an OS thread.
+    <code>--max-connections</code> rejects the excess with <code>53300</code>
+    rather than queueing it; put pgbouncer in front if you want a queue. When a
+    thread cannot be spawned only that connection drops, and an accept error is
+    not fatal either — though the server stops after 64 in a row.</li>
+  <li>An idle session lives <b>forever</b> by default.
+    <code>--idle-timeout &lt;s&gt;</code> applies both while waiting for the
+    next message and in the middle of a half-received one: both are signs of a
+    dropped connection.</li>
+  <li>Session threads get an <b>8 MiB</b> stack.
+    <code>thread::spawn</code>'s 2 MiB default leaves 2.7× headroom for a
+    512-level expression in release but is not enough in a debug build — and a
+    stack overflow is not a catchable panic, it is the process calling
+    <code>abort</code>. It is virtual space: with 100 idle connections the
+    measured RSS is 5.2 MB, about 36 KiB per connection.</li>
+  <li><b>The row count of <code>Execute</code> is ignored.</b> The portal
+    always runs to the end and no <code>PortalSuspended</code> is sent. Clients
+    using <code>fetch_size</code> or a named cursor get the whole result at
+    once.</li>
+</ul>
+
+<h2>fenec-http</h2>
+
+<ul>
+  <li><b>Not a separate process.</b> It opens as a second listener via
+    <code>fenec-pg --http</code>; there is no standalone binary, because two
+    processes opening the same file would corrupt it.</li>
+  <li>No TLS. Without a token it will not bind a non-loopback address. The
+    token is a single shared secret: no user separation, no scopes, no
+    expiry.</li>
+  <li><code>Transfer-Encoding: chunked</code> is unsupported (411). The body is
+    capped at 64 MiB and the header block at 64 KiB; above that, 413 or
+    431.</li>
+  <li>Pagination is <code>limit</code> and <code>offset</code> — no cursor, no
+    <code>Range</code> header. The response is built in one piece, so a very
+    large <code>select</code> holds that much memory on the server.</li>
+  <li>A field whose name matches a clause name (<code>select</code>,
+    <code>order</code>, <code>limit</code>, <code>offset</code>,
+    <code>count</code>, <code>where</code>) cannot be filtered from the query
+    string. <code>POST /query</code> and <code>fenec-pg</code> are
+    unaffected.</li>
+  <li>No <code>ETag</code>, no <code>Last-Modified</code>, no conditional
+    requests. Responses are not marked cacheable.</li>
+  <li><b>A subscription is one-way.</b> The server sends changes over SSE and
+    the client writes with ordinary <code>POST</code>, <code>PATCH</code> and
+    <code>DELETE</code>. There is no WebSocket; for the same job it would
+    demand framing, masking and ping/pong.</li>
+  <li>A subscription refuses <code>order</code>, <code>limit</code>,
+    <code>offset</code> and <code>count</code> with a 400: a shape is a set,
+    not a window, and an incremental diff cannot express a moving one.</li>
+  <li><b>A write to any collection wakes every subscriber.</b> That is a
+    necessity rather than noise: the counter and the ring are shared across
+    collections, so a subscriber to a quiet collection that did not wake would
+    keep its cursor in place and be reseeded once other writes overflowed the
+    ring. Waking moves the cursor forward, and no empty batch is sent for a
+    change that does not match the shape. The cost is one read lock and an
+    empty scan.</li>
+  <li><code>POST /batch</code> is not atomic. It stops at the first error and
+    reports how many were applied. There is no rollback.</li>
+</ul>
+
+<h2>Import</h2>
+
+<ul>
+  <li>One table becomes one collection. JOINs and multi-table migration are out
+    of scope — there is no JOIN in fenecdb anyway.</li>
+  <li><code>fenec import</code> is in the default build but is a separate
+    feature. A binary built with <code>--no-default-features</code> has no such
+    subcommand, and says so before exiting.</li>
+  <li><code>--where</code> sees only the built-in functions; plugin functions
+    cannot be used. The filter is evaluated without borrowing the target
+    database, so that writing can happen in the same loop.</li>
+  <li><b>A SQLite file with an unprocessed WAL is not read.</b> The main file
+    shows stale data and stopping beats silently returning it. Run
+    <code>sqlite3 &lt;db&gt; "PRAGMA wal_checkpoint(TRUNCATE)"</code> first.
+    <code>WITHOUT ROWID</code> tables are not read either.</li>
+  <li>No TLS, and no md5 authentication: scram-sha-256 or cleartext.</li>
+  <li>PostgreSQL <code>timestamp(tz)</code> values are truncated to
+    milliseconds.</li>
+  <li><b>A non-finite component in a vector column stops the import</b> and it
+    says which row. A NaN makes a distance incomparable; even if the index
+    accepted it, the result would be meaningless.</li>
+  <li>An import that stops halfway cannot be rolled back — there are no
+    transactions.</li>
+</ul>

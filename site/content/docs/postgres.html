@@ -1,0 +1,221 @@
+<!--
+title: PostgreSQL server — fenecdb
+description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation and running it in a container.
+-->
+
+<h1>PostgreSQL server</h1>
+<p class="kicker"><code>fenec-pg</code> speaks the PostgreSQL v3 wire protocol,
+so psql, psycopg, node-postgres, JDBC and pgbouncer all connect. What is
+compatible is the transport, not the language.</p>
+
+<pre data-lang="bash">fenec-pg --listen 127.0.0.1:5433 --file data.fenec
+
+psql -h 127.0.0.1 -p 5433 -U fenec
+# fenec=# get articles select title near embed '[0.1, 0.2]' limit 5;
+</pre>
+
+<p>fenecdb does not speak SQL. It does work with the connection tooling of the
+PostgreSQL ecosystem: vectors use the same text representation as pgvector
+(<code>[1,2,3]</code>) and errors map to SQLSTATE codes
+(<code>42P01</code>, <code>42601</code>, <code>42804</code>,
+<code>57014</code>).</p>
+
+<h2>Sessions</h2>
+
+<p>One thread per connection. Read-only statements run at the same time under a
+shared lock; writes take the exclusive one. HNSW search buffers are
+thread-local, so the same index can be searched in parallel — eight concurrent
+full scans on eight cores measured 4.3×.</p>
+
+<h2>Resource ceilings</h2>
+
+<p>One thread per connection means unlimited connections would leave the stack
+memory ceiling to the client.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th>Default</th><th>Behaviour above the ceiling</th></tr></thead>
+<tbody>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td><code>53300</code>, PostgreSQL's <i>sorry, too many clients already</i></td></tr>
+<tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td><code>57P05</code> on a session that has gone quiet</td></tr>
+<tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>the length is read before the body, so an oversized body is never allocated</td></tr>
+<tr><td>startup packet</td><td class="n">10 000 B</td><td>the same as PostgreSQL; the only allocation before authentication</td></tr>
+<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
+statements that <b>grow</b> the data are rejected while reads,
+<code>del</code> and <code>compact</code> keep working — hitting a ceiling with
+no way out would be no better than a cgroup OOM. The point is to bring the OOM
+forward: nobody warns you about a process felled by <code>SIGKILL</code>, and
+both the last sync and the checkpoint are lost with it. The measurement happens
+<i>before</i> the statement, so the overshoot is at most one statement, whose
+body <code>--max-message</code> bounds as well.</p>
+
+<h2>Durability</h2>
+
+<p>Writes accumulate in a 1 MB buffer. <code>--sync</code> decides when they
+reach the disk.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th><code>--sync</code></th><th>Meaning</th><th>Cost</th></tr></thead>
+<tbody>
+<tr><td><code>always</code></td><td><code>fsync</code> after every write statement</td><td class="n">~3 ms/write</td></tr>
+<tr><td><code>250</code> (default)</td><td>periodic; at most one interval is at risk</td><td class="n">negligible</td></tr>
+<tr><td><code>off</code></td><td>on shutdown only</td><td class="n">none</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
+and a final sync runs before exit. The exclusive lock is <b>held</b> until
+exit, so no write can be accepted between the sync and the exit and no write is
+left that looked successful to the client but never reached the disk. Sessions
+waiting on the lock do not wait for nothing — they come back with
+<code>57P01</code>. Under <code>kill -9</code> you get exactly what the chosen
+policy promised, and no more.</p>
+
+<h3>The shutdown checkpoint</h3>
+
+<p>After the sync, if a vector index exists, a checkpoint is written: the HNSW
+graph lands in the file and the next open does not rebuild it — 110 ms instead
+of 10.2 s at 100 000 × 128.</p>
+
+<p>The cost is that the whole image is produced in memory right then (peak
+about 3× the file) and that shutdown takes longer on a large database.
+<code>--no-checkpoint</code> turns it off.</p>
+
+<p>The order is deliberate. The sync comes first, so even if the process is
+killed while the checkpoint is being written, the data is already on disk and
+only the graph is lost. The rewrite goes to a side file and is renamed, so a
+half-written checkpoint cannot corrupt anything.</p>
+
+<h2>Health checks</h2>
+
+<pre data-lang="bash">fenec-pg --ping        # 0 means up
+</pre>
+
+<p>It connects, authenticates and exits — the same depth as
+<code>pg_isready</code>, and it deliberately runs no query. Every query takes
+the database lock first, so during a long <code>compact</code> the probe would
+wait too and a healthy server would look dead. Measured at roughly 100 ms.</p>
+
+<p>Because the listener binds <i>after</i> the file is opened, "healthy" also
+means "the index is ready" — a start period has to be long enough to cover the
+graph build.</p>
+
+<h2>Query cancellation</h2>
+
+<p><code>CancelRequest</code> is a real cancellation: the pending lock is
+released and the query returns <code>57014</code> at about 1 ms, with the
+connection still usable. A cancel arriving while idle, or one carrying the
+wrong secret key, is ignored.</p>
+
+<h2>Authentication</h2>
+
+<p>With <code>--password</code>, the default is <b>SCRAM-SHA-256</b> (RFC
+7677): the password never crosses the wire and the exchange cannot be replayed.
+<code>--auth cleartext</code> exists for clients that cannot speak it, and
+<code>--user</code> restricts the user name.</p>
+
+<p>Pass the password with <code>--password-file</code> or the
+<code>FENECPG_PASSWORD</code> environment variable —
+<code>argv</code> shows up in <code>ps</code> output.</p>
+
+<div class="note trap">
+  <p><b>There is no TLS.</b> <code>SSLRequest</code> is refused with
+  <code>N</code>, and a client connecting remotely gets a
+  <code>NoticeResponse</code> saying the connection is unencrypted. Listening
+  on a non-loopback address without authentication is refused outright; it can
+  be opened deliberately with <code>--insecure</code>. On an open network, put
+  it behind a TLS terminator such as stunnel or <code>nginx stream</code>.</p>
+</div>
+
+<h2>Extended protocol</h2>
+
+<p><code>Describe</code> is answered without running the query: the parameter
+count comes from the largest <code>$n</code> in the statement, and the columns
+and type OIDs from the schema — with <code>near</code>, <code>_score</code> is
+reported too. Parameter types are left unspecified; the client sends text and
+the server infers. <code>RowDescription</code> goes exactly once, on
+<code>Execute</code> when <code>Describe</code> is skipped.</p>
+
+<h2>Both directions</h2>
+
+<p>The same protocol code runs the other way round. <code>fenec import</code>
+connects to a real PostgreSQL server and streams
+<code>COPY ... TO STDOUT</code>. The server half of SCRAM lives in
+<code>scram.rs</code> and the client half in <code>client.rs</code>; both are
+hand-written, so they test each other. See <a href="import.html">Import</a>.</p>
+
+<h2>Plugins</h2>
+
+<p>The plugin system takes after PostgreSQL's extension model: scalar
+functions, write hooks and transport adapters can be registered.</p>
+
+<pre data-lang="rust">db.install_plugin(&PgPlugin)?;   // pg_version(), pg_typeof(), to_pgvector()
+</pre>
+
+<h2>Containers</h2>
+
+<p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
+<code>scratch</code>. There are no dependencies and the binary runs its own
+health check, so the runtime image holds nothing but the binary — no shell, no
+package manager, no libc. The image is <b>1.55 MB</b>, and since no target is
+written in, arm64 and amd64 come out of the same file.</p>
+
+<pre data-lang="bash">make docker                     # build the image
+make docker-run PGPASS=secret   # 127.0.0.1:5433, named volume
+
+FENECPG_PASSWORD=secret docker compose up -d
+</pre>
+
+<p>Three things behave differently in a container:</p>
+
+<ul>
+  <li><b>A password is mandatory.</b> The default <code>CMD</code> listens on
+    <code>0.0.0.0</code>, and with authentication off a non-loopback bind errors
+    out and exits. Give <code>FENECPG_PASSWORD</code>, a Docker secret works
+    too, or add <code>--insecure</code> deliberately.</li>
+  <li><b>The memory limit comes from the data.</b> With no page cache there is
+    no knob to tune: open peaks at about 2× the file and
+    <code>compact</code>/<code>checkpoint</code> at about 3×. Below that the
+    cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
+    one sync interval is lost. Set <code>--max-memory</code> to a third of the
+    container limit to bring that forward.</li>
+  <li><b>The restart cost depends on how it stopped.</b>
+    <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
+    written, so the next open takes 110 ms. After <code>kill -9</code> or a
+    cgroup OOM the graph is rebuilt instead: 10.2 s at 100 000 × 128.</li>
+</ul>
+
+<div class="note trap">
+  <p><b>Every default has to be written out by hand.</b> Overriding
+  <code>CMD</code> drops <code>--file</code> and the container comes up with an
+  in-memory database.</p>
+</div>
+
+<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
+  -p 127.0.0.1:5433:5433 -p 127.0.0.1:8080:8080 \
+  -e FENECPG_PASSWORD=secret fenecdb \
+  --listen 0.0.0.0:5433 --file /data/data.fenec --sync 250 \
+  --http 0.0.0.0:8080 --http-token a-token
+</pre>
+
+<p>There is no shell in the image, so <code>docker exec ... sh</code> does not
+work; what is left is <code>docker logs</code> and
+<code>docker run --rm fenecdb --help</code>.</p>
+
+<div class="note trap">
+  <p><b>A single instance, always.</b> Two containers loading the same file
+  into memory and writing it corrupt it. On Kubernetes that means a
+  <code>StatefulSet</code> rather than a <code>Deployment</code>,
+  <code>replicas: 1</code>, <code>strategy: Recreate</code> and a
+  <code>ReadWriteOnce</code> volume — a rolling update keeps two pods up
+  together for a moment. There is a connection ceiling but no pool: an excess
+  connection does not wait, it gets <code>53300</code>. Put pgbouncer in front
+  to queue.</p>
+</div>

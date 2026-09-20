@@ -1,0 +1,210 @@
+<!--
+title: Sync — fenecdb
+description: A local replica that reads without the network, writes optimistically and reconciles by business key. Shapes, live queries, multi-tab leadership and the change horizon.
+-->
+
+<h1>Sync</h1>
+<p class="kicker">A copy on the client, changes streaming from the server,
+optimistic writes. In fenecdb that is not a library — it is an endpoint and a
+transport, because the same engine already runs on both sides.</p>
+
+<pre data-lang="js">import { sync } from './fenec.js';
+
+const db = await sync({
+  url: 'http://127.0.0.1:8080',
+  shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
+});
+await db.ready();
+
+// read: from the local copy, no network
+const rows = await db.from('tasks').where('priority', '>=', 3).rows();
+
+// live query: re-runs on every change
+const stop = db.live(db.from('tasks').order('priority', 'desc'), draw);
+
+// write: to the local copy first, instantly, then to the server
+await db.from('tasks').insert({ title: 'new', status: 'open' });
+</pre>
+
+<p>The query code does not change. <code>db.from(...)</code> is the same
+builder producing the same FenecQL; the only difference is where it is
+bound.</p>
+
+<h2>The stream carries state, not transactions</h2>
+
+<p>The classic route is a transaction log: every write is an event and the
+subscriber replays them. fenecdb sends the current state of what changed
+instead — the stream is a <i>clock</i>, not a record. That is right for a
+replica and wrong for anyone who wanted an audit log.</p>
+
+<h2>A shape is a set, not a window</h2>
+
+<p>The whole database is in memory and the WASM32 address space is 4 GB, so a
+client cannot pull an entire collection. A subscription is a subset and the
+filter is applied on the server.</p>
+
+<div class="note">
+  <p><b><code>order</code>, <code>limit</code>, <code>offset</code> and
+  <code>count</code> are refused in a subscription</b> with a 400. A shape like
+  "the latest 100 rows" looks correct but is not: when a new row arrives the
+  oldest has to drop out, and an incremental diff cannot express that. An
+  explicit error beats a silently wrong stream.</p>
+</div>
+
+<p>The shape condition uses the <code>?field=op.value</code> form, so there is
+no <code>or</code> group and no function call. The reason is escaping: a free
+<code>where=</code> would turn into string concatenation, exactly what the
+builder avoids. Escaping goes to the transport via
+<code>URLSearchParams</code> and types go to the server, leaving no injection
+surface.</p>
+
+<p><b>One collection per shape.</b> The seed has to mean "this is the whole of
+this collection", or the cleanup step becomes ambiguous.</p>
+
+<h2>Optimistic writes</h2>
+
+<p>A write is three steps and the order matters: first gather what undoes the
+local change, then apply it locally, then send it to the server. If the server
+refuses, the local side rolls back fully — no network needed, the undo is
+already in hand.</p>
+
+<p>Everything up to the first <code>await</code> is synchronous. An
+<code>async</code> function body runs synchronously until its first
+<code>await</code>, so the optimistic row is local before the caller awaits the
+promise. A single microtask in between would have broken the "visible
+instantly" promise.</p>
+
+<pre data-lang="js">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
+await db.from('tasks').where('title', 'new').first();  // already here
+await p;                                               // server ack
+</pre>
+
+<h3>Reconciliation by key</h3>
+
+<p>The id space belongs to the server and the client cannot know it in advance,
+so an optimistic row gets a temporary id starting at 2<sup>52</sup> — far from
+the server's range and below <code>Number.MAX_SAFE_INTEGER</code>. What matches
+the two is a <b>business key</b>: when a row with the same <code>key</code>
+arrives from the subscription, the temporary one is dropped.</p>
+
+<div class="note">
+  <p><b>An insert into a keyless shape is not applied optimistically.</b> With
+  nothing to reconcile, the row would stay a local duplicate; one round trip of
+  latency beats a silent copy. <code>key</code> must be
+  <code>text @hash</code>.</p>
+</div>
+
+<p>Update and delete need no key: they work by id, and reading the previous
+state is enough.</p>
+
+<h2>Live queries</h2>
+
+<p>There is no incremental maintenance and none is needed. The local side is an
+indexed database, so re-running the query from scratch is already under a
+millisecond — the differential dataflow that a <code>Map</code>-backed
+collection requires buys nothing here.</p>
+
+<p>It would not even be <i>correct</i> for <code>near</code>. A single insert
+can change the entire top-k ordering, and there is no incremental HNSW
+maintenance that is both cheap and correct — the machinery would have to be
+disabled for fenecdb's headline feature.</p>
+
+<p>Invalidation is at collection granularity: the change stream says which
+collections changed, the live queries bound to them re-run, and all of it
+coalesces into one frame. Anything finer, like intersecting id sets, would cost
+more than the local query itself.</p>
+
+<h2>Batches</h2>
+
+<pre data-lang="js">await db.batch(async (t) => {
+  await t.from('tasks').insert({ title: 'a', status: 'open' });
+  await t.from('tasks').where('key', 'x').update({ status: 'closed' });
+});
+</pre>
+
+<p>There are no transactions in fenecdb and this batch does not fake one. The
+statements run in order under a single write lock and stop at the first error.
+The gain is one round trip instead of N, and no other writer slipping in
+between.</p>
+
+<p><b>The local side rolls back fully; the server side cannot.</b> A batch that
+stops halfway reports how many statements were applied, because a silent error
+would permanently separate the client's optimistic state from the server's.</p>
+
+<h2>Multiple tabs share one stream</h2>
+
+<p>Every tab has its own wasm instance. If each opened its own subscription
+there would be N copies and N connections, so a single <b>leader</b> is elected
+with <code>navigator.locks</code>; the others receive the same batches over
+<code>BroadcastChannel</code> and apply them to their own local copies. The
+apply path is identical — only the transport differs.</p>
+
+<p>Writes do not go through the leader. Every tab sends its own write straight
+to the server, so leadership concerns only the <i>read</i> stream: a leader
+dying does not stop writes, the lock passes to the next tab and it continues
+from its own cursor.</p>
+
+<p>Turn it off with <code>leader: false</code>. Without
+<code>navigator.locks</code>, as in Node, it is off already.</p>
+
+<h2>Dropped connections and the horizon</h2>
+
+<p>A client returns with <code>?since=&lt;cursor&gt;</code> and asks for no
+seed. If the cursor has fallen behind the ring, the server reseeds by itself
+rather than silently sending incomplete events.</p>
+
+<pre data-lang="bash">--changes &lt;n&gt;    entries in the ring (default 4096, 24 bytes per entry)
+</pre>
+
+<p>That number is directly <b>how far behind a subscriber may fall</b>. At 100
+writes per second, 4096 entries is roughly a 40 second window. With
+<code>persist</code>, the image <i>and</i> the cursor are written to IndexedDB,
+so a reopened tab is not reseeded from scratch — unless its cursor has fallen
+past the horizon.</p>
+
+<p>When the server restarts, the horizon is set to the counter: a database
+loaded from a file has no history, only its present state. A cursor standing
+exactly there, after a quiet restart, gets an empty response; anything behind
+it is reseeded.</p>
+
+<h2>Cost</h2>
+
+<p>At the default <code>--changes 4096</code> the ring is about 96 KB and costs
+one push per entry on the write path. Subscriptions do not poll — see
+<a href="http.html#subscriptions">the HTTP endpoint</a> for why — and are
+counted separately from ordinary requests under
+<code>--http-max-streams</code>.</p>
+
+<h2>Limits</h2>
+
+<ul>
+  <li><b>A shape is not a security boundary.</b> If a changed id does not match
+    the shape at all, the subscriber sees it as a deletion. Deleting a row that
+    is not there locally is harmless, but <i>which ids changed</i> leaks.
+    Hiding rows needs a separate endpoint, or
+    <code>--http-read-only</code> plus a token.</li>
+  <li><b><code>bytes</code> fields cannot be synced.</b> In JSON they become
+    number arrays with no way back. That is a limit of the HTTP surface, not
+    something sync introduces.</li>
+  <li><b>In a projected shape the other fields read as <code>null</code>.</b>
+    With <code>select</code>, the local row carries only those fields — which
+    is all the client knows anyway.</li>
+  <li><b><code>batch()</code> does not nest</b> and the calls inside it return
+    no result: writes pile up and go in a single request.</li>
+  <li><b>Rolling back needs no network, but the server has the last word.</b>
+    A rolled-back local state is overwritten by the server's in the next
+    batch.</li>
+</ul>
+
+<h2>Persisting the replica</h2>
+
+<pre data-lang="js">const db = await sync({
+  url: 'https://api.example.com',
+  shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
+  persist: 'tasks',           // the image and the cursor are both stored
+});
+await db.ready();
+
+db.live(db.from('tasks').order('priority', 'desc'), draw);
+await db.from('tasks').insert({ title: 'new', status: 'open' });
+</pre>

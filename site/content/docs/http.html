@@ -1,0 +1,182 @@
+<!--
+title: HTTP endpoint — fenecdb
+description: A REST/JSON surface derived from the schema, vector search over POST, raw FenecQL, NDJSON batches and an SSE subscription stream.
+-->
+
+<h1>HTTP endpoint</h1>
+<p class="kicker">For clients that want no driver at all: <code>fetch</code>,
+<code>curl</code>, or any language's standard library. The schema is already in
+the database, so the surface is derived from it.</p>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080
+</pre>
+
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
+# [{"title":"the rust book","year":2024}]
+
+curl 'http://127.0.0.1:8080/articles?year=gte.2024&count'
+# {"count":1}
+
+curl -X POST http://127.0.0.1:8080/articles -d '{"title":"new","year":2025}'
+# {"inserted":1}
+</pre>
+
+<div class="note">
+  <p><b>Not a separate binary.</b> The HTTP endpoint is a second listener in
+  the same process as <code>fenec-pg</code>. fenecdb has a single writer, and
+  two processes writing one file corrupt it. Being in the same process also
+  keeps the sync policy, the checkpoint, the memory ceiling and the shutdown
+  signal in one place — <code>--sync always</code> covers HTTP writes too.</p>
+</div>
+
+<h2>Routes</h2>
+
+<pre data-lang="http">GET    /                        version and collection list
+GET    /collections             schemas
+GET    /&lt;name&gt;?&lt;filter&gt;         rows
+GET    /&lt;name&gt;?&lt;filter&gt;&count   number of matching rows
+POST   /&lt;name&gt;                  body: {...} or [{...}]
+PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
+DELETE /&lt;name&gt;?&lt;filter&gt;
+PATCH  /&lt;name&gt;/all              no filter — deliberately explicit
+DELETE /&lt;name&gt;/all
+POST   /&lt;name&gt;/near             body: {"vector":[...], "limit":10}
+GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental diff
+POST   /query                   body: {"query":"&lt;FenecQL&gt;","params":[...]}
+POST   /batch                   one query body per line (NDJSON)
+</pre>
+
+<h2>Filters</h2>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><b>Operators</b></td><td><code>eq</code> <code>neq</code> <code>lt</code> <code>lte</code> <code>gt</code> <code>gte</code> <code>like</code> <code>has</code> <code>in</code> <code>is</code></td></tr>
+<tr><td><b>Negation</b></td><td>the <code>not.</code> prefix — <code>?summary=not.is.null</code>, <code>?year=not.eq.1999</code></td></tr>
+<tr><td><b>Shorthand</b></td><td>an unrecognised prefix makes the whole value an equality: <code>?year=2024</code></td></tr>
+<tr><td><b>List</b></td><td><code>?year=in.(1999,2023)</code></td></tr>
+<tr><td><b>Clauses</b></td><td><code>select</code> <code>order</code> <code>limit</code> <code>offset</code> <code>count</code> <code>where</code></td></tr>
+<tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code></td></tr>
+<tr><td><b>Free expression</b></td><td><code>?where=year >= 2024 and tags has "rust"</code> — full FenecQL</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Values are parsed by the field's type: <code>?year=gte.2024</code> is an
+int, <code>?published=gte.2024-01-01</code> is a timestamp. An unknown field
+returns 404. <code>where=</code> exists for what the pattern cannot hold —
+<code>or</code> groups and function calls.</p>
+
+<h2>Vector search</h2>
+
+<p><code>near</code> is a <code>POST</code> rather than a query parameter
+because a 768-dimension embedding does not fit in a query string. Squeezing it
+into the URL — base64, truncation — is unreadable and runs into proxy and
+server URL ceilings. PostgREST's model does not cover fenecdb's headline
+feature, so <code>near</code> gets its own endpoint, and it takes a filter in
+the body.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/articles/near -d '{
+  "vector": [0.1, 0.2, 0.3],
+  "ef": 128, "limit": 5,
+  "select": ["title"],
+  "where": "year >= 2024"
+}'
+# [{"title":"the rust book","_score":0.97}]
+</pre>
+
+<p>If the collection has a single vector field, <code>field</code> can be left
+out. Filters in the query string are <code>and</code>ed with the
+<code>where</code> in the body.</p>
+
+<h2>Raw FenecQL</h2>
+
+<p>When the REST shape does not fit, send the language itself. Parameters stay
+parameters.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
+</pre>
+
+<h2>Batches</h2>
+
+<p><code>POST /batch</code> takes one query body per line as NDJSON. The
+statements run in order under a single write lock and stop at the first error.
+This is not a transaction — fenecdb has none — and it does not pretend to be
+one. What it buys is a single round trip and no other writer slipping in
+between.</p>
+
+<pre data-lang="json">{"error":"collection `tasks` has no field `nofield`","completed":1}
+</pre>
+
+<p>A failed batch reports how many statements were applied, because a silent
+error would permanently separate a client's optimistic local state from the
+server's.</p>
+
+<p>The body is NDJSON rather than a JSON array because fenecdb's JSON parser
+deliberately does not accept nested objects, so
+<code>{"statements":[{...}]}</code> could not be parsed anyway. Instead of
+writing a second parser, the boundary was put at the end of a line — by the
+escaping rules no JSON encoder can write a bare newline into the body.</p>
+
+<h2>Subscriptions</h2>
+
+<p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: a seed
+carrying the current shape, then incremental diffs. No driver needed.</p>
+
+<pre data-lang="bash">curl -N 'http://127.0.0.1:8080/articles/changes?year=gte.2024'
+# event: seed
+# data: {"seq":12,"rows":[...]}
+</pre>
+
+<p>A subscription does not poll. <code>fenec-core</code> has no waiting
+primitive at all — there are no threads in wasm — it only reports that the
+change counter has reached a point, and <code>fenec-http</code> ties that to a
+<code>Condvar</code>. A 50 ms polling loop would take 20 read locks per second
+per subscriber and still add 50 ms of latency.</p>
+
+<p>Every subscription is a connection and a thread, so they are counted
+separately from ordinary requests (<code>--http-max-streams</code>, default
+64). Sharing one ceiling would let 100 subscribers shut the server to plain
+requests. The client-side layer built on this stream is
+<a href="sync.html">Sync</a>.</p>
+
+<h2>Security</h2>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
+<tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all</td></tr>
+<tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-pg</code>'s own path is unaffected</td></tr>
+<tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>There is no TLS, the same rule as <code>fenec-pg</code>: on an open network
+it needs a TLS terminator in front. A <code>PATCH</code> or <code>DELETE</code>
+without a filter is refused, and covering a whole collection needs a separate
+<b>path</b> rather than a flag — a key like <code>?all=true</code> would
+collide with a field named <code>all</code>.</p>
+
+<p>Limits are shared with <code>fenec-pg</code> (<code>--max-connections</code>,
+<code>--idle-timeout</code>); the body ceiling is 64 MiB and the header block
+64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
+411, which beats reading half a body. A field whose name matches a clause name
+(<code>select</code>, <code>order</code>, <code>limit</code>,
+<code>offset</code>, <code>count</code>, <code>where</code>) cannot be filtered
+over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
+
+<div class="note trap">
+  <p><b>A shape is not a security boundary.</b> Which ids changed is visible to
+  a subscriber even when the rows are not. Hiding rows needs a separate
+  endpoint, or <code>--http-read-only</code> plus a token.</p>
+</div>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 \
+         --http-cors 'http://localhost:8787' \
+         --http-token "$TOKEN" \
+         --http-read-only
+</pre>

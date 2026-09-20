@@ -4,10 +4,12 @@
 # library, so ~/.cargo/bin is preferred when it is present.
 CARGO ?= $(shell test -x $(HOME)/.cargo/bin/cargo && echo $(HOME)/.cargo/bin/cargo || echo cargo)
 PORT ?= 8787
+SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
 .PHONY: all test test-js types wasm web serve pg small bench sweep compare import-test \
-	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean
+	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
+	site site-serve site-deploy
 
 all: test wasm
 
@@ -118,6 +120,21 @@ memory:
 sweep:
 	$(CARGO) run --release -p fenec-core --example sweep -- 50000 128
 
+## The website and the documentation. Plain static files, stdlib-only
+## generator; the live console on the home page needs `make wasm` first.
+site: wasm
+	python3 site/build.py
+
+## Same, on http://localhost:8788
+site-serve: wasm
+	python3 site/build.py --serve --port $(SITE_PORT)
+
+## Publishes to Cloudflare Workers (fenecdb.com). Needs `wrangler login`
+## or CLOUDFLARE_API_TOKEN; CI does the same thing on a push to main.
+site-deploy: site
+	npx wrangler deploy
+
 clean:
 	$(CARGO) clean
 	rm -f web/fenec.wasm
+	rm -rf site/dist

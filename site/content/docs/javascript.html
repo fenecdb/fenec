@@ -1,0 +1,212 @@
+<!--
+title: JavaScript client — fenecdb
+description: The browser client, the immutable query builder, transport binding, and TypeScript types generated from the live schema.
+-->
+
+<h1>JavaScript</h1>
+<p class="kicker"><code>web/fenec.js</code> is one dependency-free ES module:
+the WebAssembly glue, the query builder, the HTTP client and the sync layer.
+Copy two files and you are done.</p>
+
+<h2>Opening a database</h2>
+
+<pre data-lang="js">import { Fenec, persist, restore } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');
+
+db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
+db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
+
+const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
+
+await persist(db);     // snapshot into IndexedDB
+await restore(db);     // read it back
+</pre>
+
+<p><code>db.run()</code> is synchronous because raw FenecQL is a single wasm
+call. The builder's endpoints return promises, because a builder has to pick
+its transport first.</p>
+
+<h2>The query builder</h2>
+
+<p>FenecQL reads well, but on the application side the job is still building a
+string — and every interface with conditional filters ends up here:</p>
+
+<pre data-lang="js">let q = 'get articles where 1=1';
+if (year) q += ` and year >= ${year}`;    // quote escaping and $n by hand
+</pre>
+
+<p>What usually drives people to an ORM is not the ORM but two things: dynamic
+queries and type safety. The builder gives both, without npm, a build step, or
+a second schema definition.</p>
+
+<pre data-lang="js">const rows = await db.from('articles')
+  .select('title', 'year')
+  .where('year', '>=', 2024)
+  .where('tags', 'has', 'rust')
+  .near('embed', queryVector, { ef: 128 })
+  .limit(10)
+  .rows();
+</pre>
+
+<p>Every <code>where</code> is <code>and</code>ed with the previous one, and the
+query object is <b>immutable</b> — so a body can be shared and branched:</p>
+
+<pre data-lang="js">let q = db.from('articles').select('title');
+if (year) q = q.where('year', '>=', year);
+if (tag)  q = q.where('tags', 'has', tag);
+const rows = await q.limit(20).rows();
+</pre>
+
+<h3>Filters</h3>
+
+<p>Three spellings compile to the same thing. Use whichever reads better at the
+call site.</p>
+
+<pre data-lang="js">.where('year', '>=', 2024)                   // field, operator, value
+.where('category', 'book')                   // two arguments means equality
+.where({ year: { gte: 2024 }, tags: { has: 'rust' } })
+</pre>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code> <code>~</code> <code>has</code> <code>in</code></td></tr>
+<tr><td><b>Word forms</b></td><td><code>eq</code> <code>ne</code> <code>lt</code> <code>lte</code> <code>gt</code> <code>gte</code> <code>like</code> <code>has</code> <code>in</code></td></tr>
+<tr><td><b>Null</b></td><td><code>{ summary: null }</code> becomes <code>is null</code>; <code>{ summary: { not: null } }</code> becomes <code>is not null</code></td></tr>
+<tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
+<tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
+<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys</td></tr>
+<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code></td></tr>
+<tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>or</code> and <code>not</code> are separate functions because the
+<code>where</code> chain is an <code>and</code>. A nested group is written
+explicitly and the parenthesising is left to the builder:</p>
+
+<pre data-lang="js">db.from('articles')
+  .where('year', '>=', 2024)
+  .where(or({ tags: { has: 'rust' } }, { title: { like: 'rust' } }))
+// get articles where year >= $1 and (tags has $2 or title ~ $3)
+</pre>
+
+<p><code>raw</code> covers what the builder cannot express, which in practice
+today means function calls. Its <code>?</code> placeholders bind to parameters
+in order, so the escape hatch does not become string concatenation either.</p>
+
+<h3>Seeing what it produces</h3>
+
+<p>Nothing is hidden. <code>toFenecQL()</code> returns exactly the text and
+parameters that will run — loggable, testable, runnable by hand.</p>
+
+<pre data-lang="js">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
+// ['get articles where year >= $1 limit 10', [2024]]
+</pre>
+
+<p>Every leaf value is bound to a parameter and text is never embedded into the
+query, which leaves a single injection boundary: <b>names</b>. Collection and
+field names cannot be parameterised, so they are validated against FenecQL's
+identifier rule and anything that does not fit errors out.</p>
+
+<pre data-lang="js">db.from('articles').where('title', '"; del articles; --')
+// get articles where title = $1     ← a value, not text
+</pre>
+
+<h3>Independent of the transport</h3>
+
+<p><code>from()</code> builds a query on its own and <code>bind()</code> plugs
+it into an executor, so the same query code runs unchanged against wasm, a
+<code>fenec-pg</code> server, or an HTTP endpoint.</p>
+
+<pre data-lang="js">import { from, connect } from './fenec.js';
+
+const q = from('articles').where('year', '>=', 2024);
+
+await q.bind(db).rows();                                // wasm, local
+await q.bind(connect('http://localhost:8080')).rows();  // remote server
+q.toFenecQL();                                          // or just the text
+</pre>
+
+<p><code>connect()</code> returns the same builder; the FenecQL it produces
+goes to <code>POST /query</code> as is. See <a href="http.html">HTTP
+endpoint</a>.</p>
+
+<h2>TypeScript</h2>
+
+<p>The schema is not written a second time — it is generated from the live
+file, so the two cannot drift apart.</p>
+
+<pre data-lang="bash">fenec types data.fenec > web/fenec-schema.d.ts     # or: make types FILE=data.fenec
+</pre>
+
+<pre data-lang="js">import { Fenec } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';
+
+const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
+
+const rows = await db.from('articles').select('title', 'year').rows();
+//    rows: { title: string; year: number | null }[]
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Schema</th><th>TypeScript</th></tr></thead>
+<tbody>
+<tr><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code></td><td><code>boolean</code> <code>number</code> <code>number</code> <code>string</code></td></tr>
+<tr><td><code>timestamp</code></td><td><code>Timestamp</code> — ISO text on read; a <code>Date</code> or number works on write</td></tr>
+<tr><td><code>vector&lt;N&gt;</code> / <code>bytes</code></td><td><code>Vector</code> / <code>Bytes</code> — <code>number[]</code> on read, <code>Float32Array</code> also accepted on write</td></tr>
+<tr><td><code>[type]</code></td><td><code>type[]</code></td></tr>
+<tr><td>a field that is not required</td><td><code>| null</code> — an unwritten field reads as <code>null</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>What the types catch: a collection or field that does not exist, a wrong
+value type, access to an unselected field, <code>near</code> applied to a
+non-vector field, and a type mismatch inside <code>insert</code>. Objects
+inside <code>or</code>, <code>and</code> and <code>not</code> are checked
+against the query's collection rather than the first argument. A query using
+<code>near</code> gains <code>_score: number</code>.</p>
+
+<p>A standalone <code>from()</code> cannot know the collection name, since the
+schema lives in the call rather than in <code>db</code>. In TypeScript it binds
+through <code>TypedFrom</code>; at runtime it is the same function and the only
+difference is name completion.</p>
+
+<pre data-lang="js">import { from as fenecFrom, type TypedFrom } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';
+
+const from: TypedFrom&lt;FenecSchema&gt; = fenecFrom;
+from('articles').where('year', '>=', 2024);   // completes like db.from
+</pre>
+
+<p><code>fenec.d.ts</code> is hand-written — it is the client's own surface —
+and <code>fenec-schema.d.ts</code> is generated. There is no link between them:
+the <code>Timestamp</code>, <code>Vector</code> and <code>Bytes</code> brands
+are structural, so the generated file stands alone and imports nothing.</p>
+
+<h2>What the builder will not do</h2>
+
+<ul>
+  <li><b>No aggregation other than <code>count</code>.</b> <code>count()</code>
+    compiles to the language's own <code>count</code> clause and rows are not
+    decoded, but there is no <code>sum</code>, <code>avg</code> or
+    <code>group by</code>. The builder cannot invent what FenecQL lacks.</li>
+  <li><b>An <code>update</code> or <code>delete</code> without a filter is
+    refused.</b> Covering a whole collection by accident is far too easy and
+    impossible to undo; when it is deliberate you write
+    <code>delete({ all: true })</code>. PostgREST decides the same.</li>
+  <li><b><code>near</code>, <code>order</code> and <code>limit</code> error out
+    on write statements.</b> FenecQL does not support them on <code>set</code>
+    or <code>del</code>, and ignoring them silently would breed the illusion
+    that <code>limit(1)</code> deletes a single row.</li>
+  <li><b>No JOIN, no subquery, no <code>returning</code>.</b> The builder adds
+    no capability on top of FenecQL — it only builds it safely.</li>
+</ul>
+
+<p>The tests run with <code>node --test web/fenec.test.js</code> and are part
+of <code>make test</code>. When <code>web/fenec.wasm</code> is present, an
+end-to-end test that actually parses the generated text runs too.</p>

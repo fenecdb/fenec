@@ -1,0 +1,99 @@
+<!--
+title: Embedded Rust — fenecdb
+description: Use fenec-core as a library: opening a file, executing parsed statements, durability, and the plugin registry.
+-->
+
+<h1>Embedded Rust</h1>
+<p class="kicker"><code>fenec-core</code> is a plain Rust library with no
+dependencies. Parsing is <code>fenec-ql</code>; everything else is the
+engine.</p>
+
+<pre data-lang="rust">use fenec_core::prelude::*;
+use fenec_ql::parse;
+
+let mut db = fenec_core::fs::open("data.fenec")?;
+for stmt in parse("get docs near embed $1 limit 5")? {
+    let r = db.execute_with(&stmt, &[Value::Vector(embedding)])?;
+}
+</pre>
+
+<h2>Reads and writes take different locks</h2>
+
+<p><code>Database::query</code> takes a shared lock and
+<code>execute_with</code> the exclusive one. There are no transactions:
+<code>BEGIN</code> and <code>COMMIT</code> parse and do nothing.</p>
+
+<div class="note trap">
+  <p><b>One process per file.</b> Two processes opening the same file and
+  writing it corrupt it. There is no lock file and no advisory locking — the
+  single-writer rule is yours to keep.</p>
+</div>
+
+<h2>Durability is the caller's job</h2>
+
+<p>File writes are buffered. If the process crashes before <code>sync</code> is
+called, the last writes are lost. In embedded use nothing calls it for you —
+<code>fenec-pg</code> has the <code>--sync</code> policy and a shutdown hook
+precisely because the library does not.</p>
+
+<p>The same applies to the HNSW graph. It is derived data and is written only
+during <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code>,
+never on the write path. Without a graph in the file it is rebuilt on open:
+10.2 s at 100 000 × 128, against 110 ms with it.</p>
+
+<h2>Measuring the footprint</h2>
+
+<p><code>Database::memory_bytes()</code> sums the segment bytes, offset
+indexes, vector arenas and graph links from counters. It is not RSS —
+allocator slack, HNSW build buffers, upper-level neighbour allocations and the
+2–3× transient peaks all sit outside it. Measured ratios are in
+<a href="limits.html#memory-and-scale">Limits</a>.</p>
+
+<h2>Features</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Feature</th><th>What it brings</th></tr></thead>
+<tbody>
+<tr><td><code>std-fs</code></td><td>Buffered file I/O — <code>fenec_core::fs</code>. Off in wasm builds.</td></tr>
+<tr><td>threads</td><td>The parallel HNSW build path, compiled out of wasm32 entirely.</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>now()</code> errors on wasm32-unknown-unknown, which has no clock;
+time is passed in as a parameter there.</p>
+
+<h2>Errors</h2>
+
+<p><code>Error</code> in <code>fenec-core/src/error.rs</code> is the single
+error type across the whole engine: allocation-free variants, no
+<code>Box</code>. <code>fenec-pg</code> maps it onto PostgreSQL SQLSTATE
+codes.</p>
+
+<h2>Plugins</h2>
+
+<p>The registry takes after PostgreSQL's extension model. Scalar functions,
+write hooks in the shape of triggers, and transport adapters can all be
+registered.</p>
+
+<pre data-lang="rust">db.install_plugin(&PgPlugin)?;   // pg_version(), pg_typeof(), to_pgvector()
+</pre>
+
+<h2>Module map</h2>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><code>store</code></td><td>Segments and the offset index</td></tr>
+<tr><td><code>engine</code></td><td><code>Database</code>, <code>Collection</code>, replay, snapshot, compact, checkpoint</td></tr>
+<tr><td><code>vector</code></td><td>HNSW and the distance kernels</td></tr>
+<tr><td><code>query</code></td><td><code>Statement</code> and plan execution</td></tr>
+<tr><td><code>schema</code> <code>value</code> <code>codec</code> <code>json</code></td><td>Types, the binary codec, the JSON parser</td></tr>
+<tr><td><code>time</code></td><td>Calendar arithmetic, integer only</td></tr>
+<tr><td><code>changes</code></td><td>The change ring behind subscriptions</td></tr>
+<tr><td><code>plugin</code></td><td>The registry</td></tr>
+<tr><td><code>fs</code></td><td>Buffered file I/O, behind <code>std-fs</code></td></tr>
+</tbody>
+</table>
+</div>

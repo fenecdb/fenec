@@ -1,0 +1,174 @@
+<!--
+title: Quickstart — fenecdb
+description: Build fenecdb, open a file, create a collection with a vector index, and run your first near query — in the shell, in the browser, or against a server.
+-->
+
+<h1>Quickstart</h1>
+<p class="kicker">From a clone to a vector query. Pick the surface you actually
+want: a shell, a browser page, or a server.</p>
+
+<h2>Build</h2>
+
+<pre data-lang="bash">git clone https://github.com/fenecdb/fenec
+cd fenec
+make test      # 261 Rust tests, 61 JS tests
+</pre>
+
+<p>That produces <code>target/release/fenec</code> (the shell) and
+<code>target/release/fenec-pg</code> (the server). The Rust suite runs first on
+purpose: <code>cargo test</code> builds <code>fenec-pg</code>, and the JS sync
+tests run against that binary.</p>
+
+<div class="note">
+  <p><b>The wasm32 target comes from rustup.</b> Homebrew's <code>cargo</code>
+  ships no wasm32 standard library. The Makefile prefers
+  <code>~/.cargo/bin/cargo</code>; building by hand needs
+  <code>rustup target add wasm32-unknown-unknown</code> first.</p>
+</div>
+
+<h2>In the shell</h2>
+
+<pre data-lang="bash">./target/release/fenec data.fenec              # interactive
+./target/release/fenec data.fenec -c 'get docs limit 5'
+echo 'get docs' | ./target/release/fenec data.fenec
+</pre>
+
+<p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
+<code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
+<code>.quit</code>.</p>
+
+<p>A first collection, a bulk load, then the index — that order matters, and
+the reason is in <a href="concepts.html#bulk-load-first-index-after">How it
+works</a>.</p>
+
+<pre data-lang="fenecql">create collection notes (
+  body   text,
+  topic  int @hash,
+  posted timestamp,
+  embed  vector&lt;384&gt;
+)
+
+put notes {body: "hnsw is a navigable small world graph", topic: 3, embed: $1}
+put notes [ ... 100 000 more ... ]
+
+create index on notes (embed) @hnsw(cosine)
+
+get notes select body
+  where topic = 3
+  near embed $1
+  limit 10
+</pre>
+
+<p>When a file with a vector index is closed from an interactive or piped
+session, a checkpoint is written so the graph is not rebuilt on the next open.
+A one-shot <code>-c</code> call does not write one.</p>
+
+<h2>In the browser</h2>
+
+<pre data-lang="bash">make serve                    # builds the wasm, serves http://localhost:8787
+make serve PORT=3000
+</pre>
+
+<p><code>web/index.html</code> is a full console: a FenecQL editor, a sample
+data generator, live statistics and IndexedDB persistence.</p>
+
+<p>For your own page you need exactly two files, <code>fenec.js</code> and
+<code>fenec.wasm</code>. No npm, no bundler, no build step.</p>
+
+<pre data-lang="js" data-label="index.html">import { Fenec, persist, restore } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');
+
+db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
+db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
+
+const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
+
+// or with the builder, for dynamic filters and bound parameters
+const near = await db.from('docs').near('embed', queryVector).limit(5).rows();
+
+await persist(db);      // write the snapshot to IndexedDB
+await restore(db);      // read it back next session
+</pre>
+
+<div class="note trap">
+  <p><b>It does not open over <code>file://</code>.</b>
+  <code>WebAssembly.instantiateStreaming</code> and module
+  <code>import</code>s both need an HTTP origin. Any static server works:
+  <code>python3 -m http.server</code>, <code>npx serve</code>, nginx.</p>
+</div>
+
+<p>The same module runs in Node, where <code>fetch</code> cannot resolve a
+relative path — so hand it the bytes:</p>
+
+<pre data-lang="js">import { readFile } from 'node:fs/promises';
+const db = await Fenec.open(await readFile('./fenec.wasm'));
+</pre>
+
+<h2>As a server</h2>
+
+<pre data-lang="bash">./target/release/fenec-pg --listen 127.0.0.1:5433 --file data.fenec
+
+# the HTTP/JSON endpoint is a second listener in the same process
+./target/release/fenec-pg --file data.fenec --http 127.0.0.1:8080
+
+./target/release/fenec-pg --ping        # 0 means up — a health check
+</pre>
+
+<p>Then connect with anything that speaks the PostgreSQL protocol. The language
+is still FenecQL:</p>
+
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec
+# fenec=# get articles select title near embed '[0.1, 0.2]' limit 5;
+
+curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'
+</pre>
+
+<h2>Bring your own data</h2>
+
+<p><code>fenec import</code> derives the schema, recognises vector columns and
+follows the bulk-load-then-index order by itself.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
+    --vector embed:384 --index "embed@hnsw(cosine)"
+
+fenec import postgres://user@host:5432/database --table docs \
+    --into articles --index "embed@hnsw(cosine)"
+</pre>
+
+<p><code>--dry-run</code> prints the derived schema and any warnings without
+writing anything. Full flag list in <a href="import.html">Import</a>.</p>
+
+<h2>Generate TypeScript from the file</h2>
+
+<p>The schema is already in the database, so it is not written a second time in
+TypeScript — it is generated, and the two cannot drift.</p>
+
+<pre data-lang="bash">./target/release/fenec types data.fenec > web/fenec-schema.d.ts
+</pre>
+
+<pre data-lang="js">import { Fenec } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';
+
+const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
+const rows = await db.from('articles').select('title', 'year').rows();
+//    rows: { title: string; year: number | null }[]
+</pre>
+
+<h2>Make targets worth knowing</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>make test</code></td><td>Rust suite, then the JS suite</td></tr>
+<tr><td><code>make wasm</code></td><td>Build for wasm32 and copy to <code>web/fenec.wasm</code></td></tr>
+<tr><td><code>make serve</code></td><td>Build the wasm and serve the browser console</td></tr>
+<tr><td><code>make bench</code></td><td>Scale measurement</td></tr>
+<tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>
+<tr><td><code>make sweep</code></td><td>The ef/recall trade-off</td></tr>
+<tr><td><code>make compare</code></td><td>Against SQLite and pgvector (run <code>make pgvector-up</code> first)</td></tr>
+<tr><td><code>make small</code></td><td>The 636 KB binary: <code>--profile cli --no-default-features</code></td></tr>
+</tbody>
+</table>
+</div>

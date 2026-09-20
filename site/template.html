@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" class="{{lang_class}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta name="theme-color" content="#070A18">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23150F26'/%3E%3Ccircle cx='11' cy='16' r='3.4' fill='%23F4A93C'/%3E%3Cpath d='M19 9.5a9 9 0 0 1 0 13M24.5 5a15 15 0 0 1 0 22' stroke='%23F4A93C' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{base}}styles.css">
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+
+<header class="top">
+  <a class="brand" href="{{base}}">
+    <svg class="mark" width="21" height="21" viewBox="0 0 32 32" aria-hidden="true"><circle cx="11" cy="16" r="3.4" fill="currentColor"/><path d="M19 9.5a9 9 0 0 1 0 13M24.5 5a15 15 0 0 1 0 22" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
+    fenecdb
+  </a>
+  <button class="side-toggle" aria-expanded="false" aria-controls="side">Contents</button>
+  <nav class="top-nav">
+    <a href="{{base}}docs/"{{nav_docs}}>Docs</a>
+    <a href="{{base}}docs/benchmarks.html">Benchmarks</a>
+    <a href="{{repo}}">Source</a>
+  </nav>
+</header>
+
+{{content}}
+
+<footer class="foot">
+  <svg class="ridgeline" viewBox="0 0 1440 90" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 74 C 190 40 300 86 470 62 C 640 38 760 80 940 54 C 1120 28 1270 72 1440 46 L1440 90 L0 90 Z" fill="#1B1233"/>
+  </svg>
+  <div class="foot-in">
+    <div>
+      <p class="foot-mark">fenecdb</p>
+      <p>A vector-native embedded database. Written in Rust, runs in the
+         browser, speaks the PostgreSQL protocol.</p>
+    </div>
+    <ul>
+      <li><a href="{{base}}docs/">Documentation</a></li>
+      <li><a href="{{base}}docs/quickstart.html">Quickstart</a></li>
+      <li><a href="{{base}}docs/benchmarks.html">Benchmarks</a></li>
+      <li><a href="{{repo}}">Source</a></li>
+      <li><a href="{{repo}}/blob/main/CONTRIBUTING.md">Contributing</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script src="{{base}}site.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+<!--
+title: File format — fenecdb
+description: One file, replayed in a single pass. Record kinds, why the length is always written, and why the change counter and the id counter exist.
+-->
+
+<h1>File format</h1>
+<p class="kicker">One file, replayed in a single pass. Every record is
+<code>[kind][collection-id][length][body]</code>, and the reasons for each
+exception are worth knowing before you touch the reader.</p>
+
+<pre data-lang="text">"FENECDB\x01"
+  [6][u64 counter][u64 body length]        change counter (optional)
+  [1][collection-id][length][schema]       create collection
+  [7][collection-id][length][next-id]      id counter (optional)
+  [5][collection-id][length][schema]       schema change (index)
+  [2][collection-id][length]               drop collection (empty body)
+  [3][collection-id][length][records]      data
+  [4][collection-id][length][field][graph] HNSW graph (optional)
+</pre>
+
+<p>Records inside a data block are <code>[op][doc-id][length][fields]</code>.
+A half-written final record is truncated on open, so there is no separate
+recovery step after a crash.</p>
+
+<div class="note trap">
+  <p><b>The length is written even for an empty body</b> — a
+  <code>drop</code> record has one — <b>and the reader must consume it.</b>
+  Otherwise the leftover byte is read as the next record kind and the file
+  stops opening.</p>
+</div>
+
+<h2>The graph record</h2>
+
+<p>It is derived data, not a cache. On open, the version, the dimension, the
+node count and the link bounds are validated; if any of them does not hold, the
+record is ignored and the index is rebuilt from scratch. A corrupt or stale
+graph therefore cannot cause data loss.</p>
+
+<p>It is written only during <code>snapshot</code>, <code>compact</code> and
+<code>checkpoint</code> — never on the normal write path. What it stores is the
+links, not the vectors: the vectors are already in the document records, and
+the expensive part is the build.</p>
+
+<h2>The change counter, and why it is at the front</h2>
+
+<p>Record kind 6 sits at the front of the file and is fixed width. Both are
+deliberate.</p>
+
+<p><b>At the front</b>, because at the end a corrupt or half-written tail would
+break opening. The end of the file is exactly where the graph stops, and the
+graph is derived data — a record that errors out in that region would take that
+tolerance back.</p>
+
+<p><b>Fixed width</b>, because the body length is known only after the body is
+written. A placeholder can be filled in place, whereas a uvarint would mean
+shifting the whole image.</p>
+
+<p>The body length means "this is where this image's own records end". Every
+record after it was written <i>after</i> the checkpoint and carries the counter
+forward. Old files without the record load fine — the counter is then counted
+from the records. The reverse does not hold: an old binary cannot open a new
+file and reports <code>unknown record kind 6</code>.</p>
+
+<h2>The id counter exists because of compact</h2>
+
+<p>A document id is normally derived from the records: a replay takes one more
+than the largest id it saw. Compaction throws tombstones away, so that
+derivation falls short — the highest deleted id disappears from the image
+entirely and would be <b>handed out again</b> on the next open.</p>
+
+<p>An id coming back silently binds everything still holding it — a link handed
+out, a row a subscriber holds — to the wrong document. The record is per
+collection and comes right after the schema. Only <code>snapshot</code> writes
+it; the append path does not need it, because the tombstones are still there.
+Old files without the counter still load correctly.</p>
+
+<h2>Crates and layout</h2>
+
+<pre data-lang="text">crates/
+  fenec-core/   storage, HNSW, plan executor, plugin registry, JSON,
+                calendar arithmetic, change stream          (no dependencies)
+  fenec-ql/     FenecQL lexer and parser                    (core only)
+  fenec-wasm/   the browser ABI                             (no wasm-bindgen)
+  fenec-pg/     PostgreSQL v3 wire protocol, server and client
+  fenec-http/   HTTP/JSON endpoint: REST, raw FenecQL, SSE  (core + ql only)
+  fenec-import/ SQLite file reader, PostgreSQL COPY source
+  fenec-cli/    the `fenec` shell, `fenec import`, `fenec types`
+web/            fenec.js (builder + sync layer), fenec.d.ts,
+                fenec.test.js and fenec.sync.test.js, the browser console
+</pre>
+
+<h2>Maintenance operations</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Operation</th><th>What it does</th><th>Peak memory</th></tr></thead>
+<tbody>
+<tr><td><code>snapshot</code></td><td>Writes a fresh image including the graph and the id counter</td><td class="n">≈ 3× the file</td></tr>
+<tr><td><code>checkpoint</code></td><td>Lands the graph in the file so the next open does not rebuild it</td><td class="n">≈ 3× the file</td></tr>
+<tr><td><code>compact</code></td><td>Full rebuild: drops dead bytes and rebuilds every index</td><td class="n">≈ 3× the file</td></tr>
+<tr><td>open</td><td>Reads the file, then copies it into segments</td><td class="n">≈ 2× the file</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>compact</code> is not a garbage collection. Even with zero dead bytes
+every index is built from scratch, and writes block throughout: 20 000 × 32
+takes 0.94 s, against 0.05 s on a vector-free text collection of the same
+size.</p>
+
+<p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
+cannot corrupt the database.</p>

@@ -1,0 +1,37 @@
+<!--
+title: Not found — fenecdb
+description: That page is not here.
+-->
+
+<section class="hero lost">
+  <div class="scene" aria-hidden="true">
+    <div class="sky"></div>
+    <canvas class="stars"></canvas>
+    <div class="sunrise"></div>
+    <svg class="dunes" viewBox="0 0 1440 420" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="l2" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#8B3C48"/><stop offset="1" stop-color="#4E2130"/>
+        </linearGradient>
+        <linearGradient id="l1" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#2B1742"/><stop offset="1" stop-color="#150F26"/>
+        </linearGradient>
+      </defs>
+      <g class="ridge r2"><g class="ridge-in"><path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275 L1440 420 L0 420 Z" fill="url(#l2)"/></g></g>
+      <g class="ridge r1"><g class="ridge-in"><path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350 L1440 420 L0 420 Z" fill="url(#l1)"/></g></g>
+    </svg>
+    <div class="floor"></div>
+  </div>
+
+  <div class="hero-in">
+<pre class="hero-q" data-lang="fenecql" data-bare>get pages where url = $1
+-- 0 rows</pre>
+    <h1 class="hero-say reveal">Nothing at this address.</h1>
+    <p class="hero-sub reveal">The page you asked for is not in this collection.
+      The documentation index lists everything that is.</p>
+    <p class="hero-cta reveal">
+      <a class="btn btn-fill" href="/docs/">Read the docs</a>
+      <a class="btn btn-line" href="/">Back to the front</a>
+    </p>
+  </div>
+</section>

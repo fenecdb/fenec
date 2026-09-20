@@ -1,0 +1,37 @@
+{
+  // The website and documentation, served as a Cloudflare Worker.
+  //
+  //   make site            build into site/dist
+  //   make site-deploy     build, then wrangler deploy
+  //
+  // Assets-only: there is no `main`, so every request is answered from
+  // site/dist by the static-asset router. Caching and security headers come
+  // from site/dist/_headers, which site/build.py writes on every build.
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "fenecdb-site",
+  "compatibility_date": "2026-09-01",
+
+  "assets": {
+    "directory": "./site/dist",
+    // Default. `/docs/` serves docs/index.html; `/docs/fenecql.html` serves
+    // itself. Both spellings appear in the generated links.
+    "html_handling": "auto-trailing-slash",
+    // Anything unmatched gets 404.html rather than a bare Cloudflare error.
+    "not_found_handling": "404-page"
+  },
+
+  // No `routes` here, deliberately — the same call apps/site makes in the
+  // backlex repo. A deploy token with Workers Scripts permissions but without
+  // Zone > Workers Routes uploads the worker and assets fine and then fails
+  // reconciling the route (Authentication error 10000). The routes are stable,
+  // so they stay dashboard-managed and CI deploys cleanly.
+  //
+  //   fenecdb.com          needs a proxied A/AAAA record; a *.fenecdb.com
+  //                        wildcard does NOT cover the apex
+  //   www.fenecdb.com      redirect or second route, as you prefer
+  //
+  // To declare them here instead, grant the token Zone > Workers Routes > Edit
+  // on the fenecdb.com zone.
+
+  "observability": { "enabled": true }
+}
