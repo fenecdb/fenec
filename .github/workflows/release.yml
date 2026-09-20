@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -117,6 +118,74 @@ jobs:
           name: dist-wasm
           path: dist/*.tar.gz
           if-no-files-found: error
+
+  image:
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, arch: amd64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
+    env:
+      # BuildKit is what the Dockerfile's --mount=type=cache needs.
+      DOCKER_BUILDKIT: '1'
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-pg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Log in to ghcr.io
+        run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Each architecture is built on its own native runner and pushed under an
+      # arch-suffixed tag; the manifest job below stitches them together. This
+      # is the reason there is no QEMU step -- emulating a Rust build is many
+      # times slower than a second runner.
+      - name: Build and push
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          version="${tag#v}"
+          # image.source is what makes GHCR attach the package to this
+          # repository, and with it the repository's permissions.
+          docker build \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.version="$version" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            -t "$IMAGE:$version-${{ matrix.arch }}" .
+          docker push "$IMAGE:$version-${{ matrix.arch }}"
+
+  manifest:
+    name: image (manifest)
+    needs: image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-pg
+    steps:
+      - name: Log in to ghcr.io
+        run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Join the per-architecture images
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          version="${tag#v}"
+          docker buildx imagetools create \
+            -t "$IMAGE:$version" -t "$IMAGE:latest" \
+            "$IMAGE:$version-amd64" "$IMAGE:$version-arm64"
+          docker buildx imagetools inspect "$IMAGE:$version"
 
   publish:
     name: publish the release
