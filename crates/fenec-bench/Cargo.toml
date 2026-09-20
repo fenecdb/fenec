@@ -10,7 +10,7 @@ publish = false
 fenec-core = { path = "../fenec-core" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # For the PostgreSQL + pgvector comparison (only in this harness).
 postgres = "0.19"
 
