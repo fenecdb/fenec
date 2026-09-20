@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
 the browser, has its own query language (FenecQL) and speaks the PostgreSQL v3 wire
