@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: '22'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -59,7 +59,7 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
