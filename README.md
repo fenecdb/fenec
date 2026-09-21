@@ -99,7 +99,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-416 KB of WebAssembly — 135 KB brotli (`-q 11`) over the wire, client included — no
+416 KB of WebAssembly — 136 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
@@ -140,7 +140,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 416 KB wasm + 66 KB client (135 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
+| **Runtime size** | 416 KB wasm + 66 KB client (136 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

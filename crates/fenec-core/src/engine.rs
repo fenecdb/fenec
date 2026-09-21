@@ -91,7 +91,19 @@ pub trait Sink: Send {
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
+    /// `sync` in two halves: hands the buffered writes to the operating
+    /// system now, and returns what makes them durable, for the caller to
+    /// run once it has let go of the database -- a server's readers then do
+    /// not wait on the disk. `None` when this already made them durable.
+    fn flush(&mut self) -> Result<Option<Durability>> {
+        self.sync()?;
+        Ok(None)
+    }
 }
+
+/// What makes the writes a [`Sink::flush`] handed over durable: an fsync on
+/// the file they went to.
+pub type Durability = Box<dyn FnOnce() -> Result<()> + Send>;
 
 /// The party that wants to hear that a write happened.
 ///
@@ -1406,6 +1418,28 @@ impl Database {
         self.storage(r)?;
         self.dirty = false;
         Ok(())
+    }
+
+    /// The first half of [`Self::sync`], for a caller that will not hold the
+    /// database while the disk works: the writes go to the operating
+    /// system, and what comes back makes them durable. Run it, and if it
+    /// fails, report the failure back with [`Self::fail`] -- the second half
+    /// runs where the engine cannot see it.
+    pub fn flush(&mut self) -> Result<Option<Durability>> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().flush();
+        let durable = self.storage(r)?;
+        self.dirty = false;
+        Ok(durable)
+    }
+
+    /// Records a storage failure found outside the engine, a
+    /// [`Durability`] that failed: every later write and sync is refused, as
+    /// after one the engine saw itself.
+    pub fn fail(&mut self, e: &Error) {
+        if self.failed.is_none() {
+            self.failed = Some(e.to_string());
+        }
     }
 
     /// Whether a write is still waiting to be pushed to disk.

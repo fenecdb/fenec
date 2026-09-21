@@ -11,8 +11,8 @@ use fenec_pg::server::{Auth, SyncPolicy};
 use fenec_pg::{Config, PgPlugin, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------ test server
@@ -1329,6 +1329,148 @@ fn sync_failure_is_reported_and_stops_writes() {
 
     // Reads still answer, from memory.
     let r = c.simple("collections");
+    assert!(find(&r, b'E').is_none());
+    assert!(h.db.read().unwrap().failure().is_some());
+}
+
+/// A sink whose fsync, handed out by `flush`, takes `delay` and fails when
+/// `fail` is set -- the half of a sync that runs outside the lock. It keeps
+/// `FileSink`'s protocol: an fsync covers every byte appended before it
+/// starts, and one that finds its bytes covered does not run. It counts the
+/// fsyncs it ran.
+#[derive(Clone)]
+struct SlowDisk {
+    delay: Duration,
+    fail: bool,
+    fsyncs: Arc<AtomicUsize>,
+    appended: Arc<AtomicU64>,
+    /// Bytes on disk; held through an fsync, as the file is.
+    synced: Arc<Mutex<u64>>,
+}
+
+impl fenec_core::engine::Sink for SlowDisk {
+    fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.appended
+            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        Ok(())
+    }
+    fn rewrite(&mut self, _bytes: &[u8]) -> fenec_core::error::Result<()> {
+        Ok(())
+    }
+    fn flush(&mut self) -> fenec_core::error::Result<Option<fenec_core::engine::Durability>> {
+        let disk = self.clone();
+        let upto = self.appended.load(Ordering::SeqCst);
+        Ok(Some(Box::new(move || {
+            let mut synced = disk.synced.lock().unwrap();
+            if *synced >= upto {
+                return Ok(());
+            }
+            let covers = disk.appended.load(Ordering::SeqCst);
+            std::thread::sleep(disk.delay);
+            disk.fsyncs.fetch_add(1, Ordering::SeqCst);
+            if disk.fail {
+                return Err(fenec_core::error::Error::Io("input/output error".into()));
+            }
+            *synced = covers;
+            Ok(())
+        })))
+    }
+}
+
+fn slow_disk_server(delay: Duration, fail: bool) -> (Harness, Arc<AtomicUsize>) {
+    let fsyncs = Arc::new(AtomicUsize::new(0));
+    let mut db = Database::with_sink(Box::new(SlowDisk {
+        delay,
+        fail,
+        fsyncs: Arc::clone(&fsyncs),
+        appended: Arc::new(AtomicU64::new(0)),
+        synced: Arc::new(Mutex::new(0)),
+    }));
+    db.install_plugin(&PgPlugin).unwrap();
+    db.execute(&fenec_ql::parse_one("create collection t (n int)").unwrap())
+        .unwrap();
+    let h = start(
+        Config {
+            sync: SyncPolicy::Always,
+            ..Config::default()
+        },
+        db,
+    );
+    (h, fsyncs)
+}
+
+/// Under `--sync always` the fsync runs without the lock: a read arriving
+/// while a write waits on the disk answers at once, and writes arriving
+/// together share fsyncs instead of queueing for one each.
+#[test]
+fn a_durable_write_does_not_hold_the_readers_or_the_other_writers() {
+    let delay = Duration::from_millis(200);
+    let (h, fsyncs) = slow_disk_server(delay, false);
+
+    let port = h.port;
+    let writer = std::thread::spawn(move || {
+        let mut c = Client::connect(port, "fenec", None).unwrap();
+        let r = c.simple("put t {n: 1}");
+        assert_eq!(find(&r, b'C').unwrap().tag_text(), "INSERT 0 1");
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let mut reader = Client::connect(h.port, "fenec", None).unwrap();
+    let t = Instant::now();
+    let r = reader.simple("get t count");
+    assert!(find(&r, b'D').is_some());
+    let read = t.elapsed();
+    writer.join().unwrap();
+    // The write under way was still inside its 200 ms fsync.
+    assert!(
+        read < Duration::from_millis(100),
+        "the read waited {read:?}"
+    );
+
+    // Eight writers at once: with an fsync each under the lock they took
+    // 8 x 200 ms. Sharing, they take two or three fsyncs.
+    let before = fsyncs.load(Ordering::SeqCst);
+    let t = Instant::now();
+    let writers: Vec<_> = (0..8)
+        .map(|i| {
+            std::thread::spawn(move || {
+                let mut c = Client::connect(port, "fenec", None).unwrap();
+                let r = c.simple(&format!("put t {{n: {i}}}"));
+                assert_eq!(find(&r, b'C').unwrap().tag_text(), "INSERT 0 1");
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+    let took = t.elapsed();
+    let ran = fsyncs.load(Ordering::SeqCst) - before;
+    assert!(ran <= 4, "{ran} fsyncs for 8 writes");
+    assert!(
+        took < Duration::from_millis(1000),
+        "8 durable writes took {took:?}"
+    );
+}
+
+/// The fsync that fails outside the lock: the write waiting on it is told,
+/// its answer taken back; the engine refuses every write after it, as when
+/// the sync ran under the lock; reads go on.
+#[test]
+fn a_failed_fsync_outside_the_lock_is_reported_and_stops_writes() {
+    let (h, _) = slow_disk_server(Duration::from_millis(1), true);
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+
+    let r = c.simple("put t {n: 1}");
+    let e = find(&r, b'E').expect("the failed fsync must reach the client");
+    assert_eq!(e.sqlstate().unwrap(), "58030");
+    assert!(find(&r, b'C').is_none(), "the answer was taken back");
+    assert_eq!(status(&r), b'I', "and the session is still ready");
+
+    let r = c.simple("put t {n: 2}");
+    let e = find(&r, b'E').expect("later writes are refused");
+    assert_eq!(e.sqlstate().unwrap(), "58030");
+    assert!(e.message().unwrap().contains("refused"));
+
+    let r = c.simple("get t count");
     assert!(find(&r, b'E').is_none());
     assert!(h.db.read().unwrap().failure().is_some());
 }

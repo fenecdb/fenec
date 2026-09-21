@@ -62,6 +62,17 @@ impl Writer {
         self.buf.extend_from_slice(b);
     }
 
+    /// Where the next message will start, for [`Self::rewind`].
+    pub fn mark(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Drops every message written since `mark`: an answer that turned out
+    /// not to be true, before it was sent.
+    pub fn rewind(&mut self, mark: usize) {
+        self.buf.truncate(mark);
+    }
+
     pub fn flush_to(&mut self, w: &mut impl Write) -> io::Result<()> {
         w.write_all(&self.buf)?;
         w.flush()?;

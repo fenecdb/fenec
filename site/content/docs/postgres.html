@@ -76,12 +76,22 @@ reach the disk.</p>
 <table>
 <thead><tr><th><code>--sync</code></th><th>Meaning</th><th>Cost</th></tr></thead>
 <tbody>
-<tr><td><code>always</code></td><td><code>fsync</code> after every write statement</td><td class="n">~3 ms/write</td></tr>
+<tr><td><code>always</code></td><td>every write statement waits for an <code>fsync</code>; writes arriving together share one</td><td class="n">~3.7 ms a write alone</td></tr>
 <tr><td><code>250</code> (default)</td><td>periodic; at most one interval is at risk</td><td class="n">negligible</td></tr>
 <tr><td><code>off</code></td><td>on shutdown only</td><td class="n">none</td></tr>
 </tbody>
 </table>
 </div>
+
+<p>Under <code>always</code> the <code>fsync</code> runs after the write has
+let go of the exclusive lock, and the bytes reach the file there too. Readers
+therefore do not wait on the disk, and writes that arrive while one
+<code>fsync</code> runs are made durable together by the next. Over eight
+clients on macOS, where an <code>fsync</code> is a full cache flush of about
+3.7 ms, that took durable writes from 268 to 1 156 a second, and a read's p99
+under that load from 320 ms to 0.44 ms, against 0.15 ms idle. One client
+still gets one write per <code>fsync</code>. The HTTP listener's writes take
+the same path.</p>
 
 <p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
 and a final sync runs before exit. The exclusive lock is <b>held</b> until

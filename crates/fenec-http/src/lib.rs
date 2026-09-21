@@ -443,10 +443,16 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Err(e) => return error_response(&e),
         };
         let result = guard.execute_with(&routed.statement, &[]);
-        if result.is_ok() && cfg.sync_on_write {
-            if let Err(e) = guard.sync() {
-                return error_response(&e);
-            }
+        let durability = match result {
+            Ok(_) => match flush_for(cfg, &mut guard) {
+                Ok(d) => d,
+                Err(e) => return error_response(&e),
+            },
+            Err(_) => None,
+        };
+        drop(guard);
+        if let Err(e) = await_durable(db, durability) {
+            return error_response(&e);
         }
         match result {
             Ok(resp) => api::render(&resp, &routed.shape, fenec_core::VERSION),
@@ -487,10 +493,16 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Resp
     } else {
         let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
         let r = guard.execute_with(&stmt, &params);
-        if r.is_ok() && cfg.sync_on_write {
-            if let Err(e) = guard.sync() {
-                return error_response(&e);
-            }
+        let durability = match r {
+            Ok(_) => match flush_for(cfg, &mut guard) {
+                Ok(d) => d,
+                Err(e) => return error_response(&e),
+            },
+            Err(_) => None,
+        };
+        drop(guard);
+        if let Err(e) = await_durable(db, durability) {
+            return error_response(&e);
         }
         r
     };
@@ -523,19 +535,53 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Resp
             Ok(r) => results.push(r),
             Err(e) => {
                 // Sync on the error path too: whatever was applied is durable.
-                if cfg.sync_on_write && !results.is_empty() {
-                    let _ = guard.sync();
+                // The statement's error is the one reported.
+                if !results.is_empty() {
+                    let durability = flush_for(cfg, &mut guard).ok().flatten();
+                    drop(guard);
+                    let _ = await_durable(db, durability);
                 }
                 return api::render_batch_error(&e, results.len(), fenec_core::VERSION);
             }
         }
     }
-    if cfg.sync_on_write {
-        if let Err(e) = guard.sync() {
-            return error_response(&e);
-        }
+    let durability = match flush_for(cfg, &mut guard) {
+        Ok(d) => d,
+        Err(e) => return error_response(&e),
+    };
+    drop(guard);
+    if let Err(e) = await_durable(db, durability) {
+        return error_response(&e);
     }
     api::render_batch(&results, fenec_core::VERSION)
+}
+
+/// Under `sync_on_write`, hands the writes over while the write lock is
+/// held and returns what the answer has to wait for. The fsync itself runs
+/// in [`await_durable`], after the lock is let go: readers do not wait on
+/// the disk, and writes arriving together share one fsync.
+fn flush_for(cfg: &Config, db: &mut Database) -> fenec_core::error::Result<Option<Durability>> {
+    if cfg.sync_on_write {
+        db.flush()
+    } else {
+        Ok(None)
+    }
+}
+
+/// Waits for the writes `flush_for` handed over, without the lock. A
+/// failure is reported to the engine as well, which then refuses every
+/// later write as after a failure of its own.
+fn await_durable(
+    db: &RwLock<Database>,
+    durability: Option<Durability>,
+) -> fenec_core::error::Result<()> {
+    let Some(durable) = durability else {
+        return Ok(());
+    };
+    durable().inspect_err(|e| {
+        eprintln!("sync error: {e}");
+        db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
+    })
 }
 
 /// `POST /<name>/near` is a read: taking the write lock would block the other

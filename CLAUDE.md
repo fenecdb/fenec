@@ -104,7 +104,13 @@ rewrite, every later write and sync returns `Error::Io` until the file is
 reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
-had not yet sent.
+had not yet sent. That fsync runs *outside* the exclusive lock: under it a
+write only calls `Database::flush`, which hands back a `Durability` to run once
+the lock is released, and `FileSink` writes the bytes there as well (a `write`
+under the lock waited out concurrent fsyncs on macOS). A durability whose bytes
+an earlier fsync already covered runs none, which is the group commit: 268 ->
+1 156 durable writes/s over eight clients. A failed one is reported back with
+`Database::fail` so the engine stops taking writes.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
 `site/content/docs/sharding.html`). The tenant comes from the path

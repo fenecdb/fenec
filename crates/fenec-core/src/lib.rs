@@ -49,8 +49,8 @@ pub mod fs;
 pub mod prelude {
     pub use crate::changes::{ChangeLog, Since};
     pub use crate::engine::{
-        ChangeBatch, Changes, Collection, CollectionStats, Database, Sink, TextIndexStats,
-        VectorIndexStats, Watcher,
+        ChangeBatch, Changes, Collection, CollectionStats, Database, Durability, Sink,
+        TextIndexStats, VectorIndexStats, Watcher,
     };
     pub use crate::error::{Error, Result};
     pub use crate::plugin::{Hook, Plugin, Registry, ScalarFn, WriteOp};
