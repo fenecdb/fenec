@@ -114,7 +114,7 @@ two processes opening one file would corrupt it.
 [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
 [HTTP endpoint](https://fenecdb.com/docs/http).
 
-**Container.** 1.23 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 1.31 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -139,7 +139,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 338 KB wasm + 60 KB client (113 KB brotli served) · 684–927 KB binary · 1.23 MB container image |
+| **Runtime size** | 338 KB wasm + 60 KB client (113 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
