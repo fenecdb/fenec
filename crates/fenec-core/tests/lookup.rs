@@ -317,7 +317,10 @@ fn lookup_works_after_a_reload() {
 fn a_bounded_child_order_agrees_with_a_full_sort() {
     let mut db = Database::new();
     run(&mut db, "create collection p (name text)");
-    run(&mut db, "create collection c (pid int @hash, k int, tag text)");
+    run(
+        &mut db,
+        "create collection c (pid int @hash, k int, tag text)",
+    );
     run(&mut db, r#"put p {name: "one"}"#);
 
     // 400 children over 7 distinct keys: every key is a tie of ~57 rows, so
