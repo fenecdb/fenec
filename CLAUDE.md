@@ -128,8 +128,15 @@ the id counter (kind 7) exists so `compact` cannot hand out a deleted id again.
 
 **The HNSW graph is derived data, not a cache.** It is written only by
 `snapshot`, `compact` and `checkpoint` — never on the write path. On open the
-version, dimension, node count and link bounds are validated; anything off means
-a silent full rebuild. A corrupt graph can therefore never lose data.
+version, dimension, precision and link bounds are validated, and the live nodes
+against the documents holding a vector; anything off means a silent full
+rebuild. A corrupt graph can therefore never lose data. It is restored where the
+checkpoint's image ends, against the documents it was written with, and the tail
+after it is applied as the write path would (a touched document's node retired,
+its current vector inserted) -- restored after the whole file, one write in the
+tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
+tombstone carries its own vector in the record, since its document may be gone:
+without that, one `del` rebuilt the graph on every open until `compact`.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;

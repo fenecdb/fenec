@@ -133,8 +133,12 @@ that is down takes its tenants with it.</p>
     interactive or piped session, and <code>fenec-pg</code> on the shutdown
     signal — both only if a vector index exists.
     <b>A one-shot <code>fenec file.fenec -c '...'</code> does not.</b> Neither
-    does <code>kill -9</code> or a cgroup OOM; the graph is then rebuilt on the
-    next open, so what is lost is derived data.</li>
+    does <code>kill -9</code> or a cgroup OOM. The next open then restores the
+    graph the last checkpoint wrote and applies the writes since it, so what
+    is lost is time, not data: with 1 000 writes after the checkpoint,
+    0.19 s at 100 000 × 128 and 0.99 s at 100 000 × 768, where rebuilding the
+    graph took 8.8 s and 48 s. The time grows with the writes since the
+    checkpoint.</li>
   <li><b><code>compact</code> is a full rebuild, not a garbage collection.</b>
     Even with zero dead bytes every index is built from scratch and writes
     block throughout: 20 000 × 32 takes 0.94 s, against 0.05 s on a

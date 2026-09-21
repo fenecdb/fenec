@@ -1025,8 +1025,26 @@ impl Database {
         let mut seq_base = 0u64;
         let mut seq_seen = 0u64;
         let mut body_end = MAGIC.len();
+        // The graphs are restored where the image ends, against the
+        // documents they were written with, and the tail -- the writes since
+        // the checkpoint -- is applied to them afterwards, one touched
+        // document at a time. Restored after the whole file instead, a single
+        // write in the tail left the node count off and threw the graph away:
+        // a crash cost a full rebuild. Without the header (an old file) there
+        // is no boundary to restore at, and that is still what happens.
+        let mut has_header = false;
+        let mut restored: Option<Vec<(String, String)>> = None;
+        // Per collection, the documents the tail wrote. A `Vec`, not a map:
+        // a file has a handful of collections, and the map's code was 1.5 KB
+        // of the browser module.
+        let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
+        // Collections whose indexes the tail reset or replaced.
+        let mut reset: Vec<String> = Vec::new();
         while pos < bytes.len() {
             let tail = pos >= body_end;
+            if tail && has_header && restored.is_none() {
+                restored = Some(self.restore_graphs(&graphs)?);
+            }
             let rec = bytes[pos];
             pos += 1;
             match rec {
@@ -1040,6 +1058,9 @@ impl Database {
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
                     seq_seen += tail as u64;
+                    if tail {
+                        reset.push(schema.name.clone());
+                    }
                     by_id.insert(cid, schema.name.clone());
                     self.order.retain(|n| n != &schema.name);
                     self.order.push(schema.name.clone());
@@ -1062,6 +1083,7 @@ impl Database {
                     if let Some(name) = by_id.remove(&cid) {
                         self.collections.remove(&name);
                         self.order.retain(|n| n != &name);
+                        reset.push(name);
                     }
                 }
                 REC_DATA => {
@@ -1077,7 +1099,19 @@ impl Database {
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let c = self.collections.get_mut(&name).unwrap();
-                    let frames = c.store.replay(chunk)? as u64;
+                    let frames = if tail && has_header {
+                        let at = match touched.iter().position(|(n, _)| *n == name) {
+                            Some(at) => at,
+                            None => {
+                                touched.push((name, Vec::new()));
+                                touched.len() - 1
+                            }
+                        };
+                        let ids = &mut touched[at].1;
+                        c.store.replay_noting(chunk, &mut |id| ids.push(id))?
+                    } else {
+                        c.store.replay(chunk)?
+                    } as u64;
                     if tail {
                         seq_seen += frames;
                     }
@@ -1105,6 +1139,7 @@ impl Database {
                             if same_layout {
                                 c.schema = schema;
                                 c.reset_index_structures();
+                                reset.push(name.clone());
                             }
                         }
                     }
@@ -1149,6 +1184,7 @@ impl Database {
                     w.copy_from_slice(&bytes[pos + 8..pos + 16]);
                     pos += 16;
                     body_end = pos + u64::from_le_bytes(w) as usize;
+                    has_header = true;
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
             }
@@ -1158,53 +1194,121 @@ impl Database {
         // A cursor sitting exactly here (a quiet restart) gets an empty
         // answer; everything else is reseeded.
         self.changes.reset(seq_base + seq_seen);
-        // Indexes are derived data: restored from the persisted graph when
-        // there is one, rebuilt otherwise (or when validation fails).
-        self.rebuild_indexes_with(&graphs)?;
+        // Indexes are derived data: a graph restored from the file takes the
+        // tail's writes; everything else is rebuilt from the documents.
+        let restored = match restored {
+            Some(r) => r,
+            None => self.restore_graphs(&graphs)?,
+        };
+        self.rebuild_indexes_with(&restored, &reset, &touched)?;
         Ok(())
     }
 
-    pub fn rebuild_indexes(&mut self) -> Result<()> {
-        self.rebuild_indexes_with(&HashMap::new())
+    /// Restores each persisted graph against the documents as they stand,
+    /// keeping it only if it describes them exactly: every live node's
+    /// document holds a vector -- `restore_graph` checks that -- and every
+    /// document holding one has a node. The second used to be a comparison
+    /// with the number of documents, so a single document without a vector
+    /// threw the graph away on every open.
+    fn restore_graphs(
+        &mut self,
+        graphs: &HashMap<(String, String), Vec<u8>>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut restored = Vec::new();
+        for ((name, field), bytes) in graphs {
+            let Some(c) = self.collections.get_mut(name) else {
+                continue;
+            };
+            let Some(pos) = c.schema.field_pos(field) else {
+                continue;
+            };
+            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+                continue;
+            };
+            if !c.vectors.contains_key(field) {
+                continue;
+            }
+            let store = &c.store;
+            let Some(ix) = VectorIndex::restore_graph(bytes, dim, prec, |doc, out| {
+                store.read_vector_into(doc, pos, out).unwrap_or(false)
+            }) else {
+                continue;
+            };
+            let mut with_vector = 0;
+            for id in store.iter_ids() {
+                with_vector += store.has_vector(id, pos)? as usize;
+            }
+            if ix.len() == with_vector {
+                c.vectors.insert(field.clone(), ix);
+                restored.push((name.clone(), field.clone()));
+            }
+        }
+        Ok(restored)
     }
 
-    fn rebuild_indexes_with(&mut self, graphs: &HashMap<(String, String), Vec<u8>>) -> Result<()> {
+    pub fn rebuild_indexes(&mut self) -> Result<()> {
+        self.rebuild_indexes_with(&[], &[], &[])
+    }
+
+    /// Fills the derived indexes from the documents. A vector index named in
+    /// `restored` came back from the file as of the checkpoint, and takes
+    /// only the documents the tail after it touched -- unless the tail
+    /// `reset` its collection's indexes, which a restored graph cannot
+    /// survive.
+    fn rebuild_indexes_with(
+        &mut self,
+        restored: &[(String, String)],
+        reset: &[String],
+        touched: &[(String, Vec<DocId>)],
+    ) -> Result<()> {
         for name in self.order.clone() {
             let c = self.collections.get_mut(&name).unwrap();
             // `ids()` comes back ascending; no extra sorting needed.
             let ids: Vec<DocId> = c.store.ids();
-
-            // 1) Try to restore from the persisted graph.
             let fields: Vec<String> = c.vectors.keys().cloned().collect();
-            let mut restored: Vec<String> = Vec::new();
-            for field in &fields {
-                let Some(bytes) = graphs.get(&(name.clone(), field.clone())) else {
+            let fresh = reset.contains(&name);
+            let kept =
+                |field: &str| !fresh && restored.iter().any(|(n, f)| *n == name && f == field);
+
+            // 1) The restored graphs take the tail's writes the way the write
+            // path took them: the node a touched document had is retired,
+            // and the vector it holds now, if any, goes in anew.
+            let mut tail = touched
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, ids)| ids.clone())
+                .unwrap_or_default();
+            tail.sort_unstable();
+            tail.dedup();
+            for field in fields.iter().filter(|f| kept(f)) {
+                let Some(pos) = c.schema.field_pos(field) else {
                     continue;
                 };
-                let (dim, pos) = {
-                    let ix = &c.vectors[field];
-                    (ix.dim, c.schema.field_pos(field))
-                };
-                let Some(pos) = pos else { continue };
-                let store = &c.store;
-                let candidate = VectorIndex::restore_graph(bytes, dim, |doc, out| {
-                    store.read_vector_into(doc, pos, out).unwrap_or(false)
-                });
-                if let Some(ix) = candidate {
-                    // If the live document count does not match, the graph is stale.
-                    if ix.len() == ids.len() {
-                        c.vectors.insert(field.clone(), ix);
-                        restored.push(field.clone());
+                let mut items: Vec<(DocId, Vec<f32>)> = Vec::new();
+                let mut buf = Vec::new();
+                for &id in &tail {
+                    if c.store.read_vector_into(id, pos, &mut buf)? {
+                        items.push((id, buf.clone()));
                     }
                 }
+                let ix = c
+                    .vectors
+                    .get_mut(field)
+                    .expect("a restored field has its index");
+                for &id in &tail {
+                    ix.remove(id);
+                }
+                ix.insert_batch(&items);
             }
 
-            // 2) Rebuild whatever could not be restored.
+            // 2) Rebuild whatever could not be restored, at the field's own
+            // precision -- `VectorIndex::new` would have made every rebuilt
+            // `vector<N, f16>` index an f32 one.
             for (field, ix) in c.vectors.iter_mut() {
-                if restored.contains(field) {
+                if kept(field) {
                     continue;
                 }
-                *ix = VectorIndex::new(ix.dim, ix.spec);
+                *ix = VectorIndex::with_precision(ix.dim, ix.spec, ix.precision());
                 // The document count is known, so the arena is sized in one go.
                 ix.reserve(ids.len());
             }
@@ -1214,7 +1318,7 @@ impl Database {
             for t in c.texts.values_mut() {
                 t.clear();
             }
-            if restored.len() == fields.len()
+            if fields.iter().all(|f| kept(f))
                 && c.hashes.is_empty()
                 && c.texts.is_empty()
                 && c.sorted.is_empty()
@@ -1253,7 +1357,7 @@ impl Database {
                 );
             }
             for (field, ix) in c.vectors.iter_mut() {
-                if restored.contains(field) {
+                if kept(field) {
                     continue;
                 }
                 let items: Vec<(DocId, Vec<f32>)> = docs

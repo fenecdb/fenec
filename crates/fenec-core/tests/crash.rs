@@ -1,0 +1,320 @@
+//! A crash leaves a checkpoint's image and a tail of writes after it.
+//! Reopening that has to restore the graph the image holds and apply the
+//! tail to it: rebuilding the graph is what a checkpoint exists to avoid,
+//! and at 100 000 x 768 a rebuild kept a restarted server's port closed for
+//! about 54 s.
+//!
+//! A restored graph shows itself in its arena. It keeps the tombstones of
+//! the writes it took, as the live index does; a rebuilt one holds live
+//! vectors only.
+
+use fenec_core::prelude::*;
+use std::sync::{Arc, Mutex};
+
+/// A file in memory: appends go to its end, a rewrite replaces it.
+#[derive(Clone, Default)]
+struct File(Arc<Mutex<Vec<u8>>>);
+
+impl Sink for File {
+    fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(())
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        *self.0.lock().unwrap() = bytes.to_vec();
+        Ok(())
+    }
+}
+
+fn exec(db: &mut Database, sql: &str, params: &[Value]) {
+    db.execute_with(&fenec_ql::parse_one(sql).expect("parse"), params)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+}
+
+fn ids(db: &Database, sql: &str, params: &[Value]) -> Vec<(u64, f32)> {
+    let r = db
+        .query(&fenec_ql::parse_one(sql).expect("parse"), params)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    r.rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| (r.id, r.score.unwrap_or(0.0)))
+        .collect()
+}
+
+struct Rng(u64);
+impl Rng {
+    fn vector(&mut self, dim: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|_| {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                (self.0 % 20_000) as f32 / 10_000.0 - 1.0
+            })
+            .collect()
+    }
+}
+
+fn arena(db: &Database, collection: &str) -> (usize, VecPrec) {
+    let stats = db.stats();
+    let c = stats
+        .iter()
+        .find(|c| c.name == collection)
+        .expect("collection");
+    let v = &c.vector_indexes[0];
+    (v.arena_bytes, v.precision)
+}
+
+fn reopen(file: &File) -> Database {
+    let mut db = Database::new();
+    db.load(&file.0.lock().unwrap()).expect("load");
+    db
+}
+
+const DIM: usize = 16;
+
+/// What `crashed` leaves: the database as it ran, the file as it stands,
+/// and the tail's updates (id, old vector, new) and deletes (id, vector).
+struct Crash {
+    live: Database,
+    file: File,
+    rng: Rng,
+    updated: Vec<(u64, Vec<f32>, Vec<f32>)>,
+    deleted: Vec<(u64, Vec<f32>)>,
+}
+
+/// Writes before the checkpoint that leave tombstones and documents without
+/// a vector in the image, then a tail of every kind of write.
+fn crashed(ty: &str) -> Crash {
+    let file = File::default();
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    exec(
+        &mut db,
+        &format!("create collection d (tag text, e {ty} @hnsw(cosine, m=8, ef_construction=64))"),
+        &[],
+    );
+    let mut r = Rng(0x2545_F491_4F6C_DD1D);
+    let mut vectors = vec![Vec::new()];
+    for i in 1..=2000u64 {
+        let v = r.vector(DIM);
+        if i % 97 == 0 {
+            exec(&mut db, "put d {tag: \"no vector\"}", &[]);
+        } else {
+            exec(
+                &mut db,
+                "put d {tag: \"x\", e: $1}",
+                &[Value::Vector(v.clone())],
+            );
+        }
+        vectors.push(v);
+    }
+    // Before the checkpoint: a deleted document and an updated one, whose
+    // tombstones the image carries.
+    exec(&mut db, "del d where id = 5", &[]);
+    let v = r.vector(DIM);
+    exec(
+        &mut db,
+        "set d {e: $1} where id = 6",
+        &[Value::Vector(v.clone())],
+    );
+    vectors[6] = v;
+    db.checkpoint().expect("checkpoint");
+
+    // The tail: new documents, updated vectors, deletes, a document without
+    // a vector. Each document is touched once, so the live index and the
+    // restored one hold the same nodes.
+    let mut updated = Vec::new();
+    for id in (100..=2000u64).step_by(95).filter(|i| i % 97 != 0) {
+        let new = r.vector(DIM);
+        exec(
+            &mut db,
+            "set d {e: $1} where id = $2",
+            &[Value::Vector(new.clone()), Value::Int(id as i64)],
+        );
+        updated.push((id, vectors[id as usize].clone(), new));
+    }
+    let mut deleted = Vec::new();
+    for id in (150..=2000u64)
+        .step_by(190)
+        .filter(|i| i % 97 != 0 && i % 95 != 5)
+    {
+        exec(&mut db, "del d where id = $1", &[Value::Int(id as i64)]);
+        deleted.push((id, vectors[id as usize].clone()));
+    }
+    for _ in 0..100 {
+        exec(
+            &mut db,
+            "put d {tag: \"late\", e: $1}",
+            &[Value::Vector(r.vector(DIM))],
+        );
+    }
+    exec(&mut db, "put d {tag: \"late, no vector\"}", &[]);
+    Crash {
+        live: db,
+        file,
+        rng: r,
+        updated,
+        deleted,
+    }
+}
+
+#[test]
+fn a_crash_after_a_checkpoint_keeps_the_graph() {
+    for ty in [format!("vector<{DIM}>"), format!("vector<{DIM}, f16>")] {
+        let Crash {
+            live,
+            file,
+            rng: mut r,
+            updated,
+            deleted,
+        } = crashed(&ty);
+        let back = reopen(&file);
+
+        // Restored, not rebuilt: the same nodes as the live index, and the
+        // field's own precision.
+        assert_eq!(arena(&back, "d"), arena(&live, "d"), "{ty}");
+        let docs = |db: &Database| ids(db, "get d select id", &[]).len();
+        assert_eq!(docs(&back), docs(&live));
+
+        // An updated document is found at its new vector and not at its old
+        // one; a deleted one is not found at all.
+        for (id, old, new) in &updated {
+            let hit = ids(
+                &back,
+                "get d select id near e $1 limit 1",
+                &[Value::Vector(new.clone())],
+            );
+            assert_eq!(hit[0].0, *id, "{ty}: document {id} at its new vector");
+            let near_old = ids(
+                &back,
+                "get d select id near e $1 limit 5",
+                &[Value::Vector(old.clone())],
+            );
+            assert!(
+                near_old.iter().all(|(d, s)| d != id || *s < 0.999),
+                "{ty}: {id} at its old vector"
+            );
+        }
+        for (id, v) in &deleted {
+            let hit = ids(
+                &back,
+                "get d select id near e $1 limit 10",
+                &[Value::Vector(v.clone())],
+            );
+            assert!(
+                hit.iter().all(|(d, _)| d != id),
+                "{ty}: deleted {id} came back"
+            );
+        }
+
+        // The ANN over the restored graph finds what an exact scan finds.
+        let mut found = 0;
+        for _ in 0..20 {
+            let q = Value::Vector(r.vector(DIM));
+            let ann = ids(
+                &back,
+                "get d select id near e $1 limit 10",
+                std::slice::from_ref(&q),
+            );
+            let exact = ids(
+                &back,
+                "get d select id near e $1 exact limit 10",
+                std::slice::from_ref(&q),
+            );
+            found += ann
+                .iter()
+                .filter(|a| exact.iter().any(|e| e.0 == a.0))
+                .count();
+        }
+        assert!(found >= 190, "{ty}: recall {found}/200");
+    }
+}
+
+/// A checkpoint with nothing after it restores as well, tombstones and
+/// documents without a vector included -- before, either one rebuilt the
+/// graph on every open.
+#[test]
+fn tombstones_and_missing_vectors_do_not_cost_a_rebuild() {
+    let file = File::default();
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    exec(
+        &mut db,
+        "create collection d (e vector<4> @hnsw(cosine, m=8))",
+        &[],
+    );
+    let mut r = Rng(9);
+    for _ in 0..300 {
+        exec(&mut db, "put d {e: $1}", &[Value::Vector(r.vector(4))]);
+    }
+    exec(&mut db, "put d {}", &[]);
+    exec(&mut db, "del d where id = 10", &[]);
+    exec(
+        &mut db,
+        "set d {e: $1} where id = 11",
+        &[Value::Vector(r.vector(4))],
+    );
+    db.checkpoint().unwrap();
+    let back = reopen(&file);
+    // 300 vectors written, one replaced: 301 nodes, tombstones included.
+    assert_eq!(arena(&back, "d"), (301 * 4 * 4, VecPrec::F32));
+    assert_eq!(arena(&back, "d"), arena(&db, "d"));
+}
+
+/// A tail that changes a collection's schema resets its indexes; the graph
+/// it had is then rebuilt, and the answers stay right.
+#[test]
+fn a_schema_change_in_the_tail_rebuilds_that_graph() {
+    let file = File::default();
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    exec(
+        &mut db,
+        "create collection d (k int, e vector<4> @hnsw(cosine, m=8))",
+        &[],
+    );
+    let mut r = Rng(3);
+    for k in 0..200 {
+        exec(
+            &mut db,
+            "put d {k: $1, e: $2}",
+            &[Value::Int(k), Value::Vector(r.vector(4))],
+        );
+    }
+    db.checkpoint().unwrap();
+    exec(&mut db, "create index on d (k) @hash", &[]);
+    exec(&mut db, "put d {k: 7, e: [1, 0, 0, 0]}", &[]);
+    let back = reopen(&file);
+    let hit = ids(
+        &back,
+        "get d select id where k = 7 near e $1 limit 2",
+        &[Value::Vector(vec![1.0, 0.0, 0.0, 0.0])],
+    );
+    assert_eq!(hit[0].0, 201);
+    // Rebuilt: live vectors only, no tombstones to carry.
+    assert_eq!(arena(&back, "d").0, 201 * 4 * 4);
+}
+
+/// `rerank` reads the stored vectors, and a `vector<N, f16>` field is
+/// stored halved under its own tag: it used to read as empty, and the
+/// rerank returned no rows.
+#[test]
+fn rerank_reads_a_half_precision_field() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection d (body text @text, e vector<4, f16>)",
+        &[],
+    );
+    exec(
+        &mut db,
+        "put d [{body: \"a b\", e: [1, 0, 0, 0]}, {body: \"a c\", e: [0, 1, 0, 0]}]",
+        &[],
+    );
+    let hit = ids(
+        &db,
+        "get d select id match body \"a\" rerank e $1 limit 2",
+        &[Value::Vector(vec![0.0, 1.0, 0.0, 0.0])],
+    );
+    assert_eq!(hit.iter().map(|h| h.0).collect::<Vec<_>>(), vec![2, 1]);
+}
