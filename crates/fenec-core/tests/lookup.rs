@@ -305,3 +305,74 @@ fn lookup_works_after_a_reload() {
     assert_eq!(before.groups, after.groups);
     assert_eq!(before.columns, after.columns);
 }
+
+/// The bounded selection must never change the answer, only the work.
+///
+/// `lookup` carries its own `limit`, so it can stop ordering once it has
+/// `offset + limit` children -- but a partial order is only allowed if it
+/// picks exactly the rows a full one would. Ties are where that breaks, so
+/// this deliberately generates a lot of them, and the reference is the same
+/// query with the limit lifted above the group.
+#[test]
+fn a_bounded_child_order_agrees_with_a_full_sort() {
+    let mut db = Database::new();
+    run(&mut db, "create collection p (name text)");
+    run(&mut db, "create collection c (pid int @hash, k int, tag text)");
+    run(&mut db, r#"put p {name: "one"}"#);
+
+    // 400 children over 7 distinct keys: every key is a tie of ~57 rows, so
+    // the cut lands inside a tie for most limits.
+    let docs: Vec<String> = (0..400)
+        .map(|i| format!(r#"{{pid: 1, k: {}, tag: "t{i}"}}"#, i % 7))
+        .collect();
+    run(&mut db, &format!("put c [{}]", docs.join(",")));
+
+    let ids = |l: Lookup| -> Vec<u64> {
+        let (_, n) = nested(&db, &plan_for("p", l));
+        n.groups[0].iter().map(|r| r.id).collect()
+    };
+
+    for asc in [true, false] {
+        let mut full = lookup_c();
+        full.order = vec![("k".into(), asc)];
+        full.limit = Some(10_000);
+        let reference = ids(full);
+        assert_eq!(reference.len(), 400);
+
+        for (offset, limit) in [(0, 1), (0, 3), (0, 57), (0, 58), (5, 10), (57, 3), (399, 5)] {
+            let mut l = lookup_c();
+            l.order = vec![("k".into(), asc)];
+            l.offset = offset;
+            l.limit = Some(limit);
+            let want: Vec<u64> = reference.iter().copied().skip(offset).take(limit).collect();
+            assert_eq!(ids(l), want, "asc={asc} offset={offset} limit={limit}");
+        }
+    }
+
+    // Two keys, the second breaking ties of the first.
+    let mut full = lookup_c();
+    full.order = vec![("k".into(), false), ("tag".into(), true)];
+    full.limit = Some(10_000);
+    let reference = ids(full);
+    let mut l = lookup_c();
+    l.order = vec![("k".into(), false), ("tag".into(), true)];
+    l.limit = Some(9);
+    assert_eq!(ids(l), reference[..9].to_vec());
+}
+
+fn lookup_c() -> Lookup {
+    Lookup {
+        collection: "c".into(),
+        child_field: "pid".into(),
+        parent_field: "id".into(),
+        ..Default::default()
+    }
+}
+
+fn plan_for(parent: &str, l: Lookup) -> Select {
+    Select {
+        collection: parent.into(),
+        lookup: Some(l),
+        ..Default::default()
+    }
+}

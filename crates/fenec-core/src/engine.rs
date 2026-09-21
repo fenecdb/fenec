@@ -1709,15 +1709,31 @@ impl Database {
                     }
                     keyed.push((vals, *id));
                 }
-                keyed.sort_by(|a, b| {
+                // The id breaks a tie, ascending whichever way the keys
+                // run. A stable sort over an ascending-id input already
+                // decided ties that way, so this changes no answer -- it
+                // makes the order total, which is what lets the selection
+                // below pick the same rows the full sort would.
+                let cmp = |a: &(Vec<Value>, DocId), b: &(Vec<Value>, DocId)| {
                     for (i, (_, asc)) in keys.iter().enumerate() {
                         let o = a.0[i].cmp_value(&b.0[i]);
                         if o != Ordering::Equal {
                             return if *asc { o } else { o.reverse() };
                         }
                     }
-                    Ordering::Equal
-                });
+                    a.1.cmp(&b.1)
+                };
+                // `lookup` is the one place a bounded `order` is known up
+                // front: the clause carries its own `limit`, so only
+                // `offset + limit` children can ever be emitted and the rest
+                // never need an order at all. Elsewhere `order` has no such
+                // guarantee, which is why the engine sorts in full there.
+                let want = l.offset.saturating_add(limit);
+                if want < keyed.len() {
+                    keyed.select_nth_unstable_by(want, cmp);
+                    keyed.truncate(want);
+                }
+                keyed.sort_by(cmp);
                 kept = keyed.into_iter().map(|(_, id)| id).collect();
             }
 
