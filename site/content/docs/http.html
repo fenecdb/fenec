@@ -55,7 +55,7 @@ POST   /batch                   one query body per line (NDJSON)
 <tr><td><b>Negation</b></td><td>the <code>not.</code> prefix — <code>?summary=not.is.null</code>, <code>?year=not.eq.1999</code></td></tr>
 <tr><td><b>Shorthand</b></td><td>an unrecognised prefix makes the whole value an equality: <code>?year=2024</code></td></tr>
 <tr><td><b>List</b></td><td><code>?year=in.(1999,2023)</code></td></tr>
-<tr><td><b>Clauses</b></td><td><code>select</code> <code>order</code> <code>limit</code> <code>offset</code> <code>count</code> <code>where</code></td></tr>
+<tr><td><b>Clauses</b></td><td><code>select</code> <code>order</code> <code>limit</code> <code>offset</code> <code>count</code> <code>where</code> <code>lookup</code></td></tr>
 <tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code></td></tr>
 <tr><td><b>Free expression</b></td><td><code>?where=year >= 2024 and tags has "rust"</code> — full FenecQL</td></tr>
 </tbody>
@@ -98,6 +98,27 @@ parameters.</p>
   -H 'content-type: application/json' \
   -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
 </pre>
+
+<h2>Embedding a collection</h2>
+
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/products?limit=20&amp;select=name\
+&amp;lookup=reviews&amp;reviews.on=product_id&amp;reviews.stars=gte.4\
+&amp;reviews.order=created.desc&amp;reviews.limit=3'
+# [{"name":"Kahve","reviews":[{...},{...},{...}]}, ...]</pre>
+
+<p><code>lookup=&lt;name&gt;</code> names the collection once; every key prefixed
+with it configures the clause — <code>on</code> (required, the child's field
+holding the key), <code>parent</code>, <code>select</code>,
+<code>order</code>, <code>limit</code>, <code>offset</code>,
+<code>required</code>, <code>where</code>, and any field name as a condition,
+in the same <code>op.value</code> form the parent's filters use. Prefixing is
+what keeps the two sides apart in a query string, the way the clause's
+position does in FenecQL.</p>
+
+<p><code>lookup</code> is a reserved key here, so a field named
+<code>lookup</code> cannot be filtered over the REST path — the FenecQL and
+<code>fenec-pg</code> paths are unaffected, as with the other reserved
+names.</p>
 
 <p>A query with a <code>lookup</code> answers with the children nested under
 the collection's name — one object per parent, with an empty array where

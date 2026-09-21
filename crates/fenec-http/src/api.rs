@@ -32,13 +32,15 @@ use fenec_core::prelude::*;
 /// Query keys that are read as clauses rather than as filters. A field with
 /// the same name cannot be filtered over HTTP (the FenecQL and `fenec-pg` paths
 /// are unaffected).
-const RESERVED: [&str; 6] = ["select", "order", "limit", "offset", "count", "where"];
+const RESERVED: [&str; 7] = [
+    "select", "order", "limit", "offset", "count", "where", "lookup",
+];
 
 /// On the subscription endpoint `since` is a clause as well. It is a
 /// separate list so that a field named `since` stays filterable on the
 /// **other** endpoints.
-const RESERVED_STREAM: [&str; 7] = [
-    "select", "order", "limit", "offset", "count", "where", "since",
+const RESERVED_STREAM: [&str; 8] = [
+    "select", "order", "limit", "offset", "count", "where", "since", "lookup",
 ];
 
 pub struct Routed {
@@ -74,7 +76,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
         }),
         (Method::Get | Method::Head, [name]) => {
             let schema = &db.collection(name)?.schema;
-            let sel = select_from_query(schema, req)?;
+            let sel = select_from_query(db, schema, req)?;
             let shape = if sel.count { Shape::Count } else { Shape::Rows };
             Ok(Routed {
                 statement: Statement::Select(sel),
@@ -148,10 +150,13 @@ fn require_filter(schema: &Schema, req: &Request, all: bool, verb: &str) -> Resu
 
 // --------------------------------------------------------------- reading
 
-fn select_from_query(schema: &Schema, req: &Request) -> Result<Select> {
+fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Select> {
+    let lookup = lookup_from_query(db, schema, req)?;
+    let skip = lookup.as_ref().map(|l| format!("{}.", l.collection));
     let mut sel = Select {
         collection: schema.name.clone(),
-        filter: filter_from_query(schema, req)?,
+        filter: filter_with(schema, req, &RESERVED, skip.as_deref())?,
+        lookup,
         ..Default::default()
     };
     for (k, v) in &req.query {
@@ -166,6 +171,64 @@ fn select_from_query(schema: &Schema, req: &Request) -> Result<Select> {
     }
     sel.check()?;
     Ok(sel)
+}
+
+/// `?lookup=reviews&reviews.on=product_id&reviews.limit=3&reviews.stars=gte.4`
+///
+/// The collection is named once and everything prefixed with it configures
+/// the clause -- `on`, `parent`, `select`, `order`, `limit`, `offset`,
+/// `required`, `where`, and any field name as a condition. Prefixing keeps
+/// the two sides apart in a query string the way the clause's position does
+/// in FenecQL, and it is the shape PostgREST already uses for an embedded
+/// resource's filters.
+fn lookup_from_query(db: &Database, parent: &Schema, req: &Request) -> Result<Option<Lookup>> {
+    let Some((_, name)) = req.query.iter().find(|(k, _)| k == "lookup") else {
+        return Ok(None);
+    };
+    let child = &db.collection(name)?.schema;
+    let prefix = format!("{name}.");
+    let mut l = Lookup {
+        collection: name.clone(),
+        parent_field: "id".to_string(),
+        ..Default::default()
+    };
+    let mut parts: Vec<Expr> = Vec::new();
+    for (key, raw) in &req.query {
+        let Some(k) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        match k {
+            "on" => l.child_field = field_of(child, raw)?,
+            "parent" => l.parent_field = field_of(parent, raw)?,
+            "select" => l.project = Some(projection(child, raw)?),
+            "order" => l.order = order(child, raw)?,
+            "limit" => l.limit = Some(number(raw, "limit")?),
+            "offset" => l.offset = number(raw, "offset")?,
+            "required" => l.required = truthy(raw),
+            "where" => parts.push(parse_expr(name, raw)?),
+            other => parts.push(condition(child, other, raw)?),
+        }
+    }
+    if l.child_field.is_empty() {
+        return Err(Error::Query(format!(
+            "`lookup={name}` needs `{name}.on=<field>`: the child field holding the key"
+        )));
+    }
+    l.filter = parts
+        .into_iter()
+        .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)));
+    Ok(Some(l))
+}
+
+/// A field name from the query string, checked against the schema so an
+/// unknown one is an error here rather than at execution. `id` is not a
+/// declared field but is a legal key on either side.
+fn field_of(schema: &Schema, raw: &str) -> Result<String> {
+    let name = raw.trim();
+    if name == "id" || schema.field(name).is_some() {
+        return Ok(name.to_string());
+    }
+    Err(Error::NotFound(format!("field `{}.{name}`", schema.name)))
 }
 
 fn projection(schema: &Schema, raw: &str) -> Result<Vec<String>> {
@@ -221,12 +284,22 @@ fn truthy(raw: &str) -> bool {
 
 /// Joins every condition in the query string with `and`.
 fn filter_from_query(schema: &Schema, req: &Request) -> Result<Option<Expr>> {
-    filter_with(schema, req, &RESERVED)
+    filter_with(schema, req, &RESERVED, None)
 }
 
-fn filter_with(schema: &Schema, req: &Request, reserved: &[&str]) -> Result<Option<Expr>> {
+/// `skip` is a `lookup`'s `<collection>.` prefix: those keys configure the
+/// child and must not be read as conditions on the parent.
+fn filter_with(
+    schema: &Schema,
+    req: &Request,
+    reserved: &[&str],
+    skip: Option<&str>,
+) -> Result<Option<Expr>> {
     let mut parts: Vec<Expr> = Vec::new();
     for (key, raw) in &req.query {
+        if skip.is_some_and(|p| key.starts_with(p)) {
+            continue;
+        }
         if reserved.contains(&key.as_str()) {
             if key == "where" {
                 parts.push(parse_expr(&schema.name, raw)?);
@@ -587,7 +660,7 @@ pub fn subscription(db: &Database, req: &Request) -> Result<Subscription> {
 
     Ok(Subscription {
         collection: name.to_string(),
-        filter: filter_with(schema, req, &RESERVED_STREAM)?,
+        filter: filter_with(schema, req, &RESERVED_STREAM, None)?,
         project,
         since,
     })

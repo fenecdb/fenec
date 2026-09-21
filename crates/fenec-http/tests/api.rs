@@ -37,6 +37,18 @@ fn seeded() -> Database {
     );
     run(
         &mut db,
+        "create collection remarks (article_id int @hash, body text, stars int)",
+    );
+    run(
+        &mut db,
+        r#"put remarks [
+             {article_id: 1, body: "solid", stars: 5},
+             {article_id: 1, body: "dense", stars: 3},
+             {article_id: 3, body: "thin",  stars: 2}
+           ]"#,
+    );
+    run(
+        &mut db,
         r#"put articles [
              {title: "rust book", tags: ["rust","book"], year: 2024,
               summary: "a", published: "2024-03-01T00:00:00Z", embed: [1.0, 0.0, 0.0]},
@@ -693,4 +705,70 @@ fn a_float_in_the_query_string_is_read_like_every_other_number() {
             "{bad:?} should not be a number"
         );
     }
+}
+
+/// `lookup` over the query string: the collection is named once and
+/// everything prefixed with it configures the clause. Prefixing keeps the two
+/// sides apart the way the clause's position does in FenecQL, and it is the
+/// shape PostgREST uses for an embedded resource's filters.
+#[test]
+fn lookup_from_the_query_string() {
+    let h = start(Config::default());
+
+    let r = get(h.port, "/articles?lookup=remarks&remarks.on=article_id&select=title");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains(r#""remarks":[{"#), "{}", r.body);
+    // A parent with no children keeps its row and an empty group.
+    assert!(r.body.contains(r#""remarks":[]"#), "{}", r.body);
+
+    // The child's own clauses, all prefixed.
+    let r = get(
+        h.port,
+        "/articles?select=title&lookup=remarks&remarks.on=article_id\
+         &remarks.select=stars&remarks.stars=gte.4&remarks.order=stars.desc&remarks.limit=1",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains(r#""remarks":[{"stars":5}]"#), "{}", r.body);
+
+    // `required` lets the children decide who appears, and is what lets
+    // `count` combine with a lookup at all.
+    let r = get(
+        h.port,
+        "/articles?select=title&lookup=remarks&remarks.on=article_id&remarks.stars=gte.4&remarks.required=true",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.matches("\"title\"").count(), 1, "{}", r.body);
+
+    let r = get(
+        h.port,
+        "/articles?count=true&lookup=remarks&remarks.on=article_id&remarks.stars=gte.4&remarks.required=true",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains(r#""count":1"#), "{}", r.body);
+}
+
+/// Every way of getting it wrong, with the status the shape implies.
+#[test]
+fn lookup_from_the_query_string_is_checked() {
+    let h = start(Config::default());
+    for (target, status, needle) in [
+        ("/articles?lookup=remarks", 400, "remarks.on"),
+        ("/articles?lookup=nosuch&nosuch.on=x", 404, "nosuch"),
+        ("/articles?lookup=remarks&remarks.on=nope", 404, "remarks.nope"),
+        ("/articles?lookup=remarks&remarks.on=article_id&remarks.nofield=1", 404, "nofield"),
+        ("/articles?lookup=remarks&remarks.on=article_id&count=true", 400, "required"),
+        ("/articles?lookup=articles&articles.on=id", 400, "itself"),
+    ] {
+        let r = get(h.port, target);
+        assert_eq!(r.status, status, "{target} -> {}", r.body);
+        assert!(r.body.contains(needle), "{target} -> {}", r.body);
+    }
+
+    // A prefixed key must not be read as a condition on the parent: without
+    // the skip, `remarks.stars` would be looked for as an article field.
+    let r = get(
+        h.port,
+        "/articles?year=gte.2020&lookup=remarks&remarks.on=article_id&remarks.stars=gte.4",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
 }
