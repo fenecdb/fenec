@@ -586,3 +586,75 @@ fn eq(field: &str, v: i64) -> Expr {
         Box::new(Expr::Lit(Value::Int(v))),
     )
 }
+
+/// A named parent key takes the parent-driven plan, because the child-driven
+/// one was measured there and lost -- mapping values back means encoding and
+/// sorting byte strings rather than integers. It still has to give the same
+/// answer as the reference that uses no index, indexed key field or not.
+#[test]
+fn required_on_a_named_parent_key_matches_the_reference() {
+    let mut db = Database::new();
+    // `ph` indexes the key field, `pn` does not; same rows, same question.
+    run(&mut db, "create collection ph (sku text @hash, name text)");
+    run(&mut db, "create collection pn (sku text, name text)");
+    run(&mut db, "create collection rv (sku text @hash, stars int @hash)");
+    for c in ["ph", "pn"] {
+        run(
+            &mut db,
+            &format!(
+                r#"put {c} [{{sku: "a", name: "1"}}, {{sku: "b", name: "2"}},
+                            {{sku: "c", name: "3"}}, {{name: "no key"}}]"#
+            ),
+        );
+    }
+    run(
+        &mut db,
+        r#"put rv [
+             {sku: "a", stars: 5}, {sku: "a", stars: 1},
+             {sku: "b", stars: 5}, {sku: "c", stars: 2},
+             {sku: "zz", stars: 5}, {stars: 5}
+           ]"#,
+    );
+
+    let named = |coll: &str, required: bool, filter: Option<Expr>| -> Vec<u64> {
+        let l = Lookup {
+            collection: "rv".into(),
+            child_field: "sku".into(),
+            parent_field: "sku".into(),
+            filter,
+            required,
+            ..Default::default()
+        };
+        let (parents, n) = nested(&db, &plan_for(coll, l));
+        parents
+            .rows
+            .iter()
+            .zip(&n.groups)
+            .filter(|(_, g)| required || !g.is_empty())
+            .map(|(r, _)| r.id)
+            .collect()
+    };
+
+    for filter in [
+        None,
+        Some(eq("stars", 5)),
+        Some(eq("stars", 2)),
+        Some(eq("stars", 99)),
+        Some(Expr::Cmp(
+            CmpOp::Ge,
+            Box::new(Expr::Field("stars".into())),
+            Box::new(Expr::Lit(Value::Int(2))),
+        )),
+    ] {
+        // The reference: no `required`, keep the parents with a non-empty
+        // group. It reads every child and uses no index to decide.
+        let want = named("pn", false, filter.clone());
+        for coll in ["ph", "pn"] {
+            assert_eq!(
+                named(coll, true, filter.clone()),
+                want,
+                "{coll} {filter:?}"
+            );
+        }
+    }
+}
