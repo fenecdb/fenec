@@ -77,11 +77,35 @@ call site.</p>
 <tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
 <tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys</td></tr>
+<tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row</td></tr>
 <tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code></td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>
 </tbody>
 </table>
 </div>
+
+<p><code>lookup</code> hangs another collection's matching documents off each
+row. Everything in its options object binds to that collection, so
+<code>limit</code> there counts children per parent — twenty products with
+three reviews each, in one query:</p>
+
+<pre data-lang="js">const rows = await db.from('products')
+  .where('price', '>=', 10000)
+  .limit(20)
+  .lookup('reviews', {
+    on: 'product_id',
+    where: { stars: { gte: 4 } },
+    order: [['created', 'desc']],
+    limit: 3,
+  })
+  .rows();
+
+// [{ id: 1, name: 'Kahve', price: 12000, reviews: [ {...}, {...} ] }, ...]</pre>
+
+<p>The child's field names cannot be reached from a builder that carries one
+collection's types, so in TypeScript they default to a loose row; naming them
+tightens it:
+<code>.lookup&lt;'reviews', FenecSchema['reviews']&gt;('reviews', {...})</code>.</p>
 
 <p><code>or</code> and <code>not</code> are separate functions because the
 <code>where</code> chain is an <code>and</code>. A nested group is written
@@ -204,7 +228,9 @@ are structural, so the generated file stands alone and imports nothing.</p>
     or <code>del</code>, and ignoring them silently would breed the illusion
     that <code>limit(1)</code> deletes a single row.</li>
   <li><b>No JOIN, no subquery, no <code>returning</code>.</b> The builder adds
-    no capability on top of FenecQL — it only builds it safely.</li>
+    no capability on top of FenecQL — it only builds it safely.
+    <code>lookup</code> is the exception FenecQL itself makes, and
+    <code>.lookup(name, opts)</code> builds it like any other clause.</li>
 </ul>
 
 <p>The tests run with <code>node --test web/fenec.test.js</code> and are part

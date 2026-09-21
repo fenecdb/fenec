@@ -340,6 +340,39 @@ pub struct Rerank {
     pub candidates: Option<usize>,
 }
 
+/// The `lookup` clause: attach each matching document of another collection
+/// to the row it belongs to.
+///
+/// It is a terminal clause -- everything before it binds to the driving
+/// collection, everything after it to `collection`. That positional scoping
+/// is what keeps qualified names (`reviews.stars`) out of the language
+/// altogether: `where` means on either side exactly what it always meant,
+/// and each side still reaches its own indexes through the ordinary path.
+///
+/// `limit` here counts children *per parent*, which is the whole reason the
+/// clause exists. A join's limit counts pairs, so one parent with 56 374
+/// children eats the entire page, and asking a join for three children each
+/// needs a window function -- measured at 0.458 ms against 0.237 ms for
+/// doing the same thing by hand.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Lookup {
+    /// Where the children come from.
+    pub collection: String,
+    /// The child field matched against the parent. `id` is allowed; anything
+    /// else must carry `@hash`, because the probe is a bucket lookup and a
+    /// scan per parent would be a different feature wearing the same name.
+    pub child_field: String,
+    /// The parent field holding the key. `id` unless `on a = b` says so,
+    /// which is the foreign-key-to-primary-key case spelled out.
+    pub parent_field: String,
+    /// None = all fields of the child.
+    pub project: Option<Vec<String>>,
+    pub filter: Option<Expr>,
+    pub order: Vec<(String, bool)>,
+    pub limit: Option<usize>,
+    pub offset: usize,
+}
+
 /// Column name of the `count` result. No such field can exist in a schema --
 /// field names are identifiers and `count` may be one too; on a clash the
 /// column name matches but the value is still the count, because `count`
@@ -366,6 +399,8 @@ pub struct Select {
     pub offset: usize,
     /// `count`: returns the number of matching rows instead of the rows.
     pub count: bool,
+    /// `lookup`: children of another collection, attached per row.
+    pub lookup: Option<Lookup>,
 }
 
 impl Select {
@@ -393,6 +428,39 @@ impl Select {
             return Err(Error::Query(
                 "`rerank` needs `match`: it reorders the candidates match found".into(),
             ));
+        }
+        // `lookup` does not combine with the clauses that rank or collapse
+        // the parent rows. `near`, `match` and `rerank` each order one
+        // collection's documents by a score, and a score spanning a parent
+        // and its children has no defensible meaning; `count` collapses the
+        // very rows the children would hang from. Refused rather than
+        // resolved silently against the parent.
+        if let Some(l) = &self.lookup {
+            let clash = if self.near.is_some() {
+                "near"
+            } else if self.matcher.is_some() {
+                "match"
+            } else if self.rerank.is_some() {
+                "rerank"
+            } else if self.count {
+                "count"
+            } else {
+                ""
+            };
+            if !clash.is_empty() {
+                return Err(Error::Query(format!(
+                    "`lookup` cannot be used together with `{clash}`"
+                )));
+            }
+            // Both sides would answer to the same name, so neither `on` nor
+            // a child `where` could say which one it meant. Aliases would
+            // fix it; there are none, so it is refused rather than guessed.
+            if l.collection == self.collection {
+                return Err(Error::Query(format!(
+                    "`{}` cannot look itself up: both sides would answer to the same name",
+                    self.collection
+                )));
+            }
         }
         if !self.count {
             return Ok(());
@@ -488,7 +556,12 @@ impl Statement {
                     .as_ref()
                     .map(|r| r.vector.max_param())
                     .unwrap_or(0);
-                opt(&sel.filter).max(near).max(m).max(rr)
+                // A `lookup`'s `where` belongs to the same statement, so its
+                // parameters count here too. `Describe` answers with this
+                // number before the query runs; a client told there are none
+                // sends none, and the query then fails on an unbound `$1`.
+                let lk = sel.lookup.as_ref().map(|l| opt(&l.filter)).unwrap_or(0);
+                opt(&sel.filter).max(near).max(m).max(rr).max(lk)
             }
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
             Statement::Delete { filter, .. } => opt(filter),
@@ -512,10 +585,83 @@ pub struct Row {
     pub score: Option<f32>,
 }
 
+/// Children attached by `lookup`, grouped per parent row.
+///
+/// The grouping sits beside the rows instead of inside `Value` because no
+/// value in this database is an object and none is going to become one --
+/// a field you want to filter on should be a field. Keeping the nesting in
+/// the envelope leaves the value model, the codec and the JSON *parser*
+/// untouched; only serialisation learns a second shape, which is the easy
+/// direction. It is also the shape the codebase already uses to answer for
+/// more than one collection: `Response::Schemas` goes long rather than wide.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nested {
+    /// The looked-up collection's name, and the key it serialises under.
+    pub name: String,
+    pub columns: Vec<String>,
+    /// One group per row of the parent set, in the same order.
+    pub groups: Vec<Vec<Row>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResultSet {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
+    /// Set only by `lookup`; `None` for every query that could be written
+    /// before it existed.
+    pub nested: Option<Nested>,
+}
+
+impl ResultSet {
+    /// The same data as one flat table: the parent columns, then the child's
+    /// under `<collection>.<field>`, one row per pair.
+    ///
+    /// This is what a transport that cannot carry nesting gets -- the
+    /// PostgreSQL wire, which has no nested row, and the terminal table. The
+    /// shape is exactly a join's, and since `lookup` caps children per parent
+    /// it is a join's shape with the per-parent limit a join cannot express.
+    /// A parent with no children keeps one row with the child columns null,
+    /// because the page is the parents either way.
+    ///
+    /// `Row::id` stays the parent's. It is never serialised -- both JSON
+    /// writers emit columns and values only -- so a repeated id here reaches
+    /// nobody who could be misled by it.
+    /// Borrowed unchanged when there is nothing nested, so the transports
+    /// that call it on every query do not pay for a clone they do not need.
+    pub fn flatten(&self) -> std::borrow::Cow<'_, ResultSet> {
+        let Some(n) = &self.nested else {
+            return std::borrow::Cow::Borrowed(self);
+        };
+        let mut columns = self.columns.clone();
+        columns.extend(n.columns.iter().map(|c| format!("{}.{}", n.name, c)));
+        let nulls = vec![Value::Null; n.columns.len()];
+        let mut rows = Vec::with_capacity(self.rows.len());
+        for (i, row) in self.rows.iter().enumerate() {
+            let group = n.groups.get(i).map(|g| g.as_slice()).unwrap_or(&[]);
+            let mut widen = |extra: &[Value]| {
+                let mut values = Vec::with_capacity(columns.len());
+                values.extend(row.values.iter().cloned());
+                values.extend(extra.iter().cloned());
+                rows.push(Row {
+                    id: row.id,
+                    values,
+                    score: row.score,
+                });
+            };
+            if group.is_empty() {
+                widen(&nulls);
+            } else {
+                for child in group {
+                    widen(&child.values);
+                }
+            }
+        }
+        std::borrow::Cow::Owned(ResultSet {
+            columns,
+            rows,
+            nested: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -554,6 +700,88 @@ pub fn projection_columns(schema: &Schema, project: &Option<Vec<String>>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lookup_sel() -> Select {
+        Select {
+            collection: "products".into(),
+            lookup: Some(Lookup {
+                collection: "reviews".into(),
+                child_field: "product_id".into(),
+                parent_field: "id".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// `lookup` hangs children off parent rows, so anything that reorders
+    /// those rows by a score or replaces them with a number has to be
+    /// refused rather than quietly applied to the parent alone. `check` runs
+    /// in the engine as well as the parser, because a plan can be built in
+    /// Rust and never see FenecQL.
+    #[test]
+    fn lookup_refuses_clauses_that_rank_or_collapse_the_parent() {
+        for (name, mutate) in [
+            ("near", (|s: &mut Select| {
+                s.near = Some(Near {
+                    field: "embed".into(),
+                    vector: Expr::Param(0),
+                    ef: None,
+                    exact: false,
+                })
+            }) as fn(&mut Select)),
+            ("match", |s: &mut Select| {
+                s.matcher = Some(Match {
+                    field: "body".into(),
+                    query: Expr::Param(0),
+                })
+            }),
+            ("count", |s: &mut Select| s.count = true),
+        ] {
+            let mut sel = lookup_sel();
+            mutate(&mut sel);
+            let e = sel.check().unwrap_err().to_string();
+            assert!(e.contains("lookup") && e.contains(name), "{name} -> {e}");
+        }
+
+        // `rerank` needs `match`, so it can only be reached with both set --
+        // and then `match` is the clash that is reported first.
+        let mut sel = lookup_sel();
+        sel.rerank = Some(Rerank {
+            field: "embed".into(),
+            vector: Expr::Param(0),
+            candidates: None,
+        });
+        assert!(sel.check().is_err());
+    }
+
+    /// The qualifier for a child field is the collection name, so a
+    /// self-lookup would leave `on` and the child `where` with no way to say
+    /// which side they meant.
+    #[test]
+    fn a_collection_cannot_look_itself_up() {
+        let mut sel = lookup_sel();
+        sel.lookup.as_mut().unwrap().collection = "products".into();
+        let e = sel.check().unwrap_err().to_string();
+        assert!(e.contains("itself"), "{e}");
+    }
+
+    /// The clauses `lookup` does combine with have to keep working, or the
+    /// refusals above are just a way of banning the feature.
+    #[test]
+    fn lookup_combines_with_filter_order_and_pagination() {
+        let mut sel = lookup_sel();
+        sel.filter = Some(Expr::Cmp(
+            CmpOp::Ge,
+            Box::new(Expr::Field("price".into())),
+            Box::new(Expr::Lit(Value::Int(10))),
+        ));
+        sel.order = vec![("price".into(), false)];
+        sel.limit = Some(20);
+        sel.offset = 40;
+        sel.project = Some(vec!["name".into()]);
+        assert!(sel.check().is_ok());
+    }
 
     /// What `~` folded to before the ASCII fast path existed. The fast path is
     /// only allowed to be cheaper, never to answer differently.

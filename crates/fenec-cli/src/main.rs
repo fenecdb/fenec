@@ -22,6 +22,7 @@ FenecQL summary
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+           [lookup <name> on <child> [= <parent>] <clauses...>]
   select a, b from <name> ...             -- the classic SQL order works too
   set <name> { field: value } [where <expr>]
   del <name> [where <expr>]
@@ -351,6 +352,10 @@ fn print_response(r: &Response, took: std::time::Duration) {
             }
         }
         Response::Rows(rs) => {
+            // The terminal has no nested row, so `lookup` renders the way a
+            // join would: parent columns, then the child's, one line per
+            // pair.
+            let rs = rs.flatten();
             let mut cols = rs.columns.clone();
             let has_score = rs.rows.iter().any(|r| r.score.is_some());
             if has_score {

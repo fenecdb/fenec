@@ -98,6 +98,12 @@ mod tests {
         assert_eq!(n("set t {a: $1} where b = $2"), 2);
         assert_eq!(n("del t where a = $1"), 1);
         assert_eq!(n("get t where a in [$1, $2, $3]"), 3);
+        // A `lookup`'s own `where` is part of the same statement, so its
+        // parameters have to be counted too: `Describe` answers with this
+        // number before the query runs, and a client that is told there are
+        // none will not send any.
+        assert_eq!(n("get t lookup c on k where s >= $1"), 1);
+        assert_eq!(n("get t where y >= $1 lookup c on k where s >= $2"), 2);
         assert_eq!(n("get t where cosine(e, $1) > 0.5"), 1);
         assert_eq!(n("collections"), 0);
     }

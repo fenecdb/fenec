@@ -1213,3 +1213,141 @@ fn order_by_id() {
     sorted.reverse();
     assert_eq!(desc, sorted);
 }
+
+// ------------------------------------------------------------------ lookup
+
+fn shop() -> Database {
+    let mut db = Database::new();
+    run(&mut db, "create collection products (sku text @hash, name text)");
+    run(
+        &mut db,
+        "create collection reviews (product_id int @hash, stars int, body text)",
+    );
+    run(
+        &mut db,
+        r#"put products [{sku: "a", name: "Kahve"}, {sku: "b", name: "Demlik"}, {sku: "c", name: "Kupa"}]"#,
+    );
+    run(
+        &mut db,
+        r#"put reviews [
+             {product_id: 1, stars: 5, body: "guzel"},
+             {product_id: 1, stars: 3, body: "idare eder"},
+             {product_id: 1, stars: 4, body: "hizli kargo"},
+             {product_id: 3, stars: 2, body: "kirik geldi"}
+           ]"#,
+    );
+    db
+}
+
+fn groups(db: &mut Database, sql: &str) -> Vec<Vec<Row>> {
+    let Response::Rows(rs) = run(db, sql) else {
+        panic!("expected rows");
+    };
+    rs.nested.expect("nested").groups
+}
+
+/// The clause is sugar over a plan that can already be written: one query for
+/// the page, one indexed query per row. Whatever it returns, that has to
+/// return the same thing -- otherwise the sugar is a second implementation.
+#[test]
+fn lookup_equals_a_page_query_plus_one_query_per_row() {
+    let mut db = shop();
+    let Response::Rows(page) = run(&mut db, "get products") else {
+        panic!("expected rows");
+    };
+    let got = groups(&mut db, "get products lookup reviews on product_id");
+
+    assert_eq!(got.len(), page.rows.len());
+    for (row, group) in page.rows.iter().zip(&got) {
+        let Response::Rows(want) = run(&mut db, &format!("get reviews where product_id = {}", row.id))
+        else {
+            panic!("expected rows");
+        };
+        assert_eq!(group, &want.rows, "children of product {}", row.id);
+    }
+}
+
+/// `limit` after `lookup` binds to the child and counts per parent. This is
+/// the shape a join cannot express: its limit counts pairs, so one parent
+/// with many children takes the whole page.
+#[test]
+fn a_child_limit_is_per_parent() {
+    let mut db = shop();
+    let got = groups(
+        &mut db,
+        "get products lookup reviews on product_id order stars desc limit 2",
+    );
+    assert_eq!(got.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 0, 1]);
+    // Ordered by stars within the parent, not by insertion.
+    assert_eq!(got[0][0].values[2], Value::Int(5));
+    assert_eq!(got[0][1].values[2], Value::Int(4));
+}
+
+/// Clauses are scoped by position: everything before `lookup` is the parent's,
+/// everything after is the child's. The same keyword on both sides has to
+/// mean each collection's own field.
+#[test]
+fn clauses_are_scoped_by_which_side_of_lookup_they_are_on() {
+    let mut db = shop();
+    let Response::Rows(rs) = run(
+        &mut db,
+        r#"get products where sku != "b" select name
+             lookup reviews on product_id select body where stars >= 4"#,
+    ) else {
+        panic!("expected rows");
+    };
+    assert_eq!(rs.columns, vec!["name".to_string()]);
+    assert_eq!(rs.rows.len(), 2); // the parent filter dropped Demlik
+    let n = rs.nested.expect("nested");
+    assert_eq!(n.columns, vec!["body".to_string()]);
+    // The child filter dropped the 3-star and 2-star reviews.
+    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 0]);
+}
+
+/// `on child = parent` when the key is not the parent's id.
+#[test]
+fn the_parent_key_can_be_named() {
+    let mut db = shop();
+    run(&mut db, "create collection tags (sku text @hash, label text)");
+    run(
+        &mut db,
+        r#"put tags [{sku: "a", label: "kavrulmus"}, {sku: "c", label: "seramik"}]"#,
+    );
+    let got = groups(&mut db, "get products lookup tags on sku = sku");
+    assert_eq!(got.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![1, 0, 1]);
+}
+
+/// The message a refused query produces, from whichever side refuses it.
+/// `Select::check` runs in the parser (so the error carries a position) and
+/// again in the engine (so a plan built in Rust is checked too), while the
+/// schema-dependent refusals can only happen once there is a database.
+fn refusal(db: &mut Database, sql: &str) -> String {
+    let stmts = match parse(sql) {
+        Err(e) => return e.to_string(),
+        Ok(s) => s,
+    };
+    for s in &stmts {
+        if let Err(e) = db.execute_with(s, &[]) {
+            return e.to_string();
+        }
+    }
+    panic!("`{sql}` was accepted");
+}
+
+/// The refusals, each carrying the word that says what to do instead.
+#[test]
+fn lookup_is_refused_where_it_cannot_be_answered() {
+    let mut db = shop();
+    run(&mut db, "create collection plain (product_id int, note text)");
+    for (sql, want) in [
+        ("get products count lookup reviews on product_id", "count"),
+        ("get products lookup products on id", "itself"),
+        ("get products lookup plain on product_id", "@hash"),
+        ("get products lookup reviews on product_id = sku", "do not match"),
+        ("get products lookup reviews on nope", "nope"),
+        ("get products lookup nosuch on product_id", "nosuch"),
+    ] {
+        let e = refusal(&mut db, sql);
+        assert!(e.contains(want), "`{sql}` -> {e}");
+    }
+}

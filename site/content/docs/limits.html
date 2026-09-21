@@ -13,6 +13,13 @@ to read about than to discover.</p>
 <p>Deliberately not done: transactions, JOIN, subqueries, schema migration,
 multi-writer replication, SQL.</p>
 
+<p>Relations are <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
+rather than JOIN: it attaches a collection's matching documents to the row they
+belong to, which is one bucket probe per parent and a <code>limit</code> that
+counts children per parent. It does not give the other half of a join — there
+is no predicate spanning both sides, and no way to drop a parent because of
+what its children say. Those stay a second query.</p>
+
 <p>Replication exists in <b>one direction only</b>: the server is
 authoritative and clients read it. Multi-writer merging, CRDTs and a long-lived
 offline write queue are out of scope — that is what fits the single-writer

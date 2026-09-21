@@ -19,6 +19,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
+           [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] &lt;clauses...&gt;]
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value } [where &lt;expr&gt;]
@@ -96,6 +97,67 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   same vectors, and on FiQA 1 000 candidates reproduce the full scan exactly —
   each while scoring under 2% of the corpus. If the lexical stage cannot find
   the answer at all, no amount of reranking will.</p>
+</div>
+
+<h2>The lookup clause</h2>
+
+<pre data-lang="fenecql">get products lookup reviews on product_id
+get products limit 20 lookup reviews on product_id order created desc limit 3
+get products where price &gt;= 10000 select name
+  lookup reviews on product_id select body where stars &gt;= 4 limit 3
+get products lookup tags on sku = sku
+</pre>
+
+<p><code>lookup</code> attaches the matching documents of another collection
+to the row they belong to. <code>on</code> names the child's field; the
+parent's key is <code>id</code> unless <code>= &lt;parent&gt;</code> says
+otherwise, which is the foreign-key-to-primary-key case spelled out.</p>
+
+<p>It is <b>terminal</b>: everything before it binds to the driving
+collection, everything after it to the looked-up one. That is the whole
+scoping rule, and it is why there are no qualified names in the language —
+<code>where</code> on either side means what it has always meant. The price
+is that a parent clause cannot follow a child one, which reads the way the
+query runs anyway.</p>
+
+<div class="note">
+  <p><b><code>limit</code> after <code>lookup</code> counts children per
+  parent.</b> This is the clause's reason to exist. A join's limit counts
+  pairs, so a single product with 56 374 reviews consumes the whole page and
+  the other nineteen never appear; asking a join for three reviews each needs
+  a window function. Here twenty products with three reviews apiece is one
+  query with a bounded answer.</p>
+</div>
+
+<p>The child key must be <code>id</code> or carry <code>@hash</code>. Refusing
+an unindexed one is the same rule <code>near</code> and <code>match</code>
+follow: the clause is one bucket probe per parent, and quietly becoming a
+full scan of the child collection instead — 12.98 ms against 0.092 ms on the
+same 200 000 rows — is not a thing a query should do without saying so.</p>
+
+<p><code>lookup</code> combines with neither <code>near</code>,
+<code>match</code>, <code>rerank</code> nor <code>count</code>. The first
+three rank one collection's documents and a score spanning a parent and its
+children has no defensible meaning; <code>count</code> collapses the very
+rows the children hang from.</p>
+
+<p>Over JSON the children are nested under the collection's name. On the
+PostgreSQL wire, which has no nested row, they arrive flattened into the
+parent row the way a join presents them — the same data, the shape the
+transport can carry. A parent with no matches keeps its row either way: the
+page is the parents.</p>
+
+<div class="note">
+  <p><b>What it buys, measured</b> (5 000 products, 100 007 reviews, twenty
+  parents with three children each): the clause is <b>22.7 µs</b> in process
+  and <b>0.188 ms</b> over HTTP, against <b>0.332 ms</b> for the same work as
+  a <code>/batch</code> of twenty-one queries merged on the client.</p>
+  <p>The larger gain is that there is one way to write it. The same question
+  in SQLite, over the same data: a correlated subquery takes 0.053 ms, a
+  window function with the restriction pushed inside the partition 0.331 ms,
+  and the same window function with the restriction left outside
+  <b>81.34 ms</b> — a factor of 1 500 between three spellings of one
+  question, with nothing in the query text to tell them apart.</p>
 </div>
 
 <h2>Indexes</h2>

@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — a vector database that fits in a browser tab
-description: Minimal, vector-native embedded database. Written in Rust, compiles to 338 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
+description: Minimal, vector-native embedded database. Written in Rust, compiles to 351 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
 -->
 
 <section class="hero">
@@ -47,7 +47,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   <div class="hero-in">
     <div class="hero-col">
       <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
-      <p class="hero-sub reveal">338 KB of WebAssembly with no dependencies.
+      <p class="hero-sub reveal">351 KB of WebAssembly with no dependencies.
         Vectors are a type, <code>near</code> is a clause, and the HNSW index is
         built in the same tab that asks the question. The same engine runs as a
         process that speaks the PostgreSQL protocol.</p>
@@ -161,7 +161,9 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
             three, so a filter and a vector search are planned together rather
             than stacked.</p>
           <p class="bill"><b>The bill:</b> no JOINs, no subqueries, no
-            transactions. One collection at a time.</p>
+            transactions. Relations are <code>lookup</code>, which hangs a
+            collection's matching documents off each row — not a join, and
+            deliberately not one.</p>
         </div>
       </div>
 
@@ -170,7 +172,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <div class="stratum-v">
           <p>Own codec, own JSON, own HNSW, own lexer and parser, own SCRAM. The
             core is <code>std</code> and nothing else, which is why the
-            WebAssembly output is 338 KB and auditable in an afternoon.</p>
+            WebAssembly output is 351 KB and auditable in an afternoon.</p>
           <p class="bill"><b>The bill:</b> every bug is ours.</p>
         </div>
       </div>

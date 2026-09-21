@@ -346,6 +346,128 @@ fn hash_key(v: &Value) -> Vec<u8> {
     out
 }
 
+/// How `lookup` addresses the child collection.
+///
+/// Both arms are one lookup per parent. There is deliberately no "scan the
+/// child collection" arm: `near` refuses an unindexed field and names
+/// `@hnsw`, `match` refuses one and names `@text`, and the same rule keeps
+/// `lookup` from being an index probe in one query and a full scan in the
+/// next with nothing in the text telling them apart. The gap is not small --
+/// the scan was measured at 12.98 ms against 0.092 ms for the indexed
+/// equality over the same 200 000 rows.
+enum Probe<'a> {
+    /// The key is `id`, so the parent's value is already the address. No
+    /// index exists or could -- `Schema::new` reserves `id` and refuses it
+    /// as a declared field -- and none is needed. This is the foreign key to
+    /// primary key case, which is what makes refusing the unindexed one
+    /// tenable rather than obstructive.
+    Id,
+    /// A `@hash` bucket, borrowed for the whole query.
+    Hash(&'a HashMap<Vec<u8>, Vec<DocId>>, &'a DataType),
+}
+
+impl<'a> Probe<'a> {
+    fn resolve(child: &'a Collection, field: &str, name: &str) -> Result<Probe<'a>> {
+        if field == "id" {
+            return Ok(Probe::Id);
+        }
+        let Some(fd) = child.schema.field(field) else {
+            return Err(Error::NotFound(format!("field `{name}.{field}`")));
+        };
+        match child.hashes.get(field) {
+            Some(map) => Ok(Probe::Hash(map, &fd.ty)),
+            None => Err(Error::Query(format!(
+                "`lookup` on `{name}.{field}` needs a hash index (declare it with @hash)"
+            ))),
+        }
+    }
+
+    /// The type the parent's key is compared against.
+    fn key_type(&self) -> DataType {
+        match self {
+            Probe::Id => DataType::Int,
+            Probe::Hash(_, ty) => (*ty).clone(),
+        }
+    }
+
+    /// Fills `out` with the child ids matching `key`: ascending, alive and
+    /// free of duplicates.
+    fn ids(&self, child: &Collection, key: &Value, out: &mut Vec<DocId>) {
+        out.clear();
+        // A NULL key matches nothing, not even a stored NULL. A field left
+        // out of a document is written as NULL and does get a bucket, so
+        // without this guard every document missing the key would attach to
+        // every other one -- a cross product over exactly the rows that
+        // carry no information. It disagrees with `eval`, where `NULL =
+        // NULL` is true; `on` is not `where`, and this is the rule SQL
+        // settled on for the same reason.
+        if key.is_null() {
+            return;
+        }
+        match self {
+            Probe::Id => {
+                if let Ok(Value::Int(i)) = key.clone().coerce(&DataType::Int) {
+                    if i > 0 && child.store.contains(i as DocId) {
+                        out.push(i as DocId);
+                    }
+                }
+            }
+            Probe::Hash(map, ty) => {
+                // The same conversion the write path used to build the
+                // bucket key, for the reason spelled out in `matching_ids`:
+                // an `int` key has to become `10.0` before it can find
+                // `price = 10.0`. Skipping it lets the mere presence of an
+                // index change the answer.
+                let Ok(k) = key.clone().coerce(ty) else {
+                    return;
+                };
+                let Some(ids) = map.get(&hash_key(&k)) else {
+                    return;
+                };
+                // A bucket can hold ids whose document is gone.
+                out.extend(ids.iter().copied().filter(|id| child.store.contains(*id)));
+                // Insertion order is not id order -- an upsert removes an id
+                // and pushes it back at the end -- so the children would
+                // otherwise reshuffle after a rewrite that changed nothing.
+                out.sort_unstable();
+                // A duplicate here is not one extra row but one extra child
+                // *per parent*. The pass is free on a list this short.
+                out.dedup();
+            }
+        }
+    }
+}
+
+/// The two `lookup` key types must be identical, or both numeric.
+///
+/// The probe is a bucket lookup keyed by `encode_value(coerce(key, ty))`,
+/// while the equality it stands for is `cmp_value` -- two different
+/// cross-type rulebooks. They diverge in one reachable place: a `timestamp`
+/// parent key against a `text @hash` child key, where `coerce` renders
+/// ISO-8601 and so only finds text spelled that exact way, while `cmp_value`
+/// parses the text and calls them equal. Refusing the mismatch closes that
+/// by construction instead of special-casing the one pair known to differ
+/// today. The cost is refusing two pairs that would have agreed.
+fn check_key_types(parent: &DataType, child: &DataType, l: &Lookup) -> Result<()> {
+    let numeric = |t: &DataType| matches!(t, DataType::Int | DataType::Float | DataType::Timestamp);
+    if matches!(parent, DataType::Vector(..)) || matches!(child, DataType::Vector(..)) {
+        return Err(Error::Type(
+            "a vector cannot be a `lookup` key: float equality is a coincidence, not a match".into(),
+        ));
+    }
+    if parent == child || (numeric(parent) && numeric(child)) {
+        return Ok(());
+    }
+    Err(Error::Type(format!(
+        "`lookup` key types do not match: `{}` is {}, `{}.{}` is {}",
+        l.parent_field,
+        parent.name(),
+        l.collection,
+        l.child_field,
+        child.name()
+    )))
+}
+
 /// Lazy field access over the store. When the same field is asked for again
 /// the decoded value is reused.
 struct StoreRow<'a> {
@@ -577,7 +699,11 @@ impl Database {
 
         Ok(Changes::Batch(ChangeBatch {
             seq: self.changes.seq(),
-            puts: ResultSet { columns, rows },
+            puts: ResultSet {
+                columns,
+                rows,
+                nested: None,
+            },
             dels,
             schema_changed,
         }))
@@ -1475,6 +1601,152 @@ impl Database {
             .collect())
     }
 
+    /// Collects the children of each parent row.
+    ///
+    /// One bucket probe per parent, which is the same plan an application
+    /// would write by hand as a page query plus one indexed query per row --
+    /// measured at 0.265 ms for twenty parents through `/batch`. The clause
+    /// does not make that cheaper; it removes the round trips and the
+    /// regrouping, and it makes `limit` mean "per parent", which is the part
+    /// no join can express.
+    fn run_lookup(
+        &self,
+        parent: &Collection,
+        l: &Lookup,
+        rows: &[Row],
+        ctx: &EvalCtx,
+    ) -> Result<Nested> {
+        let child = self.collection(&l.collection)?;
+        let probe = Probe::resolve(child, &l.child_field, &l.collection)?;
+
+        // `id` is not a schema field but is the commonest key on both sides.
+        let parent_pos = if l.parent_field == "id" {
+            None
+        } else {
+            Some(
+                parent
+                    .schema
+                    .field_pos(&l.parent_field)
+                    .ok_or_else(|| Error::NotFound(format!("field `{}`", l.parent_field)))?,
+            )
+        };
+        let parent_ty = match parent_pos {
+            None => DataType::Int,
+            Some(p) => parent.schema.fields[p].ty.clone(),
+        };
+        check_key_types(&parent_ty, &probe.key_type(), l)?;
+
+        let columns = projection_columns(&child.schema, &l.project);
+        let mut sources = Vec::with_capacity(columns.len());
+        for col in &columns {
+            if col == "id" {
+                sources.push(None);
+                continue;
+            }
+            sources.push(Some(child.schema.field_pos(col).ok_or_else(|| {
+                Error::NotFound(format!("field `{}.{col}`", l.collection))
+            })?));
+        }
+
+        let mut keys = Vec::with_capacity(l.order.len());
+        for (field, asc) in &l.order {
+            let pos = if field == "id" {
+                None
+            } else {
+                Some(child.schema.field_pos(field).ok_or_else(|| {
+                    Error::NotFound(format!("field `{}.{field}`", l.collection))
+                })?)
+            };
+            keys.push((pos, *asc));
+        }
+
+        let limit = l.limit.unwrap_or(usize::MAX);
+        let mut groups = Vec::with_capacity(rows.len());
+        let mut bucket: Vec<DocId> = Vec::new();
+
+        for row in rows {
+            let key = match parent_pos {
+                None => Value::Int(row.id as i64),
+                Some(p) => parent.store.read_field(row.id, p)?.unwrap_or(Value::Null),
+            };
+            probe.ids(child, &key, &mut bucket);
+
+            // The child filter is evaluated over the bucket rather than sent
+            // through `matching_ids`. The bucket is already one parent's
+            // children, so a second index lookup would have to be
+            // intersected with it and would almost always cost more than
+            // reading the handful of rows it is narrowing.
+            let mut kept: Vec<DocId> = Vec::new();
+            for &cid in &bucket {
+                if let Some(f) = &l.filter {
+                    let mut r = StoreRow {
+                        store: &child.store,
+                        schema: &child.schema,
+                        id: cid,
+                        memo: Vec::new(),
+                    };
+                    if !truthy(&eval(f, &mut r, ctx)?) {
+                        continue;
+                    }
+                }
+                kept.push(cid);
+            }
+
+            if !keys.is_empty() {
+                // Read the keys up front and sort on them, exactly as the
+                // parent path does: comparing through the store would read
+                // every row log(n) times.
+                let mut keyed: Vec<(Vec<Value>, DocId)> = Vec::with_capacity(kept.len());
+                for id in &kept {
+                    let mut vals = Vec::with_capacity(keys.len());
+                    for (pos, _) in &keys {
+                        vals.push(match pos {
+                            None => Value::Int(*id as i64),
+                            Some(p) => child.store.read_field(*id, *p)?.unwrap_or(Value::Null),
+                        });
+                    }
+                    keyed.push((vals, *id));
+                }
+                keyed.sort_by(|a, b| {
+                    for (i, (_, asc)) in keys.iter().enumerate() {
+                        let o = a.0[i].cmp_value(&b.0[i]);
+                        if o != Ordering::Equal {
+                            return if *asc { o } else { o.reverse() };
+                        }
+                    }
+                    Ordering::Equal
+                });
+                kept = keyed.into_iter().map(|(_, id)| id).collect();
+            }
+
+            let mut group = Vec::new();
+            for cid in kept.into_iter().skip(l.offset) {
+                if group.len() >= limit {
+                    break;
+                }
+                let mut values = Vec::with_capacity(sources.len());
+                for src in &sources {
+                    values.push(match src {
+                        None => Value::Int(cid as i64),
+                        Some(p) => child.store.read_field(cid, *p)?.unwrap_or(Value::Null),
+                    });
+                }
+                group.push(Row {
+                    id: cid,
+                    values,
+                    score: None,
+                });
+            }
+            groups.push(group);
+        }
+
+        Ok(Nested {
+            name: l.collection.clone(),
+            columns,
+            groups,
+        })
+    }
+
     fn select(&self, sel: &Select, params: &[Value]) -> Result<ResultSet> {
         let c = self.collection(&sel.collection)?;
         let ctx = EvalCtx {
@@ -1496,6 +1768,7 @@ impl Database {
                     values: vec![Value::Int(n as i64)],
                     score: None,
                 }],
+                nested: None,
             });
         }
 
@@ -1651,7 +1924,21 @@ impl Database {
             rows.push(Row { id, values, score });
         }
 
-        Ok(ResultSet { columns, rows })
+        // Children are attached after the parent page is decided, so a
+        // `limit 20` probes twenty buckets and not one per matching row.
+        // `check` has already refused `count`, `near` and `match` alongside
+        // `lookup`, which is what lets this sit at the end of every path
+        // rather than forking one.
+        let nested = match &sel.lookup {
+            None => None,
+            Some(l) => Some(self.run_lookup(c, l, &rows, &ctx)?),
+        };
+
+        Ok(ResultSet {
+            columns,
+            rows,
+            nested,
+        })
     }
 
     fn update(
