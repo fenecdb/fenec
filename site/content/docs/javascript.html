@@ -19,7 +19,7 @@ db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
 
 const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
 
-await persist(db);     // snapshot into IndexedDB
+await persist(db);     // into IndexedDB: the image once, then only the writes since
 await restore(db);     // read it back
 </pre>
 

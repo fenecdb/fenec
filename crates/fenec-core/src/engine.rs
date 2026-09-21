@@ -762,6 +762,12 @@ impl Database {
         db
     }
 
+    /// Sends every later write to `sink`. What was written before is not
+    /// in it: the caller starts it from a [`Self::snapshot`].
+    pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
+        *self.sink_mut() = sink;
+    }
+
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
     fn sink_mut(&mut self) -> &mut Box<dyn Sink> {
         self.sink.get_mut().unwrap_or_else(|e| e.into_inner())

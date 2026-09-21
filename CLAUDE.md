@@ -74,9 +74,14 @@ execution), `schema`, `value`, `codec`,
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
 
-The browser client is `web/fenec.js` — WASM glue (~175 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~190 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
+`persist`/`restore` keep a database in IndexedDB as a file would hold it: an
+image, then the writes since as chunks, from the journal `fenec_journal` starts
+and `fenec_drain` empties (off until asked for -- a page that never drains would
+hold every write). One row persists in 0.6 ms over 32 MB, against 136 ms for the
+image.
 
 ## Invariants worth knowing before you change things
 
