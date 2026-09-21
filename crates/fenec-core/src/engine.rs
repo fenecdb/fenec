@@ -1686,6 +1686,104 @@ impl Database {
         Ok((child, probe, parent_pos))
     }
 
+    /// The children a `@hash` equality inside the child filter names
+    /// directly, or `None` when the filter holds no equality an index can
+    /// answer.
+    ///
+    /// `Some(&[])` is a real answer and a cheap one: the equality names a
+    /// bucket that does not exist, so no child matches and therefore no
+    /// parent does.
+    fn child_candidates<'a>(
+        child: &'a Collection,
+        filter: &Expr,
+        params: &[Value],
+    ) -> Option<&'a [DocId]> {
+        let mut eqs = Vec::new();
+        filter.conjunct_equalities(params, &mut eqs);
+        let mut best: Option<&[DocId]> = None;
+        for (field, val) in eqs {
+            let map = child.hashes.get(field)?;
+            let fd = child.schema.field(field)?;
+            let Ok(key) = val.clone().coerce(&fd.ty) else {
+                continue;
+            };
+            let bucket: &[DocId] = map.get(&hash_key(&key)).map_or(&[], |b| b.as_slice());
+            if best.map(|b| bucket.len() < b.len()).unwrap_or(true) {
+                best = Some(bucket);
+            }
+        }
+        best
+    }
+
+    /// `required` answered from the child side: read the candidate children,
+    /// keep the ones the filter passes, and take their parent keys.
+    ///
+    /// Only for the shape where the parent's key is `id`, which is the
+    /// foreign-key-to-primary-key case and every case measured. Then the
+    /// child's join field already holds parent ids, so the keys *are* the
+    /// answer and not one parent is read. A named parent key would need
+    /// either a read per parent or a `@hash` on it to map the values back,
+    /// and neither has been measured; it falls back.
+    fn retain_via_children(
+        &self,
+        l: &Lookup,
+        ids: Vec<DocId>,
+        candidates: &[DocId],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<DocId>> {
+        let child = self.collection(&l.collection)?;
+        let child_pos = if l.child_field == "id" {
+            None
+        } else {
+            Some(
+                child
+                    .schema
+                    .field_pos(&l.child_field)
+                    .ok_or_else(|| Error::NotFound(format!("field `{}`", l.child_field)))?,
+            )
+        };
+
+        let mut keys: Vec<DocId> = Vec::new();
+        for &cid in candidates {
+            // The bucket can name a document that is gone.
+            if !child.store.contains(cid) {
+                continue;
+            }
+            // The bucket covers one equality out of the filter; the rest of
+            // it still has to be evaluated.
+            if let Some(f) = &l.filter {
+                let mut r = StoreRow {
+                    store: &child.store,
+                    schema: &child.schema,
+                    id: cid,
+                    memo: Vec::new(),
+                };
+                if !truthy(&eval(f, &mut r, ctx)?) {
+                    continue;
+                }
+            }
+            let k = match child_pos {
+                None => Value::Int(cid as i64),
+                Some(p) => child.store.read_field(cid, p)?.unwrap_or(Value::Null),
+            };
+            // The same rule the probe follows from the other side: a NULL
+            // key matches nothing, and a value the id space cannot express
+            // names no parent.
+            let Ok(Value::Int(i)) = k.coerce(&DataType::Int) else {
+                continue;
+            };
+            if let Ok(id) = DocId::try_from(i) {
+                keys.push(id);
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        Ok(ids
+            .into_iter()
+            .filter(|id| keys.binary_search(id).is_ok())
+            .collect())
+    }
+
     /// Drops the parents that no child matches, for `required`.
     ///
     /// It runs before the ordering and before `limit`, because it decides
@@ -1707,6 +1805,44 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
         let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
+
+        // Two plans answer this question, and every number that decides
+        // between them is exact and already in hand: the candidate parents
+        // are a vector whose length is known, a `@hash` bucket's length is an
+        // O(1) read, and so is the child collection's size. This is the
+        // smallest-wins comparison the planner already makes inside one
+        // collection, reaching across the clause.
+        //
+        // Walking the parents costs one probe each plus however many children
+        // it reads before one passes. The bucket's share of the collection is
+        // the equality's selectivity `p`, so that is about `1/p` children per
+        // parent; reading the bucket instead costs `|bucket|` outright, and
+        // `|bucket| = p * n`. Child-driven wins when
+        //
+        //     |ids| / p  >  |bucket|      i.e.   |ids| * n  >  |bucket|^2
+        //
+        // which is derived rather than fitted -- the only assumption is that
+        // the matching children are spread across parents rather than piled
+        // on a few, and where they are piled the comparison errs toward the
+        // bucket, which is the bounded side.
+        //
+        // Measured over 20 000 parents and 200 007 children with a 40 013
+        // bucket (threshold 8 004), parent-driven against child-driven:
+        // 21 parents 1.10/5.01 ms, 736 1.76/5.87, 4 172 7.67/10.13,
+        // 10 932 19.40/17.07, 20 000 36.84/30.68. The rule picks the winner
+        // at every one of them.
+        if l.parent_field == "id" {
+            if let Some(f) = &l.filter {
+                if let Some(cands) = Self::child_candidates(child, f, ctx.params) {
+                    let n = child.store.len() as u64;
+                    let b = cands.len() as u64;
+                    if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
+                        return self.retain_via_children(l, ids, cands, ctx);
+                    }
+                }
+            }
+        }
+
         let mut out = Vec::new();
         for id in ids {
             let key = match parent_pos {

@@ -495,3 +495,94 @@ fn count_works_with_required_and_is_refused_without() {
     let e = err(&db, &sel);
     assert!(e.contains("required"), "{e}");
 }
+
+/// `required` has two plans -- walk the parents probing each, or read the
+/// children a `@hash` equality names and take their parents. They are not
+/// allowed to disagree, whichever the planner picks, so this pins the answer
+/// over the cases where they could: a bucket that does not exist, a filter
+/// the index only half covers, NULL keys, dead children, duplicates.
+#[test]
+fn both_required_plans_give_the_same_answer() {
+    let mut db = Database::new();
+    run(&mut db, "create collection p (name text)");
+    run(
+        &mut db,
+        "create collection c (pid int @hash, stars int @hash, tag text)",
+    );
+    run(
+        &mut db,
+        r#"put p [{name: "a"}, {name: "b"}, {name: "c"}, {name: "d"}]"#,
+    );
+    run(
+        &mut db,
+        r#"put c [
+             {pid: 1, stars: 5, tag: "x"},
+             {pid: 1, stars: 3, tag: "y"},
+             {pid: 2, stars: 5, tag: "y"},
+             {pid: 3, stars: 1, tag: "x"},
+             {pid: 9, stars: 5, tag: "x"},
+             {stars: 5, tag: "z"}
+           ]"#,
+    );
+    run(&mut db, "del c where id = 3");
+    run(&mut db, r#"put c {id: 1, pid: 1, stars: 5, tag: "x"}"#);
+
+    // The reference is the plan that needs no index at all: keep a parent
+    // when the unindexed `lookup` gave it a non-empty group.
+    let reference = |db: &Database, filter: Option<Expr>| -> Vec<u64> {
+        let mut l = lookup_p();
+        l.filter = filter;
+        let (parents, n) = nested(db, &plan_for("p", l));
+        parents
+            .rows
+            .iter()
+            .zip(&n.groups)
+            .filter(|(_, g)| !g.is_empty())
+            .map(|(r, _)| r.id)
+            .collect()
+    };
+
+    for filter in [
+        None,
+        Some(eq("stars", 5)),
+        Some(eq("stars", 1)),
+        Some(eq("stars", 99)), // a bucket that does not exist
+        Some(Expr::And(
+            Box::new(eq("stars", 5)),
+            Box::new(Expr::Like(
+                Box::new(Expr::Field("tag".into())),
+                Box::new(Expr::Lit(Value::Text("x".into()))),
+            )),
+        )), // the index covers half of it
+        Some(Expr::Cmp(
+            CmpOp::Ge,
+            Box::new(Expr::Field("stars".into())),
+            Box::new(Expr::Lit(Value::Int(3))),
+        )), // no equality: no child-side plan exists
+    ] {
+        let want = reference(&db, filter.clone());
+        let mut l = lookup_p();
+        l.filter = filter.clone();
+        l.required = true;
+        let (parents, _) = nested(&db, &plan_for("p", l));
+        let got: Vec<u64> = parents.rows.iter().map(|r| r.id).collect();
+        assert_eq!(got, want, "{filter:?}");
+    }
+}
+
+fn lookup_p() -> Lookup {
+    Lookup {
+        collection: "c".into(),
+        child_field: "pid".into(),
+        parent_field: "id".into(),
+        ..Default::default()
+    }
+}
+
+fn eq(field: &str, v: i64) -> Expr {
+    Expr::Cmp(
+        CmpOp::Eq,
+        Box::new(Expr::Field(field.into())),
+        Box::new(Expr::Lit(Value::Int(v))),
+    )
+}
