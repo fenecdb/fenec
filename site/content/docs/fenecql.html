@@ -19,7 +19,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
-           [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] &lt;clauses...&gt;]
+           [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value } [where &lt;expr&gt;]
@@ -135,11 +135,44 @@ follow: the clause is one bucket probe per parent, and quietly becoming a
 full scan of the child collection instead — 12.98 ms against 0.092 ms on the
 same 200 000 rows — is not a thing a query should do without saying so.</p>
 
+<pre data-lang="fenecql">get products limit 20 lookup reviews on product_id required where stars = 5
+get products count lookup reviews on product_id required where stars = 5
+</pre>
+
+<p><code>required</code> drops a parent that no child matches — "products that
+have a five-star review" rather than "products, with their five-star reviews".
+It is tested before <code>offset</code> and <code>limit</code>, so a page of
+twenty comes back with twenty parents that have children rather than whatever
+survived; a child <code>offset</code> that walks past every match does not undo
+it, because the parent has matches all the same. It is the one shape where
+<code>count</code> combines with <code>lookup</code>: nothing is being attached,
+so counting the parents that have a match is a question with an answer.</p>
+
+<div class="note">
+  <p><b><code>required</code> is a pass over the candidate parents, and it is
+  not cheap.</b> There is no index from "a child matching this filter" back to
+  its parent, so every candidate is probed — it stops at the first child that
+  passes, which is why the unfiltered form is an order cheaper. Over 20 000
+  products and 200 000 reviews, for a page of twenty:</p>
+  <table>
+  <tbody>
+  <tr><td><code>required</code>, with a child filter</td><td>16.39 ms</td></tr>
+  <tr><td><code>required</code>, no child filter</td><td>2.19 ms</td></tr>
+  <tr><td><code>count … required</code></td><td>7.57 ms</td></tr>
+  <tr><td>a <code>bool @hash</code> field on the parent</td><td>0.02 ms</td></tr>
+  </tbody>
+  </table>
+  <p>Ask it occasionally and <code>required</code> is the right tool. Ask it on
+  every page load and the answer belongs in a field on the parent, maintained
+  on write — which is the same trade the rest of this database makes.</p>
+</div>
+
 <p><code>lookup</code> combines with neither <code>near</code>,
-<code>match</code>, <code>rerank</code> nor <code>count</code>. The first
-three rank one collection's documents and a score spanning a parent and its
-children has no defensible meaning; <code>count</code> collapses the very
-rows the children hang from.</p>
+<code>match</code> nor <code>rerank</code>: each ranks one collection's
+documents, and a score spanning a parent and its children has no defensible
+meaning. <code>count</code> is refused as well unless the clause is
+<code>required</code>, since otherwise it collapses the very rows the children
+would hang from.</p>
 
 <p><code>order</code> inside a <code>lookup</code> is the one ordering in the
 engine that is bounded in advance: the clause carries its own

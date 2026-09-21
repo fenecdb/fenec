@@ -1374,3 +1374,49 @@ fn lookup_is_refused_where_it_cannot_be_answered() {
         assert!(e.contains(want), "`{sql}` -> {e}");
     }
 }
+
+/// `required` turns the children from something attached into something that
+/// decides who appears. The reference is the same query without it, keeping
+/// the parents whose group came back non-empty.
+#[test]
+fn required_drops_the_parents_no_child_matches() {
+    let mut db = shop();
+    let sizes = |db: &mut Database, sql: &str| -> (Vec<u64>, Vec<usize>) {
+        let Response::Rows(rs) = run(db, sql) else {
+            panic!("expected rows");
+        };
+        let n = rs.nested.expect("nested");
+        (
+            rs.rows.iter().map(|r| r.id).collect(),
+            n.groups.iter().map(|g| g.len()).collect(),
+        )
+    };
+
+    let base = "lookup reviews on product_id where stars >= 4";
+    let (all, all_n) = sizes(&mut db, &format!("get products {base}"));
+    let (kept, kept_n) = sizes(&mut db, &format!("get products {base} required"));
+
+    let want: Vec<u64> = all
+        .iter()
+        .zip(&all_n)
+        .filter(|(_, n)| **n > 0)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(kept, want);
+    assert!(kept_n.iter().all(|n| *n > 0));
+    assert!(all_n.iter().any(|n| *n == 0), "the fixture must exercise both");
+
+    // The page is filled after the drop, not before.
+    let (page, _) = sizes(&mut db, &format!("get products limit 1 {base} required"));
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0], want[0]);
+
+    // `count` answers how many parents have a match; without `required` there
+    // is nothing to attach children to and it is refused.
+    let Response::Rows(rs) = run(&mut db, &format!("get products count {base} required")) else {
+        panic!("expected rows");
+    };
+    assert_eq!(rs.rows[0].values[0], Value::Int(want.len() as i64));
+    let e = refusal(&mut db, &format!("get products count {base}"));
+    assert!(e.contains("required"), "{e}");
+}

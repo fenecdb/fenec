@@ -379,3 +379,101 @@ fn plan_for(parent: &str, l: Lookup) -> Select {
         ..Default::default()
     }
 }
+
+/// `required` turns the children from something attached into something that
+/// decides. The reference is the same query without it, keeping the parents
+/// whose group came back non-empty -- the two must agree, or the flag means
+/// something other than what it says.
+#[test]
+fn required_keeps_only_the_parents_a_child_matches() {
+    let db = fixture();
+    let filtered = |required: bool| -> (Vec<u64>, Vec<usize>) {
+        let mut l = lookup("product_id", "id");
+        l.filter = Some(Expr::Cmp(
+            CmpOp::Ge,
+            Box::new(Expr::Field("stars".into())),
+            Box::new(Expr::Lit(Value::Int(4))),
+        ));
+        l.required = required;
+        let (parents, n) = nested(&db, &plan(l));
+        (
+            parents.rows.iter().map(|r| r.id).collect(),
+            n.groups.iter().map(|g| g.len()).collect(),
+        )
+    };
+
+    let (all_ids, all_sizes) = filtered(false);
+    let (kept_ids, kept_sizes) = filtered(true);
+
+    let want: Vec<u64> = all_ids
+        .iter()
+        .zip(&all_sizes)
+        .filter(|(_, n)| **n > 0)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(kept_ids, want);
+    assert!(kept_sizes.iter().all(|n| *n > 0));
+    assert!(all_sizes.iter().any(|n| *n == 0), "the fixture must exercise both");
+}
+
+/// `required` decides who is on the page, so it has to run before `limit`:
+/// asking for two rows must give two parents that have children, not two
+/// candidates of which some were dropped afterwards.
+#[test]
+fn required_fills_the_page_before_limit_applies() {
+    let mut db = fixture();
+    // Products 2 and 3 have no five-star review; 1 and 4 do.
+    run(&mut db, r#"put products {sku: "e", name: "Fincan", price: 3000}"#);
+    run(&mut db, r#"put reviews {product_id: 5, sku: "e", stars: 5, body: "sade"}"#);
+
+    let mut l = lookup("product_id", "id");
+    l.filter = Some(Expr::Cmp(
+        CmpOp::Eq,
+        Box::new(Expr::Field("stars".into())),
+        Box::new(Expr::Lit(Value::Int(5))),
+    ));
+    l.required = true;
+    let mut sel = plan(l);
+    sel.limit = Some(2);
+    let (parents, n) = nested(&db, &sel);
+    assert_eq!(parents.rows.len(), 2, "the page must be full");
+    assert_eq!(parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 4]);
+    assert!(n.groups.iter().all(|g| !g.is_empty()));
+}
+
+/// A child `offset` that skips past every match must not drop the parent: it
+/// has matches, the page simply walked past them.
+#[test]
+fn a_child_offset_does_not_undo_required() {
+    let db = fixture();
+    let mut l = lookup("product_id", "id");
+    l.required = true;
+    l.offset = 99;
+    let (parents, n) = nested(&db, &plan(l));
+    // Products 1, 2 and 4 have reviews; 3 does not.
+    assert_eq!(parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2, 4]);
+    assert!(n.groups.iter().all(|g| g.is_empty()), "offset skipped them all");
+}
+
+/// `count` with `required` asks how many parents have a match, which is a
+/// question with an answer; without it there is nothing to attach children
+/// to and it is refused.
+#[test]
+fn count_works_with_required_and_is_refused_without() {
+    let db = fixture();
+    let mut l = lookup("product_id", "id");
+    l.required = true;
+    let mut sel = plan(l);
+    sel.count = true;
+    let Response::Rows(rs) = db
+        .query(&Statement::Select(sel.clone()), &[])
+        .expect("query")
+    else {
+        panic!("expected rows");
+    };
+    assert_eq!(rs.rows[0].values[0], Value::Int(3));
+
+    sel.lookup.as_mut().unwrap().required = false;
+    let e = err(&db, &sel);
+    assert!(e.contains("required"), "{e}");
+}

@@ -140,6 +140,16 @@ PostgreSQL wire flattens (`ResultSet::flatten`), and the "no nested objects"
 rule stands. Measured at 22.7 us in process against 0.332 ms for the same
 page as a `/batch` of 21 queries merged on the client.
 
+**`required` is the other half, and it is a pass.** `lookup ... required`
+drops a parent no child matches, tested before `offset` and `limit` so the page
+still fills. It is also the only shape where `count` combines with `lookup`,
+since nothing is being attached. There is no index from "a child matching this
+filter" back to its parent, so every candidate parent is probed -- it stops at
+the first child that passes, which is why the unfiltered form is an order
+cheaper. Over 20 000 parents and 200 000 children: 16.39 ms filtered, 2.19 ms
+unfiltered, against 0.02 ms for a `bool @hash` field on the parent maintained on
+write. Ad hoc, use `required`; on every page load, use the field.
+
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --
 on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose
 remaining ceiling cannot beat the worst kept score stop driving the frontier.

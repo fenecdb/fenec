@@ -8,7 +8,7 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
-//!            [lookup <name> on <child> [= <parent>] <clauses...>]
+//!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! set    <name> { k: v, ... } [where <expr>]
 //! del    <name> [where <expr>]
@@ -685,6 +685,12 @@ impl Parser {
             }
             if self.eat_kw("offset") {
                 l.offset = self.int()?.max(0) as usize;
+                continue;
+            }
+            // A bare flag among the keyword clauses, the way `exact` sits
+            // inside `near`.
+            if self.eat_kw("required") {
+                l.required = true;
                 continue;
             }
             break;

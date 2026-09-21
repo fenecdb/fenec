@@ -1610,16 +1610,16 @@ impl Database {
     /// does not make that cheaper; it removes the round trips and the
     /// regrouping, and it makes `limit` mean "per parent", which is the part
     /// no join can express.
-    fn run_lookup(
-        &self,
+    /// The parts of a `lookup` that do not depend on a row: where the
+    /// children live, how they are addressed, and where the parent's key
+    /// sits. Resolved once per query by both passes.
+    fn lookup_plan<'a>(
+        &'a self,
         parent: &Collection,
         l: &Lookup,
-        rows: &[Row],
-        ctx: &EvalCtx,
-    ) -> Result<Nested> {
+    ) -> Result<(&'a Collection, Probe<'a>, Option<usize>)> {
         let child = self.collection(&l.collection)?;
         let probe = Probe::resolve(child, &l.child_field, &l.collection)?;
-
         // `id` is not a schema field but is the commonest key on both sides.
         let parent_pos = if l.parent_field == "id" {
             None
@@ -1636,6 +1636,74 @@ impl Database {
             Some(p) => parent.schema.fields[p].ty.clone(),
         };
         check_key_types(&parent_ty, &probe.key_type(), l)?;
+        Ok((child, probe, parent_pos))
+    }
+
+    /// Drops the parents that no child matches, for `required`.
+    ///
+    /// It runs before the ordering and before `limit`, because it decides
+    /// who is on the page: filtering afterwards would answer a request for
+    /// twenty rows with three. It stops at the first child that passes, so a
+    /// parent with a thousand matches costs what one with a single match
+    /// costs, and the collecting pass afterwards still only sees the page.
+    ///
+    /// The cost is one bucket probe per candidate parent -- there is no
+    /// index from "a child matching this filter" back to its parent, and
+    /// inventing one would be a second index to build, hold and validate. A
+    /// field on the parent, maintained on write, remains the cheap way to
+    /// ask this often.
+    fn retain_with_children(
+        &self,
+        parent: &Collection,
+        l: &Lookup,
+        ids: Vec<DocId>,
+        ctx: &EvalCtx,
+    ) -> Result<Vec<DocId>> {
+        let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
+        let mut out = Vec::new();
+        let mut bucket: Vec<DocId> = Vec::new();
+        for id in ids {
+            let key = match parent_pos {
+                None => Value::Int(id as i64),
+                Some(p) => parent.store.read_field(id, p)?.unwrap_or(Value::Null),
+            };
+            probe.ids(child, &key, &mut bucket);
+            let mut any = false;
+            for &cid in &bucket {
+                match &l.filter {
+                    None => {
+                        any = true;
+                        break;
+                    }
+                    Some(f) => {
+                        let mut r = StoreRow {
+                            store: &child.store,
+                            schema: &child.schema,
+                            id: cid,
+                            memo: Vec::new(),
+                        };
+                        if truthy(&eval(f, &mut r, ctx)?) {
+                            any = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if any {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    fn run_lookup(
+        &self,
+        parent: &Collection,
+        l: &Lookup,
+        rows: &[Row],
+        ctx: &EvalCtx,
+    ) -> Result<Nested> {
+        let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
 
         let columns = projection_columns(&child.schema, &l.project);
         let mut sources = Vec::with_capacity(columns.len());
@@ -1776,9 +1844,14 @@ impl Database {
         // `count` sends the filter down the same path but never decodes the
         // rows: it returns a single row with a single column.
         if sel.count {
-            let n = self
-                .matching_ids(&sel.collection, &sel.filter, params)?
-                .len();
+            let mut ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
+            // `count` reaches here with a `lookup` only when it is
+            // `required`, so the children are a filter and nothing is being
+            // attached: the number is how many parents have a match.
+            if let Some(l) = &sel.lookup {
+                ids = self.retain_with_children(c, l, ids, &ctx)?;
+            }
+            let n = ids.len();
             return Ok(ResultSet {
                 columns: vec![COUNT_COLUMN.to_string()],
                 rows: vec![Row {
@@ -1877,7 +1950,16 @@ impl Database {
             };
             scored = hits.into_iter().map(|(id, s)| (id, Some(s))).collect();
         } else {
-            let ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
+            let mut ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
+            // `required` decides who is on the page, so it runs before the
+            // ordering and before `limit`. Dropping rows afterwards would
+            // answer a request for twenty with however many happened to
+            // survive.
+            if let Some(l) = &sel.lookup {
+                if l.required {
+                    ids = self.retain_with_children(c, l, ids, &ctx)?;
+                }
+            }
             let mut ordered: Vec<(DocId, Option<f32>)> =
                 ids.into_iter().map(|id| (id, None)).collect();
 
