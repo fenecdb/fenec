@@ -500,7 +500,8 @@ fn count_works_with_required_and_is_refused_without() {
 /// children a `@hash` equality names and take their parents. They are not
 /// allowed to disagree, whichever the planner picks, so this pins the answer
 /// over the cases where they could: a bucket that does not exist, a filter
-/// the index only half covers, NULL keys, dead children, duplicates.
+/// the index only half covers, an equality over a field with no index beside
+/// one that has it, NULL keys, dead children, duplicates.
 #[test]
 fn both_required_plans_give_the_same_answer() {
     let mut db = Database::new();
@@ -554,6 +555,14 @@ fn both_required_plans_give_the_same_answer() {
                 Box::new(Expr::Lit(Value::Text("x".into()))),
             )),
         )), // the index covers half of it
+        Some(Expr::And(
+            Box::new(eq("stars", 5)),
+            Box::new(Expr::Cmp(
+                CmpOp::Eq,
+                Box::new(Expr::Field("tag".into())),
+                Box::new(Expr::Lit(Value::Text("x".into()))),
+            )),
+        )), // an equality with no index beside one that has it
         Some(Expr::Cmp(
             CmpOp::Ge,
             Box::new(Expr::Field("stars".into())),
