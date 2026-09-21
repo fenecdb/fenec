@@ -209,16 +209,23 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <div class="tbl">
 <table>
-<thead><tr><th>Build</th><th class="n">Size</th></tr></thead>
+<thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">863 KB</td></tr>
-<tr><td><code>--no-default-features</code>, no import</td><td class="n">717 KB</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>636 KB</b></td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>289 KB</b></td></tr>
-<tr><td>container image, scratch + musl</td><td class="n">1.23 MB</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">863 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import</td><td class="n">717 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>636 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>338 KB</b></td><td class="n"><b>97 KB</b></td><td class="n">117 KB</td></tr>
+<tr><td><code>web/fenec.js</code>, the client</td><td class="n">60 KB</td><td class="n">16 KB</td><td class="n">19 KB</td></tr>
+<tr><td>container image, scratch + musl</td><td class="n">1.23 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
+
+<p>The compressed columns are filled in only where they mean something: the
+wasm module and the client are fetched over HTTP, so what the browser pays is
+<b>113 KB brotli</b> for both together. A binary you execute and an image
+whose layers are already compressed are not served that way, hence the
+dashes.</p>
 
 <p><code>fenec-pg</code> stays on the <code>release</code> profile on purpose:
 a connection thread that panics unwinds and takes down only its own session,

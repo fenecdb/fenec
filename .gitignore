@@ -7,3 +7,4 @@ web/fenec-schema.d.ts
 web/fenec.wasm
 site/dist/
 .wrangler/
+__pycache__/

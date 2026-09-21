@@ -47,6 +47,14 @@ jobs:
       - name: Install esbuild
         run: npm install -g esbuild@0.28.2
 
+      # site/build.py checks every size the site quotes against the file it
+      # describes, and the brotli figures need the CLI: the standard library
+      # has gzip and nothing else. Without it those claims come back
+      # unverified, which build.py treats as a failure under CI rather than
+      # shipping a number nobody checked.
+      - name: Install brotli
+        run: sudo apt-get install -y --no-install-recommends brotli
+
       - name: Build the wasm module and the site
         run: make site
 

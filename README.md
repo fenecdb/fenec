@@ -15,6 +15,7 @@ publishes it to Cloudflare Workers.
 ```
 create collection articles (
   title     text,
+  body      text  @text,
   tags      [text],
   year      int   @hash,
   embed     vector<768> @hnsw(cosine, m=16, ef_construction=200)
@@ -23,6 +24,16 @@ create collection articles (
 get articles select title
   where year >= 2024 and tags has "rust"
   near embed $1
+  limit 10
+```
+
+Lexical recall and an exact vector reordering on top of it — the second stage
+reads the stored vectors, so this path needs no HNSW graph at all:
+
+```
+get articles select title
+  match body $1
+  rerank embed $2 candidates 500
   limit 10
 ```
 
@@ -88,8 +99,8 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-289 KB of WebAssembly, no wasm-bindgen, no build step —
-[JavaScript client](https://fenecdb.com/docs/javascript).
+338 KB of WebAssembly — 113 KB brotli over the wire, client included — no
+wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
 
@@ -122,12 +133,13 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | | |
 |---|---|
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `[type]` |
-| **Indexes** | `@hash`, `@hnsw(metric, m=.., ef_construction=.., ef_search=..)` |
+| **Indexes** | `@hash`, `@hnsw(metric, m=.., ef_construction=.., ef_search=..)`, `@text(k1=.., b=.., prefix=..)` |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
+| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 289 KB wasm · 636–863 KB binary · 1.23 MB container image |
+| **Runtime size** | 338 KB wasm + 60 KB client (113 KB brotli served) · 636–863 KB binary · 1.23 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

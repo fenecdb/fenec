@@ -17,6 +17,7 @@ create index [if not exists] on &lt;name&gt; (&lt;field&gt;) @index
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
+           [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
@@ -43,8 +44,8 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too</td></tr>
-<tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
-<tr><td><b>Ceilings</b></td><td><code>near</code> at most 10 000 rows (<code>limit + offset</code>); expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
+<tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
+<tr><td><b>Ceilings</b></td><td><code>near</code> and <code>match</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates; expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -67,24 +68,75 @@ running the ANN with a membership test. The mechanism, and the fallback that
 keeps it correct, is in <a href="concepts.html#a-filter-and-a-vector-together">How
 it works</a>.</p>
 
+<h2>The text clause</h2>
+
+<pre data-lang="fenecql">get articles match body $1 limit 10
+get articles where year >= 2024 match body $1 limit 10
+get articles match body $1 rerank embed $2 candidates 500 limit 10
+</pre>
+
+<p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
+<code>_score</code> column. Like <code>near</code> it decides the ordering, so
+it combines with neither <code>order</code> nor <code>near</code>. A
+<code>where</code> filter is applied while the postings are merged, so it costs
+no second pass.</p>
+
+<p><code>rerank</code> reorders what <code>match</code> found by exact vector
+distance. It needs <code>match</code> — there is nothing to reorder without it
+— but it does <b>not</b> need an <code>@hnsw</code> index: the vectors are read
+straight out of the store, so this path builds, holds and validates no graph at
+all. <code>candidates</code> sets how many of the matched rows are rescored
+(default 200); it is never allowed below <code>limit + offset</code>.</p>
+
+<div class="note">
+  <p><b>The two stages answer different questions.</b> <code>match</code> is
+  recall and knows nothing about meaning; <code>rerank</code> is precision but
+  only over what the first stage handed it. Measured on BEIR: on SciFact
+  50 candidates score nDCG@10 0.676 against 0.645 for a full dense scan of the
+  same vectors, and on FiQA 1 000 candidates reproduce the full scan exactly —
+  each while scoring under 2% of the corpus. If the lexical stage cannot find
+  the answer at all, no amount of reranking will.</p>
+</div>
+
 <h2>Indexes</h2>
 
 <pre data-lang="fenecql">create collection articles (
   title  text,
+  body   text @text(k1=0.9, b=0.4, prefix=0),
   year   int @hash,
   embed  vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
 )
 
 create index on articles (embed) @hnsw(cosine)
+create index on articles (body) @text
+create index on articles (body) @text(prefix=6)   -- for an inflected language
 </pre>
+
+<div class="note">
+  <p><b><code>prefix=N</code> indexes each word's prefixes alongside it</b>
+  (3..N by default; <code>prefix_min</code> moves the lower bound). It is a
+  stemmer that needs no dictionary and no language setting, and it is off
+  unless asked for because it is a trade the corpus decides. Word-boundary
+  matching suits English; it does not suit a language that inflects by gluing
+  suffixes on, where <code>kitap</code>, <code>kitabı</code> and
+  <code>kitapların</code> are three terms sharing a stem the index never
+  sees.</p>
+  <p>Measured on Turkish WebFAQ (144 846 documents, 10 000 queries):
+  nDCG@10 0.4841 &rarr; 0.5547, +14.6%, closing about two fifths of the gap to
+  a 278M-parameter multilingual transformer (0.650). The cost is the 3.4&times;
+  postings it indexes — 58 MB &rarr; 182 MB, and 82 &rarr; 485 µs per query.
+  On English SciFact the same option is worth +0.0137.</p>
+</div>
 
 <div class="note">
   <p><b>Only <code>@hash</code> equalities inside an <code>and</code> chain
   reach an index.</b> Every other predicate — <code>&gt;=</code>,
   <code>~</code>, <code>has</code>, <code>in</code>, and anything under an
   <code>or</code> — is a full scan: each matching row is decoded and evaluated.
-  There is no text index. <code>order</code> has no top-k either: every match
-  is sorted and then <code>limit</code> applies.</p>
+  <code>~</code> in particular is substring matching without ranking and reaches
+  no index; ranked retrieval is <code>match</code> over a <code>@text</code>
+  field. <code>order</code> has no top-k either: every match is sorted and then
+  <code>limit</code> applies.</p>
 </div>
 
 <h2>Time</h2>

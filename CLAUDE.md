@@ -65,7 +65,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 
 `fenec-core` modules: `store` (segments, offset index), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
-kernels), `query` (`Statement`, plan execution), `schema`, `value`, `codec`,
+kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
+execution), `schema`, `value`, `codec`,
 `json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
@@ -120,8 +121,41 @@ the filter set in full when the result lands under the limit — otherwise a fil
 correlated with the vector eliminates every candidate and returns empty.
 
 **Only `@hash` equalities inside an `and` chain reach an index.** Everything else
-— `>=`, `~`, `has`, `in`, anything under `or` — is a full scan. `order` has no
-top-k: every match is sorted, then `limit` applies.
+— `>=`, `~`, `has`, `in`, anything under `or` — is a full scan. `~` is unranked
+substring matching; ranked text retrieval is `match` over an `@text` field,
+which does reach one. `order` has no top-k: every match is sorted, then `limit`
+applies.
+
+**`match` prunes with MaxScore.** The exhaustive merge is not selective --
+on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose
+remaining ceiling cannot beat the worst kept score stop driving the frontier.
+Measured, with identical output: SciFact 179 -> 47 us, FiQA 1918 -> 311 us,
+Turkish WebFAQ 401 -> 82 us. `pruning_never_changes_the_answer` compares it
+against an exhaustive reference over 25 000 generated cases; scores accumulate
+in `f64` so the two orders of summation agree once rounded back to `f32`.
+
+**`@text` is word-boundary matching unless told otherwise.** `prefix=N` also
+indexes each word's prefixes, which is a dictionary-free stemmer for inflected
+languages: on Turkish WebFAQ it is worth +14.6% nDCG@10 for 3.4x the postings
+(58 MB -> 182 MB, 82 -> 485 us per query). Off by default — the corpus
+decides. The tokenizer also folds `I`, `İ`, `ı`, `i` onto one term, because the
+locale-blind Unicode mapping turns `İ` into two code points nobody can type and
+would hide every capitalised Turkish word.
+
+**The text index is derived data as well, but it is not persisted.** `@text`
+builds an inverted index that is rebuilt from the documents on open — 27 µs per
+document against the HNSW graph's ~102 µs, and the rebuild pass already reads
+every document for the hash indexes. Nothing about it reaches the file, so
+there is no validation path and no stale-index case to handle. It is shrunk to
+fit where it is known complete (rebuild, `create index`); live ingest keeps
+`Vec` growth slack.
+
+**`rerank` deliberately uses no index.** `match ... rerank` takes candidates
+from the inverted index and reorders them by exact distance over vectors read
+straight out of the store — so a collection can do vector retrieval with no
+HNSW graph to build, hold, validate or rebuild. Measured on BEIR it matches or
+beats a full dense scan while scoring under 2% of the corpus. It requires
+`match`: without candidates there is nothing to reorder.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

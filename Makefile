@@ -38,12 +38,13 @@ types:
 ## Builds WASM for the browser and copies it under web/
 #
 # No wasm-opt step, and that is measured rather than assumed. On this module
-# `-Oz` takes the raw file from 295 564 to 253 534 bytes, but the bytes it
-# removes are ones the compressor was already removing: gzip moves 107 251 ->
-# 107 032 and brotli goes the wrong way, 89 311 -> 90 170. What is served is
-# compressed, so the step costs ~860 bytes on every load and buys back about
-# 0.15 ms of `WebAssembly.compile` (0.9 ms against 0.8 ms, cold, in Chrome).
-# Any network at all makes that a losing trade.
+# `-Oz` takes the raw file from 334 131 to 281 738 bytes, but the bytes it
+# removes are ones the compressor was already removing -- both served sizes
+# come out *worse*: gzip 116 911 -> 118 932, brotli 97 169 -> 98 970. What is
+# served is compressed, so the step costs ~1 800 bytes on every load to buy
+# back a fraction of a millisecond of `WebAssembly.compile` (0.9 ms against
+# 0.8 ms, cold, in Chrome, measured before the text index went in). Any
+# network at all makes that a losing trade.
 wasm:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm 2>&1 | tail -2 || \
 		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)

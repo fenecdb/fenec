@@ -10,6 +10,7 @@ across a dozen files and drift.
     python3 site/build.py --serve    # build, then serve on :8788
 """
 
+import gzip as gziplib
 import hashlib
 import html
 import os
@@ -296,14 +297,29 @@ def prev_next(active, base):
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
     ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
-    ("README.md", r"(\d+) KB of WebAssembly, no wasm-bindgen", "kb", 0),
+    ("README.md", r"(\d+) KB of WebAssembly —", "kb", 0),
     ("site/content/index.html", r"compiles to (\d+) KB of WebAssembly", "kb", 0),
     ("site/content/index.html", r"(\d+) KB of WebAssembly with no", "kb", 0),
     ("site/content/index.html", r"WebAssembly output is (\d+) KB", "kb", 0),
     ("site/content/playground.html", r"the same (\d+) KB WebAssembly module", "kb", 0),
     ("site/content/docs/index.html", r"(\d+) KB wasm", "kb", 0),
+    ("site/content/docs/index.html", r"(\d+) KB brotli, with the client", "kb_br_all", 0),
     ("site/content/docs/benchmarks.html",
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b></td><td class="n">\d+ KB</td>',
+     "kb_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<b>\d+ KB</b></td><td class="n"><b>\d+ KB</b></td><td class="n">(\d+) KB</td>',
+     "kb_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r'the client</td><td class="n">(\d+) KB</td>', "kb_client", 0),
+    ("site/content/docs/benchmarks.html",
+     r'the client</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_client_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
+    ("README.md", r"(\d+) KB brotli over the wire", "kb_br_all", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
@@ -324,15 +340,47 @@ def workspace_version():
     return re.search(r'^version = "([^"]+)"', body, re.MULTILINE).group(1)
 
 
+def compressed(path):
+    """`(gzip, brotli)` bytes for a file that is served over HTTP.
+
+    What a reader downloads is the compressed form, so that is the number the
+    site quotes -- and a quoted number has to be checkable or it rots, which
+    is the whole point of this file. gzip comes from the standard library.
+    Brotli does not exist there, so it comes from the `brotli` CLI; when that
+    is missing the caller is told, and the brotli claims are reported as
+    unverified rather than quietly passed.
+    """
+    raw = open(path, "rb").read()
+    gz = len(gziplib.compress(raw, 9, mtime=0))
+    exe = shutil.which("brotli")
+    if not exe:
+        return gz, None
+    out = subprocess.run(
+        [exe, "-c", "-q", "11"], input=raw, stdout=subprocess.PIPE, check=True
+    ).stdout
+    return gz, len(out)
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     wasm = os.path.join(REPO, "web", "fenec.wasm")
+    client = os.path.join(REPO, "web", "fenec.js")
     if not os.path.exists(wasm):
         return []  # the copy step above already said so
     size = os.path.getsize(wasm)
+    wasm_gz, wasm_br = compressed(wasm)
+    client_size = os.path.getsize(client)
+    client_gz, client_br = compressed(client)
     truth = {
         "bytes": size,
         "kb": round(size / 1024),
+        "kb_gz": round(wasm_gz / 1024),
+        "kb_br": round(wasm_br / 1024) if wasm_br else None,
+        "kb_client": round(client_size / 1024),
+        "kb_client_gz": round(client_gz / 1024),
+        "kb_client_br": round(client_br / 1024) if client_br else None,
+        # What the browser actually pays: the module and the client together.
+        "kb_br_all": round((wasm_br + client_br) / 1024) if wasm_br else None,
         "glue": glue_lines(),
         # The tag the docs tell people to pull. It follows the workspace
         # version rather than the last release, so a version bump that
@@ -340,7 +388,7 @@ def check_claims():
         # has shipped.
         "version": workspace_version(),
     }
-    unit = {"bytes": " bytes", "kb": " KB", "glue": " lines", "version": ""}
+    unit = {"glue": " lines", "version": "", "bytes": " bytes"}
 
     problems = []
     for rel, pattern, fact, tol in CLAIMS:
@@ -351,6 +399,12 @@ def check_claims():
         found = list(re.finditer(pattern, body, re.MULTILINE))
         if not found:
             problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")
+            continue
+        if truth.get(fact) is None:
+            problems.append(
+                f"{rel}: /{pattern}/ claims a brotli size and `brotli` is not "
+                f"installed, so it went unchecked"
+            )
             continue
         for m in found:
             said, want = m.group(1), truth[fact]
