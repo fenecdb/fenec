@@ -294,6 +294,11 @@ def prev_next(active, base):
 # daemon nor the registry; it drifted from 1.25 MB to a claimed 1.55 before
 # anyone noticed. `docker image inspect ghcr.io/fenecdb/fenec-pg:<v>` is the
 # way to settle it by hand.
+# Not in here, and deliberately: the `fenec` and `fenec-pg` binary sizes. They
+# are quoted for an Apple M-series and CI is Linux, so a check would compare
+# two different numbers and fail honest builds. They are re-measured by hand at
+# each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
+# 684/765/927 KB when the text index went in.
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
     ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
