@@ -1817,6 +1817,16 @@ impl Database {
     /// `Some(&[])` is a real answer and a cheap one: the equality names a
     /// bucket that does not exist, so no child matches and therefore no
     /// parent does.
+    ///
+    /// An equality the child cannot index is skipped, not fatal -- the same
+    /// smallest-wins walk `matching_ids` makes. Returning `None` at the first
+    /// one instead made the plan depend on a conjunct that has nothing to do
+    /// with it: over 20 000 parents and 200 000 children, `stars = 5 and tag
+    /// = "x"` with no `@hash` on `tag` fell back to the parent side at 13.06
+    /// ms, while the identical question written `tag ~ "x"` -- never
+    /// collected as an equality, so never in the way -- took 8.14 ms. The
+    /// candidates are re-filtered in full either way, so the bucket is
+    /// always safe to use; it only has to be the smallest one on offer.
     fn child_candidates<'a>(
         child: &'a Collection,
         filter: &Expr,
@@ -1826,8 +1836,12 @@ impl Database {
         filter.conjunct_equalities(params, &mut eqs);
         let mut best: Option<&[DocId]> = None;
         for (field, val) in eqs {
-            let map = child.hashes.get(field)?;
-            let fd = child.schema.field(field)?;
+            let Some(map) = child.hashes.get(field) else {
+                continue;
+            };
+            let Some(fd) = child.schema.field(field) else {
+                continue;
+            };
             let Ok(key) = val.clone().coerce(&fd.ty) else {
                 continue;
             };
