@@ -839,6 +839,16 @@ export class Query {
     return r.rows?.[0]?.count ?? 0;
   }
 
+  /**
+   * The path the query took -- which index answered, how many rows each
+   * stage read -- one line a step. The query runs to find out.
+   */
+  async explain() {
+    const [sql, params] = this.toFenecQL();
+    const r = await this.#exec(`explain ${sql}`, params);
+    return (r.rows ?? []).map((row) => row.plan);
+  }
+
   // The text of the write statements, **without running them**. The write
   // side counterpart of `toFenecQL()`: inspectable, loggable, handable to
   // another transport -- and synchronous. The optimistic layer depends on

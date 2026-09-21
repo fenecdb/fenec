@@ -20,6 +20,13 @@ PostgreSQL ecosystem: vectors use the same text representation as pgvector
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>).</p>
 
+<p><code>explain get ...</code> answers the way PostgreSQL's
+<code>EXPLAIN ANALYZE</code> does on the wire: rows of text in one column,
+here <code>plan</code>, tagged <code>EXPLAIN</code>, so psql prints the plan
+and a driver reads it as rows. The steps are fenecdb's own — which index,
+how many rows each stage read — and are described under <a
+href="fenecql.html#explain">Explain</a>.</p>
+
 <p>With <code>--dir &lt;path&gt;</code> instead of <code>--file</code> the
 process serves a directory of tenant files over HTTP, one file per tenant under
 <code>/t/&lt;tenant&gt;/</code>, and the PostgreSQL listener is off. That mode,

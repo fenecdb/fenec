@@ -546,6 +546,9 @@ impl Lookup {
 /// replaces the projection entirely.
 pub const COUNT_COLUMN: &str = "count";
 
+/// The one column `explain` answers with.
+pub const PLAN_COLUMN: &str = "plan";
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -705,6 +708,10 @@ pub enum Statement {
         docs: Vec<Vec<(String, Expr)>>,
     },
     Select(Select),
+    /// `explain get ...`: the query runs, and what comes back is the path it
+    /// took -- which index answered, how many rows each stage read -- one
+    /// row a step, in a single `plan` column.
+    Explain(Select),
     Update {
         collection: String,
         set: Vec<(String, Expr)>,
@@ -725,7 +732,10 @@ impl Statement {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
-            Statement::Select(_) | Statement::ListCollections | Statement::Describe(_)
+            Statement::Select(_)
+                | Statement::Explain(_)
+                | Statement::ListCollections
+                | Statement::Describe(_)
         )
     }
 
@@ -736,7 +746,7 @@ impl Statement {
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
             Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
-            Statement::Select(sel) => {
+            Statement::Select(sel) | Statement::Explain(sel) => {
                 let near = sel.near.as_ref().map(|n| n.vector.max_param()).unwrap_or(0);
                 let m = sel
                     .matcher

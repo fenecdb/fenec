@@ -1332,3 +1332,41 @@ fn sync_failure_is_reported_and_stops_writes() {
     assert!(find(&r, b'E').is_none());
     assert!(h.db.read().unwrap().failure().is_some());
 }
+
+/// `explain` over the wire: one `plan` text column, reported by Describe
+/// before the query runs, a row a step, and the `EXPLAIN` tag PostgreSQL
+/// sends for a plan.
+#[test]
+fn explain_is_a_text_column_tagged_explain() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text, year int @sorted)");
+    c.simple(r#"put t [{name: "a", year: 2024}, {name: "b", year: 2023}]"#);
+
+    let r = c.simple("explain get t where year >= 2024");
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![("plan".to_string(), 25)]
+    );
+    let steps: Vec<Option<String>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells()[0].clone())
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            Some("filter: the ordered index on year, 1 rows, which is the answer".to_string()),
+            Some("rows: 1".to_string()),
+        ]
+    );
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "EXPLAIN");
+
+    let r = c.extended("explain get t where year >= $1", &["2023"], true);
+    assert_eq!(find(&r, b't').unwrap().param_oids().len(), 1);
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![("plan".to_string(), 25)]
+    );
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "EXPLAIN");
+}

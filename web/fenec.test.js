@@ -390,6 +390,12 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)
   assert.equal(near[0].title, 'rust');
   assert.equal(typeof near[0]._score, 'number');
 
+  // `explain` names the path: an equality over `@hash` is answered by the index.
+  assert.deepEqual(await docs.where('year', 2024).explain(), [
+    'filter: the hash index on year, 1 rows, which is the answer',
+    'rows: 1',
+  ]);
+
   // filter and near together
   const filtered = await docs.where('year', '<', 2024).near('embed', [1, 0, 0]).limit(5).rows();
   assert.equal(filtered.length, 2);

@@ -1290,6 +1290,9 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
             select_columns(guard.db(), sel)
         }
         Some(Statement::ListCollections) | Some(Statement::Describe(_)) => Some(schema_columns()),
+        Some(Statement::Explain(_)) => {
+            Some(vec![(fenec_core::query::PLAN_COLUMN.to_string(), OID_TEXT)])
+        }
         _ => None,
     };
     Some(Shape { params, columns })
@@ -1510,7 +1513,11 @@ fn execute_into(
                             }
                             out.data_row(&cells);
                         }
-                        out.command_complete(&format!("SELECT {}", rs.rows.len()));
+                        // PostgreSQL tags a plan `EXPLAIN`; psql prints the rows either way.
+                        match stmt {
+                            Statement::Explain(_) => out.command_complete("EXPLAIN"),
+                            _ => out.command_complete(&format!("SELECT {}", rs.rows.len())),
+                        }
                     }
                     Response::Affected(n) => {
                         let tag = match stmt {

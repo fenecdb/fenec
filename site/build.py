@@ -465,7 +465,7 @@ Writing FenecQL -- the reference below spells it out in full:
   `limit`, `@hnsw(cosine)` (or `l2`, `dot`) for `near`, `@text` for `match`.
   Only an `and` chain uses an index: `=` and `in [...]` on a `@hash` field or
   on `id`, `<`, `<=`, `>`, `>=` and `=` on a `@sorted` field; everything else
-  scans.
+  scans. `explain get ...` runs a query and returns the path it took.
 - `near` and `match` decide the order: neither combines with `order` or with
   the other, and each returns at most 10 000 rows (`limit + offset`). Both add
   a `_score` column.
@@ -485,6 +485,7 @@ get articles select title where published >= "2026-01-01" near embed $1 limit 3
 get articles match body "borrowing" rerank embed $1 candidates 200 limit 10
 get articles order published desc limit 20 lookup comments on article_id where score >= 4 order published desc limit 3
 get articles count lookup comments on article_id required where score = 5
+explain get articles where views < 100 order published desc limit 5
 set articles {views: 11} where id = 7
 del articles where views > 100000
 create index on articles (views) @hash

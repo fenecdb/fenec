@@ -299,6 +299,11 @@ export declare class Query<
   first(): Promise<P | null>;
   /** Number of matching rows (`get ... count`); rows are not decoded. */
   count(): Promise<number>;
+  /**
+   * The path the query took (`explain get ...`): which index answered and
+   * how many rows each stage read, one line a step. The query runs.
+   */
+  explain(): Promise<string[]>;
 
   insert(docs: Insert<F> | Insert<F>[]): Promise<number>;
   update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;

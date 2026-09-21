@@ -174,6 +174,13 @@ impl Parser {
             "drop" => self.drop(),
             "put" | "insert" => self.put(),
             "get" | "select" => self.get(),
+            "explain" => {
+                self.next();
+                let Statement::Select(sel) = self.statement()? else {
+                    return self.err("`explain` takes a `get` or `select`");
+                };
+                Ok(Statement::Explain(sel))
+            }
             "set" | "update" => self.set(),
             "del" | "delete" => self.del(),
             "collections" => {

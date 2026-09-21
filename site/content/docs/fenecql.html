@@ -21,6 +21,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
+explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value } [where &lt;expr&gt;]
 del &lt;name&gt; [where &lt;expr&gt;]
@@ -45,6 +46,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too</td></tr>
+<tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Ceilings</b></td><td><code>near</code> and <code>match</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates; expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
@@ -348,6 +350,58 @@ than gathering and sorting that many ids.</p>
   to 0.88 s, and the index is rebuilt from the documents on open, like the
   hash and text indexes — it is never written to the file.</p>
 </div>
+
+<h2>Explain</h2>
+
+<p><code>explain</code> in front of a <code>get</code> runs the query and
+answers with the path it took instead of its rows: one row a step, in the
+order the steps ran, in a single <code>plan</code> column. The last row is
+the size of the answer.</p>
+
+<pre data-lang="fenecql">explain get events where cat = "c7" order created desc limit 20
+
+plan
+order: the ordered index on created not walked, an equality names fewer rows
+filter: the hash index on cat, 9753 rows, which is the answer
+order: created desc, every key read, 9753 matches, the first 20 put in order
+rows: 20
+
+explain get events where cat ~ "c77" order created desc limit 20
+
+plan
+order: walked the ordered index on created desc, 2153 rows tested, 20 kept
+rows: 20
+</pre>
+
+<p>Both are over a million events, <code>cat</code> carrying
+<code>@hash</code> and <code>created</code> <code>@sorted</code>. The first
+filter names a hundredth of the rows through an index, so they are sorted;
+the second is one no index narrows, so the walk tests rows newest first
+until twenty pass.</p>
+
+<p>It runs the query because several choices depend on the data rather than
+the text: whether a filter's rows outnumber the ANN's budget, whether a walk
+along an ordered index fills the page before it gives up, whether the ANN
+came up short and fell back. The steps name each of them.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>A step that starts</th><th>says</th></tr></thead>
+<tbody>
+<tr><td><code>filter:</code></td><td>which index narrowed the filter — the id index, a hash index, an <code>in</code> over one, an ordered index's range — or that it was a full scan, how many rows were tested, and whether the scan stopped at the page</td></tr>
+<tr><td><code>order:</code></td><td>a walk along an ordered index and how many rows it tested, why one was not walked, or the sort: how many matches, how many put in order</td></tr>
+<tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, and the fallback when the ANN came up short</td></tr>
+<tr><td><code>match:</code>, <code>rerank:</code></td><td>the text index and how many rows it ranked, the vectors read for the rerank</td></tr>
+<tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached; which side <code>required</code> was answered from</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The same statement goes through every transport: <code>psql</code> prints
+the rows with the <code>EXPLAIN</code> tag, <code>POST /query</code> returns
+them as JSON, and the JavaScript builder has <code>.explain()</code>, which
+resolves to the lines. The steps are for reading, not parsing — their wording
+may change between versions.</p>
 
 <h2>Time</h2>
 
