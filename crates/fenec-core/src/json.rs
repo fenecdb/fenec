@@ -5,7 +5,7 @@
 //! subset fenecdb needs.
 
 use crate::error::{Error, Result};
-use crate::query::{Response, ResultSet};
+use crate::query::{Response, ResultSet, Row};
 use crate::value::Value;
 
 // ---------------------------------------------------------------- writing
@@ -89,6 +89,62 @@ pub fn to_string(v: &Value) -> String {
     s
 }
 
+/// One row as a JSON object: its columns, the score when `near` produced
+/// one, and the children `lookup` attached.
+///
+/// This loop had two copies before -- here and in the HTTP endpoint's
+/// `rows_json` -- and `lookup` would have made a third place to forget, so
+/// both now come through here. `children` carries the collection's name, its
+/// own columns and this row's group; a child row never has children of its
+/// own, which is what keeps the recursion one level deep.
+pub fn row_object_into(
+    out: &mut String,
+    columns: &[String],
+    row: &Row,
+    children: Option<(&str, &[String], &[Row])>,
+) {
+    out.push('{');
+    for (j, c) in columns.iter().enumerate() {
+        if j > 0 {
+            out.push(',');
+        }
+        escape_into(out, c);
+        out.push(':');
+        value_into(out, &row.values[j]);
+    }
+    if let Some(s) = row.score {
+        out.push_str(",\"_score\":");
+        num_into(out, s as f64);
+    }
+    if let Some((name, cols, group)) = children {
+        out.push(',');
+        escape_into(out, name);
+        out.push_str(":[");
+        for (k, child) in group.iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            row_object_into(out, cols, child, None);
+        }
+        out.push(']');
+    }
+    out.push('}');
+}
+
+/// The children of row `i`, in the shape `row_object_into` wants.
+///
+/// A parent with no matches still has a group -- an empty one -- because the
+/// page is the parents and a missing key would read as "not asked for"
+/// rather than "nothing matched".
+pub fn children_of(rs: &ResultSet, i: usize) -> Option<(&str, &[String], &[Row])> {
+    let n = rs.nested.as_ref()?;
+    Some((
+        n.name.as_str(),
+        n.columns.as_slice(),
+        n.groups.get(i).map(|g| g.as_slice()).unwrap_or(&[]),
+    ))
+}
+
 pub fn result_set_into(out: &mut String, rs: &ResultSet) {
     out.push_str("{\"columns\":[");
     for (i, c) in rs.columns.iter().enumerate() {
@@ -102,20 +158,7 @@ pub fn result_set_into(out: &mut String, rs: &ResultSet) {
         if i > 0 {
             out.push(',');
         }
-        out.push('{');
-        for (j, c) in rs.columns.iter().enumerate() {
-            if j > 0 {
-                out.push(',');
-            }
-            escape_into(out, c);
-            out.push(':');
-            value_into(out, &row.values[j]);
-        }
-        if let Some(s) = row.score {
-            out.push_str(",\"_score\":");
-            num_into(out, s as f64);
-        }
-        out.push('}');
+        row_object_into(out, &rs.columns, row, children_of(rs, i));
     }
     out.push_str("]}");
 }

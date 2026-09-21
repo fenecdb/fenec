@@ -1018,3 +1018,87 @@ fn deep_expression_does_not_kill_the_server() {
     // The server still answers.
     assert!(find(&c.simple("collections"), b'E').is_none());
 }
+
+/// A PostgreSQL row is flat, so `lookup` arrives widened the way a join
+/// presents it -- and the child's columns have to be described with their
+/// real type OIDs. The fallback types anything it cannot place as `text`,
+/// and `Describe` answers before the query runs, so a client that learned
+/// the shape there would have no chance to correct it later.
+#[test]
+fn lookup_is_flattened_and_its_child_columns_are_typed() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection products (name text, price int)");
+    c.simple("create collection reviews (product_id int @hash, stars int, body text)");
+    c.simple(r#"put products [{name: "Kahve", price: 12000}, {name: "Demlik", price: 34000}]"#);
+    c.simple(r#"put reviews [{product_id: 1, stars: 5, body: "guzel"}, {product_id: 1, stars: 3, body: "idare"}]"#);
+
+    let sql = "get products select name lookup reviews on product_id select stars, body";
+    let r = c.simple(sql);
+    // text=25, int8=20 -- not the `text` everything degrades to.
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![
+            ("name".to_string(), 25),
+            ("reviews.stars".to_string(), 20),
+            ("reviews.body".to_string(), 25),
+        ]
+    );
+    let rows: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Some("Kahve".to_string()),
+                Some("5".to_string()),
+                Some("guzel".to_string())
+            ],
+            vec![
+                Some("Kahve".to_string()),
+                Some("3".to_string()),
+                Some("idare".to_string())
+            ],
+            // A parent with no children keeps its row: the page is the
+            // parents, so the child columns are null rather than absent.
+            vec![Some("Demlik".to_string()), None, None],
+        ]
+    );
+
+    // The same shape through `Describe`, which answers without executing.
+    let r = c.extended(sql, &[], true);
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![
+            ("name".to_string(), 25),
+            ("reviews.stars".to_string(), 20),
+            ("reviews.body".to_string(), 25),
+        ]
+    );
+
+    // A parameter inside the child's `where` is part of the same statement.
+    // `Describe` reports the count before the query runs, so a client told
+    // there were none would send none and the query would fail on an
+    // unbound `$1`.
+    let r = c.extended(
+        "get products select name lookup reviews on product_id select stars where stars >= $1",
+        &["4"],
+        true,
+    );
+    assert_eq!(find(&r, b't').unwrap().param_oids().len(), 1);
+    let rows: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("Kahve".to_string()), Some("5".to_string())],
+            vec![Some("Demlik".to_string()), None],
+        ]
+    );
+}

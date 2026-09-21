@@ -8,6 +8,7 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+//!            [lookup <name> on <child> [= <parent>] <clauses...>]
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! set    <name> { k: v, ... } [where <expr>]
 //! del    <name> [where <expr>]
@@ -513,20 +514,7 @@ impl Parser {
 
         loop {
             if self.eat_kw("select") {
-                if matches!(self.peek(), Tok::Star) {
-                    self.next();
-                    sel.project = None;
-                } else {
-                    let mut cols = Vec::new();
-                    loop {
-                        cols.push(self.ident()?);
-                        if !matches!(self.peek(), Tok::Comma) {
-                            break;
-                        }
-                        self.next();
-                    }
-                    sel.project = Some(cols);
-                }
+                sel.project = self.projection_list()?;
                 continue;
             }
             if self.eat_kw("where") {
@@ -578,21 +566,7 @@ impl Parser {
                 continue;
             }
             if self.eat_kw("order") {
-                self.eat_kw("by");
-                loop {
-                    let field = self.ident()?;
-                    let asc = if self.eat_kw("desc") {
-                        false
-                    } else {
-                        self.eat_kw("asc");
-                        true
-                    };
-                    sel.order.push((field, asc));
-                    if !matches!(self.peek(), Tok::Comma) {
-                        break;
-                    }
-                    self.next();
-                }
+                self.order_list(&mut sel.order)?;
                 continue;
             }
             if self.eat_kw("count") {
@@ -606,6 +580,16 @@ impl Parser {
             if self.eat_kw("offset") {
                 sel.offset = self.int()?.max(0) as usize;
                 continue;
+            }
+            // `lookup` is terminal: every clause after it binds to the child.
+            // Scoping by position is what keeps qualified names out of the
+            // language -- `where` means on either side exactly what it always
+            // meant, and neither side needs a prefix to say which it is. The
+            // cost is that a parent clause cannot follow the child ones, which
+            // reads the way the query runs anyway.
+            if self.eat_kw("lookup") {
+                sel.lookup = Some(self.lookup_clause()?);
+                break;
             }
             break;
         }
@@ -623,6 +607,91 @@ impl Parser {
     /// An outer `Some` means "that was a projection and `from` was consumed";
     /// on `None` the caller rewinds the position. An inner `None` means
     /// `select *`: all fields.
+    /// `select a, b` or `select *`. `None` means every field.
+    fn projection_list(&mut self) -> Result<Option<Vec<String>>> {
+        if matches!(self.peek(), Tok::Star) {
+            self.next();
+            return Ok(None);
+        }
+        let mut cols = Vec::new();
+        loop {
+            cols.push(self.ident()?);
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        Ok(Some(cols))
+    }
+
+    /// `order year desc, title asc` -- keys in priority order.
+    fn order_list(&mut self, out: &mut Vec<(String, bool)>) -> Result<()> {
+        self.eat_kw("by");
+        loop {
+            let field = self.ident()?;
+            let asc = if self.eat_kw("desc") {
+                false
+            } else {
+                self.eat_kw("asc");
+                true
+            };
+            out.push((field, asc));
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        Ok(())
+    }
+
+    /// `lookup <name> on <child> [= <parent>]` and the clauses that follow,
+    /// all of which belong to the child collection.
+    ///
+    /// Written without the second half of `on`, the parent key is `id`: that
+    /// is the foreign-key-to-primary-key shape, which is most of them, and
+    /// spelling it out every time would be noise.
+    fn lookup_clause(&mut self) -> Result<Lookup> {
+        let collection = self.ident()?;
+        self.expect_kw("on")?;
+        let child_field = self.ident()?;
+        let parent_field = if matches!(self.peek(), Tok::Eq) {
+            self.next();
+            self.ident()?
+        } else {
+            "id".to_string()
+        };
+        let mut l = Lookup {
+            collection,
+            child_field,
+            parent_field,
+            ..Default::default()
+        };
+        loop {
+            if self.eat_kw("select") {
+                l.project = self.projection_list()?;
+                continue;
+            }
+            if self.eat_kw("where") {
+                l.filter = Some(self.expr()?);
+                continue;
+            }
+            if self.eat_kw("order") {
+                self.order_list(&mut l.order)?;
+                continue;
+            }
+            if self.eat_kw("limit") {
+                l.limit = Some(self.int()?.max(0) as usize);
+                continue;
+            }
+            if self.eat_kw("offset") {
+                l.offset = self.int()?.max(0) as usize;
+                continue;
+            }
+            break;
+        }
+        Ok(l)
+    }
+
     fn projection_before_from(&mut self) -> Result<Option<Option<Vec<String>>>> {
         if matches!(self.peek(), Tok::Star) {
             self.next();

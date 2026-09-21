@@ -32,6 +32,28 @@ type AnySchema<S> = Record<keyof S, Fields>;
 /** A row as read: the fields plus the automatic `id`. */
 export type Row<F extends Fields> = F & { id: number };
 
+/**
+ * The child side of a `lookup`. `on` is the child's field; the parent's key
+ * is `id` unless `parentKey` names another. `order` takes `[field, dir]`
+ * pairs, or a bare field name for one ascending key.
+ *
+ * With no `C` every name is a plain `string`, which is the honest default:
+ * the builder carries one collection's fields, so the child's are only
+ * known when the caller names them. `parentKey` stays `string` for the same
+ * reason from the other side.
+ */
+export interface LookupOptions<C extends Fields = Fields> {
+  on: keyof Row<C> & string;
+  parentKey?: string;
+  select?: ChildKey<C> | ChildKey<C>[];
+  where?: Where<C> | Cond<C>;
+  order?: ChildKey<C> | Array<ChildKey<C> | [ChildKey<C>, ('asc' | 'desc')?]>;
+  limit?: number;
+  offset?: number;
+}
+
+type ChildKey<C extends Fields> = keyof Row<C> & string;
+
 /** The widened type accepted in write position. */
 export type Writable<T> = T extends Timestamp
   ? Timestamp | string | number | Date
@@ -195,6 +217,25 @@ export declare class Query<F extends Fields = Fields, P = Row<F>> {
     vector: number[] | Float32Array,
     opts?: { candidates?: number },
   ): Query<F, P & { _score: number }>;
+
+  /**
+   * Attaches the children of another collection to each row.
+   *
+   * Everything in `opts` binds to the looked-up collection: `limit` there
+   * counts children **per parent**, which is the shape a join cannot
+   * express. The clause is terminal in FenecQL, so it is emitted last
+   * whatever order the builder was called in.
+   *
+   * The child's field type cannot be reached from `Query<F>` -- the builder
+   * carries one collection's fields, not the schema -- so it defaults to a
+   * loose row. Pass it to get the tight one:
+   *
+   *     q.lookup<'reviews', FenecSchema['reviews']>('reviews', { on: 'product_id' })
+   */
+  lookup<N extends string, C extends Fields = Fields>(
+    name: N,
+    opts: LookupOptions<C>,
+  ): Query<F, P & { [K in N]: Row<C>[] }>;
 
   /** Successive calls add a sort key (the second decides when the first ties). */
   order(field: keyof Row<F> & string, dir?: 'asc' | 'desc'): Query<F, P>;

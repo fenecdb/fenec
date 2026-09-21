@@ -299,6 +299,24 @@ const OPS = {
 // so this is exactly where the injection boundary sits.
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
 
+/**
+ * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`.
+ * A bare string is one ascending key; anything else is a list of pairs, so
+ * there is no reading under which `['a','desc']` could mean two fields.
+ */
+function orderKeys(spec) {
+  if (spec === undefined || spec === null) return [];
+  if (typeof spec === 'string') return [{ field: ident(spec), asc: true }];
+  return spec.map((k) => {
+    const [field, dir = 'asc'] = [k].flat();
+    const d = String(dir).toLowerCase();
+    if (d !== 'asc' && d !== 'desc') {
+      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
+    }
+    return { field: ident(field), asc: d === 'asc' };
+  });
+}
+
 function ident(name, what = 'field') {
   if (typeof name !== 'string' || !IDENT.test(name)) {
     throw new FenecError(`invalid ${what} name: ${JSON.stringify(name)}`);
@@ -598,6 +616,45 @@ export class Query {
   }
 
   /**
+   * `lookup name on child [= parent] ...` -- the children of each row,
+   * attached to it.
+   *
+   * Everything in `opts` binds to the looked-up collection, which is what
+   * the clause's position means in FenecQL. `limit` in particular counts
+   * children **per parent**, not rows in the page: asking twenty products
+   * for three reviews each is one query, and no join expresses it.
+   *
+   *   db.from('products').limit(20)
+   *     .lookup('reviews', { on: 'product_id', limit: 3,
+   *                          order: [['created', 'desc']] })
+   *
+   * `on` names the child's field; the parent's key is `id` unless
+   * `parentKey` says otherwise. `order` takes `[field, dir]` pairs, or a
+   * bare field name for one ascending key.
+   */
+  lookup(name, opts = {}) {
+    if (!opts.on) {
+      throw new FenecError('lookup needs `on`: the child field holding the key');
+    }
+    const select = opts.select === undefined ? null : [opts.select].flat();
+    return this.#with({
+      lookup: {
+        collection: ident(name, 'collection'),
+        on: ident(opts.on),
+        parent: opts.parentKey === undefined ? null : ident(opts.parentKey),
+        project:
+          select === null || select.includes('*')
+            ? null
+            : select.map((c) => ident(c)),
+        cond: opts.where === undefined ? [] : [condOf([opts.where])],
+        order: orderKeys(opts.order),
+        limit: opts.limit === undefined ? undefined : whole(opts.limit, 'limit'),
+        offset: opts.offset === undefined ? 0 : whole(opts.offset, 'offset'),
+      },
+    });
+  }
+
+  /**
    * `order field asc|desc`. Successive calls add keys: when the first key
    * ties, the second decides.
    */
@@ -626,7 +683,7 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank } = this.#s;
+    const { match, rerank, lookup } = this.#s;
     // The engine refuses both of these too; failing here never sends a query.
     if (rerank && !match) {
       throw new FenecError('rerank needs match: it reorders what match found');
@@ -635,6 +692,19 @@ export class Query {
       throw new FenecError(
         'match and near cannot be combined: both order the result',
       );
+    }
+    // Refused in the engine too: a score spanning a parent and its children
+    // has no meaning, and `count` collapses the rows they would hang from.
+    if (lookup) {
+      const clash = near ? 'near' : match ? 'match' : rerank ? 'rerank' : null;
+      if (clash) throw new FenecError(`lookup cannot be combined with ${clash}`);
+      if (count) throw new FenecError('lookup cannot be combined with count');
+      if (lookup.collection === collection) {
+        throw new FenecError(
+          `${collection} cannot look itself up: both sides would answer to ` +
+            'the same name',
+        );
+      }
     }
     if (count) this.#assertCountable();
     const params = [];
@@ -662,6 +732,21 @@ export class Query {
     if (limit !== undefined) sql += ` limit ${limit}`;
     if (offset) sql += ` offset ${offset}`;
     if (count) sql += ' count';
+    // Terminal, so every clause after it belongs to the child -- and being
+    // emitted last, its parameters land after the parent's, which is the
+    // order `bind` numbered them in.
+    if (lookup) {
+      sql += ` lookup ${lookup.collection} on ${lookup.on}`;
+      if (lookup.parent) sql += ` = ${lookup.parent}`;
+      if (lookup.project) sql += ` select ${lookup.project.join(', ')}`;
+      const root = prune({ t: 'and', items: lookup.cond });
+      if (root) sql += ` where ${render(root, bind, null)}`;
+      for (const [i, o] of lookup.order.entries()) {
+        sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+      }
+      if (lookup.limit !== undefined) sql += ` limit ${lookup.limit}`;
+      if (lookup.offset) sql += ` offset ${lookup.offset}`;
+    }
     return [sql, params];
   }
 

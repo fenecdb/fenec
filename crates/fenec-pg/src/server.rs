@@ -1158,6 +1158,27 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
             (c, oid)
         })
         .collect();
+    // The wire has no nested row, so `lookup` arrives flattened and its
+    // columns have to be described here too. Falling through would not
+    // error: the caller's fallback types every column it cannot place as
+    // `text`, so an extended-protocol client would silently read every
+    // child int and timestamp as a string -- and `Describe` answers before
+    // the query runs, so nothing downstream could correct it.
+    if let Some(l) = &sel.lookup {
+        let child = db.collection(&l.collection).ok()?;
+        cols.extend(
+            projection_columns(&child.schema, &l.project)
+                .into_iter()
+                .map(|c| {
+                    let oid = child
+                        .schema
+                        .field(&c)
+                        .map(|f| pg_oid(&f.ty))
+                        .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
+                    (format!("{}.{}", l.collection, c), oid)
+                }),
+        );
+    }
     if sel.near.is_some() {
         cols.push(("_score".to_string(), OID_FLOAT8));
     }
@@ -1333,6 +1354,10 @@ fn execute_into(
                 }
                 match resp {
                     Response::Rows(rs) => {
+                        // A PostgreSQL row is flat, so children are widened
+                        // into the parent row the way a join would present
+                        // them. Borrowed untouched when there are none.
+                        let rs = rs.flatten();
                         let cols = match stmt {
                             Statement::Select(sel) => select_columns(guard.db(), sel),
                             _ => None,

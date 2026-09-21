@@ -99,6 +99,16 @@ parameters.</p>
   -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
 </pre>
 
+<p>A query with a <code>lookup</code> answers with the children nested under
+the collection's name — one object per parent, with an empty array where
+nothing matched. The <code>fenec-pg</code> side of the same query flattens
+them into the parent row instead, because a PostgreSQL row cannot nest.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"get products limit 20 lookup reviews on product_id limit 3"}'
+# [{"id":1,"name":"Kahve","reviews":[{"id":1,"stars":5,"body":"guzel"}]}, ...]</pre>
+
 <h2>Batches</h2>
 
 <p><code>POST /batch</code> takes one query body per line as NDJSON. The

@@ -99,7 +99,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-338 KB of WebAssembly — 113 KB brotli over the wire, client included — no
+351 KB of WebAssembly — 116 KB brotli over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
@@ -137,16 +137,19 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
 | **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
+| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 338 KB wasm + 60 KB client (113 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
+| **Runtime size** | 351 KB wasm + 63 KB client (116 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
 What it deliberately does **not** do — no transactions, no JOIN, no subqueries,
 no schema migration, no multi-writer replication, no decimal type — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
-ceiling baked into the code.
+ceiling baked into the code. Relations are `lookup`, which attaches a
+collection's matching documents to the row they belong to with a `limit` that
+counts children per parent; it is not a join and is not trying to be one.
 
 ---
 

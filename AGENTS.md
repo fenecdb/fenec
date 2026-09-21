@@ -126,6 +126,20 @@ substring matching; ranked text retrieval is `match` over an `@text` field,
 which does reach one. `order` has no top-k: every match is sorted, then `limit`
 applies.
 
+**`lookup` is one bucket probe per parent, not a join.** It attaches another
+collection's matching documents to the row they belong to, and a `limit` after
+it counts children *per parent* -- the shape a join cannot express. It is
+terminal in the grammar: everything before it binds to the driving collection,
+everything after to the looked-up one, which is exactly why there are no
+qualified names (`reviews.stars`) in the language and no filter splitting in
+the planner. The child key must be `id` or carry `@hash`; refusing an
+unindexed one follows `near` and `match`, because a silent full scan of the
+child collection would be a different feature under the same name. Nesting
+lives in `ResultSet.nested`, never in `Value` -- JSON transports nest, the
+PostgreSQL wire flattens (`ResultSet::flatten`), and the "no nested objects"
+rule stands. Measured at 22.7 us in process against 0.332 ms for the same
+page as a `/batch` of 21 queries merged on the client.
+
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --
 on BEIR FiQA the average query reaches 86% of the corpus -- so terms whose
 remaining ceiling cannot beat the worst kept score stop driving the frontier.

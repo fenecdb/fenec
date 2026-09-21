@@ -522,3 +522,99 @@ test('a clear error when fetch is missing', () => {
     globalThis.fetch = original;
   }
 });
+
+// ------------------------------------------------------------------ lookup
+
+test('lookup is terminal: its clauses bind to the child', () => {
+  const [sql, p] = from('products')
+    .where('price', '>', 100)
+    .limit(20)
+    .lookup('reviews', {
+      on: 'product_id',
+      select: ['body', 'stars'],
+      where: { stars: { gte: 4 } },
+      order: [['created', 'desc']],
+      limit: 3,
+    })
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get products where price > $1 limit 20 lookup reviews on product_id ' +
+      'select body, stars where stars >= $2 order created desc limit 3',
+  );
+  // The child's parameters follow the parent's, because the clause is last.
+  assert.deepEqual(p, [100, 4]);
+});
+
+test('lookup defaults the parent key to id, and can name it', () => {
+  assert.equal(
+    from('products').lookup('reviews', { on: 'product_id' }).toFenecQL()[0],
+    'get products lookup reviews on product_id',
+  );
+  assert.equal(
+    from('products')
+      .lookup('tags', { on: 'sku', parentKey: 'sku', order: 'label' })
+      .toFenecQL()[0],
+    'get products lookup tags on sku = sku order label asc',
+  );
+});
+
+test('lookup refuses what the engine refuses', () => {
+  assert.throws(
+    () => from('p').near('e', [1, 0]).lookup('r', { on: 'k' }).toFenecQL(),
+    /lookup cannot be combined with near/,
+  );
+  assert.throws(
+    () => from('p').match('body', 'x').lookup('r', { on: 'k' }).toFenecQL(),
+    /lookup cannot be combined with match/,
+  );
+  assert.throws(
+    () => from('p').lookup('p', { on: 'k' }).toFenecQL(),
+    /cannot look itself up/,
+  );
+  assert.throws(() => from('p').lookup('r', {}), /lookup needs `on`/);
+});
+
+test('lookup names go through the same identifier check as every other name', () => {
+  assert.throws(() => from('p').lookup('r; del p; --', { on: 'k' }), FenecError);
+  assert.throws(() => from('p').lookup('r', { on: 'a.b' }), FenecError);
+  assert.throws(
+    () => from('p').lookup('r', { on: 'k', order: [['a', 'sideways']] }),
+    /asc.*desc/,
+  );
+});
+
+test('lookup end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection products (name text, price int)');
+  db.run('create collection reviews (product_id int @hash, stars int, body text)');
+  await db.from('products').insert([
+    { name: 'Kahve', price: 12000 },
+    { name: 'Demlik', price: 34000 },
+  ]);
+  await db.from('reviews').insert([
+    { product_id: 1, stars: 5, body: 'guzel' },
+    { product_id: 1, stars: 3, body: 'idare eder' },
+    { product_id: 1, stars: 4, body: 'hizli kargo' },
+  ]);
+
+  const rows = await db
+    .from('products')
+    .select('name')
+    .lookup('reviews', {
+      on: 'product_id',
+      select: ['stars'],
+      where: { stars: { gte: 4 } },
+      order: [['stars', 'desc']],
+      limit: 2,
+    })
+    .rows();
+
+  assert.deepEqual(rows, [
+    { name: 'Kahve', reviews: [{ stars: 5 }, { stars: 4 }] },
+    // A parent with no matching children keeps its row and an empty group:
+    // the page is the parents.
+    { name: 'Demlik', reviews: [] },
+  ]);
+});

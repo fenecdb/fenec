@@ -774,20 +774,7 @@ pub fn rows_json(rs: &ResultSet) -> String {
         if i > 0 {
             out.push(',');
         }
-        out.push('{');
-        for (j, col) in rs.columns.iter().enumerate() {
-            if j > 0 {
-                out.push(',');
-            }
-            json::escape_into(&mut out, col);
-            out.push(':');
-            json::value_into(&mut out, &row.values[j]);
-        }
-        if let Some(s) = row.score {
-            out.push_str(",\"_score\":");
-            json::value_into(&mut out, &Value::Float(s as f64));
-        }
-        out.push('}');
+        json::row_object_into(&mut out, &rs.columns, row, json::children_of(rs, i));
     }
     out.push(']');
     out
