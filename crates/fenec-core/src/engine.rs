@@ -390,6 +390,53 @@ impl<'a> Probe<'a> {
         }
     }
 
+    /// Whether any live child under `key` satisfies `pred`.
+    ///
+    /// `ids` below materialises the bucket -- filtered, sorted, deduped --
+    /// because the collecting pass needs the children in order. The
+    /// existence pass behind `required` does not: it needs one witness, so
+    /// it walks the bucket as it lies and stops at the first. Order and
+    /// duplicates cannot change the answer to "is there one".
+    ///
+    /// On a parent holding 56 374 children that is the difference between
+    /// sorting all of them and reading a handful.
+    fn any(
+        &self,
+        child: &Collection,
+        key: &Value,
+        mut pred: impl FnMut(DocId) -> Result<bool>,
+    ) -> Result<bool> {
+        if key.is_null() {
+            return Ok(false);
+        }
+        match self {
+            Probe::Id => {
+                if let Ok(Value::Int(i)) = key.clone().coerce(&DataType::Int) {
+                    if let Ok(id) = DocId::try_from(i) {
+                        if child.store.contains(id) {
+                            return pred(id);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            Probe::Hash(map, ty) => {
+                let Ok(k) = key.clone().coerce(ty) else {
+                    return Ok(false);
+                };
+                let Some(ids) = map.get(&hash_key(&k)) else {
+                    return Ok(false);
+                };
+                for &id in ids {
+                    if child.store.contains(id) && pred(id)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
     /// Fills `out` with the child ids matching `key`: ascending, alive and
     /// free of duplicates.
     fn ids(&self, child: &Collection, key: &Value, out: &mut Vec<DocId>) {
@@ -1661,35 +1708,24 @@ impl Database {
     ) -> Result<Vec<DocId>> {
         let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
         let mut out = Vec::new();
-        let mut bucket: Vec<DocId> = Vec::new();
         for id in ids {
             let key = match parent_pos {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, p)?.unwrap_or(Value::Null),
             };
-            probe.ids(child, &key, &mut bucket);
-            let mut any = false;
-            for &cid in &bucket {
-                match &l.filter {
-                    None => {
-                        any = true;
-                        break;
-                    }
-                    Some(f) => {
-                        let mut r = StoreRow {
-                            store: &child.store,
-                            schema: &child.schema,
-                            id: cid,
-                            memo: Vec::new(),
-                        };
-                        if truthy(&eval(f, &mut r, ctx)?) {
-                            any = true;
-                            break;
-                        }
-                    }
+            let hit = probe.any(child, &key, |cid| match &l.filter {
+                None => Ok(true),
+                Some(f) => {
+                    let mut r = StoreRow {
+                        store: &child.store,
+                        schema: &child.schema,
+                        id: cid,
+                        memo: Vec::new(),
+                    };
+                    Ok(truthy(&eval(f, &mut r, ctx)?))
                 }
-            }
-            if any {
+            })?;
+            if hit {
                 out.push(id);
             }
         }
