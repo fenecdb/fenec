@@ -597,7 +597,10 @@ fn required_on_a_named_parent_key_matches_the_reference() {
     // `ph` indexes the key field, `pn` does not; same rows, same question.
     run(&mut db, "create collection ph (sku text @hash, name text)");
     run(&mut db, "create collection pn (sku text, name text)");
-    run(&mut db, "create collection rv (sku text @hash, stars int @hash)");
+    run(
+        &mut db,
+        "create collection rv (sku text @hash, stars int @hash)",
+    );
     for c in ["ph", "pn"] {
         run(
             &mut db,
@@ -650,11 +653,7 @@ fn required_on_a_named_parent_key_matches_the_reference() {
         // group. It reads every child and uses no index to decide.
         let want = named("pn", false, filter.clone());
         for coll in ["ph", "pn"] {
-            assert_eq!(
-                named(coll, true, filter.clone()),
-                want,
-                "{coll} {filter:?}"
-            );
+            assert_eq!(named(coll, true, filter.clone()), want, "{coll} {filter:?}");
         }
     }
 }
