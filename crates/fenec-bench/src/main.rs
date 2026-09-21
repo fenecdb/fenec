@@ -11,6 +11,9 @@
 //! - The SQLite core has no ANN index; vector search is a full scan. So
 //!   **exact against exact** is compared first (equal semantics), and
 //!   fenecdb's ANN is shown as a separate row.
+//! - PostgreSQL computes its distances inside pgvector, not with our kernel.
+//!   What it shares with fenecdb is the HNSW build (`m`, `ef_construction`,
+//!   one process per core), the search beam (`ef_search`) and the data.
 //!
 //! The PostgreSQL arm needs a running pgvector:
 //! ```text
@@ -126,6 +129,8 @@ struct Result_ {
     recall: Option<f64>,
     /// Round-trip time of an empty query on client-server engines.
     rtt: Option<f64>,
+    /// Where the on-disk bytes go, for an engine that can say.
+    breakdown: Option<String>,
 }
 
 fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Result_ {
@@ -273,6 +278,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
         reopen_ms: Some(reopen_ms),
         recall: Some(hits as f64 / total as f64 * 100.0),
         rtt: None,
+        breakdown: None,
     }
 }
 
@@ -380,6 +386,7 @@ fn run_sqlite(path: &str, rows: &[Row], queries: &[Vec<f32>]) -> Result_ {
         reopen_ms: Some(reopen_ms),
         recall: None,
         rtt: None,
+        breakdown: None,
     }
 }
 
@@ -451,7 +458,16 @@ fn run_postgres(
         w.finish()?;
     }
     let ingest_ms = ms(t.elapsed());
-    // the same HNSW parameters as fenecdb
+    // The same HNSW parameters as fenecdb, and the same parallelism: one
+    // process per core, the leader included, as fenecdb's build uses every
+    // core. pgvector's default of two workers measured 14.7 s against 9.0 s
+    // with seven, and made fenecdb look faster at a build it is not faster at.
+    let workers = std::thread::available_parallelism()
+        .map(|c| c.get().saturating_sub(1))
+        .unwrap_or(1);
+    cl.batch_execute(&format!(
+        "SET max_parallel_maintenance_workers = {workers};"
+    ))?;
     let ti = Instant::now();
     cl.batch_execute(
         "CREATE INDEX ON docs (category);
@@ -465,6 +481,28 @@ fn run_postgres(
     let bytes: i64 = cl
         .query_one("SELECT pg_total_relation_size('docs')::bigint", &[])?
         .get(0);
+    // Most of the difference to fenecdb's file is not MVCC: pgvector's HNSW
+    // index keeps a copy of every vector in its own pages, so it reads no
+    // heap tuple during a search. The split says so rather than leaving it
+    // to a guess.
+    let split = cl.query_one(
+        "SELECT pg_relation_size('docs')::bigint,
+                coalesce(sum(pg_relation_size(i.indexrelid)) FILTER (WHERE am.amname = 'hnsw'), 0)::bigint,
+                coalesce(sum(pg_relation_size(i.indexrelid)) FILTER (WHERE am.amname <> 'hnsw'), 0)::bigint
+           FROM pg_index i
+           JOIN pg_class c ON c.oid = i.indexrelid
+           JOIN pg_am am ON am.oid = c.relam
+          WHERE i.indrelid = 'docs'::regclass",
+        &[],
+    )?;
+    let mb = |b: i64| b as f64 / 1e6;
+    let breakdown = format!(
+        "PostgreSQL on disk: heap {:.1} MB, HNSW index {:.1} MB (a copy of every vector), \
+         B-trees {:.1} MB",
+        mb(split.get(0)),
+        mb(split.get(1)),
+        mb(split.get(2))
+    );
 
     let mut lat = Vec::new();
     for _ in 0..20 {
@@ -494,10 +532,11 @@ fn run_postgres(
     }
     let exact_p50 = p50(&mut lat);
 
-    // ANN: the same ef_search as fenecdb
-    cl.batch_execute(
-        "SET enable_indexscan = on; SET enable_indexonlyscan = on; SET hnsw.ef_search = 64;",
-    )?;
+    // ANN: the same ef_search as fenecdb's default
+    cl.batch_execute(&format!(
+        "SET enable_indexscan = on; SET enable_indexonlyscan = on; SET hnsw.ef_search = {};",
+        VectorIndexSpec::default().ef_search
+    ))?;
     let mut lat = Vec::new();
     let mut hits = 0usize;
     let mut total = 0usize;
@@ -526,6 +565,7 @@ fn run_postgres(
         reopen_ms: None, // continuously running server: no equivalent
         recall: Some(hits as f64 / total as f64 * 100.0),
         rtt: Some(rtt),
+        breakdown: Some(breakdown),
     })
 }
 
@@ -671,6 +711,9 @@ fn main() {
             p.rtt.unwrap(),
             p.rtt.unwrap() / p.ann_p50.unwrap() * 100.0
         );
+        if let Some(b) = &p.breakdown {
+            println!("{b}.");
+        }
     }
     let _ = s;
 

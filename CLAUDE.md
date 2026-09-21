@@ -93,9 +93,18 @@ dirty pages, and the whole database is resident — open peak ≈ 2× the file,
 `compact`/`checkpoint` peak ≈ 3×.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
-exclusive one (`execute_with`). There are no transactions — `BEGIN`/`COMMIT` are
-accepted and do nothing. Two processes opening the same file corrupts it, which
-is why `fenec-http` is a second listener inside `fenec-pg`, never its own binary.
+exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
+`BEGIN`/`COMMIT` and does nothing with them, and refuses (`0A000`) a `ROLLBACK`
+that follows a write in the block rather than answering "done". Two processes
+opening the same file corrupts it, which is why `fenec-http` is a second
+listener inside `fenec-pg`, never its own binary.
+
+**A storage error stops writes.** Once the sink refuses an append, a sync or a
+rewrite, every later write and sync returns `Error::Io` until the file is
+reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
+never retried -- the kernel may already have dropped the pages -- and
+`fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
+had not yet sent.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
 `site/content/docs/sharding.html`). The tenant comes from the path
@@ -131,6 +140,15 @@ believed right. Full table in `site/content/docs/limits.html`.
 the wasm32 target. Likewise `now()` errors there — wasm32-unknown-unknown has no
 clock, so time is passed in as a parameter.
 
+**The wasm32 build has SIMD, and its kernels match the scalar ones bit for
+bit.** `.cargo/config.toml` turns on `simd128` for that target, and
+`vector::simd` holds the distance kernels written against it: the module is
+built at `opt-level = "z"`, where LLVM does not vectorise the scalar strips
+(a 20 000 x 384 HNSW build went 28.0 -> 9.95 s). They keep the scalar loop's
+eight accumulators and reduction order, so a graph built in the browser is the
+graph built natively; `web/fenec.test.js` checks that order against a
+`Math.fround` reference.
+
 **Filtered `near` needs its fallback.** The filter set is extracted first; either
 it is scanned directly (when smaller than `ef × m0`) or the ANN runs and
 candidates are membership-tested. The second path *must* fall back to scanning
@@ -147,8 +165,9 @@ wrong answer rather than a slow one. `id` has no `@hash` and cannot have one --
 before that it was a full scan, 383 us against 0.50 us over 20 000 documents.
 Everything else -- `>=`, `~`, `has`, anything under `or` -- is a full scan. `~`
 is unranked substring matching; ranked text retrieval is `match` over an `@text`
-field, which does reach one. `order` has no top-k: every match is sorted, then
-`limit` applies.
+field, which does reach one. `order` reads every match's key but puts only
+`offset + limit` rows in order; with no `order`, the scan stops at
+`offset + limit` matches.
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

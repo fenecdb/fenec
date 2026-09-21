@@ -99,7 +99,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-370 KB of WebAssembly — 122 KB brotli (`-q 11`) over the wire, client included — no
+369 KB of WebAssembly — 123 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
@@ -140,7 +140,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 370 KB wasm + 65 KB client (122 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
+| **Runtime size** | 369 KB wasm + 66 KB client (123 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
@@ -175,6 +175,11 @@ query; it is not a join and is not trying to be one.
 The docs are the long-form reference; their source is
 [`site/content/docs/`](site/content/docs/), so a correction is a pull request
 like any other.
+
+Coding agents get the same docs as text, rendered from those pages on every
+build: [`llms.txt`](https://fenecdb.com/llms.txt) is a brief with the rules
+FenecQL does not share with SQL, and
+[`llms-full.txt`](https://fenecdb.com/llms-full.txt) is every page in one file.
 
 ---
 

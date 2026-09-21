@@ -1163,3 +1163,172 @@ fn a_chained_lookup_is_flattened_level_by_level() {
     let r = c.extended(sql, &[], true);
     assert_eq!(find(&r, b'T').unwrap().columns(), want);
 }
+
+// ------------------------------------------------------------ transactions
+
+/// The status byte of the ReadyForQuery that closes a response.
+fn status(msgs: &[Msg]) -> u8 {
+    let z = msgs.last().expect("a response");
+    assert_eq!(z.tag, b'Z', "a response ends with ReadyForQuery");
+    z.body[0]
+}
+
+/// `ROLLBACK` after a write cannot undo it, so it says so rather than
+/// answering "done"; the block closes either way and the write stays.
+#[test]
+fn rollback_after_a_write_is_refused() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    let r = c.simple("BEGIN");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "BEGIN");
+    assert_eq!(status(&r), b'T', "inside a block the session reports T");
+    let r = c.simple("put t {name: \"a\"}");
+    assert_eq!(status(&r), b'T');
+    c.simple("put t {name: \"b\"}");
+
+    let r = c.simple("ROLLBACK");
+    let e = find(&r, b'E').expect("ROLLBACK after a write must fail");
+    assert_eq!(e.sqlstate().unwrap(), "0A000");
+    let msg = e.message().unwrap();
+    assert!(msg.contains("2 write statements"), "{msg}");
+    assert_eq!(status(&r), b'I', "the block is closed after the refusal");
+
+    let names: Vec<_> = c
+        .simple("get t select name")
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells()[0].clone().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["a", "b"],
+        "nothing was undone, and that is what it said"
+    );
+}
+
+/// With nothing to undo, `ROLLBACK` is true and succeeds: pools send it on
+/// every check-in, and refusing it there would only break them.
+#[test]
+fn rollback_with_nothing_to_undo_succeeds() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    // No block at all.
+    let r = c.simple("ROLLBACK");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'I');
+
+    // A block that only read, or wrote nothing it matched.
+    c.simple("BEGIN");
+    c.simple("get t");
+    c.simple("del t where name = \"nobody\"");
+    let r = c.simple("ROLLBACK");
+    assert!(find(&r, b'E').is_none(), "{:?}", find(&r, b'E'));
+
+    // A write that failed before touching anything.
+    c.simple("BEGIN");
+    let r = c.simple("put t {name: 1}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
+    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
+
+    // A write made outside a block does not count against a later one.
+    c.simple("put t {name: \"outside\"}");
+    c.simple("BEGIN");
+    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
+}
+
+/// `COMMIT` closes the block; the extended protocol sees the same status, so
+/// a driver that reads its state from ReadyForQuery sends its own `COMMIT`.
+#[test]
+fn transaction_status_follows_the_block() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    assert_eq!(status(&c.extended("BEGIN", &[], false)), b'T');
+    let r = c.extended("put t {name: $1}", &["x"], false);
+    assert_eq!(status(&r), b'T');
+    let r = c.extended("COMMIT", &[], false);
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
+    assert_eq!(status(&r), b'I');
+
+    // After COMMIT the count starts over: nothing is left to refuse.
+    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
+    // A second BEGIN keeps the block it is in, and its count.
+    c.simple("BEGIN");
+    c.simple("put t {name: \"y\"}");
+    c.simple("BEGIN");
+    let r = c.simple("ROLLBACK");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "0A000");
+}
+
+/// `LISTEN` would leave a client waiting for notifications that never come;
+/// `UNLISTEN` is true as it is.
+#[test]
+fn listen_and_notify_are_refused() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    for q in ["LISTEN jobs", "NOTIFY jobs, 'ready'"] {
+        let r = c.simple(q);
+        let e = find(&r, b'E').unwrap_or_else(|| panic!("`{q}` must be refused"));
+        assert_eq!(e.sqlstate().unwrap(), "0A000");
+        assert!(e.message().unwrap().contains("/changes"));
+    }
+    let r = c.simple("UNLISTEN *");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "UNLISTEN");
+}
+
+// ------------------------------------------------------------ storage errors
+
+/// A sink whose `sync` fails: what a dying disk or a full volume looks like
+/// from above.
+struct SyncFails;
+
+impl fenec_core::engine::Sink for SyncFails {
+    fn append(&mut self, _bytes: &[u8]) -> fenec_core::error::Result<()> {
+        Ok(())
+    }
+    fn rewrite(&mut self, _bytes: &[u8]) -> fenec_core::error::Result<()> {
+        Ok(())
+    }
+    fn sync(&mut self) -> fenec_core::error::Result<()> {
+        Err(fenec_core::error::Error::Io("input/output error".into()))
+    }
+}
+
+/// Under `--sync always` a write the disk refused is reported as failed, and
+/// every write after it is refused until the file is reopened; reads go on.
+#[test]
+fn sync_failure_is_reported_and_stops_writes() {
+    let mut db = Database::with_sink(Box::new(SyncFails));
+    db.install_plugin(&PgPlugin).unwrap();
+    let h = start(
+        Config {
+            sync: SyncPolicy::Always,
+            ..Config::default()
+        },
+        db,
+    );
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+
+    let r = c.simple("create collection t (name text)");
+    let e = find(&r, b'E').expect("the failed sync must reach the client");
+    assert_eq!(e.sqlstate().unwrap(), "58030");
+    assert!(
+        find(&r, b'C').is_none(),
+        "no CommandComplete for a write the disk refused"
+    );
+
+    let r = c.simple("put t {name: \"a\"}");
+    let e = find(&r, b'E').expect("later writes are refused");
+    assert_eq!(e.sqlstate().unwrap(), "58030");
+    assert!(e.message().unwrap().contains("refused"));
+
+    // Reads still answer, from memory.
+    let r = c.simple("collections");
+    assert!(find(&r, b'E').is_none());
+    assert!(h.db.read().unwrap().failure().is_some());
+}

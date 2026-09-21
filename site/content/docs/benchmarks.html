@@ -10,9 +10,10 @@ table, because a number without one is a claim, not a measurement.</p>
 
 <h2>Against SQLite and pgvector</h2>
 
-<p>Same data, same process, same distance kernel. SQLite 3.46 and PostgreSQL
-17 with pgvector 0.8.6, on an Apple M-series, 100 000 rows × 128 dimensions
-with clustered embeddings.</p>
+<p>Same data, and the same index settings wherever there is an index. SQLite
+3.53 and PostgreSQL 17 with pgvector 0.8.6, on an Apple M-series, 100 000 rows
+× 128 dimensions with clustered embeddings. Every figure is the median of three
+runs.</p>
 
 <pre data-lang="bash">make pgvector-up      # start PostgreSQL + pgvector in Docker
 make compare          # without it, that arm is skipped
@@ -22,16 +23,16 @@ make compare          # without it, that arm is skipped
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
 <tbody>
-<tr><td>data write, no index</td><td class="n"><b>900 k rows/s</b></td><td class="n">415 k/s</td><td class="n">64 k/s</td></tr>
-<tr><td>index build</td><td class="n"><b>10.2 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">14.2 s HNSW</td></tr>
-<tr><td>total</td><td class="n">10.3 s</td><td class="n"><b>0.27 s</b>, no ANN</td><td class="n">15.7 s</td></tr>
-<tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
-<tr><td>scalar filter, indexed</td><td class="n"><b>4.3 ms</b></td><td class="n">14.5 ms</td><td class="n">7.8 ms</td></tr>
-<tr><td>vector top-10, <b>exact</b></td><td class="n"><b>4.0 ms</b></td><td class="n">31.3 ms</td><td class="n">14.8 ms</td></tr>
-<tr><td>vector top-10, <b>approximate</b></td><td class="n"><b>0.18 ms</b></td><td class="n">none</td><td class="n">0.91 ms</td></tr>
+<tr><td>data write, no index</td><td class="n"><b>925 k rows/s</b></td><td class="n">433 k/s</td><td class="n">62 k/s</td></tr>
+<tr><td>index build</td><td class="n">10.2 s HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n"><b>8.7 s</b> HNSW</td></tr>
+<tr><td>total</td><td class="n">10.4 s</td><td class="n"><b>0.26 s</b>, no ANN</td><td class="n">10.3 s</td></tr>
+<tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">144.9 MB</td></tr>
+<tr><td>scalar filter, indexed</td><td class="n"><b>4.5 ms</b></td><td class="n">14.2 ms</td><td class="n">7.8 ms</td></tr>
+<tr><td>vector top-10, <b>exact</b></td><td class="n"><b>4.1 ms</b></td><td class="n">31.1 ms</td><td class="n">15.6 ms</td></tr>
+<tr><td>vector top-10, <b>approximate</b></td><td class="n"><b>0.18 ms</b></td><td class="n">none</td><td class="n">1.04 ms</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n"><b>100%</b></td></tr>
-<tr><td>reopen</td><td class="n">117 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server, always open</td></tr>
-<tr><td>empty query round trip</td><td class="n">0, embedded</td><td class="n">0, embedded</td><td class="n">0.49 ms</td></tr>
+<tr><td>reopen</td><td class="n">120 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server, always open</td></tr>
+<tr><td>empty query round trip</td><td class="n">0, embedded</td><td class="n">0, embedded</td><td class="n">0.41 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -47,44 +48,53 @@ make compare          # without it, that arm is skipped
     <code>fsync</code> per write.</li>
   <li><b>PostgreSQL</b>: in Docker, bulk load with COPY, then
     <code>hnsw (m=16, ef_construction=200)</code> — the same parameters as
-    fenecdb. At query time <code>hnsw.ef_search = 64</code>, again matching
-    fenecdb's setting.</li>
-  <li>Vector distance is computed by the same code in all three. What is
-    measured is the engine's cost of <i>fetching the data</i>, not the
-    arithmetic.</li>
+    fenecdb — with <code>max_parallel_maintenance_workers</code> set so the
+    build gets one process per core, as fenecdb's does: seven workers and the
+    leader here. At query time <code>hnsw.ef_search = 100</code>, fenecdb's
+    default.</li>
+  <li>fenecdb and SQLite compute vector distance with the same code: SQLite's
+    rows are read back and scored by fenecdb's kernel, so what separates the
+    two is the cost of <i>fetching the data</i>, not the arithmetic.
+    PostgreSQL computes it inside pgvector.</li>
   <li>SQLite's core has no ANN index, so a vector search there is a full scan.
     The comparison is therefore <b>exact against exact</b> first, with ANN on a
     separate row.</li>
   <li>The write is split in two stages, rows and index. A single "total" would
     weigh an engine that builds an ANN index and one that does not on the same
     scale.</li>
-  <li>The PostgreSQL figures include a 0.40 ms TCP round trip, about 40% of its
+  <li>The PostgreSQL figures include a 0.41 ms TCP round trip, about 40% of its
     ANN time. That is not a measurement flaw, it is the client-server
     architecture.</li>
 </ul>
 
 <h2>How to read the numbers</h2>
 
-<p><b>fenecdb leads on raw write speed:</b> 900 k rows/s, more than twice
+<p><b>fenecdb leads on raw write speed:</b> 925 k rows/s, more than twice
 SQLite's. The append-only segment store reduces a write to appending to an
 arena — no B-tree rebalancing, no page splits.</p>
 
-<p><b>It leads on index build too</b>, 10.2 s against pgvector's 14.2 s at the
-same <code>m</code> and <code>ef_construction</code>. SQLite's 0.03 s is not an
-ANN index but a single-column B-tree; that cost does not vanish, it is deferred
-to query time, where a vector search takes 31.3 ms — 171× slower than fenecdb's
-ANN.</p>
+<p><b>pgvector builds the index faster</b>: 8.7 s against fenecdb's 10.2 s, at
+the same <code>m</code> and <code>ef_construction</code> on the same cores.
+This page used to say the opposite, 10.2 s against 14.2 s — pgvector was then
+building with its default two workers while fenecdb used every core. SQLite's
+0.03 s is not an ANN index but a single-column B-tree; that cost does not
+vanish, it is deferred to query time, where a vector search takes 31.1 ms —
+174× slower than fenecdb's ANN.</p>
 
-<p><b>The one real loss is reopen.</b> SQLite opens in 1 ms because it loads
+<p><b>The clearest loss is reopen.</b> SQLite opens in 1 ms because it loads
 nothing, reading pages as it needs them. fenecdb pulls the vector arena into
-memory and validates the graph: 117 ms. That is not a shortcoming but the other
-side of the same coin — it is why queries are 3–171× faster. The measured
+memory and validates the graph: 120 ms. That is not a shortcoming but the other
+side of the same coin — it is why queries are 3–174× faster. The measured
 break-even is <b>four vector queries</b>; after that fenecdb is ahead on the
 total.</p>
 
-<p><b>fenecdb leads on disk as well</b>, 2.5× smaller than pgvector.
-PostgreSQL's extra is MVCC row headers, WAL and the visibility map: the price
-of concurrent transactions. The single-writer model does not need it.</p>
+<p><b>fenecdb leads on disk as well</b>, 2.5× smaller than pgvector — though
+not for the reason this page used to give. Of pgvector's 144.9 MB, 83.2 MB is
+the HNSW index, which keeps its own copy of every vector so a search reads no
+heap tuple. The heap is 58.7 MB, as large as fenecdb's whole file with its
+graph, and its MVCC headers are about 2.8 MB of that. fenecdb's graph stores
+links and nothing else; the vectors are read from the one arena. The WAL is in
+neither figure.</p>
 
 <h2>Scale measurement</h2>
 
@@ -214,8 +224,8 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">927 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import</td><td class="n">765 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>684 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>370 KB</b></td><td class="n"><b>104 KB</b></td><td class="n">127 KB</td></tr>
-<tr><td><code>web/fenec.js</code>, the client</td><td class="n">65 KB</td><td class="n">18 KB</td><td class="n">21 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>369 KB</b></td><td class="n"><b>105 KB</b></td><td class="n">127 KB</td></tr>
+<tr><td><code>web/fenec.js</code>, the client</td><td class="n">66 KB</td><td class="n">18 KB</td><td class="n">21 KB</td></tr>
 <tr><td>container image, scratch + musl</td><td class="n">1.31 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -223,7 +233,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>122 KB brotli</b> for both together. A binary you execute and an image
+<b>123 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -232,9 +242,9 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  132 KB at <code>-q 5</code>, nginx's dynamic default, and 141 KB at
+  138 KB at <code>-q 5</code>, nginx's dynamic default, and 146 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
-  number by 11–18%.</p>
+  number by 12–19%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is
   what gets decompressed, compiled and held: <code>WebAssembly.compile</code>
   and the module's memory footprint track that figure, not the compressed one,

@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — a vector database that fits in a browser tab
-description: Minimal, vector-native embedded database. Written in Rust, compiles to 370 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
+description: Minimal, vector-native embedded database. Written in Rust, compiles to 369 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
 -->
 
 <section class="hero">
@@ -47,7 +47,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   <div class="hero-in">
     <div class="hero-col">
       <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
-      <p class="hero-sub reveal">370 KB of WebAssembly with no dependencies.
+      <p class="hero-sub reveal">369 KB of WebAssembly with no dependencies.
         Vectors are a type, <code>near</code> is a clause, and the HNSW index is
         built in the same tab that asks the question. The same engine runs as a
         process that speaks the PostgreSQL protocol.</p>
@@ -94,8 +94,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   <div class="band-in">
     <h2 class="rise">Crossing the same ground</h2>
     <p class="lede rise">One vector search, top ten of a hundred thousand, on the
-      same data in the same process with the same distance kernel. Watch them
-      run.</p>
+      same data with the same index settings. Watch them run.</p>
 
     <div class="race">
       <div class="lane fenec" data-ms="0.18" data-value="0.18" data-unit=" ms">
@@ -105,14 +104,14 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         </div>
         <div class="lane-time idle">—</div>
       </div>
-      <div class="lane" data-ms="0.91" data-value="0.91" data-unit=" ms">
-        <div class="lane-name"><b>pgvector</b>hnsw · 5.1× slower</div>
+      <div class="lane" data-ms="1.04" data-value="1.04" data-unit=" ms">
+        <div class="lane-name"><b>pgvector</b>hnsw · 5.8× slower</div>
         <div class="lane-track">
           <div class="lane-fill"></div>
         </div>
         <div class="lane-time idle">—</div>
       </div>
-      <div class="lane" data-ms="31.3" data-value="31.3" data-unit=" ms">
+      <div class="lane" data-ms="31.1" data-value="31.1" data-unit=" ms">
         <div class="lane-name"><b>SQLite</b>full scan · 174× slower</div>
         <div class="lane-track">
           <div class="lane-fill"></div>
@@ -124,9 +123,9 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
     <p class="race-foot">The scale is compressed — run at the true ratio, the
       last lane would take nearly three minutes to cross. The times beside each
       lane are the measured ones. SQLite has no ANN index in core, so its lane
-      is a full scan; pgvector runs the same <code>m</code> and
-      <code>ef_construction</code> as fenecdb, and its figure carries a 0.40 ms
-      TCP round trip that no embedded engine pays.</p>
+      is a full scan; pgvector runs the same <code>m</code>,
+      <code>ef_construction</code> and <code>ef_search</code> as fenecdb, and its
+      figure carries a 0.41 ms TCP round trip that no embedded engine pays.</p>
     <button class="race-replay" type="button">Run it again</button>
   </div>
 </section>
@@ -172,7 +171,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <div class="stratum-v">
           <p>Own codec, own JSON, own HNSW, own lexer and parser, own SCRAM. The
             core is <code>std</code> and nothing else, which is why the
-            WebAssembly output is 370 KB and auditable in an afternoon.</p>
+            WebAssembly output is 369 KB and auditable in an afternoon.</p>
           <p class="bill"><b>The bill:</b> every bug is ours.</p>
         </div>
       </div>
@@ -181,8 +180,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <div class="stratum-k">single writer</div>
         <div class="stratum-v">
           <p>Reads take a shared lock, writes the exclusive one. That is what
-            removes MVCC row headers, the WAL and the visibility map — and why
-            the file is 2.5× smaller than the same data under pgvector.</p>
+            removes MVCC row headers, the WAL and the visibility map.</p>
           <p class="bill"><b>The bill:</b> one process per file. Two writers
             corrupt it.</p>
         </div>
@@ -207,22 +205,22 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   <div class="band-in">
     <h2 class="rise">Everything else, measured</h2>
     <p class="lede rise">100 000 rows × 128 dimensions, clustered embeddings,
-      Apple M-series. All three engines bulk load first and index after, which is
-      the recommended order for each.</p>
+      Apple M-series, median of three runs. All three engines bulk load first
+      and index after, which is the recommended order for each.</p>
 
     <div class="tbl rise">
       <table>
         <thead>
-          <tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite 3.46</th><th class="n">PostgreSQL 17 + pgvector</th></tr>
+          <tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite 3.53</th><th class="n">PostgreSQL 17 + pgvector</th></tr>
         </thead>
         <tbody>
-          <tr><td>data write, no index</td><td class="n"><b>900 k rows/s</b></td><td class="n">415 k/s</td><td class="n">64 k/s</td></tr>
-          <tr><td>index build</td><td class="n"><b>10.2 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">14.2 s HNSW</td></tr>
-          <tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
-          <tr><td>scalar filter, indexed</td><td class="n"><b>4.3 ms</b></td><td class="n">14.5 ms</td><td class="n">7.8 ms</td></tr>
-          <tr><td>vector top-10, exact</td><td class="n"><b>4.0 ms</b></td><td class="n">31.3 ms</td><td class="n">14.8 ms</td></tr>
+          <tr><td>data write, no index</td><td class="n"><b>925 k rows/s</b></td><td class="n">433 k/s</td><td class="n">62 k/s</td></tr>
+          <tr><td>index build</td><td class="n">10.2 s HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n"><b>8.7 s</b> HNSW</td></tr>
+          <tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">144.9 MB</td></tr>
+          <tr><td>scalar filter, indexed</td><td class="n"><b>4.5 ms</b></td><td class="n">14.2 ms</td><td class="n">7.8 ms</td></tr>
+          <tr><td>vector top-10, exact</td><td class="n"><b>4.1 ms</b></td><td class="n">31.1 ms</td><td class="n">15.6 ms</td></tr>
           <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n">100%</td></tr>
-          <tr><td>reopen</td><td class="n">117 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server stays open</td></tr>
+          <tr><td>reopen</td><td class="n">120 ms</td><td class="n"><b>1.0 ms</b></td><td class="n">server stays open</td></tr>
         </tbody>
       </table>
     </div>
@@ -232,17 +230,17 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <h3>Where it loses</h3>
         <p>SQLite reopens in 1 ms because it loads nothing and reads pages on
           demand. fenecdb pulls the vector arena into memory and validates the
-          graph, which takes 117 ms. That is the same coin, other side: it is
-          why the queries are 3–171× faster. The break-even is four vector
-          queries.</p>
+          graph, which takes 120 ms. That is the same coin, other side: it is
+          why the queries are 3–174× faster. The break-even is four vector
+          queries. And pgvector builds the HNSW index faster, 8.7 s against
+          10.2 s on the same cores.</p>
       </div>
       <div>
         <h3>How to read the rest</h3>
         <p>SQLite's 0.03 s is a single-column B-tree, not an ANN index. The cost
-          does not vanish, it moves to query time. PostgreSQL's disk figure is
-          MVCC row headers, WAL and the visibility map — the price paid for
-          concurrent transactions, which the single-writer model does not
-          need.</p>
+          does not vanish, it moves to query time. Most of PostgreSQL's disk
+          figure is its HNSW index, which keeps a second copy of every vector;
+          fenecdb's graph stores only the links.</p>
       </div>
     </div>
     <p><a href="docs/benchmarks.html">Full method, hardware and the ef/recall sweep</a></p>

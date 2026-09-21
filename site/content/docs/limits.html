@@ -173,9 +173,14 @@ that is down takes its tenants with it.</p>
     documents, nearly all is the filter scan — an unfiltered ANN is 0.2 ms.
     With a selective filter the exact-scan path is taken, so recall is
     10/10.</li>
-  <li><b>There is no top-k for <code>order</code>.</b> The key of every
-    matching row is extracted and sorted, then <code>limit</code> applies. The
-    cost depends on the number of matches, not on <code>limit</code>.</li>
+  <li><b><code>order</code> reads every match.</b> Only
+    <code>offset + limit</code> rows are put in order — the rest are
+    partitioned away in linear time — but every matching row's key is still
+    read, since the first twenty cannot be known without seeing all of them.
+    The cost follows the number of matches, not <code>limit</code>: over a
+    million rows <code>order created desc limit 20</code> takes 28.4 ms.
+    Without <code>order</code>, a scan stops at <code>offset + limit</code>
+    matches.</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's
@@ -187,6 +192,10 @@ that is down takes its tenants with it.</p>
     check exists only on the <code>fenec import</code> path. In a
     <code>vector&lt;N, f16&gt;</code> field an out-of-range value silently
     becomes <code>inf</code> or drops to zero below about 6×10<sup>-8</sup>.</li>
+  <li>The browser module needs WebAssembly SIMD: Chrome 91, Firefox 89, Safari
+    16.4 (March 2023) or later. On an engine without it,
+    <code>Fenec.open</code> fails with a <code>FenecError</code> that says
+    so.</li>
   <li><code>now()</code> does not work in the browser: wasm32-unknown-unknown
     has no clock and the call errors. Pass the time as a parameter with
     <code>Date.now()</code>.</li>
@@ -199,8 +208,14 @@ that is down takes its tenants with it.</p>
     the clear. Non-loopback plus unauthenticated listening is refused without
     <code>--insecure</code>.</li>
   <li><b>No transactions.</b> <code>BEGIN</code> and <code>COMMIT</code> are
-    accepted and do nothing. The single-writer model gives per-statement
-    atomicity.</li>
+    accepted and do nothing; between them the session reports being in a block
+    (<code>T</code>), so drivers send their own <code>COMMIT</code> or
+    <code>ROLLBACK</code>. <code>ROLLBACK</code> succeeds only when nothing was
+    written since <code>BEGIN</code>. After a write it returns
+    <code>0A000</code>: it cannot undo anything, and answering "done" would be
+    a wrong answer believed right. <code>LISTEN</code> and <code>NOTIFY</code>
+    return <code>0A000</code> too — subscriptions are
+    <code>GET /&lt;name&gt;/changes</code>.</li>
   <li>A cancellation is seen while waiting on the lock and between batched
     statements. A running statement, such as a long <code>compact</code>, is
     not cut in the middle.</li>

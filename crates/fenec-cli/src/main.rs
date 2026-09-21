@@ -117,8 +117,13 @@ fn main() {
     };
 
     if let Some(cmd) = command {
-        let code = if run(&mut db, &cmd) { 0 } else { 1 };
-        let _ = db.sync();
+        let mut code = if run(&mut db, &cmd) { 0 } else { 1 };
+        // A one-shot write that never reached the disk must not exit 0: the
+        // caller's script would go on believing it.
+        if let Err(e) = db.sync() {
+            eprintln!("could not push the writes to disk: {e}");
+            code = 1;
+        }
         std::process::exit(code);
     }
 
@@ -186,7 +191,10 @@ fn main() {
             Err(e) => eprintln!("could not write the checkpoint: {e}"),
         }
     }
-    let _ = db.sync();
+    if let Err(e) = db.sync() {
+        eprintln!("could not push the writes to disk: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn balanced(s: &str) -> bool {

@@ -84,6 +84,13 @@ waiting on the lock do not wait for nothing — they come back with
 <code>57P01</code>. Under <code>kill -9</code> you get exactly what the chosen
 policy promised, and no more.</p>
 
+<p>When the disk refuses a write or a sync, the statement fails with
+<code>58030</code> — under <code>always</code>, before the client is told it
+succeeded — and every later write is refused until the process restarts;
+reads go on answering from memory. The sync is not retried: after a failed
+<code>fsync</code> the kernel may already have dropped the pages, so a retry
+that succeeds would prove nothing.</p>
+
 <h3>The shutdown checkpoint</h3>
 
 <p>After the sync, if a vector index exists, a checkpoint is written: the HNSW

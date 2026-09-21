@@ -20,8 +20,9 @@ for stmt in parse("get docs near embed $1 limit 5")? {
 <h2>Reads and writes take different locks</h2>
 
 <p><code>Database::query</code> takes a shared lock and
-<code>execute_with</code> the exclusive one. There are no transactions:
-<code>BEGIN</code> and <code>COMMIT</code> parse and do nothing.</p>
+<code>execute_with</code> the exclusive one. There are no transactions, and
+FenecQL has no <code>BEGIN</code> or <code>COMMIT</code>; <code>fenec-pg</code>
+accepts them for the drivers that send them.</p>
 
 <div class="note trap">
   <p><b>One process per file.</b> Two processes opening the same file and
@@ -35,6 +36,14 @@ for stmt in parse("get docs near embed $1 limit 5")? {
 called, the last writes are lost. In embedded use nothing calls it for you —
 <code>fenec-pg</code> has the <code>--sync</code> policy and a shutdown hook
 precisely because the library does not.</p>
+
+<p>A storage error stops writes. Once the sink refuses an append, a
+<code>sync</code> or a rewrite, every later write — and every later
+<code>sync</code> — returns <code>Error::Io</code> until the file is reopened,
+and <code>Database::failure()</code> says what failed. A failed
+<code>fsync</code> is not retried: the kernel may already have dropped the
+pages, so a retry that succeeds would prove nothing. Reads go on, from
+memory.</p>
 
 <p>The same applies to the HNSW graph. It is derived data and is written only
 during <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code>,

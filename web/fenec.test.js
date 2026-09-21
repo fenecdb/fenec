@@ -704,3 +704,64 @@ test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.was
     { name: 'Depo', orders: [] },
   ]);
 });
+
+// The distance kernels sum in one fixed order -- eight running sums, reduced
+// pairwise -- and the SIMD build must keep it: a graph built in the browser
+// is then the graph built natively. This is that order written out with
+// `Math.fround`, so a kernel that drifts from it fails here, SIMD or not.
+function sum8(a, b, step) {
+  const acc = new Float32Array(8);
+  const whole = a.length - (a.length % 8);
+  for (let i = 0; i < whole; i += 8) {
+    for (let k = 0; k < 8; k++) acc[k] = Math.fround(acc[k] + step(a[i + k], b[i + k]));
+  }
+  const f = Math.fround;
+  let s = f(f(f(acc[0] + acc[1]) + f(acc[2] + acc[3])) + f(f(acc[4] + acc[5]) + f(acc[6] + acc[7])));
+  for (let i = whole; i < a.length; i++) s = f(s + step(a[i], b[i]));
+  return s;
+}
+
+test('distance kernels keep their summation order', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  let x = 0x2545f491;
+  const r = () => {
+    x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+    return Math.fround((x / 2 ** 32) * 2 - 1);
+  };
+  const mul = (p, q) => Math.fround(p * q);
+  const diffSq = (p, q) => { const d = Math.fround(p - q); return Math.fround(d * d); };
+  // 37 dimensions: four full strips and a tail, so both paths are covered.
+  for (const [metric, score] of [
+    ['dot', (v, q) => sum8(v, q, mul)],
+    ['l2', (v, q) => Math.fround(Math.sqrt(sum8(v, q, diffSq)))],
+  ]) {
+    db.run(`create collection k_${metric} (e vector<37> @hnsw(${metric}))`);
+    const docs = Array.from({ length: 64 }, () => ({ e: Array.from({ length: 37 }, r) }));
+    await db.from(`k_${metric}`).insert(docs);
+    for (let t = 0; t < 8; t++) {
+      const query = Array.from({ length: 37 }, r);
+      const rows = db.rows(`get k_${metric} near e $1 exact limit 64`, [query]);
+      assert.equal(rows.length, 64);
+      for (const row of rows) {
+        assert.equal(Math.fround(row._score), score(row.e.map(Math.fround), query), metric);
+      }
+    }
+  }
+});
+
+// The brief at /llms.txt is what a coding agent copies from, so every example
+// in it has to run as written. They live in site/build.py, which renders it.
+test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const src = await readFile(new URL('../site/build.py', import.meta.url), 'utf8');
+  const brief = src.slice(src.indexOf('LLMS_BRIEF = """'));
+  const block = brief.match(/```fenecql\n([\s\S]*?)```/)[1];
+  const db = await Fenec.open(wasm);
+  db.run('create collection comments (article_id int @hash, score int, published timestamp)');
+  const examples = block.split('\n').filter(Boolean);
+  assert.ok(examples.length >= 10, `only ${examples.length} examples found`);
+  for (const sql of examples) {
+    assert.doesNotThrow(() => db.run(sql, sql.includes('$1') ? [[0.1, 0.2, 0.3, 0.4]] : []), sql);
+  }
+});

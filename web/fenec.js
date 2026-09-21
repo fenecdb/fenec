@@ -29,6 +29,20 @@ const MAX_LOOKUP_DEPTH = 8;
 
 export class FenecError extends Error {}
 
+// The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
+// 16.4). An engine without it fails to compile it with an opaque message; this
+// probe -- one function returning a v128 -- turns that into one that says why.
+const SIMD_PROBE = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0,
+  65, 0, 253, 15, 253, 98, 11,
+]);
+
+function whyNoModule(err) {
+  return WebAssembly.validate(SIMD_PROBE)
+    ? err
+    : new FenecError('fenec.wasm needs WebAssembly SIMD (Chrome 91+, Firefox 89+, Safari 16.4+)');
+}
+
 export class Fenec {
   #wasm; #handle;
 
@@ -45,15 +59,19 @@ export class Fenec {
    */
   static async open(src = './fenec.wasm') {
     let mod;
-    if (typeof src !== 'string') {
-      mod = await WebAssembly.instantiate(src, {});
-    } else {
-      try {
-        mod = await WebAssembly.instantiateStreaming(fetch(src), {});
-      } catch {
-        // Fallback for servers that return the wrong MIME type.
-        mod = await WebAssembly.instantiate(await (await fetch(src)).arrayBuffer(), {});
+    try {
+      if (typeof src !== 'string') {
+        mod = await WebAssembly.instantiate(src, {});
+      } else {
+        try {
+          mod = await WebAssembly.instantiateStreaming(fetch(src), {});
+        } catch {
+          // Fallback for servers that return the wrong MIME type.
+          mod = await WebAssembly.instantiate(await (await fetch(src)).arrayBuffer(), {});
+        }
       }
+    } catch (e) {
+      throw whyNoModule(e);
     }
     const wasm = mod.instance.exports;
     return new Fenec(wasm, wasm.fenec_open());

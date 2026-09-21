@@ -18,6 +18,121 @@ use std::collections::{BinaryHeap, HashMap};
 
 // -------------------------------------------------------------- metrics
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    simd::strips(a, b, simd::f32s, simd::f32s, simd::mul, mul, ident, ident)
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
+    simd::strips(
+        a,
+        b,
+        simd::f32s,
+        simd::f32s,
+        simd::diff_sq,
+        diff_sq,
+        ident,
+        ident,
+    )
+}
+
+/// The browser build is optimised for size (`opt-level = "z"`), and at that
+/// level LLVM does not vectorise the strips below: they ran scalar. Written
+/// out with the wasm SIMD intrinsics they are vectorised whatever the level.
+/// A 20 000 x 384 HNSW build in the browser engine went 28.0 -> 9.95 s for
+/// 0.9 KB of the module; building all of `fenec-core` at `opt-level = 3`
+/// instead reached 4.35 s for 26 KB.
+///
+/// Safe Rust throughout: the lanes are built from array elements rather than
+/// loaded through a pointer, and LLVM folds the reads into vector loads.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod simd {
+    use core::arch::wasm32::*;
+
+    /// Eight f32 as two four-lane registers.
+    #[inline(always)]
+    pub(super) fn f32s(x: &[f32; 8]) -> (v128, v128) {
+        (f32x4(x[0], x[1], x[2], x[3]), f32x4(x[4], x[5], x[6], x[7]))
+    }
+
+    /// Eight f16 widened the way [`super::half`] does it, four lanes at a
+    /// time: the same shifts, the same masks, the same multiply, so the same
+    /// bits.
+    #[inline(always)]
+    pub(super) fn halves(x: &[u16; 8]) -> (v128, v128) {
+        let v = u16x8(x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7]);
+        let widen = |u: v128| {
+            let sign = u32x4_shl(v128_and(u, u32x4_splat(0x8000)), 16);
+            let mag = u32x4_shl(v128_and(u, u32x4_splat(0x7fff)), 13);
+            f32x4_mul(
+                v128_or(sign, mag),
+                f32x4_splat(f32::from_bits((254 - 15) << 23)),
+            )
+        };
+        (
+            widen(u32x4_extend_low_u16x8(v)),
+            widen(u32x4_extend_high_u16x8(v)),
+        )
+    }
+
+    #[inline(always)]
+    pub(super) fn mul(x: v128, y: v128) -> v128 {
+        f32x4_mul(x, y)
+    }
+
+    #[inline(always)]
+    pub(super) fn diff_sq(x: v128, y: v128) -> v128 {
+        let d = f32x4_sub(x, y);
+        f32x4_mul(d, d)
+    }
+
+    /// The scalar loop's eight accumulators as two four-lane registers,
+    /// reduced in the same order, and each lane doing the same multiply and
+    /// add: the result is bit for bit the scalar one, so a graph built in the
+    /// browser is the graph built natively. The tail past the last full
+    /// strip runs scalar, through the widening each side needs.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(super) fn strips<A: Copy, B: Copy>(
+        a: &[A],
+        b: &[B],
+        la: impl Fn(&[A; 8]) -> (v128, v128),
+        lb: impl Fn(&[B; 8]) -> (v128, v128),
+        step: impl Fn(v128, v128) -> v128,
+        tail: impl Fn(f32, f32) -> f32,
+        widen_a: impl Fn(A) -> f32,
+        widen_b: impl Fn(B) -> f32,
+    ) -> f32 {
+        debug_assert_eq!(a.len(), b.len());
+        let (ca, ra) = a.as_chunks::<8>();
+        let (cb, rb) = b.as_chunks::<8>();
+        let (mut lo, mut hi) = (f32x4_splat(0.0), f32x4_splat(0.0));
+        for (x, y) in ca.iter().zip(cb) {
+            let ((x0, x1), (y0, y1)) = (la(x), lb(y));
+            lo = f32x4_add(lo, step(x0, y0));
+            hi = f32x4_add(hi, step(x1, y1));
+        }
+        let lane = |v: v128| {
+            [
+                f32x4_extract_lane::<0>(v),
+                f32x4_extract_lane::<1>(v),
+                f32x4_extract_lane::<2>(v),
+                f32x4_extract_lane::<3>(v),
+            ]
+        };
+        let (l, h) = (lane(lo), lane(hi));
+        let mut s = (l[0] + l[1]) + (l[2] + l[3]) + ((h[0] + h[1]) + (h[2] + h[3]));
+        for (x, y) in ra.iter().zip(rb) {
+            s += tail(widen_a(*x), widen_b(*y));
+        }
+        s
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -38,6 +153,7 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline]
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -97,6 +213,7 @@ pub fn score_from_distance(metric: Metric, d: f32) -> f32 {
 // loop. Widening into an intermediate f32 buffer was possible too; it measured
 // slower, because the win comes from memory bandwidth anyway.
 
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 macro_rules! strip8 {
     ($a:expr, $b:expr, $get_a:expr, $get_b:expr, $step:expr, $tail:expr) => {{
         let (a, b) = ($a, $b);
@@ -152,6 +269,29 @@ fn diff_sq(x: f32, y: f32) -> f32 {
     d * d
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
+    let (h, f) = (simd::halves, simd::f32s);
+    match metric {
+        Metric::Cosine => 1.0 - simd::strips(a, b, h, f, simd::mul, mul, half, ident),
+        Metric::L2 => simd::strips(a, b, h, f, simd::diff_sq, diff_sq, half, ident),
+        Metric::Dot => -simd::strips(a, b, h, f, simd::mul, mul, half, ident),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
+    let h = simd::halves;
+    match metric {
+        Metric::Cosine => 1.0 - simd::strips(a, b, h, h, simd::mul, mul, half, half),
+        Metric::L2 => simd::strips(a, b, h, h, simd::diff_sq, diff_sq, half, half),
+        Metric::Dot => -simd::strips(a, b, h, h, simd::mul, mul, half, half),
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline]
 fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
     match metric {
@@ -161,6 +301,7 @@ fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline]
 fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
     match metric {
