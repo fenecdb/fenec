@@ -1218,7 +1218,10 @@ fn order_by_id() {
 
 fn shop() -> Database {
     let mut db = Database::new();
-    run(&mut db, "create collection products (sku text @hash, name text)");
+    run(
+        &mut db,
+        "create collection products (sku text @hash, name text)",
+    );
     run(
         &mut db,
         "create collection reviews (product_id int @hash, stars int, body text)",
@@ -1259,8 +1262,10 @@ fn lookup_equals_a_page_query_plus_one_query_per_row() {
 
     assert_eq!(got.len(), page.rows.len());
     for (row, group) in page.rows.iter().zip(&got) {
-        let Response::Rows(want) = run(&mut db, &format!("get reviews where product_id = {}", row.id))
-        else {
+        let Response::Rows(want) = run(
+            &mut db,
+            &format!("get reviews where product_id = {}", row.id),
+        ) else {
             panic!("expected rows");
         };
         assert_eq!(group, &want.rows, "children of product {}", row.id);
@@ -1277,7 +1282,10 @@ fn a_child_limit_is_per_parent() {
         &mut db,
         "get products lookup reviews on product_id order stars desc limit 2",
     );
-    assert_eq!(got.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 0, 1]);
+    assert_eq!(
+        got.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![2, 0, 1]
+    );
     // Ordered by stars within the parent, not by insertion.
     assert_eq!(got[0][0].values[2], Value::Int(5));
     assert_eq!(got[0][1].values[2], Value::Int(4));
@@ -1301,20 +1309,29 @@ fn clauses_are_scoped_by_which_side_of_lookup_they_are_on() {
     let n = rs.nested.expect("nested");
     assert_eq!(n.columns, vec!["body".to_string()]);
     // The child filter dropped the 3-star and 2-star reviews.
-    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 0]);
+    assert_eq!(
+        n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![2, 0]
+    );
 }
 
 /// `on child = parent` when the key is not the parent's id.
 #[test]
 fn the_parent_key_can_be_named() {
     let mut db = shop();
-    run(&mut db, "create collection tags (sku text @hash, label text)");
+    run(
+        &mut db,
+        "create collection tags (sku text @hash, label text)",
+    );
     run(
         &mut db,
         r#"put tags [{sku: "a", label: "kavrulmus"}, {sku: "c", label: "seramik"}]"#,
     );
     let got = groups(&mut db, "get products lookup tags on sku = sku");
-    assert_eq!(got.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![1, 0, 1]);
+    assert_eq!(
+        got.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![1, 0, 1]
+    );
 }
 
 /// The message a refused query produces, from whichever side refuses it.
@@ -1338,12 +1355,18 @@ fn refusal(db: &mut Database, sql: &str) -> String {
 #[test]
 fn lookup_is_refused_where_it_cannot_be_answered() {
     let mut db = shop();
-    run(&mut db, "create collection plain (product_id int, note text)");
+    run(
+        &mut db,
+        "create collection plain (product_id int, note text)",
+    );
     for (sql, want) in [
         ("get products count lookup reviews on product_id", "count"),
         ("get products lookup products on id", "itself"),
         ("get products lookup plain on product_id", "@hash"),
-        ("get products lookup reviews on product_id = sku", "do not match"),
+        (
+            "get products lookup reviews on product_id = sku",
+            "do not match",
+        ),
         ("get products lookup reviews on nope", "nope"),
         ("get products lookup nosuch on product_id", "nosuch"),
     ] {

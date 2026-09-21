@@ -452,7 +452,8 @@ fn check_key_types(parent: &DataType, child: &DataType, l: &Lookup) -> Result<()
     let numeric = |t: &DataType| matches!(t, DataType::Int | DataType::Float | DataType::Timestamp);
     if matches!(parent, DataType::Vector(..)) || matches!(child, DataType::Vector(..)) {
         return Err(Error::Type(
-            "a vector cannot be a `lookup` key: float equality is a coincidence, not a match".into(),
+            "a vector cannot be a `lookup` key: float equality is a coincidence, not a match"
+                .into(),
         ));
     }
     if parent == child || (numeric(parent) && numeric(child)) {
@@ -1650,13 +1651,14 @@ impl Database {
 
         let mut keys = Vec::with_capacity(l.order.len());
         for (field, asc) in &l.order {
-            let pos = if field == "id" {
-                None
-            } else {
-                Some(child.schema.field_pos(field).ok_or_else(|| {
-                    Error::NotFound(format!("field `{}.{field}`", l.collection))
-                })?)
-            };
+            let pos =
+                if field == "id" {
+                    None
+                } else {
+                    Some(child.schema.field_pos(field).ok_or_else(|| {
+                        Error::NotFound(format!("field `{}.{field}`", l.collection))
+                    })?)
+                };
             keys.push((pos, *asc));
         }
 
