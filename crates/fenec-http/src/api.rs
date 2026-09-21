@@ -823,6 +823,9 @@ fn schemas_json(list: &[Schema]) -> String {
                         spec.ef_search
                     ),
                 ),
+                IndexKind::Text(spec) => {
+                    json::escape_into(&mut out, &format!("text(k1={}, b={})", spec.k1(), spec.b()))
+                }
             }
             out.push_str(",\"required\":");
             out.push_str(if f.required { "true" } else { "false" });

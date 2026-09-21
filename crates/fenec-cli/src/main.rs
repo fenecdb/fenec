@@ -342,6 +342,9 @@ fn print_response(r: &Response, took: std::time::Duration) {
                             sp.m,
                             sp.ef_search
                         ),
+                        IndexKind::Text(sp) => {
+                            format!("  @text(k1={}, b={})", sp.k1(), sp.b())
+                        }
                     };
                     println!("  {:<14} {:<14}{ix}", f.name, f.ty.name());
                 }

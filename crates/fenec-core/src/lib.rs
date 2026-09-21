@@ -37,6 +37,7 @@ pub mod plugin;
 pub mod query;
 pub mod schema;
 pub mod store;
+pub mod text;
 pub mod time;
 pub mod value;
 pub mod vector;
@@ -47,13 +48,15 @@ pub mod fs;
 pub mod prelude {
     pub use crate::changes::{ChangeLog, Since};
     pub use crate::engine::{
-        ChangeBatch, Changes, Collection, CollectionStats, Database, Sink, VectorIndexStats,
-        Watcher,
+        ChangeBatch, Changes, Collection, CollectionStats, Database, Sink, TextIndexStats,
+        VectorIndexStats, Watcher,
     };
     pub use crate::error::{Error, Result};
     pub use crate::plugin::{Hook, Plugin, Registry, ScalarFn, WriteOp};
-    pub use crate::query::{CmpOp, Expr, Near, Response, ResultSet, Row, Select, Statement};
-    pub use crate::schema::{Field, IndexKind, Metric, Schema, VectorIndexSpec};
+    pub use crate::query::{
+        CmpOp, Expr, Match, Near, Rerank, Response, ResultSet, Row, Select, Statement,
+    };
+    pub use crate::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};
     pub use crate::value::{DataType, DocId, Document, Value, VecPrec};
 }
 

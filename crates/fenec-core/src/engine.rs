@@ -5,10 +5,11 @@ use crate::codec::{get_uvarint, put_uvarint};
 use crate::error::{Error, Result};
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
-use crate::schema::{IndexKind, Schema};
+use crate::schema::{IndexKind, Metric, Schema};
 use crate::store::{Store, OP_DEL, OP_PUT};
+use crate::text::TextIndex;
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
-use crate::vector::VectorIndex;
+use crate::vector::{distance, dot, norm, normalized, score_from_distance, VectorIndex};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,20 @@ pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 /// similarity result is a wrong answer that looks right. Without a `limit`
 /// the ceiling is applied as the default top-k.
 pub const MAX_NEAR_ROWS: usize = 10_000;
+
+/// The most rows a `match` query may return (`limit + offset`). Same ceiling
+/// and the same reason as [`MAX_NEAR_ROWS`]: the top-k heap is sized from the
+/// request, and a silently truncated relevance list is a wrong answer that
+/// looks right.
+pub const MAX_MATCH_ROWS: usize = 10_000;
+
+/// How many `match` candidates `rerank` rescores when the query does not say.
+///
+/// Measured on BEIR: on FiQA (57 638 documents) 1 000 candidates reproduce a
+/// full dense scan exactly and 250 reach 97% of it; on SciFact 50 already
+/// beat the full scan. 200 sits where the curve has flattened on both, and
+/// costs 200 vector reads -- under 0.4% of that corpus.
+pub const DEFAULT_RERANK_CANDIDATES: usize = 200;
 
 const REC_CREATE: u8 = 1;
 const REC_DROP: u8 = 2;
@@ -110,12 +125,15 @@ pub struct Collection {
     pub vectors: HashMap<String, VectorIndex>,
     /// field name -> (encoded value -> document ids)
     pub hashes: HashMap<String, HashMap<Vec<u8>, Vec<DocId>>>,
+    /// field name -> inverted index
+    pub texts: HashMap<String, TextIndex>,
 }
 
 impl Collection {
     fn new(id: u32, schema: Schema) -> Collection {
         let mut vectors = HashMap::new();
         let mut hashes = HashMap::new();
+        let mut texts = HashMap::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -127,6 +145,9 @@ impl Collection {
                 (IndexKind::Hash, _) => {
                     hashes.insert(f.name.clone(), HashMap::new());
                 }
+                (IndexKind::Text(spec), DataType::Text) => {
+                    texts.insert(f.name.clone(), TextIndex::new(*spec));
+                }
                 _ => {}
             }
         }
@@ -136,6 +157,7 @@ impl Collection {
             store: Store::new(),
             vectors,
             hashes,
+            texts,
         }
     }
 
@@ -144,6 +166,7 @@ impl Collection {
     fn reset_index_structures(&mut self) {
         self.vectors.clear();
         self.hashes.clear();
+        self.texts.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -154,6 +177,9 @@ impl Collection {
                 }
                 (IndexKind::Hash, _) => {
                     self.hashes.insert(f.name.clone(), HashMap::new());
+                }
+                (IndexKind::Text(spec), DataType::Text) => {
+                    self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
                 _ => {}
             }
@@ -169,12 +195,17 @@ impl Collection {
         self.index_scalar(doc);
     }
 
-    /// Hash indexes only. Vectors are left to the batch path.
+    /// Hash and full-text indexes. Vectors are left to the batch path.
     fn index_scalar(&mut self, doc: &Document) {
         for (name, map) in self.hashes.iter_mut() {
             if let Some(v) = doc.get(name) {
                 let key = hash_key(v);
                 map.entry(key).or_default().push(doc.id);
+            }
+        }
+        for (name, ix) in self.texts.iter_mut() {
+            if let Some(Value::Text(t)) = doc.get(name) {
+                ix.insert(doc.id, t);
             }
         }
     }
@@ -211,6 +242,13 @@ impl Collection {
                 }
             }
         }
+        // Every caller reads the *stored* document before unindexing, so the
+        // terms here are the ones that went in.
+        for (name, ix) in self.texts.iter_mut() {
+            if let Some(Value::Text(t)) = doc.get(name) {
+                ix.remove(doc.id, t);
+            }
+        }
     }
 
     pub fn stats(&self) -> CollectionStats {
@@ -229,6 +267,17 @@ impl Collection {
                     dim: v.dim,
                     arena_bytes: v.arena_bytes(),
                     precision: v.precision(),
+                })
+                .collect(),
+            text_indexes: self
+                .texts
+                .iter()
+                .map(|(k, t)| TextIndexStats {
+                    field: k.clone(),
+                    count: t.len(),
+                    terms: t.terms(),
+                    postings: t.postings_count(),
+                    bytes: t.memory_bytes(),
                 })
                 .collect(),
         }
@@ -266,6 +315,7 @@ pub struct CollectionStats {
     pub dead_bytes: usize,
     pub segments: usize,
     pub vector_indexes: Vec<VectorIndexStats>,
+    pub text_indexes: Vec<TextIndexStats>,
 }
 
 /// State of a single vector index. The arena size scales directly with the
@@ -277,6 +327,17 @@ pub struct VectorIndexStats {
     pub dim: usize,
     pub arena_bytes: usize,
     pub precision: VecPrec,
+}
+
+/// State of a single full-text index. `postings` is the number that matters
+/// for both memory and query cost: a `match` walks the lists of its terms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextIndexStats {
+    pub field: String,
+    pub count: usize,
+    pub terms: usize,
+    pub postings: usize,
+    pub bytes: usize,
 }
 
 fn hash_key(v: &Value) -> Vec<u8> {
@@ -569,6 +630,7 @@ impl Database {
                         .values()
                         .map(|ix| ix.arena_bytes() + ix.graph_bytes())
                         .sum::<usize>()
+                    + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
             })
             .sum()
     }
@@ -835,7 +897,10 @@ impl Database {
             for (_, m) in c.hashes.iter_mut() {
                 m.clear();
             }
-            if restored.len() == fields.len() && c.hashes.is_empty() {
+            for t in c.texts.values_mut() {
+                t.clear();
+            }
+            if restored.len() == fields.len() && c.hashes.is_empty() && c.texts.is_empty() {
                 continue; // everything restored, no need to read the documents
             }
             // The rebuild goes through the batch path as well.
@@ -847,8 +912,16 @@ impl Database {
                             map.entry(hash_key(v)).or_default().push(doc.id);
                         }
                     }
+                    for (field, ix) in c.texts.iter_mut() {
+                        if let Some(Value::Text(t)) = doc.get(field) {
+                            ix.insert(doc.id, t);
+                        }
+                    }
                     docs.push(doc);
                 }
+            }
+            for ix in c.texts.values_mut() {
+                ix.shrink_to_fit();
             }
             for (field, ix) in c.vectors.iter_mut() {
                 if restored.contains(field) {
@@ -1038,6 +1111,13 @@ impl Database {
                 )));
             }
         }
+        if let IndexKind::Text(_) = kind {
+            if !matches!(f.ty, DataType::Text) {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not text, no full-text index can be built"
+                )));
+            }
+        }
 
         let cid = c.id;
         let c = self.collections.get_mut(collection).unwrap();
@@ -1070,6 +1150,16 @@ impl Database {
                     }
                 }
                 c.hashes.insert(field.to_string(), map);
+            }
+            IndexKind::Text(spec) => {
+                let mut ix = TextIndex::new(*spec);
+                for id in c.store.ids() {
+                    if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
+                        ix.insert(id, &t);
+                    }
+                }
+                ix.shrink_to_fit();
+                c.texts.insert(field.to_string(), ix);
             }
             IndexKind::None => {}
         }
@@ -1251,6 +1341,140 @@ impl Database {
         Ok(out)
     }
 
+    /// `match`, and `rerank` on top of it when the query asks for one.
+    ///
+    /// The two stages answer different questions. `match` is recall: cheap,
+    /// lexical, and wrong about meaning. `rerank` is precision: exact vector
+    /// distance, but only over what the first stage handed it. Neither needs
+    /// an HNSW graph, which is the point -- see [`Rerank`].
+    fn run_match(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        m: &Match,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, Option<f32>)>> {
+        let ix = c.texts.get(&m.field).ok_or_else(|| {
+            Error::Query(format!(
+                "field `{}` has no full-text index (declare it with @text)",
+                m.field
+            ))
+        })?;
+        let query = match eval(&m.query, &mut NoRow, ctx)? {
+            Value::Text(t) => t,
+            other => {
+                return Err(Error::Type(format!(
+                    "`match` expects text, found {}",
+                    other.type_name()
+                )))
+            }
+        };
+
+        // As with `near`: the ceiling is checked before any scanning, because
+        // erroring beats handing back a truncated relevance list.
+        let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
+        if bound.unwrap_or(sel.offset) > MAX_MATCH_ROWS {
+            return Err(Error::Query(format!(
+                "`match` returns at most {MAX_MATCH_ROWS} rows, {} were requested (limit + offset)",
+                bound.unwrap_or(sel.offset)
+            )));
+        }
+
+        let allowed: Option<Vec<DocId>> = match &sel.filter {
+            Some(_) => Some(self.matching_ids(&sel.collection, &sel.filter, params)?),
+            None => None,
+        };
+        let accept = |id: DocId| match &allowed {
+            Some(list) => list.binary_search(&id).is_ok(),
+            None => true,
+        };
+
+        let want = bound.unwrap_or(MAX_MATCH_ROWS).max(1);
+        let Some(rr) = &sel.rerank else {
+            let hits = ix.search(&query, want, accept);
+            return Ok(hits.into_iter().map(|(id, s)| (id, Some(s))).collect());
+        };
+
+        // The candidate set has to be at least as large as what the caller
+        // asked for, or reranking would throw away rows it never scored.
+        let candidates = rr.candidates.unwrap_or(DEFAULT_RERANK_CANDIDATES).max(want);
+        if candidates > MAX_MATCH_ROWS {
+            return Err(Error::Query(format!(
+                "`rerank` scores at most {MAX_MATCH_ROWS} candidates, {candidates} were requested"
+            )));
+        }
+
+        let pos = c
+            .schema
+            .field_pos(&rr.field)
+            .ok_or_else(|| Error::NotFound(format!("field `{}`", rr.field)))?;
+        let field = &c.schema.fields[pos];
+        let DataType::Vector(dim, _) = field.ty else {
+            return Err(Error::Type(format!(
+                "`rerank` needs a vector field, `{}` is {}",
+                rr.field,
+                field.ty.name()
+            )));
+        };
+        // No index is consulted: the vectors are read out of the store. When
+        // the field does carry one its metric is reused, so `rerank` and
+        // `near` over the same field agree on what "close" means.
+        let metric = match &field.index {
+            IndexKind::Vector(spec) => spec.metric,
+            _ => Metric::Cosine,
+        };
+        let qv = near_vector(eval(&rr.vector, &mut NoRow, ctx)?)?;
+        if qv.len() != dim {
+            return Err(Error::Type(format!(
+                "the rerank vector must have {dim} dimensions, got {}",
+                qv.len()
+            )));
+        }
+        let qv = match metric {
+            Metric::Cosine => normalized(&qv),
+            _ => qv,
+        };
+
+        let hits = ix.search(&query, candidates, accept);
+        let mut out: Vec<(DocId, f32)> = Vec::with_capacity(hits.len());
+        let mut buf: Vec<f32> = Vec::with_capacity(dim);
+        for (id, _) in hits {
+            if !c.store.read_vector_into(id, pos, &mut buf)? {
+                continue; // no vector on this document: it cannot be ordered
+            }
+            if buf.len() != dim {
+                continue;
+            }
+            // The store holds vectors as they were written; the HNSW arena is
+            // what normalises on insert, and it is not in play here. With the
+            // query already unit length, cosine only needs the candidate's
+            // own norm -- computing it beside the dot product costs one pass
+            // and saves a `Vec` per candidate, which at a thousand candidates
+            // a query is the difference between an allocation-free scan and a
+            // thousand allocations.
+            let d = match metric {
+                Metric::Cosine => {
+                    let n = norm(&buf);
+                    if n == 0.0 {
+                        1.0
+                    } else {
+                        1.0 - dot(&qv, &buf) / n
+                    }
+                }
+                _ => distance(metric, &qv, &buf),
+            };
+            out.push((id, d));
+        }
+        // Ascending distance, ties on the id so the answer is stable.
+        out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        out.truncate(want);
+        Ok(out
+            .into_iter()
+            .map(|(id, d)| (id, Some(score_from_distance(metric, d))))
+            .collect())
+    }
+
     fn select(&self, sel: &Select, params: &[Value]) -> Result<ResultSet> {
         let c = self.collection(&sel.collection)?;
         let ctx = EvalCtx {
@@ -1285,7 +1509,9 @@ impl Database {
         let limit = sel.limit.unwrap_or(usize::MAX);
         let scored: Vec<(DocId, Option<f32>)>;
 
-        if let Some(near) = &sel.near {
+        if let Some(m) = &sel.matcher {
+            scored = self.run_match(c, sel, m, params, &ctx)?;
+        } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
             // rejected explicitly rather than ignored silently.
             if !sel.order.is_empty() {

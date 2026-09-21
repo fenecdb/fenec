@@ -189,6 +189,7 @@ fn index_note(k: &IndexKind) -> Option<String> {
             spec.m,
             spec.ef_search
         )),
+        IndexKind::Text(spec) => Some(format!(" @text(k1={}, b={})", spec.k1(), spec.b())),
     }
 }
 

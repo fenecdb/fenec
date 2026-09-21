@@ -70,6 +70,72 @@ impl Default for VectorIndexSpec {
     }
 }
 
+/// BM25 parameters.
+///
+/// Held in hundredths rather than as `f32` so the schema can stay `Eq`:
+/// `Field` and `Schema` derive it, and `Database::load` compares decoded
+/// schemas against live ones. Two tuning knobs are not worth taking that
+/// away from every caller. The defaults are the pair BEIR standardised on,
+/// and the numbers in `text.rs` were measured with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextIndexSpec {
+    /// Term-frequency saturation, in hundredths. BEIR's k1 = 0.9 -> 90.
+    pub k1_pct: u16,
+    /// Length normalisation, in hundredths. BEIR's b = 0.4 -> 40.
+    pub b_pct: u16,
+    /// Longest word prefix also indexed as a term; 0 turns the whole thing
+    /// off, which is the default.
+    ///
+    /// Word-boundary matching is a poor fit for a language that inflects by
+    /// gluing suffixes on: `kitap`, `kitabı`, `kitapların` are three terms
+    /// that share a stem the index never sees. Indexing each word's prefixes
+    /// alongside it is a stemmer that needs no dictionary and no language
+    /// setting.
+    ///
+    /// Measured on the Turkish WebFAQ retrieval set (144 846 documents,
+    /// 10 000 queries) through the engine: `prefix=6` moves nDCG@10 from
+    /// 0.4841 to 0.5547, +14.6%, and closes about two fifths of the distance
+    /// to a 278M-parameter multilingual transformer (0.650) with no model at
+    /// all. It is not free -- the index goes 58 MB -> 182 MB and a query
+    /// 82 -> 485 us, both roughly the 3.4x more postings it indexes.
+    ///
+    /// Character n-grams were measured against it and lost on cost: 4-grams
+    /// score about the same for 6.0x the postings, and 3..5-grams cost 15.6x
+    /// to score slightly *less*. On English SciFact the whole option is worth
+    /// +0.0137, which is why it is off unless asked for -- the corpus decides
+    /// this trade, not the engine.
+    pub prefix_max: u8,
+    /// Shortest prefix indexed. Below 3 the terms stop discriminating.
+    pub prefix_min: u8,
+}
+
+impl Default for TextIndexSpec {
+    fn default() -> Self {
+        TextIndexSpec {
+            k1_pct: 90,
+            b_pct: 40,
+            prefix_max: 0,
+            prefix_min: 3,
+        }
+    }
+}
+
+impl TextIndexSpec {
+    pub fn k1(&self) -> f32 {
+        self.k1_pct as f32 / 100.0
+    }
+    pub fn b(&self) -> f32 {
+        self.b_pct as f32 / 100.0
+    }
+    /// The prefix lengths to index, `None` when the option is off.
+    pub fn prefixes(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        if self.prefix_max == 0 || self.prefix_max < self.prefix_min {
+            return None;
+        }
+        Some(self.prefix_min as usize..=self.prefix_max as usize)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexKind {
     None,
@@ -77,6 +143,8 @@ pub enum IndexKind {
     Hash,
     /// Approximate nearest neighbour index (HNSW).
     Vector(VectorIndexSpec),
+    /// Inverted index with BM25 scoring, behind `match`.
+    Text(TextIndexSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +201,14 @@ impl Schema {
                     )));
                 }
             }
+            if let IndexKind::Text(_) = f.index {
+                if !matches!(f.ty, DataType::Text) {
+                    return Err(Error::Type(format!(
+                        "field `{}` is not text, no full-text index can be built",
+                        f.name
+                    )));
+                }
+            }
             seen.push(f.name.clone());
         }
         Ok(Schema { name, fields })
@@ -144,6 +220,18 @@ impl Schema {
 
     pub fn field_pos(&self, name: &str) -> Option<usize> {
         self.fields.iter().position(|f| f.name == name)
+    }
+
+    /// Fields carrying a full-text index.
+    pub fn text_fields(&self) -> Vec<(usize, &Field, TextIndexSpec)> {
+        self.fields
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| match &f.index {
+                IndexKind::Text(spec) => Some((i, f, *spec)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Fields carrying a vector index (name, dimension, spec).
@@ -176,6 +264,13 @@ impl Schema {
                     put_uvarint(&mut out, spec.ef_construction as u64);
                     put_uvarint(&mut out, spec.ef_search as u64);
                 }
+                IndexKind::Text(spec) => {
+                    out.push(3);
+                    put_uvarint(&mut out, spec.k1_pct as u64);
+                    put_uvarint(&mut out, spec.b_pct as u64);
+                    put_uvarint(&mut out, spec.prefix_max as u64);
+                    put_uvarint(&mut out, spec.prefix_min as u64);
+                }
             }
         }
         out
@@ -205,6 +300,12 @@ impl Schema {
                         ef_search: get_uvarint(buf, pos)? as usize,
                     })
                 }
+                3 => IndexKind::Text(TextIndexSpec {
+                    k1_pct: get_uvarint(buf, pos)? as u16,
+                    b_pct: get_uvarint(buf, pos)? as u16,
+                    prefix_max: get_uvarint(buf, pos)? as u8,
+                    prefix_min: get_uvarint(buf, pos)? as u8,
+                }),
                 o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
             };
             fields.push(Field {

@@ -128,6 +128,57 @@ test('count does not combine with the other clauses', async () => {
   }
 });
 
+test('match, on its own and with a filter', () => {
+  const [sql, p] = q().match('body', 'business trip').limit(10).toFenecQL();
+  assert.equal(sql, 'get articles match body $1 limit 10');
+  assert.deepEqual(p, ['business trip']);
+
+  const [sql2, p2] = q()
+    .select('title')
+    .where('year', '>=', 2023)
+    .match('body', 'rust')
+    .toFenecQL();
+  assert.equal(sql2, 'get articles select title where year >= $1 match body $2');
+  assert.deepEqual(p2, [2023, 'rust']);
+});
+
+test('rerank rides on match and takes a candidate budget', () => {
+  const [sql, p] = q()
+    .match('body', 'rust')
+    .rerank('embed', [1, 0, 0], { candidates: 500 })
+    .limit(5)
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get articles match body $1 rerank embed $2 candidates 500 limit 5',
+  );
+  assert.deepEqual(p, ['rust', [1, 0, 0]]);
+
+  // Without a budget the engine's default applies and nothing is emitted.
+  assert.equal(
+    q().match('body', 'x').rerank('embed', [1, 0, 0]).toFenecQL()[0],
+    'get articles match body $1 rerank embed $2',
+  );
+});
+
+// The engine refuses these too; the builder fails before a query is sent.
+test('match and rerank reject the combinations that contradict', async () => {
+  assert.throws(() => q().rerank('embed', [1, 0, 0]).toFenecQL(), FenecError);
+  assert.throws(
+    () => q().match('body', 'x').near('embed', [1, 0, 0]).toFenecQL(),
+    FenecError,
+  );
+  // `count` runs the query, so it rejects rather than throwing.
+  await assert.rejects(
+    () => q().match('body', 'x').count(),
+    /count cannot be used with `match`/,
+  );
+  assert.throws(
+    () => q().match('body', 'x').toInsert({ title: 'a' }),
+    /insert cannot be used with `match`/,
+  );
+});
+
 test('near together with where and order', () => {
   const [sql, p] = q()
     .select('title')

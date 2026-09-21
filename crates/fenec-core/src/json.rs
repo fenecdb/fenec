@@ -162,6 +162,9 @@ pub fn response_to_string(r: &Response) -> String {
                             crate::schema::IndexKind::Vector(spec) => {
                                 format!("hnsw({}, m={})", spec.metric.name(), spec.m)
                             }
+                            crate::schema::IndexKind::Text(spec) => {
+                                format!("text(k1={}, b={})", spec.k1(), spec.b())
+                            }
                         }
                         .as_str(),
                     );

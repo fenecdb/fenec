@@ -339,6 +339,7 @@ fn index_name(kind: &IndexKind) -> String {
             s.ef_construction,
             s.ef_search
         ),
+        IndexKind::Text(s) => format!("@text(k1={}, b={})", s.k1(), s.b()),
         IndexKind::None => String::new(),
     }
 }

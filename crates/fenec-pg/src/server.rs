@@ -1392,6 +1392,9 @@ fn execute_into(
                                         IndexKind::Vector(sp) => {
                                             format!("hnsw({}, m={})", sp.metric.name(), sp.m)
                                         }
+                                        IndexKind::Text(sp) => {
+                                            format!("text(k1={}, b={})", sp.k1(), sp.b())
+                                        }
                                     }),
                                 ]);
                                 n += 1;

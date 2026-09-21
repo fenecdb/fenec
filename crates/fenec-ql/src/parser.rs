@@ -6,6 +6,7 @@
 //! drop   collection [if exists] <name>
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
+//!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! set    <name> { k: v, ... } [where <expr>]
@@ -16,7 +17,7 @@
 use crate::lexer::{tokenize, Tok, Token};
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
-use fenec_core::schema::{Field, IndexKind, Metric, Schema, VectorIndexSpec};
+use fenec_core::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};
 use fenec_core::value::{DataType, Value, VecPrec};
 
 /// The maximum nesting level of an expression.
@@ -149,6 +150,17 @@ impl Parser {
         }
     }
 
+    /// A number that may be written with a decimal point. Only the BM25 knobs
+    /// need it -- `k1 = 0.9` reads the way the literature writes it, and the
+    /// schema stores it in hundredths.
+    fn number(&mut self) -> Result<f64> {
+        match self.next() {
+            Tok::Int(i) => Ok(i as f64),
+            Tok::Float(f) => Ok(f),
+            other => self.err(format!("expected a number, found {}", other.describe())),
+        }
+    }
+
     // ---------------------------------------------------------- statements
 
     fn statement(&mut self) -> Result<Statement> {
@@ -236,6 +248,7 @@ impl Parser {
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
             "hash" => IndexKind::Hash,
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
+            "text" | "bm25" => IndexKind::Text(self.text_args()?),
             other => return self.err(format!("unknown index `{other}`")),
         };
         Ok(Statement::CreateIndex {
@@ -264,6 +277,10 @@ impl Parser {
                         let spec = self.hnsw_args()?;
                         field = field.indexed(IndexKind::Vector(spec));
                     }
+                    "text" | "bm25" => {
+                        let spec = self.text_args()?;
+                        field = field.indexed(IndexKind::Text(spec));
+                    }
                     other => return self.err(format!("unknown index `{other}`")),
                 }
                 continue;
@@ -271,6 +288,54 @@ impl Parser {
             break;
         }
         Ok(field)
+    }
+
+    fn text_args(&mut self) -> Result<TextIndexSpec> {
+        let mut spec = TextIndexSpec::default();
+        if !matches!(self.peek(), Tok::LParen) {
+            return Ok(spec);
+        }
+        self.next();
+        loop {
+            if matches!(self.peek(), Tok::RParen) {
+                break;
+            }
+            let key = self.ident()?;
+            self.expect(Tok::Eq)?;
+            let v = self.number()?;
+            let lowered = key.to_ascii_lowercase();
+            match lowered.as_str() {
+                "k1" | "b" => {
+                    if !(0.0..=100.0).contains(&v) {
+                        return self.err(format!("`{key}` must be between 0 and 100, got {v}"));
+                    }
+                    let pct = (v * 100.0).round() as u16;
+                    if lowered == "k1" {
+                        spec.k1_pct = pct;
+                    } else {
+                        spec.b_pct = pct;
+                    }
+                }
+                // `prefix` is the longest prefix indexed; 0 is off.
+                "prefix" | "prefix_max" | "prefix_min" => {
+                    if !(0.0..=64.0).contains(&v) || v.fract() != 0.0 {
+                        return self.err(format!("`{key}` must be a whole number 0..64, got {v}"));
+                    }
+                    if lowered == "prefix_min" {
+                        spec.prefix_min = v as u8;
+                    } else {
+                        spec.prefix_max = v as u8;
+                    }
+                }
+                other => return self.err(format!("unknown text parameter `{other}`")),
+            }
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        self.expect(Tok::RParen)?;
+        Ok(spec)
     }
 
     fn hnsw_args(&mut self) -> Result<VectorIndexSpec> {
@@ -489,6 +554,26 @@ impl Parser {
                     vector,
                     ef,
                     exact,
+                });
+                continue;
+            }
+            if self.eat_kw("match") {
+                let field = self.ident()?;
+                let query = self.expr()?;
+                sel.matcher = Some(Match { field, query });
+                continue;
+            }
+            if self.eat_kw("rerank") {
+                let field = self.ident()?;
+                let vector = self.expr()?;
+                let mut candidates = None;
+                if self.eat_kw("candidates") {
+                    candidates = Some(self.int()?.max(1) as usize);
+                }
+                sel.rerank = Some(Rerank {
+                    field,
+                    vector,
+                    candidates,
                 });
                 continue;
             }

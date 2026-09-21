@@ -312,6 +312,34 @@ pub struct Near {
     pub exact: bool,
 }
 
+/// The `match` clause: BM25 over a full-text index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Match {
+    pub field: String,
+    /// The query text, given directly or through a parameter.
+    pub query: Expr,
+}
+
+/// The `rerank` clause: reorder what `match` found by exact vector distance.
+///
+/// This is the no-graph retrieval path. `match` is cheap and recall-oriented,
+/// the vectors are read straight out of the store, and the reordering is
+/// exact over the candidate set -- so no HNSW graph has to be built, held,
+/// validated on open or rebuilt when it fails to validate. Measured on BEIR:
+/// on SciFact taking 50 candidates scores nDCG@10 0.676 against 0.645 for a
+/// full dense scan of the same vectors, and on FiQA 1 000 candidates match
+/// the full scan exactly (0.3687), each while scoring under 2% of the corpus.
+/// The lexical stage does not only save work -- it removes documents that are
+/// semantically close but lexically wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rerank {
+    pub field: String,
+    /// The query vector, given directly or through a parameter.
+    pub vector: Expr,
+    /// How many `match` candidates to rescore. None means the default.
+    pub candidates: Option<usize>,
+}
+
 /// Column name of the `count` result. No such field can exist in a schema --
 /// field names are identifiers and `count` may be one too; on a clash the
 /// column name matches but the value is still the count, because `count`
@@ -325,6 +353,11 @@ pub struct Select {
     pub project: Option<Vec<String>>,
     pub filter: Option<Expr>,
     pub near: Option<Near>,
+    /// `match`: relevance ordering out of a full-text index. Named `matcher`
+    /// because `match` is a Rust keyword.
+    pub matcher: Option<Match>,
+    /// `rerank`: exact vector ordering over the `match` candidates.
+    pub rerank: Option<Rerank>,
     /// Sort keys in priority order: (field, ascending?).
     /// Empty = no ordering. Additional keys break ties:
     /// `order year desc, title asc`.
@@ -341,6 +374,26 @@ impl Select {
     /// at its own ceiling -- it would answer "how many are there" wrongly.
     /// We raise an error instead of ignoring them silently.
     pub fn check(&self) -> Result<()> {
+        // `match` and `near` both decide the ordering. A query asking for
+        // both is asking two questions, and silently picking one of them
+        // would answer the other one wrongly.
+        if self.matcher.is_some() && self.near.is_some() {
+            return Err(Error::Query(
+                "`match` and `near` cannot be combined: both order the result".into(),
+            ));
+        }
+        if self.matcher.is_some() && !self.order.is_empty() {
+            return Err(Error::Query(
+                "`match` cannot be combined with `order`: match orders results by relevance".into(),
+            ));
+        }
+        // `rerank` reorders candidates; without `match` there are none. An
+        // exact scan over a vector field is `near ... exact`, which says so.
+        if self.rerank.is_some() && self.matcher.is_none() {
+            return Err(Error::Query(
+                "`rerank` needs `match`: it reorders the candidates match found".into(),
+            ));
+        }
         if !self.count {
             return Ok(());
         }
@@ -348,6 +401,8 @@ impl Select {
             "select"
         } else if self.near.is_some() {
             "near"
+        } else if self.matcher.is_some() {
+            "match"
         } else if !self.order.is_empty() {
             "order"
         } else if self.limit.is_some() {
@@ -423,7 +478,17 @@ impl Statement {
             Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
             Statement::Select(sel) => {
                 let near = sel.near.as_ref().map(|n| n.vector.max_param()).unwrap_or(0);
-                opt(&sel.filter).max(near)
+                let m = sel
+                    .matcher
+                    .as_ref()
+                    .map(|m| m.query.max_param())
+                    .unwrap_or(0);
+                let rr = sel
+                    .rerank
+                    .as_ref()
+                    .map(|r| r.vector.max_param())
+                    .unwrap_or(0);
+                opt(&sel.filter).max(near).max(m).max(rr)
             }
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
             Statement::Delete { filter, .. } => opt(filter),

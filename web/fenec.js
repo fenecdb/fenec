@@ -574,6 +574,29 @@ export class Query {
     });
   }
 
+  /** `match field $n` -- BM25 over a `@text` index. */
+  match(field, query) {
+    return this.#with({ match: { field: ident(field), query } });
+  }
+
+  /**
+   * `rerank field $n [candidates N]` -- reorders what `match` found by exact
+   * vector distance. Needs a `match`; it does not need an `@hnsw` index,
+   * because the vectors are read straight out of the store.
+   */
+  rerank(field, vector, opts = {}) {
+    return this.#with({
+      rerank: {
+        field: ident(field),
+        vector,
+        candidates:
+          opts.candidates === undefined
+            ? null
+            : whole(opts.candidates, 'candidates'),
+      },
+    });
+  }
+
   /**
    * `order field asc|desc`. Successive calls add keys: when the first key
    * ties, the second decides.
@@ -603,6 +626,16 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
+    const { match, rerank } = this.#s;
+    // The engine refuses both of these too; failing here never sends a query.
+    if (rerank && !match) {
+      throw new FenecError('rerank needs match: it reorders what match found');
+    }
+    if (match && near) {
+      throw new FenecError(
+        'match and near cannot be combined: both order the result',
+      );
+    }
     if (count) this.#assertCountable();
     const params = [];
     const bind = binder(params);
@@ -615,6 +648,13 @@ export class Query {
       sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
       if (near.ef !== null) sql += ` ef ${near.ef}`;
       if (near.exact) sql += ' exact';
+    }
+    if (match) {
+      sql += ` match ${match.field} ${bind(match.query, match.field)}`;
+    }
+    if (rerank) {
+      sql += ` rerank ${rerank.field} ${bind(rerank.vector, rerank.field)}`;
+      if (rerank.candidates !== null) sql += ` candidates ${rerank.candidates}`;
     }
     for (const [i, o] of order.entries()) {
       sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
@@ -725,8 +765,10 @@ export class Query {
   }
 
   #extraClause() {
-    const { near, order, limit, offset, project } = this.#s;
+    const { near, match, rerank, order, limit, offset, project } = this.#s;
     return near ? 'near'
+      : match ? 'match'
+      : rerank ? 'rerank'
       : order.length ? 'order'
       : limit !== undefined ? 'limit'
       : offset ? 'offset'

@@ -52,6 +52,16 @@ export type VectorKey<F extends Fields> = {
 }[keyof F] &
   string;
 
+/**
+ * Fields of type `text` -- the only ones `match` accepts. Whether the field
+ * actually carries a `@text` index is a schema question the engine answers;
+ * the type only rules out the fields that could never have one.
+ */
+export type TextKey<F extends Fields> = {
+  [K in keyof F]: NonNullable<F[K]> extends string ? K : never;
+}[keyof F] &
+  string;
+
 export type Op =
   | '=' | '!=' | '<' | '<=' | '>' | '>=' | '~' | 'has' | 'in'
   | 'eq' | 'ne' | 'neq' | 'lt' | 'lte' | 'le' | 'gt' | 'gte' | 'ge'
@@ -171,6 +181,19 @@ export declare class Query<F extends Fields = Fields, P = Row<F>> {
     field: VectorKey<F>,
     vector: number[] | Float32Array,
     opts?: { ef?: number; exact?: boolean },
+  ): Query<F, P & { _score: number }>;
+
+  /** Full-text search over a `@text` index; `_score` is added to the result. */
+  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }>;
+
+  /**
+   * Reorders what `match` found by exact vector distance. Requires `match`,
+   * but not an `@hnsw` index: the vectors are read out of the store.
+   */
+  rerank(
+    field: VectorKey<F>,
+    vector: number[] | Float32Array,
+    opts?: { candidates?: number },
   ): Query<F, P & { _score: number }>;
 
   /** Successive calls add a sort key (the second decides when the first ties). */
