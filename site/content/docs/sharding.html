@@ -1,0 +1,231 @@
+<!--
+title: Tenants and sharding — fenecdb
+description: One file per tenant, many tenants per node, and a router that knows which node holds which. Placement, moving a tenant, what clients see meanwhile, and what the router costs.
+-->
+
+<h1>Tenants and sharding</h1>
+<p class="kicker">A single fenecdb is bounded by one machine's memory and one
+writer. Past that, the data is split by tenant: each tenant is a file of its
+own, a node holds many of them, and <code>fenec-shard</code> knows which node
+holds which.</p>
+
+<pre data-lang="bash"># two nodes, each a directory of tenant files
+fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
+fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2
+
+# the router, and its directory of which tenant lives where
+fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --token root
+
+curl -X PUT localhost:8090/_shard/nodes/n1 -H 'Authorization: Bearer root' \
+     -d '{"addr":"127.0.0.1:8081","token":"a1"}'
+curl -X PUT localhost:8090/_shard/nodes/n2 -H 'Authorization: Bearer root' \
+     -d '{"addr":"127.0.0.1:8082","token":"a2"}'
+curl -X PUT localhost:8090/_shard/tenants/acme -H 'Authorization: Bearer root'
+# {"tenant":"acme","node":"n1"}
+
+curl -X POST localhost:8090/t/acme/query -d '{"query":"create collection notes (title text)"}'
+curl -X POST localhost:8090/t/acme/notes -d '{"title":"hello"}'
+curl localhost:8090/t/acme/notes
+</pre>
+
+<p>Below <code>/t/&lt;tenant&gt;</code> the surface is exactly the
+<a href="/docs/http">HTTP endpoint</a> of a single database — routes,
+<code>/query</code>, <code>/batch</code>, subscriptions. A client changes its
+base URL and nothing else; the <a href="/docs/sync">sync layer</a> included:</p>
+
+<pre data-lang="js">const db = await sync({ url: 'http://127.0.0.1:8090/t/acme', shapes: [...] });</pre>
+
+<h2>A file per tenant</h2>
+
+<p>The tenant is picked by the request path, never by the query text, so
+nothing rewrites a query to add <code>tenant = ...</code>. Two tenants sharing a
+collection would then read each other's rows. A file each keeps them apart by
+construction, and the same decision settles four things a shared file would
+have had to solve:</p>
+
+<ul>
+  <li><b>Ids</b> are counted per file, so they never collide and a moved tenant
+    keeps its own.</li>
+  <li><b>The change sequence</b> behind <code>/changes</code> is one number per
+    file, so a client's cursor stays a plain number.</li>
+  <li><b>BM25 statistics</b> — document count, average length, document
+    frequency — are the tenant's own, which is what ranking inside a tenant
+    should mean.</li>
+  <li><b><code>lookup</code></b> never crosses a file, so it stays one bucket
+    probe per parent.</li>
+</ul>
+
+<h2>Why tenants and not hash partitioning</h2>
+
+<p>With a tenant whole on one node, every query runs where all of its data is:
+<code>near</code>, <code>match</code>, <code>order</code>, <code>count</code>
+and <code>lookup</code> keep their single-database meaning, and the router never
+parses a query. Spreading one collection across nodes would need a merge for
+every read shape — and global statistics before <code>match</code> could rank
+anything, because per-node IDF gives scores that do not compare and a merged
+order that is quietly wrong. That is a different feature, and the case for it
+is a single tenant that outgrows a node. Until then, a tenant has to fit one
+node's memory.</p>
+
+<h2>The node: <code>fenec-pg --dir</code></h2>
+
+<p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
+files over HTTP instead of one file. It is still one process per directory — the
+single-writer rule is per file, and one process owning all of them is what keeps
+it. The PostgreSQL listener is off in this mode; <code>--http</code> is
+required.</p>
+
+<ul>
+  <li><b>Opened on first use.</b> Open cost is proportional to the file, so a
+    node does not spend its start-up on tenants nobody asks for. A tenant that
+    has not been created is 404 — a request never brings one into being, or a
+    typo would make an empty database.</li>
+  <li><b>Closed when idle.</b> <code>--idle-close &lt;s&gt;</code> (default 300)
+    syncs, checkpoints when there is a vector index, and closes a tenant nothing
+    has touched for that long. One with an open request or subscription is never
+    closed.</li>
+  <li><b><code>--max-memory</code> covers the open tenants together.</b>
+    Opening one more over the ceiling first closes idle tenants, least recently
+    used first. With everything busy the open goes ahead anyway: refusing a
+    read because other tenants are busy would turn a memory warning into an
+    outage.</li>
+  <li><b>Shutdown</b> syncs every open tenant and checkpoints the ones with a
+    graph, holding their write locks until exit.</li>
+</ul>
+
+<p>The router drives the node through <code>/_admin/</code>, which answers only
+to <code>--admin-token</code> and is off (404) without it — a client allowed to
+read and write a tenant must not be able to delete it or take another tenant's
+image:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Route</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>GET /_admin/stats</code></td><td>tenant count, bytes on disk, memory of the open ones</td></tr>
+<tr><td><code>GET /_admin/open</code></td><td>the open tenants: name, memory, frozen</td></tr>
+<tr><td><code>GET /_admin/tenants</code></td><td>names on disk</td></tr>
+<tr><td><code>PUT /_admin/tenants/&lt;t&gt;</code></td><td>create an empty tenant (409 if it exists)</td></tr>
+<tr><td><code>DELETE /_admin/tenants/&lt;t&gt;</code></td><td>end its streams, close it, remove the file</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/freeze</code></td><td>refuse writes and wait for the ones in flight</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
+<tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
+<tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>An image is replayed in memory before it is written, so a truncated transfer
+is refused rather than installed, and the file appears by rename, never
+half-written. Tenant names are <code>[a-z0-9_-]</code>, 1 to 64 characters:
+they become file names, and that set means the same thing on every file
+system.</p>
+
+<h2>The router: <code>fenec-shard</code></h2>
+
+<p>The router reads a request's head and body, looks the tenant up, and forwards
+it byte for byte — the original target, not a re-encoding of it. An answer with
+a length is read and passed back on a kept-alive connection; one without is a
+subscription, copied as it arrives until either side closes, so the stream
+format lives in one place, the node.</p>
+
+<p>Its only state is the <b>directory</b>: two collections in a fenecdb file of
+its own, <code>nodes</code> and <code>tenants</code>. Every change is written and
+synced before it takes effect, and a tenant's node and state change in one
+statement, so there is no moment on disk where a tenant belongs to both nodes or
+to neither. The node admin tokens stay in it; <code>GET /_shard/nodes</code>
+does not return them.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Route</th><th>Does</th></tr></thead>
+<tbody>
+<tr><td><code>GET /_shard/nodes</code></td><td>name and address of each node</td></tr>
+<tr><td><code>PUT /_shard/nodes/&lt;n&gt;</code></td><td><code>{addr, token}</code>; checked against the node before it is recorded</td></tr>
+<tr><td><code>DELETE /_shard/nodes/&lt;n&gt;</code></td><td>refused while the node holds a tenant</td></tr>
+<tr><td><code>GET /_shard/tenants</code></td><td>name, node and state of each tenant</td></tr>
+<tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk</td></tr>
+<tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
+<tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Placement goes by disk rather than memory: memory counts only the open
+tenants, and which ones are open depends on who asked last.</p>
+
+<h2>Moving a tenant</h2>
+
+<pre data-lang="bash">curl -X POST localhost:8090/_shard/tenants/acme/move -H 'Authorization: Bearer root' \
+     -d '{"to":"n2"}'
+# {"tenant":"acme","from":"n1","to":"n2","bytes":58685634,"ms":267,"source_removed":true}</pre>
+
+<ol>
+  <li>The directory marks the tenant <code>moving</code>; it is still routed to
+    the source.</li>
+  <li>The source freezes it: writes in flight finish, new ones get
+    <b>503 with <code>Retry-After: 1</code></b>. Reads go on being served.</li>
+  <li>The image is copied from the source and installed on the target.</li>
+  <li>The directory points the tenant at the target, in one statement.</li>
+  <li>The source copy is deleted. Its open subscriptions end with an
+    <code>error</code> event, and the client reconnects through the router to
+    the target. A client that had seen everything <b>resumes from its cursor
+    without a reseed</b>: the change sequence travels in the image and the
+    source was frozen, so nothing happened in between. One that was behind is
+    reseeded, as after any restart — the target has the sequence but not the
+    history before it.</li>
+</ol>
+
+<p>The router refuses nothing itself during a move, so there is no window in
+which the tenant is nowhere — only one in which writes are asked to retry. If a
+step before the flip fails, the source is thawed and the directory put back. A
+router that stops mid-move comes back with the tenant still served from the
+source and marked <code>moving</code>; moving it again replaces whatever copy the
+interrupted attempt left on the target, which is stale by definition, since the
+directory never pointed at it.</p>
+
+<h2>What it costs</h2>
+
+<p>Node and router in one process on loopback, one keep-alive client, 5 000
+requests after 500 of warm-up (<code>make shard-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">p50</th><th class="n">p95</th><th class="n">p99</th></tr></thead>
+<tbody>
+<tr><td>straight to the node</td><td class="n">23.1 µs</td><td class="n">31.5 µs</td><td class="n">38.1 µs</td></tr>
+<tr><td>through the router</td><td class="n">44.7 µs</td><td class="n">53.2 µs</td><td class="n">64.0 µs</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>About 21 µs per request, which is one more loopback round trip; across a
+network the extra hop is whatever that network charges for one. Moving a tenant
+of 100 000 × 128 with an HNSW index — a 58.7 MB image — took 188–267 ms end to
+end over three runs, and the first query on the target about 70 ms, most of it
+opening the file: the graph travels in the image, so nothing is rebuilt.</p>
+
+<h2>What it does not do</h2>
+
+<ul>
+  <li><b>No replication.</b> A node that is down takes its tenants with it;
+    the router answers 502 for them until it is back. Tenant files are ordinary
+    files, so backups are file copies.</li>
+  <li><b>No query across tenants.</b> Each request names one.</li>
+  <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
+    memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
+  <li><b>No PostgreSQL wire in <code>--dir</code> mode.</b> Picking the tenant
+    from the startup packet's <code>database</code> is possible and not done.</li>
+  <li><b>One router.</b> Its directory is a single-writer file like any other;
+    several routers would need a shared one.</li>
+</ul>
+
+<h2>Tokens</h2>
+
+<p>Three, each for a different job. Data requests carry whatever the nodes'
+<code>--http-token</code> expects, and the router passes
+<code>Authorization</code> through untouched. Each node has its own
+<code>--admin-token</code>, which only the router holds. The router's
+<code>--token</code> guards <code>/_shard/</code>; like the nodes, it refuses to
+listen on a non-loopback address without one unless given
+<code>--insecure</code>.</p>

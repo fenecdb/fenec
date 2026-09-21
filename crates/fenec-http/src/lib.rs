@@ -18,10 +18,17 @@
 //!
 //! There is no TLS: the same rule as `fenec-pg` applies, and a TLS terminator
 //! is needed in front of it on an open network.
+//!
+//! With [`Server::with_tenants`] one listener serves many databases, one
+//! file each, under `/t/<tenant>/...` -- the same surface as a single file
+//! below the prefix, so a client's base URL is the only thing that changes.
+//! See [`tenants`] for why a file per tenant.
 
+pub mod admin;
 pub mod api;
 pub mod http;
 pub mod sse;
+pub mod tenants;
 
 use fenec_core::prelude::*;
 use http::{Method, Request, Response};
@@ -31,7 +38,9 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use tenants::{Refused, Tenants};
 
+#[derive(Clone)]
 pub struct Config {
     pub addr: String,
     /// When set, every request requires `Authorization: Bearer <token>`.
@@ -69,6 +78,12 @@ pub struct Config {
     /// Entry count of the change ring: how far behind a subscriber may fall.
     /// On overflow the subscriber is reseeded.
     pub change_capacity: usize,
+    /// Token for `/_admin/` (tenant mode only). Without it the admin
+    /// endpoints are off.
+    pub admin_token: Option<String>,
+    /// Body ceiling for `PUT /_admin/tenants/<t>/file`: an image is the
+    /// whole tenant, far past what a data request needs.
+    pub max_import: usize,
 }
 
 impl Default for Config {
@@ -87,15 +102,25 @@ impl Default for Config {
             stream_keepalive: Duration::from_secs(20),
             stream_write_timeout: Duration::from_secs(30),
             change_capacity: fenec_core::changes::DEFAULT_CAPACITY,
+            admin_token: None,
+            max_import: 1 << 30,
         }
     }
 }
 
 pub struct Server {
-    db: Arc<RwLock<Database>>,
+    backend: Backend,
     cfg: Arc<Config>,
     live: Arc<AtomicUsize>,
-    hub: Arc<Hub>,
+}
+
+#[derive(Clone)]
+enum Backend {
+    Single {
+        db: Arc<RwLock<Database>>,
+        hub: Arc<Hub>,
+    },
+    Tenants(Arc<Tenants>),
 }
 
 impl Server {
@@ -111,16 +136,29 @@ impl Server {
             guard.set_change_capacity(cfg.change_capacity);
         }
         Server {
-            db,
+            backend: Backend::Single { db, hub },
             cfg: Arc::new(cfg),
             live: Arc::new(AtomicUsize::new(0)),
-            hub,
         }
     }
 
-    /// Number of live subscriptions (for measurement and tests).
+    /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
+    /// tenant gets its own watcher as it is opened.
+    pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+        Server {
+            backend: Backend::Tenants(tenants),
+            cfg: Arc::new(cfg),
+            live: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Number of live subscriptions (for measurement and tests). Single
+    /// database only; a tenant's streams are counted on its own hub.
     pub fn live_streams(&self) -> usize {
-        self.hub.live()
+        match &self.backend {
+            Backend::Single { hub, .. } => hub.live(),
+            Backend::Tenants(_) => 0,
+        }
     }
 
     /// Opens the listener. A non-loopback address is not accepted without a
@@ -173,14 +211,13 @@ impl Server {
                 continue;
             }
 
-            let db = Arc::clone(&self.db);
+            let backend = self.backend.clone();
             let cfg = Arc::clone(&self.cfg);
             let counter = Arc::clone(&self.live);
-            let hub = Arc::clone(&self.hub);
             let spawned = std::thread::Builder::new()
                 .name("fenec-http".into())
                 .spawn(move || {
-                    serve_connection(stream, &db, &cfg, &hub);
+                    serve_connection(stream, &backend, &cfg);
                     counter.fetch_sub(1, Ordering::SeqCst);
                 });
             if spawned.is_err() {
@@ -216,7 +253,7 @@ fn is_remote(addr: &str) -> bool {
 }
 
 /// A single connection: reads consecutive requests on a keep-alive connection.
-fn serve_connection(stream: TcpStream, db: &Arc<RwLock<Database>>, cfg: &Config, hub: &Hub) {
+fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(cfg.idle_timeout);
     let Ok(write_half) = stream.try_clone() else {
@@ -225,14 +262,49 @@ fn serve_connection(stream: TcpStream, db: &Arc<RwLock<Database>>, cfg: &Config,
     let mut reader = BufReader::new(stream);
     let mut out = write_half;
 
+    // The body is read before the path is looked at, so in tenant mode the
+    // reading ceiling is the larger of the two and a data request over
+    // `max_body` is refused afterwards.
+    let tenant_mode = matches!(backend, Backend::Tenants(_));
+    let ceiling = if tenant_mode && cfg.admin_token.is_some() {
+        cfg.max_body.max(cfg.max_import)
+    } else {
+        cfg.max_body
+    };
+
     loop {
-        let req = match http::read_request(&mut reader, cfg.max_body) {
+        let mut req = match http::read_request(&mut reader, ceiling) {
             Ok(Some(req)) => req,
             Ok(None) => return,
             Err(http::BadRequest(status, msg)) => {
                 let _ = cors(Response::error(status, &msg), cfg).write(&mut out, false, false);
                 return;
             }
+        };
+        let keep_alive = req.keep_alive;
+        let head_only = req.method == Method::Head;
+
+        // The database is only ever borrowed from the tenant, never cloned
+        // out of it: the tenant's `Arc` count is what says "in use", and a
+        // clone of the inner `Arc` would keep the database alive past a
+        // close without the registry knowing.
+        let tenant = match backend {
+            Backend::Single { .. } => None,
+            Backend::Tenants(tenants) => match route_tenant(tenants, cfg, &mut req) {
+                Ok(t) => Some(t),
+                Err(resp) => {
+                    let resp = cors(resp, cfg);
+                    if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                        return;
+                    }
+                    continue;
+                }
+            },
+        };
+        let (db, hub) = match (&tenant, backend) {
+            (Some(t), _) => (&t.db, &t.hub),
+            (None, Backend::Single { db, hub }) => (db, hub),
+            (None, Backend::Tenants(_)) => unreachable!("routed above"),
         };
         // A subscription cannot go down the ordinary response path: it is a
         // body with unknown `Content-Length` and no end. It takes the
@@ -248,13 +320,84 @@ fn serve_connection(stream: TcpStream, db: &Arc<RwLock<Database>>, cfg: &Config,
             sse::serve(&mut out, db, cfg, hub, &req);
             return;
         }
-        let keep_alive = req.keep_alive;
-        let head_only = req.method == Method::Head;
-        let resp = cors(handle(db, cfg, &req), cfg);
+        let resp = match &tenant {
+            None => handle(db, cfg, &req),
+            Some(t) => handle_tenant(t, cfg, &req),
+        };
+        // Let go of the tenant before writing: a slow client must not keep
+        // it from closing.
+        drop(tenant);
+        let resp = cors(resp, cfg);
         if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
             return;
         }
     }
+}
+
+/// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below
+/// sees the single-database surface. `/_admin/` is answered here, and so is
+/// every refusal; `Ok` means "serve this request against the tenant".
+fn route_tenant(
+    tenants: &Tenants,
+    cfg: &Config,
+    req: &mut Request,
+) -> std::result::Result<Arc<tenants::Tenant>, Response> {
+    let segs = req.segments();
+    if segs.first() == Some(&"_admin") {
+        return Err(admin::handle(tenants, cfg, req));
+    }
+    if req.body.len() > cfg.max_body {
+        return Err(Response::error(
+            413,
+            &format!(
+                "the body is {} bytes, the ceiling is {}",
+                req.body.len(),
+                cfg.max_body
+            ),
+        ));
+    }
+    let name = match segs.as_slice() {
+        ["t", name, ..] => name.to_string(),
+        _ => {
+            return Err(Response::error(
+                404,
+                "this node serves tenants: /t/<tenant>/...",
+            ))
+        }
+    };
+    // The token is checked before the tenant is looked up: otherwise a 404
+    // against a 401 would tell an unauthenticated caller which tenants exist.
+    if let Some(deny) = unauthorized(cfg, req) {
+        return Err(deny);
+    }
+    let t = tenants
+        .get(&name)
+        .map_err(|Refused(status, msg)| Response::error(status, &msg))?;
+    // Rebuilt from the segments rather than cut at an offset: `//t/acme`
+    // has the same segments as `/t/acme` but not the same prefix length.
+    req.path = format!("/{}", segs[2..].join("/"));
+    Ok(t)
+}
+
+/// A tenant request: held against `freeze` for its whole handling. A frozen
+/// tenant answers as a read-only server would, then the refusal is turned
+/// into 503 with `Retry-After` -- a freeze is a move in progress, and the
+/// right thing for the client is to come back, not to give up.
+fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
+    let _held = t.enter();
+    if !t.is_frozen() || cfg.read_only {
+        return handle(&t.db, cfg, req);
+    }
+    let frozen = Config {
+        read_only: true,
+        ..cfg.clone()
+    };
+    let resp = handle(&t.db, &frozen, req);
+    if resp.status == 403 {
+        return Response::error(503, "the tenant is being moved; retry shortly")
+            .header("Retry-After", "1");
+    }
+    resp
 }
 
 /// `GET /<name>/changes`
@@ -441,7 +584,7 @@ fn cors(resp: Response, cfg: &Config) -> Response {
 
 /// The token comparison is constant time: an early-exit comparison leaks the
 /// length of the correct prefix.
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

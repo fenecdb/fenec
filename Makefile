@@ -7,7 +7,8 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg small bench sweep compare import-test \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench small bench sweep \
+	compare import-test \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
 
@@ -63,6 +64,20 @@ serve: wasm
 pg:
 	$(CARGO) run --release -p fenec-pg -- --listen 127.0.0.1:5433 --file data.fenec \
 	  --sync 250 $(if $(PGPASS),--password $(PGPASS),) $(if $(HTTP),--http $(HTTP),)
+
+## A tenant node: one file per tenant under ./tenants, HTTP only.
+## make node HTTP=127.0.0.1:8081 ADMIN=secret
+node:
+	$(CARGO) run --release -p fenec-pg -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
+	  --admin-token $(or $(ADMIN),$(error ADMIN=<token> is required)) --sync 250
+
+## The router in front of the nodes; the directory lives in ./shard.fenec.
+shard:
+	$(CARGO) run --release -p fenec-shard -- --listen 127.0.0.1:8090 --directory shard.fenec
+
+## What the router adds per request, and how long a tenant move takes.
+shard-bench:
+	$(CARGO) run --release -p fenec-shard --example overhead -- 100000 128
 
 ## When size comes first: no import, abort instead of panic unwinding.
 small:

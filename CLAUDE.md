@@ -21,6 +21,9 @@ make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make import-test   # the PostgreSQL arm of import (needs Docker)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
+make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants, HTTP only
+make shard               # the router in front of the nodes (./shard.fenec)
+make shard-bench         # router overhead per request, tenant move time
 ```
 
 Single tests:
@@ -51,10 +54,10 @@ fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
      |
-fenec-http  (REST/JSON + SSE)
-     |
-fenec-pg    (wire protocol: server AND client)
-     |
+fenec-http  (REST/JSON + SSE, tenant registry)
+     |                     \
+fenec-pg    (wire protocol:  fenec-shard (tenant router: directory,
+     |      server AND client)            placement, move)
 fenec-import (SQLite file reader + PG COPY source)
      |
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
@@ -78,7 +81,7 @@ holds the types; `fenec types <file>` generates schema-specific declarations.
 ## Invariants worth knowing before you change things
 
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
-`fenec-http`, `fenec-pg`, `fenec-import`. The WASM output has to stay small and
+`fenec-http`, `fenec-pg`, `fenec-import`, `fenec-shard`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 (`str::parse` drags in a 12 KB table -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
@@ -93,6 +96,20 @@ dirty pages, and the whole database is resident — open peak ≈ 2× the file,
 exclusive one (`execute_with`). There are no transactions — `BEGIN`/`COMMIT` are
 accepted and do nothing. Two processes opening the same file corrupts it, which
 is why `fenec-http` is a second listener inside `fenec-pg`, never its own binary.
+
+**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
+`site/content/docs/sharding.html`). The tenant comes from the path
+(`/t/<tenant>/`), never from the query, so tenants cannot share a file -- they
+would read each other's rows. A file each also keeps ids, the change sequence,
+BM25 statistics and `lookup` per tenant, which is why the router forwards bytes
+and never parses a query. The registry (`fenec-http/src/tenants.rs`) opens a
+file only under its lock after checking the open map, and closes one only when
+the map holds the last `Arc` -- a second `Database` over one file corrupts it
+exactly as a second process would. `freeze` takes a per-tenant gate
+exclusively so a write that passed the frozen check cannot land after the final
+export. A move is freeze, copy the image, install, flip the directory in one
+statement, delete the source; the change sequence travels in the image, so a
+caught-up subscriber resumes on the target without a reseed.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty

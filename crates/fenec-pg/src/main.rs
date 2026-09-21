@@ -6,8 +6,9 @@
 //! ```
 
 use fenec_core::prelude::*;
+use fenec_http::tenants::Tenants;
 use fenec_pg::client::{Client, Url};
-use fenec_pg::server::{Auth, SyncPolicy};
+use fenec_pg::server::{self, Auth, SyncPolicy};
 use fenec_pg::{Config, PgPlugin, Server};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -17,6 +18,13 @@ usage: fenec-pg [options]
 
   -l, --listen <address>    default 127.0.0.1:5433
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
+      --dir <path>          one file per tenant in this directory, served over
+                            HTTP under /t/<tenant>/. Needs --http; the pg
+                            listener is off in this mode
+      --admin-token <value> token for /_admin/ (--dir only): create, delete,
+                            freeze and move tenants. Without it, off
+      --idle-close <s>      close a tenant untouched for this long  default: 300
+                            (0 = never). The next request reopens it
 
   -W, --password <password> turn on password authentication
       --password-file <path> read the password from a file (argv shows up in `ps`)
@@ -39,7 +47,9 @@ usage: fenec-pg [options]
                             Above it, writes stop with 53200; reads, `del`
                             and `compact` keep working. A third of the
                             container memory limit is a good start:
-                            `compact` peaks at ~3x the file
+                            `compact` peaks at ~3x the file. With --dir it
+                            covers the open tenants together, and opening one
+                            more over it closes the idle ones first
       --insecure            allow listening without auth on a non-loopback address
 
       --http <address>      also open the HTTP/JSON endpoint (e.g. 127.0.0.1:8080).
@@ -122,6 +132,8 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
 fn main() {
     let mut cfg = Config::default();
     let mut file: Option<String> = None;
+    let mut dir: Option<String> = None;
+    let mut idle_close = Duration::from_secs(300);
     let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
     let mut method = "scram".to_string();
     let mut ping = false;
@@ -142,6 +154,15 @@ fn main() {
         match args[i].as_str() {
             "--listen" | "-l" => cfg.addr = next(&mut i, "--listen"),
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
+            "--dir" => dir = Some(next(&mut i, "--dir")),
+            "--admin-token" => http_cfg.admin_token = Some(next(&mut i, "--admin-token")),
+            "--idle-close" => {
+                let v = next(&mut i, "--idle-close");
+                let secs: u64 = v
+                    .parse()
+                    .unwrap_or_else(|_| fail(&format!("--idle-close expects seconds, got `{v}`")));
+                idle_close = Duration::from_secs(secs);
+            }
             "--password" | "-W" => password = Some(next(&mut i, "--password")),
             "--password-file" => {
                 let path = next(&mut i, "--password-file");
@@ -232,6 +253,23 @@ fn main() {
         ));
     }
 
+    if let Some(dir) = dir {
+        if file.is_some() {
+            fail(
+                "--dir and --file are exclusive: one serves a file, the other a directory of them",
+            );
+        }
+        let Some(addr) = http else {
+            fail("--dir serves tenants over HTTP: give --http <address>");
+        };
+        http_cfg.addr = addr;
+        http_cfg.insecure = cfg.insecure;
+        http_cfg.max_connections = cfg.max_connections;
+        http_cfg.idle_timeout = cfg.idle_timeout;
+        http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
+        serve_dir(&dir, http_cfg, &cfg, idle_close);
+    }
+
     cfg.auth = match &password {
         Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
         Some(pw) => match Auth::parse(&method, pw) {
@@ -303,5 +341,64 @@ fn main() {
     if let Err(e) = server.serve() {
         eprintln!("server error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// `--dir`: the HTTP listener over a directory of tenants, and on this
+/// thread the syncer that a single file gets from the pg server -- periodic
+/// sync, idle close, and on the shutdown signal a final sync and checkpoint
+/// of every open tenant.
+fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: Duration) -> ! {
+    let tenants = match Tenants::new(dir) {
+        Ok(t) => t,
+        Err(e) => fail(&format!("could not use {dir}: {e}")),
+    };
+    let tenants = Arc::new(
+        tenants
+            .with_setup(|db| db.install_plugin(&PgPlugin))
+            .with_change_capacity(http_cfg.change_capacity)
+            .with_max_memory(cfg.max_memory)
+            .with_checkpoint(cfg.checkpoint_on_exit),
+    );
+    eprintln!(
+        "serving tenants from: {dir}  ({} on disk)",
+        tenants.names().len()
+    );
+
+    let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
+    let listener = match http_server.bind() {
+        Ok(l) => l,
+        Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
+    };
+    std::thread::Builder::new()
+        .name("fenec-http".into())
+        .spawn(move || {
+            if let Err(e) = http_server.serve_on(listener) {
+                eprintln!("HTTP server error: {e}");
+                std::process::exit(1);
+            }
+        })
+        .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
+
+    server::install_signal_handlers();
+    let tick = match cfg.sync {
+        SyncPolicy::Interval(d) if !d.is_zero() => d,
+        _ => Duration::from_millis(200),
+    };
+    loop {
+        std::thread::sleep(tick);
+        if server::shutdown_requested() {
+            // The write locks come back held: nothing is accepted between
+            // the last sync and exit.
+            let open = tenants.shutdown();
+            eprintln!("\nshutting down: {open} open tenant(s) synced");
+            std::process::exit(0);
+        }
+        if matches!(cfg.sync, SyncPolicy::Interval(_)) {
+            tenants.sync_dirty();
+        }
+        if !idle_close.is_zero() {
+            tenants.close_idle(idle_close);
+        }
     }
 }
