@@ -207,6 +207,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenec-shard"
+version = "0.1.4"
+dependencies = [
+ "fenec-core",
+ "fenec-http",
+ "fenec-ql",
+]
+
+[[package]]
 name = "fenec-wasm"
 version = "0.1.4"
 dependencies = [

@@ -34,7 +34,7 @@ use crate::Config;
 use fenec_core::prelude::*;
 use std::io::Write;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
@@ -56,6 +56,11 @@ pub struct Hub {
     /// subscriptions are long lived, and sharing a single ceiling would let
     /// 100 subscribers close the server to ordinary requests.
     live: AtomicUsize,
+    /// Set when the database behind the hub is going away (a tenant being
+    /// deleted or moved). The open streams hold the database alive; they
+    /// have to be told to let go, or a moved tenant's old copy would keep
+    /// answering from a file that is no longer authoritative.
+    closed: AtomicBool,
 }
 
 impl Watcher for Hub {
@@ -77,7 +82,7 @@ impl Hub {
     /// returns as is -- the caller writes the keep-alive line.
     fn wait(&self, after: u64, timeout: Duration) -> u64 {
         let g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        if *g > after {
+        if *g > after || self.is_closed() {
             return *g;
         }
         let (g, _) = self
@@ -85,6 +90,18 @@ impl Hub {
             .wait_timeout(g, timeout)
             .unwrap_or_else(|e| e.into_inner());
         *g
+    }
+
+    /// Ends every stream on this hub: each one writes an `error` event and
+    /// closes, and a client reconnecting lands wherever the tenant is now.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let _g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub fn live(&self) -> usize {
@@ -166,6 +183,14 @@ pub fn serve(
     };
 
     loop {
+        if hub.is_closed() {
+            let _ = event(
+                out,
+                "error",
+                "{\"error\":\"the tenant was closed on this node\"}",
+            );
+            return;
+        }
         let step = {
             let guard = db.read().unwrap_or_else(|e| e.into_inner());
             guard.changes_since(

@@ -7,6 +7,7 @@ members = [
     "crates/fenec-pg",
     "crates/fenec-http",
     "crates/fenec-import",
+    "crates/fenec-shard",
     "crates/fenec-cli",
     "crates/fenec-bench",
 ]

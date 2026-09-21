@@ -368,7 +368,10 @@ fn is_remote(addr: &str) -> bool {
 
 /// Catches `SIGINT`/`SIGTERM`. The handler only writes an atomic
 /// (signal-safe); the real `sync` happens in the syncer thread.
-fn install_signal_handlers() {
+///
+/// Public for `fenec-pg --dir`, which has no pg listener and runs its own
+/// syncer over the tenants.
+pub fn install_signal_handlers() {
     // libc's `signal` function, declared directly so as not to add a
     // dependency. SIGINT=2, SIGTERM=15, SIGHUP=1.
     extern "C" {
@@ -382,6 +385,11 @@ fn install_signal_handlers() {
             signal(sig, on_signal as *const () as usize);
         }
     }
+}
+
+/// Whether a shutdown signal has arrived.
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
 }
 
 /// The periodic syncer + the shutdown hook.

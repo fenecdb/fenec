@@ -57,6 +57,10 @@ impl Method {
 
 pub struct Request {
     pub method: Method,
+    /// The request target exactly as sent, still percent-encoded: a proxy
+    /// forwards this, since re-encoding `path` and `query` would not
+    /// reproduce every byte of the original.
+    pub target: String,
     /// Percent-decoded path: `/articles/near`
     pub path: String,
     /// Query string pairs, **in order** and with repeats: two conditions on
@@ -176,6 +180,7 @@ pub fn read_request(
     let (raw_path, raw_query) = target.split_once('?').unwrap_or((target, ""));
     Ok(Some(Request {
         method,
+        target: target.to_string(),
         path: percent_decode(raw_path),
         query: parse_query(raw_query),
         headers,

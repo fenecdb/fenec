@@ -11,12 +11,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile, access } from 'node:fs/promises';
+import { readFile, access, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Fenec, sync, FenecError } from './fenec.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
-const bin = await (async () => {
-  for (const p of ['../target/debug/fenec-pg', '../target/release/fenec-pg']) {
+async function binary(name) {
+  for (const p of [`../target/debug/${name}`, `../target/release/${name}`]) {
     const url = new URL(p, import.meta.url);
     try {
       await access(url);
@@ -26,7 +28,9 @@ const bin = await (async () => {
     }
   }
   return null;
-})();
+}
+const bin = await binary('fenec-pg');
+const shardBin = await binary('fenec-shard');
 
 const skip = !wasm
   ? 'no web/fenec.wasm (make wasm)'
@@ -42,11 +46,9 @@ process.on('exit', () => {
   for (const p of alive) p.kill('SIGKILL');
 });
 
-/** Brings up an in-memory `fenec-pg --http`; reads the address off stderr. */
-async function server(extra = []) {
-  const proc = spawn(bin, ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', ...extra], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-  });
+/** Spawns a server binary and reads its HTTP address off stderr. */
+async function listening(path, args, name) {
+  const proc = spawn(path, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   alive.add(proc);
   const url = await new Promise((res, rej) => {
     let buf = '';
@@ -58,7 +60,7 @@ async function server(extra = []) {
       // (`http://127.0.0.`) when stderr arrives in pieces -- and the URL
       // parser silently turns that into `127.0.0.0:80`, followed by a 10 s
       // connection timeout. The closing bracket says the line has ended.
-      const m = buf.match(/fenec-http \S+ listening on: (http:\/\/\S+)\s+\[[^\]]*\]/);
+      const m = buf.match(new RegExp(`${name} \\S+ listening on: (http://\\S+)\\s+\\[[^\\]]*\\]`));
       if (m) {
         clearTimeout(timer);
         res(m[1]);
@@ -69,6 +71,20 @@ async function server(extra = []) {
       rej(new Error(`server exited with ${c}: ${buf}`));
     });
   });
+  const close = () => {
+    alive.delete(proc);
+    proc.kill('SIGKILL');
+  };
+  return { url, close };
+}
+
+/** Brings up an in-memory `fenec-pg --http`; reads the address off stderr. */
+async function server(extra = []) {
+  const { url, close } = await listening(
+    bin,
+    ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', ...extra],
+    'fenec-http',
+  );
 
   const run = async (query, params = []) => {
     const res = await fetch(`${url}/query`, {
@@ -91,14 +107,7 @@ async function server(extra = []) {
        {key: "c", title: "three", status: "closed", priority: 3}
      ]`,
   );
-  return {
-    url,
-    run,
-    close: () => {
-      alive.delete(proc);
-      proc.kill('SIGKILL');
-    },
-  };
+  return { url, run, close };
 }
 
 async function open(url, opts = {}) {
@@ -550,5 +559,84 @@ test('a tab joining before the leader is seeded is not left hanging', opts, asyn
     a.close();
     b.close();
     s.close();
+  }
+});
+
+// ------------------------------------------------------------------ tenants
+//
+// The same sync layer through a router: `fenec-shard` in front of a
+// `fenec-pg --dir` node. The client's base URL gains `/t/<tenant>` and
+// nothing else changes -- which is the whole claim of tenant routing.
+
+const shardSkip = skip || (!shardBin ? 'no fenec-shard binary (cargo build)' : false);
+
+/** A node, a router in front of it, and tenant `name` seeded with tasks. */
+async function sharded(names) {
+  const dir = await mkdtemp(join(tmpdir(), 'fenec-sync-'));
+  const node = await listening(
+    bin,
+    ['--dir', join(dir, 'n1'), '--http', '127.0.0.1:0', '--admin-token', 'adm'],
+    'fenec-http',
+  );
+  const router = await listening(
+    shardBin,
+    ['--listen', '127.0.0.1:0', '--directory', join(dir, 'shard.fenec')],
+    'fenec-shard',
+  );
+  const call = async (method, path, body) => {
+    const res = await fetch(`${router.url}${path}`, {
+      method,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${method} ${path}: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
+  };
+  await call('PUT', '/_shard/nodes/n1', { addr: new URL(node.url).host, token: 'adm' });
+  for (const name of names) {
+    await call('PUT', `/_shard/tenants/${name}`);
+    await call('POST', `/t/${name}/query`, {
+      query: 'create collection tasks (key text @hash, title text, status text @hash, priority int)',
+    });
+    await call('POST', `/t/${name}/query`, {
+      query: `put tasks {key: "a", title: "${name}", status: "open", priority: 1}`,
+    });
+  }
+  return {
+    url: (name) => `${router.url}/t/${name}`,
+    run: (name, query) => call('POST', `/t/${name}/query`, { query }),
+    close: async () => {
+      router.close();
+      node.close();
+      await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test('a tenant syncs through the router with only the base URL changed', { ...opts, skip: shardSkip }, async () => {
+  const c = await sharded(['acme', 'beta']);
+  const acme = await open(c.url('acme'));
+  const beta = await open(c.url('beta'));
+  try {
+    await acme.ready();
+    await beta.ready();
+    assert.deepEqual((await acme.from('tasks').rows()).map((r) => r.title), ['acme']);
+    assert.deepEqual((await beta.from('tasks').rows()).map((r) => r.title), ['beta']);
+
+    // A write on one tenant streams to its subscriber and to no other.
+    await c.run('acme', 'put tasks {key: "b", title: "acme 2", status: "open", priority: 2}');
+    await until(async () => (await acme.from('tasks').count()) === 2, 'acme got its write');
+    assert.equal(await beta.from('tasks').count(), 1);
+
+    // An optimistic write goes through the router and reconciles.
+    await acme.from('tasks').insert({ key: 'c', title: 'local', status: 'open', priority: 3 });
+    await until(
+      async () => (await c.run('acme', 'get tasks where key = "c" count'))[0]?.count === 1,
+      'the insert reached the node',
+    );
+  } finally {
+    acme.close();
+    beta.close();
+    await c.close();
   }
 });

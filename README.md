@@ -165,6 +165,7 @@ query; it is not a join and is not trying to be one.
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [PostgreSQL server](https://fenecdb.com/docs/postgres) | Sessions, SCRAM authentication, the type mapping, what the protocol does not carry |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
+| [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |

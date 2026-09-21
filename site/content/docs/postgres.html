@@ -20,6 +20,12 @@ PostgreSQL ecosystem: vectors use the same text representation as pgvector
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>).</p>
 
+<p>With <code>--dir &lt;path&gt;</code> instead of <code>--file</code> the
+process serves a directory of tenant files over HTTP, one file per tenant under
+<code>/t/&lt;tenant&gt;/</code>, and the PostgreSQL listener is off. That mode,
+its <code>--admin-token</code> and <code>--idle-close</code>, and the router in
+front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
+
 <h2>Sessions</h2>
 
 <p>One thread per connection. Read-only statements run at the same time under a

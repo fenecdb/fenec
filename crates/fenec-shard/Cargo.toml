@@ -1,0 +1,19 @@
+[package]
+name = "fenec-shard"
+description = "Tenant router for fenecdb: one HTTP front for many fenec-pg --dir nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+fenec-core.workspace = true
+fenec-ql.workspace = true
+fenec-http.workspace = true
+
+[[bin]]
+name = "fenec-shard"
+path = "src/main.rs"
