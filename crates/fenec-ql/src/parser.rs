@@ -248,6 +248,7 @@ impl Parser {
         self.expect(Tok::At)?;
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
             "hash" => IndexKind::Hash,
+            "sorted" => IndexKind::Sorted,
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
             other => return self.err(format!("unknown index `{other}`")),
@@ -274,6 +275,7 @@ impl Parser {
                 let kind = self.ident()?.to_ascii_lowercase();
                 match kind.as_str() {
                     "hash" => field = field.indexed(IndexKind::Hash),
+                    "sorted" => field = field.indexed(IndexKind::Sorted),
                     "hnsw" | "vector" => {
                         let spec = self.hnsw_args()?;
                         field = field.indexed(IndexKind::Vector(spec));

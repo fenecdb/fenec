@@ -183,6 +183,7 @@ fn index_note(k: &IndexKind) -> Option<String> {
     match k {
         IndexKind::None => None,
         IndexKind::Hash => Some(" @hash".into()),
+        IndexKind::Sorted => Some(" @sorted".into()),
         IndexKind::Vector(spec) => Some(format!(
             " @hnsw({}, m={}, ef_search={})",
             spec.metric.name(),

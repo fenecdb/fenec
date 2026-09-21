@@ -1544,6 +1544,7 @@ fn execute_into(
                                     Some(match &f.index {
                                         IndexKind::None => "-".to_string(),
                                         IndexKind::Hash => "hash".to_string(),
+                                        IndexKind::Sorted => "sorted".to_string(),
                                         IndexKind::Vector(sp) => {
                                             format!("hnsw({}, m={})", sp.metric.name(), sp.m)
                                         }

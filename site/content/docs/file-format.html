@@ -41,6 +41,17 @@ graph therefore cannot cause data loss.</p>
 links, not the vectors: the vectors are already in the document records, and
 the expensive part is the build.</p>
 
+<h2>Indexes in the schema</h2>
+
+<p>A schema names each field's index by a kind byte: 0 none, 1
+<code>@hash</code>, 2 <code>@hnsw</code> with its parameters, 3
+<code>@text</code> with its parameters, 4 <code>@sorted</code>. For every
+kind but the graph that byte is all the file holds: the hash, text and
+ordered indexes are rebuilt from the documents on open, so there is nothing
+of theirs to validate or to go stale. An old binary cannot open a file whose
+schema uses a newer kind and reports <code>unknown index kind 4</code>, the
+same refusal as for a record kind it does not know.</p>
+
 <h2>The change counter, and why it is at the front</h2>
 
 <p>Record kind 6 sits at the front of the file and is fixed width. Both are

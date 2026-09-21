@@ -332,6 +332,7 @@ fn print_plan(plan: &map::Plan, columns: &[fenec_import::Column], target: &str, 
 fn index_name(kind: &IndexKind) -> String {
     match kind {
         IndexKind::Hash => "@hash".into(),
+        IndexKind::Sorted => "@sorted".into(),
         IndexKind::Vector(s) => format!(
             "@hnsw({}, m={}, ef_construction={}, ef_search={})",
             s.metric.name(),
@@ -403,17 +404,20 @@ fn parse_cast(s: &str) -> std::result::Result<(String, DataType), String> {
     Ok((name.to_string(), ty))
 }
 
-/// `field@hash` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=..)]`
+/// `field@hash`, `field@sorted` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=..)]`
 fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
-    let (name, spec) = s
-        .split_once('@')
-        .ok_or_else(|| format!("--index expects `field@hash` or `field@hnsw(...)`, got `{s}`"))?;
+    let (name, spec) = s.split_once('@').ok_or_else(|| {
+        format!("--index expects `field@hash`, `field@sorted` or `field@hnsw(...)`, got `{s}`")
+    })?;
     if name.is_empty() {
         return Err(format!("invalid --index: `{s}`"));
     }
     let spec = spec.trim();
     if spec.eq_ignore_ascii_case("hash") {
         return Ok((name.to_string(), IndexKind::Hash));
+    }
+    if spec.eq_ignore_ascii_case("sorted") {
+        return Ok((name.to_string(), IndexKind::Sorted));
     }
     let args = match spec.strip_prefix("hnsw").map(str::trim) {
         None => return Err(format!("unknown index kind: `{spec}`")),

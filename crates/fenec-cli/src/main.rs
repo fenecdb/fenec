@@ -17,7 +17,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 const HELP: &str = r#"
 FenecQL summary
-  create collection <name> ( <field> <type> [@hash|@hnsw(metric, m=.., ef_search=..)], ... )
+  create collection <name> ( <field> <type> [@hash|@sorted|@text|@hnsw(metric, m=.., ef_search=..)], ... )
+  create index [if not exists] on <name> (<field>) @hash|@sorted|@text|@hnsw(..)
   drop collection [if exists] <name>
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
@@ -345,6 +346,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                     let ix = match &f.index {
                         IndexKind::None => String::new(),
                         IndexKind::Hash => "  @hash".into(),
+                        IndexKind::Sorted => "  @sorted".into(),
                         IndexKind::Vector(sp) => format!(
                             "  @hnsw({}, m={}, ef_search={})",
                             sp.metric.name(),

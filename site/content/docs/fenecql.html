@@ -37,7 +37,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <table>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=..)</code></td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=..)</code></td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
@@ -242,16 +242,24 @@ transports carry.</p>
 <h2>Indexes</h2>
 
 <pre data-lang="fenecql">create collection articles (
-  title  text,
-  body   text @text(k1=0.9, b=0.4, prefix=0),
-  year   int @hash,
-  embed  vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
+  title      text,
+  body       text @text(k1=0.9, b=0.4, prefix=0),
+  year       int @hash,
+  published  timestamp @sorted,
+  embed      vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
 )
 
 create index on articles (embed) @hnsw(cosine)
 create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
+create index on articles (title) @sorted
 </pre>
+
+<p>A field takes one index. <code>@hash</code> answers equality,
+<code>@sorted</code> ranges and order, <code>@text</code> ranked text
+retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
+for <code>int</code>, <code>float</code>, <code>timestamp</code> and
+<code>text</code> — the types with an order.</p>
 
 <div class="note">
   <p><b><code>prefix=N</code> indexes each word's prefixes alongside it</b>
@@ -270,19 +278,74 @@ create index on articles (body) @text(prefix=6)   -- for an inflected language
 </div>
 
 <div class="note">
-  <p><b>Only equality reaches an index, and only inside an <code>and</code>
-  chain.</b> That means <code>=</code> and <code>in [..]</code> over a
-  <code>@hash</code> field — <code>in</code> is a set of equalities written
-  short, so it is answered as the union of one bucket per element — and either
-  over <code>id</code>, which the store's own id index answers without a
-  <code>@hash</code> being declared or possible.</p>
-  <p>Everything else — <code>&gt;=</code>, <code>~</code>, <code>has</code>,
-  and anything under an <code>or</code> — is a full scan: each matching row is
-  decoded and evaluated. <code>~</code> in particular is substring matching
-  without ranking and reaches no index; ranked retrieval is <code>match</code>
-  over a <code>@text</code> field. <code>order</code> reaches no index either:
-  every match's key is read, and only <code>offset + limit</code> of them are
-  put in order.</p>
+  <p><b>A filter reaches an index only inside an <code>and</code> chain.</b>
+  Equality — <code>=</code> and <code>in [..]</code> — reaches a
+  <code>@hash</code> field; <code>in</code> is a set of equalities written
+  short, so it is answered as the union of one bucket per element. Either
+  reaches <code>id</code>, which the store's own id index answers without a
+  <code>@hash</code> being declared or possible. Comparisons —
+  <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>
+  and <code>=</code> — reach a <code>@sorted</code> field, which narrows them
+  to a range of keys.</p>
+  <p>Everything else — <code>!=</code>, <code>~</code>, <code>has</code>,
+  comparisons on a field without <code>@sorted</code>, and anything under an
+  <code>or</code> — is a full scan: each matching row is decoded and
+  evaluated. <code>~</code> in particular is substring matching without
+  ranking and reaches no index; ranked retrieval is <code>match</code> over a
+  <code>@text</code> field.</p>
+</div>
+
+<h3>Ordered indexes</h3>
+
+<pre data-lang="fenecql">get articles order published desc limit 20
+get articles where published >= "2026-09-01" order published desc limit 20
+get articles where title >= "k" and title < "l" count
+get articles where published >= "2026-01-01" near embed $1 limit 10
+</pre>
+
+<p><code>order</code> over a <code>@sorted</code> field with a
+<code>limit</code> walks the index in order and stops at the page, testing
+the rest of the filter on each row it passes; without one, every match's key
+is read and only <code>offset + limit</code> of them are put in order. A
+filter that matches too little to fill the page within an eighth of the
+collection sends the walk back to the scan: over a million rows one matching
+nothing cost 152 ms against the scan's 121, while one matching 1% fills the
+page in 0.29 ms against 125. A range on a <code>@sorted</code> field is read
+from the index as a set of ids — for a filter, a <code>count</code>, or the
+allowed set of a filtered <code>near</code>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 rows unless noted</th><th class="n">scan</th><th class="n"><code>@sorted</code></th></tr></thead>
+<tbody>
+<tr><td><code>order created desc limit 20</code></td><td class="n">26.8 ms</td><td class="n">0.001 ms</td></tr>
+<tr><td>the newest 1%, <code>order created desc limit 20</code></td><td class="n">63.1 ms</td><td class="n">0.001 ms</td></tr>
+<tr><td><code>where price &gt;= 99900 limit 20</code>, 0.1% of the rows</td><td class="n">1.44 ms</td><td class="n">0.008 ms</td></tr>
+<tr><td>the same range, <code>count</code></td><td class="n">65.8 ms</td><td class="n">0.008 ms</td></tr>
+<tr><td><code>where year &gt;= 2020 near embed $1 limit 10</code>, 200 000 × 128</td><td class="n">15.2 ms</td><td class="n">0.68 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The planner prefers a smaller set when it has one: an equality over a
+<code>@hash</code> field, or a narrow range on another <code>@sorted</code>
+field, names fewer rows than the walk would pass, so those are sorted instead.
+A range wider than half the collection is left to the scan, which is cheaper
+than gathering and sorting that many ids.</p>
+
+<div class="note">
+  <p><b>A comparison reaches the index only when its literal says exactly
+  what the scan would compare.</b> <code>price &lt; 12.5</code> on an
+  <code>int</code> field, or an integer past 2<sup>53</sup> against a
+  <code>timestamp</code>, is evaluated row by row — the index narrows with the
+  comparisons it can express and the rest are tested — because an answer that
+  differs from the scan's is a wrong answer, not a fast one. Ties come out in
+  ascending <code>id</code> either way, as the scan leaves them.</p>
+  <p>The cost is paid on write and in memory: about 20 bytes a row for a
+  number, plus the text for <code>text</code>, and an insert into a sorted
+  run. Over a million rows two ordered indexes took a bulk load from 0.52 s
+  to 0.88 s, and the index is rebuilt from the documents on open, like the
+  hash and text indexes — it is never written to the file.</p>
 </div>
 
 <h2>Time</h2>

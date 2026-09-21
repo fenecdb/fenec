@@ -36,6 +36,7 @@ pub mod num;
 pub mod plugin;
 pub mod query;
 pub mod schema;
+pub mod sorted;
 pub mod store;
 pub mod text;
 pub mod time;

@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
+use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::store::{Store, OP_DEL, OP_PUT};
 use crate::text::TextIndex;
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
@@ -127,6 +128,11 @@ pub struct Collection {
     pub hashes: HashMap<String, HashMap<Vec<u8>, Vec<DocId>>>,
     /// field name -> inverted index
     pub texts: HashMap<String, TextIndex>,
+    /// field name -> ordered index, in schema order. A `Vec` rather than a
+    /// map: a collection has a handful of ordered fields, the map's code was
+    /// 2.6 KB of the browser module, and a fixed order keeps the choice
+    /// between two ranges the same from one run to the next.
+    pub sorted: Vec<(String, SortedIndex)>,
 }
 
 impl Collection {
@@ -134,6 +140,7 @@ impl Collection {
         let mut vectors = HashMap::new();
         let mut hashes = HashMap::new();
         let mut texts = HashMap::new();
+        let mut sorted = Vec::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -148,6 +155,9 @@ impl Collection {
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                    sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                }
                 _ => {}
             }
         }
@@ -158,6 +168,7 @@ impl Collection {
             vectors,
             hashes,
             texts,
+            sorted,
         }
     }
 
@@ -167,6 +178,7 @@ impl Collection {
         self.vectors.clear();
         self.hashes.clear();
         self.texts.clear();
+        self.sorted.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -181,9 +193,19 @@ impl Collection {
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                    self.sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                }
                 _ => {}
             }
         }
+    }
+
+    pub fn sorted_index(&self, field: &str) -> Option<&SortedIndex> {
+        self.sorted
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, ix)| ix)
     }
 
     fn index_doc(&mut self, doc: &Document) {
@@ -207,6 +229,9 @@ impl Collection {
             if let Some(Value::Text(t)) = doc.get(name) {
                 ix.insert(doc.id, t);
             }
+        }
+        for (name, ix) in self.sorted.iter_mut() {
+            ix.insert(doc.id, doc.get(name));
         }
     }
 
@@ -248,6 +273,9 @@ impl Collection {
             if let Some(Value::Text(t)) = doc.get(name) {
                 ix.remove(doc.id, t);
             }
+        }
+        for (name, ix) in self.sorted.iter_mut() {
+            ix.remove(doc.id, doc.get(name));
         }
     }
 
@@ -913,6 +941,10 @@ impl Database {
                         .map(|ix| ix.arena_bytes() + ix.graph_bytes())
                         .sum::<usize>()
                     + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
+                    + c.sorted
+                        .iter()
+                        .map(|(_, ix)| ix.memory_bytes())
+                        .sum::<usize>()
             })
             .sum()
     }
@@ -1182,7 +1214,11 @@ impl Database {
             for t in c.texts.values_mut() {
                 t.clear();
             }
-            if restored.len() == fields.len() && c.hashes.is_empty() && c.texts.is_empty() {
+            if restored.len() == fields.len()
+                && c.hashes.is_empty()
+                && c.texts.is_empty()
+                && c.sorted.is_empty()
+            {
                 continue; // everything restored, no need to read the documents
             }
             // The rebuild goes through the batch path as well.
@@ -1204,6 +1240,17 @@ impl Database {
             }
             for ix in c.texts.values_mut() {
                 ix.shrink_to_fit();
+            }
+            // Built from the documents in one pass each, sorted once rather
+            // than inserted row by row.
+            for (field, ix) in c.sorted.iter_mut() {
+                let Some(fd) = c.schema.field(field) else {
+                    continue;
+                };
+                *ix = SortedIndex::build(
+                    &fd.ty,
+                    &mut docs.iter().map(|d| (d.id, d.get(field).cloned())),
+                );
             }
             for (field, ix) in c.vectors.iter_mut() {
                 if restored.contains(field) {
@@ -1436,6 +1483,11 @@ impl Database {
                 )));
             }
         }
+        if *kind == IndexKind::Sorted && !SortedIndex::supports(&f.ty) {
+            return Err(Error::Type(format!(
+                "field `{field}` is not int, float, timestamp or text, no ordered index can be built"
+            )));
+        }
 
         let cid = c.id;
         let c = self.collections.get_mut(collection).unwrap();
@@ -1478,6 +1530,17 @@ impl Database {
                 }
                 ix.shrink_to_fit();
                 c.texts.insert(field.to_string(), ix);
+            }
+            IndexKind::Sorted => {
+                let ty = c.schema.fields[pos].ty.clone();
+                let mut rows = Vec::with_capacity(c.store.len());
+                for id in c.store.ids() {
+                    rows.push((id, c.store.read_field(id, pos)?));
+                }
+                c.sorted.push((
+                    field.to_string(),
+                    SortedIndex::build(&ty, &mut rows.into_iter()),
+                ));
             }
             IndexKind::None => {}
         }
@@ -1739,6 +1802,38 @@ impl Database {
             }
         }
 
+        // Comparisons over an ordered index narrow to a range. It is collected
+        // only while it stays smaller than the candidates already in hand and
+        // than the scan it would replace: past half the collection the scan
+        // is cheaper than gathering and sorting the ids, and a page of twenty
+        // over a wide range is found sooner by the scan in id order.
+        let mut bare_range = false;
+        if !c.sorted.is_empty() {
+            let mut ranges = Vec::new();
+            f.conjunct_ranges(params, &mut ranges);
+            let n = c.store.len();
+            for (field, ix) in &c.sorted {
+                if !ranges.iter().any(|r| r.0 == field) {
+                    continue;
+                }
+                let Some(fd) = c.schema.field(field) else {
+                    continue;
+                };
+                let Some((range, exact)) = sorted_range(&fd.ty, field, f, params) else {
+                    continue;
+                };
+                let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
+                if want != usize::MAX {
+                    cap = cap.min(want.saturating_mul(64).max(4096));
+                }
+                if let Some(ids) = ix.range_ids(&range, cap) {
+                    candidates = Some(ids);
+                    bare_range = exact && f.only_ranges_on(field, params);
+                    bare_in = false;
+                }
+            }
+        }
+
         let matches = |id: DocId| -> Result<bool> {
             let mut row = StoreRow {
                 store: &c.store,
@@ -1755,8 +1850,9 @@ impl Database {
                 b.sort_unstable();
                 b.retain(|id| c.store.contains(*id));
                 // If the filter is exactly that equality, or exactly a list
-                // that was pushed down whole, no re-evaluation is needed.
-                if f.is_bare_equality(params) || bare_in {
+                // that was pushed down whole, or exactly the range an ordered
+                // index expressed, no re-evaluation is needed.
+                if f.is_bare_equality(params) || bare_in || bare_range {
                     b.truncate(want);
                     return Ok(b);
                 }
@@ -1782,6 +1878,104 @@ impl Database {
             }
         }
         Ok(out)
+    }
+
+    /// `order <field> limit N` answered by walking an ordered index and
+    /// stopping at the page -- `None` when that is not the better plan.
+    ///
+    /// The walk visits rows in order and tests the filter on each, so it wins
+    /// when the page fills early; an equality over a hash index, an `in`, or
+    /// a narrow range on another ordered field names a small set that is
+    /// cheaper to sort, and those keep the sorting path. Without a `limit`
+    /// every row is emitted anyway, and `required` needs every candidate, so
+    /// both keep it too. A range on the ordered field itself bounds the walk.
+    fn walk_order(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<DocId>>> {
+        let [(field, asc)] = sel.order.as_slice() else {
+            return Ok(None);
+        };
+        let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
+            return Ok(None);
+        };
+        if ix.has_nan() || sel.lookup.as_ref().is_some_and(|l| l.required) {
+            return Ok(None);
+        }
+        let want = limit.saturating_add(sel.offset);
+        let mut range = None;
+        let mut bare = true;
+        if let Some(f) = &sel.filter {
+            let indexed = |name: &str| name == "id" || c.hashes.contains_key(name);
+            let mut eqs = Vec::new();
+            f.conjunct_equalities(params, &mut eqs);
+            let mut ins = Vec::new();
+            f.conjunct_in_sets(params, &mut ins);
+            if eqs.iter().any(|(n, _)| indexed(n)) || ins.iter().any(|(n, _)| indexed(n)) {
+                return Ok(None);
+            }
+            let mut ranges = Vec::new();
+            f.conjunct_ranges(params, &mut ranges);
+            for (name, _, _) in &ranges {
+                if name == field {
+                    continue;
+                }
+                let (Some(other), Some(fd)) = (c.sorted_index(name), c.schema.field(name)) else {
+                    continue;
+                };
+                if let Some((r, _)) = sorted_range(&fd.ty, name, f, params) {
+                    if other.range_ids(&r, 4096).is_some() {
+                        return Ok(None);
+                    }
+                }
+            }
+            let fd = c
+                .schema
+                .field(field)
+                .expect("an ordered index has its field");
+            let own = sorted_range(&fd.ty, field, f, params);
+            bare = matches!(&own, Some((_, true))) && f.only_ranges_on(field, params);
+            range = own.map(|(r, _)| r);
+        }
+        let mut out = Vec::with_capacity(want.min(4096));
+        if want == 0 {
+            return Ok(Some(out));
+        }
+        // A filter the index cannot narrow is tested as the walk passes each
+        // row, and one that matches almost nothing would have the walk read
+        // every row in key order: random reads, which over a million rows
+        // took 237 ms against the scan's 121. Past an eighth of the
+        // collection the scan is the better bet, and the rows walked so far
+        // are what the wrong guess cost -- 1.25x the scan at worst, while a
+        // filter matching 1% still fills the page in 0.29 ms against 125.
+        let budget = (c.store.len() / 8).max(want);
+        let (mut walked, mut gave_up) = (0usize, false);
+        ix.walk(!asc, range.as_ref(), |id| {
+            if !bare {
+                if let Some(f) = &sel.filter {
+                    walked += 1;
+                    if walked > budget {
+                        gave_up = true;
+                        return Ok(false);
+                    }
+                    let mut row = StoreRow {
+                        store: &c.store,
+                        schema: &c.schema,
+                        id,
+                        memo: Vec::new(),
+                    };
+                    if !truthy(&eval(f, &mut row, ctx)?) {
+                        return Ok(true);
+                    }
+                }
+            }
+            out.push(id);
+            Ok(out.len() < want)
+        })?;
+        Ok((!gave_up).then_some(out))
     }
 
     /// `match`, and `rerank` on top of it when the query asks for one.
@@ -2453,6 +2647,8 @@ impl Database {
                 }
             };
             scored = hits.into_iter().map(|(id, s)| (id, Some(s))).collect();
+        } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
+            scored = ids.into_iter().map(|id| (id, None)).collect();
         } else {
             // With no ordering the page is the first `offset + limit` matches
             // in id order, so the scan can stop there. `required` drops
@@ -2638,6 +2834,35 @@ impl Database {
             "compaction done, {reclaimed} bytes reclaimed"
         )))
     }
+}
+
+/// The range a filter's comparisons put on an ordered field, and whether
+/// every one of them could be said as a key. A comparison the key space
+/// cannot express exactly -- `price < 12.5` on an `int` field -- is left out
+/// of the range, which then only narrows, and the filter is evaluated.
+fn sorted_range(
+    ty: &DataType,
+    field: &str,
+    f: &Expr,
+    params: &[Value],
+) -> Option<(SortRange, bool)> {
+    let mut ranges = Vec::new();
+    f.conjunct_ranges(params, &mut ranges);
+    let mut range = SortRange::all();
+    let (mut any, mut exact) = (false, true);
+    for (name, op, v) in ranges {
+        if name != field {
+            continue;
+        }
+        match SortedIndex::bound(ty, v) {
+            Some(key) => {
+                range.narrow(op, key);
+                any = true;
+            }
+            None => exact = false,
+        }
+    }
+    any.then_some((range, exact))
 }
 
 /// Sort keys: a field position (`None` for `id`) and whether it ascends.

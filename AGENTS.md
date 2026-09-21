@@ -138,19 +138,38 @@ candidates are membership-tested. The second path *must* fall back to scanning
 the filter set in full when the result lands under the limit — otherwise a filter
 correlated with the vector eliminates every candidate and returns empty.
 
-**Only equality inside an `and` chain reaches an index** -- `=` or `in [..]`,
-over a `@hash` field or over `id`. `in` is a set of equalities written short, so
-it is answered as the union of one bucket per element, and only when *every*
-element resolves to something the field's type can express: one it cannot sends
-the whole list back to the scan, because a union missing an element's rows is a
-wrong answer rather than a slow one. `id` has no `@hash` and cannot have one --
-`Schema::new` reserves the name -- so the store's id index answers it directly;
-before that it was a full scan, 383 us against 0.50 us over 20 000 documents.
-Everything else -- `>=`, `~`, `has`, anything under `or` -- is a full scan. `~`
-is unranked substring matching; ranked text retrieval is `match` over an `@text`
-field, which does reach one. `order` reads every match's key but puts only
-`offset + limit` rows in order; with no `order`, the scan stops at
-`offset + limit` matches.
+**Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
+`@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set
+of equalities written short, so it is answered as the union of one bucket per
+element, and only when *every* element resolves to something the field's type
+can express: one it cannot sends the whole list back to the scan, because a
+union missing an element's rows is a wrong answer rather than a slow one. `id`
+has no `@hash` and cannot have one -- `Schema::new` reserves the name -- so the
+store's id index answers it directly; before that it was a full scan, 383 us
+against 0.50 us over 20 000 documents. Everything else -- `!=`, `~`, `has`, a
+comparison on a field without `@sorted`, anything under `or` -- is a full scan.
+`~` is unranked substring matching; ranked text retrieval is `match` over an
+`@text` field, which does reach one. `order` reads every match's key but puts
+only `offset + limit` rows in order -- unless it is one key over a `@sorted`
+field with a `limit`, which walks the index and stops at the page; with no
+`order`, the scan stops at `offset + limit` matches.
+
+**`@sorted` must give the scan's answer, row for row.** Its keys order exactly
+as `Value::cmp_value` orders the field's values (ints and timestamps through a
+sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
+`0.0`), `null` is held apart below every key, and `NaN` apart from both: it
+compares equal to everything, so it matches every inclusive comparison and no
+strict one, and an index holding one is never walked for `order`. A literal the
+key space cannot express exactly (`12.5` against an `int`, an int past 2^53
+against a `timestamp`) is left out of the range and evaluated per row. Ties come
+out in ascending id both ways, since that is the order the scan leaves them in
+-- a descending walk reverses each run of equal keys. A walk tests the rest of
+the filter row by row and gives up past an eighth of the collection, so a filter
+that matches almost nothing costs 1.25x the scan rather than 2x in random reads.
+The structure is a sorted `Vec` of chunks of at most 512 entries, not a
+`BTreeSet`, which made the browser module 75 KB larger; `tests/sorted.rs` checks
+every filter, order and page against a twin collection without the index. It is
+derived data like the hash and text indexes: built on open, never in the file.
 
 **`lookup` is one bucket probe per parent, not a join.** It attaches another
 collection's matching documents to the row they belong to, and a `limit` after

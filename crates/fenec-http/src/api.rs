@@ -906,6 +906,7 @@ fn schemas_json(list: &[Schema]) -> String {
             match &f.index {
                 IndexKind::None => out.push_str("null"),
                 IndexKind::Hash => json::escape_into(&mut out, "hash"),
+                IndexKind::Sorted => json::escape_into(&mut out, "sorted"),
                 IndexKind::Vector(spec) => json::escape_into(
                     &mut out,
                     &format!(

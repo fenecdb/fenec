@@ -229,6 +229,7 @@ pub fn response_to_string(r: &Response) -> String {
                         match &f.index {
                             crate::schema::IndexKind::None => "none".to_string(),
                             crate::schema::IndexKind::Hash => "hash".to_string(),
+                            crate::schema::IndexKind::Sorted => "sorted".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {
                                 format!("hnsw({}, m={})", spec.metric.name(), spec.m)
                             }

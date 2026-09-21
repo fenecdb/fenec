@@ -96,10 +96,10 @@ space of 4 GB is the upper bound, and the 2–3× factors above come out of it
 too, so the real ceiling is lower.</p>
 
 <p><code>Database::memory_bytes()</code> sums the segment bytes, the offset
-indexes, the vector arenas and the graph links from counters, and
-<code>--max-memory</code> uses it. It is not RSS: allocator slack, HNSW build
-buffers, upper-level neighbour allocations (~3% of level 0) and the transient
-peaks all sit outside it.</p>
+indexes, the vector arenas, the graph links, the text postings and the
+ordered indexes from counters, and <code>--max-memory</code> uses it. It is
+not RSS: allocator slack, HNSW build buffers, upper-level neighbour
+allocations (~3% of level 0) and the transient peaks all sit outside it.</p>
 
 <div class="tbl">
 <table>
@@ -148,6 +148,13 @@ that is down takes its tenants with it.</p>
     but very small collections fall to the serial path below 1024 vectors.</li>
   <li>The build is parallel within a batch, and because writing links is serial
     the speed-up is not linear in core count: about 1.9× on eight cores.</li>
+  <li><b>Ordered indexes are rebuilt on open and cost on write.</b>
+    <code>@sorted</code> keeps about 20 bytes a row for a number, plus the
+    text for a <code>text</code> field, and none of it is in the file: two
+    ordered indexes over a million rows added about 40 ms to an open, and took
+    a bulk load from 0.52 s to 0.88 s. A key that grows with the id, a
+    creation time, is appended; a random one is inserted into a sorted run of
+    at most 512 entries.</li>
   <li>File writes are buffered. If the process crashes before
     <code>sync</code> or <code>checkpoint</code>, the last writes can be lost.
     In embedded use calling <code>sync</code> is the caller's job.</li>
@@ -156,13 +163,21 @@ that is down takes its tenants with it.</p>
 <h2>Query behaviour</h2>
 
 <ul>
-  <li><b>Only equality in an <code>and</code> chain reaches an index</b> —
-    <code>=</code> or <code>in [..]</code>, over a <code>@hash</code> field or
-    over <code>id</code>. <code>&gt;=</code>, <code>~</code>, <code>has</code>
-    and anything under an <code>or</code> is a full scan: every matching row is
+  <li><b>Only an <code>and</code> chain reaches an index</b> — equality
+    (<code>=</code> or <code>in [..]</code>) over a <code>@hash</code> field
+    or over <code>id</code>, and comparisons (<code>&lt;</code>,
+    <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>=</code>)
+    over a <code>@sorted</code> field. <code>!=</code>, <code>~</code>,
+    <code>has</code>, a comparison on a field without <code>@sorted</code>, and
+    anything under an <code>or</code> is a full scan: every matching row is
     decoded and evaluated. <code>~</code> is unranked substring matching;
     ranked retrieval is <code>match</code> over a <code>@text</code> field,
     which does reach an index.</li>
+  <li>A comparison reaches an ordered index only when its literal compares
+    exactly as the scan would: <code>price &lt; 12.5</code> on an
+    <code>int</code> field, or an integer past 2<sup>53</sup> against a
+    <code>timestamp</code>, is tested row by row. A range wider than half the
+    collection is scanned rather than read from the index.</li>
   <li>An <code>in</code> list reaches the index only when <b>every</b> element
     resolves to a value the field's type can express. One element it cannot —
     <code>year in [2024, "abc"]</code> — sends the whole list back to the scan,
@@ -172,14 +187,24 @@ that is down takes its tenants with it.</p>
     filter set, not by the vector search. Of the ~6.5 ms measured on 100 000
     documents, nearly all is the filter scan — an unfiltered ANN is 0.2 ms.
     With a selective filter the exact-scan path is taken, so recall is
-    10/10.</li>
-  <li><b><code>order</code> reads every match.</b> Only
+    10/10. An index on the filtered field takes the scan away: over
+    200 000 × 128, <code>year &gt;= 2020</code> went from 15.2 ms to 0.68 ms
+    once <code>year</code> was <code>@sorted</code>.</li>
+  <li><b><code>order</code> reads every match, unless it is over a
+    <code>@sorted</code> field and has a <code>limit</code>.</b> Only
     <code>offset + limit</code> rows are put in order — the rest are
     partitioned away in linear time — but every matching row's key is still
     read, since the first twenty cannot be known without seeing all of them.
     The cost follows the number of matches, not <code>limit</code>: over a
-    million rows <code>order created desc limit 20</code> takes 28.4 ms.
-    Without <code>order</code>, a scan stops at <code>offset + limit</code>
+    million rows <code>order created desc limit 20</code> takes 26.8 ms, and
+    0.001 ms once <code>created</code> is <code>@sorted</code>, because the
+    index is walked in order and the walk stops at the page. A filter the
+    index cannot narrow is tested on each row the walk passes, and one that
+    has not filled the page within an eighth of the collection hands the query
+    back to the scan — at worst about 1.25× the scan alone. An order over two
+    keys, or over a <code>float</code> field holding a <code>NaN</code>, which
+    has no place in an order, takes the sorting path. Without
+    <code>order</code>, a scan stops at <code>offset + limit</code>
     matches.</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
