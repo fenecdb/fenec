@@ -631,6 +631,11 @@ export class Query {
    * `on` names the child's field; the parent's key is `id` unless
    * `parentKey` says otherwise. `order` takes `[field, dir]` pairs, or a
    * bare field name for one ascending key.
+   *
+   * `required: true` drops a parent no child matches -- "products that have
+   * a five-star review" rather than "products, with their five-star
+   * reviews". It is tested before `limit`, so the page still comes back
+   * full.
    */
   lookup(name, opts = {}) {
     if (!opts.on) {
@@ -647,6 +652,7 @@ export class Query {
             ? null
             : select.map((c) => ident(c)),
         cond: opts.where === undefined ? [] : [condOf([opts.where])],
+        required: !!opts.required,
         order: orderKeys(opts.order),
         limit: opts.limit === undefined ? undefined : whole(opts.limit, 'limit'),
         offset: opts.offset === undefined ? 0 : whole(opts.offset, 'offset'),
@@ -698,7 +704,14 @@ export class Query {
     if (lookup) {
       const clash = near ? 'near' : match ? 'match' : rerank ? 'rerank' : null;
       if (clash) throw new FenecError(`lookup cannot be combined with ${clash}`);
-      if (count) throw new FenecError('lookup cannot be combined with count');
+      // `count` collapses the rows children would hang from -- unless they
+      // are only deciding who is counted.
+      if (count && !lookup.required) {
+        throw new FenecError(
+          'count cannot be used with lookup unless it is required: there is ' +
+            'nothing to attach children to',
+        );
+      }
       if (lookup.collection === collection) {
         throw new FenecError(
           `${collection} cannot look itself up: both sides would answer to ` +
@@ -738,6 +751,10 @@ export class Query {
     if (lookup) {
       sql += ` lookup ${lookup.collection} on ${lookup.on}`;
       if (lookup.parent) sql += ` = ${lookup.parent}`;
+      // Early rather than trailing like `exact`: this one changes which rows
+      // come back, so it should be read before the clauses that only shape
+      // the children.
+      if (lookup.required) sql += ' required';
       if (lookup.project) sql += ` select ${lookup.project.join(', ')}`;
       const root = prune({ t: 'and', items: lookup.cond });
       if (root) sql += ` where ${render(root, bind, null)}`;

@@ -45,6 +45,12 @@ export type Row<F extends Fields> = F & { id: number };
 export interface LookupOptions<C extends Fields = Fields> {
   on: keyof Row<C> & string;
   parentKey?: string;
+  /**
+   * Drop a parent that no child matches — "products that have a five-star
+   * review" rather than "products, with their five-star reviews". Tested
+   * before `limit`, so the page still comes back full.
+   */
+  required?: boolean;
   select?: ChildKey<C> | ChildKey<C>[];
   where?: Where<C> | Cond<C>;
   order?: ChildKey<C> | Array<ChildKey<C> | [ChildKey<C>, ('asc' | 'desc')?]>;

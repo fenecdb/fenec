@@ -371,6 +371,17 @@ pub struct Lookup {
     pub order: Vec<(String, bool)>,
     pub limit: Option<usize>,
     pub offset: usize,
+    /// `required`: drop a parent that no child matches.
+    ///
+    /// Without it the page is the parents and a childless one keeps its row
+    /// with an empty group, which is what a listing wants. With it the
+    /// children decide who appears -- "products that have a five-star
+    /// review" -- and that is a different question, so it is asked for
+    /// rather than inferred from the presence of a child `where`.
+    ///
+    /// It is tested before `offset` and `limit`: a parent whose matches the
+    /// page happened to skip has matches all the same.
+    pub required: bool,
 }
 
 /// Column name of the `count` result. No such field can exist in a schema --
@@ -442,8 +453,6 @@ impl Select {
                 "match"
             } else if self.rerank.is_some() {
                 "rerank"
-            } else if self.count {
-                "count"
             } else {
                 ""
             };
@@ -451,6 +460,18 @@ impl Select {
                 return Err(Error::Query(format!(
                     "`lookup` cannot be used together with `{clash}`"
                 )));
+            }
+            // `count` collapses the rows the children would hang from, so it
+            // cannot combine with a `lookup` that attaches them. With
+            // `required` the children only decide who is counted -- "how
+            // many products have a five-star review" -- and that is a
+            // question with an answer.
+            if self.count && !l.required {
+                return Err(Error::Query(
+                    "`count` cannot be used with `lookup` unless it is `required`: \
+                     there is nothing to attach children to"
+                        .into(),
+                ));
             }
             // Both sides would answer to the same name, so neither `on` nor
             // a child `where` could say which one it meant. Aliases would

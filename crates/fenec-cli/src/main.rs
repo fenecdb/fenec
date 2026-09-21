@@ -22,7 +22,7 @@ FenecQL summary
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
-           [lookup <name> on <child> [= <parent>] <clauses...>]
+           [lookup <name> on <child> [= <parent>] [required] <clauses...>]
   select a, b from <name> ...             -- the classic SQL order works too
   set <name> { field: value } [where <expr>]
   del <name> [where <expr>]

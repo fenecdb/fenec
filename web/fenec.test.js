@@ -575,6 +575,26 @@ test('lookup refuses what the engine refuses', () => {
   assert.throws(() => from('p').lookup('r', {}), /lookup needs `on`/);
 });
 
+test('required goes into the clause and changes what count is allowed to do', () => {
+  assert.equal(
+    from('products')
+      .lookup('reviews', { on: 'product_id', required: true, where: { stars: { gte: 4 } } })
+      .toFenecQL()[0],
+    'get products lookup reviews on product_id required where stars >= $1',
+  );
+});
+
+test('count needs a required lookup, because there is nothing to attach to', async () => {
+  const exec = { run: () => ({ columns: ['count'], rows: [{ count: 2 }] }) };
+  // `count` collapses the rows children hang from -- unless they are only
+  // deciding who is counted.
+  await assert.rejects(
+    from('p').lookup('r', { on: 'k' }).bind(exec).count(),
+    /count cannot be used with lookup unless it is required/,
+  );
+  assert.equal(await from('p').lookup('r', { on: 'k', required: true }).bind(exec).count(), 2);
+});
+
 test('lookup names go through the same identifier check as every other name', () => {
   assert.throws(() => from('p').lookup('r; del p; --', { on: 'k' }), FenecError);
   assert.throws(() => from('p').lookup('r', { on: 'a.b' }), FenecError);
