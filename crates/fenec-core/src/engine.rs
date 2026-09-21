@@ -1718,12 +1718,18 @@ impl Database {
     /// `required` answered from the child side: read the candidate children,
     /// keep the ones the filter passes, and take their parent keys.
     ///
-    /// Only for the shape where the parent's key is `id`, which is the
-    /// foreign-key-to-primary-key case and every case measured. Then the
-    /// child's join field already holds parent ids, so the keys *are* the
-    /// answer and not one parent is read. A named parent key would need
-    /// either a read per parent or a `@hash` on it to map the values back,
-    /// and neither has been measured; it falls back.
+    /// Only for the shape where the parent's key is `id`. That is the
+    /// foreign-key-to-primary-key case, and it is the only one where this
+    /// plan pays: the child's join field already holds parent ids, so
+    /// mapping a key back to its parents is integer work -- sort, dedup,
+    /// binary search -- and not one parent is read.
+    ///
+    /// A named key was written and measured and is not here. Mapping values
+    /// back means encoding ~40 000 of them and sorting the byte strings,
+    /// which costs more than it saves: over 20 000 parents and 200 000
+    /// children it came out 2-4% slower with a `@hash` on the parent's field
+    /// and 21-34% slower without one. The win in the `id` case is the cheap
+    /// mapping, not the direction of the walk.
     fn retain_via_children(
         &self,
         l: &Lookup,
