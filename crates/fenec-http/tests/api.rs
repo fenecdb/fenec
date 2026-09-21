@@ -715,7 +715,10 @@ fn a_float_in_the_query_string_is_read_like_every_other_number() {
 fn lookup_from_the_query_string() {
     let h = start(Config::default());
 
-    let r = get(h.port, "/articles?lookup=remarks&remarks.on=article_id&select=title");
+    let r = get(
+        h.port,
+        "/articles?lookup=remarks&remarks.on=article_id&select=title",
+    );
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(r.body.contains(r#""remarks":[{"#), "{}", r.body);
     // A parent with no children keeps its row and an empty group.
@@ -754,9 +757,21 @@ fn lookup_from_the_query_string_is_checked() {
     for (target, status, needle) in [
         ("/articles?lookup=remarks", 400, "remarks.on"),
         ("/articles?lookup=nosuch&nosuch.on=x", 404, "nosuch"),
-        ("/articles?lookup=remarks&remarks.on=nope", 404, "remarks.nope"),
-        ("/articles?lookup=remarks&remarks.on=article_id&remarks.nofield=1", 404, "nofield"),
-        ("/articles?lookup=remarks&remarks.on=article_id&count=true", 400, "required"),
+        (
+            "/articles?lookup=remarks&remarks.on=nope",
+            404,
+            "remarks.nope",
+        ),
+        (
+            "/articles?lookup=remarks&remarks.on=article_id&remarks.nofield=1",
+            404,
+            "nofield",
+        ),
+        (
+            "/articles?lookup=remarks&remarks.on=article_id&count=true",
+            400,
+            "required",
+        ),
         ("/articles?lookup=articles&articles.on=id", 400, "itself"),
     ] {
         let r = get(h.port, target);
