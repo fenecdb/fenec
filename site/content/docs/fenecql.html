@@ -149,16 +149,20 @@ it, because the parent has matches all the same. It is the one shape where
 so counting the parents that have a match is a question with an answer.</p>
 
 <div class="note">
-  <p><b><code>required</code> is a pass over the candidate parents, and it is
-  not cheap.</b> There is no index from "a child matching this filter" back to
-  its parent, so every candidate is probed — it stops at the first child that
-  passes, which is why the unfiltered form is an order cheaper. Over 20 000
-  products and 200 000 reviews, for a page of twenty:</p>
+  <p><b><code>required</code> is a pass, and it is not cheap.</b> It is
+  answered from whichever side is smaller: walking the candidate parents and
+  probing each, or — when the child filter carries a <code>@hash</code>
+  equality and the parent's key is <code>id</code> — reading the children that
+  equality names and taking their parents. Both counts that decide are exact,
+  so the choice is not a guess; what neither plan escapes is that one full
+  pass has to happen. Over 20 000 products and 200 000 reviews, for a page of
+  twenty:</p>
   <table>
   <tbody>
-  <tr><td><code>required</code>, with a child filter</td><td>16.39 ms</td></tr>
+  <tr><td><code>required</code>, child filter on a <code>@hash</code> field</td><td>12.07 ms</td></tr>
+  <tr><td>the same, walking the parents instead</td><td>15.63 ms</td></tr>
   <tr><td><code>required</code>, no child filter</td><td>2.19 ms</td></tr>
-  <tr><td><code>count … required</code></td><td>7.57 ms</td></tr>
+  <tr><td><code>count … required</code></td><td>4.50 ms</td></tr>
   <tr><td>a <code>bool @hash</code> field on the parent</td><td>0.02 ms</td></tr>
   </tbody>
   </table>
