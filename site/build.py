@@ -325,7 +325,7 @@ CLAIMS = [
      "kb_client_br", 0),
     ("site/content/docs/benchmarks.html",
      r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
-    ("README.md", r"(\d+) KB brotli over the wire", "kb_br_all", 0),
+    ("README.md", r"(\d+) KB brotli \(`-q 11`\) over the wire", "kb_br_all", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
