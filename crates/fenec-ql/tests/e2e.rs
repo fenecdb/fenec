@@ -1404,7 +1404,10 @@ fn required_drops_the_parents_no_child_matches() {
         .collect();
     assert_eq!(kept, want);
     assert!(kept_n.iter().all(|n| *n > 0));
-    assert!(all_n.iter().any(|n| *n == 0), "the fixture must exercise both");
+    assert!(
+        all_n.iter().any(|n| *n == 0),
+        "the fixture must exercise both"
+    );
 
     // The page is filled after the drop, not before.
     let (page, _) = sizes(&mut db, &format!("get products limit 1 {base} required"));

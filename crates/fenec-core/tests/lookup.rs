@@ -413,7 +413,10 @@ fn required_keeps_only_the_parents_a_child_matches() {
         .collect();
     assert_eq!(kept_ids, want);
     assert!(kept_sizes.iter().all(|n| *n > 0));
-    assert!(all_sizes.iter().any(|n| *n == 0), "the fixture must exercise both");
+    assert!(
+        all_sizes.iter().any(|n| *n == 0),
+        "the fixture must exercise both"
+    );
 }
 
 /// `required` decides who is on the page, so it has to run before `limit`:
@@ -423,8 +426,14 @@ fn required_keeps_only_the_parents_a_child_matches() {
 fn required_fills_the_page_before_limit_applies() {
     let mut db = fixture();
     // Products 2 and 3 have no five-star review; 1 and 4 do.
-    run(&mut db, r#"put products {sku: "e", name: "Fincan", price: 3000}"#);
-    run(&mut db, r#"put reviews {product_id: 5, sku: "e", stars: 5, body: "sade"}"#);
+    run(
+        &mut db,
+        r#"put products {sku: "e", name: "Fincan", price: 3000}"#,
+    );
+    run(
+        &mut db,
+        r#"put reviews {product_id: 5, sku: "e", stars: 5, body: "sade"}"#,
+    );
 
     let mut l = lookup("product_id", "id");
     l.filter = Some(Expr::Cmp(
@@ -437,7 +446,10 @@ fn required_fills_the_page_before_limit_applies() {
     sel.limit = Some(2);
     let (parents, n) = nested(&db, &sel);
     assert_eq!(parents.rows.len(), 2, "the page must be full");
-    assert_eq!(parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 4]);
+    assert_eq!(
+        parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![1, 4]
+    );
     assert!(n.groups.iter().all(|g| !g.is_empty()));
 }
 
@@ -451,8 +463,14 @@ fn a_child_offset_does_not_undo_required() {
     l.offset = 99;
     let (parents, n) = nested(&db, &plan(l));
     // Products 1, 2 and 4 have reviews; 3 does not.
-    assert_eq!(parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2, 4]);
-    assert!(n.groups.iter().all(|g| g.is_empty()), "offset skipped them all");
+    assert_eq!(
+        parents.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![1, 2, 4]
+    );
+    assert!(
+        n.groups.iter().all(|g| g.is_empty()),
+        "offset skipped them all"
+    );
 }
 
 /// `count` with `required` asks how many parents have a match, which is a
