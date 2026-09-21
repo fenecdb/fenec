@@ -137,7 +137,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
 | **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
-| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent |
+| **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
 | **Runtime size** | 358 KB wasm + 64 KB client (119 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
@@ -149,7 +149,8 @@ no schema migration, no multi-writer replication, no decimal type — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
 ceiling baked into the code. Relations are `lookup`, which attaches a
 collection's matching documents to the row they belong to with a `limit` that
-counts children per parent; it is not a join and is not trying to be one.
+counts children per parent, and chains — `products → reviews → authors` is one
+query; it is not a join and is not trying to be one.
 
 ---
 

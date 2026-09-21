@@ -19,7 +19,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
-           [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]
+           [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value } [where &lt;expr&gt;]
@@ -120,6 +120,18 @@ scoping rule, and it is why there are no qualified names in the language —
 is that a parent clause cannot follow a child one, which reads the way the
 query runs anyway.</p>
 
+<pre data-lang="fenecql">get shops limit 20
+  lookup orders on shop_id limit 3
+  lookup lines on order_id limit 5
+</pre>
+
+<p>A second <code>lookup</code> <b>chains</b> onto the first: its clauses bind
+to <i>its</i> collection, and <code>on &lt;child&gt; = &lt;parent&gt;</code>
+names a field of the level immediately above. Position keeps scoping the query
+one level deeper, so exactly one collection is in scope at any point and it is
+the last one named — which is what keeps qualified names out of the language at
+any depth. Up to <b>8</b> levels; deeper is an error, not a silent truncation.</p>
+
 <div class="note">
   <p><b><code>limit</code> after <code>lookup</code> counts children per
   parent.</b> This is the clause's reason to exist. A join's limit counts
@@ -171,6 +183,15 @@ so counting the parents that have a match is a question with an answer.</p>
   on write — which is the same trade the rest of this database makes.</p>
 </div>
 
+<p>In a chain, <code>required</code> is a statement about its own level: it
+drops rows of the level immediately above it and stops there. Requiring lines
+drops the <i>orders</i> that have none; the shops keep their rows, with an
+empty group, unless the orders level says <code>required</code> as well. Said
+at every level it composes into "shops with an order that has a line", and the
+existence check walks the whole way down — a row is only kept if it has a
+descendant that is itself kept. Nothing acts at a distance, and the flag means
+the same thing wherever it is written.</p>
+
 <p><code>lookup</code> combines with neither <code>near</code>,
 <code>match</code> nor <code>rerank</code>: each ranks one collection's
 documents, and a score spanning a parent and its children has no defensible
@@ -187,11 +208,15 @@ remains is reading one key per child, which no ordering can avoid — you cannot
 know the first three without having seen all of them. Elsewhere
 <code>order</code> has no such guarantee and still sorts in full.</p>
 
-<p>Over JSON the children are nested under the collection's name. On the
-PostgreSQL wire, which has no nested row, they arrive flattened into the
-parent row the way a join presents them — the same data, the shape the
-transport can carry. A parent with no matches keeps its row either way: the
-page is the parents.</p>
+<p>Over JSON the children are nested under the collection's name, and a chain
+nests all the way down. On the PostgreSQL wire, which has no nested row, they
+arrive flattened into the parent row the way a join presents them — the same
+data, the shape the transport can carry; a chain widens once per level, one row
+per root-to-leaf path, and a level that ran out fills its own columns and every
+column below it with nulls. A parent with no matches keeps its row either way:
+the page is the parents. What the flat shape cannot show is the per-level
+<code>limit</code>, which is exactly why the nesting is what the other
+transports carry.</p>
 
 <div class="note">
   <p><b>What it buys, measured</b> (5 000 products, 100 007 reviews, twenty
@@ -204,6 +229,15 @@ page is the parents.</p>
   and the same window function with the restriction left outside
   <b>81.34 ms</b> — a factor of 1 500 between three spellings of one
   question, with nothing in the query text to tell them apart.</p>
+  <p>A second level is where batching stops being an answer. One level of N+1
+  fits in a single round trip, because every query in it can be written from
+  the page's ids; the level below cannot, because its keys are in rows that
+  have not come back yet — so the client pays two round trips whatever it
+  does. Over 2 000 shops, 20 000 orders and 200 000 lines, for a page of
+  20 × 3 × 5: <b>49.1 µs</b> in process against <b>139.8 µs</b> for the same
+  page as 81 separate queries, and <b>0.204 ms</b> for the one HTTP request
+  against <b>0.415 ms</b> for two <code>/batch</code> trips — measured on
+  loopback, where the extra trip costs almost nothing and still doubles it.</p>
 </div>
 
 <h2>Indexes</h2>

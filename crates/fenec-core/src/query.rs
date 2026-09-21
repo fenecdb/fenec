@@ -431,6 +431,49 @@ pub struct Lookup {
     /// It is tested before `offset` and `limit`: a parent whose matches the
     /// page happened to skip has matches all the same.
     pub required: bool,
+    /// A further `lookup`, hanging off the children of this one:
+    /// `products -> reviews -> authors`.
+    ///
+    /// The positional scoping simply reads one level deeper -- everything
+    /// after this clause's `lookup` binds to *its* collection, and `on child
+    /// = parent` names a field of the level immediately above. So the rule
+    /// that keeps qualified names out of the language survives the chain
+    /// unchanged: at any point in the query exactly one collection is in
+    /// scope, and it is the last one named.
+    ///
+    /// The second level is where a batch stops being an answer. One level
+    /// of N+1 fits in a single round trip, because every query in it can be
+    /// written from the page's ids; the level below cannot, because its keys
+    /// are in the rows that have not come back yet. So the client pays two
+    /// round trips whatever it does. Over 2 000 shops, 20 000 orders and
+    /// 200 000 lines, a page of 20 x 3 x 5: 49.1 us in process against
+    /// 139.8 us for the same page as 81 separate queries, and over HTTP
+    /// 0.204 ms for the one request against 0.415 ms for two `/batch` trips
+    /// -- on loopback, where the extra trip costs almost nothing and still
+    /// doubles it.
+    pub next: Option<Box<Lookup>>,
+}
+
+/// How many `lookup` levels one query may chain.
+///
+/// A bound on the stack rather than on the work: the parser recurses once
+/// per level, `check` and the engine walk the chain the same way, and
+/// dropping the boxed chain recurses too. `products -> reviews -> authors`
+/// is three collections and two levels; the rest is headroom nobody has
+/// asked for. Exceeding it is an error, not a truncation -- a chain quietly
+/// cut short is a wrong answer believed right.
+pub const MAX_LOOKUP_DEPTH: usize = 8;
+
+impl Lookup {
+    /// This clause and every one hanging off it, outermost first.
+    pub fn chain(&self) -> impl Iterator<Item = &Lookup> {
+        let mut cur = Some(self);
+        std::iter::from_fn(move || {
+            let l = cur?;
+            cur = l.next.as_deref();
+            Some(l)
+        })
+    }
 }
 
 /// Column name of the `count` result. No such field can exist in a schema --
@@ -525,11 +568,26 @@ impl Select {
             // Both sides would answer to the same name, so neither `on` nor
             // a child `where` could say which one it meant. Aliases would
             // fix it; there are none, so it is refused rather than guessed.
-            if l.collection == self.collection {
-                return Err(Error::Query(format!(
-                    "`{}` cannot look itself up: both sides would answer to the same name",
-                    self.collection
-                )));
+            //
+            // A chain makes this a whole-query rule rather than a pairwise
+            // one: `products lookup reviews lookup products` would put the
+            // driving collection back in scope two levels down, where `on
+            // child = parent` reaches the level above and could mean either.
+            // Every collection in the chain must therefore be distinct.
+            let mut seen = vec![self.collection.as_str()];
+            for (depth, step) in l.chain().enumerate() {
+                if depth + 1 > MAX_LOOKUP_DEPTH {
+                    return Err(Error::Query(format!(
+                        "`lookup` chained too deep: at most {MAX_LOOKUP_DEPTH} levels"
+                    )));
+                }
+                if seen.contains(&step.collection.as_str()) {
+                    return Err(Error::Query(format!(
+                        "`{}` cannot look itself up: both sides would answer to the same name",
+                        step.collection
+                    )));
+                }
+                seen.push(step.collection.as_str());
             }
         }
         if !self.count {
@@ -630,7 +688,11 @@ impl Statement {
                 // parameters count here too. `Describe` answers with this
                 // number before the query runs; a client told there are none
                 // sends none, and the query then fails on an unbound `$1`.
-                let lk = sel.lookup.as_ref().map(|l| opt(&l.filter)).unwrap_or(0);
+                let lk = sel
+                    .lookup
+                    .as_ref()
+                    .map(|l| l.chain().map(|s| opt(&s.filter)).max().unwrap_or(0))
+                    .unwrap_or(0);
                 opt(&sel.filter).max(near).max(m).max(rr).max(lk)
             }
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
@@ -669,8 +731,29 @@ pub struct Nested {
     /// The looked-up collection's name, and the key it serialises under.
     pub name: String,
     pub columns: Vec<String>,
-    /// One group per row of the parent set, in the same order.
+    /// One group per row of the level above, in the same order.
     pub groups: Vec<Vec<Row>>,
+    /// The next level down, attached to the rows of *this* one.
+    ///
+    /// A tree stored one level at a time: `nested.groups` holds one group
+    /// per row of `groups` read left to right, concatenated. The alignment
+    /// rule is therefore the same sentence at every depth, and a level costs
+    /// one vector rather than a node per row -- which matters, because the
+    /// row count multiplies going down.
+    pub nested: Option<Box<Nested>>,
+}
+
+impl Nested {
+    /// The rows of this level, in the order the level below is aligned to.
+    pub fn rows(&self) -> impl Iterator<Item = &Row> {
+        self.groups.iter().flatten()
+    }
+
+    /// The group belonging to row `i` of the level above. A row with no
+    /// matches has an empty group, not a missing one.
+    pub fn group(&self, i: usize) -> &[Row] {
+        self.groups.get(i).map_or(&[], |g| g.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -693,6 +776,13 @@ impl ResultSet {
     /// A parent with no children keeps one row with the child columns null,
     /// because the page is the parents either way.
     ///
+    /// A chain renders the same way, one column block per level: a row is
+    /// one root-to-leaf path, and a level that ran out of matches fills its
+    /// block -- and every block below it -- with nulls. That is a left join's
+    /// shape repeated, which is the only rendering a transport with no
+    /// nested row can be given; what it loses is the per-level `limit`,
+    /// still readable in the nesting the other transports keep.
+    ///
     /// `Row::id` stays the parent's. It is never serialised -- both JSON
     /// writers emit columns and values only -- so a repeated id here reaches
     /// nobody who could be misled by it.
@@ -703,34 +793,77 @@ impl ResultSet {
             return std::borrow::Cow::Borrowed(self);
         };
         let mut columns = self.columns.clone();
-        columns.extend(n.columns.iter().map(|c| format!("{}.{}", n.name, c)));
-        let nulls = vec![Value::Null; n.columns.len()];
-        let mut rows = Vec::with_capacity(self.rows.len());
-        for (i, row) in self.rows.iter().enumerate() {
-            let group = n.groups.get(i).map(|g| g.as_slice()).unwrap_or(&[]);
-            let mut widen = |extra: &[Value]| {
-                let mut values = Vec::with_capacity(columns.len());
-                values.extend(row.values.iter().cloned());
-                values.extend(extra.iter().cloned());
-                rows.push(Row {
-                    id: row.id,
-                    values,
-                    score: row.score,
-                });
-            };
-            if group.is_empty() {
-                widen(&nulls);
-            } else {
-                for child in group {
-                    widen(&child.values);
-                }
+        // Each level contributes a block of columns, and the prefix sums of
+        // its groups turn "row `t` of group `k`" into the single index the
+        // level below is keyed by -- the alignment `Nested::rows` describes.
+        let mut levels: Vec<(&Nested, Vec<usize>)> = Vec::new();
+        let mut level = Some(n);
+        while let Some(l) = level {
+            columns.extend(l.columns.iter().map(|c| format!("{}.{}", l.name, c)));
+            let mut prefix = Vec::with_capacity(l.groups.len());
+            let mut acc = 0;
+            for g in &l.groups {
+                prefix.push(acc);
+                acc += g.len();
             }
+            levels.push((l, prefix));
+            level = l.nested.as_deref();
+        }
+        let width = columns.len();
+        let mut rows = Vec::with_capacity(self.rows.len());
+        let mut path = Vec::with_capacity(width);
+        for (i, row) in self.rows.iter().enumerate() {
+            path.clear();
+            path.extend(row.values.iter().cloned());
+            flatten_level(&mut rows, &mut path, &levels, 0, i, row, width);
         }
         std::borrow::Cow::Owned(ResultSet {
             columns,
             rows,
             nested: None,
         })
+    }
+}
+
+/// One output row per root-to-leaf path through the nesting.
+///
+/// A level with nothing for the row above writes nulls for its own block and
+/// for every block below it, and stops: the page is the parents, so the path
+/// still produces a row. Recursion is bounded by `MAX_LOOKUP_DEPTH`.
+fn flatten_level(
+    out: &mut Vec<Row>,
+    path: &mut Vec<Value>,
+    levels: &[(&Nested, Vec<usize>)],
+    depth: usize,
+    group: usize,
+    root: &Row,
+    width: usize,
+) {
+    let mut leaf = |path: &mut Vec<Value>| {
+        let mark = path.len();
+        path.resize(width, Value::Null);
+        out.push(Row {
+            id: root.id,
+            values: path.clone(),
+            score: root.score,
+        });
+        path.truncate(mark);
+    };
+    let Some((n, prefix)) = levels.get(depth) else {
+        leaf(path);
+        return;
+    };
+    let children = n.group(group);
+    if children.is_empty() {
+        leaf(path);
+        return;
+    }
+    let base = prefix[group];
+    for (t, child) in children.iter().enumerate() {
+        let mark = path.len();
+        path.extend(child.values.iter().cloned());
+        flatten_level(out, path, levels, depth + 1, base + t, root, width);
+        path.truncate(mark);
     }
 }
 

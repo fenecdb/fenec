@@ -23,6 +23,10 @@
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// How many `lookup` levels one query may chain. The engine refuses a deeper
+// one; failing here never sends the query.
+const MAX_LOOKUP_DEPTH = 8;
+
 export class FenecError extends Error {}
 
 export class Fenec {
@@ -517,7 +521,7 @@ export class Query {
   #s;
 
   constructor(state) {
-    this.#s = { cond: [], order: [], offset: 0, ...state };
+    this.#s = { cond: [], order: [], offset: 0, lookups: [], ...state };
   }
 
   // Cloned through `this.constructor`: subclasses such as `FenecSync.from()`
@@ -636,28 +640,39 @@ export class Query {
    * a five-star review" rather than "products, with their five-star
    * reviews". It is tested before `limit`, so the page still comes back
    * full.
+   *
+   * Call it again to chain: the second call binds to the collection the
+   * first one named, the way position scopes it in FenecQL.
+   *
+   *   db.from('shops')
+   *     .lookup('orders', { on: 'shop_id', limit: 3 })
+   *     .lookup('lines',  { on: 'order_id', limit: 5 })
+   *
+   * -- three shops' worth of orders, each with its own lines, in one query
+   * instead of one round trip per order. `required` keeps meaning what it
+   * means at its own level: on `lines` it drops the *orders* that have
+   * none, and the shops stay unless `orders` says `required` as well.
    */
   lookup(name, opts = {}) {
     if (!opts.on) {
       throw new FenecError('lookup needs `on`: the child field holding the key');
     }
     const select = opts.select === undefined ? null : [opts.select].flat();
-    return this.#with({
-      lookup: {
-        collection: ident(name, 'collection'),
-        on: ident(opts.on),
-        parent: opts.parentKey === undefined ? null : ident(opts.parentKey),
-        project:
-          select === null || select.includes('*')
-            ? null
-            : select.map((c) => ident(c)),
-        cond: opts.where === undefined ? [] : [condOf([opts.where])],
-        required: !!opts.required,
-        order: orderKeys(opts.order),
-        limit: opts.limit === undefined ? undefined : whole(opts.limit, 'limit'),
-        offset: opts.offset === undefined ? 0 : whole(opts.offset, 'offset'),
-      },
-    });
+    const level = {
+      collection: ident(name, 'collection'),
+      on: ident(opts.on),
+      parent: opts.parentKey === undefined ? null : ident(opts.parentKey),
+      project:
+        select === null || select.includes('*')
+          ? null
+          : select.map((c) => ident(c)),
+      cond: opts.where === undefined ? [] : [condOf([opts.where])],
+      required: !!opts.required,
+      order: orderKeys(opts.order),
+      limit: opts.limit === undefined ? undefined : whole(opts.limit, 'limit'),
+      offset: opts.offset === undefined ? 0 : whole(opts.offset, 'offset'),
+    };
+    return this.#with({ lookups: [...this.#s.lookups, level] });
   }
 
   /**
@@ -689,7 +704,7 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank, lookup } = this.#s;
+    const { match, rerank, lookups } = this.#s;
     // The engine refuses both of these too; failing here never sends a query.
     if (rerank && !match) {
       throw new FenecError('rerank needs match: it reorders what match found');
@@ -701,22 +716,35 @@ export class Query {
     }
     // Refused in the engine too: a score spanning a parent and its children
     // has no meaning, and `count` collapses the rows they would hang from.
-    if (lookup) {
+    if (lookups.length) {
       const clash = near ? 'near' : match ? 'match' : rerank ? 'rerank' : null;
       if (clash) throw new FenecError(`lookup cannot be combined with ${clash}`);
       // `count` collapses the rows children would hang from -- unless they
       // are only deciding who is counted.
-      if (count && !lookup.required) {
+      if (count && !lookups[0].required) {
         throw new FenecError(
           'count cannot be used with lookup unless it is required: there is ' +
             'nothing to attach children to',
         );
       }
-      if (lookup.collection === collection) {
+      if (lookups.length > MAX_LOOKUP_DEPTH) {
         throw new FenecError(
-          `${collection} cannot look itself up: both sides would answer to ` +
-            'the same name',
+          `lookup chained too deep: at most ${MAX_LOOKUP_DEPTH} levels`,
         );
+      }
+      // A collection may appear once in a query. Chained, that is a
+      // whole-query rule and not a pairwise one: put the driving collection
+      // back in scope two levels down and `on child = parent` reaches a
+      // level that could be either of them.
+      const seen = [collection];
+      for (const l of lookups) {
+        if (seen.includes(l.collection)) {
+          throw new FenecError(
+            `${l.collection} cannot look itself up: both sides would answer ` +
+              'to the same name',
+          );
+        }
+        seen.push(l.collection);
       }
     }
     if (count) this.#assertCountable();
@@ -748,7 +776,7 @@ export class Query {
     // Terminal, so every clause after it belongs to the child -- and being
     // emitted last, its parameters land after the parent's, which is the
     // order `bind` numbered them in.
-    if (lookup) {
+    for (const lookup of lookups) {
       sql += ` lookup ${lookup.collection} on ${lookup.on}`;
       if (lookup.parent) sql += ` = ${lookup.parent}`;
       // Early rather than trailing like `exact`: this one changes which rows

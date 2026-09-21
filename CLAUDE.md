@@ -106,9 +106,9 @@ version, dimension, node count and link bounds are validated; anything off means
 a silent full rebuild. A corrupt graph can therefore never lose data.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
-(`limit + offset`) and expression depth at 512 levels; both return a query error,
-because a silently cut result is a wrong answer believed right. Full table in
-README *Fixed limits*.
+(`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
+all three return a query error, because a silently cut result is a wrong answer
+believed right. Full table in `site/content/docs/limits.html`.
 
 **Threads are `cfg`'d out of WASM.** The parallel HNSW build path must not enter
 the wasm32 target. Likewise `now()` errors there — wasm32-unknown-unknown has no
@@ -133,6 +133,25 @@ is unranked substring matching; ranked text retrieval is `match` over an `@text`
 field, which does reach one. `order` has no top-k: every match is sorted, then
 `limit` applies.
 
+**`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
+...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*
+collection, and `on child = parent` names a field of the level immediately
+above -- so exactly one collection is in scope at any point and it is the last
+one named, which is what keeps qualified names out of the language at any
+depth. `Nested` holds the tree one level at a time: a level's `groups` has one
+entry per row of the level above, read left to right and concatenated, so the
+alignment is the same sentence at every depth and a level costs one vector
+rather than a node per row. A collection may appear once per query, at any
+depth -- put the driving one back in scope two levels down and `on child =
+parent` reaches a level that could be either. The second level is what a
+`/batch` cannot answer in one round trip: its keys live in rows that have not
+come back yet. Over 2 000 / 20 000 / 200 000 for a 20 x 3 x 5 page, 49.1 us in
+process against 139.8 us for the same page as 81 separate queries, and 0.204 ms
+for one HTTP request against 0.415 ms for two `/batch` trips. `required` stays
+a statement about its own level -- it drops rows of the level immediately above
+and stops there, so it composes by being written at each level rather than by
+reaching down.
+
 **`lookup` is one bucket probe per parent, not a join.** It attaches another
 collection's matching documents to the row they belong to, and a `limit` after
 it counts children *per parent* -- the shape a join cannot express. It is
@@ -142,9 +161,10 @@ qualified names (`reviews.stars`) in the language and no filter splitting in
 the planner. The child key must be `id` or carry `@hash`; refusing an
 unindexed one follows `near` and `match`, because a silent full scan of the
 child collection would be a different feature under the same name. Nesting
-lives in `ResultSet.nested`, never in `Value` -- JSON transports nest, the
-PostgreSQL wire flattens (`ResultSet::flatten`), and the "no nested objects"
-rule stands. Measured at 22.7 us in process against 0.332 ms for the same
+lives in `ResultSet.nested`, never in `Value` -- JSON transports nest all the
+way down, the PostgreSQL wire flattens (`ResultSet::flatten`: one row per
+root-to-leaf path, nulls below the first level that ran out), and the "no
+nested objects" rule stands. Measured at 22.7 us in process against 0.332 ms for the same
 page as a `/batch` of 21 queries merged on the client.
 
 **`required` is the other half, and it is a pass.** `lookup ... required`

@@ -33,6 +33,22 @@ type AnySchema<S> = Record<keyof S, Fields>;
 export type Row<F extends Fields> = F & { id: number };
 
 /**
+ * The row shape a chained `lookup` produces: the new collection's rows are
+ * attached to the level named by `Path`, not to the parent.
+ *
+ * `Path` is the chain walked so far. Empty, the key lands on the parent row,
+ * which is the single-level case; otherwise the first name is followed into
+ * its element type and the rest of the path from there. Linear, so the
+ * recursion is as deep as the chain and no deeper.
+ */
+type Attach<T, Path extends readonly string[], N extends string, C extends Fields> =
+  Path extends readonly [infer H extends keyof T & string, ...infer R extends readonly string[]]
+    ? Omit<T, H> & {
+        [K in H]: T[H] extends readonly (infer E)[] ? Attach<E, R, N, C>[] : never;
+      }
+    : T & { [K in N]: Row<C>[] };
+
+/**
  * The child side of a `lookup`. `on` is the child's field; the parent's key
  * is `id` unless `parentKey` names another. `order` takes `[field, dir]`
  * pairs, or a bare field name for one ascending key.
@@ -161,58 +177,63 @@ export declare class FenecError extends Error {}
 
 /**
  * Immutable query builder. `F` is the collection's fields, `P` the result
- * of the projection so far.
+ * of the projection so far, and `L` the chain of `lookup` names so far --
+ * bookkeeping for the chained overload, never written out by a caller.
  */
-export declare class Query<F extends Fields = Fields, P = Row<F>> {
+export declare class Query<
+  F extends Fields = Fields,
+  P = Row<F>,
+  L extends readonly string[] = [],
+> {
   /** Binds the query to an executor (wasm, HTTP, fenec-pg). */
-  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P>;
+  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L>;
 
   select<K extends keyof Row<F> & string>(
     ...cols: (K | K[])[]
-  ): Query<F, Pick<Row<F>, K>>;
-  select(): Query<F, Row<F>>;
+  ): Query<F, Pick<Row<F>, K>, L>;
+  select(): Query<F, Row<F>, L>;
 
-  where(cond: Where<F> | Cond<F>): Query<F, P>;
+  where(cond: Where<F> | Cond<F>): Query<F, P, L>;
   where<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P>;
+  ): Query<F, P, L>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'in',
     values: Writable<Row<F>[K]>[],
-  ): Query<F, P>;
+  ): Query<F, P, L>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'has',
     value: Elem<Row<F>[K]>,
-  ): Query<F, P>;
+  ): Query<F, P, L>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: Writable<Row<F>[K]> | null,
-  ): Query<F, P>;
+  ): Query<F, P, L>;
 
-  orWhere(cond: Where<F> | Cond<F>): Query<F, P>;
+  orWhere(cond: Where<F> | Cond<F>): Query<F, P, L>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P>;
+  ): Query<F, P, L>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: unknown,
-  ): Query<F, P>;
+  ): Query<F, P, L>;
 
   /** Vector search; `_score` is added to the result. */
   near(
     field: VectorKey<F>,
     vector: number[] | Float32Array,
     opts?: { ef?: number; exact?: boolean },
-  ): Query<F, P & { _score: number }>;
+  ): Query<F, P & { _score: number }, L>;
 
   /** Full-text search over a `@text` index; `_score` is added to the result. */
-  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }>;
+  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L>;
 
   /**
    * Reorders what `match` found by exact vector distance. Requires `match`,
@@ -222,7 +243,7 @@ export declare class Query<F extends Fields = Fields, P = Row<F>> {
     field: VectorKey<F>,
     vector: number[] | Float32Array,
     opts?: { candidates?: number },
-  ): Query<F, P & { _score: number }>;
+  ): Query<F, P & { _score: number }, L>;
 
   /**
    * Attaches the children of another collection to each row.
@@ -237,16 +258,26 @@ export declare class Query<F extends Fields = Fields, P = Row<F>> {
    * loose row. Pass it to get the tight one:
    *
    *     q.lookup<'reviews', FenecSchema['reviews']>('reviews', { on: 'product_id' })
+   *
+   * Calling it again chains rather than replaces: the second call binds to
+   * the collection the first one named, and its rows are attached to *those*
+   * rows. The type follows, which is why `Query` carries the chain so far --
+   * `L` is bookkeeping, never written out by a caller.
+   *
+   *     db.from('shops')
+   *       .lookup('orders', { on: 'shop_id' })
+   *       .lookup('lines',  { on: 'order_id' })
+   *     // -> { ...shop, orders: { ...order, lines: {...}[] }[] }[]
    */
   lookup<N extends string, C extends Fields = Fields>(
     name: N,
     opts: LookupOptions<C>,
-  ): Query<F, P & { [K in N]: Row<C>[] }>;
+  ): Query<F, Attach<P, L, N, C>, [...L, N]>;
 
   /** Successive calls add a sort key (the second decides when the first ties). */
-  order(field: keyof Row<F> & string, dir?: 'asc' | 'desc'): Query<F, P>;
-  limit(n: number): Query<F, P>;
-  offset(n: number): Query<F, P>;
+  order(field: keyof Row<F> & string, dir?: 'asc' | 'desc'): Query<F, P, L>;
+  limit(n: number): Query<F, P, L>;
+  offset(n: number): Query<F, P, L>;
 
   /** The generated FenecQL and its parameters -- inspectable before running. */
   toFenecQL(): [sql: string, params: unknown[]];
@@ -261,7 +292,7 @@ export declare class Query<F extends Fields = Fields, P = Row<F>> {
   /** The opaque context carried by `bind` (for subclasses). */
   readonly context: unknown;
   /** The same body as a plain `Query`: bypasses subclass behaviour. */
-  plain(): Query<F, P>;
+  plain(): Query<F, P, L>;
 
   run(): Promise<{ columns: string[]; rows: P[] }>;
   rows(): Promise<P[]>;
@@ -457,8 +488,8 @@ export declare class FenecSync<S extends AnySchema<S> = Schema> {
    * Live query: re-run after every local change.
    * Returns: the function that ends the subscription.
    */
-  live<F extends Fields, P>(
-    query: Query<F, P>,
+  live<F extends Fields, P, L extends readonly string[]>(
+    query: Query<F, P, L>,
     cb: (rows: P[]) => void,
     opts?: { onError?: (e: unknown) => void },
   ): () => void;

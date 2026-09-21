@@ -380,6 +380,71 @@ fn hash_key(v: &Value) -> Vec<u8> {
     out
 }
 
+/// One resolved level of a `lookup` chain: the parts that do not depend on
+/// a row, plus the collection the key is read *from*.
+///
+/// `parent` is the level above -- the driving collection at depth 0, the
+/// level's own child collection one step down. That is the only thing a
+/// chained level needs that a single one did not: which store the key comes
+/// out of.
+struct Step<'a> {
+    l: &'a Lookup,
+    parent: &'a Collection,
+    child: &'a Collection,
+    probe: Probe<'a>,
+    /// Position of the key field in `parent`'s schema; `None` for `id`.
+    parent_pos: Option<usize>,
+}
+
+impl Step<'_> {
+    /// The value a row of the level above probes with.
+    fn key(&self, id: DocId) -> Result<Value> {
+        Ok(match self.parent_pos {
+            None => Value::Int(id as i64),
+            Some(p) => self.parent.store.read_field(id, p)?.unwrap_or(Value::Null),
+        })
+    }
+
+    /// Whether `id` passes this level's own `where`.
+    fn passes(&self, id: DocId, ctx: &EvalCtx) -> Result<bool> {
+        let Some(f) = &self.l.filter else {
+            return Ok(true);
+        };
+        let mut r = StoreRow {
+            store: &self.child.store,
+            schema: &self.child.schema,
+            id,
+            memo: Vec::new(),
+        };
+        Ok(truthy(&eval(f, &mut r, ctx)?))
+    }
+}
+
+/// Whether a row at `depth` survives -- it passes that level's `where`, and
+/// if the level below is `required`, it has at least one row there that
+/// survives in turn.
+///
+/// `required` is a statement about its own level: it drops rows of the level
+/// *above* it. So a review can be lost to an author that is not there, and a
+/// product then loses that review -- but only if the product's own level
+/// asked for `required` too. Nothing acts at a distance; the recursion is
+/// what makes the local rule compose.
+///
+/// It stops at the first survivor at every level, so a row with a thousand
+/// descendants costs what one with a single descendant costs -- the same
+/// property the single-level check has, carried down.
+fn survives(steps: &[Step], depth: usize, id: DocId, ctx: &EvalCtx) -> Result<bool> {
+    if !steps[depth].passes(id, ctx)? {
+        return Ok(false);
+    }
+    let Some(next) = steps.get(depth + 1).filter(|n| n.l.required) else {
+        return Ok(true);
+    };
+    let key = next.key(id)?;
+    next.probe
+        .any(next.child, &key, |g| survives(steps, depth + 1, g, ctx))
+}
+
 /// How `lookup` addresses the child collection.
 ///
 /// Both arms are one lookup per parent. There is deliberately no "scan the
@@ -1783,7 +1848,7 @@ impl Database {
     /// no join can express.
     /// The parts of a `lookup` that do not depend on a row: where the
     /// children live, how they are addressed, and where the parent's key
-    /// sits. Resolved once per query by both passes.
+    /// sits. Resolved once per level by both passes.
     fn lookup_plan<'a>(
         &'a self,
         parent: &Collection,
@@ -1808,6 +1873,32 @@ impl Database {
         };
         check_key_types(&parent_ty, &probe.key_type(), l)?;
         Ok((child, probe, parent_pos))
+    }
+
+    /// The whole chain resolved once, outermost first.
+    ///
+    /// Every level costs two map lookups and a type check. One resolution
+    /// per level is nothing; one per *row* would not be, and both the
+    /// collecting pass and the existence check behind `required` walk rows
+    /// at every depth. Holding the resolved levels in a slice also turns the
+    /// recursion into an index, so nothing below has to re-derive where it is.
+    fn lookup_chain<'a>(&'a self, parent: &'a Collection, l: &'a Lookup) -> Result<Vec<Step<'a>>> {
+        let mut steps: Vec<Step<'a>> = Vec::new();
+        let mut above = parent;
+        let mut cur = Some(l);
+        while let Some(step) = cur {
+            let (child, probe, parent_pos) = self.lookup_plan(above, step)?;
+            steps.push(Step {
+                l: step,
+                parent: above,
+                child,
+                probe,
+                parent_pos,
+            });
+            above = child;
+            cur = step.next.as_deref();
+        }
+        Ok(steps)
     }
 
     /// The children a `@hash` equality inside the child filter names
@@ -1870,12 +1961,13 @@ impl Database {
     /// mapping, not the direction of the walk.
     fn retain_via_children(
         &self,
-        l: &Lookup,
+        steps: &[Step],
         ids: Vec<DocId>,
         candidates: &[DocId],
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
-        let child = self.collection(&l.collection)?;
+        let l = steps[0].l;
+        let child = steps[0].child;
         let child_pos = if l.child_field == "id" {
             None
         } else {
@@ -1894,17 +1986,12 @@ impl Database {
                 continue;
             }
             // The bucket covers one equality out of the filter; the rest of
-            // it still has to be evaluated.
-            if let Some(f) = &l.filter {
-                let mut r = StoreRow {
-                    store: &child.store,
-                    schema: &child.schema,
-                    id: cid,
-                    memo: Vec::new(),
-                };
-                if !truthy(&eval(f, &mut r, ctx)?) {
-                    continue;
-                }
+            // it still has to be evaluated -- and so does whatever a
+            // `required` level below adds, which the bucket knows nothing
+            // about. It stays a valid superset either way: a deeper level
+            // only ever removes children.
+            if !survives(steps, 0, cid, ctx)? {
+                continue;
             }
             let k = match child_pos {
                 None => Value::Int(cid as i64),
@@ -1948,7 +2035,11 @@ impl Database {
         ids: Vec<DocId>,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
-        let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
+        let steps = self.lookup_chain(parent, l)?;
+        let (child, probe, parent_pos) = {
+            let s = &steps[0];
+            (s.child, &s.probe, s.parent_pos)
+        };
 
         // Two plans answer this question, and every number that decides
         // between them is exact and already in hand: the candidate parents
@@ -1981,7 +2072,7 @@ impl Database {
                     let n = child.store.len() as u64;
                     let b = cands.len() as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
-                        return self.retain_via_children(l, ids, cands, ctx);
+                        return self.retain_via_children(&steps, ids, cands, ctx);
                     }
                 }
             }
@@ -1993,19 +2084,10 @@ impl Database {
                 None => Value::Int(id as i64),
                 Some(p) => parent.store.read_field(id, p)?.unwrap_or(Value::Null),
             };
-            let hit = probe.any(child, &key, |cid| match &l.filter {
-                None => Ok(true),
-                Some(f) => {
-                    let mut r = StoreRow {
-                        store: &child.store,
-                        schema: &child.schema,
-                        id: cid,
-                        memo: Vec::new(),
-                    };
-                    Ok(truthy(&eval(f, &mut r, ctx)?))
-                }
-            })?;
-            if hit {
+            // A child only counts if it survives what is below it too: with
+            // a `required` level further down, a child that passes its own
+            // `where` may still have nothing hanging off it.
+            if probe.any(child, &key, |cid| survives(&steps, 0, cid, ctx))? {
                 out.push(id);
             }
         }
@@ -2016,10 +2098,31 @@ impl Database {
         &self,
         parent: &Collection,
         l: &Lookup,
-        rows: &[Row],
+        ids: &[DocId],
         ctx: &EvalCtx,
     ) -> Result<Nested> {
-        let (child, probe, parent_pos) = self.lookup_plan(parent, l)?;
+        let steps = self.lookup_chain(parent, l)?;
+        self.run_level(&steps, 0, ids, ctx)
+    }
+
+    /// One level of the chain, then the level below it.
+    ///
+    /// The rows it is given are the level above's, and the rows it produces
+    /// are what the next call is given -- concatenated in group order, which
+    /// is exactly the alignment `Nested` documents. Only the ids travel: a
+    /// level reads its keys out of the store, never out of the projected
+    /// values, so a chain works no matter what the level above selected.
+    fn run_level(
+        &self,
+        steps: &[Step],
+        depth: usize,
+        ids: &[DocId],
+        ctx: &EvalCtx,
+    ) -> Result<Nested> {
+        let Step {
+            l, child, probe, ..
+        } = &steps[depth];
+        let (l, child) = (*l, *child);
 
         let columns = projection_columns(&child.schema, &l.project);
         let mut sources = Vec::with_capacity(columns.len());
@@ -2047,14 +2150,11 @@ impl Database {
         }
 
         let limit = l.limit.unwrap_or(usize::MAX);
-        let mut groups = Vec::with_capacity(rows.len());
+        let mut groups = Vec::with_capacity(ids.len());
         let mut bucket: Vec<DocId> = Vec::new();
 
-        for row in rows {
-            let key = match parent_pos {
-                None => Value::Int(row.id as i64),
-                Some(p) => parent.store.read_field(row.id, p)?.unwrap_or(Value::Null),
-            };
+        for &pid in ids {
+            let key = steps[depth].key(pid)?;
             probe.ids(child, &key, &mut bucket);
 
             // The child filter is evaluated over the bucket rather than sent
@@ -2062,20 +2162,17 @@ impl Database {
             // children, so a second index lookup would have to be
             // intersected with it and would almost always cost more than
             // reading the handful of rows it is narrowing.
+            //
+            // `survives` also drops a child a `required` level below has
+            // nothing for, and it does so here -- before the ordering and
+            // before `offset` and `limit` -- for the reason `required`
+            // already runs there: it decides who is on the page, so cutting
+            // afterwards would answer a request for three with one.
             let mut kept: Vec<DocId> = Vec::new();
             for &cid in &bucket {
-                if let Some(f) = &l.filter {
-                    let mut r = StoreRow {
-                        store: &child.store,
-                        schema: &child.schema,
-                        id: cid,
-                        memo: Vec::new(),
-                    };
-                    if !truthy(&eval(f, &mut r, ctx)?) {
-                        continue;
-                    }
+                if survives(steps, depth, cid, ctx)? {
+                    kept.push(cid);
                 }
-                kept.push(cid);
             }
 
             if !keys.is_empty() {
@@ -2142,10 +2239,21 @@ impl Database {
             groups.push(group);
         }
 
+        // The level below is aligned to these rows read left to right, so it
+        // is handed exactly that: one flat list of ids, in group order.
+        let nested = match steps.get(depth + 1) {
+            None => None,
+            Some(_) => {
+                let below: Vec<DocId> = groups.iter().flatten().map(|r| r.id).collect();
+                Some(Box::new(self.run_level(steps, depth + 1, &below, ctx)?))
+            }
+        };
+
         Ok(Nested {
             name: l.collection.clone(),
             columns,
             groups,
+            nested,
         })
     }
 
@@ -2347,7 +2455,10 @@ impl Database {
         // rather than forking one.
         let nested = match &sel.lookup {
             None => None,
-            Some(l) => Some(self.run_lookup(c, l, &rows, &ctx)?),
+            Some(l) => {
+                let ids: Vec<DocId> = rows.iter().map(|r| r.id).collect();
+                Some(self.run_lookup(c, l, &ids, &ctx)?)
+            }
         };
 
         Ok(ResultSet {

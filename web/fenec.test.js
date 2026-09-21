@@ -638,3 +638,69 @@ test('lookup end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (mak
     { name: 'Demlik', reviews: [] },
   ]);
 });
+
+test('a second lookup chains onto the first instead of replacing it', () => {
+  const [sql, p] = from('shops')
+    .limit(20)
+    .lookup('orders', { on: 'shop_id', where: { paid: true }, limit: 3 })
+    .lookup('lines', { on: 'order_id', select: 'item', limit: 5 })
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get shops limit 20 lookup orders on shop_id where paid = $1 limit 3 ' +
+      'lookup lines on order_id select item limit 5',
+  );
+  assert.deepEqual(p, [true]);
+});
+
+test('a chain refuses a repeated collection and a chain too deep', () => {
+  // A collection may appear once in a query: two levels down the driving
+  // one would be back in scope, and `on child = parent` could mean either.
+  assert.throws(
+    () =>
+      from('shops')
+        .lookup('orders', { on: 'shop_id' })
+        .lookup('shops', { on: 'id', parentKey: 'shop_id' })
+        .toFenecQL(),
+    /shops cannot look itself up/,
+  );
+  let q = from('shops');
+  for (let i = 0; i < 9; i++) q = q.lookup(`c${i}`, { on: 'k' });
+  assert.throws(() => q.toFenecQL(), /chained too deep/);
+});
+
+test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection shops (name text)');
+  db.run('create collection orders (shop_id int @hash, code text)');
+  db.run('create collection lines (order_id int @hash, item text)');
+  await db.from('shops').insert([{ name: 'Merkez' }, { name: 'Depo' }]);
+  await db.from('orders').insert([
+    { shop_id: 1, code: 'A' },
+    { shop_id: 1, code: 'B' },
+  ]);
+  await db.from('lines').insert([
+    { order_id: 1, item: 'kahve' },
+    { order_id: 1, item: 'demlik' },
+  ]);
+
+  const rows = await db
+    .from('shops')
+    .select('name')
+    .lookup('orders', { on: 'shop_id', select: 'code' })
+    .lookup('lines', { on: 'order_id', select: 'item' })
+    .rows();
+
+  assert.deepEqual(rows, [
+    {
+      name: 'Merkez',
+      orders: [
+        { code: 'A', lines: [{ item: 'kahve' }, { item: 'demlik' }] },
+        // Order B has no lines: an empty array, not a missing key.
+        { code: 'B', lines: [] },
+      ],
+    },
+    { name: 'Depo', orders: [] },
+  ]);
+});
