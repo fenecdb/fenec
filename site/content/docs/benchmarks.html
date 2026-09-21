@@ -227,6 +227,20 @@ wasm module and the client are fetched over HTTP, so what the browser pays is
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
+<div class="note">
+  <p><b>The brotli column is <code>-q 11</code>, and the level matters.</b>
+  That is the right number for a file compressed once at build time and served
+  as a static asset, which is how this site ships the module. A server
+  compressing on the fly does not spend that: the same two files come out at
+  132 KB at <code>-q 5</code>, nginx's dynamic default, and 141 KB at
+  <code>-q 4</code>. Quoting the best case without naming it would flatter the
+  number by 11–18%.</p>
+  <p>The on-disk column is not the transfer size and is not trying to be. It is
+  what gets decompressed, compiled and held: <code>WebAssembly.compile</code>
+  and the module's memory footprint track that figure, not the compressed one,
+  and so does reading the thing end to end.</p>
+</div>
+
 <p><code>fenec-pg</code> stays on the <code>release</code> profile on purpose:
 a connection thread that panics unwinds and takes down only its own session,
 and the server stays up. The <code>cli</code> profile turns panic unwinding
