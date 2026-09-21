@@ -340,6 +340,40 @@ pub struct TextIndexStats {
     pub bytes: usize,
 }
 
+/// The candidate set for a filter on `id`, or `None` when the index cannot
+/// answer it.
+///
+/// `id` is not a schema field -- `Schema::new` reserves the name -- so it has
+/// no hash bucket and had no plan at all: `where id = 42` walked every
+/// document in the collection to compare one integer. Measured over 20 000
+/// documents, a `set ... where id = N` took 424 us against 22 us for the
+/// same write through a `@hash` mirror of the id, which is why the docs used
+/// to recommend keeping one. The store's own id index answers it directly.
+///
+/// A value the id space cannot express (`id = "abc"`) returns `None` and
+/// leaves the decision to the eval path, the same rule a hash lookup follows:
+/// the presence of an index is never allowed to change an answer. A numeric
+/// value out of range simply matches nothing, which is what comparing it to
+/// `row.id()` would have concluded anyway.
+fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
+    let mut out = Vec::with_capacity(vals.len());
+    for v in vals {
+        // The same coercion a hash lookup performs: `id = 42.0` has to find
+        // document 42, because `cmp_value` says they are equal.
+        let Ok(Value::Int(i)) = (*v).clone().coerce(&DataType::Int) else {
+            return None;
+        };
+        if let Ok(id) = DocId::try_from(i) {
+            if store.contains(id) {
+                out.push(id);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Some(out)
+}
+
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     crate::codec::encode_value(&mut out, v);
@@ -1460,6 +1494,19 @@ impl Database {
         f.conjunct_equalities(params, &mut eqs);
         let mut candidates: Option<Vec<DocId>> = None;
         for (field, val) in eqs {
+            if field == "id" {
+                let Some(hit) = id_candidates(&c.store, &[val]) else {
+                    continue;
+                };
+                if candidates
+                    .as_ref()
+                    .map(|c| hit.len() < c.len())
+                    .unwrap_or(true)
+                {
+                    candidates = Some(hit);
+                }
+                continue;
+            }
             let Some(map) = c.hashes.get(field) else {
                 continue;
             };
@@ -1486,6 +1533,82 @@ impl Database {
             }
         }
 
+        // `in` over a hash field is the union of one bucket per element. It
+        // is compared against the equalities above under the same
+        // smallest-wins rule, so a query carrying both still picks whichever
+        // candidate set is narrower.
+        let mut ins = Vec::new();
+        f.conjunct_in_sets(params, &mut ins);
+        // Whether the chosen candidate set *is* the answer. `in` needs its own
+        // flag where a single equality has `is_bare_equality`: without it the
+        // union is re-evaluated row by row, which on a 56 374-document bucket
+        // costs 3.2 ms against the 90 us the same bucket takes as `= x`.
+        let mut bare_in = false;
+        for (field, vals) in ins {
+            if field == "id" {
+                let Some(hit) = id_candidates(&c.store, &vals) else {
+                    continue;
+                };
+                if candidates
+                    .as_ref()
+                    .map(|c| hit.len() < c.len())
+                    .unwrap_or(true)
+                {
+                    candidates = Some(hit);
+                    bare_in = matches!(f, Expr::In(..));
+                }
+                continue;
+            }
+            let Some(map) = c.hashes.get(field) else {
+                continue;
+            };
+            let Some(fd) = c.schema.field(field) else {
+                continue;
+            };
+            let mut union: Vec<DocId> = Vec::new();
+            let mut whole = true;
+            for v in vals {
+                // The same coercion the single equality needs, and for the
+                // same reason. An element the index cannot express takes the
+                // whole list back to the eval path: a union missing one
+                // element's rows is a wrong answer, not a slow one.
+                let Ok(key) = v.clone().coerce(&fd.ty) else {
+                    whole = false;
+                    break;
+                };
+                if let Some(bucket) = map.get(&hash_key(&key)) {
+                    union.extend_from_slice(bucket);
+                }
+            }
+            if !whole {
+                continue;
+            }
+            // `sort` rather than `sort_unstable`: the union is k buckets laid
+            // end to end, and a bucket is almost always already ascending
+            // (ids are pushed in insertion order), so the merge sort joins
+            // runs that exist instead of re-sorting them. Over 200 000 rows
+            // where one bucket holds 56 374 of them: `in [2]` 901 -> 394 us,
+            // `in [100]` 1 260 -> 940 us. Pattern-defeating quicksort does
+            // not exploit multiple runs; this is the one place that matters.
+            union.sort();
+            // Two elements can coerce to the same key (`year in [2024,
+            // 2024.0]`), and a document reached twice would be counted twice
+            // by `count` and emitted twice by `get`.
+            union.dedup();
+            if candidates
+                .as_ref()
+                .map(|c| union.len() < c.len())
+                .unwrap_or(true)
+            {
+                candidates = Some(union);
+                // Exact only when the list is the whole filter. With anything
+                // `and`ed on, every candidate still has to be tested -- and a
+                // filter holding an equality as well cannot be a bare `in`,
+                // so this cannot be set by the wrong branch.
+                bare_in = matches!(f, Expr::In(..));
+            }
+        }
+
         let (ids, from_index) = match candidates {
             Some(mut b) => {
                 b.sort_unstable();
@@ -1495,8 +1618,9 @@ impl Database {
             None => (c.store.ids(), false),
         };
 
-        // If the filter is exactly that equality, no re-evaluation is needed.
-        if from_index && f.is_bare_equality(params) {
+        // If the filter is exactly that equality, or exactly a list that was
+        // pushed down whole, no re-evaluation is needed.
+        if from_index && (f.is_bare_equality(params) || bare_in) {
             return Ok(ids);
         }
 

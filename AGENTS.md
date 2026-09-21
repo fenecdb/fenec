@@ -120,11 +120,18 @@ candidates are membership-tested. The second path *must* fall back to scanning
 the filter set in full when the result lands under the limit — otherwise a filter
 correlated with the vector eliminates every candidate and returns empty.
 
-**Only `@hash` equalities inside an `and` chain reach an index.** Everything else
-— `>=`, `~`, `has`, `in`, anything under `or` — is a full scan. `~` is unranked
-substring matching; ranked text retrieval is `match` over an `@text` field,
-which does reach one. `order` has no top-k: every match is sorted, then `limit`
-applies.
+**Only equality inside an `and` chain reaches an index** -- `=` or `in [..]`,
+over a `@hash` field or over `id`. `in` is a set of equalities written short, so
+it is answered as the union of one bucket per element, and only when *every*
+element resolves to something the field's type can express: one it cannot sends
+the whole list back to the scan, because a union missing an element's rows is a
+wrong answer rather than a slow one. `id` has no `@hash` and cannot have one --
+`Schema::new` reserves the name -- so the store's id index answers it directly;
+before that it was a full scan, 383 us against 0.50 us over 20 000 documents.
+Everything else -- `>=`, `~`, `has`, anything under `or` -- is a full scan. `~`
+is unranked substring matching; ranked text retrieval is `match` over an `@text`
+field, which does reach one. `order` has no top-k: every match is sorted, then
+`limit` applies.
 
 **`lookup` is one bucket probe per parent, not a join.** It attaches another
 collection's matching documents to the row they belong to, and a `limit` after

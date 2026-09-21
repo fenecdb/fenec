@@ -1422,4 +1422,155 @@ fn required_drops_the_parents_no_child_matches() {
     assert_eq!(rs.rows[0].values[0], Value::Int(want.len() as i64));
     let e = refusal(&mut db, &format!("get products count {base}"));
     assert!(e.contains("required"), "{e}");
+
+/// `in` reaches the hash index as the union of one bucket per element, so the
+/// same differential rule applies as for a single equality: an indexed and an
+/// unindexed schema must answer identically, whatever the list holds.
+///
+/// Before the pushdown `in` was the one predicate whose meaning and whose
+/// cost disagreed -- `year in [2024]` scanned the collection while
+/// `year = 2024` read a bucket, 12.98 ms against 0.092 ms over 200 000 rows
+/// for the same question.
+#[test]
+fn in_pushdown_agrees_with_a_scan() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection ix (price float @hash, year int @hash, label text @hash)",
+    );
+    run(
+        &mut db,
+        "create collection sc (price float, year int, label text)",
+    );
+    for c in ["ix", "sc"] {
+        run(
+            &mut db,
+            &format!(
+                r#"put {c} [
+                     {{price: 10.0, year: 2024, label: "a"}},
+                     {{price: 20.0, year: 2023, label: "b"}},
+                     {{price: 30.0, year: 2024, label: "c"}},
+                     {{price: 40.0, year: 1999, label: "a"}}
+                   ]"#
+            ),
+        );
+    }
+
+    for filter in [
+        "where year in [2024]",
+        "where year in [2024, 2023]",
+        "where year in [1900]",              // nothing matches
+        "where year in []",                  // an empty list matches nothing
+        "where year in [2024, 2024]",        // the same bucket twice
+        "where year in [2024, 2024.0]",      // two spellings of one bucket
+        "where price in [10]",               // int literal -> float field
+        "where year in [2024.5]",            // not a whole number: no match
+        r#"where year in [2024, "abc"]"#,    // an element the index cannot express
+        r#"where label in ["a", "c"]"#,
+        // Combined with an equality: both are candidates, the smaller wins.
+        r#"where year in [2024, 2023] and label = "a""#,
+        "where year in [2024, 2023] and price > 15.0",
+        // `or` must not reach the index, and must still answer the same.
+        r#"where year in [2024] or label = "b""#,
+        "where not (year in [2024])",
+        // Two lists over different fields in one chain.
+        r#"where year in [2024, 1999] and label in ["a"]"#,
+    ] {
+        let a = run(&mut db, &format!("get ix {filter} order id"));
+        let b = run(&mut db, &format!("get sc {filter} order id"));
+        assert_eq!(
+            a.rows().unwrap().rows,
+            b.rows().unwrap().rows,
+            "`{filter}`"
+        );
+        let ca = run(&mut db, &format!("get ix {filter} count"));
+        let cb = run(&mut db, &format!("get sc {filter} count"));
+        assert_eq!(ca, cb, "`{filter}` count");
+    }
+}
+
+/// The same, with the list coming in as parameters -- the shape the browser
+/// and `fenec-pg` actually send.
+#[test]
+fn in_pushdown_resolves_params() {
+    let mut db = Database::new();
+    run(&mut db, "create collection ix (year int @hash)");
+    run(&mut db, "create collection sc (year int)");
+    for c in ["ix", "sc"] {
+        run(&mut db, &format!("put {c} [{{year: 2024}}, {{year: 2023}}, {{year: 1999}}]"));
+    }
+
+    for (filter, params) in [
+        ("where year in [$1]", vec![Value::Int(2024)]),
+        ("where year in [$1, $2]", vec![Value::Int(2024), Value::Int(1999)]),
+        ("where year in [$1, 2023]", vec![Value::Float(2024.0)]),
+        ("where year in [$1]", vec![Value::Int(1900)]),
+    ] {
+        let a = run_with(&mut db, &format!("get ix {filter} order id"), &params);
+        let b = run_with(&mut db, &format!("get sc {filter} order id"), &params);
+        assert_eq!(a, b, "`{filter}` {params:?}");
+    }
+
+    // An unbound parameter must not be quietly treated as an empty bucket:
+    // it has to reach the eval path and error there, indexed or not.
+    for c in ["ix", "sc"] {
+        let stmt = &fenec_ql::parse(&format!("get {c} where year in [$1]")).unwrap()[0];
+        assert!(db.execute_with(stmt, &[]).is_err(), "{c}");
+    }
+}
+
+/// `id` has no hash bucket -- the name is reserved and cannot be a schema
+/// field -- so it used to have no plan either: `where id = 42` walked the
+/// collection to compare one integer, which is why keeping a `@hash` mirror
+/// of the id was worth recommending. The store's id index answers it now,
+/// and the answer must not move.
+#[test]
+fn id_lookup_agrees_with_a_scan() {
+    let mut db = Database::new();
+    run(&mut db, "create collection t (pid int @hash, name text)");
+    run(
+        &mut db,
+        r#"put t [{pid: 1, name: "a"}, {pid: 2, name: "b"}, {pid: 3, name: "c"}, {pid: 4, name: "d"}]"#,
+    );
+    run(&mut db, "del t where pid = 3");
+
+    // The mirror field is the reference: the two are the same question.
+    for (by_id, by_mirror) in [
+        ("where id = 1", "where pid = 1"),
+        ("where id = 1.0", "where pid = 1"),
+        ("where id = 4", "where pid = 4"),
+        ("where id in [1, 4]", "where pid in [1, 4]"),
+        ("where id in [1, 1]", "where pid in [1, 1]"),
+        (r#"where id = 2 and name = "b""#, r#"where pid = 2 and name = "b""#),
+        ("where id in [1, 2] and name ~ \"a\"", "where pid in [1, 2] and name ~ \"a\""),
+        ("where not (id = 1)", "where not (pid = 1)"),
+        ("where id = 1 or name = \"b\"", "where pid = 1 or name = \"b\""),
+    ] {
+        let a = run(&mut db, &format!("get t select name {by_id} order id"));
+        let b = run(&mut db, &format!("get t select name {by_mirror} order id"));
+        assert_eq!(a, b, "`{by_id}` vs `{by_mirror}`");
+    }
+
+    // Cases with no mirror to compare against, stated outright.
+    for (filter, want) in [
+        ("where id = 3", 0),       // deleted
+        ("where id = 99", 0),      // never existed
+        ("where id = -1", 0),      // outside the id space
+        ("where id = 1.5", 0),     // not a whole number
+        (r#"where id = "abc""#, 0), // not a number at all: falls to eval
+        ("where id in []", 0),
+        ("where id in [1, 99]", 1),
+    ] {
+        let Response::Rows(rs) = run(&mut db, &format!("get t {filter}")) else {
+            panic!("expected rows");
+        };
+        assert_eq!(rs.rows.len(), want, "`{filter}`");
+    }
+
+    // `del` and `set` go through the same planner.
+    run(&mut db, r#"set t {name: "z"} where id = 1"#);
+    let Response::Rows(rs) = run(&mut db, "get t select name where id = 1") else {
+        panic!("expected rows");
+    };
+    assert_eq!(rs.rows[0].values[0], Value::Text("z".into()));
 }
