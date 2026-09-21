@@ -129,7 +129,10 @@ fn a_childless_parent_keeps_its_row() {
     let db = fixture();
     let (parents, n) = nested(&db, &plan(lookup("product_id", "id")));
     assert_eq!(parents.rows.len(), 4);
-    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![3, 1, 0, 2]);
+    assert_eq!(
+        n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![3, 1, 0, 2]
+    );
 }
 
 /// `limit` counts children per parent. A join's limit counts pairs, so one
@@ -141,13 +144,19 @@ fn limit_and_offset_are_per_parent() {
     let mut l = lookup("product_id", "id");
     l.limit = Some(2);
     let (_, n) = nested(&db, &plan(l));
-    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 1, 0, 2]);
+    assert_eq!(
+        n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![2, 1, 0, 2]
+    );
 
     let mut l = lookup("product_id", "id");
     l.offset = 1;
     l.limit = Some(1);
     let (_, n) = nested(&db, &plan(l));
-    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![1, 0, 0, 1]);
+    assert_eq!(
+        n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![1, 0, 0, 1]
+    );
     // Skipping one of product 1's three reviews leaves the second.
     assert_eq!(n.groups[0][0].id, 2);
 }
@@ -165,7 +174,10 @@ fn a_child_filter_empties_a_group_without_dropping_the_parent() {
     ));
     let (parents, n) = nested(&db, &plan(l));
     assert_eq!(parents.rows.len(), 4);
-    assert_eq!(n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(), vec![2, 0, 0, 1]);
+    assert_eq!(
+        n.groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+        vec![2, 0, 0, 1]
+    );
 }
 
 /// Child ordering, against a full sort of the same group.
@@ -203,7 +215,10 @@ fn a_null_key_never_matches() {
     // handed to anybody.
     assert!(n.groups[4].is_empty());
     for g in &n.groups {
-        assert!(g.iter().all(|r| r.values[2] != Value::Null), "a null-keyed review was attached");
+        assert!(
+            g.iter().all(|r| r.values[2] != Value::Null),
+            "a null-keyed review was attached"
+        );
     }
 }
 
@@ -213,7 +228,10 @@ fn a_deleted_child_leaves_no_row_behind() {
     let mut db = fixture();
     run(&mut db, "del reviews where id = 2");
     let (_, n) = nested(&db, &plan(lookup("product_id", "id")));
-    assert_eq!(n.groups[0].iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 3]);
+    assert_eq!(
+        n.groups[0].iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
 }
 
 /// An upsert removes the id from its bucket and pushes it back, so the same
@@ -226,7 +244,10 @@ fn an_upserted_child_appears_once() {
         r#"put reviews {id: 1, product_id: 1, sku: "a", stars: 5, body: "duzeltildi"}"#,
     );
     let (_, n) = nested(&db, &plan(lookup("product_id", "id")));
-    assert_eq!(n.groups[0].iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        n.groups[0].iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }
 
 /// The refusals. Each one is a case where answering would mean inventing a
@@ -236,7 +257,10 @@ fn an_upserted_child_appears_once() {
 #[test]
 fn refuses_what_it_cannot_answer() {
     let mut db = fixture();
-    run(&mut db, "create collection plain (product_id int, note text)");
+    run(
+        &mut db,
+        "create collection plain (product_id int, note text)",
+    );
 
     let mut sel = plan(lookup("product_id", "id"));
     sel.count = true;

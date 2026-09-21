@@ -722,14 +722,17 @@ mod tests {
     #[test]
     fn lookup_refuses_clauses_that_rank_or_collapse_the_parent() {
         for (name, mutate) in [
-            ("near", (|s: &mut Select| {
-                s.near = Some(Near {
-                    field: "embed".into(),
-                    vector: Expr::Param(0),
-                    ef: None,
-                    exact: false,
-                })
-            }) as fn(&mut Select)),
+            (
+                "near",
+                (|s: &mut Select| {
+                    s.near = Some(Near {
+                        field: "embed".into(),
+                        vector: Expr::Param(0),
+                        ef: None,
+                        exact: false,
+                    })
+                }) as fn(&mut Select),
+            ),
             ("match", |s: &mut Select| {
                 s.matcher = Some(Match {
                     field: "body".into(),
