@@ -141,6 +141,15 @@ three rank one collection's documents and a score spanning a parent and its
 children has no defensible meaning; <code>count</code> collapses the very
 rows the children hang from.</p>
 
+<p><code>order</code> inside a <code>lookup</code> is the one ordering in the
+engine that is bounded in advance: the clause carries its own
+<code>limit</code>, so only <code>offset + limit</code> children can ever be
+emitted and the rest are never put in order. On a parent with 56 374 children,
+<code>order created desc limit 3</code> costs 3.71 ms rather than 7.52 ms. What
+remains is reading one key per child, which no ordering can avoid — you cannot
+know the first three without having seen all of them. Elsewhere
+<code>order</code> has no such guarantee and still sorts in full.</p>
+
 <p>Over JSON the children are nested under the collection's name. On the
 PostgreSQL wire, which has no nested row, they arrive flattened into the
 parent row the way a join presents them — the same data, the shape the
