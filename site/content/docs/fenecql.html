@@ -237,14 +237,18 @@ create index on articles (body) @text(prefix=6)   -- for an inflected language
 </div>
 
 <div class="note">
-  <p><b>Only <code>@hash</code> equalities inside an <code>and</code> chain
-  reach an index.</b> Every other predicate — <code>&gt;=</code>,
-  <code>~</code>, <code>has</code>, <code>in</code>, and anything under an
-  <code>or</code> — is a full scan: each matching row is decoded and evaluated.
-  <code>~</code> in particular is substring matching without ranking and reaches
-  no index; ranked retrieval is <code>match</code> over a <code>@text</code>
-  field. <code>order</code> has no top-k either: every match is sorted and then
-  <code>limit</code> applies.</p>
+  <p><b>Only equality reaches an index, and only inside an <code>and</code>
+  chain.</b> That means <code>=</code> and <code>in [..]</code> over a
+  <code>@hash</code> field — <code>in</code> is a set of equalities written
+  short, so it is answered as the union of one bucket per element — and either
+  over <code>id</code>, which the store's own id index answers without a
+  <code>@hash</code> being declared or possible.</p>
+  <p>Everything else — <code>&gt;=</code>, <code>~</code>, <code>has</code>,
+  and anything under an <code>or</code> — is a full scan: each matching row is
+  decoded and evaluated. <code>~</code> in particular is substring matching
+  without ranking and reaches no index; ranked retrieval is <code>match</code>
+  over a <code>@text</code> field. <code>order</code> has no top-k either:
+  every match is sorted and then <code>limit</code> applies.</p>
 </div>
 
 <h2>Time</h2>

@@ -144,12 +144,18 @@ container memory is a sensible start: it covers both this 60–75% ratio and
 <h2>Query behaviour</h2>
 
 <ul>
-  <li><b>Only <code>@hash</code> equalities in an <code>and</code> chain reach
-    an index.</b> <code>&gt;=</code>, <code>~</code>, <code>has</code>,
-    <code>in</code> and anything under an <code>or</code> is a full scan: every
-    matching row is decoded and evaluated. <code>~</code> is unranked substring
-    matching; ranked retrieval is <code>match</code> over a <code>@text</code>
-    field, which does reach an index.</li>
+  <li><b>Only equality in an <code>and</code> chain reaches an index</b> —
+    <code>=</code> or <code>in [..]</code>, over a <code>@hash</code> field or
+    over <code>id</code>. <code>&gt;=</code>, <code>~</code>, <code>has</code>
+    and anything under an <code>or</code> is a full scan: every matching row is
+    decoded and evaluated. <code>~</code> is unranked substring matching;
+    ranked retrieval is <code>match</code> over a <code>@text</code> field,
+    which does reach an index.</li>
+  <li>An <code>in</code> list reaches the index only when <b>every</b> element
+    resolves to a value the field's type can express. One element it cannot —
+    <code>year in [2024, "abc"]</code> — sends the whole list back to the scan,
+    because a union missing an element's rows would be a wrong answer rather
+    than a slow one.</li>
   <li>The cost of a filtered <code>near</code> is dominated by extracting the
     filter set, not by the vector search. Of the ~6.5 ms measured on 100 000
     documents, nearly all is the filter scan — an unfiltered ANN is 0.2 ms.
