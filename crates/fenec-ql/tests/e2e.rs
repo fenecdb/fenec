@@ -1422,6 +1422,7 @@ fn required_drops_the_parents_no_child_matches() {
     assert_eq!(rs.rows[0].values[0], Value::Int(want.len() as i64));
     let e = refusal(&mut db, &format!("get products count {base}"));
     assert!(e.contains("required"), "{e}");
+}
 
 /// `in` reaches the hash index as the union of one bucket per element, so the
 /// same differential rule applies as for a single equality: an indexed and an
@@ -1459,13 +1460,13 @@ fn in_pushdown_agrees_with_a_scan() {
     for filter in [
         "where year in [2024]",
         "where year in [2024, 2023]",
-        "where year in [1900]",              // nothing matches
-        "where year in []",                  // an empty list matches nothing
-        "where year in [2024, 2024]",        // the same bucket twice
-        "where year in [2024, 2024.0]",      // two spellings of one bucket
-        "where price in [10]",               // int literal -> float field
-        "where year in [2024.5]",            // not a whole number: no match
-        r#"where year in [2024, "abc"]"#,    // an element the index cannot express
+        "where year in [1900]",           // nothing matches
+        "where year in []",               // an empty list matches nothing
+        "where year in [2024, 2024]",     // the same bucket twice
+        "where year in [2024, 2024.0]",   // two spellings of one bucket
+        "where price in [10]",            // int literal -> float field
+        "where year in [2024.5]",         // not a whole number: no match
+        r#"where year in [2024, "abc"]"#, // an element the index cannot express
         r#"where label in ["a", "c"]"#,
         // Combined with an equality: both are candidates, the smaller wins.
         r#"where year in [2024, 2023] and label = "a""#,
@@ -1478,11 +1479,7 @@ fn in_pushdown_agrees_with_a_scan() {
     ] {
         let a = run(&mut db, &format!("get ix {filter} order id"));
         let b = run(&mut db, &format!("get sc {filter} order id"));
-        assert_eq!(
-            a.rows().unwrap().rows,
-            b.rows().unwrap().rows,
-            "`{filter}`"
-        );
+        assert_eq!(a.rows().unwrap().rows, b.rows().unwrap().rows, "`{filter}`");
         let ca = run(&mut db, &format!("get ix {filter} count"));
         let cb = run(&mut db, &format!("get sc {filter} count"));
         assert_eq!(ca, cb, "`{filter}` count");
@@ -1497,12 +1494,18 @@ fn in_pushdown_resolves_params() {
     run(&mut db, "create collection ix (year int @hash)");
     run(&mut db, "create collection sc (year int)");
     for c in ["ix", "sc"] {
-        run(&mut db, &format!("put {c} [{{year: 2024}}, {{year: 2023}}, {{year: 1999}}]"));
+        run(
+            &mut db,
+            &format!("put {c} [{{year: 2024}}, {{year: 2023}}, {{year: 1999}}]"),
+        );
     }
 
     for (filter, params) in [
         ("where year in [$1]", vec![Value::Int(2024)]),
-        ("where year in [$1, $2]", vec![Value::Int(2024), Value::Int(1999)]),
+        (
+            "where year in [$1, $2]",
+            vec![Value::Int(2024), Value::Int(1999)],
+        ),
         ("where year in [$1, 2023]", vec![Value::Float(2024.0)]),
         ("where year in [$1]", vec![Value::Int(1900)]),
     ] {
@@ -1541,10 +1544,19 @@ fn id_lookup_agrees_with_a_scan() {
         ("where id = 4", "where pid = 4"),
         ("where id in [1, 4]", "where pid in [1, 4]"),
         ("where id in [1, 1]", "where pid in [1, 1]"),
-        (r#"where id = 2 and name = "b""#, r#"where pid = 2 and name = "b""#),
-        ("where id in [1, 2] and name ~ \"a\"", "where pid in [1, 2] and name ~ \"a\""),
+        (
+            r#"where id = 2 and name = "b""#,
+            r#"where pid = 2 and name = "b""#,
+        ),
+        (
+            "where id in [1, 2] and name ~ \"a\"",
+            "where pid in [1, 2] and name ~ \"a\"",
+        ),
         ("where not (id = 1)", "where not (pid = 1)"),
-        ("where id = 1 or name = \"b\"", "where pid = 1 or name = \"b\""),
+        (
+            "where id = 1 or name = \"b\"",
+            "where pid = 1 or name = \"b\"",
+        ),
     ] {
         let a = run(&mut db, &format!("get t select name {by_id} order id"));
         let b = run(&mut db, &format!("get t select name {by_mirror} order id"));
@@ -1553,10 +1565,10 @@ fn id_lookup_agrees_with_a_scan() {
 
     // Cases with no mirror to compare against, stated outright.
     for (filter, want) in [
-        ("where id = 3", 0),       // deleted
-        ("where id = 99", 0),      // never existed
-        ("where id = -1", 0),      // outside the id space
-        ("where id = 1.5", 0),     // not a whole number
+        ("where id = 3", 0),        // deleted
+        ("where id = 99", 0),       // never existed
+        ("where id = -1", 0),       // outside the id space
+        ("where id = 1.5", 0),      // not a whole number
         (r#"where id = "abc""#, 0), // not a number at all: falls to eval
         ("where id in []", 0),
         ("where id in [1, 99]", 1),
