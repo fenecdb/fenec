@@ -63,11 +63,12 @@ for recall. <code>exact</code> replaces the ANN walk with a full scan, which is
 how you verify recall against ground truth. A query that uses
 <code>near</code> gains a <code>_score</code> column.</p>
 
-<p>A filter next to <code>near</code> is planned, not stacked: the filter set
-is extracted first and the planner picks between scanning it directly and
-running the ANN with a membership test. The mechanism, and the fallback that
-keeps it correct, is in <a href="concepts.html#a-filter-and-a-vector-together">How
-it works</a>.</p>
+<p>A filter next to <code>near</code> is planned, not stacked: the filter's
+rows are read only until it is clear whether there are more of them than the
+ANN would measure anyway, and the planner picks between searching that set
+exactly and running the ANN with each candidate tested against the filter.
+The mechanism, and the fallback that keeps it correct, is in <a
+href="concepts.html#a-filter-and-a-vector-together">How it works</a>.</p>
 
 <h2>The text clause</h2>
 
@@ -322,7 +323,7 @@ allowed set of a filtered <code>near</code>.</p>
 <tr><td>the newest 1%, <code>order created desc limit 20</code></td><td class="n">63.1 ms</td><td class="n">0.001 ms</td></tr>
 <tr><td><code>where price &gt;= 99900 limit 20</code>, 0.1% of the rows</td><td class="n">1.44 ms</td><td class="n">0.008 ms</td></tr>
 <tr><td>the same range, <code>count</code></td><td class="n">65.8 ms</td><td class="n">0.008 ms</td></tr>
-<tr><td><code>where year &gt;= 2020 near embed $1 limit 10</code>, 200 000 × 128</td><td class="n">15.2 ms</td><td class="n">0.68 ms</td></tr>
+<tr><td><code>where pct &lt; 1 near embed $1 limit 10</code>, 1% of 200 000 × 128</td><td class="n">17.9 ms</td><td class="n">0.16 ms</td></tr>
 </tbody>
 </table>
 </div>

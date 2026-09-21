@@ -149,11 +149,15 @@ eight accumulators and reduction order, so a graph built in the browser is the
 graph built natively; `web/fenec.test.js` checks that order against a
 `Math.fround` reference.
 
-**Filtered `near` needs its fallback.** The filter set is extracted first; either
-it is scanned directly (when smaller than `ef × m0`) or the ANN runs and
-candidates are membership-tested. The second path *must* fall back to scanning
-the filter set in full when the result lands under the limit — otherwise a filter
-correlated with the vector eliminates every candidate and returns empty.
+**Filtered `near` needs its fallback.** The filter's rows are probed first -- in
+blocks spread over the collection, and only until more than `ef × m0` match,
+which is all the plan needs to know. A set that stays under that is searched
+exactly; a larger one goes through the ANN with each candidate tested against the
+filter. That second path *must* fall back to searching the whole set (the probe
+carries on from where it stopped) when the result lands under the limit —
+otherwise a filter correlated with the vector eliminates every candidate and
+returns empty. The probe decides when rows are read, never the answer:
+`tests/filtered.rs` checks it against the plan with the whole set found first.
 
 **Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
 `@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set

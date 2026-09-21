@@ -183,13 +183,14 @@ that is down takes its tenants with it.</p>
     <code>year in [2024, "abc"]</code> — sends the whole list back to the scan,
     because a union missing an element's rows would be a wrong answer rather
     than a slow one.</li>
-  <li>The cost of a filtered <code>near</code> is dominated by extracting the
-    filter set, not by the vector search. Of the ~6.5 ms measured on 100 000
-    documents, nearly all is the filter scan — an unfiltered ANN is 0.2 ms.
-    With a selective filter the exact-scan path is taken, so recall is
-    10/10. An index on the filtered field takes the scan away: over
-    200 000 × 128, <code>year &gt;= 2020</code> went from 15.2 ms to 0.68 ms
-    once <code>year</code> was <code>@sorted</code>.</li>
+  <li>A filtered <code>near</code> reads its filter's rows only until more of
+    them match than the ANN would measure anyway (<code>ef × m0</code>, 3 200
+    at the defaults), so a filter matching many rows costs little: over
+    200 000 × 128, <code>year &gt;= 2020</code>, 23% of the rows, takes
+    1.1 ms against the ANN's 0.14. <b>A selective filter is read in full</b>
+    — 17.9 ms for 1% of the rows — and its set is searched exactly, so recall
+    is 10/10. An index on the filtered field takes that scan away: 0.16 ms
+    with <code>@sorted</code>.</li>
   <li><b><code>order</code> reads every match, unless it is over a
     <code>@sorted</code> field and has a <code>limit</code>.</b> Only
     <code>offset + limit</code> rows are put in order — the rest are

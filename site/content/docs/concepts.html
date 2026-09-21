@@ -62,22 +62,37 @@ get articles near embed $1 exact limit 10        -- exact scan, for verification
 
 <h3>A filter and a vector together</h3>
 
-<p>The filter set is extracted first. Then one of two paths runs:</p>
+<p>The filter's rows are found first, but only as far as the plan needs
+them. An index hands them over directly — a <code>@hash</code> equality, a
+<code>@sorted</code> range. Otherwise they are probed: rows are tested in
+blocks spread across the collection until more of them match than an ANN
+walk would measure anyway (<code>ef × m0</code>, 3 200 at the defaults), or
+until none are left. Then one of two paths runs:</p>
 
 <ul>
-  <li>if the set is smaller than the candidate count an ANN walk would measure
-    anyway (<code>ef × m0</code>), that set is scanned directly — cheaper, and
-    exact;</li>
-  <li>otherwise the ANN runs and candidates go through a membership test. If
-    the result lands under the limit, the filter set is scanned in full.</li>
+  <li>if the set stayed smaller than that, it is searched directly — cheaper,
+    and exact;</li>
+  <li>otherwise the ANN runs and each candidate is tested against the filter.
+    If the result lands under the limit, the probe carries on to the end and
+    the whole set is searched exactly.</li>
 </ul>
 
+<p>The probe changes when the rows are found, never the answer: it is the
+one finding the whole set first gave, row for row. What it saves is the scan.
+Over 200 000 × 128, <code>year &gt;= 2020</code>, 23% of the rows, took
+16.4 ms with the set found first, 0.14 ms of it the ANN, and takes 1.1 ms
+probed. A filter under the budget is still read in full unless an index
+narrows it: 17.9 ms for 1% of the rows, 0.16 ms over <code>@sorted</code>.
+The blocks are spread out so that a filter for the newest rows, which sit at
+the end of the id order, is found as fast as one for rows everywhere: 1.7 ms
+for the newest 23%.</p>
+
 <div class="note">
-  <p><b>The fallback is not an optimisation, it is required.</b> The membership
-  test is applied <i>after</i> the candidates are gathered. When the filter
-  field correlates with the vector, every one of the <code>ef</code> nearest
-  neighbours can be eliminated and the query would return empty while thousands
-  of documents match.</p>
+  <p><b>The fallback is not an optimisation, it is required.</b> The filter
+  is tested <i>after</i> the candidates are gathered. When the filter field
+  correlates with the vector, every one of the <code>ef</code> nearest
+  neighbours can be eliminated and the query would return empty while
+  thousands of documents match.</p>
 </div>
 
 <h3>Half precision</h3>
