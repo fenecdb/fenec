@@ -1102,3 +1102,64 @@ fn lookup_is_flattened_and_its_child_columns_are_typed() {
         ]
     );
 }
+
+/// A chain widens once per level, and every level has to be described --
+/// a block left out would be typed by the caller's fallback, which is the
+/// exact failure the single-level version of this test pins.
+///
+/// The rows are one root-to-leaf path each, and a level that ran out fills
+/// its own columns and every column below it with nulls. That is a chain of
+/// left joins, which is the only rendering a wire with no nested row can be
+/// given; what it cannot show is the per-level `limit`, which is why the
+/// nesting is what the other transports carry.
+#[test]
+fn a_chained_lookup_is_flattened_level_by_level() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection shops (name text)");
+    c.simple("create collection orders (shop_id int @hash, code text)");
+    c.simple("create collection lines (order_id int @hash, item text, qty int)");
+    c.simple(r#"put shops [{name: "Merkez"}, {name: "Depo"}]"#);
+    c.simple(r#"put orders [{shop_id: 1, code: "A"}, {shop_id: 1, code: "B"}]"#);
+    c.simple(r#"put lines [{order_id: 1, item: "kahve", qty: 2}]"#);
+
+    let sql = "get shops select name lookup orders on shop_id select code                lookup lines on order_id select item, qty";
+    let want = vec![
+        ("name".to_string(), 25),
+        ("orders.code".to_string(), 25),
+        ("lines.item".to_string(), 25),
+        // int8, not the `text` an undescribed level would degrade to.
+        ("lines.qty".to_string(), 20),
+    ];
+    let r = c.simple(sql);
+    assert_eq!(find(&r, b'T').unwrap().columns(), want);
+    let rows: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Some("Merkez".to_string()),
+                Some("A".to_string()),
+                Some("kahve".to_string()),
+                Some("2".to_string()),
+            ],
+            // Order B has no lines: the leaf block goes null.
+            vec![
+                Some("Merkez".to_string()),
+                Some("B".to_string()),
+                None,
+                None,
+            ],
+            // Depo has no orders: both blocks below it go null.
+            vec![Some("Depo".to_string()), None, None, None],
+        ]
+    );
+
+    // And the same shape from `Describe`, which answers without executing.
+    let r = c.extended(sql, &[], true);
+    assert_eq!(find(&r, b'T').unwrap().columns(), want);
+}

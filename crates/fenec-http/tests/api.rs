@@ -750,6 +750,76 @@ fn lookup_from_the_query_string() {
     assert!(r.body.contains(r#""count":1"#), "{}", r.body);
 }
 
+/// `?lookup=orders,lines` chains: the list is read left to right, each name
+/// binding to the one before it, and each level keeps its own prefix. A
+/// query string has no position to scope by, so the order is written out.
+#[test]
+fn a_chained_lookup_from_the_query_string() {
+    let mut db = Database::new();
+    let run = |db: &mut Database, sql: &str| {
+        for stmt in fenec_ql::parse(sql).expect("parse") {
+            db.execute(&stmt).expect("execute");
+        }
+    };
+    run(&mut db, "create collection shops (name text)");
+    run(
+        &mut db,
+        "create collection orders (shop_id int @hash, code text)",
+    );
+    run(
+        &mut db,
+        "create collection lines (order_id int @hash, item text, qty int)",
+    );
+    run(&mut db, r#"put shops [{name: "Merkez"}, {name: "Depo"}]"#);
+    run(
+        &mut db,
+        r#"put orders [{shop_id: 1, code: "A"}, {shop_id: 1, code: "B"}]"#,
+    );
+    run(
+        &mut db,
+        r#"put lines [{order_id: 1, item: "kahve", qty: 2}, {order_id: 1, item: "kupa", qty: 1}]"#,
+    );
+    let h = start_with(Config::default(), db);
+
+    let r = get(
+        h.port,
+        "/shops?select=name&lookup=orders,lines&orders.on=shop_id\
+         &orders.select=code&lines.on=order_id&lines.select=item",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body,
+        r#"[{"name":"Merkez","orders":[{"code":"A","lines":[{"item":"kahve"},{"item":"kupa"}]},{"code":"B","lines":[]}]},{"name":"Depo","orders":[]}]"#,
+        "{}",
+        r.body
+    );
+
+    // Every level's own clauses, each behind its own prefix -- including a
+    // condition, which must not be read as a condition on the parent.
+    let r = get(
+        h.port,
+        "/shops?select=name&lookup=orders,lines&orders.on=shop_id&orders.select=code\
+         &lines.on=order_id&lines.select=item&lines.qty=gte.2&lines.required=true",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    // Order B has no line with qty >= 2, so `required` on the lines drops
+    // the order -- and the shop keeps its row, because it did not ask.
+    assert_eq!(
+        r.body,
+        r#"[{"name":"Merkez","orders":[{"code":"A","lines":[{"item":"kahve"}]}]},{"name":"Depo","orders":[]}]"#,
+        "{}",
+        r.body
+    );
+
+    // A collection may appear once in a query, at any depth.
+    let r = get(
+        h.port,
+        "/shops?lookup=orders,shops&orders.on=shop_id&shops.on=id&shops.parent=shop_id",
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.body.contains("itself"), "{}", r.body);
+}
+
 /// Every way of getting it wrong, with the status the shape implies.
 #[test]
 fn lookup_from_the_query_string_is_checked() {

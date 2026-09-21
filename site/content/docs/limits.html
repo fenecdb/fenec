@@ -16,9 +16,13 @@ multi-writer replication, SQL.</p>
 <p>Relations are <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
 rather than JOIN: it attaches a collection's matching documents to the row they
 belong to, which is one bucket probe per parent and a <code>limit</code> that
-counts children per parent. It does not give the other half of a join — there
-is no predicate spanning both sides, and no way to drop a parent because of
-what its children say. Those stay a second query.</p>
+counts children per parent. It chains up to 8 levels, and
+<code>required</code> lets the children decide which parents appear. What it
+still does not give is a predicate spanning both sides —
+<code>products.price &gt; reviews.cost</code> cannot be written, because the
+positional scoping that keeps qualified names out of the language leaves a
+predicate no way to say it reads two collections. That stays a second
+query.</p>
 
 <p>Replication exists in <b>one direction only</b>: the server is
 authoritative and clients read it. Multi-writer merging, CRDTs and a long-lived
@@ -48,6 +52,7 @@ right.</p>
 <tbody>
 <tr><td><code>near</code> result (<code>limit + offset</code>)</td><td class="n"><b>10 000 rows</b></td><td>a query error when exceeded; without <code>limit</code>, the default top-k applies</td></tr>
 <tr><td>expression depth</td><td class="n"><b>512 levels</b></td><td>parentheses <i>and</i> <code>and</code>/<code>or</code> chains count</td></tr>
+<tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
 <tr><td>session stack (<code>fenec-pg</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
 <tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
 <tr><td>document payload, segment offset</td><td class="n">4 GiB</td><td>the location record is a <code>u32</code></td></tr>

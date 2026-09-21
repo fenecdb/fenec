@@ -7,8 +7,10 @@
 //! children *per parent*, which is the thing no join expresses, so that gets
 //! its own test rather than being left to the differential one.
 //!
-//! The parser does not speak `lookup` yet, so the plans here are built in
-//! Rust. That is also the path `Select::check` exists for.
+//! The single-level plans here are built in Rust rather than parsed, which
+//! is also the path `Select::check` exists for; the chained ones are written
+//! as queries, because a chain is as much a grammar question as a planner
+//! one.
 
 use fenec_core::prelude::*;
 
@@ -665,4 +667,319 @@ fn required_on_a_named_parent_key_matches_the_reference() {
             assert_eq!(named(coll, true, filter.clone()), want, "{coll} {filter:?}");
         }
     }
+}
+
+// ---------------------------------------------------------------- chaining
+
+/// shops 1..3 with 2, 1 and 0 orders; orders 1, 2 and 4 with 2, 1 and 1
+/// lines, order 3 with none. Order 4 hangs off a shop that does not exist,
+/// so it can only ever be reached through the orphan path.
+///
+/// The shape is deliberate: the first shop has *two* orders, so the second
+/// one's lines sit at index 1 of the flattened child list while sitting at
+/// index 0 of their own group. Anything that confuses the two indexes gives
+/// order 3 order 1's lines, and every level below inherits the mistake.
+fn chain_fixture() -> Database {
+    let mut db = Database::new();
+    run(&mut db, "create collection shops (name text)");
+    run(
+        &mut db,
+        "create collection orders (shop_id int @hash, code text, buyer_id int)",
+    );
+    run(
+        &mut db,
+        "create collection lines (order_id int @hash, item text, qty int)",
+    );
+    run(&mut db, "create collection buyers (name text)");
+    run(
+        &mut db,
+        r#"put shops [{name: "Merkez"}, {name: "Sube"}, {name: "Depo"}]"#,
+    );
+    run(
+        &mut db,
+        r#"put orders [
+             {shop_id: 1, code: "A", buyer_id: 1},
+             {shop_id: 1, code: "B", buyer_id: 2},
+             {shop_id: 2, code: "C", buyer_id: 1},
+             {shop_id: 9, code: "Z", buyer_id: 1}
+           ]"#,
+    );
+    run(
+        &mut db,
+        r#"put lines [
+             {order_id: 1, item: "kahve",  qty: 2},
+             {order_id: 1, item: "demlik", qty: 1},
+             {order_id: 2, item: "kupa",   qty: 5},
+             {order_id: 4, item: "filtre", qty: 1}
+           ]"#,
+    );
+    run(&mut db, r#"put buyers [{name: "Ada"}, {name: "Bora"}]"#);
+    db
+}
+
+/// The ids of a result's rows, for comparing against a query written out by
+/// hand.
+fn ids(rs: &ResultSet) -> Vec<DocId> {
+    rs.rows.iter().map(|r| r.id).collect()
+}
+
+/// Same claim as the single-level differential test, one level deeper: a
+/// chain must equal the page query plus one indexed query per parent plus
+/// one per child. If it ever does not, the clause has stopped being sugar
+/// over a plan an application could write itself.
+#[test]
+fn a_chain_equals_a_query_per_row_at_every_level() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id lookup lines on order_id",
+    );
+    let n = rs.nested.as_ref().expect("orders");
+    let below = n.nested.as_deref().expect("lines");
+
+    let parents = rows(&db, "get shops");
+    assert_eq!(ids(&rs), ids(&parents));
+
+    // One group of orders per shop, and one group of lines per order --
+    // counted over every order the level above emitted, in that order.
+    let mut seen = 0;
+    for (i, shop) in parents.rows.iter().enumerate() {
+        let want = rows(&db, &format!("get orders where shop_id = {}", shop.id));
+        assert_eq!(ids_of(n.group(i)), ids(&want), "shop {}", shop.id);
+        for order in n.group(i) {
+            let kids = rows(&db, &format!("get lines where order_id = {}", order.id));
+            assert_eq!(ids_of(below.group(seen)), ids(&kids), "order {}", order.id);
+            seen += 1;
+        }
+    }
+    assert_eq!(
+        seen,
+        below.groups.len(),
+        "a group per row of the level above"
+    );
+}
+
+fn ids_of(rows: &[Row]) -> Vec<DocId> {
+    rows.iter().map(|r| r.id).collect()
+}
+
+/// The alignment rule in isolation, because getting it wrong is silent: a
+/// level's groups are keyed by the position of the owning row among *all*
+/// the rows above it, not by its position inside its own group.
+///
+/// Shop 2's only order is the third order overall, so a level that keyed by
+/// the within-group index would hand it the first order's lines and look
+/// entirely plausible doing it.
+#[test]
+fn a_level_is_keyed_by_the_row_above_across_groups() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id lookup lines on order_id",
+    );
+    let n = rs.nested.as_ref().unwrap();
+    let below = n.nested.as_deref().unwrap();
+
+    // shop 1 -> orders 1, 2; shop 2 -> order 3; shop 3 -> none.
+    assert_eq!(ids_of(n.group(0)), vec![1, 2]);
+    assert_eq!(ids_of(n.group(1)), vec![3]);
+    assert!(n.group(2).is_empty());
+
+    // Flattened, the orders are [1, 2, 3], so the line groups are theirs in
+    // that order: two, one, none.
+    assert_eq!(ids_of(below.group(0)), vec![1, 2]);
+    assert_eq!(ids_of(below.group(1)), vec![3]);
+    assert!(
+        below.group(2).is_empty(),
+        "order 3 has no lines; it must not inherit another order's"
+    );
+    assert_eq!(below.groups.len(), 3);
+}
+
+/// `limit` counts children per parent at every level, which is the whole
+/// reason the clause exists -- and the reason a chain cannot be rendered as
+/// a chain of joins and left at that.
+#[test]
+fn limit_counts_per_parent_at_every_level() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id limit 1 lookup lines on order_id limit 1",
+    );
+    let n = rs.nested.as_ref().unwrap();
+    let below = n.nested.as_deref().unwrap();
+    // One order per shop, not one order in total.
+    assert_eq!(ids_of(n.group(0)), vec![1]);
+    assert_eq!(ids_of(n.group(1)), vec![3]);
+    // And one line per order, over the orders that survived the limit above.
+    assert_eq!(below.groups.len(), 2);
+    assert_eq!(ids_of(below.group(0)), vec![1]);
+    assert!(below.group(1).is_empty());
+}
+
+/// `required` is a statement about its own level: it drops rows of the level
+/// immediately above it and stops there.
+///
+/// Requiring lines drops the *orders* that have none. It must not also drop
+/// the shops those orders belonged to -- that is what requiring orders says,
+/// and it was not said here. A shop left with nothing keeps its row and an
+/// empty group, exactly as a childless parent always has.
+#[test]
+fn required_below_drops_the_row_above_and_stops_there() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id lookup lines on order_id required",
+    );
+    let n = rs.nested.as_ref().unwrap();
+
+    assert_eq!(ids(&rs), vec![1, 2, 3], "every shop keeps its row");
+    // Order 3 has no lines, so shop 2's group empties -- but shop 2 stays.
+    assert_eq!(ids_of(n.group(0)), vec![1, 2]);
+    assert!(n.group(1).is_empty(), "order 3 has no lines");
+    assert!(n.group(2).is_empty(), "shop 3 never had an order");
+}
+
+/// Said at both levels, it composes: the shops that survive are the ones
+/// with an order that has a line. The reference is the same query without
+/// the flags, keeping the parents whose group came back non-empty -- the
+/// same reference the single-level test uses, applied twice.
+#[test]
+fn required_composes_down_the_chain() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id required lookup lines on order_id required",
+    );
+    assert_eq!(ids(&rs), vec![1], "only shop 1 has an order with a line");
+
+    let loose = rows(
+        &db,
+        "get shops lookup orders on shop_id lookup lines on order_id required",
+    );
+    let n = loose.nested.as_ref().unwrap();
+    let want: Vec<DocId> = loose
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !n.group(*i).is_empty())
+        .map(|(_, r)| r.id)
+        .collect();
+    assert_eq!(ids(&rs), want);
+}
+
+/// `count` with `required` at the top asks how many parents have a match,
+/// and a `required` level further down is part of what "a match" means.
+#[test]
+fn count_sees_the_whole_required_chain() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops count lookup orders on shop_id required lookup lines on order_id required",
+    );
+    assert_eq!(rs.rows[0].values[0], Value::Int(1));
+}
+
+/// The key of a deeper level comes out of the store, not out of what the
+/// level above projected: `select code` on the orders must not take
+/// `buyer_id` away from the level below it.
+#[test]
+fn a_deeper_level_reads_its_key_even_when_the_level_above_hid_it() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops lookup orders on shop_id select code lookup buyers on id = buyer_id",
+    );
+    let n = rs.nested.as_ref().unwrap();
+    assert_eq!(n.columns, vec!["code".to_string()]);
+    let below = n.nested.as_deref().unwrap();
+    // Orders 1, 2, 3 were bought by 1, 2, 1.
+    assert_eq!(ids_of(below.group(0)), vec![1]);
+    assert_eq!(ids_of(below.group(1)), vec![2]);
+    assert_eq!(ids_of(below.group(2)), vec![1]);
+}
+
+/// Flattened, a chain is one row per root-to-leaf path, and a level that ran
+/// out fills its own columns and every column below with nulls. That is what
+/// the PostgreSQL wire and the terminal table get; the per-level `limit` is
+/// the part only the nested transports keep.
+#[test]
+fn a_chain_flattens_to_one_row_per_path() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops select name lookup orders on shop_id select code lookup lines on order_id select item",
+    );
+    let flat = rs.flatten();
+    assert_eq!(flat.columns, vec!["name", "orders.code", "lines.item"]);
+
+    let cell = |r: &Row, i: usize| match &r.values[i] {
+        Value::Text(s) => s.clone(),
+        Value::Null => "-".to_string(),
+        v => panic!("unexpected {v:?}"),
+    };
+    let table: Vec<(String, String, String)> = flat
+        .rows
+        .iter()
+        .map(|r| (cell(r, 0), cell(r, 1), cell(r, 2)))
+        .collect();
+    assert_eq!(
+        table,
+        vec![
+            ("Merkez".into(), "A".into(), "kahve".into()),
+            ("Merkez".into(), "A".into(), "demlik".into()),
+            ("Merkez".into(), "B".into(), "kupa".into()),
+            // Order C has no lines, so the leaf columns go null.
+            ("Sube".into(), "C".into(), "-".into()),
+            // Depo has no orders at all: both blocks below it go null.
+            ("Depo".into(), "-".into(), "-".into()),
+        ]
+    );
+}
+
+/// JSON nests all the way down, and a row with nothing under it still gets
+/// the key with an empty array -- a missing one would read as "not asked
+/// for" rather than "nothing matched".
+#[test]
+fn a_chain_nests_all_the_way_down_in_json() {
+    let db = chain_fixture();
+    let rs = rows(
+        &db,
+        "get shops select name lookup orders on shop_id select code lookup lines on order_id select item",
+    );
+    let mut out = String::new();
+    fenec_core::json::rows_array_into(&mut out, &rs);
+    assert_eq!(
+        out,
+        r#"[{"name":"Merkez","orders":[{"code":"A","lines":[{"item":"kahve"},{"item":"demlik"}]},{"code":"B","lines":[{"item":"kupa"}]}]},{"name":"Sube","orders":[{"code":"C","lines":[]}]},{"name":"Depo","orders":[]}]"#
+    );
+}
+
+/// The refusals a chain adds. A collection may appear once in a query: put
+/// it back in scope two levels down and `on child = parent` reaches a level
+/// that could be either of them, which is the ambiguity the single-level
+/// self-lookup rule already refuses. The depth cap is a bound on the stack
+/// -- the parser, `check` and the engine all recurse per level -- and it is
+/// an error rather than a truncation, because a chain quietly cut short is a
+/// wrong answer believed right.
+#[test]
+fn refuses_a_repeated_collection_and_a_chain_too_deep() {
+    let db = chain_fixture();
+    let bad = |sql: &str| -> String {
+        let stmt = match fenec_ql::parse_one(sql) {
+            Ok(s) => s,
+            Err(e) => return e.to_string(),
+        };
+        db.query(&stmt, &[]).expect_err("must refuse").to_string()
+    };
+
+    let e = bad("get shops lookup orders on shop_id lookup shops on id = shop_id");
+    assert!(e.contains("shops") && e.contains("look itself up"), "{e}");
+
+    let e = bad("get orders lookup lines on order_id lookup lines on order_id");
+    assert!(e.contains("lines") && e.contains("look itself up"), "{e}");
+
+    let deep = "get shops".to_string() + &" lookup orders on shop_id".repeat(64);
+    let e = bad(&deep);
+    assert!(e.contains("too deep"), "{e}");
 }

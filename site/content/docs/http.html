@@ -115,6 +115,16 @@ in the same <code>op.value</code> form the parent's filters use. Prefixing is
 what keeps the two sides apart in a query string, the way the clause's
 position does in FenecQL.</p>
 
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/shops?limit=20&amp;select=name\
+&amp;lookup=orders,lines&amp;orders.on=shop_id&amp;orders.limit=3\
+&amp;lines.on=order_id&amp;lines.limit=5'
+# [{"name":"Merkez","orders":[{"code":"A","lines":[{...}]}, ...]}, ...]</pre>
+
+<p>A comma-separated list chains, read left to right, each name binding to the
+one before it and each level keeping its own prefix. A query string has no
+position to scope by, so the order is written out; the meaning is the same one
+FenecQL gets from position, up to the same 8 levels.</p>
+
 <p><code>lookup</code> is a reserved key here, so a field named
 <code>lookup</code> cannot be filtered over the REST path — the FenecQL and
 <code>fenec-pg</code> paths are unaffected, as with the other reserved
@@ -122,8 +132,10 @@ names.</p>
 
 <p>A query with a <code>lookup</code> answers with the children nested under
 the collection's name — one object per parent, with an empty array where
-nothing matched. The <code>fenec-pg</code> side of the same query flattens
-them into the parent row instead, because a PostgreSQL row cannot nest.</p>
+nothing matched, and a chain nests all the way down. The
+<code>fenec-pg</code> side of the same query flattens them into the parent row
+instead, because a PostgreSQL row cannot nest: one row per root-to-leaf path,
+with nulls below the first level that ran out.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \

@@ -65,7 +65,8 @@ the design, not a roadmap.</p>
   <li><b>No transactions.</b> <code>BEGIN</code> and <code>COMMIT</code> are
     accepted and do nothing. There is one writer.</li>
   <li><b>No JOIN and no subqueries.</b> A query reads one collection, plus
-    the children <code>lookup</code> attaches to each of its rows.</li>
+    the children <code>lookup</code> attaches to each of its rows — and,
+    chained, the children of those.</li>
   <li><b>No SQL.</b> <code>fenec-pg</code> is compatible at the transport
     layer, not the language.</li>
   <li><b>No schema migration</b> and no multi-writer replication.</li>

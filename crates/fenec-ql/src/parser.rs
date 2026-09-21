@@ -588,7 +588,7 @@ impl Parser {
             // cost is that a parent clause cannot follow the child ones, which
             // reads the way the query runs anyway.
             if self.eat_kw("lookup") {
-                sel.lookup = Some(self.lookup_clause()?);
+                sel.lookup = Some(self.lookup_clause(1)?);
                 break;
             }
             break;
@@ -650,7 +650,24 @@ impl Parser {
     /// Written without the second half of `on`, the parent key is `id`: that
     /// is the foreign-key-to-primary-key shape, which is most of them, and
     /// spelling it out every time would be noise.
-    fn lookup_clause(&mut self) -> Result<Lookup> {
+    ///
+    /// A second `lookup` inside the first chains it -- `products lookup
+    /// reviews on product_id lookup authors on id = author_id`. Position
+    /// keeps scoping the same way, one level deeper: what follows a `lookup`
+    /// belongs to *its* collection, and `on child = parent` names a field of
+    /// the level immediately above. Exactly one collection is in scope at
+    /// any point in the query, and it is the last one named, which is what
+    /// keeps qualified names out of the language at any depth.
+    ///
+    /// `depth` is counted here as well as in `Select::check` because this
+    /// function recurses: the check would run after a pathological query had
+    /// already taken the stack down with it.
+    fn lookup_clause(&mut self, depth: usize) -> Result<Lookup> {
+        if depth > MAX_LOOKUP_DEPTH {
+            return self.err(Error::Query(format!(
+                "`lookup` chained too deep: at most {MAX_LOOKUP_DEPTH} levels"
+            )));
+        }
         let collection = self.ident()?;
         self.expect_kw("on")?;
         let child_field = self.ident()?;
@@ -692,6 +709,13 @@ impl Parser {
             if self.eat_kw("required") {
                 l.required = true;
                 continue;
+            }
+            // Terminal here for the same reason it is terminal up there: the
+            // clauses after it bind to the next collection down, so nothing
+            // belonging to this one can follow.
+            if self.eat_kw("lookup") {
+                l.next = Some(Box::new(self.lookup_clause(depth + 1)?));
+                break;
             }
             break;
         }

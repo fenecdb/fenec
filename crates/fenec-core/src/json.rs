@@ -5,7 +5,7 @@
 //! subset fenecdb needs.
 
 use crate::error::{Error, Result};
-use crate::query::{Response, ResultSet, Row};
+use crate::query::{Nested, Response, ResultSet, Row};
 use crate::value::Value;
 
 // ---------------------------------------------------------------- writing
@@ -89,19 +89,56 @@ pub fn to_string(v: &Value) -> String {
     s
 }
 
-/// One row as a JSON object: its columns, the score when `near` produced
-/// one, and the children `lookup` attached.
+/// A row's group at one level of a `lookup` chain, and the levels below it.
+///
+/// `group` is the index the owning row has among the rows of the level
+/// *above*, counted across groups -- the alignment `Nested` documents.
+pub struct Children<'a> {
+    level: &'a Nested,
+    group: usize,
+}
+
+/// The rows of a result as a JSON array, children and grandchildren nested
+/// inside the row they hang from.
 ///
 /// This loop had two copies before -- here and in the HTTP endpoint's
 /// `rows_json` -- and `lookup` would have made a third place to forget, so
-/// both now come through here. `children` carries the collection's name, its
-/// own columns and this row's group; a child row never has children of its
-/// own, which is what keeps the recursion one level deep.
+/// both now come through here.
+pub fn rows_array_into(out: &mut String, rs: &ResultSet) {
+    // One cursor per nested level: the index of the next row to be emitted
+    // there. A level's groups are keyed by the position of the owning row in
+    // the level above, and emission walks rows in exactly that order, so a
+    // running counter *is* that position -- no prefix sums, and no second
+    // pass to keep in step with.
+    let mut depth = 0;
+    let mut level = rs.nested.as_ref();
+    while let Some(n) = level {
+        depth += 1;
+        level = n.nested.as_deref();
+    }
+    let mut cursors = vec![0usize; depth];
+
+    out.push('[');
+    for (i, row) in rs.rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let children = rs.nested.as_ref().map(|n| Children { level: n, group: i });
+        row_object_into(out, &rs.columns, row, children, &mut cursors, 0);
+    }
+    out.push(']');
+}
+
+/// One row as a JSON object: its columns, the score when `near` produced
+/// one, and the children `lookup` attached -- each of which carries its own
+/// children, all the way down the chain.
 pub fn row_object_into(
     out: &mut String,
     columns: &[String],
     row: &Row,
-    children: Option<(&str, &[String], &[Row])>,
+    children: Option<Children<'_>>,
+    cursors: &mut [usize],
+    depth: usize,
 ) {
     out.push('{');
     for (j, c) in columns.iter().enumerate() {
@@ -116,33 +153,28 @@ pub fn row_object_into(
         out.push_str(",\"_score\":");
         num_into(out, s as f64);
     }
-    if let Some((name, cols, group)) = children {
+    // A row with no matches still gets the key, holding an empty array: a
+    // missing one would read as "not asked for" rather than "nothing
+    // matched".
+    if let Some(c) = children {
         out.push(',');
-        escape_into(out, name);
+        escape_into(out, &c.level.name);
         out.push_str(":[");
-        for (k, child) in group.iter().enumerate() {
+        for (k, child) in c.level.group(c.group).iter().enumerate() {
             if k > 0 {
                 out.push(',');
             }
-            row_object_into(out, cols, child, None);
+            let pos = cursors[depth];
+            cursors[depth] += 1;
+            let below = c.level.nested.as_deref().map(|n| Children {
+                level: n,
+                group: pos,
+            });
+            row_object_into(out, &c.level.columns, child, below, cursors, depth + 1);
         }
         out.push(']');
     }
     out.push('}');
-}
-
-/// The children of row `i`, in the shape `row_object_into` wants.
-///
-/// A parent with no matches still has a group -- an empty one -- because the
-/// page is the parents and a missing key would read as "not asked for"
-/// rather than "nothing matched".
-pub fn children_of(rs: &ResultSet, i: usize) -> Option<(&str, &[String], &[Row])> {
-    let n = rs.nested.as_ref()?;
-    Some((
-        n.name.as_str(),
-        n.columns.as_slice(),
-        n.groups.get(i).map(|g| g.as_slice()).unwrap_or(&[]),
-    ))
 }
 
 pub fn result_set_into(out: &mut String, rs: &ResultSet) {
@@ -153,14 +185,9 @@ pub fn result_set_into(out: &mut String, rs: &ResultSet) {
         }
         escape_into(out, c);
     }
-    out.push_str("],\"rows\":[");
-    for (i, row) in rs.rows.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        row_object_into(out, &rs.columns, row, children_of(rs, i));
-    }
-    out.push_str("]}");
+    out.push_str("],\"rows\":");
+    rows_array_into(out, rs);
+    out.push('}');
 }
 
 pub fn response_to_string(r: &Response) -> String {

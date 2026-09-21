@@ -152,10 +152,16 @@ fn require_filter(schema: &Schema, req: &Request, all: bool, verb: &str) -> Resu
 
 fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Select> {
     let lookup = lookup_from_query(db, schema, req)?;
-    let skip = lookup.as_ref().map(|l| format!("{}.", l.collection));
+    // Every level's prefix is reserved, not just the first: a chained key
+    // read as a condition on the parent would be a silent wrong answer.
+    let skip: Vec<String> = lookup
+        .iter()
+        .flat_map(|l| l.chain())
+        .map(|s| format!("{}.", s.collection))
+        .collect();
     let mut sel = Select {
         collection: schema.name.clone(),
-        filter: filter_with(schema, req, &RESERVED, skip.as_deref())?,
+        filter: filter_with(schema, req, &RESERVED, &skip)?,
         lookup,
         ..Default::default()
     };
@@ -181,14 +187,46 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
 /// the two sides apart in a query string the way the clause's position does
 /// in FenecQL, and it is the shape PostgREST already uses for an embedded
 /// resource's filters.
+///
+/// `?lookup=orders,lines&orders.on=shop_id&lines.on=order_id` chains: the
+/// list is read left to right, each name binding to the one before it, and
+/// each level keeps its own prefix. A comma-separated list is the same
+/// ordering FenecQL gets from position, written where a query string has no
+/// position to use.
 fn lookup_from_query(db: &Database, parent: &Schema, req: &Request) -> Result<Option<Lookup>> {
-    let Some((_, name)) = req.query.iter().find(|(k, _)| k == "lookup") else {
+    let Some((_, spec)) = req.query.iter().find(|(k, _)| k == "lookup") else {
         return Ok(None);
     };
-    let child = &db.collection(name)?.schema;
+    let names: Vec<&str> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        return Err(Error::Query("`lookup` is empty".into()));
+    }
+    // Built innermost-last, then linked from the back, so each level owns the
+    // one below it.
+    let mut levels = Vec::with_capacity(names.len());
+    let mut above = parent;
+    for name in &names {
+        let child = &db.collection(name)?.schema;
+        levels.push(lookup_level(name, above, child, req)?);
+        above = child;
+    }
+    let mut chain: Option<Box<Lookup>> = None;
+    for mut l in levels.into_iter().rev() {
+        l.next = chain;
+        chain = Some(Box::new(l));
+    }
+    Ok(chain.map(|b| *b))
+}
+
+/// One level of the chain: every key prefixed with its collection's name.
+fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> Result<Lookup> {
     let prefix = format!("{name}.");
     let mut l = Lookup {
-        collection: name.clone(),
+        collection: name.to_string(),
         parent_field: "id".to_string(),
         ..Default::default()
     };
@@ -217,7 +255,7 @@ fn lookup_from_query(db: &Database, parent: &Schema, req: &Request) -> Result<Op
     l.filter = parts
         .into_iter()
         .reduce(|a, b| Expr::And(Box::new(a), Box::new(b)));
-    Ok(Some(l))
+    Ok(l)
 }
 
 /// A field name from the query string, checked against the schema so an
@@ -284,20 +322,20 @@ fn truthy(raw: &str) -> bool {
 
 /// Joins every condition in the query string with `and`.
 fn filter_from_query(schema: &Schema, req: &Request) -> Result<Option<Expr>> {
-    filter_with(schema, req, &RESERVED, None)
+    filter_with(schema, req, &RESERVED, &[])
 }
 
-/// `skip` is a `lookup`'s `<collection>.` prefix: those keys configure the
-/// child and must not be read as conditions on the parent.
+/// `skip` holds each `lookup` level's `<collection>.` prefix: those keys
+/// configure a child and must not be read as conditions on the parent.
 fn filter_with(
     schema: &Schema,
     req: &Request,
     reserved: &[&str],
-    skip: Option<&str>,
+    skip: &[String],
 ) -> Result<Option<Expr>> {
     let mut parts: Vec<Expr> = Vec::new();
     for (key, raw) in &req.query {
-        if skip.is_some_and(|p| key.starts_with(p)) {
+        if skip.iter().any(|p| key.starts_with(p)) {
             continue;
         }
         if reserved.contains(&key.as_str()) {
@@ -660,7 +698,7 @@ pub fn subscription(db: &Database, req: &Request) -> Result<Subscription> {
 
     Ok(Subscription {
         collection: name.to_string(),
-        filter: filter_with(schema, req, &RESERVED_STREAM, None)?,
+        filter: filter_with(schema, req, &RESERVED_STREAM, &[])?,
         project,
         since,
     })
@@ -842,14 +880,8 @@ pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
 pub use fenec_core::query::Response as Response2;
 
 pub fn rows_json(rs: &ResultSet) -> String {
-    let mut out = String::from("[");
-    for (i, row) in rs.rows.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        json::row_object_into(&mut out, &rs.columns, row, json::children_of(rs, i));
-    }
-    out.push(']');
+    let mut out = String::new();
+    json::rows_array_into(&mut out, rs);
     out
 }
 

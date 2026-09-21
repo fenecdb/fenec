@@ -1164,20 +1164,25 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
     // `text`, so an extended-protocol client would silently read every
     // child int and timestamp as a string -- and `Describe` answers before
     // the query runs, so nothing downstream could correct it.
+    // One block per level, in the order `flatten` lays them out -- a chain
+    // widens once per `lookup`, and a level left out here would be typed by
+    // the caller's fallback rather than described.
     if let Some(l) = &sel.lookup {
-        let child = db.collection(&l.collection).ok()?;
-        cols.extend(
-            projection_columns(&child.schema, &l.project)
-                .into_iter()
-                .map(|c| {
-                    let oid = child
-                        .schema
-                        .field(&c)
-                        .map(|f| pg_oid(&f.ty))
-                        .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
-                    (format!("{}.{}", l.collection, c), oid)
-                }),
-        );
+        for step in l.chain() {
+            let child = db.collection(&step.collection).ok()?;
+            cols.extend(
+                projection_columns(&child.schema, &step.project)
+                    .into_iter()
+                    .map(|c| {
+                        let oid = child
+                            .schema
+                            .field(&c)
+                            .map(|f| pg_oid(&f.ty))
+                            .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
+                        (format!("{}.{}", step.collection, c), oid)
+                    }),
+            );
+        }
     }
     if sel.near.is_some() {
         cols.push(("_score".to_string(), OID_FLOAT8));
