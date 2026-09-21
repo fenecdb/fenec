@@ -146,8 +146,13 @@ still fills. It is also the only shape where `count` combines with `lookup`,
 since nothing is being attached. There is no index from "a child matching this
 filter" back to its parent, so every candidate parent is probed -- it stops at
 the first child that passes, which is why the unfiltered form is an order
-cheaper. Over 20 000 parents and 200 000 children: 16.39 ms filtered, 2.19 ms
-unfiltered, against 0.02 ms for a `bool @hash` field on the parent maintained on
+cheaper. It is answered from whichever side is smaller -- walk the parents probing each,
+or read the children a `@hash` equality in the child filter names and take their
+parents -- and the counts that decide (candidate parents, bucket length, child
+collection size) are all exact, so the choice is derived rather than estimated:
+child-driven when `|ids| * n > |bucket|^2`. Over 20 000 parents and 200 000
+children that is 12.07 ms against 15.63 ms for the parent side, 2.19 ms with no
+child filter, and 0.02 ms for a `bool @hash` field on the parent maintained on
 write. Ad hoc, use `required`; on every page load, use the field.
 
 **`match` prunes with MaxScore.** The exhaustive merge is not selective --
