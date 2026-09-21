@@ -93,6 +93,10 @@ quote measurements, not estimates.
 
 ## Pull requests
 
+`main` is protected and takes no direct pushes, including from maintainers:
+the required checks run on a pull request, so a push straight to the branch
+would land code the gate never saw. Branch, open a PR, let CI go green.
+
 Keep the diff to one concern. Say what you measured, and name the invariant
 above that the change touches if it touches one. CI runs `make test` on Linux
 and macOS plus a release build; it has to be green.
