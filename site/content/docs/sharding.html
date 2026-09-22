@@ -70,10 +70,21 @@ node's memory.</p>
 <h2>The node: <code>fenec-pg --dir</code></h2>
 
 <p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
-files over HTTP instead of one file. It is still one process per directory — the
+files instead of one file. It is still one process per directory — the
 single-writer rule is per file, and one process owning all of them is what keeps
-it. The PostgreSQL listener is off in this mode; <code>--http</code> is
-required.</p>
+it. <code>--http</code> is required; <code>--listen</code> opens the PostgreSQL
+wire as well, where the database in the startup packet is the tenant:</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
+psql postgres://fenec@127.0.0.1:5433/acme
+</pre>
+
+<p>A session is bound to its tenant for its lifetime, and the tenant is looked
+up again for every statement — so one created after the session opened is
+there for it, one closed as idle reopens, one deleted meanwhile answers
+<code>3D000</code> as an unknown database does, and one frozen for a move
+refuses writes with <code>57P03</code> while its reads go on. A name that is
+no tenant of this node is refused at connect.</p>
 
 <ul>
   <li><b>Opened on first use.</b> Open cost is proportional to the file, so a
@@ -216,8 +227,6 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
-  <li><b>No PostgreSQL wire in <code>--dir</code> mode.</b> Picking the tenant
-    from the startup packet's <code>database</code> is possible and not done.</li>
   <li><b>One router.</b> Its directory is a single-writer file like any other;
     several routers would need a shared one.</li>
 </ul>

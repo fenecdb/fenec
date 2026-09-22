@@ -71,6 +71,7 @@ pg:
 ## make node HTTP=127.0.0.1:8081 ADMIN=secret
 node:
 	$(CARGO) run --release -p fenec-pg -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
+	  $(if $(PG),--listen $(PG),) \
 	  --admin-token $(or $(ADMIN),$(error ADMIN=<token> is required)) --sync 250
 
 ## The router in front of the nodes; the directory lives in ./shard.fenec.

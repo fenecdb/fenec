@@ -25,7 +25,7 @@ make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
-make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants, HTTP only
+make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds the pg wire)
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
@@ -150,7 +150,9 @@ that, so a restore is a concatenation checked by opening it.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
 `site/content/docs/sharding.html`). The tenant comes from the path
-(`/t/<tenant>/`), never from the query, so tenants cannot share a file -- they
+(`/t/<tenant>/`), or over the pg wire from the startup packet's database
+(`--listen` in `--dir` mode; looked up again per statement, so a move, an idle
+close or a delete between two of them is seen), never from the query, so tenants cannot share a file -- they
 would read each other's rows. A file each also keeps ids, the change sequence,
 BM25 statistics and `lookup` per tenant, which is why the router forwards bytes
 and never parses a query. The registry (`fenec-http/src/tenants.rs`) opens a

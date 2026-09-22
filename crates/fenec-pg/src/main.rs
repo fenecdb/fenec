@@ -20,8 +20,10 @@ usage: fenec-pg [options]
   -l, --listen <address>    default 127.0.0.1:5433
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
       --dir <path>          one file per tenant in this directory, served over
-                            HTTP under /t/<tenant>/. Needs --http; the pg
-                            listener is off in this mode
+                            HTTP under /t/<tenant>/. Needs --http. With
+                            --listen it serves the pg wire as well, where the
+                            database in the startup packet is the tenant
+                            (psql postgres://host:port/acme)
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off
       --idle-close <s>      close a tenant untouched for this long  default: 300
@@ -166,6 +168,9 @@ fn main() {
     let mut cfg = Config::default();
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
+    // `--dir` opens the pg listener only when an address was named: a node
+    // that serves tenants over HTTP alone should not take the default port.
+    let mut listen_given = false;
     let mut idle_close = Duration::from_secs(300);
     let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
     let mut method = "scram".to_string();
@@ -193,7 +198,10 @@ fn main() {
     };
     while i < args.len() {
         match args[i].as_str() {
-            "--listen" | "-l" => cfg.addr = next(&mut i, "--listen"),
+            "--listen" | "-l" => {
+                cfg.addr = next(&mut i, "--listen");
+                listen_given = true;
+            }
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
             "--dir" => dir = Some(next(&mut i, "--dir")),
             "--admin-token" => http_cfg.admin_token = Some(next(&mut i, "--admin-token")),
@@ -366,6 +374,15 @@ fn main() {
         fail("replicas are fed over HTTP: give --http <address>");
     }
 
+    cfg.auth = match &password {
+        Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
+        Some(pw) => match Auth::parse(&method, pw) {
+            Ok(a) => a,
+            Err(e) => fail(&e),
+        },
+        None => Auth::Trust,
+    };
+
     if let Some(dir) = dir {
         if replicating || promote {
             fail("replication is per file: a --dir node cannot have replicas yet");
@@ -386,17 +403,8 @@ fn main() {
         http_cfg.max_connections = cfg.max_connections;
         http_cfg.idle_timeout = cfg.idle_timeout;
         http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
-        serve_dir(&dir, http_cfg, &cfg, idle_close);
+        serve_dir(&dir, http_cfg, cfg, idle_close, listen_given);
     }
-
-    cfg.auth = match &password {
-        Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
-        Some(pw) => match Auth::parse(&method, pw) {
-            Ok(a) => a,
-            Err(e) => fail(&e),
-        },
-        None => Auth::Trust,
-    };
 
     let mut feed = None;
     let mut db = match &file {
@@ -585,7 +593,13 @@ fn settle_history(
 /// thread the syncer that a single file gets from the pg server -- periodic
 /// sync, idle close, and on the shutdown signal a final sync and checkpoint
 /// of every open tenant.
-fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: Duration) -> ! {
+fn serve_dir(
+    dir: &str,
+    http_cfg: fenec_http::Config,
+    cfg: Config,
+    idle_close: Duration,
+    pg: bool,
+) -> ! {
     let tenants = match Tenants::new(dir) {
         Ok(t) => t,
         Err(e) => fail(&format!("could not use {dir}: {e}")),
@@ -601,6 +615,28 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
+
+    // The pg listener, when an address was named: there the database in the
+    // startup packet is the tenant (`psql postgres://host:port/acme`). It
+    // runs no syncer -- the loop below is this node's, over every open
+    // tenant -- and the same --password guards it as guards a file server.
+    let sync = cfg.sync;
+    if pg {
+        let server = Server::with_tenants(Arc::clone(&tenants), cfg);
+        let listener = match server.bind() {
+            Ok(l) => l,
+            Err(e) => fail(&format!("could not open the pg endpoint: {e}")),
+        };
+        std::thread::Builder::new()
+            .name("fenec-pg".into())
+            .spawn(move || {
+                if let Err(e) = server.serve_on(listener) {
+                    fenec_http::log!("pg server error: {e}");
+                    std::process::exit(1);
+                }
+            })
+            .unwrap_or_else(|e| fail(&format!("could not start the pg thread: {e}")));
+    }
 
     let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
     let listener = match http_server.bind() {
@@ -620,7 +656,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    let tick = match cfg.sync {
+    let tick = match sync {
         SyncPolicy::Interval(d) if !d.is_zero() => d,
         _ => Duration::from_millis(200),
     };
@@ -633,7 +669,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(0);
         }
-        if matches!(cfg.sync, SyncPolicy::Interval(_)) {
+        if matches!(sync, SyncPolicy::Interval(_)) {
             tenants.sync_dirty();
         }
         if !idle_close.is_zero() {

@@ -27,6 +27,7 @@ use fenec_core::prelude::*;
 use fenec_core::query::projection_columns;
 use fenec_core::value::DataType;
 use fenec_http::metrics::Transport;
+use fenec_http::tenants::{Refused, Tenant, Tenants};
 use fenec_ql::parse;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -204,8 +205,47 @@ type Backends = Arc<Mutex<HashMap<i32, Arc<Backend>>>>;
 
 // ------------------------------------------------------------------ server
 
+/// What a session runs against: one database, or a directory of tenants
+/// where the startup packet's database name picks one (`fenec-pg --dir`).
+#[derive(Clone)]
+pub enum Source {
+    One(Arc<RwLock<Database>>),
+    Tenants(Arc<Tenants>),
+}
+
+impl Source {
+    /// The database the next statement runs against, with the tenant it
+    /// belongs to. A tenant is resolved again for every statement -- between
+    /// two of them it can be frozen for a move, closed as idle or deleted --
+    /// which is what the HTTP path does per request, for the same reason.
+    fn open(&self, tenant: &str) -> std::result::Result<(Arc<RwLock<Database>>, Held), Refused> {
+        match self {
+            Source::One(db) => Ok((Arc::clone(db), None)),
+            Source::Tenants(reg) => {
+                let t = reg.get(tenant)?;
+                Ok((Arc::clone(&t.db), Some(t)))
+            }
+        }
+    }
+}
+
+/// The tenant a statement is running against, `None` over a single file.
+type Held = Option<Arc<Tenant>>;
+
+/// The registry's refusal as a client sees it: a name that is no tenant of
+/// this node is PostgreSQL's unknown database, a node on its way down is its
+/// "not accepting connections", and anything else a system error.
+fn tenant_error(Refused(status, msg): Refused) -> (&'static str, String) {
+    let code = match status {
+        400 | 404 => "3D000",
+        503 => "57P03",
+        _ => "58000",
+    };
+    (code, msg)
+}
+
 pub struct Server {
-    db: Arc<RwLock<Database>>,
+    source: Source,
     cfg: Arc<Config>,
     backends: Backends,
     /// Number of live sessions. Incremented on accept, decremented via
@@ -215,8 +255,19 @@ pub struct Server {
 
 impl Server {
     pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
+        Server::over(Source::One(db), cfg)
+    }
+
+    /// A server over a directory of tenants (`fenec-pg --dir`): the database
+    /// name in the startup packet is the tenant. It runs no syncer of its
+    /// own -- the registry's owner syncs and closes the files.
+    pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+        Server::over(Source::Tenants(tenants), cfg)
+    }
+
+    fn over(source: Source, cfg: Config) -> Server {
         Server {
-            db,
+            source,
             cfg: Arc::new(cfg),
             backends: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(AtomicUsize::new(0)),
@@ -259,15 +310,17 @@ impl Server {
         // supervisor that sends SIGTERM as soon as it reads that line would
         // otherwise stop it by the default action, with no final sync.
         install_signal_handlers();
-        spawn_syncer(
-            Arc::clone(&self.db),
-            self.cfg.sync,
-            self.cfg.checkpoint_on_exit,
-        );
+        if let Source::One(db) = &self.source {
+            spawn_syncer(Arc::clone(db), self.cfg.sync, self.cfg.checkpoint_on_exit);
+        }
         fenec_http::log!(
-            "fenec-pg {} listening on: postgres://localhost:{}/fenec  [{}, sync={}]",
+            "fenec-pg {} listening on: postgres://localhost:{}/{}  [{}, sync={}]",
             fenec_core::VERSION,
             listener.local_addr()?.port(),
+            match &self.source {
+                Source::One(_) => "fenec",
+                Source::Tenants(_) => "<tenant>",
+            },
             match &self.cfg.auth {
                 Auth::Trust => "no auth",
                 Auth::Cleartext(_) => "password: plain text",
@@ -319,7 +372,7 @@ impl Server {
                 continue;
             }
 
-            let db = Arc::clone(&self.db);
+            let source = self.source.clone();
             let cfg = Arc::clone(&self.cfg);
             let backends = Arc::clone(&self.backends);
             // A second descriptor for the refusal path: if `spawn` fails it
@@ -335,7 +388,7 @@ impl Server {
                         .peer_addr()
                         .map(|a| a.to_string())
                         .unwrap_or_default();
-                    if let Err(e) = session(stream, db, cfg, backends) {
+                    if let Err(e) = session(stream, source, cfg, backends) {
                         // Neither an idle connection that timed out nor a
                         // client that closed is noise.
                         let quiet = matches!(
@@ -653,7 +706,7 @@ struct Portal {
 
 fn session(
     stream: TcpStream,
-    db: Arc<RwLock<Database>>,
+    source: Source,
     cfg: Arc<Config>,
     backends: Backends,
 ) -> io::Result<()> {
@@ -747,6 +800,19 @@ fn session(
         return Ok(());
     }
 
+    // ---- the tenant, over a directory of them: the database name.
+    // Resolved once here so a name that is no tenant of this node fails at
+    // connect, as PostgreSQL's unknown database does.
+    let tenant = params.get("database").cloned().unwrap_or_default();
+    if let Source::Tenants(reg) = &source {
+        if let Err(refused) = reg.get(&tenant) {
+            let (code, msg) = tenant_error(refused);
+            out.error(code, &msg);
+            out.flush_to(&mut w)?;
+            return Ok(());
+        }
+    }
+
     // ---- session record (for cancellation)
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     let secret = i32::from_le_bytes(
@@ -827,9 +893,23 @@ fn session(
             b'Q' => {
                 let mut pos = 0;
                 let sql = take_cstr(&m.body, &mut pos);
+                let (db, held) = match source.open(&tenant) {
+                    Ok(v) => v,
+                    Err(refused) => {
+                        let (code, msg) = tenant_error(refused);
+                        out.error(code, &msg);
+                        out.ready(tx.status());
+                        out.flush_to(&mut w)?;
+                        continue;
+                    }
+                };
+                // Held against a move for the length of the statement, as a
+                // request is held on the HTTP path.
+                let _gate = held.as_ref().map(|t| t.enter());
+                let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
                 be.busy.store(true, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
-                execute_into(&db, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
+                execute_into(&db, frozen, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
                 be.busy.store(false, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
                 out.ready(tx.status());
@@ -897,6 +977,17 @@ fn session(
                     portals.get(&name).map(|p| p.sql.clone())
                 };
                 let sql = sql.unwrap_or_default();
+                let (db, held) = match source.open(&tenant) {
+                    Ok(v) => v,
+                    Err(refused) => {
+                        let (code, msg) = tenant_error(refused);
+                        out.error(code, &msg);
+                        out.ready(tx.status());
+                        out.flush_to(&mut w)?;
+                        continue;
+                    }
+                };
+                let _gate = held.as_ref().map(|t| t.enter());
                 be.busy.store(true, Ordering::SeqCst);
                 let shape = describe(&db, &cfg, &sql, &be);
                 be.busy.store(false, Ordering::SeqCst);
@@ -935,10 +1026,21 @@ fn session(
                 // names.
                 let already =
                     described_portals.contains(&portal) || described_stmts.contains(&p.stmt_name);
+                let (db, held) = match source.open(&tenant) {
+                    Ok(v) => v,
+                    Err(refused) => {
+                        let (code, msg) = tenant_error(refused);
+                        out.error(code, &msg);
+                        // No ReadyForQuery here: the client sends Sync.
+                        continue;
+                    }
+                };
+                let _gate = held.as_ref().map(|t| t.enter());
+                let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
                 be.busy.store(true, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
                 execute_into(
-                    &db, &cfg, &be, &mut tx, &p.sql, &p.params, &mut out, already,
+                    &db, frozen, &cfg, &be, &mut tx, &p.sql, &p.params, &mut out, already,
                 );
                 be.busy.store(false, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
@@ -1506,6 +1608,7 @@ impl TxState {
 #[allow(clippy::too_many_arguments)]
 fn execute_into(
     db: &Arc<RwLock<Database>>,
+    frozen: bool,
     cfg: &Config,
     be: &Backend,
     tx: &mut TxState,
@@ -1516,7 +1619,7 @@ fn execute_into(
 ) {
     let started = Instant::now();
     let errors = out.errors();
-    let wait = run_locked(db, cfg, be, tx, sql, params, out, row_desc_sent);
+    let wait = run_locked(db, frozen, cfg, be, tx, sql, params, out, row_desc_sent);
     if let Some((durability, answer)) = wait {
         durable_or_refused(db, durability, answer, out);
     }
@@ -1560,6 +1663,7 @@ fn durable_or_refused(
 #[allow(clippy::too_many_arguments)]
 fn run_locked(
     db: &Arc<RwLock<Database>>,
+    frozen: bool,
     cfg: &Config,
     be: &Backend,
     tx: &mut TxState,
@@ -1618,12 +1722,23 @@ fn run_locked(
     // database: readers and writers go on, and the write lock is taken only
     // to put the result in place (see `Database::maintain`).
     if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
+        if frozen {
+            out.error("57P03", "the tenant is being moved; retry shortly");
+            return None;
+        }
         fenec_http::metrics::wrote();
         return maintain(db, cfg, tx, stmt, out);
     }
 
     // A shared lock suffices when everything is read-only: reads flow in parallel.
     let needs_write = stmts.iter().any(|s| !s.is_read_only());
+    // A frozen tenant is being exported for a move: the HTTP path answers
+    // 503 with `Retry-After`, and this is that answer on the wire. Reads go
+    // on -- the export is what they would read.
+    if needs_write && frozen {
+        out.error("57P03", "the tenant is being moved; retry shortly");
+        return None;
+    }
     if needs_write {
         fenec_http::metrics::wrote();
     }
