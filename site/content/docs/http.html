@@ -46,6 +46,12 @@ POST   /query                   body: {"query":"&lt;FenecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
 </pre>
 
+<p>With <code>--replication-token</code>, <code>/_replication</code> is taken
+as well: the stream a replica is fed, its status, and a replica's promotion —
+see <a href="/docs/replication">Replication</a>. It asks for that token
+rather than <code>--http-token</code>, and a collection named
+<code>_replication</code> is then out of HTTP's reach.</p>
+
 <h2>Filters</h2>
 
 <div class="tbl">
@@ -193,6 +199,7 @@ requests. The client-side layer built on this stream is
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
 <tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all</td></tr>
 <tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-pg</code>'s own path is unaffected</td></tr>
+<tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
 </tbody>
 </table>

@@ -99,7 +99,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-418 KB of WebAssembly — 137 KB brotli (`-q 11`) over the wire, client included — no
+420 KB of WebAssembly — 137 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
@@ -110,11 +110,14 @@ psql -h 127.0.0.1 -p 5432 -U fenec
 ```
 
 The same process carries the HTTP/JSON endpoint — never a second binary, since
-two processes opening one file would corrupt it.
-[PostgreSQL server](https://fenecdb.com/docs/postgres) ·
-[HTTP endpoint](https://fenecdb.com/docs/http).
+two processes opening one file would corrupt it. A second `fenec-pg` follows
+it as a read replica with `--replica-of`: it is sent the writes on the
+primary's disk, serves reads, refuses writes with `25006`, and is promoted by
+hand. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
+[HTTP endpoint](https://fenecdb.com/docs/http) ·
+[Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 1.31 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 1.70 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -140,7 +143,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 418 KB wasm + 69 KB client (137 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
+| **Runtime size** | 420 KB wasm + 69 KB client (137 KB brotli served) · 797–1105 KB binary · 1.70 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
@@ -164,6 +167,7 @@ query; it is not a join and is not trying to be one.
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [PostgreSQL server](https://fenecdb.com/docs/postgres) | Sessions, SCRAM authentication, the type mapping, what the protocol does not carry |
+| [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command |

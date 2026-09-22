@@ -18,7 +18,7 @@ psql -h 127.0.0.1 -p 5433 -U fenec
 PostgreSQL ecosystem: vectors use the same text representation as pgvector
 (<code>[1,2,3]</code>) and errors map to SQLSTATE codes
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
-<code>57014</code>).</p>
+<code>57014</code>, and <code>25006</code> for a write sent to a replica).</p>
 
 <p><code>explain get ...</code> answers the way PostgreSQL's
 <code>EXPLAIN ANALYZE</code> does on the wire: rows of text in one column,
@@ -26,6 +26,14 @@ here <code>plan</code>, tagged <code>EXPLAIN</code>, so psql prints the plan
 and a driver reads it as rows. The steps are fenecdb's own — which index,
 how many rows each stage read — and are described under <a
 href="fenecql.html#explain">Explain</a>.</p>
+
+<p>With <code>--replica-of</code> the process follows another
+<code>fenec-pg</code> as a read replica: it serves every read, refuses every
+write with <code>25006</code> as a PostgreSQL standby does, and answers
+<code>SHOW transaction_read_only</code> and <code>pg_is_in_recovery()</code>
+accordingly, which is what libpq's <code>target_session_attrs</code> and
+JDBC's <code>targetServerType</code> go by. The flags, promotion and what a
+failover loses are on <a href="/docs/replication">Replication</a>.</p>
 
 <p>With <code>--dir &lt;path&gt;</code> instead of <code>--file</code> the
 process serves a directory of tenant files over HTTP, one file per tenant under
@@ -194,7 +202,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>1.31 MB</b> on amd64 and 1.18 MB on arm64 — since no target
+package manager, no libc. The image is <b>1.70 MB</b> on amd64 and 1.51 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image

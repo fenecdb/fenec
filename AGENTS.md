@@ -19,6 +19,7 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make import-test   # the PostgreSQL arm of import (needs Docker)
+make replica-bench # replica lag per sync policy, catch-up, what a failover loses
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 ```
@@ -51,7 +52,7 @@ fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
      |
-fenec-http  (REST/JSON + SSE)
+fenec-http  (REST/JSON + SSE, replication)
      |
 fenec-pg    (wire protocol: server AND client)
      |
@@ -114,11 +115,29 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 1 156 durable writes/s over eight clients. A failed one is reported back with
 `Database::fail` so the engine stops taking writes.
 
+**Replication ships only what is on disk, numbered by the change counter.**
+A primary (`--replication-token`) writes through a `Tee`
+(`fenec-http/src/replication.rs`): a write's record enters a bounded feed in
+memory as it is appended, and is sent once an fsync has covered it -- so a
+primary back from a crash holds every write any replica was sent. A replica
+applies them with `Database::apply`, which does the write path's index upkeep
+and hands each record on to its own sink with `Sink::record(seq, ..)`: its
+change counter matches the primary's write for write, and its file reopens
+where it stopped. So every write goes through `wal`, one record and one tick;
+a record that moved no counter would leave every replica one change off. The
+history (record kind 8, `History`) is the one record that moves none, and it is
+never sent: a promotion forks it, a replica is continued only from a position
+the primary's history passed through and sent an image otherwise, and a
+following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
+p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
+under `always` lost no acknowledged write.
+
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
 record kind. The change counter record (kind 6) is at the front and fixed width;
-the id counter (kind 7) exists so `compact` cannot hand out a deleted id again.
+the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
+the history (kind 8) is the one appended record that is not a write.
 
 **The HNSW graph is derived data, not a cache.** It is written only by
 `snapshot`, `compact` and `checkpoint` — never on the write path. On open the

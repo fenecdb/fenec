@@ -119,8 +119,9 @@ container memory is a sensible start: it covers both this 60–75% ratio and
 file of its own, nodes hold many, and a router forwards each request to the
 right one (<a href="/docs/sharding">Tenants and sharding</a>). The bound moves
 from "the database fits one machine" to "each tenant does" — a single tenant
-larger than a node is still out of reach, and there is no replication, so a node
-that is down takes its tenants with it.</p>
+larger than a node is still out of reach. A single file has
+<a href="/docs/replication">read replicas</a>, but a tenant node does not yet,
+so a node that is down takes its tenants with it.</p>
 
 <h2 id="index-build-open-and-maintenance">Index build, open and maintenance</h2>
 

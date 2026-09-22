@@ -27,11 +27,13 @@
 pub mod admin;
 pub mod api;
 pub mod http;
+pub mod replication;
 pub mod sse;
 pub mod tenants;
 
 use fenec_core::prelude::*;
 use http::{Method, Request, Response};
+use replication::Replication;
 use sse::Hub;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -119,6 +121,9 @@ enum Backend {
     Single {
         db: Arc<RwLock<Database>>,
         hub: Arc<Hub>,
+        /// Feeding replicas, following a primary, or both; see
+        /// [`replication`].
+        repl: Option<Arc<Replication>>,
     },
     Tenants(Arc<Tenants>),
 }
@@ -136,10 +141,25 @@ impl Server {
             guard.set_change_capacity(cfg.change_capacity);
         }
         Server {
-            backend: Backend::Single { db, hub },
+            backend: Backend::Single {
+                db,
+                hub,
+                repl: None,
+            },
             cfg: Arc::new(cfg),
             live: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Serves `/_replication` for a single database: the stream replicas
+    /// are fed from, the status, and a replica's promotion. That path is
+    /// then this server's -- a collection named `_replication` is not
+    /// reachable over HTTP while it is.
+    pub fn with_replication(mut self, repl: Arc<Replication>) -> Server {
+        if let Backend::Single { repl: slot, .. } = &mut self.backend {
+            *slot = Some(repl);
+        }
+        self
     }
 
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
@@ -303,9 +323,33 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         };
         let (db, hub) = match (&tenant, backend) {
             (Some(t), _) => (&t.db, &t.hub),
-            (None, Backend::Single { db, hub }) => (db, hub),
+            (None, Backend::Single { db, hub, .. }) => (db, hub),
             (None, Backend::Tenants(_)) => unreachable!("routed above"),
         };
+        if let Backend::Single {
+            repl: Some(repl), ..
+        } = backend
+        {
+            if req.segments().first() == Some(&"_replication") {
+                // A replica's stream is a body with no end, like a
+                // subscription: it takes the connection over.
+                let _ = out.set_read_timeout(None);
+                match replication::handle(&mut out, db, repl, &req) {
+                    None => return,
+                    Some(resp) => {
+                        if cors(resp, cfg)
+                            .write(&mut out, keep_alive, head_only)
+                            .is_err()
+                            || !keep_alive
+                        {
+                            return;
+                        }
+                        let _ = out.set_read_timeout(cfg.idle_timeout);
+                        continue;
+                    }
+                }
+            }
+        }
         // A subscription cannot go down the ordinary response path: it is a
         // body with unknown `Content-Length` and no end. It takes the
         // connection over and never returns.
@@ -605,7 +649,8 @@ fn error_response(e: &Error) -> Response {
         | Error::Query(m)
         | Error::Corrupt(m)
         | Error::Io(m)
-        | Error::Plugin(m) => m.as_str(),
+        | Error::Plugin(m)
+        | Error::ReadOnly(m) => m.as_str(),
     };
     Response::error(api::status_of(e), msg)
 }

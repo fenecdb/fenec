@@ -31,6 +31,7 @@ pub mod changes;
 pub mod codec;
 pub mod engine;
 pub mod error;
+pub mod history;
 pub mod json;
 pub mod num;
 pub mod plugin;
@@ -53,6 +54,7 @@ pub mod prelude {
         TextIndexStats, VectorIndexStats, Watcher,
     };
     pub use crate::error::{Error, Result};
+    pub use crate::history::History;
     pub use crate::plugin::{Hook, Plugin, Registry, ScalarFn, WriteOp};
     pub use crate::query::{
         CmpOp, Expr, Lookup, Match, Near, Nested, Rerank, Response, ResultSet, Row, Select,

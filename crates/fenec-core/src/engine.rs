@@ -3,6 +3,7 @@
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::error::{Error, Result};
+use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
@@ -83,10 +84,23 @@ const REC_SEQ_LEN: usize = 1 + 8 + 8;
 /// tombstones are still present and carry the counter themselves.
 const REC_NEXTID: u8 = 7;
 
+/// Which history a database's writes belong to: `[8][0][length][following]
+/// [count]{[id: u64 LE][from]}`. Not a write -- it moves no counter -- so a
+/// replica never receives it as one; see [`History`].
+const REC_HISTORY: u8 = 8;
+
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
     fn append(&mut self, bytes: &[u8]) -> Result<()>;
+    /// Appends a write, the `seq`th of the change counter. A sink that
+    /// passes writes on -- a primary's feed to its replicas -- numbers them
+    /// by it; everything else only appends. Records that are not writes
+    /// (the history) come through [`Self::append`] and carry no number.
+    fn record(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
+        let _ = seq;
+        self.append(bytes)
+    }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
     fn sync(&mut self) -> Result<()> {
         Ok(())
@@ -186,6 +200,12 @@ impl Collection {
 
     /// Rebuilds the index structures from the schema's index definitions
     /// (contents empty; filling them is `rebuild_indexes_with`'s job).
+    ///
+    /// Inlined, as the other two functions [`Database::apply`] shares with the
+    /// write path are: the browser module links no `apply`, and with a
+    /// second caller they were no longer inlined into their first -- 1.1 KB
+    /// of the module for nothing it runs.
+    #[inline(always)]
     fn reset_index_structures(&mut self) {
         self.vectors.clear();
         self.hashes.clear();
@@ -251,6 +271,7 @@ impl Collection {
     ///
     /// Calling `insert` one at a time missed the chance to parallelise the
     /// read-only part of the HNSW build; the batch path takes it.
+    #[inline(always)]
     fn index_vectors_batch(&mut self, docs: &[Document]) {
         for (name, ix) in self.vectors.iter_mut() {
             let items: Vec<(DocId, Vec<f32>)> = docs
@@ -733,6 +754,9 @@ pub struct Database {
     changes: ChangeLog,
     /// The party to wake after a write (if any).
     watcher: Option<Arc<dyn Watcher>>,
+    /// Which history the writes belong to, and whether they come from a
+    /// primary; see [`History`].
+    history: History,
 }
 
 impl Default for Database {
@@ -753,6 +777,7 @@ impl Database {
             failed: None,
             changes: ChangeLog::default(),
             watcher: None,
+            history: History::default(),
         }
     }
 
@@ -980,6 +1005,14 @@ impl Database {
         out.extend_from_slice(&0u64.to_le_bytes());
         let body_at = out.len();
 
+        if self.history.following || !self.history.lineage.is_empty() {
+            let h = self.history.encode();
+            out.push(REC_HISTORY);
+            put_uvarint(&mut out, 0);
+            put_uvarint(&mut out, h.len() as u64);
+            out.extend_from_slice(&h);
+        }
+
         for name in &self.order {
             let c = &self.collections[name];
             let sc = c.schema.encode();
@@ -1191,6 +1224,16 @@ impl Database {
                     if let Some(name) = by_id.get(&cid) {
                         graphs.insert((name.clone(), field), chunk[cp..].to_vec());
                     }
+                }
+                REC_HISTORY => {
+                    let _ = get_uvarint(bytes, &mut pos)?;
+                    let len = get_uvarint(bytes, &mut pos)? as usize;
+                    if pos + len > bytes.len() {
+                        break;
+                    }
+                    // Not a write: it does not move `seq`.
+                    self.history = History::decode(&bytes[pos..pos + len])?;
+                    pos += len;
                 }
                 REC_SEQ => {
                     if pos + REC_SEQ_LEN - 1 > bytes.len() {
@@ -1404,13 +1447,17 @@ impl Database {
         Ok(())
     }
 
+    /// Appends a write's record. Every caller notes the write on the change
+    /// counter right after, so the record is numbered as the one after the
+    /// counter's current value.
     fn wal(&mut self, rec: u8, cid: u32, payload: &[u8]) -> Result<()> {
         let mut frame = Vec::with_capacity(payload.len() + 12);
         frame.push(rec);
         put_uvarint(&mut frame, cid as u64);
         put_uvarint(&mut frame, payload.len() as u64);
         frame.extend_from_slice(payload);
-        let r = self.sink_mut().append(&frame);
+        let seq = self.changes.seq() + 1;
+        let r = self.sink_mut().record(seq, &frame);
         self.storage(r)?;
         self.dirty = true;
         Ok(())
@@ -1478,6 +1525,242 @@ impl Database {
         }
     }
 
+    // ---------------------------------------------------------- replication
+
+    /// Which history the writes belong to; see [`History`].
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+
+    /// Starts a new history at the current change, under `id`, and takes
+    /// writes from here on: a replica being promoted, or a primary about to
+    /// have its first replica -- the root history is every database's and
+    /// names none. `id` must be one no other database holds; the caller
+    /// draws it at random.
+    pub fn fork(&mut self, id: u64) -> Result<()> {
+        let mut h = self.history.clone();
+        h.lineage.push((id, self.changes.seq()));
+        h.following = false;
+        self.set_history(h)
+    }
+
+    /// Takes a primary's history, and from then on no write of its own:
+    /// the writes arrive through [`Self::apply`].
+    pub fn follow(&mut self, lineage: Vec<(u64, u64)>) -> Result<()> {
+        self.set_history(History {
+            lineage,
+            following: true,
+        })
+    }
+
+    fn set_history(&mut self, h: History) -> Result<()> {
+        self.refuse_if_failed()?;
+        if h == self.history {
+            return Ok(());
+        }
+        let body = h.encode();
+        let mut frame = Vec::with_capacity(body.len() + 4);
+        frame.push(REC_HISTORY);
+        put_uvarint(&mut frame, 0);
+        put_uvarint(&mut frame, body.len() as u64);
+        frame.extend_from_slice(&body);
+        // Not a write: it has no number, and no replica is sent it.
+        let r = self.sink_mut().append(&frame);
+        self.storage(r)?;
+        self.dirty = true;
+        self.history = h;
+        Ok(())
+    }
+
+    /// Applies writes a primary made. `records` are what its write path
+    /// appended to its file, whole and in order, and each is numbered as
+    /// the change after this database's counter -- the number the primary
+    /// gave it, when the two agree on where they stand
+    /// ([`History::continues`]).
+    ///
+    /// Each record goes through the index upkeep the write path does and on
+    /// to this database's own sink, so a replica's file holds the primary's
+    /// records and reopens at the same change. The one thing that may come
+    /// out different is the HNSW graph: the same vectors go in, in the same
+    /// order, but not in the same batches, and the search is approximate
+    /// either way.
+    pub fn apply(&mut self, records: &[u8]) -> Result<usize> {
+        self.refuse_if_failed()?;
+        let before = self.changes.seq();
+        let mut batch = VectorBatch::default();
+        let applied = self.apply_records(records, &mut batch);
+        // A record that failed leaves the ones before it applied, and their
+        // vectors are indexed all the same.
+        self.index_batch(&mut batch);
+        let after = self.changes.seq();
+        if after != before {
+            if let Some(w) = &self.watcher {
+                w.notify(after);
+            }
+        }
+        applied
+    }
+
+    fn apply_records(&mut self, bytes: &[u8], batch: &mut VectorBatch) -> Result<usize> {
+        let cut = || Error::Corrupt("a write record cut short".into());
+        let mut n = 0;
+        let mut pos = 0;
+        while pos < bytes.len() {
+            let start = pos;
+            let rec = bytes[pos];
+            pos += 1;
+            let cid = get_uvarint(bytes, &mut pos)? as u32;
+            let len = get_uvarint(bytes, &mut pos)? as usize;
+            let body = bytes.get(pos..pos + len).ok_or_else(cut)?;
+            pos += len;
+
+            let mut marked = SCHEMA_MARK;
+            if rec == REC_DATA {
+                let mut p = 1;
+                marked = get_uvarint(body, &mut p)?;
+            }
+            // The graph takes a batch as the graph stands before it: a
+            // record that needs it as it stands after -- a document the
+            // batch holds, another collection, a schema change -- ends it.
+            if !batch.docs.is_empty()
+                && (rec != REC_DATA || cid != batch.cid || batch.ids.contains(&marked))
+            {
+                self.index_batch(batch);
+            }
+            match rec {
+                REC_CREATE => {
+                    let mut sp = 0;
+                    let schema = Schema::decode(body, &mut sp)?;
+                    if self.collections.contains_key(&schema.name) || self.named(cid).is_some() {
+                        return Err(Error::Corrupt(format!(
+                            "collection `{}` is already here",
+                            schema.name
+                        )));
+                    }
+                    self.next_coll_id = self.next_coll_id.max(cid + 1);
+                    self.order.push(schema.name.clone());
+                    self.collections
+                        .insert(schema.name.clone(), Collection::new(cid, schema));
+                }
+                REC_DROP => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    self.collections.remove(&name);
+                    self.order.retain(|n| *n != name);
+                }
+                REC_ALTER => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    let mut sp = 0;
+                    let schema = Schema::decode(body, &mut sp)?;
+                    let c = self.collections.get_mut(&name).unwrap();
+                    let same_layout = c.schema.fields.len() == schema.fields.len()
+                        && c.schema
+                            .fields
+                            .iter()
+                            .zip(&schema.fields)
+                            .all(|(a, b)| a.name == b.name && a.ty == b.ty);
+                    if !same_layout {
+                        return Err(Error::Corrupt(format!(
+                            "a schema change moved the fields of `{name}`"
+                        )));
+                    }
+                    // `create index` adds one; anything else rebuilds them all.
+                    let changed: Vec<usize> = (0..schema.fields.len())
+                        .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
+                        .collect();
+                    let added = changed
+                        .iter()
+                        .all(|&i| c.schema.fields[i].index == IndexKind::None);
+                    c.schema = schema;
+                    if added {
+                        for i in changed {
+                            build_index(c, i)?;
+                        }
+                    } else {
+                        c.reset_index_structures();
+                        for i in 0..c.schema.fields.len() {
+                            build_index(c, i)?;
+                        }
+                    }
+                }
+                REC_DATA => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    let c = self.collections.get_mut(&name).unwrap();
+                    let op = body[0];
+                    let mut p = 1;
+                    let id = get_uvarint(body, &mut p)?;
+                    let plen = get_uvarint(body, &mut p)? as usize;
+                    let payload = body.get(p..p + plen).ok_or_else(cut)?;
+                    if let Some(old) = c.store.read(&c.schema, id)? {
+                        c.unindex_doc(&old);
+                    }
+                    c.store.append(op, id, payload);
+                    if op == OP_PUT {
+                        let doc = c.store.read(&c.schema, id)?.ok_or_else(cut)?;
+                        c.index_scalar(&doc);
+                        if !c.vectors.is_empty() {
+                            batch.cid = cid;
+                            batch.ids.insert(id);
+                            batch.docs.push(doc);
+                        }
+                    }
+                }
+                other => {
+                    return Err(Error::Corrupt(format!(
+                        "record kind {other} is not a write"
+                    )))
+                }
+            }
+            let seq = self.changes.seq() + 1;
+            let r = self.sink_mut().record(seq, &bytes[start..pos]);
+            self.storage(r)?;
+            self.dirty = true;
+            self.note(cid, marked);
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// The name of the collection with id `cid`.
+    fn named(&self, cid: u32) -> Option<String> {
+        self.order
+            .iter()
+            .find(|n| self.collections[*n].id == cid)
+            .cloned()
+    }
+
+    fn index_batch(&mut self, batch: &mut VectorBatch) {
+        if let Some(name) = self.named(batch.cid) {
+            if let Some(c) = self.collections.get_mut(&name) {
+                c.index_vectors_batch(&batch.docs);
+            }
+        }
+        batch.docs.clear();
+        batch.ids.clear();
+    }
+
+    /// Replaces everything with `fresh` -- a database loaded from `image` --
+    /// and rewrites the sink with the image: what a replica does when its
+    /// primary no longer holds the writes it missed. The sink, the watcher,
+    /// the plugins and the change ring's size stay. The ring's marks do not,
+    /// so every subscriber reseeds.
+    pub fn adopt(&mut self, fresh: Database, image: &[u8]) -> Result<()> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().rewrite(image);
+        self.storage(r)?;
+        let cap = self.changes.capacity();
+        self.collections = fresh.collections;
+        self.order = fresh.order;
+        self.next_coll_id = fresh.next_coll_id;
+        self.history = fresh.history;
+        self.changes = fresh.changes;
+        self.changes.set_capacity(cap);
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------ execution
 
     pub fn execute(&mut self, stmt: &Statement) -> Result<Response> {
@@ -1511,6 +1794,12 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         if !stmt.is_read_only() {
             self.refuse_if_failed()?;
+            // `compact` changes no document, only how the file holds them.
+            if self.history.following && !matches!(stmt, Statement::Compact(_)) {
+                return Err(Error::ReadOnly(
+                    "this database is a replica: its writes come from its primary".into(),
+                ));
+            }
         }
         let before = self.changes.seq();
         let out = self.execute_inner(stmt, params);
@@ -1639,57 +1928,7 @@ impl Database {
         let c = self.collections.get_mut(collection).unwrap();
         let pos = c.schema.field_pos(field).unwrap();
         c.schema.fields[pos].index = kind.clone();
-
-        // Build the index structure and fill it from the current documents.
-        match kind {
-            IndexKind::Vector(spec) => {
-                let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
-                    unreachable!()
-                };
-                let mut ix = VectorIndex::with_precision(dim, *spec, prec);
-                let ids: Vec<DocId> = c.store.ids();
-                ix.reserve(ids.len());
-                let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
-                for id in &ids {
-                    if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
-                        items.push((*id, v));
-                    }
-                }
-                ix.insert_batch(&items);
-                c.vectors.insert(field.to_string(), ix);
-            }
-            IndexKind::Hash => {
-                let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
-                for id in c.store.ids() {
-                    if let Some(v) = c.store.read_field(id, pos)? {
-                        map.entry(hash_key(&v)).or_default().push(id);
-                    }
-                }
-                c.hashes.insert(field.to_string(), map);
-            }
-            IndexKind::Text(spec) => {
-                let mut ix = TextIndex::new(*spec);
-                for id in c.store.ids() {
-                    if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
-                        ix.insert(id, &t);
-                    }
-                }
-                ix.shrink_to_fit();
-                c.texts.insert(field.to_string(), ix);
-            }
-            IndexKind::Sorted => {
-                let ty = c.schema.fields[pos].ty.clone();
-                let mut rows = Vec::with_capacity(c.store.len());
-                for id in c.store.ids() {
-                    rows.push((id, c.store.read_field(id, pos)?));
-                }
-                c.sorted.push((
-                    field.to_string(),
-                    SortedIndex::build(&ty, &mut rows.into_iter()),
-                ));
-            }
-            IndexKind::None => {}
-        }
+        build_index(c, pos)?;
 
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;
@@ -3258,6 +3497,79 @@ impl Database {
             "compaction done, {reclaimed} bytes reclaimed"
         )))
     }
+}
+
+/// The documents [`Database::apply`] has yet to put into the graph: one
+/// collection's, none of them twice.
+#[derive(Default)]
+struct VectorBatch {
+    cid: u32,
+    ids: std::collections::HashSet<DocId>,
+    docs: Vec<Document>,
+}
+
+fn missing(cid: u32) -> Error {
+    Error::Corrupt(format!("a write to collection {cid}, which is not here"))
+}
+
+/// Builds the index the schema declares on the field at `pos` and fills it
+/// from the collection's documents: what `create index` does, and what a
+/// replica does with the primary's. Inlined for the reason
+/// [`Collection::reset_index_structures`] is.
+#[inline(always)]
+fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    let field = c.schema.fields[pos].name.clone();
+    match c.schema.fields[pos].index.clone() {
+        IndexKind::Vector(spec) => {
+            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+                return Err(Error::Type(format!("field `{field}` is not vector<N>")));
+            };
+            let mut ix = VectorIndex::with_precision(dim, spec, prec);
+            let ids: Vec<DocId> = c.store.ids();
+            ix.reserve(ids.len());
+            let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
+                    items.push((*id, v));
+                }
+            }
+            ix.insert_batch(&items);
+            c.vectors.insert(field, ix);
+        }
+        IndexKind::Hash => {
+            let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+            for id in c.store.ids() {
+                if let Some(v) = c.store.read_field(id, pos)? {
+                    map.entry(hash_key(&v)).or_default().push(id);
+                }
+            }
+            c.hashes.insert(field, map);
+        }
+        IndexKind::Text(spec) => {
+            let mut ix = TextIndex::new(spec);
+            for id in c.store.ids() {
+                if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
+                    ix.insert(id, &t);
+                }
+            }
+            ix.shrink_to_fit();
+            c.texts.insert(field, ix);
+        }
+        IndexKind::Sorted => {
+            let ty = c.schema.fields[pos].ty.clone();
+            let mut rows = Vec::with_capacity(c.store.len());
+            for id in c.store.ids() {
+                rows.push((id, c.store.read_field(id, pos)?));
+            }
+            let ix = SortedIndex::build(&ty, &mut rows.into_iter());
+            match c.sorted.iter_mut().find(|(n, _)| *n == field) {
+                Some(slot) => slot.1 = ix,
+                None => c.sorted.push((field, ix)),
+            }
+        }
+        IndexKind::None => {}
+    }
+    Ok(())
 }
 
 thread_local! {

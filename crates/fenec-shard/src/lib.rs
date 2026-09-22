@@ -699,7 +699,8 @@ fn message(e: &Error) -> String {
         | Error::Query(m)
         | Error::Corrupt(m)
         | Error::Io(m)
-        | Error::Plugin(m) => m.clone(),
+        | Error::Plugin(m)
+        | Error::ReadOnly(m) => m.clone(),
     }
 }
 

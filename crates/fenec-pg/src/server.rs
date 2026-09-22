@@ -546,6 +546,9 @@ fn sqlstate(e: &Error) -> &'static str {
         // PostgreSQL's io_error: the disk refused, and the engine now refuses
         // writes until the file is reopened.
         Error::Io(_) => "58030",
+        // read_only_sql_transaction: what a PostgreSQL standby answers, and
+        // what pools and drivers look for to tell a replica from a primary.
+        Error::ReadOnly(_) => "25006",
         _ => "XX000",
     }
 }
@@ -1275,7 +1278,7 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
         });
     }
     // Compatibility-layer queries are pure and fixed; the shape is read from there.
-    if let Some(shim) = compat::handle(trimmed, cfg) {
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
         return Some(Shape {
             params: Vec::new(),
             columns: match shim {
@@ -1458,7 +1461,7 @@ fn run_locked(
     }
 
     // The standard queries PostgreSQL clients send at startup
-    if let Some(shim) = compat::handle(trimmed, cfg) {
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
         match shim {
             compat::Shim::Rows { columns, rows, tag } => {
                 if !row_desc_sent {

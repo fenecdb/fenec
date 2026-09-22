@@ -64,11 +64,13 @@ pub struct Hub {
 }
 
 impl Watcher for Hub {
+    /// Set, not raised: a replica that takes an image can land on a lower
+    /// change than it held, and a mark left above it would wake every
+    /// stream at once, forever. Notifications come under the database's
+    /// write lock, so they arrive in the order the counter moved.
     fn notify(&self, seq: u64) {
         let mut g = self.seq.lock().unwrap_or_else(|e| e.into_inner());
-        if seq > *g {
-            *g = seq;
-        }
+        *g = seq;
         self.cv.notify_all();
     }
 }
@@ -321,4 +323,23 @@ fn write_head(
     head.push_str("\r\n");
     out.write_all(head.as_bytes())?;
     out.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A replica that takes an image can land on a lower change than it
+    /// held. The hub has to follow it down: kept at the old high mark, it
+    /// told every stream reseeded at the new one that a write was waiting,
+    /// and the stream spun on empty batches until writes caught up.
+    #[test]
+    fn the_mark_follows_the_database_down() {
+        let hub = Hub::new();
+        hub.notify(1000);
+        hub.notify(900);
+        let t = std::time::Instant::now();
+        assert_eq!(hub.wait(900, Duration::from_millis(50)), 900);
+        assert!(t.elapsed() >= Duration::from_millis(40));
+    }
 }

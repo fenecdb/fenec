@@ -208,8 +208,10 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
 <h2>What it does not do</h2>
 
 <ul>
-  <li><b>No replication.</b> A node that is down takes its tenants with it;
-    the router answers 502 for them until it is back. Tenant files are ordinary
+  <li><b>No replicas of tenants.</b> A single file has
+    <a href="/docs/replication">read replicas</a>; a <code>--dir</code> node
+    does not yet, so a node that is down takes its tenants with it and the
+    router answers 502 for them until it is back. Tenant files are ordinary
     files, so backups are file copies.</li>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's

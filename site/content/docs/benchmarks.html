@@ -221,12 +221,12 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">927 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import</td><td class="n">765 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>684 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>418 KB</b></td><td class="n"><b>118 KB</b></td><td class="n">143 KB</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1105 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import</td><td class="n">911 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>797 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>420 KB</b></td><td class="n"><b>118 KB</b></td><td class="n">143 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">69 KB</td><td class="n">19 KB</td><td class="n">22 KB</td></tr>
-<tr><td>container image, scratch + musl</td><td class="n">1.31 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">1.70 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>

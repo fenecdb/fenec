@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench small bench sweep \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench small bench sweep \
 	compare import-test \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -79,6 +79,13 @@ shard:
 ## What the router adds per request, and how long a tenant move takes.
 shard-bench:
 	$(CARGO) run --release -p fenec-shard --example overhead -- 100000 128
+
+## Replication: a replica's lag under each sync policy, how fast it
+## catches up and starts from an image, and what a failover loses.
+replica-bench:
+	$(CARGO) build --release -p fenec-pg
+	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
+	$(CARGO) run --release -p fenec-pg --example failover -- 10
 
 ## When size comes first: no import, abort instead of panic unwinding.
 small:

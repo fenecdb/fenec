@@ -66,7 +66,9 @@ fn is_fenecql(lower: &str) -> bool {
     }
 }
 
-pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
+/// `standby` says whether the database is a replica. It is asked only by the
+/// queries that are about it, since it takes the database's read lock.
+pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shim> {
     let q = sql.trim().trim_end_matches(';').trim();
     let lower = q.to_ascii_lowercase();
     if is_fenecql(&lower) {
@@ -106,6 +108,13 @@ pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
                 "standard_conforming_strings" => "on".into(),
                 "client_encoding" | "server_encoding" => "UTF8".into(),
                 "search_path" => "public".into(),
+                // How libpq's `target_session_attrs=read-write` and JDBC's
+                // `targetServerType` tell a primary from a standby: a replica
+                // saying "off" would be sent the writes it refuses.
+                "transaction_read_only"
+                | "default_transaction_read_only"
+                | "in_hot_standby"
+                | "transaction read only" => if standby() { "on" } else { "off" }.into(),
                 _ => String::new(),
             };
             return Some(one(name, &val));
@@ -135,6 +144,13 @@ pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
     if lower.starts_with("select 1") && !lower.contains("from") {
         return Some(one("?column?", "1"));
     }
+    // libpq's `target_session_attrs=primary|standby` asks this, catalog
+    // prefix and all, before the catalog rule below would answer it empty.
+    if lower.starts_with("select pg_is_in_recovery()")
+        || lower.starts_with("select pg_catalog.pg_is_in_recovery()")
+    {
+        return Some(one("pg_is_in_recovery", if standby() { "t" } else { "f" }));
+    }
 
     // Catalog discovery: return an empty result so the client does not stall
     // while opening.
@@ -155,14 +171,33 @@ pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
 mod tests {
     use super::*;
 
+    fn as_primary(q: &str, cfg: &Config) -> Option<Shim> {
+        handle(q, cfg, &|| false)
+    }
+
+    #[test]
+    fn a_standby_says_so() {
+        let cfg = Config::default();
+        let value = |q: &str, standby: bool| match handle(q, &cfg, &move || standby) {
+            Some(Shim::Rows { rows, .. }) => rows[0][0].clone(),
+            _ => panic!("`{q}` unanswered"),
+        };
+        for q in ["SHOW transaction_read_only", "show in_hot_standby"] {
+            assert_eq!(value(q, true), "on");
+            assert_eq!(value(q, false), "off");
+        }
+        assert_eq!(value("SELECT pg_catalog.pg_is_in_recovery()", true), "t");
+        assert_eq!(value("select pg_is_in_recovery()", false), "f");
+    }
+
     #[test]
     fn startup_queries_are_answered() {
         let cfg = Config::default();
-        assert!(handle("BEGIN", &cfg).is_some());
-        assert!(handle("SET client_encoding TO 'UTF8'", &cfg).is_some());
-        assert!(handle("SHOW server_version", &cfg).is_some());
-        assert!(handle("select version()", &cfg).is_some());
-        assert!(handle("SELECT c.oid FROM pg_catalog.pg_class c", &cfg).is_some());
+        assert!(as_primary("BEGIN", &cfg).is_some());
+        assert!(as_primary("SET client_encoding TO 'UTF8'", &cfg).is_some());
+        assert!(as_primary("SHOW server_version", &cfg).is_some());
+        assert!(as_primary("select version()", &cfg).is_some());
+        assert!(as_primary("SELECT c.oid FROM pg_catalog.pg_class c", &cfg).is_some());
     }
 
     /// Transaction control is handed to the session; a notification command
@@ -170,7 +205,7 @@ mod tests {
     #[test]
     fn transaction_control_and_notifications() {
         let cfg = Config::default();
-        let tx = |q: &str| match handle(q, &cfg) {
+        let tx = |q: &str| match handle(q, &cfg, &|| false) {
             Some(Shim::Tx(t)) => Some(t),
             _ => None,
         };
@@ -183,37 +218,40 @@ mod tests {
 
         for q in ["LISTEN jobs", "notify jobs, 'x'"] {
             assert!(
-                matches!(handle(q, &cfg), Some(Shim::Refuse { code: "0A000", .. })),
+                matches!(
+                    handle(q, &cfg, &|| false),
+                    Some(Shim::Refuse { code: "0A000", .. })
+                ),
                 "`{q}` must be refused"
             );
         }
-        assert!(matches!(handle("UNLISTEN *", &cfg), Some(Shim::Tag(_))));
+        assert!(matches!(as_primary("UNLISTEN *", &cfg), Some(Shim::Tag(_))));
     }
 
     #[test]
     fn fenecql_passes_through() {
         let cfg = Config::default();
-        assert!(handle("get docs limit 1", &cfg).is_none());
-        assert!(handle("put docs {a: 1}", &cfg).is_none());
-        assert!(handle("create collection t (a int)", &cfg).is_none());
-        assert!(handle("drop collection t", &cfg).is_none());
-        assert!(handle("del docs where a = 1", &cfg).is_none());
-        assert!(handle("compact", &cfg).is_none());
+        assert!(as_primary("get docs limit 1", &cfg).is_none());
+        assert!(as_primary("put docs {a: 1}", &cfg).is_none());
+        assert!(as_primary("create collection t (a int)", &cfg).is_none());
+        assert!(as_primary("drop collection t", &cfg).is_none());
+        assert!(as_primary("del docs where a = 1", &cfg).is_none());
+        assert!(as_primary("compact", &cfg).is_none());
     }
 
     #[test]
     fn set_is_disambiguated() {
         let cfg = Config::default();
         // A FenecQL update: it has a body
-        assert!(handle("set docs {year: 2026} where id = 1", &cfg).is_none());
-        assert!(handle("update docs {year: 2026}", &cfg).is_none());
+        assert!(as_primary("set docs {year: 2026} where id = 1", &cfg).is_none());
+        assert!(as_primary("update docs {year: 2026}", &cfg).is_none());
         // A PostgreSQL parameter assignment: no body
         assert!(matches!(
-            handle("SET client_encoding TO 'UTF8'", &cfg),
+            as_primary("SET client_encoding TO 'UTF8'", &cfg),
             Some(Shim::Tag(_))
         ));
         assert!(matches!(
-            handle("set search_path = public", &cfg),
+            as_primary("set search_path = public", &cfg),
             Some(Shim::Tag(_))
         ));
     }

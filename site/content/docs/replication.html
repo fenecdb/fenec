@@ -1,0 +1,194 @@
+<!--
+title: Replication — fenecdb
+description: A primary streams the writes on its disk to read replicas, each applying them to a file of its own. Positions, histories and promotion, what a failover loses, and what it costs.
+-->
+
+<h1>Replication</h1>
+<p class="kicker">A primary sends its replicas the writes that have reached
+its disk, and each applies them to a file of its own and serves reads from
+it. A replica refuses writes until it is promoted, by hand; what a failover
+can lose is what the primary's sync policy had not yet put on disk.</p>
+
+<pre data-lang="bash"># the primary: replicas are fed over its HTTP listener
+fenec-pg --file primary.fenec --http 0.0.0.0:8080 --http-token "$HTTP" \
+         --replication-token "$REPL" --sync always
+
+# a replica, over a file of its own
+fenec-pg --file replica.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8081 \
+         --replication-token "$REPL" --replica-of http://primary:8080
+
+# the primary is gone: the replica takes writes from here on
+curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
+# {"promoted":true,"seq":41873,"history":"5f0e2c9a81b44d17"}
+</pre>
+
+<p>A replica is a whole <code>fenec-pg</code>: every read works on it over
+PostgreSQL and HTTP, subscriptions included, from its own copy in memory. A
+write gets <code>25006</code> over PostgreSQL, the code a PostgreSQL standby
+answers with, and 403 over HTTP; <code>SHOW transaction_read_only</code> says
+<code>on</code> and <code>pg_is_in_recovery()</code> says true, which is how
+libpq's <code>target_session_attrs</code> and JDBC's
+<code>targetServerType</code> tell it from the primary.</p>
+
+<h2>What is sent</h2>
+
+<p>A fenecdb file is already a log: an image, then every write appended as a
+record. A replica is sent those records, whole and in order, and applies each
+the way the write path made it — the document, and the upkeep of every index
+on it — and appends it to its own file. Its file therefore ends as the
+primary's does, and a replica stopped and started again reopens where it was
+and asks only for what came after. The primary keeps the last 64 MiB of
+writes for this (<code>--replication-buffer</code>); a replica further behind
+than that is sent an image of the whole database instead, and follows write
+by write from there.</p>
+
+<p>Only writes on the primary's disk are sent. A write enters the feed when it
+is appended and leaves it once an fsync has covered it, so a primary that
+crashes comes back holding every write any replica was sent, and a replica
+never has to be told to forget one. The price is latency, set by the
+primary's <code>--sync</code>: under <code>always</code> a write goes out right
+after its own fsync, under <code>250</code> up to 250 ms later. Under
+<code>off</code> nothing is on disk before shutdown, so a server with a
+replication token refuses to start with it.</p>
+
+<h2>Positions and histories</h2>
+
+<p>Every write moves the change counter by one, on the primary and on each
+replica alike, so a replica's position is its own counter and a subscriber's
+cursor means the same change on either. A replica of a replica is fed exactly
+as its primary was.</p>
+
+<p>Numbers alone stop being enough once a history forks. A replica promoted
+after its primary died writes its own change 1 001; the old primary, or a
+second replica that had got further along, may hold a different 1 001.
+Streaming the new primary's 1 002 on top of that would go unnoticed. So each
+fork gets a fresh id and remembers the change where it left its parent, as
+PostgreSQL numbers its timelines, and a replica is continued only from a
+position the primary's own history passed through:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>A replica that…</th><th>is sent</th></tr></thead>
+<tbody>
+<tr><td>reconnects to a primary that restarted, even after a crash</td><td>the writes it missed</td></tr>
+<tr><td>was stopped and started again over its file</td><td>the writes it missed</td></tr>
+<tr><td>is pointed at a promoted replica, holding nothing past the fork</td><td>the writes it missed, and the new history</td></tr>
+<tr><td>is pointed at a promoted replica, holding writes past the fork — the old primary, say</td><td>an image</td></tr>
+<tr><td>is further behind than the primary keeps writes for</td><td>an image</td></tr>
+<tr><td>starts empty</td><td>the writes from the first, or an image</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The history lives in the file (<a href="/docs/file-format">record kind
+8</a>), and the first time a primary serves replicas it draws an id of its
+own — the root history is every database's, so it names none.</p>
+
+<h2>Promotion</h2>
+
+<p>By hand, one of two ways: <code>POST /_replication/promote</code> on the
+replica's HTTP listener, or restarting it over its file with
+<code>--promote</code> in place of <code>--replica-of</code>. Either forks the
+history where the replica stands and turns writes on. A replica's file does
+not open any other way — started with neither flag, <code>fenec-pg</code>
+refuses and says which to give — because a replica taking writes without a
+fork would continue its primary's history with writes the primary never
+made.</p>
+
+<p>Making sure the old primary takes no more writes is the operator's part, as
+it is with PostgreSQL: nothing here fences it. Brought back, it rejoins under
+the new primary with <code>--replica-of</code>, and is sent an image if it
+wrote past the fork.</p>
+
+<h2>What a failover loses</h2>
+
+<p>A primary killed with <code>SIGKILL</code> while one client writes to it as
+fast as it answers, the replica promoted half a second later, ten times per
+policy; counted are the writes the client was told succeeded that the promoted
+replica does not hold (<code>make replica-bench</code>, macOS, loopback):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>primary's <code>--sync</code></th><th class="n">acknowledged writes/s</th><th class="n">lost per failover</th></tr></thead>
+<tbody>
+<tr><td><code>always</code></td><td class="n">284</td><td class="n">0 in all ten</td></tr>
+<tr><td><code>250</code></td><td class="n">53 565</td><td class="n">9 700–10 788: the last ≤ 201 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Under <code>250</code> the loss is the policy's own: those writes were
+answered before any fsync and were not on the primary's disk either. Under
+<code>always</code> a write is answered after its fsync and sent right after,
+so what can be lost is a write whose answer went out in the fraction of a
+millisecond before it was sent — none of the ten failovers caught one. No
+failover left the replica holding a write the client had not been answered
+for.</p>
+
+<h2>What it costs</h2>
+
+<p>Primary and replica in one process over loopback, each over its own file;
+lag is from a write's answer on the primary to the write being readable on the
+replica, over 1 000 writes:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>primary's <code>--sync</code></th><th class="n">p50</th><th class="n">p95</th><th class="n">p99</th><th class="n">max</th></tr></thead>
+<tbody>
+<tr><td><code>always</code>, writes back to back</td><td class="n">0.20 ms</td><td class="n">0.30 ms</td><td class="n">0.37 ms</td><td class="n">0.44 ms</td></tr>
+<tr><td><code>250</code>, 250 writes a second</td><td class="n">148 ms</td><td class="n">262 ms</td><td class="n">273 ms</td><td class="n">282 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A replica keeps up with a bulk load: 100 000 documents of 128 dimensions
+with an HNSW index, which the primary wrote in 23.4 s in statements of 1 000,
+were applied from the stream in 19.7 s — 5 088 writes a second, the graph
+built as they arrive. A new replica of that database sent it as an image —
+58.3 MB, the graph in it — answered from it 0.17 s after it connected.</p>
+
+<p>The primary keeps the writes in memory up to its buffer, and copies the
+image it sends; a replica holds the database in memory as a primary does. The
+replica's HNSW graph is built from the same vectors in the same order, but not
+in the same batches, so an approximate <code>near</code> can rank a close call
+the other way on the two; everything else answers identically.</p>
+
+<h2>Endpoints</h2>
+
+<pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
+GET  /_replication/status                          role, position, replicas, lag
+POST /_replication/promote                         a replica's promotion
+</pre>
+
+<p>All three want <code>Authorization: Bearer &lt;replication token&gt;</code>,
+not the <code>--http-token</code>: the token is for replicas and for whoever
+promotes them. The status of a replica names its primary and says whether it
+is connected, how many writes it is <code>behind</code> the primary's disk,
+and how long ago it last heard from it; a primary's lists the replicas it is
+feeding and how far each has been sent.</p>
+
+<h2>Flags</h2>
+
+<div class="tbl">
+<table>
+<tbody>
+<tr><td><code>--replication-token &lt;value&gt;</code></td><td>turns replication on; needs <code>--file</code>, and <code>--http</code> to feed replicas. Also read from <code>FENEC_REPLICATION_TOKEN</code></td></tr>
+<tr><td><code>--replica-of http://host:port</code></td><td>follows that primary into <code>--file</code>; needs the token</td></tr>
+<tr><td><code>--promote</code></td><td>opens a replica's file to take writes, forking its history</td></tr>
+<tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>writes kept for replicas that fall behind; default 64</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>What it does not do</h2>
+
+<ul>
+  <li><b>No synchronous replication.</b> A write is answered when it is on the
+    primary's disk, never when a replica has it.</li>
+  <li><b>No automatic failover.</b> Promotion is by hand, and so is keeping
+    the old primary from taking writes.</li>
+  <li><b>No replicas of tenants yet.</b> A <code>--dir</code> node refuses the
+    flags; each of its files would need a feed of its own.</li>
+  <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
+    here: across an open network, a tunnel carries it.</li>
+</ul>

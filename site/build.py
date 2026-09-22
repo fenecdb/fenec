@@ -66,6 +66,7 @@ NAV = [
     ]),
     ("Operate", [
         ("docs/postgres", "PostgreSQL server"),
+        ("docs/replication", "Replication"),
         ("docs/sharding", "Tenants and sharding"),
         ("docs/import", "Import"),
         ("docs/embedding", "Embedded Rust"),

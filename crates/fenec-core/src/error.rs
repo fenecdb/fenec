@@ -17,6 +17,8 @@ pub enum Error {
     Io(String),
     /// Error originating from a plugin.
     Plugin(String),
+    /// A write sent to a database that takes its writes from a primary.
+    ReadOnly(String),
 }
 
 impl fmt::Display for Error {
@@ -29,6 +31,7 @@ impl fmt::Display for Error {
             Error::Query(m) => write!(f, "query error: {m}"),
             Error::Io(m) => write!(f, "io error: {m}"),
             Error::Plugin(m) => write!(f, "plugin error: {m}"),
+            Error::ReadOnly(m) => write!(f, "read only: {m}"),
         }
     }
 }
