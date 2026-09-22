@@ -20,8 +20,15 @@ exception are worth knowing before you touch the reader.</p>
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>.
-A half-written final record is truncated on open, so there is no separate
-recovery step after a crash.</p>
+A crash in the middle of an append leaves the last record cut short, in its
+header or its body: the open loads everything before it and cuts it off the
+file, so there is no separate recovery step after a crash.</p>
+
+<div class="note trap">
+  <p><b>A record cut short is cut off the file, not only skipped.</b> Left in
+  place, the first write appended after it is read back as the rest of it:
+  the write was acknowledged, and the next open loses it.</p>
+</div>
 
 <div class="note trap">
   <p><b>The length is written even for an empty body</b> — a

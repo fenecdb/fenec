@@ -249,12 +249,16 @@ fn a_truncated_tail_still_loads() {
     // opening. This test protects that property.
     let db = seeded();
     let full = db.snapshot();
+    assert_eq!(Database::new().load(&full).unwrap(), full.len());
     for cut in [1usize, 7, 30] {
         let mut trimmed = full.clone();
         trimmed.truncate(full.len() - cut);
         let mut back = Database::new();
-        back.load(&trimmed)
+        let whole = back
+            .load(&trimmed)
             .expect("a truncated tail must not break opening");
+        // What it took ends where the record cut short begins.
+        assert!(whole < trimmed.len(), "{whole} of {}", trimmed.len());
         assert_eq!(back.change_seq(), db.change_seq());
     }
 }

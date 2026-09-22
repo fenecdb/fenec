@@ -347,18 +347,24 @@ impl Sink for Tee {
 /// going through a [`Tee`] to a feed of `buffer` bytes.
 ///
 /// The file is fsynced as it is: a process that died leaves bytes it wrote
-/// but never synced, and those are the first a replica could be sent.
+/// but never synced, and those are the first a replica could be sent. A
+/// last record it cut short is cut off first, as `fs::open` does; it was
+/// never synced, so no replica was sent it.
 pub fn open(path: &str, buffer: usize) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
     let (mut file, existing) = FileSink::open(path)?;
+    let mut db = Database::new();
+    if existing.len() > MAGIC.len() {
+        let whole = db.load(&existing)?;
+        if whole < existing.len() {
+            file.cut(whole)?;
+        }
+    }
     file.sync_existing()?;
     let feed = Feed::new(buffer);
-    let mut db = Database::with_sink(Box::new(Tee {
+    db.set_sink(Box::new(Tee {
         file: Box::new(file),
         feed: Arc::clone(&feed),
     }));
-    if existing.len() > MAGIC.len() {
-        db.load(&existing)?;
-    }
     feed.start(db.change_seq());
     Ok((db, feed))
 }

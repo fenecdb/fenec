@@ -159,6 +159,50 @@ fn watermark_survives_a_file_restart() {
     cleanup(dir, path);
 }
 
+/// A crash in the middle of an append leaves the last record cut short, in
+/// its body or its header. The open loads what came before it and cuts it
+/// off the file: left there, it swallowed the first record appended after
+/// it -- a write acknowledged, and gone on the open after -- and a header cut
+/// short left the file unopenable.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_record_cut_short_is_cut_off_before_the_next_write() {
+    use std::io::Write;
+    let torn: [(&str, &[u8]); 3] = [
+        // A data record promising 100 bytes, 8 of them there.
+        ("body", &[3, 1, 100, 0, 1, 2, 3, 4, 5, 6, 7, 8]),
+        // Its kind and half its collection id.
+        ("header", &[3, 0x81]),
+        ("kind", &[3]),
+    ];
+    for (tag, bytes) in torn {
+        let (dir, path) = tmp_path(&format!("torn-{tag}"));
+        {
+            let mut db = fenec_core::fs::open(&path).expect("open");
+            run(&mut db, "create collection t (a text)");
+            run(&mut db, r#"put t {a: "before"}"#);
+            db.sync().expect("sync");
+        }
+        let whole = std::fs::metadata(&path).unwrap().len();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(bytes).unwrap();
+        drop(f);
+        {
+            let mut db = fenec_core::fs::open(&path).expect("the open after the crash");
+            assert_eq!(ids(&mut db, "t"), vec![1], "{tag}");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), whole, "{tag}");
+            run(&mut db, r#"put t {a: "after"}"#);
+            db.sync().expect("sync");
+        }
+        let mut db = fenec_core::fs::open(&path).expect("the open after that");
+        assert_eq!(ids(&mut db, "t"), vec![1, 2], "{tag}");
+        cleanup(dir, path);
+    }
+}
+
 /// Dropping a collection must not make the file unopenable.
 ///
 /// The `drop` record carries a length field like every other one (even

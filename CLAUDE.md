@@ -188,7 +188,10 @@ lone statement takes this path; a batch, the shell and `execute` hold the lock.
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
-record kind. The change counter record (kind 6) is at the front and fixed width;
+record kind. A last record a crash cut short is cut off the file on open
+(`Database::load` says where, `fs::open` and `replication::open` cut): only
+skipped, it swallowed the next append, an acknowledged write lost on the open
+after. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) is the one appended record that is not a write.
 

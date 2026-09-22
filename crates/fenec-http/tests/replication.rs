@@ -162,6 +162,44 @@ fn write_some(node: &Node, from: usize, n: usize) {
 const SCHEMA: &str =
     "create collection items (name text @text, n int @sorted, e vector<3> @hnsw(cosine))";
 
+/// A primary that died in the middle of an append left its last record
+/// cut short. It is cut off the file on the way back up -- no replica was
+/// sent it, since no fsync covered it -- rather than read back later with
+/// the first write after the restart as the rest of it.
+#[test]
+fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
+    let d = dir("torn");
+    let file = d.join("p.fenec");
+    let path = file.to_str().unwrap();
+    let run = |db: &mut Database, sql: &str| {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    };
+    {
+        let (mut db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
+        run(&mut db, "create collection t (x int)");
+        run(&mut db, "put t {x: 1}");
+        db.sync().unwrap();
+    }
+    let whole = std::fs::metadata(&file).unwrap().len();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    f.write_all(&[3, 1, 100, 0, 1, 2]).unwrap();
+    drop(f);
+    {
+        let (mut db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), whole);
+        run(&mut db, "put t {x: 2}");
+        db.sync().unwrap();
+    }
+    let (db, _) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
+    let r = db
+        .query(&fenec_ql::parse_one("get t count").unwrap(), &[])
+        .unwrap();
+    assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Int(2));
+}
+
 #[test]
 fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     let d = dir("follow");

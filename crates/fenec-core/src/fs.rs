@@ -133,6 +133,18 @@ impl FileSink {
         &self.path
     }
 
+    /// Cuts the file back to its first `len` bytes, before anything is
+    /// appended: past them is a record a crash left cut short (see
+    /// [`Database::load`]). Left there, it swallowed the first write
+    /// appended after it -- acknowledged, and gone on the next open.
+    pub fn cut(&mut self, len: usize) -> Result<()> {
+        let mut disk = lock(&self.disk);
+        disk.file.set_len(len as u64)?;
+        disk.file.sync_data()?;
+        disk.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+
     /// Pushes the whole file to disk, the bytes an earlier process wrote
     /// and never synced included. After a crash of the process alone they
     /// are in the file but may be only in the kernel's cache: a primary
@@ -210,13 +222,18 @@ impl Drop for FileSink {
     }
 }
 
-/// Opens a fenecdb file (creating it when missing) and loads its contents.
+/// Opens a fenecdb file (creating it when missing) and loads its contents;
+/// a last record a crash cut short is cut off the file.
 pub fn open(path: impl AsRef<Path>) -> Result<Database> {
-    let (sink, existing) = FileSink::open(path)?;
-    let mut db = Database::with_sink(Box::new(sink));
+    let (mut sink, existing) = FileSink::open(path)?;
+    let mut db = Database::new();
     if existing.len() > MAGIC.len() {
-        db.load(&existing)?;
+        let whole = db.load(&existing)?;
+        if whole < existing.len() {
+            sink.cut(whole)?;
+        }
     }
+    db.set_sink(Box::new(sink));
     Ok(db)
 }
 

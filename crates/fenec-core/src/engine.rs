@@ -111,6 +111,31 @@ const REC_NEXTID: u8 = 7;
 /// replica never receives it as one; see [`History`].
 const REC_HISTORY: u8 = crate::history::RECORD;
 
+/// Whether the record at `at` is all there, rather than cut short where the
+/// bytes end -- in its header or its body -- as a crash in the middle of an
+/// append leaves the last one. Only the kinds written with a length are
+/// judged: a kind this version does not know is the loader's to refuse, and
+/// the counter header is only ever written by a rewrite, whole or not at all.
+fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
+    if !matches!(
+        bytes[at],
+        REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY
+    ) {
+        return Ok(true);
+    }
+    let mut pos = at + 1;
+    let mut len = 0;
+    // The collection's id, then the body's length.
+    for _ in 0..2 {
+        len = match get_uvarint(bytes, &mut pos) {
+            Ok(v) => v,
+            Err(_) if pos >= bytes.len() => return Ok(false),
+            Err(e) => return Err(e),
+        };
+    }
+    Ok(len <= (bytes.len() - pos) as u64)
+}
+
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
@@ -1103,8 +1128,13 @@ impl Database {
         out
     }
 
-    /// Builds the database from a byte image.
-    pub fn load(&mut self, bytes: &[u8]) -> Result<()> {
+    /// Builds the database from a byte image, and returns how much of it
+    /// that took: all of it, or the bytes before a last record cut short --
+    /// what a crash in the middle of an append leaves. A file is cut back
+    /// there before anything is appended to it (`fs::open`): a write
+    /// appended after the torn bytes is read back as the rest of them, and
+    /// the next open lost it.
+    pub fn load(&mut self, bytes: &[u8]) -> Result<usize> {
         if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != &MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
@@ -1136,7 +1166,12 @@ impl Database {
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         // Collections whose indexes the tail reset or replaced.
         let mut reset: Vec<String> = Vec::new();
+        let mut whole = bytes.len();
         while pos < bytes.len() {
+            if !whole_record(bytes, pos)? {
+                whole = pos;
+                break;
+            }
             let tail = pos >= body_end;
             if tail && has_header && restored.is_none() {
                 restored = Some(self.restore_graphs(&graphs)?);
@@ -1147,9 +1182,6 @@ impl Database {
                 REC_CREATE => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut sp = 0usize;
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
@@ -1171,9 +1203,6 @@ impl Database {
                     // byte is read as the next record kind and the whole file
                     // becomes unopenable with "unknown record kind 0".
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break; // half-written tail
-                    }
                     pos += len;
                     seq_seen += tail as u64;
                     if let Some(name) = by_id.remove(&cid) {
@@ -1185,9 +1214,6 @@ impl Database {
                 REC_DATA => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break; // half-written tail
-                    }
                     let name = by_id
                         .get(&cid)
                         .cloned()
@@ -1215,9 +1241,6 @@ impl Database {
                 REC_ALTER => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut sp = 0usize;
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
@@ -1243,9 +1266,6 @@ impl Database {
                 REC_NEXTID => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut np = 0usize;
                     let next = get_uvarint(&bytes[pos..pos + len], &mut np)?;
                     pos += len;
@@ -1259,9 +1279,6 @@ impl Database {
                 REC_GRAPH => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let mut cp = 0usize;
@@ -1273,9 +1290,6 @@ impl Database {
                 REC_HISTORY => {
                     let _ = get_uvarint(bytes, &mut pos)?;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     // Not a write: it does not move `seq`.
                     self.history = History::decode(&bytes[pos..pos + len])?;
                     pos += len;
@@ -1307,7 +1321,7 @@ impl Database {
             None => self.restore_graphs(&graphs)?,
         };
         self.rebuild_indexes_with(&restored, &reset, &touched)?;
-        Ok(())
+        Ok(whole)
     }
 
     /// Restores each persisted graph against the documents as they stand,

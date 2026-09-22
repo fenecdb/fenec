@@ -432,9 +432,12 @@ impl Tenants {
     pub fn import(&self, name: &str, image: &[u8]) -> std::result::Result<(), Refused> {
         check_name(name)?;
         let mut check = Database::new();
-        check
+        let whole = check
             .load(image)
             .map_err(|e| Refused(400, format!("the image does not load: {e}")))?;
+        if whole < image.len() {
+            return Err(Refused(400, "the image is cut short".into()));
+        }
         drop(check);
 
         self.with_slot(name, |held| {
