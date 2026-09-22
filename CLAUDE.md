@@ -19,7 +19,8 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir)
-make import-test   # the PostgreSQL arm of import (needs Docker)
+make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
+make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants, HTTP only
@@ -61,7 +62,7 @@ fenec-http  (REST/JSON + SSE, tenant registry, replication)
      |                     \
 fenec-pg    (wire protocol:  fenec-shard (tenant router: directory,
      |      server AND client)            placement, move)
-fenec-import (SQLite file reader + PG COPY source)
+fenec-import (SQLite file reader + PG COPY source + --follow)
      |
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
 ```
@@ -353,6 +354,22 @@ both scores fall (0.687, 0.358). It is built from what the engine already
 had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
+
+**`--follow` confirms nothing that is not on disk.** `fenec import --follow`
+reads a logical replication slot through `pgoutput` and applies every change
+through the copy's own mapping (`fenec-import/src/follow.rs`). The slot's
+confirmed position only moves past a transaction an fsync has covered, and
+every write is a put or a delete by id, so a broken stream or a killed
+follower resumes from the slot and replays what it had applied without
+changing it. The slot is made before the copy is read, so the stream starts
+with changes the copy may already hold; the same idempotence converges them.
+A `_follow` collection in the file records whether a collection's copy
+finished: a copy cut short is made again rather than streamed on top of,
+which would lose the rows it never reached. An update arrives without its
+TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
+follower takes them from its pending writes or the collection; flushing
+before each such read cost the batching, 5 900 rows/s against 17 100. Commit
+to visible: p50 0.32 ms (`make follow-bench`).
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

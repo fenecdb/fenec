@@ -12,12 +12,13 @@ categories.workspace = true
 [dependencies]
 fenec-core.workspace = true
 fenec-ql.workspace = true
-# The `fenec import` subcommand. The SQLite reader + PostgreSQL client grow the
-# binary by ~190 KB; it is unnecessary for embedded/browser use and can be
-# turned off: `cargo build --release -p fenec-cli --no-default-features`.
+# The `fenec import` subcommand. The SQLite reader, the PostgreSQL client and
+# the `--follow` replication follower grow the binary by 242 KB; it is
+# unnecessary for embedded/browser use and can be turned off:
+# `cargo build --release -p fenec-cli --no-default-features`.
 fenec-import = { workspace = true, optional = true }
 # `fenec backup`, `fenec archive`, `fenec restore`: they speak the replication
-# stream through fenec-http's client -- 49 KB next to import, 82 KB alone. Off
+# stream through fenec-http's client -- 65 KB next to import, 82 KB alone. Off
 # with the rest in `make small`.
 fenec-http = { workspace = true, optional = true }
 

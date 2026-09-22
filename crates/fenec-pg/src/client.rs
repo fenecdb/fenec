@@ -2,7 +2,8 @@
 //!
 //! The `server` module makes fenecdb look like PostgreSQL; this module does
 //! the opposite and connects to a real PostgreSQL server. The subset needed
-//! for import: connect, authenticate, simple query and `COPY ... TO STDOUT`.
+//! for import: connect, authenticate, simple query and `COPY ... TO STDOUT`
+//! -- and for `--follow`, a logical replication stream ([`WalStream`]).
 //!
 //! Framing comes from [`crate::proto`], crypto from [`crate::crypto`]. The
 //! server half of SCRAM is in [`crate::scram`]; this is the client half.
@@ -13,9 +14,9 @@
 use crate::crypto::{b64_decode, b64_encode, hmac_sha256, nonce, pbkdf2_sha256, sha256};
 use crate::proto::{put_cstr, read_message, Message, Writer, PROTOCOL_V3};
 use fenec_core::error::{Error, Result};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, ErrorKind, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The timeout used while connecting and while waiting for a message.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -253,6 +254,16 @@ pub struct Client {
 impl Client {
     /// Connects and completes authentication.
     pub fn connect(url: &Url) -> Result<Client> {
+        Client::open(url, false)
+    }
+
+    /// A connection in logical replication mode (`replication=database`):
+    /// it takes [`Client::start_replication`] besides ordinary SQL.
+    pub fn connect_replication(url: &Url) -> Result<Client> {
+        Client::open(url, true)
+    }
+
+    fn open(url: &Url, replication: bool) -> Result<Client> {
         let stream = TcpStream::connect((url.host.as_str(), url.port))
             .map_err(|e| io(format!("{}:{} -- {e}", url.host, url.port)))?;
         stream.set_read_timeout(Some(TIMEOUT)).ok();
@@ -271,7 +282,18 @@ impl Client {
         put_cstr(&mut body, "database");
         put_cstr(&mut body, &url.database);
         put_cstr(&mut body, "application_name");
-        put_cstr(&mut body, "fenec-import");
+        put_cstr(
+            &mut body,
+            if replication {
+                "fenec-follow"
+            } else {
+                "fenec-import"
+            },
+        );
+        if replication {
+            put_cstr(&mut body, "replication");
+            put_cstr(&mut body, "database");
+        }
         body.push(0);
         let mut packet = ((body.len() + 4) as i32).to_be_bytes().to_vec();
         packet.extend_from_slice(&body);
@@ -480,6 +502,165 @@ impl Client {
     }
 }
 
+impl Client {
+    /// `START_REPLICATION` of a logical slot through `pgoutput`, protocol 1:
+    /// the connection turns into a stream of the publication's changes, a
+    /// transaction at a time as each commits, from where the slot was last
+    /// confirmed. Needs a [`Client::connect_replication`] connection.
+    ///
+    /// The names go into the command as they are, so they have to be plain
+    /// lowercase identifiers; anything else is refused rather than quoted.
+    pub fn start_replication(mut self, slot: &str, publication: &str) -> Result<WalStream> {
+        for name in [slot, publication] {
+            if !plain_name(name) {
+                return Err(Error::Query(format!(
+                    "`{name}` is not a plain name: lowercase letters, digits and `_`, \
+                     63 at most, not starting with a digit"
+                )));
+            }
+        }
+        self.send_query(&format!(
+            "START_REPLICATION SLOT {slot} LOGICAL 0/0 \
+             (proto_version '1', publication_names '{publication}')"
+        ))?;
+        loop {
+            let m = self.read()?;
+            match m.tag {
+                // CopyBothResponse: from here on both sides send CopyData.
+                b'W' => return Ok(WalStream { client: self }),
+                b'E' => return Err(server_error(&m)),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether `name` can go into a replication command unquoted.
+pub fn plain_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && !b[0].is_ascii_digit()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// A write-ahead log position as PostgreSQL prints it: `16/B374D848`.
+pub fn lsn_text(lsn: u64) -> String {
+    format!("{:X}/{:X}", lsn >> 32, lsn as u32)
+}
+
+/// The other way round; `None` when it is not one.
+pub fn parse_lsn(s: &str) -> Option<u64> {
+    let (hi, lo) = s.trim().split_once('/')?;
+    let hi = u32::from_str_radix(hi, 16).ok()?;
+    let lo = u32::from_str_radix(lo, 16).ok()?;
+    Some((hi as u64) << 32 | lo as u64)
+}
+
+/// One message of a replication stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wal {
+    /// `XLogData`: one `pgoutput` message, and how far the server's log
+    /// reaches.
+    Data { end: u64, body: Vec<u8> },
+    /// A keepalive: how far the server's log reaches, and whether it wants
+    /// a status update now -- it drops a receiver that stays silent past
+    /// `wal_sender_timeout`.
+    Keepalive { end: u64, reply: bool },
+}
+
+/// A logical replication stream, from [`Client::start_replication`].
+#[derive(Debug)]
+pub struct WalStream {
+    client: Client,
+}
+
+impl WalStream {
+    /// The next message, or `None` when none arrived within `wait`.
+    ///
+    /// The wait is a `peek`, never a read: a read that timed out halfway
+    /// through a message would leave the rest of it to be taken for the
+    /// start of the next one.
+    pub fn next(&mut self, wait: Duration) -> Result<Option<Wal>> {
+        if self.client.reader.buffer().is_empty() {
+            let sock = self.client.reader.get_ref();
+            // A zero timeout is refused by the socket, and means "forever"
+            // to the kernel.
+            sock.set_read_timeout(Some(wait.max(Duration::from_millis(1))))
+                .map_err(io)?;
+            let peeked = sock.peek(&mut [0u8; 1]);
+            sock.set_read_timeout(Some(TIMEOUT)).map_err(io)?;
+            match peeked {
+                Ok(0) => return Err(io("the server closed the replication stream")),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return Ok(None)
+                }
+                Err(e) => return Err(io(e)),
+            }
+        }
+        let m = self.client.read()?;
+        match m.tag {
+            b'd' => wal_message(&m.body).map(Some),
+            b'E' => Err(server_error(&m)),
+            b'c' => Err(io("the server ended the replication stream")),
+            // A notice, or anything else outside the copy: nothing to act on.
+            _ => Ok(None),
+        }
+    }
+
+    /// Standby status update: everything up to `lsn` is safe with the
+    /// receiver, and the slot may let the server forget it. The server takes
+    /// the flushed position as the slot's confirmed one, so it must never run
+    /// ahead of what is on disk.
+    pub fn confirm(&mut self, lsn: u64) -> Result<()> {
+        // Microseconds since 2000-01-01, PostgreSQL's epoch; only for the
+        // server's lag statistics.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64)
+            - 946_684_800_000_000;
+        let mut w = Writer::new();
+        w.msg(b'd', |b| {
+            b.push(b'r');
+            for _ in 0..3 {
+                // written, flushed, applied
+                b.extend_from_slice(&lsn.to_be_bytes());
+            }
+            b.extend_from_slice(&now.to_be_bytes());
+            b.push(0);
+        });
+        w.flush_to(&mut self.client.writer).map_err(io)
+    }
+}
+
+/// The body of a `CopyData` on a replication stream.
+fn wal_message(b: &[u8]) -> Result<Wal> {
+    let short = || Error::Corrupt("postgres: short replication message".into());
+    let u64_at = |at: usize| -> Result<u64> {
+        let bytes = b.get(at..at + 8).ok_or_else(short)?;
+        Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| short())?))
+    };
+    match b.first() {
+        // 'w', start (8), end (8), send time (8), data
+        Some(b'w') => Ok(Wal::Data {
+            end: u64_at(9)?,
+            body: b.get(25..).ok_or_else(short)?.to_vec(),
+        }),
+        // 'k', end (8), send time (8), reply requested (1)
+        Some(b'k') => Ok(Wal::Keepalive {
+            end: u64_at(1)?,
+            reply: *b.get(17).ok_or_else(short)? == 1,
+        }),
+        Some(other) => Err(Error::Corrupt(format!(
+            "postgres: unknown replication message `{}`",
+            *other as char
+        ))),
+        None => Err(short()),
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         // Terminate: let the server close the connection cleanly.
@@ -609,6 +790,42 @@ mod tests {
         body.extend_from_slice(&0i32.to_be_bytes()); // empty string
         let cells = data_row(&Message { tag: b'D', body }).unwrap();
         assert_eq!(cells, vec![Some("hi".into()), None, Some(String::new())]);
+    }
+
+    #[test]
+    fn replication_messages_are_parsed() {
+        let mut w = vec![b'w'];
+        w.extend_from_slice(&1u64.to_be_bytes());
+        w.extend_from_slice(&0x16_B374_D848u64.to_be_bytes());
+        w.extend_from_slice(&0i64.to_be_bytes());
+        w.extend_from_slice(b"BEGIN");
+        assert_eq!(
+            wal_message(&w).unwrap(),
+            Wal::Data {
+                end: 0x16_B374_D848,
+                body: b"BEGIN".to_vec()
+            }
+        );
+        let mut k = vec![b'k'];
+        k.extend_from_slice(&7u64.to_be_bytes());
+        k.extend_from_slice(&0i64.to_be_bytes());
+        k.push(1);
+        assert_eq!(
+            wal_message(&k).unwrap(),
+            Wal::Keepalive {
+                end: 7,
+                reply: true
+            }
+        );
+        assert!(wal_message(&k[..10]).is_err());
+        assert_eq!(lsn_text(0x16_B374_D848), "16/B374D848");
+        assert_eq!(parse_lsn("16/B374D848"), Some(0x16_B374_D848));
+        assert_eq!(parse_lsn("0/0"), Some(0));
+        assert_eq!(parse_lsn("nope"), None);
+        assert!(plain_name("fenec_articles2"));
+        for bad in ["", "Fenec", "2a", "a-b", "a b", "a'b"] {
+            assert!(!plain_name(bad), "{bad}");
+        }
     }
 
     #[test]

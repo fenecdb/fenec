@@ -8,7 +8,7 @@ SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
 .PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep \
-	compare beir import-test \
+	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
 
@@ -112,16 +112,24 @@ beir:
 
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
-	@$(CARGO) test -p fenec-import --test pg -- --ignored; \
+	@$(CARGO) test -p fenec-import --test pg --test follow -- --ignored; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
-## Starts PostgreSQL with pgvector for the comparison
+## `fenec import --follow` against a live server: commit-to-visible latency,
+## how fast a burst drains, how long a cut stream takes to come back.
+## Needs `make pgvector-up` first.
+follow-bench:
+	$(CARGO) run --release -p fenec-import --example follow -- 10000 384
+
+## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
+## is for `fenec import --follow` and its tests; it changes what is logged
+## for updates and deletes, not how the compared reads run.
 pgvector-up:
 	docker run -d --name fenecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
 	  -p 55432:5432 --shm-size=1g pgvector/pgvector:pg17 \
 	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
-	  -c max_parallel_workers_per_gather=0
+	  -c max_parallel_workers_per_gather=0 -c wal_level=logical
 	@echo "waiting for it to become ready..."
 	@until docker exec fenecbench-pg pg_isready -U postgres -d fenecbench >/dev/null 2>&1; do sleep 1; done
 	@echo "postgres://postgres:fenec@127.0.0.1:55432/fenecbench"

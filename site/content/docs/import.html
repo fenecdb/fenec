@@ -1,6 +1,6 @@
 <!--
 title: Import — fenecdb
-description: Build a collection from SQLite or a live PostgreSQL server in one command. Schema derivation, vector columns, type mapping and filtering.
+description: Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes. Schema derivation, vector columns, type mapping and filtering.
 -->
 
 <h1>Import</h1>
@@ -115,17 +115,93 @@ the source. Both can be used together.</p>
   counts rows that <i>pass</i> the filter.</p>
 </div>
 
+<h2 id="following">Following changes</h2>
+
+<p>With <code>--follow</code> the import does not end at the copy: it keeps
+applying the table's inserts, updates, deletes and truncates as they commit,
+until it is interrupted. Run the same command again and it picks up where it
+stopped, without a second copy.</p>
+
+<pre data-lang="bash">fenec import postgres://app@db:5432/app --table docs --into articles \
+    --index "embed@hnsw(cosine)" --follow
+follow   slot fenec_articles (created), publication fenec_articles (created)
+copying  there is none yet
+100000 records, articles.fenec (3.1s)
+following docs: ctrl-c stops, and the same command resumes
+42 transactions, 57 changes, at 0/1B0E7F0
+</pre>
+
+<p>It reads a logical replication slot through PostgreSQL's own
+<code>pgoutput</code>, so nothing is installed on the server. The
+publication and the slot are made when missing (<code>--publication</code>,
+<code>--slot</code>; both default to <code>fenec_&lt;into&gt;</code>). The
+server needs <code>wal_level = logical</code>, and the table needs an integer
+key that becomes the document id, since a changed row has to be found again.
+It must also be in the replica identity: the primary key, or
+<code>replica identity full</code>.</p>
+
+<ul>
+  <li><b>A row arrives as the copy would have written it.</b> The stream goes
+    through the same type mapping, <code>--cast</code>,
+    <code>--vector</code> and <code>--where</code> as the copy. A row that
+    stops passing <code>--where</code> is deleted from the collection.</li>
+  <li><b>Nothing is confirmed before it is on disk.</b> The slot only moves
+    past a transaction once an fsync has covered it. A broken connection or a
+    killed follower starts again from there, and the writes it replays are
+    puts and deletes by id, so applying them twice changes nothing.</li>
+  <li><b>An untouched vector is not resent.</b> A vector of 768 floats is
+    3 KB, past PostgreSQL's TOAST threshold, so an update of any other column
+    arrives without it; the follower takes it from the collection.</li>
+  <li><b>A copy is resumed only when it is whole.</b> A small
+    <code>_follow</code> collection in the file records which collection
+    follows which slot and whether its copy finished. A copy cut short, or
+    one whose slot was dropped in the meantime, is made again rather than
+    streamed on top of, and a collection the follower did not copy is never
+    replaced.</li>
+</ul>
+
+<p>Measured against the Makefile's server, 10 000 rows with a
+<code>vector(384)</code>, the mirror a file (<code>make
+follow-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">vector(384)</th><th class="n">vector(768), TOASTed</th></tr></thead>
+<tbody>
+<tr><td>commit to visible, one row a transaction</td><td class="n">p50 0.32 ms, p99 1.54 ms</td><td class="n">p50 0.45 ms, p99 4.78 ms</td></tr>
+<tr><td>one transaction updating every row</td><td class="n">21 300 rows/s</td><td class="n">17 100 rows/s</td></tr>
+<tr><td>2 000 one-row transactions from one client</td><td class="n">visible 0.2 ms after the last</td><td class="n">0.4 ms</td></tr>
+<tr><td>a connection the server cut</td><td class="n">585 ms</td><td class="n">539 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note">
+  <p><b>The slot keeps the server's log</b> until the follower confirms it,
+  for as long as it exists. To stop following for good, drop it:
+  <code>select pg_drop_replication_slot('fenec_articles')</code>. PostgreSQL
+  13 and later can cap what a forgotten slot holds with
+  <code>max_slot_wal_keep_size</code>.</p>
+</div>
+
+<p>The follower is the file's only writer, as every fenecdb file has exactly
+one. Stop it to open the mirror elsewhere. A column added to the table after
+the copy is reported and left out. A column the collection needs that is
+dropped from the table stops the follower. <code>--source-where</code> and
+<code>--limit</code> do not combine with it: the first narrows the copy but
+not the stream, and a mirror keeps every row.</p>
+
 <h2>Speed and testing</h2>
 
 <p>100 000 rows × 3 dimensions, index build included: about 3.1 s from either
 source. Every option is in <code>fenec import --help</code>.</p>
 
-<pre data-lang="bash">make import-test        # the PostgreSQL arm — needs Docker
-cargo test -p fenec-import --test pg -- --ignored
+<pre data-lang="bash">make import-test        # the PostgreSQL arm and --follow — needs Docker
+cargo test -p fenec-import --test pg --test follow -- --ignored
 </pre>
 
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
-for 178 KB of it. <code>--no-default-features</code> removes it, and
-<code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (66 KB);
-with the <code>cli</code> profile as well, the binary drops from 1187 KB to 814 KB
+for 242 KB of it. <code>--no-default-features</code> removes it, and
+<code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (65 KB);
+with the <code>cli</code> profile as well, the binary drops from 1251 KB to 814 KB
 (<code>make small</code>).</p>

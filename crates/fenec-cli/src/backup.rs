@@ -3,10 +3,10 @@
 //! stood at a moment. They speak the replication stream, so the server needs
 //! `--replication-token`.
 
+use crate::stop::{on_signals, STOP};
 use fenec_http::archive::{self, Archive, Target};
 use fenec_http::replication::Upstream;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const USAGE: &str = r#"
 usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
@@ -25,25 +25,6 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             after change <n>, or at the archive's end: the latest image at
             or before that point and the writes after it
 "#;
-
-static STOP: AtomicBool = AtomicBool::new(false);
-
-/// SIGINT and SIGTERM end `fenec archive` between two messages, its segment
-/// synced; libc's `signal` is declared here as `fenec-pg` does, to add no
-/// dependency.
-fn on_signals() {
-    extern "C" {
-        fn signal(sig: i32, handler: usize) -> usize;
-    }
-    extern "C" fn stop(_sig: i32) {
-        STOP.store(true, Ordering::SeqCst);
-    }
-    unsafe {
-        for sig in [2, 15] {
-            signal(sig, stop as *const () as usize);
-        }
-    }
-}
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");

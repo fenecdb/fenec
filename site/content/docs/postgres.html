@@ -185,7 +185,9 @@ the server infers. <code>RowDescription</code> goes exactly once, on
 
 <p>The same protocol code runs the other way round. <code>fenec import</code>
 connects to a real PostgreSQL server and streams
-<code>COPY ... TO STDOUT</code>. The server half of SCRAM lives in
+<code>COPY ... TO STDOUT</code>, and with <code>--follow</code> reads a
+logical replication slot through <code>pgoutput</code>. The server half of
+SCRAM lives in
 <code>scram.rs</code> and the client half in <code>client.rs</code>; both are
 hand-written, so they test each other. See <a href="import.html">Import</a>.</p>
 

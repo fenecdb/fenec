@@ -348,4 +348,11 @@ so a node that is down takes its tenants with it.</p>
     accepted it, the result would be meaningless.</li>
   <li>An import that stops halfway cannot be rolled back — there are no
     transactions.</li>
+  <li><b><code>--follow</code> needs <code>wal_level = logical</code> and an
+    integer key</b> in the replica identity: a changed row has to be found
+    again by id. It holds its file as its only writer, and its slot holds the
+    server's log until confirmed — drop the slot when you stop following for
+    good (<a href="import.html#following">Following changes</a>).</li>
+  <li>A column added to the followed table after the copy is left out; one
+    the collection needs that is dropped from it stops the follower.</li>
 </ul>

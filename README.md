@@ -159,7 +159,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
-| **Runtime size** | 435 KB wasm + 72 KB client (143 KB brotli served) · 814–1187 KB binary · 1.84 MB container image |
+| **Runtime size** | 435 KB wasm + 72 KB client (143 KB brotli served) · 814–1251 KB binary · 1.84 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
@@ -186,7 +186,7 @@ query; it is not a join and is not trying to be one.
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
-| [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command |
+| [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
 | [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process |

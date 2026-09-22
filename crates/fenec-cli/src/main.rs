@@ -11,6 +11,8 @@
 mod backup;
 #[cfg(feature = "import")]
 mod import;
+#[cfg(any(feature = "backup", feature = "import"))]
+mod stop;
 mod types;
 
 use fenec_core::prelude::*;
@@ -38,13 +40,14 @@ Operators = != < <= > >=   ~ (text contains)   has (list contains)   in [..]
 "#;
 
 /// The import arm is only compiled with the `import` feature: the SQLite
-/// reader and the PostgreSQL client add ~190 KB to the binary and are
-/// unnecessary for embedded use.
+/// reader, the PostgreSQL client and the `--follow` follower add 242 KB to
+/// the binary and are unnecessary for embedded use.
 #[cfg(feature = "import")]
 const IMPORT_HELP: &str = r#"
 Import
   fenec import <file.sqlite|postgres://...> --table <name> [--into <name>]
-                                         load from SQLite or PostgreSQL
+                                         load from SQLite or PostgreSQL;
+                                         --follow keeps applying its changes
                                          for details: fenec import --help
 "#;
 #[cfg(not(feature = "import"))]
