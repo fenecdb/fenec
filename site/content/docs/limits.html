@@ -94,7 +94,9 @@ saying there is no page cache, and it has three consequences.</p>
 </ul>
 
 <p>The vector arena is the largest item: one million 768-dimension vectors is
-about 3 GB, or 1.5 GB with <code>f16</code>. In the browser the WASM32 address
+about 3 GB, or 1.5 GB with <code>f16</code>, 772 MB as int8 codes and 96 MB
+as bit codes (<a href="concepts.html#quantized-indexes"><code>quant=</code></a>)
+— the documents keep their vectors either way. In the browser the WASM32 address
 space of 4 GB is the upper bound, and the 2–3× factors above come out of it
 too, so the real ceiling is lower.</p>
 

@@ -136,6 +136,65 @@ WASM32's 4 GB address space that is the difference between fitting and not.
 Embedding model output sits comfortably inside the f16 range (±65 504, roughly
 three decimal digits) and the measured recall loss is 0.3 points.</p>
 
+<h3 id="quantized-indexes">Quantized indexes</h3>
+
+<p>Half precision shrinks the record and the arena together. A quantized
+index leaves the record alone and shrinks the arena further, by holding codes
+instead of vectors: a byte a component with <code>quant=int8</code>, the sign
+of each with <code>quant=bit</code>.</p>
+
+<pre data-lang="fenecql">create collection docs (embed vector&lt;768, f16&gt; @hnsw(cosine, quant=int8))
+</pre>
+
+<p>A code only estimates a distance, so it is used for what an estimate is
+good for: walking the graph to the right neighbourhood. The candidates the
+beam holds, <code>ef</code> of them, are then put in order by the documents'
+own vectors, read out of the store as <code>rerank</code> reads them, and the
+first <code>limit</code> are the answer. The scores are exact; the codes
+decide only which candidates are found. One million vectors of 768
+dimensions, stored as <code>f16</code>, in 64 clusters each spread along 32
+directions — embeddings vary along far fewer directions than they have — on
+an 8 GB machine that was swapping, so the latencies are high for all three
+(<code>make quant-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">vectors</th><th class="n">quant=int8</th><th class="n">quant=bit</th></tr></thead>
+<tbody>
+<tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>96 MB</b></td></tr>
+<tr><td>heap, the documents included</td><td class="n">3 381 MB</td><td class="n">2 580 MB</td><td class="n"><b>1 905 MB</b></td></tr>
+<tr><td>index build</td><td class="n">1 001 s</td><td class="n">891 s</td><td class="n"><b>857 s</b></td></tr>
+<tr><td>recall@10, beam of 100</td><td class="n"><b>97.4%</b></td><td class="n">97.1%</td><td class="n">82.5%</td></tr>
+<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n"><b>98.8%</b></td><td class="n">98.4%</td></tr>
+<tr><td>ANN p50, beam of 100</td><td class="n">1.11 ms</td><td class="n">1.57 ms</td><td class="n"><b>0.69 ms</b></td></tr>
+<tr><td>ANN p50, beam of 400</td><td class="n">2.83 ms</td><td class="n">3.91 ms</td><td class="n"><b>1.65 ms</b></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>int8 codes follow the vectors closely enough for the default beam of 100
+and cost the reading of a hundred documents a query. Bit codes take the
+wider beam, and a <code>quant=bit</code> index searches 400 unless told
+otherwise; they find less per step but measure it faster, from an arena that
+fits in cache. The rest of the heap is the documents, whose vectors the
+answers are ordered by.</p>
+
+<div class="note trap">
+  <p><b>How well a bit code estimates depends on the vectors.</b> Spread in
+  every dimension instead — as many degrees of freedom as dimensions, the
+  hardest case for any graph — 100 000 such vectors gave full vectors 97.8%
+  at a beam of 100, int8 codes 98.0%, and bit codes 36%, 75% at 400: when a
+  cluster is crowded around its centre, most of its members' signs are the
+  centre's, and the signs cannot tell them apart. int8 codes held with full
+  vectors on every set measured; measure bit codes on the vectors they are
+  for.</p>
+</div>
+
+<p>The kernels over codes are scalar on every target, in the eight-strip
+order of the vector kernels: natively LLVM vectorises them, and in the
+browser they add in the same order, so a graph over codes is the same graph
+in both.</p>
+
 <h2 id="bulk-load-first-index-after">Bulk load first, index after</h2>
 
 <p>Writing the index during the load makes every insert a graph mutation.

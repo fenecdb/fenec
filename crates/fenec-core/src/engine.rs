@@ -1381,6 +1381,9 @@ impl Database {
             let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
                 continue;
             };
+            let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+                continue;
+            };
             if !c.vectors.contains_key(field) {
                 continue;
             }
@@ -1390,6 +1393,11 @@ impl Database {
             }) else {
                 continue;
             };
+            // Built with other parameters -- another quantization, whose
+            // arena holds other codes -- it is not this index's graph.
+            if ix.spec != spec {
+                continue;
+            }
             let mut with_vector = 0;
             for id in store.iter_ids() {
                 with_vector += store.has_vector(id, pos)? as usize;
@@ -2444,7 +2452,7 @@ impl Database {
     fn filtered_near(
         &self,
         c: &Collection,
-        ix: &VectorIndex,
+        sp: &Space,
         f: &Expr,
         qv: &[f32],
         want: usize,
@@ -2452,6 +2460,7 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
+        let ix = sp.ix;
         let budget = ix.probe_budget(near.ef);
         let mut probe = match self.filter_candidates(c, f, params, usize::MAX)? {
             Some((rows, true)) => FilterProbe::done(rows),
@@ -2486,7 +2495,7 @@ impl Database {
                 plan(|| {
                     format!("near: exact scan over every vector in {field}, the set as a test")
                 });
-                ix.search_exact(qv, want, accept)
+                sp.search_exact(qv, want, &accept)?
             } else if ids.len() <= budget {
                 // The set is smaller than the number of candidates the ANN
                 // walk would measure anyway: the walk buys nothing, and
@@ -2497,9 +2506,9 @@ impl Database {
                         ids.len()
                     )
                 });
-                ix.search_ids(qv, want, &ids)
+                sp.search_ids(qv, want, &ids)?
             } else {
-                let hits = ix.search(qv, want, near.ef, accept);
+                let hits = sp.search(qv, want, near.ef, &accept)?;
                 plan(|| {
                     format!(
                         "near: ANN over {field}, the set as a test, {} kept",
@@ -2513,7 +2522,7 @@ impl Database {
                             ids.len()
                         )
                     });
-                    ix.search_ids(qv, want, &ids)
+                    sp.search_ids(qv, want, &ids)?
                 } else {
                     hits
                 }
@@ -2525,7 +2534,7 @@ impl Database {
         let ef = near.ef.unwrap_or(ix.spec.ef_search);
         let mut hits = Vec::with_capacity(want);
         let mut tested = 0;
-        for (id, score) in ix.search(qv, want.max(ef), near.ef, |_| true) {
+        for (id, score) in sp.search(qv, want.max(ef), near.ef, &|_| true)? {
             if hits.len() == want {
                 break;
             }
@@ -2555,7 +2564,7 @@ impl Database {
                         ids.len()
                     )
                 });
-                return Ok(ix.search_ids(qv, want, &ids));
+                return sp.search_ids(qv, want, &ids);
             }
         }
         Ok(hits)
@@ -2718,17 +2727,18 @@ impl Database {
             )));
         }
 
+        let sp = Space::new(c, ix, &near.field);
         let hits = match &sel.filter {
             // No filter: ANN directly, or a full scan when asked for.
             None if near.exact => {
                 plan(|| format!("near: exact scan over every vector in {}", near.field));
-                ix.search_exact(&qv, want, |_| true)
+                sp.search_exact(&qv, want, &|_| true)?
             }
             None => {
                 plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                ix.search(&qv, want, near.ef, |_| true)
+                sp.search(&qv, want, near.ef, &|_| true)?
             }
-            Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, ctx)?,
+            Some(f) => self.filtered_near(c, &sp, f, &qv, want, near, params, ctx)?,
         };
         Ok(hits)
     }
@@ -2882,11 +2892,6 @@ impl Database {
                 qv.len()
             )));
         }
-        let qv = match metric {
-            Metric::Cosine => normalized(&qv),
-            _ => qv,
-        };
-
         let hits = ix.search(&query, candidates, accept);
         plan(|| {
             format!(
@@ -2896,42 +2901,14 @@ impl Database {
             )
         });
         plan(|| format!("rerank: {}, exact distance read from the store", rr.field));
-        let mut out: Vec<(DocId, f32)> = Vec::with_capacity(hits.len());
-        let mut buf: Vec<f32> = Vec::with_capacity(dim);
-        for (id, _) in hits {
-            if !c.store.read_vector_into(id, pos, &mut buf)? {
-                continue; // no vector on this document: it cannot be ordered
-            }
-            if buf.len() != dim {
-                continue;
-            }
-            // The store holds vectors as they were written; the HNSW arena is
-            // what normalises on insert, and it is not in play here. With the
-            // query already unit length, cosine only needs the candidate's
-            // own norm -- computing it beside the dot product costs one pass
-            // and saves a `Vec` per candidate, which at a thousand candidates
-            // a query is the difference between an allocation-free scan and a
-            // thousand allocations.
-            let d = match metric {
-                Metric::Cosine => {
-                    let n = norm(&buf);
-                    if n == 0.0 {
-                        1.0
-                    } else {
-                        1.0 - dot(&qv, &buf) / n
-                    }
-                }
-                _ => distance(metric, &qv, &buf),
-            };
-            out.push((id, d));
-        }
-        // Ascending distance, ties on the id so the answer is stable.
-        out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        out.truncate(want);
-        for h in &mut out {
-            h.1 = score_from_distance(metric, h.1);
-        }
-        Ok(out)
+        order_exactly(
+            &c.store,
+            pos,
+            metric,
+            &qv,
+            &mut hits.into_iter().map(|h| h.0),
+            want,
+        )
     }
 
     /// Collects the children of each parent row.
@@ -4062,6 +4039,143 @@ fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
 /// `fuse`: a closure each was a copy each in the browser module.
 fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
     hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
+}
+
+/// The `k` of `ids` nearest `q` by the documents' own vectors, read out of
+/// the store: nearest first, ties to the lower id so the answer is stable.
+/// How `match ... rerank` orders the text index's candidates, and `near` the
+/// candidates a quantized index found.
+fn order_exactly(
+    store: &Store,
+    pos: usize,
+    metric: Metric,
+    q: &[f32],
+    ids: &mut dyn Iterator<Item = DocId>,
+    k: usize,
+) -> Result<Vec<(DocId, f32)>> {
+    let q = match metric {
+        Metric::Cosine => normalized(q),
+        _ => q.to_vec(),
+    };
+    let mut out: Vec<(DocId, f32)> = Vec::new();
+    let mut buf: Vec<f32> = Vec::with_capacity(q.len());
+    for id in ids {
+        // A document without a vector cannot be ordered.
+        if !store.read_vector_into(id, pos, &mut buf)? || buf.len() != q.len() {
+            continue;
+        }
+        // The store holds vectors as they were written; the HNSW arena is
+        // what normalises on insert, and it is not in play here. With the
+        // query already unit length, cosine only needs the candidate's own
+        // norm -- computing it beside the dot product costs one pass and
+        // saves a `Vec` per candidate, which at a thousand candidates a
+        // query is the difference between an allocation-free scan and a
+        // thousand allocations.
+        let d = match metric {
+            Metric::Cosine => {
+                let n = norm(&buf);
+                if n == 0.0 {
+                    1.0
+                } else {
+                    1.0 - dot(&q, &buf) / n
+                }
+            }
+            _ => distance(metric, &q, &buf),
+        };
+        out.push((id, d));
+    }
+    out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(k);
+    for h in &mut out {
+        h.1 = score_from_distance(metric, h.1);
+    }
+    Ok(out)
+}
+
+/// What `near` searches: a vector index, and when the index holds codes
+/// rather than vectors (`quant=`) the store the field's vectors are in. The
+/// codes find the candidates, the beam's worth of them, and the documents'
+/// own vectors put those in order -- so a search over codes answers in exact
+/// distances, and an exact search reads every vector it ranks.
+struct Space<'a> {
+    ix: &'a VectorIndex,
+    /// The store and the field's position, over codes.
+    exact: Option<(&'a Store, usize)>,
+}
+
+impl<'a> Space<'a> {
+    fn new(c: &'a Collection, ix: &'a VectorIndex, field: &str) -> Space<'a> {
+        let exact = match ix.quantized() {
+            true => c.schema.field_pos(field).map(|p| (&c.store, p)),
+            false => None,
+        };
+        Space { ix, exact }
+    }
+
+    fn order(
+        &self,
+        (store, pos): (&Store, usize),
+        q: &[f32],
+        ids: &mut dyn Iterator<Item = DocId>,
+        k: usize,
+    ) -> Result<Vec<(DocId, f32)>> {
+        order_exactly(store, pos, self.ix.spec.metric, q, ids, k)
+    }
+
+    /// [`VectorIndex::search`]; over codes, every candidate of the beam
+    /// ordered again, and the first `k` of them. One call to the index
+    /// either way: a second one in the other branch doubled its inlined
+    /// body in the browser module.
+    fn search(
+        &self,
+        q: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        accept: &dyn Fn(DocId) -> bool,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let (n, ef) = match self.exact {
+            None => (k, ef),
+            Some(_) => {
+                let ef = ef.unwrap_or(self.ix.spec.ef_search).max(k);
+                (ef, Some(ef))
+            }
+        };
+        let found = self.ix.search(q, n, ef, accept);
+        let Some(exact) = self.exact else {
+            return Ok(found);
+        };
+        plan(|| {
+            format!(
+                "near: the {} candidates of the codes ordered by exact distance read from the store",
+                found.len()
+            )
+        });
+        self.order(exact, q, &mut found.into_iter().map(|h| h.0), k)
+    }
+
+    /// [`VectorIndex::search_ids`], exactly over codes as well.
+    fn search_ids(&self, q: &[f32], k: usize, ids: &[DocId]) -> Result<Vec<(DocId, f32)>> {
+        match self.exact {
+            None => Ok(self.ix.search_ids(q, k, ids)),
+            Some(exact) => self.order(exact, q, &mut ids.iter().copied(), k),
+        }
+    }
+
+    /// [`VectorIndex::search_exact`], exactly over codes as well.
+    fn search_exact(
+        &self,
+        q: &[f32],
+        k: usize,
+        accept: &dyn Fn(DocId) -> bool,
+    ) -> Result<Vec<(DocId, f32)>> {
+        match self.exact {
+            None => Ok(self.ix.search_exact(q, k, accept)),
+            Some(exact) => {
+                let mut ids = exact.0.ids().into_iter().filter(|id| accept(*id));
+                self.order(exact, q, &mut ids, k)
+            }
+        }
+    }
 }
 
 /// The ANN's beam as `explain` states it: the `ef` in force, and the page

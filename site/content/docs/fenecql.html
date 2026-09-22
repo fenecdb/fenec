@@ -41,8 +41,8 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <table>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=..)</code></td></tr>
-<tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code></td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code></td></tr>
+<tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=400</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
@@ -337,6 +337,24 @@ for <code>int</code>, <code>float</code>, <code>timestamp</code> and
   ranking and reaches no index; ranked retrieval is <code>match</code> over a
   <code>@text</code> field.</p>
 </div>
+
+<h3 id="quantized">Quantized vector indexes</h3>
+
+<pre data-lang="fenecql">create collection articles (embed vector&lt;768&gt; @hnsw(cosine, quant=int8))
+create index on articles (embed) @hnsw(cosine, quant=bit)
+</pre>
+
+<p><code>quant=</code> sets what the index holds of each vector:
+<code>int8</code> a byte a component, a quarter of <code>f32</code>, and
+<code>bit</code> the sign of each, a thirty-second — cosine only, since the
+signs are a unit vector's. The documents keep their vectors whole. The codes
+find the candidates, the beam's <code>ef</code> of them, and the documents'
+own vectors put those in order, so <code>_score</code> is the exact distance,
+and <code>exact</code> and a filtered set searched exactly read the vectors
+rather than the codes. Bit codes estimate coarsely and take a wider beam:
+<code>ef_search</code> is 400 there unless it is named. What they save and
+what they cost is in <a href="concepts.html#quantized-indexes">How it
+works</a>.</p>
 
 <h3>Ordered indexes</h3>
 

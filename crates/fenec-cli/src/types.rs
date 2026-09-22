@@ -185,10 +185,11 @@ fn index_note(k: &IndexKind) -> Option<String> {
         IndexKind::Hash => Some(" @hash".into()),
         IndexKind::Sorted => Some(" @sorted".into()),
         IndexKind::Vector(spec) => Some(format!(
-            " @hnsw({}, m={}, ef_search={})",
+            " @hnsw({}, m={}, ef_search={}{})",
             spec.metric.name(),
             spec.m,
-            spec.ef_search
+            spec.ef_search,
+            spec.quant_arg()
         )),
         IndexKind::Text(spec) => Some(format!(" @text(k1={}, b={})", spec.k1(), spec.b())),
     }

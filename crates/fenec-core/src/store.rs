@@ -558,11 +558,15 @@ impl Store {
         out.clear();
         out.reserve(n);
         if half {
+            // Widened as the arena widens, without a branch: the vectors read
+            // here are for measuring, and through `codec::f32_from_f16`'s
+            // subnormal branch the loop stayed scalar -- ordering a quantized
+            // index's candidates took most of its query that way.
             let (words, _) = buf[pos..end].as_chunks::<2>();
             out.extend(
                 words
                     .iter()
-                    .map(|w| crate::codec::f32_from_f16(u16::from_le_bytes(*w))),
+                    .map(|w| crate::vector::half(u16::from_le_bytes(*w))),
             );
         } else {
             let (words, _) = buf[pos..end].as_chunks::<4>();

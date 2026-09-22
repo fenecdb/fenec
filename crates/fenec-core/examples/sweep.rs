@@ -35,6 +35,7 @@ fn build(n: usize, dim: usize, clustered: bool, efc: usize) -> (VectorIndex, Vec
         m: 16,
         ef_construction: efc,
         ef_search: 64,
+        ..VectorIndexSpec::default()
     };
     let mut ix = VectorIndex::new(dim, spec);
     ix.reserve(n);

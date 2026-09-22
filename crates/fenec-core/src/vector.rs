@@ -9,7 +9,7 @@
 //! - A delete is a tombstone; skipped while searching, cleaned up on merge.
 
 use crate::codec::{get_uvarint, put_uvarint};
-use crate::schema::{Metric, VectorIndexSpec};
+use crate::schema::{Metric, Quant, VectorIndexSpec};
 use crate::value::{DocId, VecPrec};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -213,7 +213,6 @@ pub fn score_from_distance(metric: Metric, d: f32) -> f32 {
 // loop. Widening into an intermediate f32 buffer was possible too; it measured
 // slower, because the win comes from memory bandwidth anyway.
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 macro_rules! strip8 {
     ($a:expr, $b:expr, $get_a:expr, $get_b:expr, $step:expr, $tail:expr) => {{
         let (a, b) = ($a, $b);
@@ -247,7 +246,7 @@ macro_rules! strip8 {
 /// finite number on this path -- they carry no meaning in vector data, and
 /// `codec::f32_from_f16` is used whenever an exact conversion is needed.
 #[inline(always)]
-fn half(x: u16) -> f32 {
+pub(crate) fn half(x: u16) -> f32 {
     let magic = f32::from_bits((254 - 15) << 23);
     let u = (((x & 0x8000) as u32) << 16) | (((x & 0x7fff) as u32) << 13);
     // The sign is set before the multiply: a negative value scales correctly
@@ -311,6 +310,54 @@ fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
     }
 }
 
+// ------------------------------------------------------ quantized kernels
+//
+// Scalar on every target, in `strip8!`'s order: LLVM vectorises the strips
+// natively, and the browser's scalar loop adds in the same order, so a graph
+// over codes is the same graph in both, as over vectors.
+
+#[inline]
+fn widen_i8(x: i8) -> f32 {
+    x as f32
+}
+
+/// Σ code·q, the int8 arena's dot product with a query before its scale.
+#[inline]
+fn dot_i8(code: &[i8], q: &[f32]) -> f32 {
+    strip8!(code, q, widen_i8, ident, mul, 0)
+}
+
+/// Σ (scale·code − q)², the int8 arena's squared distance.
+#[inline]
+fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
+    strip8!(code, q, |x: i8| x as f32 * scale, ident, diff_sq, 0)
+}
+
+/// Σ ±q, the sign each bit gives: the bit arena's dot product with a query
+/// before its 1/√dim. A clear bit sets the float's sign bit rather than
+/// branching, so the strips vectorise as `dot`'s do.
+#[inline]
+fn dot_bits(bits: &[u64], q: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let mut iq = q.chunks_exact(8);
+    let mut at = 0usize;
+    for x in iq.by_ref() {
+        let byte = (bits[at / 64] >> (at % 64)) as u32;
+        for k in 0..8 {
+            let flip = (!byte >> k & 1) << 31;
+            acc[k] += f32::from_bits(x[k].to_bits() ^ flip);
+        }
+        at += 8;
+    }
+    let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+    for x in iq.remainder() {
+        let flip = ((!(bits[at / 64] >> (at % 64)) & 1) as u32) << 31;
+        s += f32::from_bits(x.to_bits() ^ flip);
+        at += 1;
+    }
+    s
+}
+
 // ----------------------------------------------------------------- arena
 
 /// Vector arena: every vector in one contiguous array, strided by `node * dim`.
@@ -318,30 +365,41 @@ fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
 /// The `F16` variant fits the same array into half the space. The query side
 /// is always f32; widening happens inside the distance kernel, so there is no
 /// extra allocation on the search path.
+///
+/// `I8` and `Bit` hold codes instead (`quant=`): a byte a component over a
+/// scale a vector -- the largest component over 127 -- or the sign of each
+/// component, 64 to a word. Their distances are estimates, and `near` puts
+/// the candidates they find in order again by the documents' own vectors.
 pub(crate) enum Arena {
     F32(Vec<f32>),
     F16(Vec<u16>),
+    I8(Vec<i8>, Vec<f32>),
+    Bit(Vec<u64>),
 }
 
 impl Arena {
-    fn new(prec: VecPrec) -> Arena {
-        match prec {
-            VecPrec::F32 => Arena::F32(Vec::new()),
-            VecPrec::F16 => Arena::F16(Vec::new()),
+    fn new(prec: VecPrec, quant: Quant) -> Arena {
+        match (quant, prec) {
+            (Quant::Int8, _) => Arena::I8(Vec::new(), Vec::new()),
+            (Quant::Bit, _) => Arena::Bit(Vec::new()),
+            (Quant::None, VecPrec::F32) => Arena::F32(Vec::new()),
+            (Quant::None, VecPrec::F16) => Arena::F16(Vec::new()),
         }
     }
 
-    pub(crate) fn prec(&self) -> VecPrec {
-        match self {
-            Arena::F32(_) => VecPrec::F32,
-            Arena::F16(_) => VecPrec::F16,
-        }
+    fn quantized(&self) -> bool {
+        matches!(self, Arena::I8(..) | Arena::Bit(_))
     }
 
-    fn reserve(&mut self, n: usize) {
+    fn reserve(&mut self, nodes: usize, dim: usize) {
         match self {
-            Arena::F32(d) => d.reserve(n),
-            Arena::F16(d) => d.reserve(n),
+            Arena::F32(d) => d.reserve(nodes * dim),
+            Arena::F16(d) => d.reserve(nodes * dim),
+            Arena::I8(c, s) => {
+                c.reserve(nodes * dim);
+                s.reserve(nodes);
+            }
+            Arena::Bit(b) => b.reserve(nodes * dim.div_ceil(64)),
         }
     }
 
@@ -382,6 +440,22 @@ impl Arena {
             Arena::F16(d) => {
                 d.extend(raw.iter().map(|x| crate::codec::f16_from_f32(x * inv)));
             }
+            Arena::I8(codes, scales) => {
+                let top = raw.iter().fold(0.0f32, |m, x| m.max((x * inv).abs()));
+                let scale = if top > 0.0 { top / 127.0 } else { 1.0 };
+                codes.extend(raw.iter().map(|x| (x * inv / scale).round() as i8));
+                scales.push(scale);
+            }
+            // A sign needs no normalising.
+            Arena::Bit(words) => {
+                for part in raw.chunks(64) {
+                    let mut w = 0u64;
+                    for (i, x) in part.iter().enumerate() {
+                        w |= ((*x > 0.0) as u64) << i;
+                    }
+                    words.push(w);
+                }
+            }
         }
     }
 
@@ -392,7 +466,7 @@ impl Arena {
                 let s = node as usize * dim;
                 Some(&d[s..s + dim])
             }
-            Arena::F16(_) => None,
+            _ => None,
         }
     }
 
@@ -402,6 +476,20 @@ impl Arena {
         match self {
             Arena::F32(d) => distance(metric, q, &d[s..s + dim]),
             Arena::F16(d) => distance_hf(metric, &d[s..s + dim], q),
+            Arena::I8(c, sc) => {
+                let (code, scale) = (&c[s..s + dim], sc[node as usize]);
+                match metric {
+                    Metric::Cosine => 1.0 - scale * dot_i8(code, q),
+                    Metric::L2 => l2_i8(code, q, scale),
+                    Metric::Dot => -scale * dot_i8(code, q),
+                }
+            }
+            // A code stands for the unit vector of its signs, ±1/√dim.
+            Arena::Bit(b) => {
+                let w = dim.div_ceil(64);
+                let at = node as usize * w;
+                1.0 - dot_bits(&b[at..at + w], q) / (dim as f32).sqrt()
+            }
         }
     }
 
@@ -411,6 +499,11 @@ impl Arena {
         match self {
             Arena::F32(d) => distance(metric, &d[sa..sa + dim], &d[sb..sb + dim]),
             Arena::F16(d) => distance_hh(metric, &d[sa..sa + dim], &d[sb..sb + dim]),
+            // Off the hot path: `select_heuristic` widens codes once and
+            // keeps them, as it does halves.
+            Arena::I8(..) | Arena::Bit(_) => {
+                distance(metric, &self.vec_at(a, dim), &self.vec_at(b, dim))
+            }
         }
     }
 
@@ -420,9 +513,10 @@ impl Arena {
     fn vec_at(&self, node: u32, dim: usize) -> Cow<'_, [f32]> {
         match self {
             Arena::F32(_) => Cow::Borrowed(self.slice_f32(node, dim).unwrap()),
-            Arena::F16(d) => {
-                let s = node as usize * dim;
-                Cow::Owned(d[s..s + dim].iter().map(|x| half(*x)).collect())
+            _ => {
+                let mut v = Vec::with_capacity(dim);
+                self.read_into(node, dim, &mut v);
+                Cow::Owned(v)
             }
         }
     }
@@ -437,6 +531,21 @@ impl Arena {
         match self {
             Arena::F32(d) => out.extend_from_slice(&d[s..s + dim]),
             Arena::F16(d) => out.extend(d[s..s + dim].iter().map(|x| half(*x))),
+            Arena::I8(c, sc) => {
+                let scale = sc[node as usize];
+                out.extend(c[s..s + dim].iter().map(|x| *x as f32 * scale));
+            }
+            Arena::Bit(b) => {
+                let at = node as usize * dim.div_ceil(64);
+                let unit = 1.0 / (dim as f32).sqrt();
+                out.extend((0..dim).map(|i| {
+                    if b[at + i / 64] >> (i % 64) & 1 == 1 {
+                        unit
+                    } else {
+                        -unit
+                    }
+                }));
+            }
         }
     }
 
@@ -450,6 +559,16 @@ impl Arena {
             Arena::F16(d) => d[s..s + dim]
                 .iter()
                 .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            Arena::I8(c, sc) => {
+                out.extend(c[s..s + dim].iter().map(|x| *x as u8));
+                out.extend_from_slice(&sc[node as usize].to_le_bytes());
+            }
+            Arena::Bit(b) => {
+                let w = dim.div_ceil(64);
+                b[node as usize * w..(node as usize + 1) * w]
+                    .iter()
+                    .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
+            }
         }
     }
 
@@ -471,6 +590,18 @@ impl Arena {
                     .iter()
                     .map(|b| u16::from_le_bytes(*b)),
             ),
+            Arena::I8(c, sc) => {
+                let (code, scale) = bytes.split_at(bytes.len() - 4);
+                c.extend(code.iter().map(|x| *x as i8));
+                sc.push(f32::from_le_bytes([scale[0], scale[1], scale[2], scale[3]]));
+            }
+            Arena::Bit(b) => b.extend(
+                bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|x| u64::from_le_bytes(*x)),
+            ),
         }
     }
 
@@ -479,6 +610,8 @@ impl Arena {
         match self {
             Arena::F32(_) => dim * 4,
             Arena::F16(_) => dim * 2,
+            Arena::I8(..) => dim + 4,
+            Arena::Bit(_) => dim.div_ceil(64) * 8,
         }
     }
 
@@ -487,6 +620,8 @@ impl Arena {
         match self {
             Arena::F32(d) => d.len() * 4,
             Arena::F16(d) => d.len() * 2,
+            Arena::I8(c, s) => c.len() + s.len() * 4,
+            Arena::Bit(b) => b.len() * 8,
         }
     }
 }
@@ -545,8 +680,11 @@ impl Rng {
 
 /// Version of the serialised graph format. 3 added the arena's precision
 /// and a tombstone's own vector; a record of an older version is rejected
-/// and the graph rebuilt once.
+/// and the graph rebuilt once. 4 adds the quantization, and only a quantized
+/// index writes it: every other graph stays 3, so a file written before
+/// quantization existed is not rebuilt for it.
 const GRAPH_VERSION: u8 = 3;
+const GRAPH_VERSION_QUANT: u8 = 4;
 
 /// Upper bound on a single batch during parallel construction. Nodes inside a
 /// batch cannot see each other, so large batches lower recall; this limit is
@@ -754,7 +892,7 @@ impl<'a> GraphView<'a> {
         // ones are fixed they are widened once and kept, and the candidate is
         // widened once as well. In the f32 arena a copy would be pointless --
         // the old path is kept exactly as it was.
-        let decode = matches!(self.data, Arena::F16(_));
+        let decode = !matches!(self.data, Arena::F32(_));
         let mut picked: Vec<f32> = Vec::new(); // same order as `out`, dim-strided
         let mut cbuf: Vec<f32> = Vec::new();
         for c in cands {
@@ -822,11 +960,14 @@ impl<'a> GraphView<'a> {
     }
 
     /// Computes a node's neighbour candidates across every level.
-    /// It only reads, so it can be run in parallel.
+    /// It only reads, so it can be run in parallel. `query` is the vector
+    /// the node was written with, over an arena of codes (see
+    /// [`VectorIndex::build_query`]).
     fn candidates_for(
         &self,
         sc: &mut Scratch,
         node: u32,
+        query: Option<&[f32]>,
         level: usize,
         ef_construction: usize,
         m: usize,
@@ -834,7 +975,10 @@ impl<'a> GraphView<'a> {
         let Some(entry) = self.entry else {
             return Vec::new();
         };
-        let v = self.vec_at(node);
+        let v = match query {
+            Some(q) => Cow::Borrowed(q),
+            None => self.vec_at(node),
+        };
         let cur = if self.max_level > level {
             self.descend(&v, entry, self.max_level, level)
         } else {
@@ -860,8 +1004,11 @@ pub struct VectorIndex {
     pub dim: usize,
     pub spec: VectorIndexSpec,
     /// Contiguous vector arena: node i -> data[i*dim .. (i+1)*dim].
-    /// Precision comes from the field type (`vector<N, f16>` -> half size).
+    /// Precision comes from the field type (`vector<N, f16>` -> half size),
+    /// or codes from `quant`.
     data: Arena,
+    /// The field's precision, which a quantized arena does not show.
+    prec: VecPrec,
     doc_ids: Vec<DocId>,
     by_doc: HashMap<DocId, u32>,
 
@@ -915,7 +1062,8 @@ impl VectorIndex {
         VectorIndex {
             dim,
             spec,
-            data: Arena::new(prec),
+            data: Arena::new(prec, spec.quant),
+            prec,
             doc_ids: Vec::new(),
             by_doc: HashMap::new(),
             l0: Vec::new(),
@@ -934,8 +1082,7 @@ impl VectorIndex {
 
     /// Reserves room up front for a known capacity (bulk loading).
     pub fn reserve(&mut self, n: usize) {
-        self.data.reserve(n * self.dim);
-        // (the arena allocates in its own element type)
+        self.data.reserve(n, self.dim);
         self.doc_ids.reserve(n);
         self.l0.reserve(n * self.m0);
         self.l0_len.reserve(n);
@@ -992,7 +1139,22 @@ impl VectorIndex {
     }
 
     pub fn precision(&self) -> VecPrec {
-        self.data.prec()
+        self.prec
+    }
+
+    /// Whether the arena holds codes rather than vectors (`quant=`), so that
+    /// its distances are estimates to be corrected from the documents.
+    pub fn quantized(&self) -> bool {
+        self.data.quantized()
+    }
+
+    /// The vector a node written with `raw` searches the graph for its
+    /// neighbours with: `raw` itself, prepared, over an arena of codes --
+    /// what the node's code widens back to is the signs alone under `bit` --
+    /// and `None`, the arena's own vector, over vectors, whose graphs stay
+    /// as they were built.
+    fn build_query(&self, raw: &[f32]) -> Option<Vec<f32>> {
+        self.quantized().then(|| self.prepare_query(raw))
     }
 
     // --- neighbour access ------------------------------------------------
@@ -1149,7 +1311,8 @@ impl VectorIndex {
         let level = self.random_level();
         let node = self.alloc_node(doc, raw, level);
         self.by_doc.insert(doc, node);
-        self.link_node(node, level, None);
+        let query = self.build_query(raw);
+        self.link_node(node, level, None, query.as_deref());
     }
 
     /// Number of usable threads.
@@ -1174,7 +1337,7 @@ impl VectorIndex {
     #[cfg(target_family = "wasm")]
     fn compute_candidates(
         &self,
-        pending: &[(u32, usize)],
+        pending: &[(u32, usize, Option<Vec<f32>>)],
         _threads: usize,
     ) -> Vec<(u32, usize, Vec<(usize, Vec<u32>)>)> {
         let (efc, m) = (self.spec.ef_construction, self.spec.m);
@@ -1182,11 +1345,11 @@ impl VectorIndex {
         let mut sc = Scratch::new();
         pending
             .iter()
-            .map(|&(node, level)| {
+            .map(|(node, level, query)| {
                 (
-                    node,
-                    level,
-                    view.candidates_for(&mut sc, node, level, efc, m),
+                    *node,
+                    *level,
+                    view.candidates_for(&mut sc, *node, query.as_deref(), *level, efc, m),
                 )
             })
             .collect()
@@ -1197,7 +1360,7 @@ impl VectorIndex {
     #[cfg(not(target_family = "wasm"))]
     fn compute_candidates(
         &self,
-        pending: &[(u32, usize)],
+        pending: &[(u32, usize, Option<Vec<f32>>)],
         threads: usize,
     ) -> Vec<(u32, usize, Vec<(usize, Vec<u32>)>)> {
         let (efc, m) = (self.spec.ef_construction, self.spec.m);
@@ -1209,11 +1372,18 @@ impl VectorIndex {
                 handles.push(scope.spawn(move || {
                     let mut sc = Scratch::new();
                     part.iter()
-                        .map(|&(node, level)| {
+                        .map(|(node, level, query)| {
                             (
-                                node,
-                                level,
-                                view.candidates_for(&mut sc, node, level, efc, m),
+                                *node,
+                                *level,
+                                view.candidates_for(
+                                    &mut sc,
+                                    *node,
+                                    query.as_deref(),
+                                    *level,
+                                    efc,
+                                    m,
+                                ),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1270,7 +1440,7 @@ impl VectorIndex {
             rest = tail;
 
             // 1) Serial: allocate the nodes (arena, id, level).
-            let mut pending: Vec<(u32, usize)> = Vec::with_capacity(chunk.len());
+            let mut pending: Vec<(u32, usize, Option<Vec<f32>>)> = Vec::with_capacity(chunk.len());
             for (doc, v) in chunk {
                 if v.len() != self.dim {
                     continue;
@@ -1284,18 +1454,18 @@ impl VectorIndex {
                 let level = self.random_level();
                 let node = self.alloc_node(*doc, v, level);
                 self.by_doc.insert(*doc, node);
-                pending.push((node, level));
+                pending.push((node, level, self.build_query(v)));
             }
             if pending.is_empty() {
                 continue;
             }
             if self.entry.is_none() {
                 // The first node becomes the entry point; the rest go in serially.
-                let (first, level) = pending[0];
+                let (first, level, _) = pending[0];
                 self.entry = Some(first);
                 self.max_level = level;
-                for &(node, level) in &pending[1..] {
-                    self.link_node(node, level, None);
+                for (node, level, query) in &pending[1..] {
+                    self.link_node(*node, *level, None, query.as_deref());
                 }
                 continue;
             }
@@ -1306,14 +1476,21 @@ impl VectorIndex {
             // 3) Serial: write the links and prune the back-links.
             computed.sort_by_key(|(node, _, _)| *node);
             for (node, level, per_level) in computed {
-                self.link_node(node, level, Some(per_level));
+                self.link_node(node, level, Some(per_level), None);
             }
         }
     }
 
     /// Links the computed candidates into the graph (computing them itself
-    /// when none are supplied).
-    fn link_node(&mut self, node: u32, level: usize, precomputed: Option<Vec<(usize, Vec<u32>)>>) {
+    /// when none are supplied, searching for `query` or the node's own
+    /// vector).
+    fn link_node(
+        &mut self,
+        node: u32,
+        level: usize,
+        precomputed: Option<Vec<(usize, Vec<u32>)>>,
+        query: Option<&[f32]>,
+    ) {
         let Some(entry) = self.entry else {
             self.entry = Some(node);
             self.max_level = level;
@@ -1323,7 +1500,10 @@ impl VectorIndex {
         let per_level: Vec<(usize, Vec<u32>)> = match precomputed {
             Some(p) => p,
             None => {
-                let v: Vec<f32> = self.vec_at(node).into_owned();
+                let v: Vec<f32> = match query {
+                    Some(q) => q.to_vec(),
+                    None => self.vec_at(node).into_owned(),
+                };
                 let start_level = self.max_level;
                 let cur = if start_level > level {
                     self.descend(&v, entry, start_level, level)
@@ -1447,7 +1627,12 @@ impl VectorIndex {
     /// and the entry point are therefore stored.
     pub fn serialize_graph(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.doc_ids.len() * 96);
-        out.push(GRAPH_VERSION);
+        let quant = self.spec.quant;
+        out.push(if quant == Quant::None {
+            GRAPH_VERSION
+        } else {
+            GRAPH_VERSION_QUANT
+        });
         put_uvarint(&mut out, self.dim as u64);
         out.push(match self.spec.metric {
             Metric::Cosine => 0,
@@ -1457,10 +1642,13 @@ impl VectorIndex {
         put_uvarint(&mut out, self.spec.m as u64);
         put_uvarint(&mut out, self.spec.ef_construction as u64);
         put_uvarint(&mut out, self.spec.ef_search as u64);
-        out.push(match self.data.prec() {
+        out.push(match self.prec {
             VecPrec::F32 => 0,
             VecPrec::F16 => 1,
         });
+        if quant != Quant::None {
+            out.push(quant.code());
+        }
         put_uvarint(&mut out, self.doc_ids.len() as u64);
         put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
         put_uvarint(&mut out, self.max_level as u64);
@@ -1512,7 +1700,8 @@ impl VectorIndex {
         mut lookup: impl FnMut(DocId, &mut Vec<f32>) -> bool,
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
-        if *bytes.first()? != GRAPH_VERSION {
+        let version = *bytes.first()?;
+        if version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
             return None;
         }
         pos += 1;
@@ -1527,11 +1716,12 @@ impl VectorIndex {
             _ => return None,
         };
         pos += 1;
-        let spec = VectorIndexSpec {
+        let mut spec = VectorIndexSpec {
             metric,
             m: get_uvarint(bytes, &mut pos).ok()? as usize,
             ef_construction: get_uvarint(bytes, &mut pos).ok()? as usize,
             ef_search: get_uvarint(bytes, &mut pos).ok()? as usize,
+            quant: Quant::None,
         };
         // The field's own precision: restored as f32, a `vector<N, f16>`
         // field held twice the memory after every reopen.
@@ -1543,6 +1733,10 @@ impl VectorIndex {
         pos += 1;
         if prec != expect_prec {
             return None;
+        }
+        if version == GRAPH_VERSION_QUANT {
+            spec.quant = Quant::from_code(*bytes.get(pos)?)?;
+            pos += 1;
         }
         let count = get_uvarint(bytes, &mut pos).ok()? as usize;
         let entry_raw = get_uvarint(bytes, &mut pos).ok()?;
@@ -1713,6 +1907,7 @@ mod tests {
             m: 8,
             ef_construction: 64,
             ef_search: 64,
+            quant: Quant::None,
         }
     }
 
@@ -1969,7 +2164,12 @@ mod tests {
             let restored =
                 VectorIndex::restore_graph(&bytes, 8, prec, fetch).expect("restore failed");
             assert_eq!(restored.len(), ix.len());
-            assert_eq!(restored.data.prec(), prec);
+            // The arena itself, not the field alone: restored as f32, an f16
+            // field held twice the memory.
+            assert!(matches!(
+                (&restored.data, prec),
+                (Arena::F32(_), VecPrec::F32) | (Arena::F16(_), VecPrec::F16)
+            ));
             assert_eq!(restored.search(&q, 20, None, |_| true), before, "{prec:?}");
 
             let other = if prec == VecPrec::F32 {
@@ -2036,5 +2236,96 @@ mod tests {
         assert_ne!(r[0].0, 10);
         let r = ix.search(&[10.0, 0.0], 1, None, |d| d % 7 == 0);
         assert_eq!(r[0].0 % 7, 0);
+    }
+
+    /// The quantized kernels are `dot`'s strips over widened codes, in the
+    /// same order: the same bits, whatever vectorises them.
+    #[test]
+    fn the_code_kernels_are_dot_over_widened_codes() {
+        let mut r = Rng(0x1234_5678);
+        for dim in [1usize, 7, 8, 63, 64, 65, 200, 768] {
+            let q: Vec<f32> = (0..dim).map(|_| r.next_f32() - 0.5).collect();
+            let code: Vec<i8> = (0..dim)
+                .map(|_| (r.next_f32() * 254.0 - 127.0) as i8)
+                .collect();
+            let wide: Vec<f32> = code.iter().map(|c| *c as f32).collect();
+            assert_eq!(
+                dot_i8(&code, &q).to_bits(),
+                dot(&wide, &q).to_bits(),
+                "{dim}"
+            );
+            let scaled: Vec<f32> = wide.iter().map(|c| c * 0.01).collect();
+            assert_eq!(
+                l2_i8(&code, &q, 0.01).to_bits(),
+                l2_sq(&scaled, &q).to_bits()
+            );
+
+            let mut bits = vec![0u64; dim.div_ceil(64)];
+            let signs: Vec<f32> = (0..dim)
+                .map(|i| {
+                    let set = r.next_f32() > 0.5;
+                    bits[i / 64] |= (set as u64) << (i % 64);
+                    if set {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                })
+                .collect();
+            assert_eq!(
+                dot_bits(&bits, &q).to_bits(),
+                dot(&signs, &q).to_bits(),
+                "{dim}"
+            );
+        }
+    }
+
+    /// A graph over codes goes through the file as one over vectors does:
+    /// version 4, the quantization with it, a tombstone's code travelling
+    /// with it; a graph over vectors stays version 3.
+    #[test]
+    fn a_graph_over_codes_round_trips() {
+        let mut r = Rng(42);
+        let docs: Vec<Vec<f32>> = (0..600)
+            .map(|_| (0..16).map(|_| r.next_f32() - 0.5).collect())
+            .collect();
+        for quant in [Quant::None, Quant::Int8, Quant::Bit] {
+            let spec = VectorIndexSpec {
+                metric: Metric::Cosine,
+                quant,
+                ..spec()
+            };
+            let mut ix = VectorIndex::new(16, spec);
+            for (i, v) in docs.iter().enumerate() {
+                ix.insert(i as u64, v);
+            }
+            for i in 0..50 {
+                ix.remove(i * 7);
+            }
+            let bytes = ix.serialize_graph();
+            assert_eq!(bytes[0], if quant == Quant::None { 3 } else { 4 });
+            let fetch = |doc: DocId, out: &mut Vec<f32>| match docs.get(doc as usize) {
+                Some(v) => {
+                    out.clear();
+                    out.extend_from_slice(v);
+                    true
+                }
+                None => false,
+            };
+            let back = VectorIndex::restore_graph(&bytes, 16, VecPrec::F32, fetch)
+                .expect("restore failed");
+            assert_eq!(back.spec, spec);
+            assert_eq!(back.arena_bytes(), ix.arena_bytes(), "{quant:?}");
+            // Restored neighbour lists come back sorted, so equal distances
+            // -- common over codes -- may leave in another order.
+            let ranked = |ix: &VectorIndex, q: &[f32]| {
+                let mut r = ix.search(q, 10, None, |_| true);
+                r.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                r
+            };
+            for q in docs.iter().step_by(37) {
+                assert_eq!(ranked(&back, q), ranked(&ix, q), "{quant:?}");
+            }
+        }
     }
 }

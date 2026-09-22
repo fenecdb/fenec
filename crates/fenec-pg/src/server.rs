@@ -1758,9 +1758,12 @@ fn run_locked(
                                         IndexKind::None => "-".to_string(),
                                         IndexKind::Hash => "hash".to_string(),
                                         IndexKind::Sorted => "sorted".to_string(),
-                                        IndexKind::Vector(sp) => {
-                                            format!("hnsw({}, m={})", sp.metric.name(), sp.m)
-                                        }
+                                        IndexKind::Vector(sp) => format!(
+                                            "hnsw({}, m={}{})",
+                                            sp.metric.name(),
+                                            sp.m,
+                                            sp.quant_arg()
+                                        ),
                                         IndexKind::Text(sp) => {
                                             format!("text(k1={}, b={})", sp.k1(), sp.b())
                                         }

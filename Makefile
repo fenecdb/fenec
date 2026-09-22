@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -194,6 +194,14 @@ open-bench:
 	test -f $(OPEN_FILE) || ./target/release/examples/open write $(OPEN_FILE) $(OPEN_ROWS) 400 hs
 	./target/release/examples/open open $(OPEN_FILE) read
 	./target/release/examples/open open $(OPEN_FILE) mapped
+
+## Quantized vector indexes against full vectors: the arena, the heap,
+## recall@10 and latency at beams of 100, 200 and 400. QUANT_ROWS=1000000 is
+## the million the docs quote; each mode runs in a process of its own.
+QUANT_ROWS ?= 100000
+quant-bench:
+	$(CARGO) build --release -p fenec-core --example quant
+	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32; done
 
 ## Memory footprint (for calibrating --max-memory)
 memory:
