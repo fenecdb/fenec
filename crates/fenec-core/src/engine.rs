@@ -16,6 +16,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod maintenance;
+
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 
 /// The most rows a `near` query may return (`limit + offset`).
@@ -240,6 +242,9 @@ impl Collection {
             .map(|(_, ix)| ix)
     }
 
+    /// Inlined for the reason [`Self::reset_index_structures`] is: a
+    /// compact beside the database calls it too.
+    #[inline(always)]
     fn index_doc(&mut self, doc: &Document) {
         for (name, ix) in self.vectors.iter_mut() {
             if let Some(Value::Vector(v)) = doc.get(name) {
@@ -757,6 +762,13 @@ pub struct Database {
     /// Which history the writes belong to, and whether they come from a
     /// primary; see [`History`].
     history: History,
+    /// The writes a `create index` or `compact` running beside the database
+    /// has to catch up with once it is built (see `maintenance`). A `Mutex`
+    /// for the reason `sink` is one: it is registered under the read lock,
+    /// and the write path reaches it through `get_mut`.
+    tails: Mutex<maintenance::Tails>,
+    /// Whether `tails` holds any: the one thing every write looks at.
+    watched: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Database {
@@ -778,6 +790,8 @@ impl Database {
             changes: ChangeLog::default(),
             watcher: None,
             history: History::default(),
+            tails: Mutex::default(),
+            watched: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -822,9 +836,24 @@ impl Database {
         self.watcher = Some(w);
     }
 
-    /// Marks a write on the feed.
+    /// Marks a write on the feed, and for any maintenance running beside
+    /// the database on that collection.
     fn note(&mut self, cid: u32, id: DocId) {
         self.changes.record(cid, id);
+        if *self.watched.get_mut() {
+            self.note_watched(cid, id);
+        }
+    }
+
+    /// Out of line: a browser never runs a maintenance, and inlined into
+    /// every write this was half a kilobyte of its module.
+    #[cold]
+    #[inline(never)]
+    fn note_watched(&mut self, cid: u32, id: DocId) {
+        self.tails
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .note(cid, id);
     }
 
     /// Names of the collections that changed since `since`.
@@ -1869,7 +1898,9 @@ impl Database {
         }
     }
 
-    /// Builds an index on an existing field and fills it from the current documents.
+    /// Builds an index on an existing field and fills it from the current
+    /// documents, all under the write lock; a server runs it beside the
+    /// database instead ([`Database::maintain`]).
     fn create_index(
         &mut self,
         collection: &str,
@@ -1877,42 +1908,11 @@ impl Database {
         kind: &IndexKind,
         if_not_exists: bool,
     ) -> Result<Response> {
-        let c = self
-            .collections
-            .get(collection)
-            .ok_or_else(|| Error::NotFound(format!("collection `{collection}`")))?;
-        let f = c
-            .schema
-            .field(field)
-            .ok_or_else(|| Error::NotFound(format!("field `{field}` in `{collection}`")))?;
-        if f.index != IndexKind::None {
-            if if_not_exists {
-                return Ok(Response::Ok(format!("`{field}` is already indexed")));
-            }
-            return Err(Error::Exists(format!("an index on field `{field}`")));
+        if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
+            return Ok(done);
         }
-        if let IndexKind::Vector(_) = kind {
-            if !matches!(f.ty, DataType::Vector(..)) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not vector<N>, no vector index can be built"
-                )));
-            }
-        }
-        if let IndexKind::Text(_) = kind {
-            if !matches!(f.ty, DataType::Text) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not text, no full-text index can be built"
-                )));
-            }
-        }
-        if *kind == IndexKind::Sorted && !SortedIndex::supports(&f.ty) {
-            return Err(Error::Type(format!(
-                "field `{field}` is not int, float, timestamp or text, no ordered index can be built"
-            )));
-        }
-
-        let cid = c.id;
         let c = self.collections.get_mut(collection).unwrap();
+        let cid = c.id;
         let pos = c.schema.field_pos(field).unwrap();
         c.schema.fields[pos].index = kind.clone();
         build_index(c, pos)?;

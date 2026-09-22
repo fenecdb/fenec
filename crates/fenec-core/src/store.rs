@@ -540,6 +540,21 @@ impl Store {
         Ok(image)
     }
 
+    /// The live records in a fresh store, the dead ones left behind -- and
+    /// `self` untouched, so the database goes on using it while a
+    /// maintenance builds beside it.
+    pub fn compacted(&self) -> Result<Store> {
+        let mut fresh = Store::new();
+        fresh.next_id = self.next_id;
+        let ids = self.index.ids();
+        fresh.reserve(ids.len());
+        for id in ids {
+            let loc = self.index.get(id).unwrap();
+            fresh.append(OP_PUT, id, self.payload(loc)?);
+        }
+        Ok(fresh)
+    }
+
     /// Byte image of the whole store (to persist or to move it).
     pub fn image(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.total_bytes);

@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench small bench sweep \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep \
 	compare import-test \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -143,6 +143,11 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fenecdb
+
+## What `create index` and `compact` cost the readers and writers of a
+## running database: under the write lock, then beside it.
+maintenance-bench:
+	$(CARGO) run --release -p fenec-core --example maintenance -- 100000 128
 
 ## Memory footprint (for calibrating --max-memory)
 memory:

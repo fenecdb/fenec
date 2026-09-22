@@ -536,6 +536,46 @@ impl Guard<'_> {
     }
 }
 
+/// A `create index` or `compact` run beside the database. Not cancellable:
+/// the build holds no lock a `CancelRequest` could release.
+fn maintain(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    tx: &mut TxState,
+    stmt: &Statement,
+    out: &mut Writer,
+) -> Option<(Durability, Option<usize>)> {
+    if let Some(msg) = over_memory_cap(cfg, &read_lock(db), stmt) {
+        out.error("53200", &msg);
+        return None;
+    }
+    if let Err(e) = Database::maintain(db, stmt).expect("a maintenance statement") {
+        out.error(sqlstate(&e), &e.to_string());
+        return None;
+    }
+    if matches!(stmt, Statement::CreateIndex { .. }) {
+        tx.note_write();
+    }
+    // The index's record waits for the disk under `always`, as any write
+    // does; a compact's image was synced when it replaced the file.
+    let durability = match cfg.sync {
+        SyncPolicy::Always => match write_lock(db).flush() {
+            Ok(d) => d,
+            Err(e) => {
+                out.error(sqlstate(&e), &e.to_string());
+                return None;
+            }
+        },
+        _ => None,
+    };
+    let answer = out.mark();
+    out.command_complete(match stmt {
+        Statement::Compact(_) => "VACUUM",
+        _ => "OK",
+    });
+    durability.map(|d| (d, Some(answer)))
+}
+
 /// The SQLSTATE an engine error is reported under.
 fn sqlstate(e: &Error) -> &'static str {
     match e {
@@ -1489,6 +1529,13 @@ fn run_locked(
             return None;
         }
     };
+
+    // `create index` and `compact` on their own are built beside the
+    // database: readers and writers go on, and the write lock is taken only
+    // to put the result in place (see `Database::maintain`).
+    if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
+        return maintain(db, cfg, tx, stmt, out);
+    }
 
     // A shared lock suffices when everything is read-only: reads flow in parallel.
     let needs_write = stmts.iter().any(|s| !s.is_read_only());

@@ -535,6 +535,21 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Resp
         db.read()
             .unwrap_or_else(|e| e.into_inner())
             .query(&stmt, &params)
+    } else if let Some(built) = Database::maintain(db, &stmt) {
+        // `create index` and `compact` are built beside the database, with
+        // no lock held; the index's record then waits for the disk as any
+        // write does.
+        let durability = match built {
+            Ok(_) => match flush_for(cfg, &mut db.write().unwrap_or_else(|e| e.into_inner())) {
+                Ok(d) => d,
+                Err(e) => return error_response(&e),
+            },
+            Err(_) => None,
+        };
+        if let Err(e) = await_durable(db, durability) {
+            return error_response(&e);
+        }
+        built
     } else {
         let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
         let r = guard.execute_with(&stmt, &params);

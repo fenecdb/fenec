@@ -20,6 +20,7 @@ make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make import-test   # the PostgreSQL arm of import (needs Docker)
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
+make maintenance-bench # reads and writes during create index / compact
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 ```
@@ -135,6 +136,19 @@ under `always` lost no acknowledged write. An archive (`fenec archive`,
 with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
 that, so a restore is a concatenation checked by opening it.
+
+**A server's `create index` and `compact` run beside the database**
+(`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
+under the read lock, the build holds no lock, and the write lock is taken only
+to apply the writes made meanwhile and put the result in place. Those writes
+are known exactly, not from the change ring a long build would overflow: every
+write passes through `Database::note`, which hands the id to the `Tail` of each
+maintenance on that collection -- so a write path that skipped `note` would
+leave a built index missing it. A schema change there (another index, a drop)
+fails the maintenance rather than installing what no longer fits. At 100 000 x
+128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
+(file rewrite included), against the full ~20 s under the write lock. Only a
+lone statement takes this path; a batch, the shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty

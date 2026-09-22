@@ -25,6 +25,7 @@ make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants, HTTP only
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
+make maintenance-bench   # reads and writes during create index / compact
 ```
 
 Single tests:
@@ -152,6 +153,19 @@ exclusively so a write that passed the frozen check cannot land after the final
 export. A move is freeze, copy the image, install, flip the directory in one
 statement, delete the source; the change sequence travels in the image, so a
 caught-up subscriber resumes on the target without a reseed.
+
+**A server's `create index` and `compact` run beside the database**
+(`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
+under the read lock, the build holds no lock, and the write lock is taken only
+to apply the writes made meanwhile and put the result in place. Those writes
+are known exactly, not from the change ring a long build would overflow: every
+write passes through `Database::note`, which hands the id to the `Tail` of each
+maintenance on that collection -- so a write path that skipped `note` would
+leave a built index missing it. A schema change there (another index, a drop)
+fails the maintenance rather than installing what no longer fits. At 100 000 x
+128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
+(file rewrite included), against the full ~20 s under the write lock. Only a
+lone statement takes this path; a batch, the shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
