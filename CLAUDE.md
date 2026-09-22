@@ -148,7 +148,8 @@ with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
 that, so a restore is a concatenation checked by opening it.
 
-**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
+**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
+whose directory replicates to a standby router like any other file;
 `site/content/docs/sharding.html`). The tenant comes from the path
 (`/t/<tenant>/`), or over the pg wire from the startup packet's database
 (`--listen` in `--dir` mode; looked up again per statement, so a move, an idle

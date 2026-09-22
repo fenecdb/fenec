@@ -13,6 +13,7 @@
 use fenec_core::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 const SCHEMA: [&str; 2] = [
     "create collection if not exists nodes (name text @hash, addr text, token text)",
@@ -58,7 +59,13 @@ pub struct Placement {
 }
 
 pub struct Directory {
-    db: Database,
+    /// Shared, because a standby follows it: the follower thread applies the
+    /// primary's writes to the same database (`fenec-shard --replica-of`).
+    db: Arc<RwLock<Database>>,
+    /// The change counter the maps were read at. A standby's database moves
+    /// under them as the primary's writes arrive, and [`Self::refresh`]
+    /// reads them again when it has.
+    seq: u64,
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
 }
@@ -66,20 +73,66 @@ pub struct Directory {
 impl Directory {
     /// Opens (or creates) the directory file.
     pub fn open(path: impl AsRef<Path>) -> Result<Directory> {
-        Directory::load(fenec_core::fs::open(path)?)
+        Directory::load(Arc::new(RwLock::new(fenec_core::fs::open(path)?)))
     }
 
     /// A directory that lives only as long as the process: tests.
     pub fn in_memory() -> Directory {
-        Directory::load(Database::new()).expect("an empty database loads")
+        Directory::load(Arc::new(RwLock::new(Database::new()))).expect("an empty database loads")
     }
 
-    fn load(mut db: Database) -> Result<Directory> {
-        for sql in SCHEMA {
-            db.execute(&fenec_ql::parse_one(sql)?)?;
+    /// A directory over a database the caller already owns -- the one a
+    /// standby's follower writes into, and a primary's feed reads from.
+    pub fn load(db: Arc<RwLock<Database>>) -> Result<Directory> {
+        {
+            let mut g = write(&db);
+            // A standby's collections arrive with the primary's writes; it
+            // refuses writes of its own, this one included.
+            if !g.history().following {
+                for sql in SCHEMA {
+                    g.execute(&fenec_ql::parse_one(sql)?)?;
+                }
+            }
         }
+        let mut d = Directory {
+            db,
+            seq: 0,
+            nodes: BTreeMap::new(),
+            tenants: HashMap::new(),
+        };
+        d.reload()?;
+        Ok(d)
+    }
+
+    /// The database itself: what the replication endpoints stream from and
+    /// the follower applies to.
+    pub fn db(&self) -> &Arc<RwLock<Database>> {
+        &self.db
+    }
+
+    /// Whether this directory follows another router's.
+    pub fn following(&self) -> bool {
+        read(&self.db).history().following
+    }
+
+    /// Whether the database has moved since the maps were read: on a standby
+    /// every write the primary sent moves it.
+    pub fn stale(&self) -> bool {
+        read(&self.db).change_seq() != self.seq
+    }
+
+    /// Reads the maps again when the database has moved.
+    pub fn refresh(&mut self) -> Result<()> {
+        if self.stale() {
+            self.reload()?;
+        }
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<()> {
+        let g = read(&self.db);
         let mut nodes = BTreeMap::new();
-        for row in rows(&db, "get nodes select name, addr, token")? {
+        for row in rows(&g, "get nodes select name, addr, token")? {
             nodes.insert(
                 text(&row[0]),
                 Node {
@@ -89,7 +142,7 @@ impl Directory {
             );
         }
         let mut tenants = HashMap::new();
-        for row in rows(&db, "get tenants select name, node, state")? {
+        for row in rows(&g, "get tenants select name, node, state")? {
             tenants.insert(
                 text(&row[0]),
                 Placement {
@@ -98,7 +151,10 @@ impl Directory {
                 },
             );
         }
-        Ok(Directory { db, nodes, tenants })
+        self.seq = g.change_seq();
+        self.nodes = nodes;
+        self.tenants = tenants;
+        Ok(())
     }
 
     pub fn nodes(&self) -> &BTreeMap<String, Node> {
@@ -185,15 +241,31 @@ impl Directory {
     /// acknowledged is on disk.
     fn run(&mut self, sql: &str, params: &[Value]) -> Result<()> {
         let stmt = fenec_ql::parse_one(sql)?;
-        self.db.execute_with(&stmt, params)?;
-        self.db.sync()
+        let mut g = write(&self.db);
+        g.execute_with(&stmt, params)?;
+        g.sync()?;
+        // The maps are updated by the caller; the counter moved here.
+        self.seq = g.change_seq();
+        Ok(())
     }
 }
 
+fn read(db: &Arc<RwLock<Database>>) -> std::sync::RwLockReadGuard<'_, Database> {
+    db.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write(db: &Arc<RwLock<Database>>) -> std::sync::RwLockWriteGuard<'_, Database> {
+    db.write().unwrap_or_else(|e| e.into_inner())
+}
+
 fn rows(db: &Database, sql: &str) -> Result<Vec<Vec<Value>>> {
-    match db.query(&fenec_ql::parse_one(sql)?, &[])? {
-        Response::Rows(rs) => Ok(rs.rows.into_iter().map(|r| r.values).collect()),
-        _ => Ok(Vec::new()),
+    match db.query(&fenec_ql::parse_one(sql)?, &[]) {
+        Ok(Response::Rows(rs)) => Ok(rs.rows.into_iter().map(|r| r.values).collect()),
+        Ok(_) => Ok(Vec::new()),
+        // A standby's collections arrive with the primary's first writes.
+        // Until they do the directory is empty, not broken.
+        Err(Error::NotFound(_)) => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
 }
 

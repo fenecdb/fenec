@@ -227,9 +227,36 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
-  <li><b>One router.</b> Its directory is a single-writer file like any other;
-    several routers would need a shared one.</li>
+  <li><b>One router takes changes at a time.</b> A standby follows its
+    directory and forwards from the same placements, but only the primary
+    places, moves and deletes; promoting the standby is a decision someone
+    makes, not a vote the routers hold.</li>
 </ul>
+
+<h2>A standby router</h2>
+
+<p>The directory is a fenecdb file, so it replicates the way any other does.
+A second router follows it and forwards from the same placements; the
+primary is the one that changes it.</p>
+
+<pre data-lang="bash">fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replication-token r1
+fenec-shard --listen 127.0.0.1:8091 --directory standby.fenec --replication-token r1 \
+            --replica-of http://127.0.0.1:8090
+</pre>
+
+<p>Both forward <code>/t/&lt;tenant&gt;/...</code>; the standby's
+<code>/_shard/</code> answers reads and refuses changes with 409, since its
+directory takes no write of its own. When the primary is gone,
+<code>POST /_replication/promote</code> on the standby forks its directory's
+history and it starts taking them — the same promotion a replica of a
+database gets, and the same rule after it: the old primary rejoins with
+<code>--replica-of</code> pointed at the new one, or its file is refused.</p>
+
+<p>A standby is behind by whatever the last directory change has not reached
+it yet, which is one write and a sync: placements change when someone places,
+moves or deletes a tenant, not when clients read and write. Nothing of the
+tenants' own data goes through the router's directory, so a standby that is a
+second behind still forwards every request correctly.</p>
 
 <h2>Tokens</h2>
 

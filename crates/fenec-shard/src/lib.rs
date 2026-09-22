@@ -33,6 +33,7 @@ pub mod upstream;
 use directory::{Directory, Node, State};
 use fenec_core::prelude::*;
 use fenec_http::http::{self, Method, Request, Response};
+use fenec_http::replication::{self, Replication};
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -71,6 +72,9 @@ impl Default for Config {
 
 pub struct Router {
     dir: RwLock<Directory>,
+    /// The directory's own replication: the feed a standby reads, and the
+    /// follower a standby runs. `None` without --replication-token.
+    repl: Option<Arc<Replication>>,
     pool: Pool,
     cfg: Config,
     /// Tenants with a create, move or delete in progress: a second
@@ -86,8 +90,19 @@ type Outcome<T> = std::result::Result<T, Fail>;
 
 impl Router {
     pub fn new(dir: Directory, cfg: Config) -> Arc<Router> {
+        Router::over(dir, cfg, None)
+    }
+
+    /// A router whose directory is replicated: a standby follows it and
+    /// forwards from the same placements, and takes over when promoted.
+    pub fn replicated(dir: Directory, cfg: Config, repl: Arc<Replication>) -> Arc<Router> {
+        Router::over(dir, cfg, Some(repl))
+    }
+
+    fn over(dir: Directory, cfg: Config, repl: Option<Arc<Replication>>) -> Arc<Router> {
         Arc::new(Router {
             dir: RwLock::new(dir),
+            repl,
             pool: Pool::new(cfg.upstream_timeout),
             cfg,
             busy: Mutex::new(HashSet::new()),
@@ -179,8 +194,35 @@ impl Router {
                     return;
                 }
             };
+            // A standby's directory moves as the primary's writes arrive:
+            // the maps are read again before the request is answered from
+            // them, and only then.
+            if self.read_dir().stale() {
+                if let Err(e) = self.write_dir().refresh() {
+                    fenec_http::log!("could not read the directory: {e}");
+                }
+            }
             let keep = match req.segments().first() {
                 Some(&"t") => self.forward(&req, &mut out),
+                Some(&"_replication") => {
+                    let Some(repl) = self.repl.clone() else {
+                        let _ = Response::error(404, "this router has no --replication-token")
+                            .write(&mut out, false, false);
+                        return;
+                    };
+                    // The directory's database, not the router's lock: a
+                    // stream lasts as long as the replica stays connected.
+                    let db = self.read_dir().db().clone();
+                    match replication::handle(&mut out, &db, &repl, &req) {
+                        // The stream took the connection over and has ended.
+                        None => return,
+                        Some(resp) => {
+                            resp.write(&mut out, req.keep_alive, req.method == Method::Head)
+                                .is_ok()
+                                && req.keep_alive
+                        }
+                    }
+                }
                 Some(&"_shard") => {
                     let resp = self.admin(&req);
                     resp.write(&mut out, req.keep_alive, req.method == Method::Head)
@@ -326,6 +368,20 @@ impl Router {
             Err(e) => return Response::error(400, &e),
         };
         let segs = req.segments();
+        // A standby's directory is a replica's file: it takes no write of
+        // its own, so a change belongs on the primary. The reads below are
+        // answered from the maps the primary's writes filled.
+        let writes = !matches!(
+            (req.method, &segs[1..]),
+            (Method::Get, ["nodes"]) | (Method::Get, ["tenants"])
+        );
+        if writes && self.read_dir().following() {
+            return Response::error(
+                409,
+                "this router follows another: send /_shard/ changes to the primary, \
+                 or promote this one (POST /_replication/promote)",
+            );
+        }
         let result = match (req.method, &segs[1..]) {
             (Method::Get, ["nodes"]) => Ok(self.list_nodes()),
             (Method::Put, ["nodes", n]) => self.set_node(n, &body),
