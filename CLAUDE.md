@@ -163,7 +163,12 @@ exactly as a second process would. `freeze` takes a per-tenant gate
 exclusively so a write that passed the frozen check cannot land after the final
 export. A move is freeze, copy the image, install, flip the directory in one
 statement, delete the source; the change sequence travels in the image, so a
-caught-up subscriber resumes on the target without a reseed.
+caught-up subscriber resumes on the target without a reseed. A node's tenants
+are replicated to its standby, each through its own feed at
+`/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
+them there one at a time -- separate databases, nothing to make atomic
+between them. The router never promotes on its own: it cannot tell a node
+that is gone from one it cannot reach, and guessing makes two primaries.
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

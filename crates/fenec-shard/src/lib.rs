@@ -351,6 +351,11 @@ impl Router {
     /// PUT    /_shard/tenants/<t> [{node}]      place and create; least disk wins
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
     /// POST   /_shard/tenants/<t>/move {to}     move to another node
+    /// PUT    /_shard/nodes/<n> {addr, token, standby}  standby: the node
+    ///                                       whose --replica-of follows this
+    ///                                       one, where its tenants are copied
+    /// POST   /_shard/nodes/<n>/failover      promote this node's tenants on
+    ///                                       its standby and route them there
     /// ```
     pub fn admin(&self, req: &Request) -> Response {
         if let Some(token) = &self.cfg.token {
@@ -386,6 +391,7 @@ impl Router {
             (Method::Get, ["nodes"]) => Ok(self.list_nodes()),
             (Method::Put, ["nodes", n]) => self.set_node(n, &body),
             (Method::Delete, ["nodes", n]) => self.remove_node(n),
+            (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants()),
             (Method::Put, ["tenants", t]) => self.create(t, field(&body, "node")),
             (Method::Delete, ["tenants", t]) => self.delete(t),
@@ -403,7 +409,15 @@ impl Router {
         let items: Vec<String> = dir
             .nodes()
             .iter()
-            .map(|(name, n)| format!("{{\"name\":{},\"addr\":{}}}", quote(name), quote(&n.addr)))
+            .map(|(name, n)| match dir.standby(name) {
+                None => format!("{{\"name\":{},\"addr\":{}}}", quote(name), quote(&n.addr)),
+                Some(s) => format!(
+                    "{{\"name\":{},\"addr\":{},\"standby\":{}}}",
+                    quote(name),
+                    quote(&n.addr),
+                    quote(s)
+                ),
+            })
             .collect();
         Response::json(200, format!("[{}]", items.join(",")))
     }
@@ -441,6 +455,15 @@ impl Router {
             addr: addr.into(),
             token: token.into(),
         };
+        let standby = field(body, "standby").map(str::to_string);
+        if let Some(s) = &standby {
+            if s == name {
+                return Err(Fail(400, "a node cannot be its own standby".into()));
+            }
+            if self.read_dir().node(s).is_none() {
+                return Err(Fail(404, format!("no node `{s}` to be the standby")));
+            }
+        }
         // A node is checked before it is recorded: an address or token that
         // does not work would otherwise surface on the first placement.
         let (status, _) = self
@@ -453,8 +476,118 @@ impl Router {
                 format!("{addr} refused its admin token ({status})"),
             ));
         }
-        self.write_dir().set_node(name, node).map_err(internal)?;
+        let mut dir = self.write_dir();
+        dir.set_node(name, node).map_err(internal)?;
+        if let Some(s) = &standby {
+            dir.set_standby(name, Some(s)).map_err(internal)?;
+        }
+        drop(dir);
         Ok(Response::json(201, format!("{{\"node\":{}}}", quote(name))))
+    }
+
+    /// The call that keeps a node's standby in step: a tenant created here
+    /// is created there so the replica has a file to follow into, and one
+    /// deleted here is deleted there. Returns what went wrong, if anything;
+    /// a standby that is down does not stop the operation, it only leaves
+    /// the tenant without a replica until someone repairs it.
+    fn on_standby(&self, node: &str, method: &str, target: &str) -> Option<String> {
+        let (name, n) = {
+            let dir = self.read_dir();
+            let s = dir.standby(node)?.to_string();
+            let n = dir.node(&s).cloned()?;
+            (s, n)
+        };
+        match self.pool.call(&n.addr, method, target, &n.token, b"") {
+            // 404 and 409 are "already as asked" here: gone, or there.
+            Ok((status, _)) if status < 300 || status == 404 || status == 409 => None,
+            Ok((status, body)) => Some(format!(
+                "standby `{name}` answered {status}: {}",
+                String::from_utf8_lossy(&body).trim()
+            )),
+            Err(e) => Some(format!("standby `{name}` did not answer: {e}")),
+        }
+    }
+
+    /// Moves every tenant of `name` to the node its writes went to: each is
+    /// promoted there -- its history forks and it stops following -- and the
+    /// directory points at it. One tenant at a time, because they are
+    /// separate databases: there is nothing to make atomic between them, and
+    /// one that will not promote leaves the others promoted and says so.
+    fn failover(&self, name: &str) -> Outcome<Response> {
+        let (to, standby) = {
+            let dir = self.read_dir();
+            let s = dir
+                .standby(name)
+                .ok_or_else(|| {
+                    Fail(
+                        409,
+                        format!(
+                            "node `{name}` has no standby: PUT /_shard/nodes/{name} {{standby}}"
+                        ),
+                    )
+                })?
+                .to_string();
+            let n = dir
+                .node(&s)
+                .cloned()
+                .ok_or_else(|| Fail(404, format!("no node `{s}`")))?;
+            (s, n)
+        };
+        let tenants: Vec<String> = self
+            .read_dir()
+            .tenants()
+            .into_iter()
+            .filter(|(_, p)| p.node == name)
+            .map(|(t, _)| t)
+            .collect();
+        let (mut promoted, mut failed) = (Vec::new(), Vec::new());
+        for tenant in tenants {
+            let Ok(_claim) = self.claim(&tenant) else {
+                failed.push(format!(
+                    "{{\"tenant\":{},\"why\":\"another operation is in progress\"}}",
+                    quote(&tenant)
+                ));
+                continue;
+            };
+            let target = format!("/_admin/tenants/{tenant}/promote");
+            let answer = self
+                .pool
+                .call(&standby.addr, "POST", &target, &standby.token, b"");
+            match answer {
+                Ok((200, _)) => match self.write_dir().place(&tenant, &to, State::Active) {
+                    Ok(()) => promoted.push(quote(&tenant)),
+                    Err(e) => failed.push(format!(
+                        "{{\"tenant\":{},\"why\":{}}}",
+                        quote(&tenant),
+                        quote(&message(&e))
+                    )),
+                },
+                Ok((status, body)) => failed.push(format!(
+                    "{{\"tenant\":{},\"why\":{}}}",
+                    quote(&tenant),
+                    quote(&format!(
+                        "{status}: {}",
+                        String::from_utf8_lossy(&body).trim()
+                    ))
+                )),
+                Err(e) => failed.push(format!(
+                    "{{\"tenant\":{},\"why\":{}}}",
+                    quote(&tenant),
+                    quote(&format!("`{to}` did not answer: {e}"))
+                )),
+            }
+        }
+        let body = format!(
+            "{{\"node\":{},\"to\":{},\"promoted\":[{}],\"failed\":[{}]}}",
+            quote(name),
+            quote(&to),
+            promoted.join(","),
+            failed.join(",")
+        );
+        Ok(Response::json(
+            if failed.is_empty() { 200 } else { 502 },
+            body,
+        ))
     }
 
     fn remove_node(&self, name: &str) -> Outcome<Response> {
@@ -552,9 +685,23 @@ impl Router {
             let _ = self.pool.call(&n.addr, "DELETE", &target, &n.token, b"");
             return Err(internal(e));
         }
+        // The replica follows into a file of its own, so the tenant is
+        // created on the standby as well.
+        let warning = self.on_standby(&name, "PUT", &target);
+        if let Some(w) = &warning {
+            fenec_http::log!("tenant `{tenant}` has no replica yet: {w}");
+        }
         Ok(Response::json(
             201,
-            format!("{{\"tenant\":{},\"node\":{}}}", quote(tenant), quote(&name)),
+            format!(
+                "{{\"tenant\":{},\"node\":{}{}}}",
+                quote(tenant),
+                quote(&name),
+                match &warning {
+                    None => String::new(),
+                    Some(w) => format!(",\"replica\":{}", quote(w)),
+                }
+            ),
         ))
     }
 
@@ -586,6 +733,13 @@ impl Router {
             return Err(Fail(status, String::from_utf8_lossy(&body).into_owned()));
         }
         self.write_dir().remove_tenant(tenant).map_err(internal)?;
+        if let Some(w) = self.on_standby(
+            &placement.node,
+            "DELETE",
+            &format!("/_admin/tenants/{tenant}"),
+        ) {
+            fenec_http::log!("tenant `{tenant}`'s replica was not removed: {w}");
+        }
         Ok(Response::empty(204))
     }
 
@@ -654,6 +808,16 @@ impl Router {
         if let Err(e) = self.write_dir().place(tenant, to, State::Active) {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(thaw(internal(e)));
+        }
+
+        // The replica follows the node the tenant is on now: a file there,
+        // and the copy on the old node's standby is not this tenant's any
+        // more.
+        if let Some(w) = self.on_standby(to, "PUT", &base) {
+            fenec_http::log!("tenant `{tenant}` has no replica on `{to}` yet: {w}");
+        }
+        if let Some(w) = self.on_standby(&from, "DELETE", &base) {
+            fenec_http::log!("tenant `{tenant}`'s replica on `{from}`'s standby stayed: {w}");
         }
 
         // From here the tenant is on `to`. The source copy ends its streams

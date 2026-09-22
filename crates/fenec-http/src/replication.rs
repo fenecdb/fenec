@@ -125,6 +125,9 @@ struct Ring {
     /// Moves when what the ring holds stops leading to the database -- a
     /// replica that took an image: a stream begun before it ends.
     epoch: u64,
+    /// The database is going: every stream ends rather than holding it open
+    /// (a tenant being deleted or moved).
+    closed: bool,
 }
 
 /// Consecutive records, the first numbered `first`.
@@ -144,6 +147,8 @@ enum Next {
     Behind,
     /// The feed started over.
     Moved,
+    /// The database this feed belongs to is going.
+    Gone,
 }
 
 impl Feed {
@@ -157,6 +162,7 @@ impl Feed {
                 seq: 0,
                 durable: 0,
                 epoch: 0,
+                closed: false,
             }),
             cv: Condvar::new(),
         })
@@ -172,6 +178,14 @@ impl Feed {
         r.durable = seq;
         r.epoch += 1;
         drop(r);
+        self.cv.notify_all();
+    }
+
+    /// Ends every stream reading from this feed. A tenant being deleted or
+    /// moved is held open by its replicas otherwise, and the delete waits
+    /// for them until it gives up.
+    pub fn close(&self) {
+        lock(&self.ring).closed = true;
         self.cv.notify_all();
     }
 
@@ -243,6 +257,9 @@ impl Feed {
     /// The durable records after `cursor`, up to about `max` bytes.
     fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
         let r = lock(&self.ring);
+        if r.closed {
+            return Next::Gone;
+        }
         if r.epoch != epoch {
             return Next::Moved;
         }
@@ -401,6 +418,23 @@ impl Replication {
             follower,
             streams: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Ends the streams replicas are reading, and stops the follower: the
+    /// database is going (a tenant deleted or moved).
+    pub fn close_streams(&self) {
+        if let Some(feed) = &self.feed {
+            feed.close();
+        }
+        if let Some(f) = &self.follower {
+            f.halt();
+        }
+    }
+
+    /// The follower, on a server that follows one: what a promotion goes
+    /// through (`/_admin/tenants/<t>/promote` on a replica node).
+    pub fn follower(&self) -> Option<&Arc<Follower>> {
+        self.follower.as_ref()
     }
 
     fn authorized(&self, req: &Request) -> bool {
@@ -678,6 +712,11 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
                     .and_then(|_| w.flush());
                 return;
             }
+            Next::Gone => {
+                let _ =
+                    message(&mut w, b'E', &[b"the database is closing"]).and_then(|_| w.flush());
+                return;
+            }
         }
     }
 }
@@ -697,6 +736,9 @@ impl Drop for Unlist<'_> {
 pub struct Upstream {
     url: String,
     addr: String,
+    /// What the stream hangs off: nothing for a file, `/t/<tenant>` for one
+    /// tenant of a node that replicates its tenants.
+    base: String,
     token: String,
 }
 
@@ -724,19 +766,25 @@ pub enum Message {
 }
 
 impl Upstream {
-    /// `url` is the primary's HTTP address, `http://host:port`. There is no
-    /// TLS here either: across an open network, a tunnel carries it.
+    /// `url` is the primary's HTTP address, `http://host:port`, and for one
+    /// tenant of a node `http://host:port/t/<tenant>`. There is no TLS here
+    /// either: across an open network, a tunnel carries it.
     pub fn new(url: &str, token: String) -> std::result::Result<Upstream, String> {
         let rest = url.strip_prefix("http://").ok_or_else(|| {
             format!("a primary is http://host:port, not `{url}` (there is no TLS)")
         })?;
-        let addr = rest.trim_end_matches('/').to_string();
-        if addr.is_empty() || addr.contains('/') {
+        let rest = rest.trim_end_matches('/');
+        let (addr, base) = match rest.split_once('/') {
+            None => (rest.to_string(), String::new()),
+            Some((a, path)) => (a.to_string(), format!("/{path}")),
+        };
+        if addr.is_empty() {
             return Err(format!("a primary is http://host:port, not `{url}`"));
         }
         Ok(Upstream {
             url: url.trim_end_matches('/').to_string(),
             addr,
+            base,
             token,
         })
     }
@@ -752,8 +800,9 @@ impl Upstream {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
         let request = format!(
-            "GET /_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
+            "GET {}/_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
+            self.base,
             if image { "&image=1" } else { "" },
             self.addr,
             self.token

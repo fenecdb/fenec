@@ -22,6 +22,7 @@
 //! and a request arriving mid-close waits for the close to finish before it
 //! opens the file again.
 
+use crate::replication::{fresh_id, Follower, Replication};
 use crate::sse::Hub;
 use fenec_core::prelude::*;
 use std::collections::HashMap;
@@ -40,6 +41,25 @@ const RELEASE_WAIT: Duration = Duration::from_secs(5);
 
 type Setup = Box<dyn Fn(&mut Database) -> Result<()> + Send + Sync>;
 
+/// How a node replicates its tenants: every tenant file is opened through a
+/// feed and serves `/t/<tenant>/_replication`, the way a single file serves
+/// `/_replication`. With `upstream` this node is the replica: each tenant it
+/// opens follows the tenant of the same name on that node.
+///
+/// A node, not a tenant, is the unit: the pair is what an operator moves
+/// traffic between, and a tenant's replica is then wherever its node's
+/// standby is. Spreading one node's tenants over several replicas would need
+/// a placement of its own, which the directory does not keep.
+pub struct Replicated {
+    pub token: String,
+    /// Bytes of writes kept per tenant for a replica that falls behind.
+    pub buffer: usize,
+    pub upstream: Option<String>,
+    /// Whether a write is fsynced before it is answered: a replica is sent
+    /// only what an fsync covered.
+    pub sync_on_write: bool,
+}
+
 /// A registry failure, already shaped as an HTTP status and message.
 #[derive(Debug)]
 pub struct Refused(pub u16, pub String);
@@ -48,6 +68,9 @@ pub struct Tenant {
     name: String,
     pub db: Arc<RwLock<Database>>,
     pub hub: Arc<Hub>,
+    /// The feed replicas of this tenant read, and the follower it runs on a
+    /// replica node. `None` unless the node replicates (`Replicated`).
+    pub repl: Option<Arc<Replication>>,
     /// Held shared by every request for the length of its handling, and
     /// exclusively by `freeze`. A write that passed the frozen check but has
     /// not taken the database lock yet would otherwise land *after* the
@@ -104,6 +127,7 @@ pub struct Tenants {
     shutting_down: AtomicBool,
     epoch: Instant,
     setup: Option<Setup>,
+    repl: Option<Replicated>,
     change_capacity: usize,
     max_memory: usize,
     checkpoint: bool,
@@ -133,6 +157,7 @@ impl Tenants {
             shutting_down: AtomicBool::new(false),
             epoch: Instant::now(),
             setup: None,
+            repl: None,
             change_capacity: fenec_core::changes::DEFAULT_CAPACITY,
             max_memory: 0,
             checkpoint: true,
@@ -147,6 +172,24 @@ impl Tenants {
     ) -> Tenants {
         self.setup = Some(Box::new(f));
         self
+    }
+
+    /// Opens every tenant through a feed, so replicas can be fed from it,
+    /// and follows another node's tenants when `upstream` is set.
+    pub fn with_replication(mut self, repl: Replicated) -> Tenants {
+        self.repl = Some(repl);
+        self
+    }
+
+    /// The token a tenant's `/_replication` asks for, when the node
+    /// replicates its tenants.
+    pub fn replication_token(&self) -> Option<&str> {
+        Some(self.repl.as_ref()?.token.as_str())
+    }
+
+    /// Whether this node follows another's tenants.
+    pub fn follows(&self) -> Option<&str> {
+        self.repl.as_ref()?.upstream.as_deref()
     }
 
     pub fn with_change_capacity(mut self, n: usize) -> Tenants {
@@ -258,6 +301,26 @@ impl Tenants {
         Ok(t)
     }
 
+    /// Takes this tenant's writes on a replica node: its history forks
+    /// here and the follower stops. The failover is one tenant at a time,
+    /// because a node's tenants are separate databases -- there is nothing
+    /// to make atomic between them.
+    pub fn promote(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
+        let t = self.get(name)?;
+        let Some(repl) = &t.repl else {
+            return Err(Refused(
+                409,
+                format!("tenant `{name}` is not replicated (--replication-token)"),
+            ));
+        };
+        let Some(follower) = repl.follower() else {
+            return Err(Refused(409, format!("tenant `{name}` follows no node")));
+        };
+        follower
+            .promote(fresh_id())
+            .map_err(|e| Refused(500, e.to_string()))
+    }
+
     /// Creates an empty tenant. 409 when it exists.
     pub fn create(&self, name: &str) -> std::result::Result<Arc<Tenant>, Refused> {
         check_name(name)?;
@@ -276,18 +339,67 @@ impl Tenants {
     }
 
     fn open_file(&self, name: &str, path: &Path) -> std::result::Result<Arc<Tenant>, Refused> {
-        let mut db = fenec_core::fs::open(path)
-            .map_err(|e| Refused(500, format!("could not open tenant `{name}`: {e}")))?;
+        let failed = |e: fenec_core::error::Error| {
+            Refused(500, format!("could not open tenant `{name}`: {e}"))
+        };
+        let (mut db, feed) = match &self.repl {
+            None => (fenec_core::fs::open(path).map_err(failed)?, None),
+            Some(r) => {
+                let file = path.to_string_lossy().into_owned();
+                let (db, feed) = crate::replication::open(&file, r.buffer).map_err(failed)?;
+                (db, Some(feed))
+            }
+        };
+        if let Some(r) = &self.repl {
+            // The same rule a single file follows: a replica's file goes on
+            // following, a primary's starts a history if it has none. A
+            // tenant promoted by a failover has forked already and is a
+            // primary's file from then on.
+            let history = db.history().clone();
+            let settled = match (&r.upstream, history.following) {
+                (Some(_), _) => db.follow(history.lineage.clone()),
+                (None, false) if history.lineage.is_empty() => {
+                    db.fork(fresh_id()).and_then(|_| db.sync())
+                }
+                (None, _) => Ok(()),
+            };
+            settled.map_err(failed)?;
+        }
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
         let hub = Hub::new();
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
+        let db = Arc::new(RwLock::new(db));
+        // The follower applies the primary node's writes for this tenant; it
+        // holds the tenant open, which is what keeps a replica following one
+        // nobody reads here.
+        let repl = self.repl.as_ref().map(|r| {
+            let follower = r.upstream.as_ref().and_then(|url| {
+                let f = Follower::new(
+                    &format!("{}/t/{name}", url.trim_end_matches('/')),
+                    r.token.clone(),
+                    Arc::clone(&db),
+                    feed.clone(),
+                    r.sync_on_write,
+                )
+                .map_err(|e| crate::log!("tenant `{name}` cannot follow {url}: {e}"))
+                .ok()?;
+                let run = Arc::clone(&f);
+                std::thread::Builder::new()
+                    .name(format!("fenec-replica-{name}"))
+                    .spawn(move || run.run())
+                    .ok()?;
+                Some(f)
+            });
+            Replication::new(r.token.clone(), feed.clone(), follower)
+        });
         Ok(Arc::new(Tenant {
             name: name.to_string(),
-            db: Arc::new(RwLock::new(db)),
+            db,
             hub,
+            repl,
             gate: RwLock::new(()),
             frozen: AtomicBool::new(false),
             last_used: AtomicU64::new(self.now()),
@@ -470,6 +582,11 @@ impl Tenants {
         self.with_slot(name, |held| {
             if let Held::Open(t) = &*held {
                 t.hub.close();
+                // A replica's stream holds the tenant as a subscription
+                // does: it is ended for the same reason.
+                if let Some(repl) = &t.repl {
+                    repl.close_streams();
+                }
                 let deadline = Instant::now() + RELEASE_WAIT;
                 while Arc::strong_count(t) > 1 {
                     if Instant::now() >= deadline {

@@ -15,9 +15,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const SCHEMA: [&str; 2] = [
+const SCHEMA: [&str; 3] = [
     "create collection if not exists nodes (name text @hash, addr text, token text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
+    // Which node replicates which. A collection of its own rather than a
+    // field on `nodes`: a directory written before this existed opens as it
+    // is, and the engine has no schema migration to add one.
+    "create collection if not exists pairs (node text @hash, standby text)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +62,9 @@ pub struct Placement {
     pub state: State,
 }
 
+/// Which node a node's tenants are replicated to.
+pub type Pairs = HashMap<String, String>;
+
 pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
@@ -68,6 +75,7 @@ pub struct Directory {
     seq: u64,
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
+    pairs: Pairs,
 }
 
 impl Directory {
@@ -99,6 +107,7 @@ impl Directory {
             seq: 0,
             nodes: BTreeMap::new(),
             tenants: HashMap::new(),
+            pairs: Pairs::new(),
         };
         d.reload()?;
         Ok(d)
@@ -151,9 +160,43 @@ impl Directory {
                 },
             );
         }
+        let mut pairs = Pairs::new();
+        for row in rows(&g, "get pairs select node, standby")? {
+            pairs.insert(text(&row[0]), text(&row[1]));
+        }
         self.seq = g.change_seq();
         self.nodes = nodes;
         self.tenants = tenants;
+        self.pairs = pairs;
+        Ok(())
+    }
+
+    /// The node `name`'s tenants are replicated to, if any.
+    pub fn standby(&self, name: &str) -> Option<&str> {
+        self.pairs.get(name).map(String::as_str)
+    }
+
+    pub fn pairs(&self) -> &Pairs {
+        &self.pairs
+    }
+
+    /// Records (or clears) the node a node's tenants are replicated to.
+    pub fn set_standby(&mut self, node: &str, standby: Option<&str>) -> Result<()> {
+        match standby {
+            None => {
+                self.run("del pairs where node = $1", &[Value::Text(node.into())])?;
+                self.pairs.remove(node);
+            }
+            Some(s) => {
+                let params = [Value::Text(node.into()), Value::Text(s.into())];
+                if self.pairs.contains_key(node) {
+                    self.run("set pairs {standby: $2} where node = $1", &params)?;
+                } else {
+                    self.run("put pairs {node: $1, standby: $2}", &params)?;
+                }
+                self.pairs.insert(node.into(), s.into());
+            }
+        }
         Ok(())
     }
 
@@ -206,6 +249,17 @@ impl Directory {
         }
         self.run("del nodes where name = $1", &[Value::Text(name.into())])?;
         self.nodes.remove(name);
+        // The pairs it was on either side of go with it.
+        self.set_standby(name, None)?;
+        let holders: Vec<String> = self
+            .pairs
+            .iter()
+            .filter(|(_, s)| s.as_str() == name)
+            .map(|(n, _)| n.clone())
+            .collect();
+        for n in holders {
+            self.set_standby(&n, None)?;
+        }
         Ok(())
     }
 

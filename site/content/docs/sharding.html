@@ -219,11 +219,10 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
 <h2>What it does not do</h2>
 
 <ul>
-  <li><b>No replicas of tenants.</b> A single file has
-    <a href="/docs/replication">read replicas</a>; a <code>--dir</code> node
-    does not yet, so a node that is down takes its tenants with it and the
-    router answers 502 for them until it is back. Tenant files are ordinary
-    files, so backups are file copies.</li>
+  <li><b>Failover is asked for, not decided.</b> The router does not watch
+    the nodes and promote on its own: a router that guesses wrong about a
+    node it cannot reach would have two primaries for one tenant. Someone
+    who knows the node is gone calls the failover.</li>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
@@ -232,6 +231,42 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
     places, moves and deletes; promoting the standby is a decision someone
     makes, not a vote the routers hold.</li>
 </ul>
+
+<h2>Replicas of tenants</h2>
+
+<p>Every tenant file has a feed of its own, so a node's tenants are followed
+by another node's — the standby — tenant by tenant, through
+<code>/t/&lt;tenant&gt;/_replication</code>:</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --replication-token r1 --sync always
+fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 \
+         --replication-token r1 --replica-of http://127.0.0.1:8081
+
+curl -X PUT localhost:8090/_shard/nodes/n1 \
+  -d '{"addr":"127.0.0.1:8081","token":"a1","standby":"n2"}'
+</pre>
+
+<p>The router creates a tenant on both, so the replica has a file to follow
+into, and deletes it from both; a move takes the replica with it. A replica
+node opens every tenant it holds at start and keeps them open — a follower
+that is not running is a replica falling behind — so
+<code>--idle-close</code> does not apply to them.</p>
+
+<p>When a node is gone, <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
+promotes its tenants on the standby, one at a time, and points the directory
+at it. They are separate databases: there is nothing to make atomic between
+them, so the answer lists what was promoted and what was not.</p>
+
+<pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
+{"node":"n1","to":"n2","promoted":["acme","beta"],"failed":[]}
+</pre>
+
+<p>A promoted tenant's history forks where the replica stood, so what the
+primary had not sent is gone — the same trade a database's failover makes,
+and <code>--sync always</code> on the primary is what makes it none. The old
+node rejoins as the standby of the new one: point its
+<code>--replica-of</code> there, and record the pair the other way round.</p>
 
 <h2>A standby router</h2>
 
