@@ -57,11 +57,12 @@ Dependency direction (nothing points back up):
 fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
-     |
+     |                                fenec-catalog (pg_catalog SQL, core only)
 fenec-http  (REST/JSON + SSE, tenant registry, replication)
      |                     \
 fenec-pg    (wire protocol:  fenec-shard (tenant router: directory,
-     |      server AND client)            placement, move)
+     |      server AND client,            placement, move)
+     |      catalog from fenec-catalog)
 fenec-import (SQLite file reader + PG COPY source + --follow)
      |
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
@@ -90,7 +91,7 @@ image.
 ## Invariants worth knowing before you change things
 
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
-`fenec-http`, `fenec-pg`, `fenec-import`, `fenec-shard`. The WASM output has to stay small and
+`fenec-http`, `fenec-pg`, `fenec-import`, `fenec-shard`, `fenec-catalog`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 (`str::parse` drags in a 12 KB table -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
@@ -370,6 +371,21 @@ TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
 before each such read cost the batching, 5 900 rows/s against 17 100. Commit
 to visible: p50 0.32 ms (`make follow-bench`).
+
+**The catalog is run, not matched.** psql's `\d`, JDBC's `DatabaseMetaData`
+and DBeaver send SQL over `pg_catalog` -- joins, `CASE`, `regclass` casts,
+correlated subqueries, `UNION`, window and set-returning functions -- and the
+texts change with every client version, so `fenec-catalog` evaluates that SQL
+over tables made from the schemas each time rather than pattern matching it.
+A collection is a table in `public` with `id` its primary key; fenecdb's
+indexes are indexes with their own access methods (`hash`, `btree` for
+`@sorted`, `hnsw`, `bm25`). Joins find rows by key where the query names an
+equality: over a thousand collections nested loops took JDBC's column lookup
+18.1 s, keyed 122 ms. What the subset cannot read, and catalog tables it does
+not build, answer empty -- the old behaviour -- so a tool never stalls. It is
+a crate of its own so that it can be built for size (`opt-level = "z"`): at
+opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
+queries 1.2-1.5x slower. The CLI and the browser module link none of it.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

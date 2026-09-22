@@ -18,6 +18,7 @@
 //! - `CancelRequest` is a real cancellation: the pending lock is released and
 //!   the remaining statements are dropped with `57014`.
 
+use crate::catalog;
 use crate::compat;
 use crate::proto::*;
 use crate::scram;
@@ -1321,6 +1322,23 @@ struct Shape {
     columns: Option<Vec<(String, i32)>>,
 }
 
+/// A catalog query run over the schemas as they stand: its columns with
+/// their types, and its rows. One the catalog cannot read answers empty.
+fn catalog_answer(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    sql: &str,
+    params: &[Value],
+) -> catalog::Answer {
+    // The schemas are copied under the read lock and the query runs without
+    // it: a catalog join is cheap, but a writer need not wait for one.
+    let snap = catalog::Snapshot::of(&read_lock(db), "fenec", &cfg.server_version);
+    catalog::answer(sql, params, &snap).unwrap_or_else(|_| catalog::Answer {
+        columns: vec![("result".to_string(), OID_TEXT)],
+        rows: Vec::new(),
+    })
+}
+
 /// Works out the shape *without running* the query.
 ///
 /// The previous version answered every Describe with `NoData` + an empty
@@ -1339,14 +1357,25 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
     }
     // Compatibility-layer queries are pure and fixed; the shape is read from there.
     if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
-        return Some(Shape {
-            params: Vec::new(),
-            columns: match shim {
-                compat::Shim::Rows { columns, .. } => {
-                    Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect())
+        return Some(match shim {
+            compat::Shim::Rows { columns, .. } => Shape {
+                params: Vec::new(),
+                columns: Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect()),
+            },
+            // A catalog query's columns do not depend on its parameters: it
+            // is run with every one null to learn them.
+            compat::Shim::Catalog => {
+                let n = catalog::params(trimmed).unwrap_or(0);
+                let answer = catalog_answer(db, cfg, trimmed, &vec![Value::Null; n]);
+                Shape {
+                    params: vec![OID_UNSPECIFIED; n],
+                    columns: Some(answer.columns),
                 }
-                // A refusal is reported by Execute, the way a syntax error is.
-                compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => None,
+            }
+            // A refusal is reported by Execute, the way a syntax error is.
+            compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => Shape {
+                params: Vec::new(),
+                columns: None,
             },
         });
     }
@@ -1523,6 +1552,16 @@ fn run_locked(
     // The standard queries PostgreSQL clients send at startup
     if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
         match shim {
+            compat::Shim::Catalog => {
+                let answer = catalog_answer(db, cfg, trimmed, params);
+                if !row_desc_sent {
+                    out.row_description(&answer.columns);
+                }
+                for row in &answer.rows {
+                    out.data_row(row);
+                }
+                out.command_complete(&format!("SELECT {}", answer.rows.len()));
+            }
             compat::Shim::Rows { columns, rows, tag } => {
                 if !row_desc_sent {
                     let cols: Vec<(String, i32)> =

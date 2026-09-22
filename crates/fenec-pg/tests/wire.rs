@@ -1551,3 +1551,101 @@ fn explain_is_a_text_column_tagged_explain() {
     );
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "EXPLAIN");
 }
+
+/// psql's `\d`, and JDBC's column lookup with its parameter bound: the
+/// catalog answers with the collections, their fields and their indexes
+/// rather than the empty result every catalog query once got.
+#[test]
+fn the_catalog_describes_the_collections() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection docs (title text @hash, n int @sorted, embed vector<3> @hnsw(cosine))",
+    );
+    c.simple("create collection notes (x float)");
+
+    let rows = |msgs: &[Msg]| -> Vec<Vec<Option<String>>> {
+        msgs.iter()
+            .filter(|m| m.tag == b'D')
+            .map(|m| m.cells())
+            .collect()
+    };
+    let r = c.simple(
+        "SELECT n.nspname as \"Schema\", c.relname as \"Name\",
+           CASE c.relkind WHEN 'r' THEN 'table' WHEN 'i' THEN 'index' END as \"Type\"
+         FROM pg_catalog.pg_class c
+              LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r','p','v','m','S','f','')
+               AND n.nspname <> 'pg_catalog' AND n.nspname !~ '^pg_toast'
+           AND pg_catalog.pg_table_is_visible(c.oid)
+         ORDER BY 1,2;",
+    );
+    let named = |s: &str| Some(s.to_string());
+    assert_eq!(
+        rows(&r),
+        [
+            [named("public"), named("docs"), named("table")],
+            [named("public"), named("notes"), named("table")]
+        ]
+    );
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "SELECT 2");
+
+    // Over the extended protocol, with the schema's oid bound as JDBC binds
+    // it: the columns come typed from Describe, the id first.
+    let r = c.extended(
+        "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attnum
+         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+         WHERE c.relnamespace = $1 AND c.relname = $2 AND a.attnum > 0 ORDER BY a.attnum",
+        &["2200", "docs"],
+        true,
+    );
+    assert_eq!(find(&r, b't').unwrap().param_oids().len(), 2);
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![
+            ("attname".to_string(), 19),
+            ("format_type".to_string(), 25),
+            ("attnotnull".to_string(), 16),
+            ("attnum".to_string(), 21)
+        ]
+    );
+    let described: Vec<(Option<String>, Option<String>)> = rows(&r)
+        .into_iter()
+        .map(|r| (r[0].clone(), r[1].clone()))
+        .collect();
+    assert_eq!(
+        described,
+        [
+            (named("id"), named("bigint")),
+            (named("title"), named("text")),
+            (named("n"), named("bigint")),
+            (named("embed"), named("vector(3)"))
+        ]
+    );
+
+    // An index a field carries is an index with its own access method.
+    let r = c.simple(
+        "SELECT c.relname, am.amname FROM pg_catalog.pg_index i
+         JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+         JOIN pg_catalog.pg_am am ON am.oid = c.relam
+         WHERE i.indrelid = 'docs'::regclass ORDER BY 1",
+    );
+    let indexes: Vec<String> = rows(&r)
+        .into_iter()
+        .map(|r| format!("{} {}", r[0].clone().unwrap(), r[1].clone().unwrap()))
+        .collect();
+    assert_eq!(
+        indexes,
+        [
+            "docs_embed_hnsw hnsw",
+            "docs_n_sorted btree",
+            "docs_pkey btree",
+            "docs_title_hash hash"
+        ]
+    );
+
+    // A query the catalog cannot read still answers, empty, as before.
+    let r = c.simple("WITH x AS (SELECT 1) SELECT * FROM pg_catalog.pg_class, x");
+    assert!(find(&r, b'E').is_none(), "{r:?}");
+    assert!(rows(&r).is_empty());
+}

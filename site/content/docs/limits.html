@@ -283,6 +283,15 @@ so a node that is down takes its tenants with it.</p>
     always runs to the end and no <code>PortalSuspended</code> is sent. Clients
     using <code>fetch_size</code> or a named cursor get the whole result at
     once.</li>
+  <li><b>The catalog reads a part of <code>SELECT</code></b>: inner, left,
+    cross and <code>USING</code> joins, <code>CASE</code>, casts,
+    subqueries, <code>UNION</code>, aggregates, <code>row_number</code>,
+    <code>rank</code> and set-returning functions in the select list. A
+    <code>WITH</code>, a right or full join, or a catalog table it does not
+    build is answered empty rather than with an error, and a catalog function
+    it does not know is null (<a href="postgres.html#catalog">The
+    catalog</a>). It is only a catalog: a collection is still queried in
+    FenecQL.</li>
 </ul>
 
 <h2>fenec-http</h2>

@@ -114,7 +114,9 @@ const db = await Fenec.open('./fenec.wasm');
 435 KB of WebAssembly — 143 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
-**PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
+**PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx, and
+the catalog they look around in: `\d`, JDBC's `DatabaseMetaData` and
+DBeaver's navigator see the collections, their fields and their indexes.
 
 ```bash
 make pg PGPASS=secret HTTP=127.0.0.1:8080
@@ -131,7 +133,7 @@ moment. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 1.84 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 2.13 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -159,7 +161,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
-| **Runtime size** | 435 KB wasm + 72 KB client (143 KB brotli served) · 814–1251 KB binary · 1.84 MB container image |
+| **Runtime size** | 435 KB wasm + 72 KB client (143 KB brotli served) · 814–1251 KB binary · 2.13 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

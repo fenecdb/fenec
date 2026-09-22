@@ -25,6 +25,7 @@
 //! Server::new(db, Config::default()).serve().unwrap();
 //! ```
 
+pub use fenec_catalog as catalog;
 pub mod client;
 pub mod compat;
 /// SHA-256, HMAC, PBKDF2 and base64 now live in `fenec-http`, which checks

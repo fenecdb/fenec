@@ -23,6 +23,9 @@ pub enum Shim {
         code: &'static str,
         message: String,
     },
+    /// A query over the catalog: the session runs it over one made from
+    /// the database's schemas ([`crate::catalog`]).
+    Catalog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,14 +39,6 @@ fn one(col: &str, val: &str) -> Shim {
     Shim::Rows {
         columns: vec![col.to_string()],
         rows: vec![vec![val.to_string()]],
-        tag: "SELECT".into(),
-    }
-}
-
-fn empty(cols: &[&str]) -> Shim {
-    Shim::Rows {
-        columns: cols.iter().map(|s| s.to_string()).collect(),
-        rows: Vec::new(),
         tag: "SELECT".into(),
     }
 }
@@ -152,16 +147,14 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
         return Some(one("pg_is_in_recovery", if standby() { "t" } else { "f" }));
     }
 
-    // Catalog discovery: return an empty result so the client does not stall
-    // while opening.
-    if lower.contains("pg_catalog.")
+    // Catalog discovery: run over a catalog made from the schemas. What that
+    // cannot read is answered empty, as every catalog query once was, so a
+    // client does not stall while opening.
+    if crate::catalog::is_catalog(&lower)
+        || lower.contains("pg_catalog.")
         || lower.contains("information_schema.")
-        || lower.starts_with("select n.nspname")
-        || lower.contains("from pg_type")
-        || lower.contains("from pg_class")
-        || lower.contains("from pg_namespace")
     {
-        return Some(empty(&["result"]));
+        return Some(Shim::Catalog);
     }
 
     None

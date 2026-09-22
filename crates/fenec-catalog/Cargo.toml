@@ -1,6 +1,6 @@
 [package]
-name = "fenec-pg"
-description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
+name = "fenec-catalog"
+description = "The PostgreSQL catalog fenec-pg answers psql, JDBC and DBeaver from"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,10 +11,3 @@ categories.workspace = true
 
 [dependencies]
 fenec-core.workspace = true
-fenec-ql.workspace = true
-fenec-http.workspace = true
-fenec-catalog.workspace = true
-
-[[bin]]
-name = "fenec-pg"
-path = "src/main.rs"
