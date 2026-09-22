@@ -30,6 +30,11 @@ export type Schema = Record<string, Fields>;
 type AnySchema<S> = Record<keyof S, Fields>;
 
 /** A row as read: the fields plus the automatic `id`. */
+/** An aggregate of a select list, as FenecQL spells it. */
+export type Aggregate<F extends Fields> =
+  | 'count(*)'
+  | `${'sum' | 'avg' | 'min' | 'max'}(${keyof F & string})`;
+
 export type Row<F extends Fields> = F & { id: number };
 
 /**
@@ -191,7 +196,19 @@ export declare class Query<
   select<K extends keyof Row<F> & string>(
     ...cols: (K | K[])[]
   ): Query<F, Pick<Row<F>, K>, L>;
+  /**
+   * An aggregating list: the field grouped by, and aggregates spelled as
+   * FenecQL spells them -- each answers under that name.
+   *
+   *   db.from('orders').select('status', 'count(*)', 'sum(total)').group('status')
+   */
+  select<K extends keyof Row<F> & string, A extends Aggregate<F>>(
+    ...cols: (K | A)[]
+  ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L>;
   select(): Query<F, Row<F>, L>;
+
+  /** `group field`: one row per value, for a select list that aggregates. */
+  group(field: keyof Row<F> & string): Query<F, P, L>;
 
   where(cond: Where<F> | Cond<F>): Query<F, P, L>;
   where<K extends keyof Row<F> & string>(
@@ -275,7 +292,7 @@ export declare class Query<
   ): Query<F, Attach<P, L, N, C>, [...L, N]>;
 
   /** Successive calls add a sort key (the second decides when the first ties). */
-  order(field: keyof Row<F> & string, dir?: 'asc' | 'desc'): Query<F, P, L>;
+  order(field: (keyof Row<F> & string) | Aggregate<F>, dir?: 'asc' | 'desc'): Query<F, P, L>;
   limit(n: number): Query<F, P, L>;
   offset(n: number): Query<F, P, L>;
 

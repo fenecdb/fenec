@@ -57,7 +57,7 @@ pub mod prelude {
     pub use crate::history::History;
     pub use crate::plugin::{Hook, Plugin, Registry, ScalarFn, WriteOp};
     pub use crate::query::{
-        CmpOp, Expr, Lookup, Match, Near, Nested, Rerank, Response, ResultSet, Row, Select,
+        Agg, CmpOp, Expr, Lookup, Match, Near, Nested, Rerank, Response, ResultSet, Row, Select,
         Statement,
     };
     pub use crate::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};

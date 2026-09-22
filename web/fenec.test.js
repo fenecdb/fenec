@@ -128,6 +128,34 @@ test('count does not combine with the other clauses', async () => {
   }
 });
 
+test('aggregates go in the select list, grouped or whole', () => {
+  const [sql] = from('orders')
+    .select('status', 'count(*)', 'SUM(total)', 'avg(total)')
+    .where('year', 2024)
+    .group('status')
+    .order('sum(total)', 'desc')
+    .limit(3)
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get orders select status, count(*), sum(total), avg(total) where year = $1 ' +
+      'group status order sum(total) desc limit 3',
+  );
+  assert.equal(
+    from('orders').select('min(at)', 'max(at)').toFenecQL()[0],
+    'get orders select min(at), max(at)',
+  );
+});
+
+test('aggregates refuse what the engine would', () => {
+  const agg = () => from('orders').select('count(*)');
+  assert.throws(() => from('orders').select('status').group('status').toFenecQL(), FenecError);
+  assert.throws(() => agg().limit(3).toFenecQL(), FenecError);
+  assert.throws(() => agg().near('v', [1, 0]).toFenecQL(), FenecError);
+  assert.throws(() => from('orders').select('median(total)'), FenecError);
+  assert.throws(() => from('orders').select('sum(a b)'), FenecError);
+});
+
 test('match, on its own and with a filter', () => {
   const [sql, p] = q().match('body', 'business trip').limit(10).toFenecQL();
   assert.equal(sql, 'get articles match body $1 limit 10');
@@ -673,6 +701,30 @@ test('a chain refuses a repeated collection and a chain too deep', () => {
   let q = from('shops');
   for (let i = 0; i < 9; i++) q = q.lookup(`c${i}`, { on: 'k' });
   assert.throws(() => q.toFenecQL(), /chained too deep/);
+});
+
+test('aggregates end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection orders (status text @hash, total int)');
+  await db.from('orders').insert([
+    { status: 'paid', total: 30 },
+    { status: 'paid', total: 12 },
+    { status: 'open', total: 7 },
+    { status: 'open' },
+  ]);
+  const rows = await db
+    .from('orders')
+    .select('status', 'count(*)', 'sum(total)', 'avg(total)')
+    .group('status')
+    .order('sum(total)', 'desc')
+    .rows();
+  assert.deepEqual(rows, [
+    { status: 'paid', count: 2, 'sum(total)': 42, 'avg(total)': 21 },
+    { status: 'open', count: 2, 'sum(total)': 7, 'avg(total)': 7 },
+  ]);
+  const [whole] = await db.from('orders').select('min(total)', 'max(total)').rows();
+  assert.deepEqual(whole, { 'min(total)': 7, 'max(total)': 30 });
 });
 
 test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

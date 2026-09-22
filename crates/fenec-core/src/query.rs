@@ -549,6 +549,41 @@ pub const COUNT_COLUMN: &str = "count";
 /// The one column `explain` answers with.
 pub const PLAN_COLUMN: &str = "plan";
 
+/// An item of an aggregating select list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Agg {
+    /// The group's own value: the `group` field, listed.
+    Key(String),
+    /// `count(*)`: the rows.
+    Count,
+    Sum(String),
+    Avg(String),
+    Min(String),
+    Max(String),
+}
+
+impl Agg {
+    /// The column it answers under: the field, `count`, `sum(total)`.
+    pub fn label(&self) -> String {
+        match self {
+            Agg::Key(f) => f.clone(),
+            Agg::Count => COUNT_COLUMN.to_string(),
+            Agg::Sum(f) => format!("sum({f})"),
+            Agg::Avg(f) => format!("avg({f})"),
+            Agg::Min(f) => format!("min({f})"),
+            Agg::Max(f) => format!("max({f})"),
+        }
+    }
+
+    /// The field it reads, if any.
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Agg::Count => None,
+            Agg::Key(f) | Agg::Sum(f) | Agg::Avg(f) | Agg::Min(f) | Agg::Max(f) => Some(f),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -571,6 +606,11 @@ pub struct Select {
     pub count: bool,
     /// `lookup`: children of another collection, attached per row.
     pub lookup: Option<Lookup>,
+    /// A select list that aggregates -- `select status, sum(total), count(*)`
+    /// -- in the order written. Empty: no aggregation.
+    pub aggregate: Vec<Agg>,
+    /// `group <field>`: one row per value of the field rather than one in all.
+    pub group: Option<String>,
 }
 
 impl Select {
@@ -657,6 +697,9 @@ impl Select {
                 seen.push(step.collection.as_str());
             }
         }
+        if !self.aggregate.is_empty() || self.group.is_some() {
+            self.check_aggregate()?;
+        }
         if !self.count {
             return Ok(());
         }
@@ -677,6 +720,70 @@ impl Select {
         };
         Err(Error::Query(format!(
             "`count` cannot be used together with `{clash}`"
+        )))
+    }
+
+    /// Aggregates follow `count`'s rules: they collapse rows, so nothing that
+    /// ranks the rows or hangs children from them combines with them, and a
+    /// single row has nothing to order or page. Grouped, the rows are the
+    /// groups, and those do.
+    fn check_aggregate(&self) -> Result<()> {
+        let Some(group) = &self.group else {
+            let clash = if !self.order.is_empty() {
+                "order"
+            } else if self.limit.is_some() {
+                "limit"
+            } else if self.offset != 0 {
+                "offset"
+            } else {
+                ""
+            };
+            if !clash.is_empty() {
+                return Err(Error::Query(format!(
+                    "aggregates answer one row, which `{clash}` has nothing to do with; \
+                     `group` makes a row per value"
+                )));
+            }
+            if let Some(Agg::Key(f)) = self.aggregate.iter().find(|a| matches!(a, Agg::Key(_))) {
+                return Err(Error::Query(format!(
+                    "`{f}` is neither aggregated nor grouped by"
+                )));
+            }
+            return self.check_aggregate_company();
+        };
+        if self.aggregate.is_empty() {
+            return Err(Error::Query(format!(
+                "`group {group}` needs an aggregate to answer with: `select {group}, count(*)`"
+            )));
+        }
+        for a in &self.aggregate {
+            if let Agg::Key(f) = a {
+                if f != group {
+                    return Err(Error::Query(format!(
+                        "`{f}` is neither aggregated nor grouped by"
+                    )));
+                }
+            }
+        }
+        self.check_aggregate_company()
+    }
+
+    fn check_aggregate_company(&self) -> Result<()> {
+        let clash = if self.near.is_some() {
+            "near"
+        } else if self.matcher.is_some() {
+            "match"
+        } else if self.lookup.is_some() {
+            "lookup"
+        } else if self.count {
+            "count"
+        } else if self.project.is_some() {
+            "select"
+        } else {
+            return Ok(());
+        };
+        Err(Error::Query(format!(
+            "aggregates cannot be used together with `{clash}`"
         )))
     }
 }

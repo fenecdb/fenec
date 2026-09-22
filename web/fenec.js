@@ -360,6 +360,20 @@ function ident(name, what = 'field') {
   return name;
 }
 
+/**
+ * A select-list item: a field, or an aggregate spelled as FenecQL spells it
+ * -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- which answers
+ * under that same name.
+ */
+const AGGREGATE = /^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)\)$/i;
+
+function column(name) {
+  const m = typeof name === 'string' ? AGGREGATE.exec(name.trim()) : null;
+  if (!m) return { text: ident(name), aggregate: false };
+  const text = m[1] ? 'count(*)' : `${m[2].toLowerCase()}(${m[3]})`;
+  return { text, aggregate: true };
+}
+
 /** `limit`, `offset`, `ef` cannot be parameterised: FenecQL wants a literal. */
 function whole(n, what) {
   if (!Number.isSafeInteger(n) || n < 0) {
@@ -591,11 +605,28 @@ export class Query {
     return this.#with({ exec: fn });
   }
 
-  /** `select a, b` -- no arguments, or `'*'`, means every field. */
+  /**
+   * `select a, b` -- no arguments, or `'*'`, means every field. Aggregates
+   * go in the same list, spelled as FenecQL spells them, and answer under
+   * that name:
+   *
+   *   db.from('orders').select('status', 'count(*)', 'sum(total)').group('status')
+   */
   select(...cols) {
     const flat = cols.flat();
-    if (flat.length === 0 || flat.includes('*')) return this.#with({ project: null });
-    return this.#with({ project: flat.map((c) => ident(c)) });
+    if (flat.length === 0 || flat.includes('*')) {
+      return this.#with({ project: null, aggregate: false });
+    }
+    const list = flat.map((c) => column(c));
+    return this.#with({
+      project: list.map((c) => c.text),
+      aggregate: list.some((c) => c.aggregate),
+    });
+  }
+
+  /** `group field` -- one row per value, for a select list that aggregates. */
+  group(field) {
+    return this.#with({ group: ident(field) });
   }
 
   /**
@@ -716,8 +747,9 @@ export class Query {
     if (d !== 'asc' && d !== 'desc') {
       throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
     }
+    // Over groups a key may be an aggregate of the list, by its name.
     return this.#with({
-      order: [...this.#s.order, { field: ident(field), asc: d === 'asc' }],
+      order: [...this.#s.order, { field: column(field).text, asc: d === 'asc' }],
     });
   }
 
@@ -736,7 +768,18 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank, lookups } = this.#s;
+    const { match, rerank, lookups, aggregate, group } = this.#s;
+    // The engine refuses these too; failing here never sends a query.
+    if (group && !aggregate) {
+      throw new FenecError(`group ${group} needs an aggregate in select: 'count(*)'`);
+    }
+    if (aggregate) {
+      const clash = near ? 'near' : match ? 'match' : lookups.length ? 'lookup' : count ? 'count' : null;
+      if (clash) throw new FenecError(`aggregates cannot be combined with ${clash}`);
+      if (!group && (order.length || limit !== undefined || offset)) {
+        throw new FenecError('aggregates answer one row; group makes a row per value');
+      }
+    }
     // The engine refuses both of these too; failing here never sends a query.
     if (rerank && !match) {
       throw new FenecError('rerank needs match: it reorders what match found');
@@ -787,6 +830,7 @@ export class Query {
     if (project) sql += ` select ${project.join(', ')}`;
     const where = this.#where(bind);
     if (where) sql += ` where ${where}`;
+    if (group) sql += ` group ${group}`;
     if (near) {
       sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
       if (near.ef !== null) sql += ` ef ${near.ef}`;

@@ -11,7 +11,7 @@
 pub mod lexer;
 pub mod parser;
 
-pub use parser::{parse, parse_one, MAX_EXPR_DEPTH};
+pub use parser::{parse, parse_one, parse_select_list, MAX_EXPR_DEPTH};
 
 #[cfg(test)]
 mod tests {

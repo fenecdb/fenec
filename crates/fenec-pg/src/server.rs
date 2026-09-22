@@ -1250,6 +1250,25 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
             OID_INT8,
         )]);
     }
+    if !sel.aggregate.is_empty() {
+        let ty = |f: &str| coll.schema.field(f).map(|f| f.ty.clone());
+        return sel
+            .aggregate
+            .iter()
+            .map(|a| {
+                let oid = match a {
+                    Agg::Count => OID_INT8,
+                    Agg::Avg(_) => OID_FLOAT8,
+                    Agg::Sum(f) => match ty(f)? {
+                        DataType::Int => OID_INT8,
+                        _ => OID_FLOAT8,
+                    },
+                    Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => pg_oid(&ty(f)?),
+                };
+                Some((a.label(), oid))
+            })
+            .collect();
+    }
     let mut cols: Vec<(String, i32)> = projection_columns(&coll.schema, &sel.project)
         .into_iter()
         .map(|c| {

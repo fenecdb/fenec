@@ -232,10 +232,11 @@ are structural, so the generated file stands alone and imports nothing.</p>
 <h2>What the builder will not do</h2>
 
 <ul>
-  <li><b>No aggregation other than <code>count</code>.</b> <code>count()</code>
-    compiles to the language's own <code>count</code> clause and rows are not
-    decoded, but there is no <code>sum</code>, <code>avg</code> or
-    <code>group by</code>. The builder cannot invent what FenecQL lacks.</li>
+  <li><b>No aggregate FenecQL lacks.</b> Aggregates go in
+    <code>select</code> spelled as FenecQL spells them —
+    <code>.select('status', 'count(*)', 'sum(total)').group('status')</code>
+    — and each row answers under those names; a median or a distinct count is
+    not there to compile to.</li>
   <li><b>An <code>update</code> or <code>delete</code> without a filter is
     refused.</b> Covering a whole collection by accident is far too easy and
     impossible to undo; when it is deliberate you write

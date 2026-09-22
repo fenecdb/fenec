@@ -426,6 +426,35 @@ impl Store {
         Ok(Some(decode_value(buf, &mut pos)?))
     }
 
+    /// Decodes the fields at `positions` -- ascending -- into `out`, in one
+    /// pass over the document that skips the others: an aggregate reads two
+    /// or three fields of every row, and a `read_field` each would skip the
+    /// fields before them once per field. `false` when there is no such
+    /// document.
+    pub fn read_fields(
+        &self,
+        id: DocId,
+        positions: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<bool> {
+        let Some(loc) = self.index.get(id) else {
+            return Ok(false);
+        };
+        let buf = self.payload(loc)?;
+        out.clear();
+        let mut pos = 0usize;
+        let mut at = 0usize;
+        for &want in positions {
+            while at < want {
+                skip_value(buf, &mut pos)?;
+                at += 1;
+            }
+            out.push(decode_value(buf, &mut pos)?);
+            at += 1;
+        }
+        Ok(true)
+    }
+
     /// Decodes a vector field into the given buffer -- with no intermediate
     /// allocation.
     ///

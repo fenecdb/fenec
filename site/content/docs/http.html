@@ -35,6 +35,8 @@ curl -X POST http://127.0.0.1:8080/articles -d '{"title":"new","year":2025}'
 GET    /collections             schemas
 GET    /&lt;name&gt;?&lt;filter&gt;         rows
 GET    /&lt;name&gt;?&lt;filter&gt;&count   number of matching rows
+GET    /&lt;name&gt;?select=status,count(*),sum(total)&group=status&order=sum(total).desc
+                                aggregates, whole or per group
 POST   /&lt;name&gt;                  body: {...} or [{...}]
 PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
 DELETE /&lt;name&gt;?&lt;filter&gt;
@@ -216,7 +218,8 @@ collide with a field named <code>all</code>.</p>
 64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
 411, which beats reading half a body. A field whose name matches a clause name
 (<code>select</code>, <code>order</code>, <code>limit</code>,
-<code>offset</code>, <code>count</code>, <code>where</code>) cannot be filtered
+<code>offset</code>, <code>count</code>, <code>where</code>,
+<code>group</code>) cannot be filtered
 over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
 
 <div class="note trap">

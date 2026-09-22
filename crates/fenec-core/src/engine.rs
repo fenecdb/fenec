@@ -3198,6 +3198,9 @@ impl Database {
             registry: &self.registry,
         };
         sel.check()?;
+        if !sel.aggregate.is_empty() {
+            return self.aggregate(c, sel, params);
+        }
 
         // `count` sends the filter down the same path but never decodes the
         // rows: it returns a single row with a single column.
@@ -3382,6 +3385,163 @@ impl Database {
         })
     }
 
+    /// An aggregating select: the rows the filter finds -- through the same
+    /// indexes any select uses -- folded into one row, or one per value of
+    /// the `group` field, each row in the select list's order.
+    ///
+    /// Written as plain loops over types the engine already has -- the hash
+    /// index's map, `order`'s sort: the first version, in iterator chains
+    /// over types of its own, was 25 KB of the browser module.
+    fn aggregate(&self, c: &Collection, sel: &Select, params: &[Value]) -> Result<ResultSet> {
+        let pos_of = |name: &str| {
+            c.schema
+                .field_pos(name)
+                .ok_or_else(|| Error::NotFound(format!("field `{name}`")))
+        };
+        // Every field the list and the group read, each read once a row, in
+        // field order. Kept sorted as it is built: a handful of fields, and
+        // `sort` over them was a sort instantiation of its own in the
+        // browser module.
+        let mut positions: Vec<usize> = Vec::new();
+        let names = sel.aggregate.iter().filter_map(Agg::field);
+        for f in names.chain(sel.group.as_deref()) {
+            let p = pos_of(f)?;
+            if let Err(i) = positions.binary_search(&p) {
+                positions.insert(i, p);
+            }
+        }
+        let slot_of = |pos: usize| positions.iter().position(|p| *p == pos).unwrap_or(0);
+        // Each item's slot in a row read, and its fold as a group starts it.
+        let mut slots = Vec::with_capacity(sel.aggregate.len());
+        let mut start = Vec::with_capacity(sel.aggregate.len());
+        for a in &sel.aggregate {
+            match a.field() {
+                Some(f) => {
+                    let pos = pos_of(f)?;
+                    slots.push(Some(slot_of(pos)));
+                    start.push(Fold::new(a, &c.schema.fields[pos].ty)?);
+                }
+                None => {
+                    slots.push(None);
+                    start.push(Fold::new(a, &DataType::Int)?);
+                }
+            }
+        }
+        let group = match &sel.group {
+            Some(g) => Some(slot_of(pos_of(g)?)),
+            None => None,
+        };
+
+        let ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
+        // A group's number under its key's encoding. The hash index's own map
+        // type, holding one number: a map of another type was 1 KB of the
+        // browser module.
+        let mut index: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+        let mut keys: Vec<Value> = Vec::new();
+        let mut folds: Vec<Vec<Fold>> = Vec::new();
+        if group.is_none() {
+            keys.push(Value::Null);
+            folds.push(start.clone());
+        }
+        let mut row = Vec::with_capacity(positions.len());
+        let mut key = Vec::new();
+        for &id in &ids {
+            if !c.store.read_fields(id, &positions, &mut row)? {
+                continue;
+            }
+            let at = match group {
+                None => 0,
+                Some(g) => {
+                    key.clear();
+                    crate::codec::encode_value(&mut key, &row[g]);
+                    // Looked up first and entered only when new: an entry a
+                    // row cloned the key every row, 81 -> 100 ms over a
+                    // million.
+                    match index.get(&key) {
+                        Some(n) => n[0] as usize,
+                        None => {
+                            index
+                                .entry(key.clone())
+                                .or_default()
+                                .push(keys.len() as DocId);
+                            keys.push(row[g].clone());
+                            folds.push(start.clone());
+                            keys.len() - 1
+                        }
+                    }
+                }
+            };
+            for (i, fold) in folds[at].iter_mut().enumerate() {
+                match slots[i] {
+                    Some(s) => fold.add(&row[s])?,
+                    None => fold.add(&Value::Bool(true))?,
+                }
+            }
+        }
+        let n = keys.len();
+        plan(|| {
+            format!(
+                "aggregate: {} rows into {n} {}",
+                ids.len(),
+                if n == 1 { "group" } else { "groups" }
+            )
+        });
+
+        let mut columns = Vec::with_capacity(sel.aggregate.len());
+        for a in &sel.aggregate {
+            columns.push(a.label());
+        }
+        let width = columns.len();
+        let mut values: Vec<Value> = Vec::with_capacity(n * width);
+        for (k, group_folds) in keys.iter().zip(folds) {
+            for (a, f) in sel.aggregate.iter().zip(group_folds) {
+                values.push(match a {
+                    Agg::Key(_) => k.clone(),
+                    _ => f.value(),
+                });
+            }
+        }
+        // Groups come out by their key unless `order` says otherwise, naming
+        // the list's columns; the key breaks what the order leaves tied.
+        let mut order: Vec<OrderKey> = Vec::with_capacity(sel.order.len() + 1);
+        let mut picked: Vec<usize> = Vec::with_capacity(sel.order.len());
+        for (name, asc) in &sel.order {
+            let Some(at) = columns.iter().position(|c| c == name) else {
+                return Err(Error::Query(format!(
+                    "`order {name}`: not a column of this select"
+                )));
+            };
+            picked.push(at);
+            order.push((None, *asc));
+        }
+        order.push((None, true));
+        let w = order.len();
+        let mut flat: Vec<Value> = Vec::with_capacity(n * w);
+        for g in 0..n {
+            for &at in &picked {
+                flat.push(values[g * width + at].clone());
+            }
+            flat.push(keys[g].clone());
+        }
+        let k = sel.limit.map_or(n, |l| l.saturating_add(sel.offset)).min(n);
+        let mut rows = Vec::with_capacity(k.saturating_sub(sel.offset));
+        for g in order_rows(&flat, w, n, &order, k)
+            .into_iter()
+            .skip(sel.offset)
+        {
+            rows.push(Row {
+                id: 0,
+                values: values[g * width..g * width + width].to_vec(),
+                score: None,
+            });
+        }
+        Ok(ResultSet {
+            columns,
+            rows,
+            nested: None,
+        })
+    }
+
     fn update(
         &mut self,
         collection: &str,
@@ -3557,6 +3717,109 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
         IndexKind::None => {}
     }
     Ok(())
+}
+
+/// One aggregate's running value over a group's rows. Nulls are skipped
+/// by every one but the row count, as SQL's are.
+#[derive(Clone)]
+enum Fold {
+    Count(i64),
+    /// An int field's sum, and how many values went in.
+    SumInt(i64, u64),
+    SumFloat(f64, u64),
+    Avg(f64, u64),
+    /// `true` for `max`.
+    Extreme(Option<Value>, bool),
+}
+
+impl Fold {
+    fn new(a: &Agg, ty: &DataType) -> Result<Fold> {
+        let numeric = |what: &str, f: &str| {
+            Error::Type(format!(
+                "`{what}({f})` needs an int or float field; `{f}` is {}",
+                ty.name()
+            ))
+        };
+        Ok(match a {
+            Agg::Count | Agg::Key(_) => Fold::Count(0),
+            Agg::Sum(f) => match ty {
+                DataType::Int => Fold::SumInt(0, 0),
+                DataType::Float => Fold::SumFloat(0.0, 0),
+                _ => return Err(numeric("sum", f)),
+            },
+            Agg::Avg(f) => match ty {
+                DataType::Int | DataType::Float => Fold::Avg(0.0, 0),
+                _ => return Err(numeric("avg", f)),
+            },
+            Agg::Min(f) | Agg::Max(f) => match ty {
+                DataType::Int
+                | DataType::Float
+                | DataType::Timestamp
+                | DataType::Text
+                | DataType::Bool => Fold::Extreme(None, matches!(a, Agg::Max(_))),
+                _ => {
+                    return Err(Error::Type(format!(
+                        "`{}` needs a field with an order; `{f}` is {}",
+                        a.label(),
+                        ty.name()
+                    )))
+                }
+            },
+        })
+    }
+
+    fn add(&mut self, v: &Value) -> Result<()> {
+        if matches!(v, Value::Null) && !matches!(self, Fold::Count(_)) {
+            return Ok(());
+        }
+        match self {
+            Fold::Count(n) => *n += 1,
+            Fold::SumInt(sum, n) => {
+                let Value::Int(i) = v else { return Ok(()) };
+                *sum = sum
+                    .checked_add(*i)
+                    .ok_or_else(|| Error::Query("the sum does not fit a 64-bit int".into()))?;
+                *n += 1;
+            }
+            Fold::SumFloat(sum, n) | Fold::Avg(sum, n) => {
+                let x = match v {
+                    Value::Int(i) => *i as f64,
+                    Value::Float(f) => *f,
+                    _ => return Ok(()),
+                };
+                *sum += x;
+                *n += 1;
+            }
+            Fold::Extreme(best, max) => {
+                let better = match best {
+                    None => true,
+                    Some(b) => {
+                        let o = v.cmp_value(b);
+                        if *max {
+                            o == Ordering::Greater
+                        } else {
+                            o == Ordering::Less
+                        }
+                    }
+                };
+                if better {
+                    *best = Some(v.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn value(self) -> Value {
+        match self {
+            Fold::Count(n) => Value::Int(n),
+            Fold::SumInt(_, 0) | Fold::SumFloat(_, 0) | Fold::Avg(_, 0) => Value::Null,
+            Fold::SumInt(s, _) => Value::Int(s),
+            Fold::SumFloat(s, _) => Value::Float(s),
+            Fold::Avg(s, n) => Value::Float(s / n as f64),
+            Fold::Extreme(v, _) => v.unwrap_or(Value::Null),
+        }
+    }
 }
 
 thread_local! {
@@ -3769,18 +4032,29 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
             });
         }
     }
+    let idx = order_rows(&flat, n, ids.len(), keys, k);
+    Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// The first `k` of `count` rows, each `n` keys wide in `flat`, in the
+/// order `keys` ask for: `order` over documents, and over the groups of an
+/// aggregate -- one function, so the browser module holds one sort for both.
+fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usize) -> Vec<usize> {
     let row = |i: usize| &flat[i * n..i * n + n];
     // Ties fall back to the position the row came in, which is what the
     // stable sort this replaced gave them: a selection is not stable, and a
     // page must not change with the plan.
     let cmp = |a: &usize, b: &usize| rank(keys, row(*a), row(*b)).then(a.cmp(b));
-    let mut idx: Vec<usize> = (0..ids.len()).collect();
+    let mut idx: Vec<usize> = (0..count).collect();
+    if k == 0 {
+        return Vec::new();
+    }
     if k < idx.len() {
         idx.select_nth_unstable_by(k - 1, cmp);
         idx.truncate(k);
     }
     idx.sort_unstable_by(cmp);
-    Ok(idx.into_iter().map(|i| ids[i]).collect())
+    idx
 }
 
 /// The query vector of `near`. Three forms are accepted, none of them

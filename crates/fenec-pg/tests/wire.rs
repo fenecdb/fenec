@@ -473,6 +473,45 @@ fn count_is_an_int8_column() {
     assert_eq!(find(&r, b'D').unwrap().cells(), vec![Some("2".to_string())]);
 }
 
+/// An aggregate's column is typed from what it answers: a count and an
+/// int's sum as int8, an average as float8, a min or max as its field.
+#[test]
+fn aggregate_columns_are_typed() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (g text, n int, x float)");
+    c.simple("put t [{g: \"a\", n: 2, x: 0.5}, {g: \"a\", n: 4}, {g: \"b\", n: 1}]");
+
+    let r = c.extended(
+        "get t select g, count(*), sum(n), avg(n), max(x) where n >= $1 group g",
+        &["1"],
+        true,
+    );
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        vec![
+            ("g".to_string(), 25),
+            ("count".to_string(), 20),
+            ("sum(n)".to_string(), 20),
+            ("avg(n)".to_string(), 701),
+            ("max(x)".to_string(), 701),
+        ]
+    );
+    let rows: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(
+        rows,
+        vec![
+            vec![s("a"), s("2"), s("6"), s("3"), s("0.5")],
+            vec![s("b"), s("1"), s("1"), s("1"), None],
+        ]
+    );
+}
+
 /// The column description sent with Describe must not be repeated on
 /// Execute; when Describe is skipped it must be repeated (leniency).
 #[test]

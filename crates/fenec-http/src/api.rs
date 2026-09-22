@@ -32,8 +32,8 @@ use fenec_core::prelude::*;
 /// Query keys that are read as clauses rather than as filters. A field with
 /// the same name cannot be filtered over HTTP (the FenecQL and `fenec-pg` paths
 /// are unaffected).
-const RESERVED: [&str; 7] = [
-    "select", "order", "limit", "offset", "count", "where", "lookup",
+const RESERVED: [&str; 8] = [
+    "select", "order", "limit", "offset", "count", "where", "lookup", "group",
 ];
 
 /// On the subscription endpoint `since` is a clause as well. It is a
@@ -167,7 +167,11 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
     };
     for (k, v) in &req.query {
         match k.as_str() {
+            // `select=status,sum(total),count(*)`: a list with an aggregate
+            // in it aggregates, as FenecQL's does.
+            "select" if v.contains('(') => sel.aggregate = aggregates(schema, v)?,
             "select" => sel.project = Some(projection(schema, v)?),
+            "group" => sel.group = Some(field_of(schema, v)?),
             "order" => sel.order = order(schema, v)?,
             "limit" => sel.limit = Some(number(v, "limit")?),
             "offset" => sel.offset = number(v, "offset")?,
@@ -285,7 +289,20 @@ fn projection(schema: &Schema, raw: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `order=year.desc,title` -> `[(year, false), (title, true)]`
+/// `select=status,sum(total),count(*)` -> the fields and aggregates, in
+/// order. The list is FenecQL's, parsed by FenecQL's parser.
+fn aggregates(schema: &Schema, raw: &str) -> Result<Vec<Agg>> {
+    let (_, list) =
+        fenec_ql::parse_select_list(raw).map_err(|e| Error::Query(format!("`select`: {e}")))?;
+    for f in list.iter().filter_map(Agg::field) {
+        field(schema, f)?;
+    }
+    Ok(list)
+}
+
+/// `order=year.desc,title` -> `[(year, false), (title, true)]`. Over groups
+/// a key may name an aggregate of the list, `order=sum(total).desc`; the
+/// engine checks it against the list.
 fn order(schema: &Schema, raw: &str) -> Result<Vec<(String, bool)>> {
     let mut out = Vec::new();
     for part in raw.split(',') {
@@ -298,8 +315,17 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<(String, bool)>> {
             Some((n, "asc")) => (n, true),
             _ => (part, true),
         };
-        field(schema, name)?;
-        out.push((name.to_string(), asc));
+        let name = if let Some((f, rest)) = name.split_once('(') {
+            // The function's name folds as FenecQL folds it; the field's does not.
+            match (f.to_ascii_lowercase().as_str(), rest) {
+                ("count", "*)" | ")") => "count".to_string(),
+                (f, rest) => format!("{f}({rest}"),
+            }
+        } else {
+            field(schema, name)?;
+            name.to_string()
+        };
+        out.push((name, asc));
     }
     Ok(out)
 }

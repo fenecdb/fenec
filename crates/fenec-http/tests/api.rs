@@ -236,6 +236,32 @@ fn select_filter_order_limit() {
 }
 
 #[test]
+fn aggregates_over_the_query_string() {
+    let h = start(Config::default());
+    let r = get(
+        h.port,
+        "/remarks?select=article_id,count(*),sum(stars),avg(stars)&group=article_id&order=count(*).desc",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body.trim(),
+        "[{\"article_id\":1,\"count\":2,\"sum(stars)\":8,\"avg(stars)\":4},\
+         {\"article_id\":3,\"count\":1,\"sum(stars)\":2,\"avg(stars)\":2}]"
+    );
+    // Whole, filtered; and what the engine refuses comes back as a 400.
+    let r = get(
+        h.port,
+        "/remarks?select=max(stars),min(body)&article_id=eq.1",
+    );
+    assert_eq!(
+        r.body.trim(),
+        "[{\"max(stars)\":5,\"min(body)\":\"dense\"}]"
+    );
+    assert_eq!(get(h.port, "/remarks?select=sum(body)").status, 400);
+    assert_eq!(get(h.port, "/remarks?select=count(*)&limit=1").status, 400);
+}
+
+#[test]
 fn count_and_free_where() {
     let h = start(Config::default());
 
