@@ -63,6 +63,7 @@ NAV = [
         ("docs/javascript", "JavaScript"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
+        ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
         ("docs/postgres", "PostgreSQL server"),

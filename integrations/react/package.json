@@ -1,0 +1,21 @@
+{
+  "name": "@fenecdb/react",
+  "version": "0.1.4",
+  "description": "useLiveQuery for fenecdb: a synced query's rows, rendered again as they change",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  }
+}

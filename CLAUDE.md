@@ -18,6 +18,8 @@ make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
+make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
+make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
@@ -415,6 +417,18 @@ path has an underscore because a collection may be called `metrics`.
 -- a second one would take the HTTP endpoint's subscription wake-ups -- and a
 tenant node publishes counts of its tenants, never a tenant's collection
 names.
+
+**`integrations/` may use outside packages; the crates may not.** The
+LangChain and LlamaIndex vector stores (`integrations/python`, one package,
+the standard library for its client) and `useLiveQuery`
+(`integrations/react`) are held to their frameworks' own tests --
+`make python-test` runs LangChain's standard suite and the tests LlamaIndex's
+integrations run from a `python:3.13` container against a fenec-pg started
+here, `make react-test` runs the hook against a real replica. A store names
+its collection and metadata columns in the statement's text, so both are
+checked against FenecQL's name pattern; values always go in as parameters,
+and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
+value and not a list.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

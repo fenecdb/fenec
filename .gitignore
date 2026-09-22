@@ -8,3 +8,6 @@ web/fenec.wasm
 site/dist/
 .wrangler/
 __pycache__/
+*.egg-info/
+integrations/python/build/
+.pytest_cache/

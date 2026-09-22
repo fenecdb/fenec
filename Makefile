@@ -8,6 +8,7 @@ SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
 .PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep collate-bench \
+	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -109,6 +110,19 @@ compare:
 beir:
 	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs)"; exit 1)
 	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
+
+## The LangChain and LlamaIndex vector stores against their frameworks' own
+## tests: fenec-pg built and started here, the tests from a python:3.13
+## container (Docker). The integrations may use outside packages; the
+## crates may not.
+python-test:
+	integrations/python/run-tests.sh
+
+## useLiveQuery for React, against a stand-in and a real fenec-pg + replica
+## (needs `make wasm`)
+react-test:
+	@$(CARGO) build -q -p fenec-pg
+	cd integrations/react && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## What `order ... collate tr` costs over a million Turkish names, in fenecdb
 ## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu
