@@ -801,6 +801,23 @@ impl<'a> GraphView<'a> {
                 }
             }
         }
+        // Nothing live among the candidates -- every node near this one was
+        // deleted, as when a document's chunks are written again, or every
+        // node at all -- and a node linked to nothing is one no search
+        // reaches: `near` over a collection of two whose rows were deleted
+        // and written again answered nothing. A tombstone still routes
+        // searches, so the node is linked through the nearest ones, and
+        // gets live neighbours as the nodes written after it link back.
+        if out.is_empty() {
+            for c in cands {
+                if out.len() >= m {
+                    break;
+                }
+                if c.node != owner {
+                    out.push(c.node);
+                }
+            }
+        }
         out
     }
 
@@ -1962,6 +1979,50 @@ mod tests {
             };
             assert!(VectorIndex::restore_graph(&bytes, 8, other, fetch).is_none());
         }
+    }
+
+    /// Deleting every row and writing it again left `near` answering
+    /// nothing over a collection of two: the new nodes' only candidates were
+    /// tombstones, the selection skipped them, and a node linked to nothing
+    /// is one no search reaches.
+    #[test]
+    fn a_node_among_tombstones_is_still_reached() {
+        let mut ix = VectorIndex::new(2, spec());
+        ix.insert(1, &[1.0, 0.0]);
+        ix.insert(2, &[0.0, 1.0]);
+        ix.remove(1);
+        ix.remove(2);
+        ix.insert(3, &[1.0, 0.0]);
+        ix.insert(4, &[0.0, 1.0]);
+        let r = ix.search(&[1.0, 0.0], 2, None, |_| true);
+        assert_eq!(r.iter().map(|x| x.0).collect::<Vec<_>>(), [3, 4]);
+    }
+
+    /// The same where a whole neighbourhood went, as when a document's
+    /// chunks are written again: more of them deleted than
+    /// `ef_construction` looks at, and the new ones landing among the old
+    /// ones' tombstones while the rest of the collection lives on.
+    #[test]
+    fn a_rewritten_neighbourhood_is_found() {
+        let at = |i: u64, shift: f32| [(i % 20) as f32 * 0.01 + shift, (i / 20) as f32 * 0.01];
+        let mut ix = VectorIndex::new(2, spec());
+        for i in 0..100u64 {
+            ix.insert(i, &[1000.0 + i as f32, 0.0]);
+        }
+        for i in 0..300u64 {
+            ix.insert(1000 + i, &at(i, 0.0));
+        }
+        for i in 0..300u64 {
+            ix.remove(1000 + i);
+        }
+        for i in 0..300u64 {
+            ix.insert(5000 + i, &at(i, 0.001));
+        }
+        for i in 0..300u64 {
+            let r = ix.search(&at(i, 0.001), 1, None, |_| true);
+            assert_eq!(r.first().map(|x| x.0), Some(5000 + i), "{i}");
+        }
+        assert_eq!(ix.search(&[1050.0, 0.0], 1, None, |_| true)[0].0, 50);
     }
 
     #[test]
