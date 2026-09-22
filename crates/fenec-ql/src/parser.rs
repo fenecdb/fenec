@@ -8,7 +8,7 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
-//!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+//!            [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
 //!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
@@ -19,6 +19,7 @@
 //! ```
 
 use crate::lexer::{tokenize, Tok, Token};
+use fenec_core::collate::Collation;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
 use fenec_core::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};
@@ -680,7 +681,7 @@ impl Parser {
 
     /// `order year desc, title asc` -- keys in priority order. Over groups a
     /// key may be an aggregate, `order sum(total) desc`, named by its column.
-    fn order_list(&mut self, out: &mut Vec<(String, bool)>) -> Result<()> {
+    fn order_list(&mut self, out: &mut Vec<Sort>) -> Result<()> {
         self.eat_kw("by");
         loop {
             let mut field = self.ident()?;
@@ -694,19 +695,43 @@ impl Parser {
                 }
                 self.expect(Tok::RParen)?;
             }
+            // `collate` comes before the direction, as in SQL; written
+            // after it, it reads just as well and is taken there too.
+            let mut collate = self.collate()?;
             let asc = if self.eat_kw("desc") {
                 false
             } else {
                 self.eat_kw("asc");
                 true
             };
-            out.push((field, asc));
+            if collate.is_none() {
+                collate = self.collate()?;
+            }
+            out.push(Sort {
+                field,
+                asc,
+                collate,
+            });
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
             self.next();
         }
         Ok(())
+    }
+
+    /// `collate <name>`, if it comes next.
+    fn collate(&mut self) -> Result<Option<Collation>> {
+        if !self.eat_kw("collate") {
+            return Ok(None);
+        }
+        let name = self.ident()?;
+        match Collation::named(&name) {
+            Some(c) => Ok(Some(c)),
+            None => self.err(format!(
+                "unknown collation `{name}`: the one there is is `tr`"
+            )),
+        }
     }
 
     /// `lookup <name> on <child> [= <parent>]` and the clauses that follow,

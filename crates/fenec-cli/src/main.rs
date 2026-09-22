@@ -26,7 +26,7 @@ FenecQL summary
   drop collection [if exists] <name>
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
-           [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+           [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
   explain get <name> ...                  -- the path the query took, one row a step
   select a, b from <name> ...             -- the classic SQL order works too

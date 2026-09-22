@@ -226,6 +226,17 @@ so a node that is down takes its tenants with it.</p>
     has no place in an order, takes the sorting path. Without
     <code>order</code>, a scan stops at <code>offset + limit</code>
     matches.</li>
+  <li><b>One collation, Turkish, and only for <code>order</code>.</b>
+    <code>collate tr</code> orders a text key as ICU's <code>tr</code> does;
+    a comparison in <code>where</code> stays a comparison of bytes, and a
+    <code>@sorted</code> field keeps the bytes' order, so a collated key is
+    always sorted — 837 ms for a million names, against 362 ms by their bytes
+    — and a Turkish listing pages by <code>offset</code>. The order is ICU's
+    exactly over the Latin script, decomposed letters included. Two marks on
+    one letter written out of their canonical order can sort apart from ICU,
+    which normalises them, and past the Latin script the order is an
+    approximation: another script's letters after the Latin ones, other
+    symbols before the digits, each by code point.</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's

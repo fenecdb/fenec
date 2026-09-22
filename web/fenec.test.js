@@ -107,6 +107,18 @@ test('order adds a key on each successive call', () => {
   assert.equal(sql, 'get articles order year desc, title asc');
 });
 
+test('order takes a collation, checked against the ones there are', () => {
+  const [sql] = q().order('title', 'desc', { collate: 'tr' }).order('year').toFenecQL();
+  assert.equal(sql, 'get articles order title collate tr desc, year asc');
+  const [child] = q()
+    .lookup('remarks', { on: 'article_id', order: [['body', 'asc', { collate: 'tr' }], 'id'] })
+    .toFenecQL();
+  assert.equal(child, 'get articles lookup remarks on article_id order body collate tr asc, id asc');
+  // Spliced into the text, so only a name on the list gets through.
+  assert.throws(() => q().order('title', 'asc', { collate: 'tr desc; del articles' }), FenecError);
+  assert.throws(() => q().order('title', 'asc', { collate: 'de' }), FenecError);
+});
+
 test('count is generated as a clause', async () => {
   const seen = [];
   const exec = (sql, p) => (seen.push([sql, p]), { columns: ['count'], rows: [{ count: 7 }] });
@@ -489,6 +501,64 @@ test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make 
     ['rust and wasm', 'rust in the browser', 'garbage collection'],
   );
   assert.ok(Math.abs(rows[0]._score - (1 / 61 + 1 / 62)) < 1e-6, String(rows[0]._score));
+  db.close();
+});
+
+test('collate tr on wasm is Intl.Collator("tr")', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  // Words over what the table covers -- Latin-1, Latin Extended-A to -C,
+  // the IPA letters, combining marks, punctuation, currency -- each written
+  // a second time with its case, its composition or an ignorable soft
+  // hyphen changed, so the comparison reaches the accents and the case and
+  // not only the letters. What the table leaves to ICU's normalisation stays
+  // out: a second mark on one letter, and a case partner outside the table.
+  const ranges = [[0x0, 0x370], [0x2000, 0x2070], [0x20a0, 0x20c1], [0x2c60, 0x2c80]];
+  const range = (a, b) => Array.from({ length: b - a }, (_, i) => String.fromCodePoint(a + i));
+  const covered = (s) => [...s].every((c) => ranges.some(([lo, hi]) => c.codePointAt(0) >= lo && c.codePointAt(0) < hi));
+  const pools = [
+    [...'abcçdefgğhıijklmnoöprsştuüvyzABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZâîûÂÎÛ'],
+    range(0x20, 0x7f),
+    [...range(0xa0, 0x300), ...range(0x2c60, 0x2c80)],
+    [...range(0x2000, 0x2070), ...range(0x20a0, 0x20c1), '\t', '­'],
+  ];
+  const marks = range(0x300, 0x370);
+  // `Math.imul`: a plain `*` loses the low bits past 2^53, and the
+  // generator falls into a cycle too short to make 3000 words.
+  let seed = 7;
+  const rnd = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const pick = (a) => a[rnd(a.length)];
+  const words = new Set();
+  while (words.size < 3000) {
+    const pool = pools[rnd(pools.length)];
+    let w = '';
+    for (let i = rnd(6); i >= 0; i--) {
+      const c = pick(rnd(4) ? pools[0] : pool);
+      w += c;
+      if (rnd(10) === 0 && c.normalize('NFD').length === 1) w += pick(marks);
+    }
+    words.add(w);
+    const twin = [...w]
+      .map((c) => {
+        const t = [c.toUpperCase(), c.toLowerCase(), c.normalize('NFD'), c + '­', c][rnd(5)];
+        return covered(t) ? t : c;
+      })
+      .join('');
+    words.add(twin);
+  }
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection words (w text)');
+  await db.from('words').insert([...words].map((w) => ({ w })));
+  const got = (await db.from('words').select('w').order('w', 'asc', { collate: 'tr' }).rows()).map(
+    (r) => r.w,
+  );
+  // What ICU calls equal goes by its bytes, as a deterministic PostgreSQL
+  // collation has it.
+  const icu = new Intl.Collator('tr');
+  const bytes = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  assert.deepEqual(got, [...words].sort((a, b) => icu.compare(a, b) || bytes(a, b)));
   db.close();
 });
 

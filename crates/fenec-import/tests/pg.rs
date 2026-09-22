@@ -223,7 +223,7 @@ fn numeric_demands_cast_and_text_is_exact() {
         .execute(&Statement::Select(Select {
             collection: "m".into(),
             project: Some(vec!["price".into()]),
-            order: vec![("price".into(), true)],
+            order: vec![Sort::new("price", true)],
             ..Default::default()
         }))
         .unwrap()

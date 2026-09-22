@@ -2,6 +2,7 @@
 
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
+use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
@@ -2476,7 +2477,13 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
-        let [(field, asc)] = sel.order.as_slice() else {
+        // The index holds the bytes' order, so a collated key sorts.
+        let [Sort {
+            field,
+            asc,
+            collate: None,
+        }] = sel.order.as_slice()
+        else {
             return Ok(None);
         };
         let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
@@ -3145,16 +3152,9 @@ impl Database {
         }
 
         let mut keys = Vec::with_capacity(l.order.len());
-        for (field, asc) in &l.order {
-            let pos =
-                if field == "id" {
-                    None
-                } else {
-                    Some(child.schema.field_pos(field).ok_or_else(|| {
-                        Error::NotFound(format!("field `{}.{field}`", l.collection))
-                    })?)
-                };
-            keys.push((pos, *asc));
+        let owner = format!("{}.", l.collection);
+        for s in &l.order {
+            keys.push(order_key(&child.schema, s, &owner)?);
         }
 
         let limit = l.limit.unwrap_or(usize::MAX);
@@ -3190,7 +3190,7 @@ impl Database {
                 let mut keyed: Vec<(Vec<Value>, DocId)> = Vec::with_capacity(kept.len());
                 for id in &kept {
                     let mut vals = Vec::with_capacity(keys.len());
-                    for (pos, _) in &keys {
+                    for (pos, ..) in &keys {
                         vals.push(match pos {
                             None => Value::Int(*id as i64),
                             Some(p) => child.store.read_field(*id, *p)?.unwrap_or(Value::Null),
@@ -3204,13 +3204,7 @@ impl Database {
                 // makes the order total, which is what lets the selection
                 // below pick the same rows the full sort would.
                 let cmp = |a: &(Vec<Value>, DocId), b: &(Vec<Value>, DocId)| {
-                    for (i, (_, asc)) in keys.iter().enumerate() {
-                        let o = a.0[i].cmp_value(&b.0[i]);
-                        if o != Ordering::Equal {
-                            return if *asc { o } else { o.reverse() };
-                        }
-                    }
-                    a.1.cmp(&b.1)
+                    rank(&keys, &a.0, &b.0).then(a.1.cmp(&b.1))
                 };
                 // `lookup` is the one place a bounded `order` is known up
                 // front: the clause carries its own `limit`, so only
@@ -3389,17 +3383,8 @@ impl Database {
                 // field lookup used to happen first, so `order id` raised an
                 // error.
                 let mut keys = Vec::with_capacity(sel.order.len());
-                for (field, asc) in &sel.order {
-                    let pos = if field == "id" {
-                        None
-                    } else {
-                        Some(
-                            c.schema
-                                .field_pos(field)
-                                .ok_or_else(|| Error::NotFound(format!("field `{field}`")))?,
-                        )
-                    };
-                    keys.push((pos, *asc));
+                for s in &sel.order {
+                    keys.push(order_key(&c.schema, s, "")?);
                 }
                 let k = sel
                     .limit
@@ -3409,10 +3394,14 @@ impl Database {
                     // Built by hand: `join` brought a 1.2 KB copy of its own
                     // into the browser module for this one line.
                     let mut by = String::new();
-                    for (i, (f, asc)) in sel.order.iter().enumerate() {
+                    for (i, s) in sel.order.iter().enumerate() {
                         by.push_str(if i == 0 { "" } else { ", " });
-                        by.push_str(f);
-                        by.push_str(if *asc { "" } else { " desc" });
+                        by.push_str(&s.field);
+                        if let Some(c) = s.collate {
+                            by.push_str(" collate ");
+                            by.push_str(c.name());
+                        }
+                        by.push_str(if s.asc { "" } else { " desc" });
                     }
                     let kept = if k < ids.len() {
                         format!("the first {k} put in order")
@@ -3583,16 +3572,33 @@ impl Database {
         // the list's columns; the key breaks what the order leaves tied.
         let mut order: Vec<OrderKey> = Vec::with_capacity(sel.order.len() + 1);
         let mut picked: Vec<usize> = Vec::with_capacity(sel.order.len());
-        for (name, asc) in &sel.order {
+        for s in &sel.order {
+            let name = &s.field;
             let Some(at) = columns.iter().position(|c| c == name) else {
                 return Err(Error::Query(format!(
                     "`order {name}`: not a column of this select"
                 )));
             };
+            if let Some(coll) = s.collate {
+                // Only the key and `min`/`max` carry a field's values;
+                // `count`, `sum` and `avg` are numbers whatever they read.
+                let text = match &sel.aggregate[at] {
+                    Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => {
+                        c.schema.field(f).is_some_and(|f| collatable(&f.ty))
+                    }
+                    _ => false,
+                };
+                if !text {
+                    return Err(Error::Query(format!(
+                        "`collate {}` orders text; `{name}` is not",
+                        coll.name()
+                    )));
+                }
+            }
             picked.push(at);
-            order.push((None, *asc));
+            order.push((None, s.asc, s.collate));
         }
-        order.push((None, true));
+        order.push((None, true, None));
         let w = order.len();
         let mut flat: Vec<Value> = Vec::with_capacity(n * w);
         for g in 0..n {
@@ -4087,13 +4093,53 @@ fn sorted_range(
     any.then_some((range, exact))
 }
 
-/// Sort keys: a field position (`None` for `id`) and whether it ascends.
-type OrderKey = (Option<usize>, bool);
+/// Sort keys: a field position (`None` for `id`), whether it ascends, and
+/// the collation its text is compared in.
+type OrderKey = (Option<usize>, bool, Option<Collation>);
+
+/// The key `s` names in `schema`. `collate` is refused on anything but text:
+/// on a number it would claim an order it does not change. `owner` goes in
+/// front of the field's name in an error -- `reviews.` for a `lookup`'s.
+fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
+    let f = &s.field;
+    let pos = if f == "id" {
+        None
+    } else {
+        Some(
+            schema
+                .field_pos(f)
+                .ok_or_else(|| Error::NotFound(format!("field `{owner}{f}`")))?,
+        )
+    };
+    if let Some(c) = s.collate {
+        let ty = pos.map_or(&DataType::Int, |p| &schema.fields[p].ty);
+        if !collatable(ty) {
+            return Err(Error::Query(format!(
+                "`collate {}` orders text; `{owner}{f}` is {}",
+                c.name(),
+                ty.name()
+            )));
+        }
+    }
+    Ok((pos, s.asc, s.collate))
+}
+
+/// Text, or a list of it -- which compares element by element.
+fn collatable(t: &DataType) -> bool {
+    match t {
+        DataType::Text => true,
+        DataType::List(t) => **t == DataType::Text,
+        _ => false,
+    }
+}
 
 /// The order `order` asks for between two rows' keys, before any tie-break.
 fn rank(keys: &[OrderKey], a: &[Value], b: &[Value]) -> Ordering {
-    for (i, (_, asc)) in keys.iter().enumerate() {
-        let o = a[i].cmp_value(&b[i]);
+    for (i, (_, asc, collate)) in keys.iter().enumerate() {
+        let o = match collate {
+            Some(c) => c.compare_values(&a[i], &b[i]),
+            None => a[i].cmp_value(&b[i]),
+        };
         if o != Ordering::Equal {
             return if *asc { o } else { o.reverse() };
         }
@@ -4124,7 +4170,7 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
     // The read stays inline: behind a closure returning `Result<Value>` the
     // same query measured 39 ms.
     for &id in ids {
-        for (pos, _) in keys {
+        for (pos, ..) in keys {
             flat.push(match pos {
                 None => Value::Int(id as i64),
                 Some(p) => store.read_field(id, *p)?.unwrap_or(Value::Null),

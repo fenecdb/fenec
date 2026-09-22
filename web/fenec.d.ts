@@ -53,10 +53,14 @@ type Attach<T, Path extends readonly string[], N extends string, C extends Field
       }
     : T & { [K in N]: Row<C>[] };
 
+/** A collation `order` can put text in: `'tr'` is Turkish (`collate tr`). */
+export type Collation = 'tr';
+
 /**
  * The child side of a `lookup`. `on` is the child's field; the parent's key
  * is `id` unless `parentKey` names another. `order` takes `[field, dir]`
- * pairs, or a bare field name for one ascending key.
+ * pairs -- `{ collate }` third, as `order()` takes it -- or a bare field name
+ * for one ascending key.
  *
  * With no `C` every name is a plain `string`, which is the honest default:
  * the builder carries one collection's fields, so the child's are only
@@ -74,7 +78,9 @@ export interface LookupOptions<C extends Fields = Fields> {
   required?: boolean;
   select?: ChildKey<C> | ChildKey<C>[];
   where?: Where<C> | Cond<C>;
-  order?: ChildKey<C> | Array<ChildKey<C> | [ChildKey<C>, ('asc' | 'desc')?]>;
+  order?:
+    | ChildKey<C>
+    | Array<ChildKey<C> | [ChildKey<C>, ('asc' | 'desc')?, { collate?: Collation }?]>;
   limit?: number;
   offset?: number;
 }
@@ -298,8 +304,15 @@ export declare class Query<
     opts: LookupOptions<C>,
   ): Query<F, Attach<P, L, N, C>, [...L, N]>;
 
-  /** Successive calls add a sort key (the second decides when the first ties). */
-  order(field: (keyof Row<F> & string) | Aggregate<F>, dir?: 'asc' | 'desc'): Query<F, P, L>;
+  /**
+   * Successive calls add a sort key (the second decides when the first ties).
+   * `{ collate: 'tr' }` orders text as Turkish does rather than by its bytes.
+   */
+  order(
+    field: (keyof Row<F> & string) | Aggregate<F>,
+    dir?: 'asc' | 'desc',
+    opts?: { collate?: Collation },
+  ): Query<F, P, L>;
   limit(n: number): Query<F, P, L>;
   offset(n: number): Query<F, P, L>;
 

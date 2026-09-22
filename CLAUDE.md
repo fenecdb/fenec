@@ -74,7 +74,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 `fenec-core` modules: `store` (segments, offset index), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
-execution), `schema`, `value`, `codec`,
+execution), `schema`, `value`, `codec`, `collate` (ICU's Turkish order, a
+generated table),
 `json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
@@ -261,6 +262,21 @@ The structure is a sorted `Vec` of chunks of at most 512 entries, not a
 `BTreeSet`, which made the browser module 75 KB larger; `tests/sorted.rs` checks
 every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built on open, never in the file.
+
+**`collate tr` is ICU's order, and `order`'s alone.** Its weights are ICU's
+own -- `tools/collate/gen.py` reads them out of macOS's libicucore into
+`collate/table.rs`, one `u32` per code point over the Latin script, the
+combining marks and general punctuation -- and a comparison walks ICU's three
+levels, letters then accents then case, over the whole string before it falls
+back to the bytes, so the order is total. `web/fenec.test.js` holds it to
+`Intl.Collator("tr")` on every run; what it does not do is ICU's
+normalisation, so two marks on one letter out of canonical order can sort
+apart. A comparison starts at the first byte the two strings do not share, a
+character earlier when that is a mark, since `c` and U+0327 are one letter:
+68 -> 30 ns a comparison over a million names. A `@sorted` field keeps byte
+order and is never walked for a collated key, and `where` compares bytes --
+collating a comparison would need an index that orders the same way. It
+costs the browser module 8.5 KB, 3.2 KB brotli.
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

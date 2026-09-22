@@ -3,6 +3,7 @@
 //! This module is independent of FenecQL: plan structures can also be built
 //! straight from Rust (embedded use); FenecQL is just a front end producing them.
 
+use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::schema::Schema;
 use crate::value::{DocId, Value};
@@ -502,7 +503,7 @@ pub struct Lookup {
     /// None = all fields of the child.
     pub project: Option<Vec<String>>,
     pub filter: Option<Expr>,
-    pub order: Vec<(String, bool)>,
+    pub order: Vec<Sort>,
     pub limit: Option<usize>,
     pub offset: usize,
     /// `required`: drop a parent that no child matches.
@@ -605,6 +606,27 @@ impl Agg {
     }
 }
 
+/// One key of `order`: `order year desc`, `order name collate tr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sort {
+    pub field: String,
+    pub asc: bool,
+    /// `collate tr`: the field's text in a language's order rather than
+    /// its bytes'. None: byte order, which is what `@sorted` holds.
+    pub collate: Option<Collation>,
+}
+
+impl Sort {
+    /// `field` ascending, or descending, in byte order.
+    pub fn new(field: impl Into<String>, asc: bool) -> Sort {
+        Sort {
+            field: field.into(),
+            asc,
+            collate: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -617,10 +639,9 @@ pub struct Select {
     pub matcher: Option<Match>,
     /// `rerank`: exact vector ordering over the `match` candidates.
     pub rerank: Option<Rerank>,
-    /// Sort keys in priority order: (field, ascending?).
-    /// Empty = no ordering. Additional keys break ties:
-    /// `order year desc, title asc`.
-    pub order: Vec<(String, bool)>,
+    /// Sort keys in priority order. Empty = no ordering. Additional keys
+    /// break ties: `order year desc, title asc`.
+    pub order: Vec<Sort>,
     pub limit: Option<usize>,
     pub offset: usize,
     /// `count`: returns the number of matching rows instead of the rows.
@@ -1211,7 +1232,7 @@ mod tests {
             Box::new(Expr::Field("price".into())),
             Box::new(Expr::Lit(Value::Int(10))),
         ));
-        sel.order = vec![("price".into(), false)];
+        sel.order = vec![Sort::new("price", false)];
         sel.limit = Some(20);
         sel.offset = 40;
         sel.project = Some(vec!["name".into()]);

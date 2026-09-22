@@ -300,21 +300,36 @@ fn aggregates(schema: &Schema, raw: &str) -> Result<Vec<Agg>> {
     Ok(list)
 }
 
-/// `order=year.desc,title` -> `[(year, false), (title, true)]`. Over groups
-/// a key may name an aggregate of the list, `order=sum(total).desc`; the
-/// engine checks it against the list.
-fn order(schema: &Schema, raw: &str) -> Result<Vec<(String, bool)>> {
+/// `order=year.desc,title` -> `order year desc, title`. A collation's name
+/// among the modifiers puts a text field in its language's order:
+/// `order=name.tr.desc` is `order name collate tr desc`. Over groups a key
+/// may name an aggregate of the list, `order=sum(total).desc`; the engine
+/// checks it against the list.
+fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
     let mut out = Vec::new();
     for part in raw.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        let (name, asc) = match part.rsplit_once('.') {
-            Some((n, "desc")) => (n, false),
-            Some((n, "asc")) => (n, true),
-            _ => (part, true),
-        };
+        // No name holds a dot -- an aggregate's parentheses neither -- so
+        // everything after the first one is a modifier.
+        let mut words = part.split('.');
+        let name = words.next().unwrap_or_default();
+        let (mut asc, mut collate) = (true, None);
+        for w in words {
+            match w {
+                "asc" => asc = true,
+                "desc" => asc = false,
+                w => {
+                    collate = Some(Collation::named(w).ok_or_else(|| {
+                        Error::Query(format!(
+                            "`order`: `{w}` in `{part}` is not asc, desc or a collation (tr)"
+                        ))
+                    })?)
+                }
+            }
+        }
         let name = if let Some((f, rest)) = name.split_once('(') {
             // The function's name folds as FenecQL folds it; the field's does not.
             match (f.to_ascii_lowercase().as_str(), rest) {
@@ -325,7 +340,11 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<(String, bool)>> {
             field(schema, name)?;
             name.to_string()
         };
-        out.push((name, asc));
+        out.push(Sort {
+            field: name,
+            asc,
+            collate,
+        });
     }
     Ok(out)
 }

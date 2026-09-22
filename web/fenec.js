@@ -336,21 +336,43 @@ const OPS = {
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
 
 /**
- * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`.
- * A bare string is one ascending key; anything else is a list of pairs, so
- * there is no reading under which `['a','desc']` could mean two fields.
+ * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`,
+ * a pair taking `{ collate }` third as `order()` does. A bare string is one
+ * ascending key; anything else is a list of pairs, so there is no reading
+ * under which `['a','desc']` could mean two fields.
  */
 function orderKeys(spec) {
   if (spec === undefined || spec === null) return [];
-  if (typeof spec === 'string') return [{ field: ident(spec), asc: true }];
+  if (typeof spec === 'string') return [{ field: ident(spec), asc: true, collate: null }];
   return spec.map((k) => {
-    const [field, dir = 'asc'] = [k].flat();
-    const d = String(dir).toLowerCase();
-    if (d !== 'asc' && d !== 'desc') {
-      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
-    }
-    return { field: ident(field), asc: d === 'asc' };
+    const [field, dir = 'asc', opts = {}] = [k].flat();
+    return { field: ident(field), asc: direction(dir), collate: collation(opts.collate) };
   });
+}
+
+function direction(dir) {
+  const d = String(dir).toLowerCase();
+  if (d !== 'asc' && d !== 'desc') {
+    throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
+  }
+  return d === 'asc';
+}
+
+// The collations the engine knows. The name is spliced into the query text,
+// so it is checked against the list rather than against the name pattern.
+const COLLATIONS = ['tr'];
+
+function collation(name) {
+  if (name === undefined || name === null) return null;
+  if (!COLLATIONS.includes(name)) {
+    throw new FenecError(`unknown collation: ${JSON.stringify(name)}; there is 'tr'`);
+  }
+  return name;
+}
+
+// `name collate tr desc`: one key of an `order`.
+function sortKey(o) {
+  return `${o.field}${o.collate ? ` collate ${o.collate}` : ''} ${o.asc ? 'asc' : 'desc'}`;
 }
 
 function ident(name, what = 'field') {
@@ -757,16 +779,17 @@ export class Query {
 
   /**
    * `order field asc|desc`. Successive calls add keys: when the first key
-   * ties, the second decides.
+   * ties, the second decides. `{ collate: 'tr' }` puts text in Turkish order
+   * rather than its bytes' -- `ç` after `c`, `ı` before `i`, `Çağla` before
+   * `Zeynep` -- which is `collate tr`.
    */
-  order(field, dir = 'asc') {
-    const d = String(dir).toLowerCase();
-    if (d !== 'asc' && d !== 'desc') {
-      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
-    }
+  order(field, dir = 'asc', { collate } = {}) {
     // Over groups a key may be an aggregate of the list, by its name.
     return this.#with({
-      order: [...this.#s.order, { field: column(field).text, asc: d === 'asc' }],
+      order: [
+        ...this.#s.order,
+        { field: column(field).text, asc: direction(dir), collate: collation(collate) },
+      ],
     });
   }
 
@@ -872,7 +895,7 @@ export class Query {
       if (fuse.candidates !== null) sql += ` candidates ${fuse.candidates}`;
     }
     for (const [i, o] of order.entries()) {
-      sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
     }
     if (limit !== undefined) sql += ` limit ${limit}`;
     if (offset) sql += ` offset ${offset}`;
@@ -891,7 +914,7 @@ export class Query {
       const root = prune({ t: 'and', items: lookup.cond });
       if (root) sql += ` where ${render(root, bind, null)}`;
       for (const [i, o] of lookup.order.entries()) {
-        sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+        sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
       }
       if (lookup.limit !== undefined) sql += ` limit ${lookup.limit}`;
       if (lookup.offset) sql += ` offset ${lookup.offset}`;

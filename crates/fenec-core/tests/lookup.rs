@@ -187,7 +187,7 @@ fn a_child_filter_empties_a_group_without_dropping_the_parent() {
 fn children_can_be_ordered() {
     let db = fixture();
     let mut l = lookup("product_id", "id");
-    l.order = vec![("stars".into(), false)];
+    l.order = vec![Sort::new("stars", false)];
     let (_, n) = nested(&db, &plan(l));
 
     let stars = |g: &Vec<Row>| {
@@ -339,14 +339,14 @@ fn a_bounded_child_order_agrees_with_a_full_sort() {
 
     for asc in [true, false] {
         let mut full = lookup_c();
-        full.order = vec![("k".into(), asc)];
+        full.order = vec![Sort::new("k", asc)];
         full.limit = Some(10_000);
         let reference = ids(full);
         assert_eq!(reference.len(), 400);
 
         for (offset, limit) in [(0, 1), (0, 3), (0, 57), (0, 58), (5, 10), (57, 3), (399, 5)] {
             let mut l = lookup_c();
-            l.order = vec![("k".into(), asc)];
+            l.order = vec![Sort::new("k", asc)];
             l.offset = offset;
             l.limit = Some(limit);
             let want: Vec<u64> = reference.iter().copied().skip(offset).take(limit).collect();
@@ -356,11 +356,11 @@ fn a_bounded_child_order_agrees_with_a_full_sort() {
 
     // Two keys, the second breaking ties of the first.
     let mut full = lookup_c();
-    full.order = vec![("k".into(), false), ("tag".into(), true)];
+    full.order = vec![Sort::new("k", false), Sort::new("tag", true)];
     full.limit = Some(10_000);
     let reference = ids(full);
     let mut l = lookup_c();
-    l.order = vec![("k".into(), false), ("tag".into(), true)];
+    l.order = vec![Sort::new("k", false), Sort::new("tag", true)];
     l.limit = Some(9);
     assert_eq!(ids(l), reference[..9].to_vec());
 }

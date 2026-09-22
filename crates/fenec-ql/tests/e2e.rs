@@ -1187,6 +1187,38 @@ fn multi_key_order() {
     );
 }
 
+/// `collate` goes before the direction as in SQL, is taken after it, and
+/// reads the same from the SQL order of the clauses.
+#[test]
+fn collate_in_an_order_key() {
+    let sort = |sql: &str| match fenec_ql::parse_one(sql).unwrap() {
+        Statement::Select(sel) => sel.order,
+        other => panic!("{other:?}"),
+    };
+    let want = vec![
+        Sort {
+            field: "b".into(),
+            asc: false,
+            collate: Some(Collation::Turkish),
+        },
+        Sort::new("a", true),
+    ];
+    assert_eq!(sort("get t order b collate tr desc, a"), want);
+    assert_eq!(sort("get t order b desc collate tr, a asc"), want);
+    assert_eq!(
+        sort("select a, b from t order by b COLLATE tr DESC, a"),
+        want
+    );
+    for (bad, says) in [
+        ("get t order b collate", "expected a name"),
+        ("get t order b collate tr collate tr", "position"),
+        ("get t order b collate de", "unknown collation `de`"),
+    ] {
+        let e = fenec_ql::parse(bad).unwrap_err().to_string();
+        assert!(e.contains(says), "`{bad}` -> {e}");
+    }
+}
+
 /// `order id` must work: `id` is not a schema field but is sortable. It
 /// errored because the field lookup happened before the `id` check.
 #[test]

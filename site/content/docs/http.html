@@ -64,7 +64,7 @@ rather than <code>--http-token</code>, and a collection named
 <tr><td><b>Shorthand</b></td><td>an unrecognised prefix makes the whole value an equality: <code>?year=2024</code></td></tr>
 <tr><td><b>List</b></td><td><code>?year=in.(1999,2023)</code></td></tr>
 <tr><td><b>Clauses</b></td><td><code>select</code> <code>order</code> <code>limit</code> <code>offset</code> <code>count</code> <code>where</code> <code>lookup</code></td></tr>
-<tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code></td></tr>
+<tr><td><b>Ordering</b></td><td><code>?order=year.desc,title.asc</code>; a collation among the modifiers puts text in its language's order — <code>?order=name.tr.desc</code> is <code>order name collate tr desc</code> (<a href="fenecql.html#collation">Collation</a>)</td></tr>
 <tr><td><b>Free expression</b></td><td><code>?where=year >= 2024 and tags has "rust"</code> — full FenecQL</td></tr>
 </tbody>
 </table>

@@ -268,6 +268,41 @@ fn near_with_match_is_fused() {
 }
 
 #[test]
+fn order_takes_a_collation() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection people (name text, n int)",
+        r#"put people [{name: "Zeynep", n: 1}, {name: "Çağla", n: 2}, {name: "ılgaz", n: 3},
+                       {name: "İlker", n: 4}, {name: "Irmak", n: 5}, {name: "cem", n: 6}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    let names = |target: &str| -> Vec<String> {
+        let r = get(h.port, target);
+        assert_eq!(r.status, 200, "{target}: {}", r.body);
+        r.body
+            .split("\"name\":\"")
+            .skip(1)
+            .map(|s| s[..s.find('"').unwrap()].to_string())
+            .collect()
+    };
+    let turkish = ["cem", "Çağla", "ılgaz", "Irmak", "İlker", "Zeynep"];
+    assert_eq!(names("/people?select=name&order=name.tr"), turkish);
+    let mut reversed = turkish;
+    reversed.reverse();
+    assert_eq!(names("/people?select=name&order=name.tr.desc"), reversed);
+    assert_eq!(names("/people?select=name&order=name.desc.tr"), reversed);
+    // Without one, the bytes' order.
+    assert_eq!(
+        names("/people?select=name&order=name"),
+        ["Irmak", "Zeynep", "cem", "Çağla", "İlker", "ılgaz"]
+    );
+    assert_eq!(get(h.port, "/people?order=name.de").status, 400);
+    assert_eq!(get(h.port, "/people?order=n.tr").status, 400);
+}
+
+#[test]
 fn aggregates_over_the_query_string() {
     let h = start(Config::default());
     let r = get(

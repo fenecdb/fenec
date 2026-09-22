@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep collate-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -109,6 +109,11 @@ compare:
 beir:
 	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs)"; exit 1)
 	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
+
+## What `order ... collate tr` costs over a million Turkish names, in fenecdb
+## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu
+collate-bench:
+	$(CARGO) run --release -p fenec-bench --bin collate
 
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
