@@ -589,6 +589,7 @@ fn sqlstate(e: &Error) -> &'static str {
         // read_only_sql_transaction: what a PostgreSQL standby answers, and
         // what pools and drivers look for to tell a replica from a primary.
         Error::ReadOnly(_) => "25006",
+        Error::Denied(_) => "42501",
         _ => "XX000",
     }
 }

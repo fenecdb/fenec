@@ -145,6 +145,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
+| **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
 | **Runtime size** | 420 KB wasm + 69 KB client (137 KB brotli served) · 797–1154 KB binary · 1.70 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).

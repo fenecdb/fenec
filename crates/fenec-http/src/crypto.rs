@@ -1,5 +1,5 @@
-//! The smallest crypto set SCRAM-SHA-256 needs: SHA-256, HMAC, PBKDF2 and
-//! base64.
+//! The smallest crypto set SCRAM-SHA-256 and HS256 JWTs need: SHA-256,
+//! HMAC, PBKDF2, and base64 in both its alphabets.
 //!
 //! No dependencies, like the rest of fenecdb. All three functions are checked
 //! against RFC test vectors (see the tests at the end of the module);
@@ -253,6 +253,23 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// base64url without padding, as a JWT spells its three parts (RFC 7515).
+pub fn b64url_encode(data: &[u8]) -> String {
+    b64_encode(data)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
+/// The inverse of [`b64url_encode`]. The standard alphabet's `+` and `/`
+/// are refused: a token that mixes the two is not one this server made.
+pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    if s.contains(['+', '/', '=']) {
+        return None;
+    }
+    b64_decode(&s.replace('-', "+").replace('_', "/"))
 }
 
 // ------------------------------------------------------------------- random

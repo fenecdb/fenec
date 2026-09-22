@@ -28,6 +28,7 @@
 //! copy. `change` is an incremental diff and **carries state**, not an
 //! operation (see `fenec_core::changes`): re-applying it is harmless.
 
+use crate::access::Who;
 use crate::api;
 use crate::http::Request;
 use crate::Config;
@@ -139,6 +140,7 @@ pub fn serve(
     cfg: &Config,
     hub: &Hub,
     req: &Request,
+    who: &Who,
 ) {
     let Some(_slot) = hub.reserve(cfg.max_streams) else {
         let _ = write_head(out, cfg, 503, "text/plain; charset=utf-8");
@@ -150,7 +152,12 @@ pub fn serve(
     // released immediately: held for the whole stream it would stop all writes.
     let sub = {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
-        api::subscription(&guard, req)
+        api::subscription(&guard, req).and_then(|mut sub| {
+            if let Some(scope) = who.scope() {
+                sub.filter = scope.restrict(&sub.collection, sub.filter.take())?;
+            }
+            Ok(sub)
+        })
     };
     let sub = match sub {
         Ok(s) => s,
@@ -176,9 +183,19 @@ pub fn serve(
     // the write timeout returns an error and the loop exits.
     let _ = out.set_write_timeout(Some(cfg.stream_write_timeout));
 
+    // A scoped subscriber is told of a row leaving only if it was sent the
+    // row. The shape's rule -- a changed id that does not match is a
+    // deletion -- would otherwise hand every user the ids everyone else
+    // writes. It costs the ids of the rows sent; an unscoped subscription
+    // keeps the rule and holds nothing.
+    let mut seen: Option<std::collections::HashSet<DocId>> =
+        who.scope().map(|_| Default::default());
     let mut cursor = match sub.since {
-        Some(n) => n,
-        None => match seed(out, db, &sub) {
+        // Resuming, a scoped subscriber is seeded all the same: the rows it
+        // holds are not known here, and without them no deletion could be
+        // told apart from someone else's write.
+        Some(n) if seen.is_none() => n,
+        _ => match seed(out, db, &sub, &mut seen) {
             Ok(seq) => seq,
             Err(_) => return,
         },
@@ -210,11 +227,15 @@ pub fn serve(
                 let _ = event(out, "error", &error_json(&e));
                 return;
             }
-            Ok(Changes::Reseed) => match seed(out, db, &sub) {
+            Ok(Changes::Reseed) => match seed(out, db, &sub, &mut seen) {
                 Ok(seq) => cursor = seq,
                 Err(_) => return,
             },
-            Ok(Changes::Batch(b)) => {
+            Ok(Changes::Batch(mut b)) => {
+                if let Some(seen) = &mut seen {
+                    b.dels.retain(|id| seen.remove(id));
+                    seen.extend(b.puts.rows.iter().map(|r| r.id));
+                }
                 // The cursor advances every round, even when the batch is
                 // empty. The counter and the ring are shared across all
                 // collections: if a subscriber of a quiet collection never
@@ -252,12 +273,18 @@ fn seed(
     out: &mut TcpStream,
     db: &Arc<RwLock<Database>>,
     sub: &api::Subscription,
+    seen: &mut Option<std::collections::HashSet<DocId>>,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
         let guard = db.read().unwrap_or_else(|e| e.into_inner());
         let stmt = Statement::Select(api::seed_select(sub));
         match guard.query(&stmt, &[]) {
-            Ok(Response::Rows(rs)) => (api::rows_json(&rs), guard.change_seq()),
+            Ok(Response::Rows(rs)) => {
+                if let Some(seen) = seen {
+                    *seen = rs.rows.iter().map(|r| r.id).collect();
+                }
+                (api::rows_json(&rs), guard.change_seq())
+            }
             Ok(_) => (String::from("[]"), guard.change_seq()),
             Err(e) => {
                 event(out, "error", &error_json(&e))?;

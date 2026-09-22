@@ -938,6 +938,6 @@ pub fn status_of(e: &Error) -> u16 {
         Error::Type(_) | Error::Query(_) => 400,
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
         // As `--http-read-only` answers: the write is not this server's to take.
-        Error::ReadOnly(_) => 403,
+        Error::ReadOnly(_) | Error::Denied(_) => 403,
     }
 }

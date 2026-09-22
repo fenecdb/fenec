@@ -154,6 +154,18 @@ export. A move is freeze, copy the image, install, flip the directory in one
 statement, delete the source; the change sequence travels in the image, so a
 caught-up subscriber resumes on the target without a reseed.
 
+**A scoped token is held to its rules at every level, twice for writes**
+(`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement
+-- the `where`, each `lookup` level, a subscription's shape -- so a new path
+that runs a statement must go through `scoped()` or it reads everything. Writes
+also get `WITH CHECK`: the `Check` write hook tests every document a put or a
+set writes against the filter, found through a thread-local set by `within()`
+around the execution -- a scoped write executed outside `within` goes
+unchecked. A scoped subscription keeps the ids it sent and reports deletions
+only for those; the unscoped shape's "a changed id that does not match is a
+deletion" would hand every user everyone's ids. The algorithm is the server's
+(HS256 only), never the token's.
+
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
 under the read lock, the build holds no lock, and the write lock is taken only

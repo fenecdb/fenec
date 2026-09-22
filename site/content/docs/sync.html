@@ -178,11 +178,12 @@ counted separately from ordinary requests under
 <h2>Limits</h2>
 
 <ul>
-  <li><b>A shape is not a security boundary.</b> If a changed id does not match
-    the shape at all, the subscriber sees it as a deletion. Deleting a row that
-    is not there locally is harmless, but <i>which ids changed</i> leaks.
-    Hiding rows needs a separate endpoint, or
-    <code>--http-read-only</code> plus a token.</li>
+  <li><b>A shape alone is not a security boundary.</b> Under the server's own
+    token, a changed id that does not match the shape is sent as a deletion:
+    harmless locally, but <i>which ids changed</i> leaks. A per-user token
+    with <a href="/docs/http#scoped-access">scoped access</a> hides both:
+    the rows outside its rules are filtered out, and it hears only of rows it
+    was sent.</li>
   <li><b><code>bytes</code> fields cannot be synced.</b> In JSON they become
     number arrays with no way back. That is a limit of the HTTP surface, not
     something sync introduces.</li>

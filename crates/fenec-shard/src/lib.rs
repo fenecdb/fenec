@@ -700,7 +700,8 @@ fn message(e: &Error) -> String {
         | Error::Corrupt(m)
         | Error::Io(m)
         | Error::Plugin(m)
-        | Error::ReadOnly(m) => m.clone(),
+        | Error::ReadOnly(m)
+        | Error::Denied(m) => m.clone(),
     }
 }
 

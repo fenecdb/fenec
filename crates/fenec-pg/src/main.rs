@@ -58,6 +58,16 @@ usage: fenec-pg [options]
                             writes one file, and the sync and checkpoint
                             policies are shared
       --http-token <value>  require `Authorization: Bearer <value>` for HTTP
+      --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
+                            each held to --policy: which collections, which
+                            rows (`where owner = $jwt.sub`). Also read from
+                            FENEC_JWT_SECRET; at least 32 bytes
+      --jwt-secret-file <path>  the secret from a file
+      --policy <path>       the rules a token is held to, one per line:
+                            <collection|*> <read|write|read,write>
+                            [where <filter>] [for <role>]
+      --mint-token <claims> print a token for this JSON object of claims,
+                            signed with the secret, and exit
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes over HTTP (the pg path is unaffected)
@@ -155,6 +165,9 @@ fn main() {
     let mut replica_of: Option<String> = None;
     let mut promote = false;
     let mut replication_buffer = replication::DEFAULT_BUFFER;
+    let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
+    let mut policy: Option<String> = None;
+    let mut mint: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut http: Option<String> = None;
@@ -228,6 +241,22 @@ fn main() {
             }
             "--http" => http = Some(next(&mut i, "--http")),
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
+            "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
+            "--jwt-secret-file" => {
+                let path = next(&mut i, "--jwt-secret-file");
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
+                    Err(e) => fail(&format!("could not read {path}: {e}")),
+                }
+            }
+            "--policy" => {
+                let path = next(&mut i, "--policy");
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => policy = Some(s),
+                    Err(e) => fail(&format!("could not read {path}: {e}")),
+                }
+            }
+            "--mint-token" => mint = Some(next(&mut i, "--mint-token")),
             "--http-cors" => http_cfg.cors = Some(next(&mut i, "--http-cors")),
             "--http-read-only" => http_cfg.read_only = true,
             "--http-max-streams" => {
@@ -271,6 +300,24 @@ fn main() {
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
         }
         i += 1;
+    }
+
+    if let Some(claims) = mint {
+        let secret = jwt_secret.unwrap_or_else(|| fail("--mint-token signs with --jwt-secret"));
+        let access =
+            fenec_http::access::Access::new(secret.as_bytes(), "").unwrap_or_else(|e| fail(&e));
+        println!("{}", access.mint(&claims).unwrap_or_else(|e| fail(&e)));
+        return;
+    }
+    match (jwt_secret, policy) {
+        (Some(secret), Some(policy)) => {
+            let access = fenec_http::access::Access::new(secret.as_bytes(), &policy)
+                .unwrap_or_else(|e| fail(&e));
+            http_cfg.access = Some(Arc::new(access));
+        }
+        (Some(_), None) => fail("--jwt-secret needs --policy: without rules a token reads nothing"),
+        (None, Some(_)) => fail("--policy needs --jwt-secret: the rules are for tokens it signs"),
+        (None, None) => {}
     }
 
     if ping {

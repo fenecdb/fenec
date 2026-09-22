@@ -220,9 +220,9 @@ collide with a field named <code>all</code>.</p>
 over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
 
 <div class="note trap">
-  <p><b>A shape is not a security boundary.</b> Which ids changed is visible to
-  a subscriber even when the rows are not. Hiding rows needs a separate
-  endpoint, or <code>--http-read-only</code> plus a token.</p>
+  <p><b>A shape alone is not a security boundary.</b> Under the server's own
+  token, which ids changed is visible to a subscriber even when the rows are
+  not. Rows are hidden by a scoped token, below.</p>
 </div>
 
 <pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 \
@@ -230,3 +230,51 @@ over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
          --http-token "$TOKEN" \
          --http-read-only
 </pre>
+
+<h2>Scoped access</h2>
+
+<p><code>--http-token</code> is everything or nothing. With
+<code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each
+held to the rules of a <code>--policy</code> file, collection by collection and
+down to the rows, so a browser can talk to the database directly with a token
+per user:</p>
+
+<pre data-lang="text"># collection   access       rows                                role
+notes          read,write   where owner = $jwt.sub
+posts          read         where published = true or author = $jwt.sub
+posts          write        where author = $jwt.sub
+*              read                                             for dashboard
+</pre>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
+         --jwt-secret-file jwt.secret --policy policy.txt
+
+fenec-pg --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456000}'
+</pre>
+
+<ul>
+  <li><b>Reads</b> get the rule's filter ANDed in at every level: the
+    collection's <code>where</code>, each <code>lookup</code> below it, a
+    subscription's shape, a <code>count</code>. A collection no rule lets a
+    token read does not exist for it: 404, and absent from the list.</li>
+  <li><b>Writes</b> get it twice, as PostgreSQL's <code>USING</code> and
+    <code>WITH CHECK</code>: a <code>set</code> or <code>del</code> touches only
+    the rows the filter matches, and every document written — a put, or a row
+    a <code>set</code> rewrote — has to match it afterwards, or the write is
+    refused with 403. A put that leaves out a field the filter pins to a claim
+    gets the claim's value, so <code>{"title":"a"}</code> is alice's. A scoped
+    put names no <code>id</code>, which could overwrite a row the token cannot
+    see, and a scoped token changes no schema and runs no maintenance.</li>
+  <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
+    subscriber hears of a row leaving its shape only if the row was in it,
+    so the ids other users write never reach it.</li>
+  <li><b>Tokens</b> are HS256 only — the algorithm is the server's, not the
+    token's, so <code>alg: none</code> is refused — and checked against
+    <code>exp</code> and <code>nbf</code>. A rule with <code>for</code> applies
+    to tokens whose <code>role</code> claim names that role; rules on one
+    collection widen each other; a rule whose filter names a claim the token
+    lacks does not apply. A subscription is checked when it opens.</li>
+</ul>
+
+<p>The server's own <code>--http-token</code> keeps full access alongside, and
+the PostgreSQL listener is not affected: it has its own password.</p>
