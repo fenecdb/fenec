@@ -81,8 +81,10 @@ saying there is no page cache, and it has three consequences.</p>
 
 <ul>
   <li><b>Open peaks at about 2× the file.</b> The file is read in one go, then
-    copied into segments. Measured: a 30.5 MB vector-free file reaches 65.5 MB
-    peak RSS.</li>
+    copied into segments, and the indexes are built from each document's
+    indexed fields alone. Measured: a 30.5 MB vector-free file reaches 65.5 MB
+    peak RSS; a 1 GB file of 2.3 million rows with a hash and an ordered
+    index, 2.3 GB of heap.</li>
   <li><b><code>checkpoint</code> and <code>compact</code> peak at about 3×.</b>
     The whole image is produced in memory and written to a side file. On the
     same file: 95.8 MB.</li>

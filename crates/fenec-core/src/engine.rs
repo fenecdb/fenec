@@ -1431,49 +1431,99 @@ impl Database {
             {
                 continue; // everything restored, no need to read the documents
             }
-            // The rebuild goes through the batch path as well.
-            let mut docs: Vec<Document> = Vec::with_capacity(ids.len());
-            for id in ids {
-                if let Some(doc) = c.store.read(&c.schema, id)? {
-                    for (field, map) in c.hashes.iter_mut() {
-                        if let Some(v) = doc.get(field) {
-                            map.entry(hash_key(v)).or_default().push(doc.id);
-                        }
-                    }
-                    for (field, ix) in c.texts.iter_mut() {
-                        if let Some(Value::Text(t)) = doc.get(field) {
-                            ix.insert(doc.id, t);
-                        }
-                    }
-                    docs.push(doc);
+            // The documents are read one at a time, and of each only the
+            // fields an index is built from. Decoding every document first
+            // held the collection a second time, bodies, field names and all:
+            // a 1 GB file of 2.3 million rows with a hash and an ordered
+            // index, which want one short field a row each, peaked at 4.2 GB
+            // of heap opening; read this way, at 2.3 GB.
+            let Collection {
+                schema,
+                store,
+                vectors,
+                hashes,
+                texts,
+                sorted,
+                ..
+            } = c;
+            // Each index beside its field's position, the ordered and vector
+            // ones with the rows they are built from afterwards. Pushed in
+            // loops: collected, the four lists were 2.5 KB of the browser
+            // module.
+            let mut hash_ix = Vec::new();
+            for (f, m) in hashes.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    hash_ix.push((p, m));
                 }
             }
-            for ix in c.texts.values_mut() {
+            let mut text_ix = Vec::new();
+            for (f, t) in texts.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    text_ix.push((p, t));
+                }
+            }
+            let mut sorted_ix = Vec::new();
+            for (f, ix) in sorted.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    sorted_ix.push((p, ix, Vec::new()));
+                }
+            }
+            let mut vector_ix = Vec::new();
+            for (f, ix) in vectors.iter_mut() {
+                if let Some(p) = schema.field_pos(f).filter(|_| !kept(f)) {
+                    vector_ix.push((p, ix, Vec::new()));
+                }
+            }
+            // In field order, as `read_fields` wants them; walked rather than
+            // sorted, since a sort was 2 KB of the browser module.
+            let mut positions = Vec::new();
+            for p in 0..schema.fields.len() {
+                if hash_ix.iter().any(|(q, _)| *q == p)
+                    || text_ix.iter().any(|(q, _)| *q == p)
+                    || sorted_ix.iter().any(|(q, ..)| *q == p)
+                    || vector_ix.iter().any(|(q, ..)| *q == p)
+                {
+                    positions.push(p);
+                }
+            }
+            let slot = |p: usize| positions.iter().position(|&q| q == p).unwrap_or(0);
+            // One field has one index, so each value is taken by one of them.
+            let mut vals = Vec::with_capacity(positions.len());
+            for id in ids {
+                if !store.read_fields(id, &positions, &mut vals)? {
+                    continue;
+                }
+                for (p, map) in hash_ix.iter_mut() {
+                    map.entry(hash_key(&vals[slot(*p)])).or_default().push(id);
+                }
+                for (p, ix) in text_ix.iter_mut() {
+                    if let Value::Text(t) = &vals[slot(*p)] {
+                        ix.insert(id, t);
+                    }
+                }
+                for (p, _, rows) in sorted_ix.iter_mut() {
+                    let v = std::mem::replace(&mut vals[slot(*p)], Value::Null);
+                    rows.push((id, Some(v)));
+                }
+                for (p, _, rows) in vector_ix.iter_mut() {
+                    if let Value::Vector(v) = std::mem::replace(&mut vals[slot(*p)], Value::Null) {
+                        rows.push((id, v));
+                    }
+                }
+            }
+            for (_, ix) in text_ix.iter_mut() {
                 ix.shrink_to_fit();
             }
-            // Built from the documents in one pass each, sorted once rather
-            // than inserted row by row.
-            for (field, ix) in c.sorted.iter_mut() {
-                let Some(fd) = c.schema.field(field) else {
-                    continue;
-                };
-                *ix = SortedIndex::build(
-                    &fd.ty,
-                    &mut docs.iter().map(|d| (d.id, d.get(field).cloned())),
+            // Each ordered index is sorted once from its keys rather than
+            // inserted row by row.
+            for (p, ix, rows) in sorted_ix.iter_mut() {
+                **ix = SortedIndex::build(
+                    &schema.fields[*p].ty,
+                    &mut std::mem::take(rows).into_iter(),
                 );
             }
-            for (field, ix) in c.vectors.iter_mut() {
-                if kept(field) {
-                    continue;
-                }
-                let items: Vec<(DocId, Vec<f32>)> = docs
-                    .iter()
-                    .filter_map(|d| match d.get(field) {
-                        Some(Value::Vector(v)) => Some((d.id, v.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                ix.insert_batch(&items);
+            for (_, ix, rows) in vector_ix.iter_mut() {
+                ix.insert_batch(rows);
             }
         }
         Ok(())

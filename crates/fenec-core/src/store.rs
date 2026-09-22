@@ -317,6 +317,11 @@ impl Store {
         if self.segments.last().map(|s| s.data.len()).unwrap_or(0) >= SEGMENT_MAX {
             if let Some(last) = self.segments.last_mut() {
                 last.sealed = true;
+                // A segment grows by doubling and is sealed just past 8 MiB,
+                // so it held up to twice its records: a 1 GB file's took
+                // 1.66 GB of heap. Sealed, it grows no more; one reallocation
+                // per 8 MiB gives the rest back.
+                last.data.shrink_to_fit();
             }
             self.segments.push(Segment::default());
         }
