@@ -46,6 +46,7 @@ POST   /&lt;name&gt;/near             body: {"vector":[...], "limit":10}
 GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental diff
 POST   /query                   body: {"query":"&lt;FenecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
+GET    /_metrics                counters and gauges, Prometheus's text format
 </pre>
 
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
@@ -53,6 +54,13 @@ as well: the stream a replica is fed, its status, and a replica's promotion —
 see <a href="/docs/replication">Replication</a>. It asks for that token
 rather than <code>--http-token</code>, and a collection named
 <code>_replication</code> is then out of HTTP's reach.</p>
+
+<p><code>/_metrics</code> is the server's statements, latency and data in
+Prometheus's text format, readable with <code>--http-token</code> or the
+admin token — see <a href="/docs/monitoring">Monitoring</a>. The underscore
+keeps it out of the way of a collection called <code>metrics</code>; a
+collection called <code>_metrics</code> cannot be read over
+<code>GET</code>.</p>
 
 <h2>Filters</h2>
 

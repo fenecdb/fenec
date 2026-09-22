@@ -26,13 +26,14 @@ use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_core::query::projection_columns;
 use fenec_core::value::DataType;
+use fenec_http::metrics::Transport;
 use fenec_ql::parse;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(1);
 
@@ -329,6 +330,7 @@ impl Server {
                 .stack_size(SESSION_STACK)
                 .spawn(move || {
                     let _guard = guard;
+                    let _open = fenec_http::metrics::Connection::open(Transport::Pg);
                     let peer = stream
                         .peer_addr()
                         .map(|a| a.to_string())
@@ -1512,10 +1514,31 @@ fn execute_into(
     out: &mut Writer,
     row_desc_sent: bool,
 ) {
-    let Some((durability, answer)) = run_locked(db, cfg, be, tx, sql, params, out, row_desc_sent)
-    else {
-        return;
-    };
+    let started = Instant::now();
+    let errors = out.errors();
+    let wait = run_locked(db, cfg, be, tx, sql, params, out, row_desc_sent);
+    if let Some((durability, answer)) = wait {
+        durable_or_refused(db, durability, answer, out);
+    }
+    fenec_http::metrics::record(
+        Transport::Pg,
+        started.elapsed(),
+        out.errors() > errors,
+        || match params.len() {
+            0 => sql.to_string(),
+            n => format!("{sql} ({n} parameters)"),
+        },
+    );
+}
+
+/// Waits for the disk under `--sync always`, the lock already let go; a
+/// write the disk refused has its answer replaced by the error.
+fn durable_or_refused(
+    db: &Arc<RwLock<Database>>,
+    durability: Durability,
+    answer: Option<usize>,
+    out: &mut Writer,
+) {
     if let Err(e) = durability() {
         fenec_http::log!("sync error: {e}");
         // The engine did not see this one fail: it is told, and refuses
@@ -1595,11 +1618,15 @@ fn run_locked(
     // database: readers and writers go on, and the write lock is taken only
     // to put the result in place (see `Database::maintain`).
     if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
+        fenec_http::metrics::wrote();
         return maintain(db, cfg, tx, stmt, out);
     }
 
     // A shared lock suffices when everything is read-only: reads flow in parallel.
     let needs_write = stmts.iter().any(|s| !s.is_read_only());
+    if needs_write {
+        fenec_http::metrics::wrote();
+    }
     let mut guard = match acquire(db, needs_write, be) {
         Some(g) => g,
         // `acquire` returns `None` both on cancellation and on shutdown; the

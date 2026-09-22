@@ -1,0 +1,13 @@
+# Scrapes fenec-pg's /_metrics. The path carries an underscore because a
+# collection may be called `metrics`; the token is the one fenec-pg takes as
+# --admin-token or --http-token, which docker-compose.yml writes to the file.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: fenecdb
+    metrics_path: /_metrics
+    authorization:
+      credentials_file: /prometheus/token
+    static_configs:
+      - targets: ["fenecdb:9464"]

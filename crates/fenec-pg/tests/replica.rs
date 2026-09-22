@@ -95,6 +95,21 @@ impl Node {
         let _ = self.child.wait();
     }
 
+    /// One sample of the scrape, by its exact name.
+    fn metric(&self, name: &str) -> Option<f64> {
+        let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        write!(
+            s,
+            "GET /_metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out.lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+    }
+
     fn post(&self, path: &str) -> (u16, String) {
         let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -200,6 +215,19 @@ fn a_replica_serves_reads_refuses_writes_and_takes_over_when_promoted() {
             .unwrap();
     }
     sees(&mut r, 60);
+    // What a dashboard watches of the two: the primary feeding one replica,
+    // the replica connected and caught up to the same sequence.
+    assert_eq!(primary.metric("fenec_replicas"), Some(1.0));
+    assert_eq!(replica.metric("fenec_replica_connected"), Some(1.0));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while replica.metric("fenec_replica_behind") != Some(0.0) {
+        assert!(Instant::now() < deadline, "the replica stayed behind");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        replica.metric("fenec_change_sequence"),
+        primary.metric("fenec_change_sequence")
+    );
     primary.signal(SIGKILL);
 
     let (status, body) = replica.post("/_replication/promote");

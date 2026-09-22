@@ -145,6 +145,13 @@ wait too and a healthy server would look dead. Measured at roughly 100 ms.</p>
 means "the index is ready" — a start period has to be long enough to cover the
 graph build.</p>
 
+<p>What the server is doing is at <code>/_metrics</code>, in Prometheus's
+text format: <code>--metrics &lt;address&gt;</code> opens a listener for it
+alone, for a server whose data goes over PostgreSQL only, and
+<code>--slow-ms &lt;ms&gt;</code> logs every statement at least that slow
+with its text. The metrics, a Grafana dashboard and the log are in
+<a href="/docs/monitoring">Monitoring</a>.</p>
+
 <h2>Query cancellation</h2>
 
 <p><code>CancelRequest</code> is a real cancellation: the pending lock is
@@ -251,7 +258,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>2.15 MB</b> on amd64 and 1.84 MB on arm64 — since no target
+package manager, no libc. The image is <b>2.19 MB</b> on amd64 and 1.90 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image

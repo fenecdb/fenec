@@ -43,6 +43,7 @@ pub mod api;
 pub mod archive;
 pub mod crypto;
 pub mod http;
+pub mod metrics;
 pub mod replication;
 pub mod sse;
 pub mod tenants;
@@ -146,6 +147,12 @@ enum Backend {
         repl: Option<Arc<Replication>>,
     },
     Tenants(Arc<Tenants>),
+    /// `--metrics <address>`: `/_metrics` and nothing else, for a server
+    /// whose data is served over the pg wire alone.
+    Metrics {
+        db: Arc<RwLock<Database>>,
+        repl: Option<Arc<Replication>>,
+    },
 }
 
 impl Server {
@@ -196,19 +203,37 @@ impl Server {
         }
     }
 
+    /// A listener that answers `/_metrics` and nothing else. Unlike
+    /// [`Server::new`] it leaves the database's watcher alone: a second
+    /// watcher would take the wake-ups from the subscriptions of the HTTP
+    /// endpoint serving the same database.
+    pub fn metrics_only(
+        db: Arc<RwLock<Database>>,
+        repl: Option<Arc<Replication>>,
+        cfg: Config,
+    ) -> Server {
+        Server {
+            backend: Backend::Metrics { db, repl },
+            cfg: Arc::new(cfg),
+            live: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     /// Number of live subscriptions (for measurement and tests). Single
     /// database only; a tenant's streams are counted on its own hub.
     pub fn live_streams(&self) -> usize {
         match &self.backend {
             Backend::Single { hub, .. } => hub.live(),
-            Backend::Tenants(_) => 0,
+            Backend::Tenants(_) | Backend::Metrics { .. } => 0,
         }
     }
 
     /// Opens the listener. A non-loopback address is not accepted without a
     /// token unless `--insecure` is given.
     pub fn bind(&self) -> std::io::Result<TcpListener> {
-        let guarded = self.cfg.token.is_some() || self.cfg.access.is_some();
+        let guarded = self.cfg.token.is_some()
+            || self.cfg.access.is_some()
+            || matches!(self.backend, Backend::Metrics { .. }) && self.cfg.admin_token.is_some();
         if is_remote(&self.cfg.addr) && !guarded && !self.cfg.insecure {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -230,21 +255,34 @@ impl Server {
     }
 
     pub fn serve_on(&self, listener: TcpListener) -> std::io::Result<()> {
-        crate::log!(
-            "fenec-http {} listening on: http://{}  [{}{}]",
-            fenec_core::VERSION,
-            listener.local_addr()?,
-            if self.cfg.token.is_some() {
-                "token"
-            } else {
-                "no auth"
-            },
-            if self.cfg.read_only {
-                ", read only"
-            } else {
-                ""
-            },
-        );
+        metrics::started();
+        let auth = if self.cfg.token.is_some() || self.cfg.admin_token.is_some() {
+            "token"
+        } else {
+            "no auth"
+        };
+        if matches!(self.backend, Backend::Metrics { .. }) {
+            crate::log!(
+                "metrics on: http://{}/_metrics  [{auth}]",
+                listener.local_addr()?
+            );
+        } else {
+            crate::log!(
+                "fenec-http {} listening on: http://{}  [{}{}]",
+                fenec_core::VERSION,
+                listener.local_addr()?,
+                if self.cfg.token.is_some() {
+                    "token"
+                } else {
+                    "no auth"
+                },
+                if self.cfg.read_only {
+                    ", read only"
+                } else {
+                    ""
+                },
+            );
+        }
 
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
@@ -344,6 +382,11 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     };
     let mut reader = BufReader::new(stream);
     let mut out = write_half;
+    // After the socket, so it is dropped first: a client that saw the
+    // connection close finds it no longer counted. A scrape is not one of
+    // the database's clients.
+    let _open = (!matches!(backend, Backend::Metrics { .. }))
+        .then(|| metrics::Connection::open(metrics::Transport::Http));
 
     // The body is read before the path is looked at, so in tenant mode the
     // reading ceiling is the larger of the two and a data request over
@@ -367,12 +410,32 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
 
+        // Before any routing: the metrics are the node's, not a tenant's.
+        let scrape =
+            matches!(req.method, Method::Get | Method::Head) && req.segments() == ["_metrics"];
+        if scrape || matches!(backend, Backend::Metrics { .. }) {
+            let resp = match backend {
+                _ if !scrape => Response::error(404, "this listener serves /_metrics alone"),
+                Backend::Single { db, repl, .. } | Backend::Metrics { db, repl } => {
+                    let repl = repl.as_deref();
+                    metrics::handle(cfg, &req, metrics::Source::Single { db, repl })
+                }
+                Backend::Tenants(t) => {
+                    metrics::handle(cfg, &req, metrics::Source::Tenants(t.stats()))
+                }
+            };
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
         // close without the registry knowing.
         let tenant = match backend {
-            Backend::Single { .. } => None,
+            Backend::Single { .. } | Backend::Metrics { .. } => None,
             Backend::Tenants(tenants) => match route_tenant(tenants, cfg, &mut req) {
                 Ok(t) => Some(t),
                 Err(resp) => {
@@ -387,7 +450,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         let (db, hub) = match (&tenant, backend) {
             (Some(t), _) => (&t.db, &t.hub),
             (None, Backend::Single { db, hub, .. }) => (db, hub),
-            (None, Backend::Tenants(_)) => unreachable!("routed above"),
+            (None, Backend::Tenants(_) | Backend::Metrics { .. }) => unreachable!("routed above"),
         };
         if let Backend::Single {
             repl: Some(repl), ..
@@ -430,10 +493,20 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             sse::serve(&mut out, db, cfg, hub, &req, &who);
             return;
         }
+        let started = std::time::Instant::now();
         let resp = match &tenant {
             None => handle(db, cfg, &req),
             Some(t) => handle_tenant(t, cfg, &req),
         };
+        // A preflight is the browser's, not a statement.
+        if req.method != Method::Options {
+            metrics::record(
+                metrics::Transport::Http,
+                started.elapsed(),
+                resp.status >= 400,
+                || describe(&req),
+            );
+        }
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.
         drop(tenant);
@@ -442,6 +515,17 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             return;
         }
     }
+}
+
+/// What the slow-statement log says a request was: its method and target,
+/// and for raw FenecQL the statements, which the target does not hold.
+fn describe(req: &Request) -> String {
+    let mut s = format!("{} {}", req.method.name(), req.target);
+    if matches!(req.segments().as_slice(), ["query"] | ["batch"]) {
+        s.push(' ');
+        s.push_str(&String::from_utf8_lossy(&req.body));
+    }
+    s
 }
 
 /// Resolves `/t/<tenant>/rest` and strips the prefix, so everything below
@@ -546,6 +630,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // is released between the schema lookup and execution, a `drop
     // collection` arriving in between leaves the two stages inconsistent.
     if wants_write(req) {
+        metrics::wrote();
         let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
@@ -605,6 +690,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     if cfg.read_only && !stmt.is_read_only() {
         return Response::error(403, "the server is in read-only mode");
+    }
+    if !stmt.is_read_only() {
+        metrics::wrote();
     }
 
     let result = if stmt.is_read_only() {
@@ -672,6 +760,9 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     };
     if cfg.read_only && stmts.iter().any(|(s, _)| !s.is_read_only()) {
         return Response::error(403, "the server is in read-only mode");
+    }
+    if stmts.iter().any(|(s, _)| !s.is_read_only()) {
+        metrics::wrote();
     }
 
     let mut guard = db.write().unwrap_or_else(|e| e.into_inner());

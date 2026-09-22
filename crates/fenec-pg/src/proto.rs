@@ -35,6 +35,9 @@ pub const OID_UNSPECIFIED: i32 = 0;
 
 pub struct Writer {
     buf: Vec<u8>,
+    /// ErrorResponses written so far: how a statement's caller tells, for
+    /// the metrics, that it ended in one.
+    errors: u64,
 }
 
 impl Default for Writer {
@@ -45,7 +48,10 @@ impl Default for Writer {
 
 impl Writer {
     pub fn new() -> Writer {
-        Writer { buf: Vec::new() }
+        Writer {
+            buf: Vec::new(),
+            errors: 0,
+        }
     }
 
     /// Writes a tagged message; the length field is filled in automatically.
@@ -202,7 +208,13 @@ impl Writer {
 
     /// SQLSTATE codes: 42601 syntax, 42P01 no such table, XX000 internal
     pub fn error(&mut self, code: &str, message: &str) {
+        self.errors += 1;
         self.diagnostic(b'E', "ERROR", code, message);
+    }
+
+    /// How many ErrorResponses have been written.
+    pub fn errors(&self) -> u64 {
+        self.errors
     }
 
     /// NoticeResponse: a warning that lands in the client's log without

@@ -58,7 +58,7 @@ fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
      |                                fenec-catalog (pg_catalog SQL, core only)
-fenec-http  (REST/JSON + SSE, tenant registry, replication)
+fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
      |                     \
 fenec-pg    (wire protocol:  fenec-shard (tenant router: directory,
      |      server AND client,            placement, move)
@@ -402,6 +402,19 @@ not build, answer empty -- the old behaviour -- so a tool never stalls. It is
 a crate of its own so that it can be built for size (`opt-level = "z"`): at
 opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
 queries 1.2-1.5x slower. The CLI and the browser module link none of it.
+
+**`/_metrics` counts at the edge, a shard per thread.** A statement is timed
+in `execute_into` (pg) and around `handle` (HTTP), from arrival to answer, so
+the lock wait and the `--sync always` fsync are in it; whether it wrote is a
+thread-local set where the write lock is taken (`metrics::wrote`), since a
+connection is a thread running one statement at a time. The counters are
+sixteen 128-byte-aligned shards handed to threads in turn: eight threads
+counting into one set cost 720 ns a statement, 6.7 ns with the shards. The
+path has an underscore because a collection may be called `metrics`.
+`--metrics <addr>` is a listener for it alone that never attaches a watcher
+-- a second one would take the HTTP endpoint's subscription wake-ups -- and a
+tenant node publishes counts of its tenants, never a tenant's collection
+names.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

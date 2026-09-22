@@ -441,6 +441,61 @@ pub fn handle(
     }
 }
 
+impl Replication {
+    /// A scrape's part of it: how many replicas a primary feeds, and how far
+    /// a replica trails -- the same figures `/_replication/status` gives.
+    pub(crate) fn metrics(&self, out: &mut crate::metrics::Text, seq: u64) {
+        if self.feed.is_some() {
+            out.family("fenec_replicas", "gauge", "Replicas being fed now.");
+            out.sample("fenec_replicas", &[], lock(&self.streams).len());
+        }
+        let Some(f) = &self.follower else {
+            return;
+        };
+        let st = lock(&f.state).clone();
+        out.family(
+            "fenec_replica_connected",
+            "gauge",
+            "1 while this replica is connected to its primary.",
+        );
+        out.sample("fenec_replica_connected", &[], st.connected as u8);
+        out.family(
+            "fenec_replica_behind",
+            "gauge",
+            "Writes on the primary's disk this replica has not applied.",
+        );
+        out.sample(
+            "fenec_replica_behind",
+            &[],
+            st.primary_durable.saturating_sub(seq),
+        );
+        if let Some(t) = st.contact {
+            out.family(
+                "fenec_replica_last_contact_seconds",
+                "gauge",
+                "Since the primary was last heard from, a keep-alive included.",
+            );
+            out.sample(
+                "fenec_replica_last_contact_seconds",
+                &[],
+                t.elapsed().as_secs_f64(),
+            );
+        }
+        out.family(
+            "fenec_replica_images_total",
+            "counter",
+            "Whole images taken from the primary: at the start, and after falling behind its buffer.",
+        );
+        out.sample("fenec_replica_images_total", &[], st.images);
+        out.family(
+            "fenec_replica_reconnects_total",
+            "counter",
+            "Connections to the primary made again after one was lost.",
+        );
+        out.sample("fenec_replica_reconnects_total", &[], st.reconnects);
+    }
+}
+
 fn status(db: &Arc<RwLock<Database>>, repl: &Replication) -> Response {
     let (seq, history, following) = {
         let g = db.read().unwrap_or_else(|e| e.into_inner());

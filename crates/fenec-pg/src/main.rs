@@ -83,6 +83,15 @@ usage: fenec-pg [options]
                             writes per second, 4096 is a ~40 second window.
                             24 bytes per entry
 
+      --slow-ms <ms>        log every statement that takes this long or longer,
+                            with its text: pg and HTTP alike, from its arrival
+                            to its answer. Off by default
+      --metrics <address>   serve /_metrics, and nothing else, here -- for a
+                            server with no --http. With --http, the HTTP
+                            listener serves it too. Readable with
+                            --http-token or --admin-token; a non-loopback
+                            address wants one of them (or --insecure)
+
       --replication-token <value>  turn replication on: /_replication on the
                             HTTP listener feeds replicas the writes on this
                             file's disk, reports status, and promotes a
@@ -171,6 +180,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut http: Option<String> = None;
+    let mut metrics: Option<String> = None;
     let mut http_cfg = fenec_http::Config::default();
 
     let mut i = 0;
@@ -240,6 +250,14 @@ fn main() {
                 cfg.max_message = mib << 20;
             }
             "--http" => http = Some(next(&mut i, "--http")),
+            "--metrics" => metrics = Some(next(&mut i, "--metrics")),
+            "--slow-ms" => {
+                let v = next(&mut i, "--slow-ms");
+                let ms: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--slow-ms expects milliseconds, got `{v}`"))
+                });
+                fenec_http::metrics::set_slow(ms);
+            }
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
             "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
             "--jwt-secret-file" => {
@@ -360,6 +378,9 @@ fn main() {
         let Some(addr) = http else {
             fail("--dir serves tenants over HTTP: give --http <address>");
         };
+        if metrics.is_some() {
+            fail("with --dir the HTTP listener serves /_metrics: --metrics is for a --file server");
+        }
         http_cfg.addr = addr;
         http_cfg.insecure = cfg.insecure;
         http_cfg.max_connections = cfg.max_connections;
@@ -451,6 +472,31 @@ fn main() {
     // Before the HTTP thread announces its listener, as `Server::serve_on`
     // does before its own: the flag a signal sets waits for the syncer.
     server::install_signal_handlers();
+
+    // `--metrics`: /_metrics alone on a listener of its own, readable with
+    // the tokens the HTTP endpoint takes.
+    if let Some(addr) = metrics {
+        let mcfg = fenec_http::Config {
+            addr,
+            token: http_cfg.token.clone(),
+            admin_token: http_cfg.admin_token.clone(),
+            insecure: cfg.insecure,
+            idle_timeout: cfg.idle_timeout,
+            ..fenec_http::Config::default()
+        };
+        let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
+        let listener = server
+            .bind()
+            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")));
+        std::thread::Builder::new()
+            .name("fenec-metrics".into())
+            .spawn(move || {
+                if let Err(e) = server.serve_on(listener) {
+                    fenec_http::log!("metrics server error: {e}");
+                }
+            })
+            .unwrap_or_else(|e| fail(&format!("could not start the metrics thread: {e}")));
+    }
 
     // The HTTP endpoint shares the same database: as a separate binary it
     // would open the same file from two processes and corrupt it (fenecdb is

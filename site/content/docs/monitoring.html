@@ -1,0 +1,129 @@
+<!--
+title: Monitoring — fenecdb
+description: /_metrics in Prometheus's text format, a Grafana dashboard ready to load, and a log of the statements over --slow-ms.
+-->
+
+<h1>Monitoring</h1>
+<p class="kicker">fenec-pg counts every statement it answers — over PostgreSQL
+and over HTTP, reads and writes apart, with how long each took — and serves
+the counts at <code>/_metrics</code> in Prometheus's text format. A Grafana
+dashboard comes with it, and <code>--slow-ms</code> logs every statement over
+a threshold with its text.</p>
+
+<pre data-lang="bash"># data over PostgreSQL alone: /_metrics on a listener of its own
+fenec-pg --file data.fenec --listen 0.0.0.0:5433 \
+         --metrics 0.0.0.0:9464 --admin-token "$SCRAPE" --slow-ms 100
+
+curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
+# fenec_statements_total{transport="pg",kind="read"} 1834
+# fenec_statement_duration_seconds_bucket{transport="pg",kind="read",le="0.001"} 1790
+# fenec_documents{collection="people"} 90000
+# ...
+</pre>
+
+<p>With <code>--http</code> the HTTP listener serves <code>/_metrics</code>
+as well, and a <code>--dir</code> node serves it there. The path carries an
+underscore, as <code>/_admin</code> and <code>/_replication</code> do: a
+collection may well be called <code>metrics</code>, and
+<code>GET /metrics</code> is how its rows are read. Prometheus takes the path
+as <code>metrics_path</code>.</p>
+
+<p>A scrape needs the server's token (<code>--http-token</code>) or the admin
+token (<code>--admin-token</code>); with neither and no JSON Web Tokens the
+server is open, and so are its metrics. A JWT is not taken: a user held to a
+policy must not learn the other collections' names from a scrape. A
+<code>--metrics</code> address outside loopback wants one of the two tokens,
+as the HTTP listener does, or <code>--insecure</code>.</p>
+
+<h2>What is counted</h2>
+
+<p>A statement is timed from its arrival to its answer: the wait for the lock
+is in it, and under <code>--sync always</code> the wait for the disk, since
+that is the latency a client sees. Over PostgreSQL a statement is a query
+string; over HTTP it is a request, and <code>/batch</code> is one however
+many statements it carries. A statement that took the write lock is a write,
+so a <code>get</code> sent through <code>POST /query</code> is a read.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
+<tbody>
+<tr><td><code>fenec_statements_total{transport, kind}</code></td><td>counter</td><td>statements answered; <code>transport</code> is <code>pg</code> or <code>http</code>, <code>kind</code> is <code>read</code> or <code>write</code></td></tr>
+<tr><td><code>fenec_statement_errors_total{transport, kind}</code></td><td>counter</td><td>statements answered with an error, the client's (a typo, a 404) or the server's</td></tr>
+<tr><td><code>fenec_statement_duration_seconds{transport, kind}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
+<tr><td><code>fenec_slow_statements_total{transport}</code></td><td>counter</td><td>statements over <code>--slow-ms</code>, each also in the log</td></tr>
+<tr><td><code>fenec_connections{transport}</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
+<tr><td><code>fenec_documents{collection}</code></td><td>gauge</td><td>documents in a collection</td></tr>
+<tr><td><code>fenec_data_bytes{collection}</code>, <code>fenec_dead_bytes{collection}</code></td><td>gauge</td><td>live records, and the overwritten and deleted ones <code>compact</code> gives back</td></tr>
+<tr><td><code>fenec_memory_bytes</code></td><td>gauge</td><td>the data footprint <code>--max-memory</code> holds to — not RSS: opening peaks at about twice the file, <code>compact</code> at three times</td></tr>
+<tr><td><code>fenec_change_sequence</code></td><td>gauge</td><td>the last write's sequence number; its rate is the writes per second, from any transport</td></tr>
+<tr><td><code>fenec_storage_failed</code></td><td>gauge</td><td>1 once the disk refused a write: writes stop until the file is reopened, reads go on</td></tr>
+<tr><td><code>fenec_replicas</code></td><td>gauge</td><td>on a primary, the replicas streaming from it</td></tr>
+<tr><td><code>fenec_replica_connected</code>, <code>fenec_replica_behind</code></td><td>gauge</td><td>on a replica: whether it hears its primary, and the writes on the primary's disk it has not applied</td></tr>
+<tr><td><code>fenec_replica_last_contact_seconds</code></td><td>gauge</td><td>since the primary was last heard from, a keep-alive included</td></tr>
+<tr><td><code>fenec_replica_images_total</code>, <code>fenec_replica_reconnects_total</code></td><td>counter</td><td>whole images taken, and connections made again</td></tr>
+<tr><td><code>fenec_tenants</code>, <code>fenec_tenants_open</code>, <code>fenec_tenants_disk_bytes</code></td><td>gauge</td><td>on a <code>--dir</code> node: tenants on disk, open, and their files together</td></tr>
+<tr><td><code>fenec_build_info{version}</code>, <code>fenec_start_time_seconds</code></td><td>gauge</td><td>the version running, and when the process started</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A tenant node counts its tenants and not what they hold: a tenant's
+collection names are not the node's to publish, and a label per tenant would
+be as many series as there are customers. The statement counters are one set
+per process, and start again at zero with it, which <code>rate()</code> takes
+in its stride.</p>
+
+<h2>The dashboard</h2>
+
+<p><code>monitoring/</code> in the repository holds a Grafana dashboard
+(<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
+file that runs fenec-pg with both, the dashboard already loaded:</p>
+
+<pre data-lang="bash">FENECPG_PASSWORD=secret FENEC_METRICS_TOKEN=scrape \
+  docker compose -f monitoring/docker-compose.yml up -d
+# Grafana: http://127.0.0.1:3000/d/fenecdb     Prometheus: http://127.0.0.1:9090
+</pre>
+
+<p>It opens on the figures that decide whether anything needs doing — the
+version and uptime, whether the disk has refused a write, statements and
+errors per second, the memory footprint — then statements by transport and
+kind with their p50 and p99, errors, and slow statements a minute; documents,
+writes a second and each collection's dead share, the one that says when to
+<code>compact</code>; replication; and tenants. The instance variable picks
+one server or all of them. Imported on its own, the dashboard asks for a
+Prometheus data source.</p>
+
+<pre data-lang="text"># the p99 of reads over PostgreSQL, over five minutes
+histogram_quantile(0.99, sum by (le) (rate(fenec_statement_duration_seconds_bucket{transport="pg",kind="read"}[5m])))
+
+# worth an alert
+fenec_storage_failed == 1
+fenec_replica_behind > 10000
+fenec_dead_bytes / (fenec_data_bytes + fenec_dead_bytes) > 0.5
+</pre>
+
+<h2>Slow statements</h2>
+
+<p><code>--slow-ms 100</code> writes every statement that took 100 ms or
+longer to the log, pg and HTTP alike, with the same timing the histogram
+has:</p>
+
+<pre data-lang="text">slow statement: 312.4 ms, pg read: get people select name order name collate tr
+slow statement: 148.9 ms, http write: POST /batch {"query":"put orders {person: 7, total: 4200}"} {"query":...</pre>
+
+<p>A parameter's value is not logged, only how many there were: a value bound
+as <code>$1</code> stays out of the log, a literal written into the text does
+not. Over HTTP the line is the method and the target, and for
+<code>/query</code> and <code>/batch</code> the body that holds the
+statements. A line is cut at 1 000 bytes, so a bulk <code>put</code> of a
+megabyte shows what it was without being all of it.</p>
+
+<h2>What it costs</h2>
+
+<p>Counting a statement is a handful of relaxed atomic adds, into counters a
+thread each: 6.7 ns a statement with eight threads counting at once. Into one
+shared set of counters the same eight cost 720 ns each, the cache line moving
+from core to core, which is why they are spread. A scrape reads the gauges
+under the database's shared lock, beside the readers and ahead of a writer
+for as long as a <code>count</code> would be.</p>
