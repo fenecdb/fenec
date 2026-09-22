@@ -31,10 +31,13 @@
 //! ```text
 //! H  hello   [version: 1][image: u8][seq u64][durable u64][time_ms u64][history]
 //! I  image   the database as of the hello's seq (when `image` is 1)
-//! W  writes  [first seq u64][time_ms u64][records]
+//! W  writes  [first seq u64][n u64][n x time_ms u64][n records]
 //! K  alive   [seq u64][durable u64][time_ms u64]
 //! E  end     why, in UTF-8; the stream closes after it
 //! ```
+//!
+//! A write's time is when the primary appended it, which is what a restore
+//! to a moment goes by (see [`crate::archive`]).
 //!
 //! `&image=1` asks for an image whatever the positions say: a replica sends
 //! it after a record it could not apply.
@@ -128,12 +131,14 @@ struct Ring {
 struct Chunk {
     first: u64,
     data: Vec<u8>,
-    /// Where each record ends in `data`.
+    /// Where each record ends in `data`, and when it was appended.
     ends: Vec<usize>,
+    times: Vec<u64>,
 }
 
 enum Next {
-    Records(u64, Vec<u8>),
+    /// The first one's number, their times, the records.
+    Records(u64, Vec<u64>, Vec<u8>),
     Nothing,
     /// The records after the cursor are no longer kept.
     Behind,
@@ -204,11 +209,13 @@ impl Feed {
                 first: seq,
                 data: Vec::new(),
                 ends: Vec::new(),
+                times: Vec::new(),
             });
         }
         let c = r.chunks.back_mut().unwrap();
         c.data.extend_from_slice(bytes);
         c.ends.push(c.data.len());
+        c.times.push(now_ms());
         r.bytes += bytes.len();
         r.seq = seq;
         while r.bytes > r.cap && r.chunks.len() > 1 {
@@ -251,6 +258,7 @@ impl Feed {
             return Next::Behind;
         };
         let mut out = Vec::new();
+        let mut times = Vec::new();
         let mut seq = first;
         'chunks: for c in r.chunks.iter().skip(at) {
             let mut k = (seq - c.first) as usize;
@@ -261,6 +269,7 @@ impl Feed {
                     break 'chunks;
                 }
                 out.extend_from_slice(&c.data[start..end]);
+                times.push(c.times[k]);
                 seq += 1;
                 k += 1;
             }
@@ -268,7 +277,7 @@ impl Feed {
                 break;
             }
         }
-        Next::Records(first, out)
+        Next::Records(first, times, out)
     }
 
     /// Waits until a write after `cursor` is on disk, the feed starts over,
@@ -456,7 +465,7 @@ fn status(db: &Arc<RwLock<Database>>, repl: &Replication) -> Response {
     if let Some(f) = &repl.follower {
         let st = lock(&f.state).clone();
         out.push_str(",\"primary\":");
-        fenec_core::json::escape_into(&mut out, &f.url);
+        fenec_core::json::escape_into(&mut out, f.upstream.url());
         out.push_str(&format!(
             ",\"connected\":{},\"primary_durable\":{},\"behind\":{},\"last_contact_ms\":{},\"images\":{},\"reconnects\":{}",
             st.connected,
@@ -570,14 +579,14 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     let mut cursor = seq;
     loop {
         match feed.next(cursor, epoch, MESSAGE) {
-            Next::Records(first, records) => {
-                let count = count_records(&records);
-                let sent = message(&mut w, b'W', &[&u64s(&[first, now_ms()]), &records])
+            Next::Records(first, times, records) => {
+                let n = times.len() as u64;
+                let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
                     .and_then(|_| w.flush());
                 if sent.is_err() {
                     return;
                 }
-                cursor = first + count - 1;
+                cursor = first + n - 1;
                 if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
                     s.sent = cursor;
                 }
@@ -620,32 +629,147 @@ impl Drop for Unlist<'_> {
     }
 }
 
-/// How many whole records `bytes` holds.
-fn count_records(bytes: &[u8]) -> u64 {
-    let mut pos = 0;
-    let mut n = 0;
-    while pos < bytes.len() {
-        pos += 1;
-        let (Ok(_), Ok(len)) = (
-            fenec_core::codec::get_uvarint(bytes, &mut pos),
-            fenec_core::codec::get_uvarint(bytes, &mut pos),
-        ) else {
-            break;
-        };
-        pos += len as usize;
-        n += 1;
-    }
-    n
+// ------------------------------------------------------ the receiving side
+
+/// A primary to be fed from: its address, and the token it asks for.
+#[derive(Clone)]
+pub struct Upstream {
+    url: String,
+    addr: String,
+    token: String,
 }
 
-// ------------------------------------------------------------- the replica
+/// A message of the stream, decoded.
+pub enum Message {
+    /// Where the stream starts: `seq`, and the primary's disk at `durable`.
+    /// An [`Message::Image`] follows when `image` is set.
+    Hello {
+        image: bool,
+        seq: u64,
+        durable: u64,
+        lineage: Vec<(u64, u64)>,
+    },
+    Image(Vec<u8>),
+    /// Writes numbered on from `first`, each with the time it was appended.
+    Writes {
+        first: u64,
+        times: Vec<u64>,
+        records: Vec<u8>,
+    },
+    Alive {
+        durable: u64,
+    },
+    End(String),
+}
+
+impl Upstream {
+    /// `url` is the primary's HTTP address, `http://host:port`. There is no
+    /// TLS here either: across an open network, a tunnel carries it.
+    pub fn new(url: &str, token: String) -> std::result::Result<Upstream, String> {
+        let rest = url.strip_prefix("http://").ok_or_else(|| {
+            format!("a primary is http://host:port, not `{url}` (there is no TLS)")
+        })?;
+        let addr = rest.trim_end_matches('/').to_string();
+        if addr.is_empty() || addr.contains('/') {
+            return Err(format!("a primary is http://host:port, not `{url}`"));
+        }
+        Ok(Upstream {
+            url: url.trim_end_matches('/').to_string(),
+            addr,
+            token,
+        })
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Opens the stream for a database `since` changes in on `history`;
+    /// `image` asks for one whatever the positions say.
+    pub fn open(&self, since: u64, history: u64, image: bool) -> io::Result<Receiver> {
+        let s = connect(&self.addr)?;
+        s.set_read_timeout(Some(SILENCE))?;
+        s.set_write_timeout(Some(SILENCE))?;
+        let request = format!(
+            "GET /_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
+             Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
+            if image { "&image=1" } else { "" },
+            self.addr,
+            self.token
+        );
+        (&s).write_all(request.as_bytes())?;
+        let conn = s.try_clone()?;
+        let mut r = BufReader::with_capacity(MESSAGE + 64, s);
+        let (status, length) = read_head(&mut r)?;
+        if status != 200 {
+            let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
+            r.read_exact(&mut body)?;
+            return Err(io::Error::other(format!(
+                "the primary answered {status}: {}",
+                String::from_utf8_lossy(&body)
+            )));
+        }
+        Ok(Receiver { r, conn })
+    }
+}
+
+/// An open stream.
+pub struct Receiver {
+    r: BufReader<TcpStream>,
+    conn: TcpStream,
+}
+
+impl Receiver {
+    /// A handle to cut the stream from another thread: a read waiting on
+    /// it returns.
+    pub fn handle(&self) -> io::Result<TcpStream> {
+        self.conn.try_clone()
+    }
+
+    pub fn receive(&mut self) -> io::Result<Message> {
+        let bad = || io::Error::other("the primary sent a message it should not");
+        let (tag, body) = read_message(&mut self.r)?;
+        Ok(match tag {
+            b'H' => {
+                if body.len() < 26 || body[0] != VERSION {
+                    return Err(io::Error::other("the primary speaks another protocol"));
+                }
+                Message::Hello {
+                    image: body[1] == 1,
+                    seq: u64_at(&body, 2),
+                    durable: u64_at(&body, 10),
+                    lineage: History::decode(&body[26..])
+                        .map_err(|e| io::Error::other(e.to_string()))?
+                        .lineage,
+                }
+            }
+            b'I' => Message::Image(body),
+            b'W' => {
+                let n = body.get(8..16).ok_or_else(bad)?;
+                let n = u64::from_le_bytes(n.try_into().unwrap()) as usize;
+                let at = 16 + 8 * n;
+                if body.len() < at {
+                    return Err(bad());
+                }
+                Message::Writes {
+                    first: u64_at(&body, 0),
+                    times: (0..n).map(|i| u64_at(&body, 16 + 8 * i)).collect(),
+                    records: body[at..].to_vec(),
+                }
+            }
+            b'K' if body.len() >= 24 => Message::Alive {
+                durable: u64_at(&body, 8),
+            },
+            b'E' => Message::End(String::from_utf8_lossy(&body).into_owned()),
+            _ => return Err(bad()),
+        })
+    }
+}
 
 /// A replica's side: connects to the primary, applies what it is sent, and
 /// connects again when the stream ends -- until it is promoted.
 pub struct Follower {
-    url: String,
-    addr: String,
-    token: String,
+    upstream: Upstream,
     db: Arc<RwLock<Database>>,
     /// This server's own feed, when it has replicas of its own.
     feed: Option<Arc<Feed>>,
@@ -670,8 +794,6 @@ struct State {
 }
 
 impl Follower {
-    /// `url` is the primary's HTTP address, `http://host:port`. There is no
-    /// TLS here either: across an open network, a tunnel carries it.
     pub fn new(
         url: &str,
         token: String,
@@ -679,17 +801,8 @@ impl Follower {
         feed: Option<Arc<Feed>>,
         sync_each: bool,
     ) -> std::result::Result<Arc<Follower>, String> {
-        let rest = url.strip_prefix("http://").ok_or_else(|| {
-            format!("--replica-of takes http://host:port, got `{url}` (there is no TLS)")
-        })?;
-        let addr = rest.trim_end_matches('/').to_string();
-        if addr.is_empty() || addr.contains('/') {
-            return Err(format!("--replica-of takes http://host:port, got `{url}`"));
-        }
         Ok(Arc::new(Follower {
-            url: url.trim_end_matches('/').to_string(),
-            addr,
-            token,
+            upstream: Upstream::new(url, token)?,
             db,
             feed,
             sync_each,
@@ -756,47 +869,24 @@ impl Follower {
             let g = self.db.read().unwrap_or_else(|e| e.into_inner());
             (g.change_seq(), g.history().current())
         };
-        let s = connect(&self.addr)?;
-        s.set_read_timeout(Some(SILENCE))?;
-        s.set_write_timeout(Some(SILENCE))?;
-        *lock(&self.conn) = Some(s.try_clone()?);
+        let mut stream = self.upstream.open(since, history, *force_image)?;
+        *lock(&self.conn) = Some(stream.handle()?);
         if self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let request = format!(
-            "GET /_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
-             Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
-            if *force_image { "&image=1" } else { "" },
-            self.addr,
-            self.token
-        );
-        (&s).write_all(request.as_bytes())?;
-        let mut r = BufReader::with_capacity(MESSAGE + 64, s);
-        let (status, length) = read_head(&mut r)?;
-        if status != 200 {
-            let mut body = vec![0u8; length.unwrap_or(0).min(64 << 10)];
-            r.read_exact(&mut body)?;
-            return Err(io::Error::other(format!(
-                "the primary answered {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
-        }
-
-        let (tag, hello) = read_message(&mut r)?;
-        if tag != b'H' || hello.len() < 26 || hello[0] != VERSION {
-            return Err(io::Error::other("the primary speaks another protocol"));
-        }
-        let image = hello[1] == 1;
-        let seq = u64_at(&hello, 2);
-        let durable = u64_at(&hello, 10);
-        let lineage = History::decode(&hello[26..])
-            .map_err(|e| io::Error::other(e.to_string()))?
-            .lineage;
+        let Message::Hello {
+            image,
+            seq,
+            durable,
+            lineage,
+        } = stream.receive()?
+        else {
+            return Err(io::Error::other("the primary did not say hello"));
+        };
         if image {
-            let (tag, bytes) = read_message(&mut r)?;
-            if tag != b'I' {
+            let Message::Image(bytes) = stream.receive()? else {
                 return Err(io::Error::other("the primary promised an image"));
-            }
+            };
             // Loaded before the lock is taken: reads go on meanwhile.
             let mut fresh = Database::new();
             fresh.load(&bytes).map_err(io::Error::other)?;
@@ -825,10 +915,8 @@ impl Follower {
         }
 
         loop {
-            let (tag, body) = read_message(&mut r)?;
-            match tag {
-                b'W' if body.len() >= 16 => {
-                    let first = u64_at(&body, 0);
+            match stream.receive()? {
+                Message::Writes { first, records, .. } => {
                     let mut g = self.db.write().unwrap_or_else(|e| e.into_inner());
                     if first != g.change_seq() + 1 {
                         *force_image = true;
@@ -837,7 +925,7 @@ impl Follower {
                             g.change_seq()
                         )));
                     }
-                    if let Err(e) = g.apply(&body[16..]) {
+                    if let Err(e) = g.apply(&records) {
                         *force_image = true;
                         return Err(io::Error::other(format!("could not apply a write: {e}")));
                     }
@@ -859,16 +947,12 @@ impl Follower {
                     st.primary_durable = st.primary_durable.max(at);
                     st.contact = Some(Instant::now());
                 }
-                b'K' if body.len() >= 24 => {
+                Message::Alive { durable } => {
                     let mut st = lock(&self.state);
-                    st.primary_durable = u64_at(&body, 8);
+                    st.primary_durable = durable;
                     st.contact = Some(Instant::now());
                 }
-                b'E' => {
-                    return Err(io::Error::other(
-                        String::from_utf8_lossy(&body).into_owned(),
-                    ))
-                }
+                Message::End(why) => return Err(io::Error::other(why)),
                 _ => return Err(io::Error::other("the primary sent a message it should not")),
             }
         }
@@ -1002,9 +1086,10 @@ mod tests {
         assert!(matches!(feed.next(10, epoch, MESSAGE), Next::Nothing));
         feed.mark_durable(13);
         match feed.next(10, epoch, MESSAGE) {
-            Next::Records(first, bytes) => {
+            Next::Records(first, times, bytes) => {
                 assert_eq!(first, 11);
-                assert_eq!(count_records(&bytes), 3);
+                assert_eq!(times.len(), 3);
+                assert_eq!(bytes, record(4).repeat(3));
             }
             _ => panic!("records expected"),
         }
@@ -1037,17 +1122,17 @@ mod tests {
             feed.next(oldest - 1, epoch, MESSAGE),
             Next::Behind
         ));
-        let Next::Records(first, bytes) = feed.next(oldest, epoch, MESSAGE) else {
+        let Next::Records(first, times, _) = feed.next(oldest, epoch, MESSAGE) else {
             panic!("records expected");
         };
-        assert_eq!((first, count_records(&bytes)), (oldest + 1, 29));
+        assert_eq!((first, times.len()), (oldest + 1, 29));
         // A message stops at its size, across the line between two chunks
         // as anywhere.
         let across = oldest + 2;
-        let Next::Records(first, bytes) = feed.next(across, epoch, 4 * big.len()) else {
+        let Next::Records(first, times, bytes) = feed.next(across, epoch, 4 * big.len()) else {
             panic!("records expected");
         };
-        assert_eq!((first, count_records(&bytes)), (across + 1, 4));
+        assert_eq!((first, times.len()), (across + 1, 4));
         assert_eq!(bytes, big.repeat(4));
         // Starting over ends every stream begun before.
         feed.start(n);

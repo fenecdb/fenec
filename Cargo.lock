@@ -162,6 +162,7 @@ name = "fenec-cli"
 version = "0.1.4"
 dependencies = [
  "fenec-core",
+ "fenec-http",
  "fenec-import",
  "fenec-ql",
 ]

@@ -87,7 +87,7 @@ const REC_NEXTID: u8 = 7;
 /// Which history a database's writes belong to: `[8][0][length][following]
 /// [count]{[id: u64 LE][from]}`. Not a write -- it moves no counter -- so a
 /// replica never receives it as one; see [`History`].
-const REC_HISTORY: u8 = 8;
+const REC_HISTORY: u8 = crate::history::RECORD;
 
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
@@ -1006,11 +1006,7 @@ impl Database {
         let body_at = out.len();
 
         if self.history.following || !self.history.lineage.is_empty() {
-            let h = self.history.encode();
-            out.push(REC_HISTORY);
-            put_uvarint(&mut out, 0);
-            put_uvarint(&mut out, h.len() as u64);
-            out.extend_from_slice(&h);
+            out.extend_from_slice(&self.history.record());
         }
 
         for name in &self.order {
@@ -1538,10 +1534,7 @@ impl Database {
     /// names none. `id` must be one no other database holds; the caller
     /// draws it at random.
     pub fn fork(&mut self, id: u64) -> Result<()> {
-        let mut h = self.history.clone();
-        h.lineage.push((id, self.changes.seq()));
-        h.following = false;
-        self.set_history(h)
+        self.set_history(self.history.forked(id, self.changes.seq()))
     }
 
     /// Takes a primary's history, and from then on no write of its own:
@@ -1558,14 +1551,8 @@ impl Database {
         if h == self.history {
             return Ok(());
         }
-        let body = h.encode();
-        let mut frame = Vec::with_capacity(body.len() + 4);
-        frame.push(REC_HISTORY);
-        put_uvarint(&mut frame, 0);
-        put_uvarint(&mut frame, body.len() as u64);
-        frame.extend_from_slice(&body);
         // Not a write: it has no number, and no replica is sent it.
-        let r = self.sink_mut().append(&frame);
+        let r = self.sink_mut().append(&h.record());
         self.storage(r)?;
         self.dirty = true;
         self.history = h;

@@ -125,6 +125,7 @@ cargo test -p fenec-import --test pg -- --ignored
 </pre>
 
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
-for 194 KB of it. <code>--no-default-features</code> removes it; with the
-<code>cli</code> profile as well, the binary drops from 1105 KB to 797 KB
+for 161 KB of it. <code>--no-default-features</code> removes it, and
+<code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (49 KB);
+with the <code>cli</code> profile as well, the binary drops from 1154 KB to 797 KB
 (<code>make small</code>).</p>

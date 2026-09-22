@@ -21,6 +21,9 @@
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::error::{Error, Result};
 
+/// The record kind the history is kept under: `[8][0][length][history]`.
+pub const RECORD: u8 = 8;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
     /// `(id, from)`, oldest first: the writes after change `from` are
@@ -67,6 +70,28 @@ impl History {
             put_uvarint(&mut out, from);
         }
         out
+    }
+
+    /// The whole record, as a file holds it: appended to an image, it
+    /// replaces the image's history without moving its change counter.
+    pub fn record(&self) -> Vec<u8> {
+        let body = self.encode();
+        let mut out = Vec::with_capacity(body.len() + 4);
+        out.push(RECORD);
+        put_uvarint(&mut out, 0);
+        put_uvarint(&mut out, body.len() as u64);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// This history with a fork at change `at` under `id`, taking writes.
+    pub fn forked(&self, id: u64, at: u64) -> History {
+        let mut lineage = self.lineage.clone();
+        lineage.push((id, at));
+        History {
+            lineage,
+            following: false,
+        }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<History> {

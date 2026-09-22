@@ -7,6 +7,8 @@
 //! echo "get docs" | fenec data.fenec
 //! ```
 
+#[cfg(feature = "backup")]
+mod backup;
 #[cfg(feature = "import")]
 mod import;
 mod types;
@@ -48,6 +50,17 @@ Import
 #[cfg(not(feature = "import"))]
 const IMPORT_HELP: &str = "";
 
+#[cfg(feature = "backup")]
+const BACKUP_HELP: &str = r#"
+Backup
+  fenec backup <http://primary> <file|dir>   the database, taken while it runs
+  fenec archive <http://primary> <dir>       keep every write, until interrupted
+  fenec restore <dir> <out> [--to <time>]    the database as it stood then
+                                         for details: fenec backup --help
+"#;
+#[cfg(not(feature = "backup"))]
+const BACKUP_HELP: &str = "";
+
 const TYPES_HELP: &str = r#"
 TypeScript types
   fenec types <file.fenec>                   generates `.d.ts` from the schema (stdout)
@@ -74,6 +87,17 @@ fn main() {
         std::process::exit(types::main(&args[1..]));
     }
 
+    if let Some(command @ ("backup" | "archive" | "restore")) = args.first().map(String::as_str) {
+        #[cfg(feature = "backup")]
+        std::process::exit(backup::main(command, &args[1..]));
+        #[cfg(not(feature = "backup"))]
+        {
+            eprintln!("this binary was built without `{command}`: its `backup` feature is off");
+            eprintln!("rebuild it: cargo build --release -p fenec-cli --features backup");
+            std::process::exit(2);
+        }
+    }
+
     if args.first().is_some_and(|a| a == "import") {
         #[cfg(feature = "import")]
         std::process::exit(import::main(&args[1..]));
@@ -95,7 +119,7 @@ fn main() {
                 command = args.get(i).cloned();
             }
             "-h" | "--help" => {
-                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{TYPES_HELP}{SHELL_HELP}");
+                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{BACKUP_HELP}{TYPES_HELP}{SHELL_HELP}");
                 return;
             }
             other if !other.starts_with('-') => path = Some(other.to_string()),

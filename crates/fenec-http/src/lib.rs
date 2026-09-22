@@ -26,6 +26,7 @@
 
 pub mod admin;
 pub mod api;
+pub mod archive;
 pub mod http;
 pub mod replication;
 pub mod sse;

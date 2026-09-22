@@ -133,7 +133,11 @@ never sent: a promotion forks it, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
 following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
 p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
-under `always` lost no acknowledged write.
+under `always` lost no acknowledged write. An archive (`fenec archive`,
+`fenec-http/src/archive.rs`) is the same stream written to files, each write
+with the time the primary appended it; `fenec restore` is an image plus the
+archived writes up to a time or a change, forked -- a fenecdb file is exactly
+that, so a restore is a concatenation checked by opening it.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
 `site/content/docs/sharding.html`). The tenant comes from the path

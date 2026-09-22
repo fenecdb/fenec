@@ -1,6 +1,6 @@
 <!--
 title: Replication — fenecdb
-description: A primary streams the writes on its disk to read replicas, each applying them to a file of its own. Positions, histories and promotion, what a failover loses, and what it costs.
+description: A primary streams the writes on its disk to read replicas, each applying them to a file of its own. Positions, histories and promotion, what a failover loses, backups and restoring to a moment, and what it costs.
 -->
 
 <h1>Replication</h1>
@@ -153,6 +153,55 @@ replica's HNSW graph is built from the same vectors in the same order, but not
 in the same batches, so an approximate <code>near</code> can rank a close call
 the other way on the two; everything else answers identically.</p>
 
+<h2>Backups and restoring to a moment</h2>
+
+<p>The same stream written to a directory instead of applied is an archive:
+base images, and every write after them with the time the primary appended
+it. The <code>fenec</code> command line writes and reads one:</p>
+
+<pre data-lang="bash"># the running database, taken whole: a file that opens as a database of its own
+fenec backup http://primary:8080 nightly.fenec --token "$REPL"
+
+# every write that reaches the primary's disk, until interrupted
+fenec archive http://primary:8080 /backups/archive --token "$REPL"
+
+# a base image into the archive -- a day's worth, say -- so a restore replays less
+fenec backup http://primary:8080 /backups/archive --token "$REPL"
+
+# the database as it stood just before the mistake
+fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z
+fenec restore /backups/archive before.fenec --to-change 41873
+</pre>
+
+<p>A restore takes the latest image at or before the point asked for and
+appends the archived writes after it up to there — a fenecdb file is an image
+and the writes after it, so that is the whole restore — then opens the result
+to check it, forks its history and checkpoints it. <code>--to</code> keeps
+every write the primary appended at or before that moment and stops at the
+first one after it; <code>--to-change</code> stops after that change. A
+statement writes each document as a change of its own, so a <code>del</code>
+of ten documents is ten changes.</p>
+
+<p>The archive is fed as a replica is: only writes that were on the primary's
+disk, so none a crash took back, and a <code>compact</code> on the primary
+loses it nothing — the writes were archived before a compact folded them into
+an image. An archiver that falls further behind than the primary keeps writes
+for takes a new image and goes on from there; the archive then holds no write
+between the two images, and a restore to a point in that gap says so rather
+than inventing one. Restoring the 100 000 × 128 load above from an image and
+its 100 000 writes took 19.9 s, most of it building the graph for them, and the
+file then opened in 63 ms; to the load's middle, 7.8 s. A base image a day
+keeps a restore to a day of writes.</p>
+
+<pre data-lang="text">image-&lt;change&gt;-&lt;time&gt;.fenec   a base image: the database at that change
+writes-&lt;first change&gt;.log      per write, the time it was appended and its record
+history                        the history the archive is on
+</pre>
+
+<p>Pruning is by hand: a restore needs an image at or before its point and
+every segment after that image, so what is older than the newest image before
+the earliest moment worth keeping can go.</p>
+
 <h2>Endpoints</h2>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
@@ -191,4 +240,6 @@ feeding and how far each has been sent.</p>
     flags; each of its files would need a feed of its own.</li>
   <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
     here: across an open network, a tunnel carries it.</li>
+  <li><b>No retention.</b> Nothing prunes an archive's images and segments on
+    its own.</li>
 </ul>

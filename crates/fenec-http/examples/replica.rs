@@ -9,9 +9,12 @@
 //!     statements of 1 000; how long the replica takes to apply them
 //!   * an image: a replica the primary no longer holds the writes for; the
 //!     image's size and the time until the replica answers from it
+//!   * an archive of the bulk load, and a restore from it: to the end, and
+//!     to the middle
 
 use fenec_core::prelude::*;
-use fenec_http::replication::{self, fresh_id, Follower, Replication};
+use fenec_http::archive::{Archive, Target};
+use fenec_http::replication::{self, fresh_id, Follower, Replication, Upstream};
 use fenec_http::{Config, Server};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -256,6 +259,23 @@ fn main() {
     let d = dir("bulk");
     let p = primary(&d.join("p.fenec"), 1 << 30, false);
     let mut rng = Rng(11);
+    // Archived as well, from before the first write.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let archiving = {
+        let (stop, arch, url) = (
+            Arc::clone(&stop),
+            d.join("archive"),
+            format!("http://{}", p.addr),
+        );
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            Archive::new(&arch)
+                .unwrap()
+                .follow(&upstream, &stop, &|_| {})
+                .unwrap();
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
     let t = Instant::now();
     {
         let mut g = p.db.write().unwrap();
@@ -317,5 +337,34 @@ fn main() {
         imaged.as_secs_f64(),
         t.elapsed().as_secs_f64() * 1e3
     );
+    // ---- restore: the archive of that load, to the end and to its middle.
+    let arch = Archive::new(d.join("archive")).unwrap();
+    let probe = d.join("probe.fenec");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while arch.restore(&probe, Target::Change(target)).is_err() {
+        assert!(Instant::now() < deadline, "the archive did not catch up");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = archiving.join();
+    for (name, to) in [
+        ("the end", Target::End),
+        ("the middle", Target::Change(target / 2)),
+    ] {
+        let out = d.join("restored.fenec");
+        let t = Instant::now();
+        let r = arch.restore(&out, to).unwrap();
+        let took = t.elapsed();
+        let t = Instant::now();
+        let db = fenec_core::fs::open(&out).unwrap();
+        println!(
+            "restore to {name} (change {}): {:.2} s, the graph built and checkpointed; \
+             the file then opens in {:.0} ms",
+            r.seq,
+            took.as_secs_f64(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        drop(db);
+    }
     drop(r);
 }
