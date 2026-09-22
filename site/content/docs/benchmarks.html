@@ -177,6 +177,43 @@ deliberately.</p>
 <p>If write speed matters more than the last point of recall,
 <code>@hnsw(cosine, ef_construction=100)</code> gains 19%.</p>
 
+<h2 id="retrieval-quality">Retrieval quality</h2>
+
+<pre data-lang="bash">cd crates/fenec-bench/beir &amp;&amp; npm install &amp;&amp; node embed.mjs path/to/scifact
+make beir BEIR=path/to/scifact
+</pre>
+
+<p>Two BEIR datasets as BEIR ships them — SciFact, 5 183 documents and 300
+test queries, and FiQA, 57 638 and 648 — with every document and query
+embedded by all-MiniLM-L6-v2 the way sentence-transformers does it. Each of
+the engine's ways of ranking ten documents is then scored by nDCG@10, through
+FenecQL: the answers are the engine's own.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">SciFact</th><th class="n">FiQA</th><th class="n">FiQA p50</th></tr></thead>
+<tbody>
+<tr><td><code>match</code>, BM25</td><td class="n">0.662</td><td class="n">0.232</td><td class="n">0.26 ms</td></tr>
+<tr><td><code>near</code>, the graph</td><td class="n">0.645</td><td class="n">0.365</td><td class="n">0.38 ms</td></tr>
+<tr><td><code>near … exact</code></td><td class="n">0.645</td><td class="n">0.368</td><td class="n">4.98 ms</td></tr>
+<tr><td><code>match … rerank</code>, 50 candidates</td><td class="n">0.654</td><td class="n">0.337</td><td class="n">0.46 ms</td></tr>
+<tr><td><code>match … rerank</code>, 200 (default)</td><td class="n">0.643</td><td class="n">0.360</td><td class="n">0.80 ms</td></tr>
+<tr><td><code>match … rerank</code>, 1 000</td><td class="n">0.647</td><td class="n">0.368</td><td class="n">1.89 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 10 a side</td><td class="n"><b>0.701</b></td><td class="n">0.364</td><td class="n">0.67 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.699</td><td class="n">0.366</td><td class="n">0.78 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.687</td><td class="n">0.358</td><td class="n">0.98 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.689</td><td class="n">0.363</td><td class="n">4.09 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The two datasets pull opposite ways. In SciFact a claim shares its words
+with the evidence and BM25 alone beats the transformer; in FiQA a question
+shares few words with its answer and BM25 is far behind. <code>fuse</code>
+is the one path near the top of both. The rank offset matters less than the
+depth: at 20 a side, <code>k</code> from 10 to 120 moves either score by at
+most 0.005.</p>
+
 <h2>Half precision</h2>
 
 <p>Same data, 100 000 × 128, clustered. The trade is explained in
@@ -221,19 +258,19 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1154 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">911 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>797 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>433 KB</b></td><td class="n"><b>122 KB</b></td><td class="n">148 KB</td></tr>
-<tr><td><code>web/fenec.js</code>, the client</td><td class="n">71 KB</td><td class="n">19 KB</td><td class="n">22 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">1.70 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1187 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">927 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>814 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>435 KB</b></td><td class="n"><b>123 KB</b></td><td class="n">149 KB</td></tr>
+<tr><td><code>web/fenec.js</code>, the client</td><td class="n">72 KB</td><td class="n">20 KB</td><td class="n">23 KB</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">1.84 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>142 KB brotli</b> for both together. A binary you execute and an image
+<b>143 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -242,7 +279,7 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  159 KB at <code>-q 5</code>, nginx's dynamic default, and 168 KB at
+  160 KB at <code>-q 5</code>, nginx's dynamic default, and 169 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
   number by 12–18%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is

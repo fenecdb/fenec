@@ -253,6 +253,13 @@ export declare class Query<
   match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L>;
 
   /**
+   * With both `match` and `near`: ranks by both. Each side takes its own
+   * `candidates` (20 unless given, never fewer than the page) and a
+   * document scores `1 / (k + rank)` from each list it is on (`k` 60).
+   */
+  fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L>;
+
+  /**
    * Reorders what `match` found by exact vector distance. Requires `match`,
    * but not an `@hnsw` index: the vectors are read out of the store.
    */

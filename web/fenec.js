@@ -665,6 +665,23 @@ export class Query {
   }
 
   /**
+   * `fuse [k N] [candidates N]` -- with both `match` and `near`, ranks by
+   * both: each side takes its own candidates and a document scores
+   * `1 / (k + rank)` from each list it is on.
+   *
+   *   db.from('docs').match('body', text).near('embed', vector).fuse().limit(10)
+   */
+  fuse(opts = {}) {
+    return this.#with({
+      fuse: {
+        k: opts.k === undefined ? null : whole(opts.k, 'k'),
+        candidates:
+          opts.candidates === undefined ? null : whole(opts.candidates, 'candidates'),
+      },
+    });
+  }
+
+  /**
    * `rerank field $n [candidates N]` -- reorders what `match` found by exact
    * vector distance. Needs a `match`; it does not need an `@hnsw` index,
    * because the vectors are read straight out of the store.
@@ -768,7 +785,7 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank, lookups, aggregate, group } = this.#s;
+    const { match, rerank, lookups, aggregate, group, fuse } = this.#s;
     // The engine refuses these too; failing here never sends a query.
     if (group && !aggregate) {
       throw new FenecError(`group ${group} needs an aggregate in select: 'count(*)'`);
@@ -784,10 +801,16 @@ export class Query {
     if (rerank && !match) {
       throw new FenecError('rerank needs match: it reorders what match found');
     }
-    if (match && near) {
+    if (match && near && !fuse) {
       throw new FenecError(
-        'match and near cannot be combined: both order the result',
+        'match and near cannot be combined: both order the result; fuse() ranks by both',
       );
+    }
+    if (fuse && !(match && near)) {
+      throw new FenecError('fuse combines match and near: the query needs both');
+    }
+    if (fuse && rerank) {
+      throw new FenecError('fuse and rerank are two ways to use a vector with match: pick one');
     }
     // Refused in the engine too: a score spanning a parent and its children
     // has no meaning, and `count` collapses the rows they would hang from.
@@ -842,6 +865,11 @@ export class Query {
     if (rerank) {
       sql += ` rerank ${rerank.field} ${bind(rerank.vector, rerank.field)}`;
       if (rerank.candidates !== null) sql += ` candidates ${rerank.candidates}`;
+    }
+    if (fuse) {
+      sql += ' fuse';
+      if (fuse.k !== null) sql += ` k ${fuse.k}`;
+      if (fuse.candidates !== null) sql += ` candidates ${fuse.candidates}`;
     }
     for (const [i, o] of order.entries()) {
       sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;

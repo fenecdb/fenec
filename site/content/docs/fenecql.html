@@ -18,6 +18,7 @@ put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
+           [fuse [k N] [candidates N]]             -- match and near, both ranking
            [order &lt;field&gt; [asc|desc], ...] [limit N] [offset N]
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
@@ -51,7 +52,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> in the select list, whole or per <code>group</code> — see <a href="#aggregates">Aggregates</a></td></tr>
-<tr><td><b>Ceilings</b></td><td><code>near</code> and <code>match</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates; expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
+<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -84,7 +85,9 @@ get articles match body $1 rerank embed $2 candidates 500 limit 10
 
 <p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
 <code>_score</code> column. Like <code>near</code> it decides the ordering, so
-it combines with neither <code>order</code> nor <code>near</code>. A
+it combines with neither <code>order</code> nor <code>near</code> — unless
+<code>fuse</code> says how the two rankings make one (<a
+href="#hybrid">below</a>). A
 <code>where</code> filter is applied while the postings are merged, so it costs
 no second pass.</p>
 
@@ -99,10 +102,44 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   <p><b>The two stages answer different questions.</b> <code>match</code> is
   recall and knows nothing about meaning; <code>rerank</code> is precision but
   only over what the first stage handed it. Measured on BEIR: on SciFact
-  50 candidates score nDCG@10 0.676 against 0.645 for a full dense scan of the
-  same vectors, and on FiQA 1 000 candidates reproduce the full scan exactly —
+  50 candidates score nDCG@10 0.654 against 0.645 for a full dense scan of the
+  same vectors, and on FiQA 1 000 candidates come within 0.0003 of the full scan —
   each while scoring under 2% of the corpus. If the lexical stage cannot find
   the answer at all, no amount of reranking will.</p>
+</div>
+
+<h2 id="hybrid">Hybrid search</h2>
+
+<pre data-lang="fenecql">get articles match body $1 near embed $2 fuse limit 10
+get articles where year >= 2024 match body $1 near embed $2 fuse limit 10
+get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10
+</pre>
+
+<p><code>fuse</code> lets <code>match</code> and <code>near</code> rank the
+same query together. Each side takes its own first <code>candidates</code> —
+20 unless given, never fewer than <code>limit + offset</code> — with the
+<code>where</code> filter applied to both, and a document scores
+<code>1 / (k + rank)</code> from each list it is on, <code>k</code> being 60
+unless given. The sum is the <code>_score</code>; ties go to the lower id.</p>
+
+<p>Ranks rather than scores, because the two have no scale in common: a BM25
+score grows with the length of the query and the rarity of its words, a
+cosine distance does neither, and a weighted sum would need its weight tuned
+again for every corpus. Where <code>rerank</code> can only reorder what the
+words found, <code>fuse</code> also takes what they missed — at the price of
+the <code>@hnsw</code> graph <code>near</code> walks.</p>
+
+<div class="note">
+  <p><b>Measured on BEIR</b>, nDCG@10, all-MiniLM-L6-v2 vectors (<a
+  href="benchmarks.html#retrieval-quality">the whole table</a>). On SciFact,
+  where a claim shares its words with the evidence, <code>fuse</code> scores
+  0.699 against 0.662 for <code>match</code> and 0.645 for <code>near</code>
+  alone. On FiQA, where a question shares few words with its answer, it scores
+  0.366 against 0.232 and 0.365: the weak side does not drag the strong one
+  down. Up to 61 candidates a side at <code>k = 60</code>, a document both
+  searches found outranks every document only one found; deeper, agreement in
+  the middle of both lists starts to outvote the top of one, and at 100 a side
+  the two scores fall to 0.687 and 0.358.</p>
 </div>
 
 <h2>The lookup clause</h2>
@@ -440,6 +477,7 @@ came up short and fell back. The steps name each of them.</p>
 <tr><td><code>order:</code></td><td>a walk along an ordered index and how many rows it tested, why one was not walked, or the sort: how many matches, how many put in order</td></tr>
 <tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, and the fallback when the ANN came up short</td></tr>
 <tr><td><code>match:</code>, <code>rerank:</code></td><td>the text index and how many rows it ranked, the vectors read for the rerank</td></tr>
+<tr><td><code>fuse:</code></td><td>the rank offset, and how many candidates each side brought — after its own <code>match:</code> and <code>near:</code> steps</td></tr>
 <tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached; which side <code>required</code> was answered from</td></tr>
 </tbody>
 </table>

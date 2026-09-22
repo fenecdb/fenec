@@ -438,10 +438,11 @@ pub struct Match {
 /// This is the no-graph retrieval path. `match` is cheap and recall-oriented,
 /// the vectors are read straight out of the store, and the reordering is
 /// exact over the candidate set -- so no HNSW graph has to be built, held,
-/// validated on open or rebuilt when it fails to validate. Measured on BEIR:
-/// on SciFact taking 50 candidates scores nDCG@10 0.676 against 0.645 for a
-/// full dense scan of the same vectors, and on FiQA 1 000 candidates match
-/// the full scan exactly (0.3687), each while scoring under 2% of the corpus.
+/// validated on open or rebuilt when it fails to validate. Measured on BEIR
+/// (`make beir`): on SciFact taking 50 candidates scores nDCG@10 0.654
+/// against 0.645 for a full dense scan of the same vectors, and on FiQA 1 000
+/// candidates come within 0.0003 of the full scan (0.368), each while scoring
+/// under 2% of the corpus.
 /// The lexical stage does not only save work -- it removes documents that are
 /// semantically close but lexically wrong.
 #[derive(Debug, Clone, PartialEq)]
@@ -450,6 +451,26 @@ pub struct Rerank {
     /// The query vector, given directly or through a parameter.
     pub vector: Expr,
     /// How many `match` candidates to rescore. None means the default.
+    pub candidates: Option<usize>,
+}
+
+/// `fuse`: `match` and `near` each rank their own candidates, and the two
+/// rankings are combined by reciprocal rank -- a document scores
+/// `1 / (k + rank)` from each list it is on. Ranks, not scores: a BM25 score
+/// and a cosine distance have no common scale to add them on.
+///
+/// Measured on BEIR (`make beir`, nDCG@10): on SciFact, where a claim shares
+/// its words with the evidence, 0.699 against 0.662 for `match` and 0.645 for
+/// `near` alone; on FiQA, where a question shares few words with its answer,
+/// 0.366 against 0.232 and 0.365 -- the weak side does not drag the strong
+/// one down. `rerank` at its default scores 0.643 and 0.360: it can only
+/// reorder what the words found, and `fuse` also takes what they missed. What
+/// that costs is the graph `near` walks, which `rerank` does without.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fuse {
+    /// The rank offset; 60 unless given, the value the method was published with.
+    pub k: Option<u32>,
+    /// How many candidates each side ranks. None means the default.
     pub candidates: Option<usize>,
 }
 
@@ -611,6 +632,8 @@ pub struct Select {
     pub aggregate: Vec<Agg>,
     /// `group <field>`: one row per value of the field rather than one in all.
     pub group: Option<String>,
+    /// `fuse`: `match` and `near` both, their rankings combined.
+    pub fuse: Option<Fuse>,
 }
 
 impl Select {
@@ -621,10 +644,35 @@ impl Select {
     pub fn check(&self) -> Result<()> {
         // `match` and `near` both decide the ordering. A query asking for
         // both is asking two questions, and silently picking one of them
-        // would answer the other one wrongly.
-        if self.matcher.is_some() && self.near.is_some() {
+        // would answer the other one wrongly -- unless `fuse` says how the
+        // two answers make one.
+        if let Some(f) = &self.fuse {
+            if self.matcher.is_none() || self.near.is_none() {
+                return Err(Error::Query(
+                    "`fuse` combines `match` and `near`: the query needs both".into(),
+                ));
+            }
+            if self.rerank.is_some() {
+                return Err(Error::Query(
+                    "`fuse` and `rerank` are two ways to use a vector with `match`: pick one"
+                        .into(),
+                ));
+            }
+            if f.candidates == Some(0) {
+                return Err(Error::Query(
+                    "`fuse` needs at least one candidate a side".into(),
+                ));
+            }
+            if !self.order.is_empty() {
+                return Err(Error::Query(
+                    "`fuse` cannot be combined with `order`: it orders by both rankings".into(),
+                ));
+            }
+        } else if self.matcher.is_some() && self.near.is_some() {
             return Err(Error::Query(
-                "`match` and `near` cannot be combined: both order the result".into(),
+                "`match` and `near` cannot be combined: both order the result; \
+                 `fuse` ranks by both"
+                    .into(),
             ));
         }
         if self.matcher.is_some() && !self.order.is_empty() {

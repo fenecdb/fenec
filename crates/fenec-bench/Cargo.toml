@@ -5,9 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+# `make compare` runs the comparison; `beir` is asked for by name.
+default-run = "fenec-bench"
 
 [dependencies]
 fenec-core = { path = "../fenec-core" }
+fenec-ql = { path = "../fenec-ql" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.
 rusqlite = { version = "0.40", features = ["bundled"] }

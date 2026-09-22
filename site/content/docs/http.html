@@ -97,6 +97,20 @@ the body.</p>
 out. Filters in the query string are <code>and</code>ed with the
 <code>where</code> in the body.</p>
 
+<p>A <code>"match"</code> makes it hybrid: BM25 over the collection's
+<code>@text</code> field ranks the same request, and the two rankings are
+fused by reciprocal rank (<a href="fenecql.html#hybrid">fuse</a>).
+<code>match_field</code> names the text field when there are several;
+<code>fuse_k</code> and <code>candidates</code> are the rank offset and how
+many candidates each side ranks.</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/articles/near -d '{
+  "vector": [0.1, 0.2, 0.3],
+  "match": "borrow checker lifetimes",
+  "limit": 10
+}'
+</pre>
+
 <h2>Raw FenecQL</h2>
 
 <p>When the REST shape does not fit, send the language itself. Parameters stay

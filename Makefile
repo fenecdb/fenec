@@ -8,7 +8,7 @@ SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
 .PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep \
-	compare import-test \
+	compare beir import-test \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
 
@@ -101,6 +101,14 @@ bench:
 ## For the PostgreSQL arm, first: make pgvector-up
 compare:
 	$(CARGO) run --release -p fenec-bench -- 100000 128
+
+## Retrieval quality on BEIR, nDCG@10 for every way of ranking ten documents:
+##   make beir BEIR=path/to/scifact
+## The directory is one of BEIR's zips unpacked, with the vectors
+## crates/fenec-bench/beir/embed.mjs writes beside it (npm install there once).
+beir:
+	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs)"; exit 1)
+	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
 
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up

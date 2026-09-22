@@ -18,6 +18,7 @@ make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
+make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir)
 make import-test   # the PostgreSQL arm of import (needs Docker)
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
 make maintenance-bench # reads and writes during create index / compact
@@ -301,6 +302,20 @@ straight out of the store — so a collection can do vector retrieval with no
 HNSW graph to build, hold, validate or rebuild. Measured on BEIR it matches or
 beats a full dense scan while scoring under 2% of the corpus. It requires
 `match`: without candidates there is nothing to reorder.
+
+**`fuse` adds ranks, not scores.** `match ... near ... fuse` runs both searches
+to their own depth -- `candidates`, 20 unless given, never under the page --
+with the filter applied to each, and a document scores `1 / (k + rank)` from
+each list it is on (`k` 60). A BM25 score and a cosine distance share no
+scale, and a weight between them would need retuning per corpus. Measured
+with `make beir` (nDCG@10): SciFact 0.699 against 0.662 for `match` and 0.645
+for `near`; FiQA 0.366 against 0.232 and 0.365 -- the one path near the top
+of both. The depth is the knob that matters: up to 61 a side a document both
+searches found outranks every document only one found, and at 100 a side
+both scores fall (0.687, 0.358). It is built from what the engine already
+had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
+index's `best_first` sort -- because in types of its own it was 11 KB of the
+browser module; this way it is 2.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

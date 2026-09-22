@@ -153,6 +153,7 @@ name = "fenec-bench"
 version = "0.1.4"
 dependencies = [
  "fenec-core",
+ "fenec-ql",
  "postgres",
  "rusqlite",
 ]

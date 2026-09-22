@@ -77,6 +77,7 @@ call site.</p>
 <tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
 <tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys</td></tr>
+<tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
 <tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>

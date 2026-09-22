@@ -7,6 +7,7 @@
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
+//!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
 //!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
@@ -583,6 +584,25 @@ impl Parser {
                 let field = self.ident()?;
                 let query = self.expr()?;
                 sel.matcher = Some(Match { field, query });
+                continue;
+            }
+            if self.eat_kw("fuse") {
+                let mut f = Fuse {
+                    k: None,
+                    candidates: None,
+                };
+                loop {
+                    if self.eat_kw("k") {
+                        f.k = Some(self.int()?.clamp(0, u32::MAX as i64) as u32);
+                        continue;
+                    }
+                    if self.eat_kw("candidates") {
+                        f.candidates = Some(self.int()?.max(0) as usize);
+                        continue;
+                    }
+                    break;
+                }
+                sel.fuse = Some(f);
                 continue;
             }
             if self.eat_kw("rerank") {

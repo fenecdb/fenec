@@ -621,6 +621,29 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
         ..Default::default()
     };
 
+    // `"match": "words"` makes it hybrid: BM25 over the text field ranks
+    // too, and the two rankings are fused. Flat keys, since a JSON body
+    // here holds no nested objects.
+    match get("match") {
+        None | Some(Value::Null) => {}
+        Some(Value::Text(q)) => {
+            let text_field = match get("match_field") {
+                Some(Value::Text(f)) => f.clone(),
+                Some(_) => return Err(Error::Query("`match_field` must be text".into())),
+                None => default_text_field(schema)?,
+            };
+            sel.matcher = Some(Match {
+                field: text_field,
+                query: Expr::Lit(Value::Text(q.clone())),
+            });
+            sel.fuse = Some(Fuse {
+                k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
+                candidates: as_usize("candidates")?,
+            });
+        }
+        Some(_) => return Err(Error::Query("`match` must be text".into())),
+    }
+
     if let Some(v) = get("select") {
         let cols = match v {
             Value::List(items) => items
@@ -652,6 +675,25 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     }
     sel.filter = filter;
     Ok(sel)
+}
+
+/// When the collection has a single `@text` field there is no need to write
+/// `match_field`.
+fn default_text_field(schema: &Schema) -> Result<String> {
+    let mut texts = schema
+        .fields
+        .iter()
+        .filter(|f| matches!(f.index, IndexKind::Text(_)));
+    match (texts.next(), texts.next()) {
+        (Some(f), None) => Ok(f.name.clone()),
+        (None, _) => Err(Error::Query(format!(
+            "`{}` has no @text field to match",
+            schema.name
+        ))),
+        (Some(_), Some(_)) => Err(Error::Query(
+            "the collection has several @text fields: name one with `match_field`".into(),
+        )),
+    }
 }
 
 /// When the collection has a single vector field there is no need to write `field`.

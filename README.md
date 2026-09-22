@@ -37,6 +37,18 @@ get articles select title
   limit 10
 ```
 
+Or both rankings at once: BM25 and the vectors each find their own
+candidates, and reciprocal rank fuses the two lists, so a document either one
+missed still counts:
+
+```
+get articles select title
+  match body $1
+  near embed $2
+  fuse
+  limit 10
+```
+
 The same query from JS — no ORM, no npm, no build step:
 
 ```js
@@ -99,7 +111,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-433 KB of WebAssembly — 142 KB brotli (`-q 11`) over the wire, client included — no
+435 KB of WebAssembly — 143 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
@@ -119,7 +131,7 @@ moment. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 1.70 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 1.84 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -141,13 +153,13 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=..)`, `@text(k1=.., b=.., prefix=..)` |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
-| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
+| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
-| **Runtime size** | 433 KB wasm + 71 KB client (142 KB brotli served) · 797–1154 KB binary · 1.70 MB container image |
+| **Runtime size** | 435 KB wasm + 72 KB client (143 KB brotli served) · 814–1187 KB binary · 1.84 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

@@ -236,6 +236,38 @@ fn select_filter_order_limit() {
 }
 
 #[test]
+fn near_with_match_is_fused() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection notes (body text @text, e vector<3> @hnsw(cosine))",
+        r#"put notes [{body: "rust and wasm", e: [0.0, 1.0, 0.0]},
+                      {body: "gardening notes", e: [1.0, 0.0, 0.0]},
+                      {body: "rust in the garden", e: [0.9, 0.1, 0.0]}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    // "rust" ranks 1 then 3; the vector ranks 2, 3, 1. With k = 60, note 1
+    // scores 1/61 + 1/63 and note 3 twice 1/62 -- the first and the third
+    // place together just beat the second place twice -- and note 2 only
+    // 1/61.
+    let body = r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "limit": 3}"#;
+    let r = call(h.port, "POST", "/notes/near", Some(body));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let order: Vec<&str> = r
+        .body
+        .match_indices("{\"id\":")
+        .map(|(i, _)| &r.body[i + 6..i + 7])
+        .collect();
+    assert_eq!(order, ["1", "3", "2"], "{}", r.body);
+    let q = r#"{"query": "get notes match body \"rust\" near e [1.0, 0.0, 0.0] fuse limit 3"}"#;
+    let same = call(h.port, "POST", "/query", Some(q));
+    assert_eq!(rows(&same.body), 3);
+    let bad = r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_field": "nope"}"#;
+    assert_eq!(call(h.port, "POST", "/notes/near", Some(bad)).status, 400);
+}
+
+#[test]
 fn aggregates_over_the_query_string() {
     let h = start(Config::default());
     let r = get(

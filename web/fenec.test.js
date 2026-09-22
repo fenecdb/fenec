@@ -128,6 +128,19 @@ test('count does not combine with the other clauses', async () => {
   }
 });
 
+test('fuse ranks by match and near together', () => {
+  const [sql, p] = q()
+    .match('body', 'rust wasm')
+    .near('embed', [1, 0, 0])
+    .fuse({ k: 20, candidates: 50 })
+    .limit(10)
+    .toFenecQL();
+  assert.equal(sql, 'get articles near embed $1 match body $2 fuse k 20 candidates 50 limit 10');
+  assert.deepEqual(p, [[1, 0, 0], 'rust wasm']);
+  assert.throws(() => q().match('body', 'x').near('embed', [1]).toFenecQL(), FenecError);
+  assert.throws(() => q().match('body', 'x').fuse().toFenecQL(), FenecError);
+});
+
 test('aggregates go in the select list, grouped or whole', () => {
   const [sql] = from('orders')
     .select('status', 'count(*)', 'SUM(total)', 'avg(total)')
@@ -450,6 +463,32 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)
   assert.equal(await docs.where('year', '<', 2000).delete(), 1);
   assert.equal(await docs.count(), 2);
 
+  db.close();
+});
+
+test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection notes (body text @text, embed vector<2> @hnsw(cosine))');
+  await db.from('notes').insert([
+    { body: 'rust in the browser', embed: [0, 1] },
+    { body: 'garbage collection', embed: [1, 0] },
+    { body: 'rust and wasm', embed: [0.9, 0.1] },
+  ]);
+  // By text: 3 then 1. By vector: 2, 3, 1. The one on top of neither list
+  // but high on both comes first; the one only the vector found, last.
+  const rows = await db
+    .from('notes')
+    .select('body')
+    .match('body', 'rust')
+    .near('embed', [1, 0])
+    .fuse()
+    .rows();
+  assert.deepEqual(
+    rows.map((r) => r.body),
+    ['rust and wasm', 'rust in the browser', 'garbage collection'],
+  );
+  assert.ok(Math.abs(rows[0]._score - (1 / 61 + 1 / 62)) < 1e-6, String(rows[0]._score));
   db.close();
 });
 

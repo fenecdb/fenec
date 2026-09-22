@@ -9,7 +9,7 @@ use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
 use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::store::{Store, OP_DEL, OP_PUT};
-use crate::text::TextIndex;
+use crate::text::{best_first, TextIndex};
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
 use crate::vector::{distance, dot, norm, normalized, score_from_distance, VectorIndex};
 use std::cmp::Ordering;
@@ -37,11 +37,30 @@ pub const MAX_MATCH_ROWS: usize = 10_000;
 
 /// How many `match` candidates `rerank` rescores when the query does not say.
 ///
-/// Measured on BEIR: on FiQA (57 638 documents) 1 000 candidates reproduce a
-/// full dense scan exactly and 250 reach 97% of it; on SciFact 50 already
-/// beat the full scan. 200 sits where the curve has flattened on both, and
-/// costs 200 vector reads -- under 0.4% of that corpus.
+/// Measured on BEIR (`make beir`): on FiQA (57 638 documents) 1 000
+/// candidates come within 0.0003 of a full dense scan and 200 reach 98% of
+/// it; on SciFact 50 already beat the full scan. 200 sits where the curve
+/// has flattened on both, and costs 200 vector reads -- under 0.4% of that
+/// corpus.
 pub const DEFAULT_RERANK_CANDIDATES: usize = 200;
+
+/// How many candidates each side of `fuse` ranks when the query does not
+/// say (and never fewer than the page).
+///
+/// Measured on BEIR (`make beir`), nDCG@10 at 10 / 20 / 100 a side: SciFact
+/// 0.701 / 0.699 / 0.687, FiQA 0.364 / 0.366 / 0.358. Up to 61 a side at
+/// `k = 60`, a document both searches found outranks every document only
+/// one found -- `2 / (60 + 61)` still beats `1 / 61` -- and deeper, agreement
+/// in the middle of both lists starts to outvote the top of one. 20 is at or
+/// within 0.003 of the best on both, and on FiQA answers in 0.78 ms against
+/// 0.98 ms at 100.
+pub const DEFAULT_FUSE_CANDIDATES: usize = 20;
+
+/// The rank offset of `fuse`: 60, the value reciprocal rank fusion was
+/// published with and the one most implementations keep. Measured on BEIR at
+/// 20 a side, anything from 10 to 120 moved nDCG@10 by at most 0.005 on
+/// either dataset, which is noise, so the published value stands.
+pub const DEFAULT_FUSE_K: u32 = 60;
 
 const REC_CREATE: u8 = 1;
 const REC_DROP: u8 = 2;
@@ -2566,7 +2585,110 @@ impl Database {
         Ok((!gave_up).then_some(out))
     }
 
-    /// `match`, and `rerank` on top of it when the query asks for one.
+    /// `near`'s first `want` candidates, nearest first -- the filter's rows
+    /// only, when there is one.
+    fn run_near(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let ix = c.vectors.get(&near.field).ok_or_else(|| {
+            Error::Query(format!(
+                "field `{}` has no vector index (declare it with @hnsw)",
+                near.field
+            ))
+        })?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        if qv.len() != ix.dim {
+            return Err(Error::Type(format!(
+                "the query vector must have {} dimensions, got {}",
+                ix.dim,
+                qv.len()
+            )));
+        }
+
+        let hits = match &sel.filter {
+            // No filter: ANN directly, or a full scan when asked for.
+            None if near.exact => {
+                plan(|| format!("near: exact scan over every vector in {}", near.field));
+                ix.search_exact(&qv, want, |_| true)
+            }
+            None => {
+                plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                ix.search(&qv, want, near.ef, |_| true)
+            }
+            Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, ctx)?,
+        };
+        Ok(hits)
+    }
+
+    /// `match ... near ... fuse`: each side ranks its own candidates -- the
+    /// filter applied to both -- and a document's score is the sum of
+    /// `1 / (k + rank)` over the lists it is on. A document one side missed
+    /// still scores from the other; ties go to the lower id.
+    ///
+    /// Built from what the engine already has -- the two searches, the
+    /// vector index's id map, the text index's order: written with types of
+    /// its own it was 11 KB of the browser module, this way it is 2.
+    #[allow(clippy::too_many_arguments)]
+    fn run_fuse(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        m: &Match,
+        near: &Near,
+        f: &Fuse,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        // Each side ranks its own first `depth`, never fewer than the page:
+        // a document neither list reaches cannot be on it.
+        let page = ranked_rows(sel, "fuse", MAX_MATCH_ROWS)?;
+        let depth = f.candidates.unwrap_or(DEFAULT_FUSE_CANDIDATES).max(page);
+        if depth > MAX_MATCH_ROWS {
+            return Err(Error::Query(format!(
+                "`fuse` ranks at most {MAX_MATCH_ROWS} candidates a side, {depth} were requested"
+            )));
+        }
+        let k = f.k.unwrap_or(DEFAULT_FUSE_K) as f32;
+        let text = self.run_match(c, sel, m, depth, params, ctx)?;
+        let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
+        plan(|| {
+            format!(
+                "fuse: reciprocal rank, k = {k}, over {} + {} candidates",
+                text.len(),
+                vectors.len()
+            )
+        });
+        let mut fused: Vec<(DocId, f32)> = Vec::with_capacity(text.len() + vectors.len());
+        let mut at: HashMap<DocId, u32> = HashMap::new();
+        at.reserve(text.len() + vectors.len());
+        let ids = text.iter().map(|h| h.0).chain(vectors.iter().map(|h| h.0));
+        for (i, id) in ids.enumerate() {
+            // Rank within its own list, from 1.
+            let rank = if i < text.len() { i } else { i - text.len() };
+            let w = 1.0 / (k + rank as f32 + 1.0);
+            match at.get(&id) {
+                Some(&slot) => fused[slot as usize].1 += w,
+                None => {
+                    at.insert(id, fused.len() as u32);
+                    fused.push((id, w));
+                }
+            }
+        }
+        fused.sort_by(best_first);
+        // Two lists can hold twice the ceiling between them; the answer
+        // keeps to it, as `match` and `near` do.
+        fused.truncate(page);
+        Ok(fused)
+    }
+
+    /// `match`, and `rerank` on top of it when the query asks for one: the
+    /// first `want` rows, best first.
     ///
     /// The two stages answer different questions. `match` is recall: cheap,
     /// lexical, and wrong about meaning. `rerank` is precision: exact vector
@@ -2577,9 +2699,10 @@ impl Database {
         c: &Collection,
         sel: &Select,
         m: &Match,
+        want: usize,
         params: &[Value],
         ctx: &EvalCtx,
-    ) -> Result<Vec<(DocId, Option<f32>)>> {
+    ) -> Result<Vec<(DocId, f32)>> {
         let ix = c.texts.get(&m.field).ok_or_else(|| {
             Error::Query(format!(
                 "field `{}` has no full-text index (declare it with @text)",
@@ -2596,16 +2719,6 @@ impl Database {
             }
         };
 
-        // As with `near`: the ceiling is checked before any scanning, because
-        // erroring beats handing back a truncated relevance list.
-        let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
-        if bound.unwrap_or(sel.offset) > MAX_MATCH_ROWS {
-            return Err(Error::Query(format!(
-                "`match` returns at most {MAX_MATCH_ROWS} rows, {} were requested (limit + offset)",
-                bound.unwrap_or(sel.offset)
-            )));
-        }
-
         let allowed: Option<Vec<DocId>> = match &sel.filter {
             Some(_) => Some(self.matching_ids(&sel.collection, &sel.filter, params)?),
             None => None,
@@ -2615,7 +2728,6 @@ impl Database {
             None => true,
         };
 
-        let want = bound.unwrap_or(MAX_MATCH_ROWS).max(1);
         let Some(rr) = &sel.rerank else {
             let hits = ix.search(&query, want, accept);
             plan(|| {
@@ -2625,7 +2737,7 @@ impl Database {
                     hits.len()
                 )
             });
-            return Ok(hits.into_iter().map(|(id, s)| (id, Some(s))).collect());
+            return Ok(hits);
         };
 
         // The candidate set has to be at least as large as what the caller
@@ -2709,10 +2821,10 @@ impl Database {
         // Ascending distance, ties on the id so the answer is stable.
         out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         out.truncate(want);
-        Ok(out
-            .into_iter()
-            .map(|(id, d)| (id, Some(score_from_distance(metric, d))))
-            .collect())
+        for h in &mut out {
+            h.1 = score_from_distance(metric, h.1);
+        }
+        Ok(out)
     }
 
     /// Collects the children of each parent row.
@@ -3234,8 +3346,11 @@ impl Database {
         let limit = sel.limit.unwrap_or(usize::MAX);
         let scored: Vec<(DocId, Option<f32>)>;
 
-        if let Some(m) = &sel.matcher {
-            scored = self.run_match(c, sel, m, params, &ctx)?;
+        if let (Some(m), Some(near), Some(f)) = (&sel.matcher, &sel.near, &sel.fuse) {
+            scored = with_scores(self.run_fuse(c, sel, m, near, f, params, &ctx)?);
+        } else if let Some(m) = &sel.matcher {
+            let want = ranked_rows(sel, "match", MAX_MATCH_ROWS)?;
+            scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
         } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
             // rejected explicitly rather than ignored silently.
@@ -3245,45 +3360,8 @@ impl Database {
                         .into(),
                 ));
             }
-            let ix = c.vectors.get(&near.field).ok_or_else(|| {
-                Error::Query(format!(
-                    "field `{}` has no vector index (declare it with @hnsw)",
-                    near.field
-                ))
-            })?;
-            let qv = near_vector(eval(&near.vector, &mut NoRow, &ctx)?)?;
-            if qv.len() != ix.dim {
-                return Err(Error::Type(format!(
-                    "the query vector must have {} dimensions, got {}",
-                    ix.dim,
-                    qv.len()
-                )));
-            }
-
-            // If the requested row count exceeds the ceiling we stop before
-            // scanning the filter: erroring beats returning a truncated result.
-            let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
-            if bound.unwrap_or(sel.offset) > MAX_NEAR_ROWS {
-                return Err(Error::Query(format!(
-                    "`near` returns at most {MAX_NEAR_ROWS} rows, {} were requested (limit + offset)",
-                    bound.unwrap_or(sel.offset)
-                )));
-            }
-
-            let want = bound.unwrap_or(MAX_NEAR_ROWS).max(1);
-            let hits = match &sel.filter {
-                // No filter: ANN directly, or a full scan when asked for.
-                None if near.exact => {
-                    plan(|| format!("near: exact scan over every vector in {}", near.field));
-                    ix.search_exact(&qv, want, |_| true)
-                }
-                None => {
-                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                    ix.search(&qv, want, near.ef, |_| true)
-                }
-                Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, &ctx)?,
-            };
-            scored = hits.into_iter().map(|(id, s)| (id, Some(s))).collect();
+            let want = ranked_rows(sel, "near", MAX_NEAR_ROWS)?;
+            scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
         } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
             scored = ids.into_iter().map(|id| (id, None)).collect();
         } else {
@@ -3857,6 +3935,27 @@ fn push_step(line: String) {
             steps.push(line);
         }
     });
+}
+
+/// How many rows a ranked clause has to produce: `limit + offset`, or the
+/// ceiling when there is no limit. A request past the ceiling is refused
+/// before anything is scanned -- erroring beats handing back a truncated
+/// ranking.
+fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
+    let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
+    if bound.unwrap_or(sel.offset) > ceiling {
+        return Err(Error::Query(format!(
+            "`{clause}` returns at most {ceiling} rows, {} were requested (limit + offset)",
+            bound.unwrap_or(sel.offset)
+        )));
+    }
+    Ok(bound.unwrap_or(ceiling).max(1))
+}
+
+/// A ranking as the rows carry it. One conversion for `match`, `near` and
+/// `fuse`: a closure each was a copy each in the browser module.
+fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
+    hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
 }
 
 /// The ANN's beam as `explain` states it: the `ef` in force, and the page
