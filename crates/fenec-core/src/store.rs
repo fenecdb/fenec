@@ -43,7 +43,29 @@ impl Loc {
     fn is_empty(&self) -> bool {
         self.seg == u32::MAX
     }
+
+    /// A payload left in the mapped file, at byte `at` of it: the top bit of
+    /// `seg` says so, and its other 31 bits are the offset's high word, so a
+    /// location stays 12 bytes however large the file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mapped(at: u64, len: u32) -> Loc {
+        Loc {
+            seg: MAPPED | (at >> 32) as u32,
+            off: at as u32,
+            len,
+        }
+    }
 }
+
+/// The bit of [`Loc::seg`] that marks a payload in the mapped file.
+#[cfg(not(target_arch = "wasm32"))]
+const MAPPED: u32 = 1 << 31;
+
+/// The bytes a store reads records from without having copied them: a file
+/// the operating system maps in on native targets (`fs::open_mapped`). The
+/// browser has no such thing, and its module none of this.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Base = std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
 
 /// Document id -> location mapping.
 ///
@@ -231,6 +253,11 @@ pub struct Segment {
 
 pub struct Store {
     segments: Vec<Segment>,
+    /// Records that stayed in a mapped file rather than being copied into a
+    /// segment: the file as it stood when opened, and the stretches of it
+    /// that are this collection's, in order -- what `image` writes back.
+    #[cfg(not(target_arch = "wasm32"))]
+    base: Option<(Base, Vec<(u64, u64)>)>,
     index: IdIndex,
     next_id: DocId,
     /// Bytes held by deleted/overwritten records (compaction threshold).
@@ -248,6 +275,8 @@ impl Store {
     pub fn new() -> Store {
         Store {
             segments: vec![Segment::default()],
+            #[cfg(not(target_arch = "wasm32"))]
+            base: None,
             index: IdIndex::default(),
             next_id: 1,
             dead_bytes: 0,
@@ -269,6 +298,11 @@ impl Store {
     }
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+    /// The record bytes held in memory: every one, unless some stayed in a
+    /// mapped file, whose pages the operating system keeps or lets go of.
+    pub fn heap_bytes(&self) -> usize {
+        self.segments.iter().map(|s| s.data.len()).sum()
     }
     /// Bytes allocated by the offset index. Small next to the segment bytes,
     /// but a fixed per-document cost: in a collection of small documents it
@@ -392,6 +426,14 @@ impl Store {
 
     #[inline]
     fn payload(&self, loc: Loc) -> Result<&[u8]> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if loc.seg & MAPPED != 0 {
+            let at = (((loc.seg & !MAPPED) as u64) << 32 | loc.off as u64) as usize;
+            let bytes = self.base.as_ref().map_or(&[][..], |(b, _)| (**b).as_ref());
+            return bytes
+                .get(at..at + loc.len as usize)
+                .ok_or_else(|| Error::Corrupt("offset outside the mapped file".into()));
+        }
         let seg = self
             .segments
             .get(loc.seg as usize)
@@ -557,6 +599,65 @@ impl Store {
         Ok(count)
     }
 
+    /// [`Self::replay_noting`] over records that stay where they are: the
+    /// `len` bytes at `at` in `base`, the mapped file. The index points into
+    /// the file and nothing is copied, so a record is read from pages the
+    /// operating system brings in, and can drop again, rather than from
+    /// memory the process holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn replay_mapped(
+        &mut self,
+        base: &Base,
+        at: u64,
+        len: u64,
+        note: &mut dyn FnMut(DocId),
+    ) -> Result<usize> {
+        let file = (**base).as_ref();
+        let bytes = file
+            .get(at as usize..(at + len) as usize)
+            .ok_or_else(|| Error::Corrupt("data record outside the mapped file".into()))?;
+        let mut pos = 0usize;
+        let mut count = 0usize;
+        while pos < bytes.len() {
+            let start = pos;
+            let op = bytes[pos];
+            pos += 1;
+            let id = get_uvarint(bytes, &mut pos)?;
+            let plen = get_uvarint(bytes, &mut pos)? as usize;
+            if pos + plen > bytes.len() {
+                // Half-written last record, as in `replay`.
+                pos = start;
+                break;
+            }
+            // The bookkeeping `append` does, with the payload left in place.
+            let frame_len = pos + plen - start;
+            if let Some(old) = self.index.get(id) {
+                self.dead_bytes += old.len as usize;
+            }
+            self.total_bytes += frame_len;
+            match op {
+                OP_PUT => {
+                    self.index
+                        .insert(id, Loc::mapped(at + pos as u64, plen as u32));
+                    if id >= self.next_id {
+                        self.next_id = id + 1;
+                    }
+                }
+                OP_DEL => {
+                    self.index.remove(id);
+                    self.dead_bytes += frame_len;
+                }
+                _ => {}
+            }
+            pos += plen;
+            note(id);
+            count += 1;
+        }
+        let (_, stretches) = self.base.get_or_insert_with(|| (base.clone(), Vec::new()));
+        stretches.push((at, pos as u64));
+        Ok(count)
+    }
+
     /// Moves the live records into fresh segments and drops the tombstones.
     /// Returns the new full byte image (to be written over the file).
     pub fn compact(&mut self) -> Result<Vec<u8>> {
@@ -592,6 +693,15 @@ impl Store {
     /// Byte image of the whole store (to persist or to move it).
     pub fn image(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.total_bytes);
+        // The records left in the mapped file came first; the segments hold
+        // what was written after the file was opened.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((base, stretches)) = &self.base {
+            let file = (**base).as_ref();
+            for &(at, len) in stretches {
+                out.extend_from_slice(&file[at as usize..(at + len) as usize]);
+            }
+        }
         for s in &self.segments {
             out.extend_from_slice(&s.data);
         }

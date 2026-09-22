@@ -25,6 +25,7 @@ make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
 make maintenance-bench # reads and writes during create index / compact
+make open-bench # opening a 1 GB file, read into memory or mapped
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 ```

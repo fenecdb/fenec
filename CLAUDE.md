@@ -30,6 +30,7 @@ make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make maintenance-bench   # reads and writes during create index / compact
+make open-bench          # opening a 1 GB file, read into memory or mapped
 ```
 
 Single tests:

@@ -97,36 +97,45 @@ impl Disk {
 
 impl FileSink {
     pub fn open(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>)> {
+        let (mut file, path) = FileSink::create(path)?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)?;
+        file.seek(SeekFrom::End(0))?;
+        Ok((FileSink::over(file, path), existing))
+    }
+
+    /// Opens the file for reading and appending, creating it with the magic
+    /// alone when it is missing or empty.
+    fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf)> {
         let path = path.as_ref().to_path_buf();
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&path)?;
-        let mut existing = Vec::new();
-        file.read_to_end(&mut existing)?;
-        if existing.is_empty() {
+        if file.metadata()?.len() == 0 {
             file.write_all(&MAGIC[..])?;
             file.flush()?;
-            existing = Vec::from(&MAGIC[..]);
+            file.seek(SeekFrom::Start(0))?;
         }
-        file.seek(SeekFrom::End(0))?;
-        Ok((
-            FileSink {
-                pending: Arc::new(Mutex::new(Vec::new())),
-                appended: 0,
-                disk: Arc::new(Mutex::new(Disk {
-                    file,
-                    written: 0,
-                    synced: 0,
-                    #[cfg(test)]
-                    fsyncs: 0,
-                    failed: None,
-                })),
-                path,
-            },
-            existing,
-        ))
+        Ok((file, path))
+    }
+
+    /// A sink appending to `file`, which is positioned at its end.
+    fn over(file: File, path: PathBuf) -> FileSink {
+        FileSink {
+            pending: Arc::new(Mutex::new(Vec::new())),
+            appended: 0,
+            disk: Arc::new(Mutex::new(Disk {
+                file,
+                written: 0,
+                synced: 0,
+                #[cfg(test)]
+                fsyncs: 0,
+                failed: None,
+            })),
+            path,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -220,6 +229,99 @@ impl Drop for FileSink {
         // Do not let buffered leftovers vanish silently.
         let _ = lock(&self.disk).write_pending(&self.pending);
     }
+}
+
+/// A file mapped read-only into the address space: its pages come in as
+/// they are read and can be dropped again by the operating system, which
+/// writes nothing back -- they are the file's. `mmap` is declared here
+/// rather than taken from a crate, as `signal` is in fenec-pg.
+///
+/// The file is never truncated or written in place while mapped: writes
+/// append past the mapped length, and a rewrite (`compact`, `checkpoint`)
+/// renames a new file over it, so the mapping keeps the old one's pages
+/// until it is dropped.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub struct Mapping {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// The pages are read-only and shared by nothing but readers.
+#[cfg(all(unix, target_pointer_width = "64"))]
+unsafe impl Send for Mapping {}
+#[cfg(all(unix, target_pointer_width = "64"))]
+unsafe impl Sync for Mapping {}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl Mapping {
+    /// The first `len` bytes of `file`. A mapping cannot be empty; a file
+    /// always holds at least the magic by then.
+    fn of(file: &File, len: usize) -> Result<Mapping> {
+        use std::os::fd::AsRawFd;
+        const PROT_READ: i32 = 1;
+        const MAP_SHARED: i32 = 1;
+        let ptr = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                len,
+                PROT_READ,
+                MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr as isize == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Mapping { ptr, len })
+    }
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl AsRef<[u8]> for Mapping {
+    fn as_ref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        unsafe { munmap(self.ptr, self.len) };
+    }
+}
+
+/// [`open`], with the documents left in the file: it is mapped rather than
+/// read, and a document is decoded from its pages. What the process holds is
+/// what is derived from the documents -- the offset index, the hash, ordered
+/// and text indexes, the graph -- and the writes made since the open.
+///
+/// A prototype, which no server opens files with yet. A `checkpoint` leaves
+/// the records in the old file's pages, and the old file's disk space held
+/// until the database is dropped; a `compact` copies them into memory.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
+    let (mut file, path) = FileSink::create(path)?;
+    let len = file.seek(SeekFrom::End(0))? as usize;
+    let mapping = Mapping::of(&file, len)?;
+    let mut sink = FileSink::over(file, path);
+    let mut db = Database::new();
+    if len > MAGIC.len() {
+        let whole = db.load_mapped(Arc::new(mapping))?;
+        if whole < len {
+            // The pages past the cut stay mapped and are never read: no
+            // record points there.
+            sink.cut(whole)?;
+        }
+    }
+    db.set_sink(Box::new(sink));
+    Ok(db)
 }
 
 /// Opens a fenecdb file (creating it when missing) and loads its contents;

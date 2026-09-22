@@ -136,6 +136,10 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
     Ok(len <= (bytes.len() - pos) as u64)
 }
 
+/// Takes a data record's frames into a collection's store: the record's
+/// offset in the file, its bytes, and what to tell of each document's id.
+type Replay<'a> = dyn FnMut(&mut Store, usize, &[u8], &mut dyn FnMut(DocId)) -> Result<usize> + 'a;
+
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
@@ -1051,7 +1055,7 @@ impl Database {
         self.collections
             .values()
             .map(|c| {
-                c.store.total_bytes()
+                c.store.heap_bytes()
                     + c.store.index_bytes()
                     + c.vectors
                         .values()
@@ -1135,6 +1139,37 @@ impl Database {
     /// appended after the torn bytes is read back as the rest of them, and
     /// the next open lost it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<usize> {
+        self.load_from(bytes, None)
+    }
+
+    /// [`Self::load`] over a mapped file (`fs::open_mapped`): the documents
+    /// stay in the file, read through the pages the operating system maps
+    /// in, and only what is derived from them -- the offset index, the hash,
+    /// ordered and text indexes, the graph -- is built in memory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_mapped(&mut self, file: crate::store::Base) -> Result<usize> {
+        let keep = file.clone();
+        self.load_from((*keep).as_ref(), Some(&file))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
+        self.load_records(bytes, &mut |store, chunk_at, chunk, note| match base {
+            Some(b) => store.replay_mapped(b, chunk_at as u64, chunk.len() as u64, note),
+            None => store.replay_noting(chunk, note),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_from(&mut self, bytes: &[u8], _base: Option<&()>) -> Result<usize> {
+        self.load_records(bytes, &mut |store, _, chunk, note| {
+            store.replay_noting(chunk, note)
+        })
+    }
+
+    /// The pass over a file's records; `replay` takes a data record's frames
+    /// into a collection's store.
+    fn load_records(&mut self, bytes: &[u8], replay: &mut Replay<'_>) -> Result<usize> {
         if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != &MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
@@ -1218,6 +1253,7 @@ impl Database {
                         .get(&cid)
                         .cloned()
                         .ok_or_else(|| Error::Corrupt(format!("unknown collection {cid}")))?;
+                    let chunk_at = pos;
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let c = self.collections.get_mut(&name).unwrap();
@@ -1230,9 +1266,9 @@ impl Database {
                             }
                         };
                         let ids = &mut touched[at].1;
-                        c.store.replay_noting(chunk, &mut |id| ids.push(id))?
+                        replay(&mut c.store, chunk_at, chunk, &mut |id| ids.push(id))?
                     } else {
-                        c.store.replay(chunk)?
+                        replay(&mut c.store, chunk_at, chunk, &mut |_| {})?
                     } as u64;
                     if tail {
                         seq_seen += frames;
