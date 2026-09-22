@@ -168,7 +168,9 @@ are replicated to its standby, each through its own feed at
 `/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
 them there one at a time -- separate databases, nothing to make atomic
 between them. The router never promotes on its own: it cannot tell a node
-that is gone from one it cannot reach, and guessing makes two primaries.
+that is gone from one it cannot reach, and guessing makes two primaries. A
+write is on the standby 0.089 ms after the primary answered it (p99 0.448),
+and 20 tenants failed over in 60 ms (`make shard-bench`).
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

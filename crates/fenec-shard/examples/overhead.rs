@@ -6,6 +6,8 @@
 //!   * a tenant move: N documents with a DIM vector and an HNSW index,
 //!     image size and wall time, and the first query on the target (the
 //!     graph travels in the image, so it is not rebuilt)
+//!   * a node's standby: how long a write takes to be visible on the
+//!     replica, and what a failover of every tenant costs
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
@@ -18,10 +20,30 @@ use std::time::{Duration, Instant};
 const ROUNDS: usize = 5_000;
 
 fn node(tag: &str) -> (String, std::path::PathBuf) {
+    started(tag, None, false)
+}
+
+/// A node; `follows` makes it the standby of the node at that address, and
+/// `sync` fsyncs each write before answering, which is what a feed ships.
+fn started(tag: &str, follows: Option<&str>, sync: bool) -> (String, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("fenec-overhead-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let tenants = Arc::new(Tenants::new(&dir).unwrap());
+    let mut tenants = Tenants::new(&dir).unwrap();
+    if sync || follows.is_some() {
+        tenants = tenants.with_replication(fenec_http::tenants::Replicated {
+            token: "repl".into(),
+            buffer: 32 << 20,
+            upstream: follows.map(|a| format!("http://{a}")),
+            // The standby applies and answers; its own fsync follows the
+            // node's policy, as a replica of a single file does. Syncing
+            // every applied write there costs an fsync a write -- 8 ms on
+            // this machine -- for writes the primary can send again.
+            sync_on_write: sync,
+        });
+    }
+    let tenants = Arc::new(tenants);
     let cfg = fenec_http::Config {
+        sync_on_write: sync,
         addr: "127.0.0.1:0".into(),
         admin_token: Some("adm".into()),
         max_body: 1 << 30,
@@ -241,6 +263,126 @@ fn main() {
     let t = Instant::now();
     r.send("POST", "/t/acme/docs/near", None, body.as_bytes());
     println!("second near: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+
+    let _ = std::fs::remove_dir_all(d1);
+    let _ = std::fs::remove_dir_all(d2);
+
+    replicas();
+}
+
+/// A node and its standby: what a write costs to reach the replica, and
+/// what promoting every tenant of a node costs.
+fn replicas() {
+    const TENANTS: usize = 20;
+    const WRITES: usize = 200;
+    let (a1, d1) = started("r1", None, true);
+    let (a2, d2) = started("r2", Some(&a1), false);
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let raddr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut r = Client::new(&raddr);
+    for (name, addr) in [("r1", &a1), ("r2", &a2)] {
+        let body = format!(r#"{{"addr":"{addr}","token":"adm"}}"#);
+        assert_eq!(
+            r.send(
+                "PUT",
+                &format!("/_shard/nodes/{name}"),
+                None,
+                body.as_bytes()
+            )
+            .0,
+            201
+        );
+    }
+    let body = format!(r#"{{"addr":"{a1}","token":"adm","standby":"r2"}}"#);
+    assert_eq!(
+        r.send("PUT", "/_shard/nodes/r1", None, body.as_bytes()).0,
+        201
+    );
+    for i in 0..TENANTS {
+        assert_eq!(
+            r.send(
+                "PUT",
+                &format!("/_shard/tenants/t{i}"),
+                None,
+                br#"{"node":"r1"}"#
+            )
+            .0,
+            201
+        );
+    }
+    let query = |c: &mut Client, tenant: &str, sql: &str| -> (u16, String) {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, sql);
+        body.push('}');
+        let (status, b) = c.send("POST", &format!("/t/{tenant}/query"), None, body.as_bytes());
+        (status, String::from_utf8_lossy(&b).into_owned())
+    };
+    for i in 0..TENANTS {
+        assert_eq!(
+            query(&mut r, &format!("t{i}"), "create collection notes (n int)").0,
+            200
+        );
+    }
+
+    // ---- commit to visible on the replica
+    let mut replica = Client::new(&a2);
+    let mut acked = Vec::with_capacity(WRITES);
+    let mut lag = Vec::with_capacity(WRITES);
+    for k in 0..WRITES {
+        let t = Instant::now();
+        assert_eq!(query(&mut r, "t0", &format!("put notes {{n: {k}}}")).0, 200);
+        let ack = t.elapsed().as_secs_f64() * 1e3;
+        loop {
+            let (status, body) = query(&mut replica, "t0", "get notes count");
+            assert_eq!(status, 200, "{body}");
+            if body.contains(&format!(":{}}}", k + 1)) || body.contains(&format!("[{}]", k + 1)) {
+                break;
+            }
+        }
+        acked.push(ack);
+        lag.push(t.elapsed().as_secs_f64() * 1e3 - ack);
+    }
+    acked.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    lag.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "\nreplica: a write through the router is answered in {:.3} ms p50 \
+         (--sync always: an fsync a write) and is on the standby {:.3} ms later, \
+         {:.3} ms at p99 -- a read of the standby's own is what times it",
+        pct(&acked, 0.5),
+        pct(&lag, 0.5),
+        pct(&lag, 0.99)
+    );
+
+    // ---- failover of every tenant
+    for i in 1..TENANTS {
+        assert_eq!(query(&mut r, &format!("t{i}"), "put notes {n: 1}").0, 200);
+    }
+    let t = Instant::now();
+    let (status, body) = r.send("POST", "/_shard/nodes/r1/failover", None, b"");
+    let took = t.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    println!(
+        "failover: {TENANTS} tenants promoted on the standby in {took:.0} ms ({:.1} ms each)",
+        took / TENANTS as f64
+    );
+    let t = Instant::now();
+    let (status, body) = query(&mut r, "t0", "put notes {n: 999}");
+    assert_eq!(status, 200, "{body}");
+    println!(
+        "first write after it: {:.2} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     let _ = std::fs::remove_dir_all(d1);
     let _ = std::fs::remove_dir_all(d2);
