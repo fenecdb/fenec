@@ -840,14 +840,14 @@ impl Follower {
                 .failure()
                 .map(String::from);
             if let Some(f) = failed {
-                eprintln!("replica stopped: {f}");
+                crate::log!("replica stopped: {f}");
                 break;
             }
             if self.stop.load(Ordering::SeqCst) {
                 break;
             }
             if let Err(e) = &r {
-                eprintln!("replication: {e}; connecting again");
+                crate::log!("replication: {e}; connecting again");
             }
             lock(&self.state).reconnects += 1;
             let until = Instant::now() + pause;

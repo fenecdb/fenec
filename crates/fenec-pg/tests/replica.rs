@@ -114,6 +114,18 @@ impl Node {
     }
 }
 
+/// A node the test did not stop -- an assertion failed first -- is killed
+/// rather than left running: a replica whose primary is gone retries it
+/// forever.
+impl Drop for Node {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            unsafe { kill(self.child.id() as i32, SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
+}
+
 fn count(c: &mut Client) -> usize {
     let r = c.query("get items count").unwrap();
     r.rows[0][0].as_deref().unwrap().parse().unwrap()
@@ -270,5 +282,42 @@ fn replication_refuses_what_it_cannot_do() {
         assert_ne!(out.status.code(), Some(0), "{args:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(says), "{args:?}: {err}");
+    }
+}
+
+/// A server whose stderr is gone -- the pipe's reader exited, a log
+/// collector restarted -- still stops on SIGTERM. `eprintln!` panics on a
+/// closed stderr, and the thread that acts on the signal died printing
+/// "shutting down", leaving the process up for good.
+#[test]
+fn a_server_with_no_stderr_still_stops() {
+    let path = tmp("deaf.fenec");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+        .args(["--listen", "127.0.0.1:0", "--file"])
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("could not start fenec-pg");
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("postgres://localhost:") {
+        line.clear();
+        assert!(err.read_line(&mut line).unwrap() > 0, "it never listened");
+    }
+    // Nobody reads its stderr any more.
+    drop(err);
+    unsafe { kill(child.id() as i32, SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{status}");
+            return;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("still running 10 s after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }

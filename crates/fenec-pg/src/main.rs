@@ -106,7 +106,7 @@ stunnel/nginx-stream before using it on an open network.
 ";
 
 fn fail(msg: &str) -> ! {
-    eprintln!("{msg}");
+    fenec_http::log!("{msg}");
     std::process::exit(2);
 }
 
@@ -121,12 +121,12 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
         Some((h, p)) => match p.parse::<u16>() {
             Ok(p) => (h.trim_matches(['[', ']']), p),
             Err(_) => {
-                eprintln!("could not parse the port in the address: {addr}");
+                fenec_http::log!("could not parse the port in the address: {addr}");
                 return 1;
             }
         },
         None => {
-            eprintln!("the address must be in `host:port` form: {addr}");
+            fenec_http::log!("the address must be in `host:port` form: {addr}");
             return 1;
         }
     };
@@ -147,7 +147,7 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
     match Client::connect(&url) {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("ping failed: {e}");
+            fenec_http::log!("ping failed: {e}");
             1
         }
     }
@@ -294,7 +294,7 @@ fn main() {
             "--ping" => ping = true,
             "--insecure" => cfg.insecure = true,
             "--help" | "-h" => {
-                eprintln!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
+                fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
@@ -390,11 +390,11 @@ fn main() {
             };
             match opened {
                 Ok(db) => {
-                    eprintln!("opened: {path}");
+                    fenec_http::log!("opened: {path}");
                     db
                 }
                 Err(e) => {
-                    eprintln!("could not open {path}: {e}");
+                    fenec_http::log!("could not open {path}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -412,13 +412,13 @@ fn main() {
     };
 
     if let Err(e) = db.install_plugin(&PgPlugin) {
-        eprintln!("could not load the plugin: {e}");
+        fenec_http::log!("could not load the plugin: {e}");
         std::process::exit(1);
     }
 
     if let Some(path) = &file {
         if let Err(e) = settle_history(&mut db, path, replicating, replica_of.is_some(), promote) {
-            eprintln!("{e}");
+            fenec_http::log!("{e}");
             std::process::exit(1);
         }
     }
@@ -441,12 +441,16 @@ fn main() {
             .name("fenec-replica".into())
             .spawn(move || run.run())
             .unwrap_or_else(|e| fail(&format!("could not start the replica thread: {e}")));
-        eprintln!("following: {url}");
+        fenec_http::log!("following: {url}");
         f
     });
     let repl = replication_token
         .filter(|_| replicating)
         .map(|token| Replication::new(token, feed.clone(), follower));
+
+    // Before the HTTP thread announces its listener, as `Server::serve_on`
+    // does before its own: the flag a signal sets waits for the syncer.
+    server::install_signal_handlers();
 
     // The HTTP endpoint shares the same database: as a separate binary it
     // would open the same file from two processes and corrupt it (fenecdb is
@@ -465,7 +469,7 @@ fn main() {
         let listener = match http_server.bind() {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("could not open the HTTP endpoint: {e}");
+                fenec_http::log!("could not open the HTTP endpoint: {e}");
                 std::process::exit(1);
             }
         };
@@ -473,7 +477,7 @@ fn main() {
             .name("fenec-http".into())
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
-                    eprintln!("HTTP server error: {e}");
+                    fenec_http::log!("HTTP server error: {e}");
                 }
             })
             .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
@@ -481,7 +485,7 @@ fn main() {
 
     let server = Server::new(shared, cfg);
     if let Err(e) = server.serve() {
-        eprintln!("server error: {e}");
+        fenec_http::log!("server error: {e}");
         std::process::exit(1);
     }
 }
@@ -506,13 +510,13 @@ fn settle_history(
         db.follow(lineage)
     } else if promote {
         if !following {
-            eprintln!("--promote: {path} is not a replica's file; it opens as it is");
+            fenec_http::log!("--promote: {path} is not a replica's file; it opens as it is");
             return Ok(());
         }
         let id = fresh_id();
         let r = db.fork(id).and_then(|_| db.sync());
         if r.is_ok() {
-            eprintln!(
+            fenec_http::log!(
                 "promoted: {path} takes writes from change {} on, history {id:016x}",
                 db.change_seq()
             );
@@ -547,7 +551,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             .with_max_memory(cfg.max_memory)
             .with_checkpoint(cfg.checkpoint_on_exit),
     );
-    eprintln!(
+    fenec_http::log!(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
@@ -557,17 +561,19 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
         Ok(l) => l,
         Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
     };
+    // Before the thread that announces the listener, for the reason
+    // `Server::serve_on` gives: once the line is out, SIGTERM must sync.
+    server::install_signal_handlers();
     std::thread::Builder::new()
         .name("fenec-http".into())
         .spawn(move || {
             if let Err(e) = http_server.serve_on(listener) {
-                eprintln!("HTTP server error: {e}");
+                fenec_http::log!("HTTP server error: {e}");
                 std::process::exit(1);
             }
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    server::install_signal_handlers();
     let tick = match cfg.sync {
         SyncPolicy::Interval(d) if !d.is_zero() => d,
         _ => Duration::from_millis(200),
@@ -578,7 +584,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             let open = tenants.shutdown();
-            eprintln!("\nshutting down: {open} open tenant(s) synced");
+            fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(0);
         }
         if matches!(cfg.sync, SyncPolicy::Interval(_)) {

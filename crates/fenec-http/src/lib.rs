@@ -24,6 +24,19 @@
 //! below the prefix, so a client's base URL is the only thing that changes.
 //! See [`tenants`] for why a file per tenant.
 
+/// Writes a line to stderr and never panics. `eprintln!` panics when stderr
+/// is gone -- a closed pipe, a log collector that restarted -- and a server
+/// thread that dies that way while logging a sync error, or while shutting
+/// down, leaves the process running and deaf to SIGTERM: the thread that
+/// would have acted on the signal is the one that died.
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod access;
 pub mod admin;
 pub mod api;
@@ -217,7 +230,7 @@ impl Server {
     }
 
     pub fn serve_on(&self, listener: TcpListener) -> std::io::Result<()> {
-        eprintln!(
+        crate::log!(
             "fenec-http {} listening on: http://{}  [{}{}]",
             fenec_core::VERSION,
             listener.local_addr()?,
@@ -712,7 +725,7 @@ fn await_durable(
         return Ok(());
     };
     durable().inspect_err(|e| {
-        eprintln!("sync error: {e}");
+        crate::log!("sync error: {e}");
         db.write().unwrap_or_else(|p| p.into_inner()).fail(e);
     })
 }

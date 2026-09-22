@@ -254,27 +254,29 @@ impl Server {
 
     /// Serves on an already-prepared listener.
     pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
-        eprintln!(
+        // The signal handlers come before the line saying it listens: a
+        // supervisor that sends SIGTERM as soon as it reads that line would
+        // otherwise stop it by the default action, with no final sync.
+        install_signal_handlers();
+        spawn_syncer(
+            Arc::clone(&self.db),
+            self.cfg.sync,
+            self.cfg.checkpoint_on_exit,
+        );
+        fenec_http::log!(
             "fenec-pg {} listening on: postgres://localhost:{}/fenec  [{}, sync={}]",
             fenec_core::VERSION,
             listener.local_addr()?.port(),
             match &self.cfg.auth {
                 Auth::Trust => "no auth",
                 Auth::Cleartext(_) => "password: plain text",
-                Auth::Scram(_) => "parola: SCRAM-SHA-256",
+                Auth::Scram(_) => "password: SCRAM-SHA-256",
             },
             match self.cfg.sync {
                 SyncPolicy::Off => "on shutdown".to_string(),
                 SyncPolicy::Always => "every write".to_string(),
                 SyncPolicy::Interval(d) => format!("{} ms", d.as_millis()),
             }
-        );
-
-        install_signal_handlers();
-        spawn_syncer(
-            Arc::clone(&self.db),
-            self.cfg.sync,
-            self.cfg.checkpoint_on_exit,
         );
 
         let mut failures = 0u32;
@@ -290,7 +292,7 @@ impl Server {
                 }
                 Err(e) => {
                     failures += 1;
-                    eprintln!("accept error ({failures}): {e}");
+                    fenec_http::log!("accept error ({failures}): {e}");
                     if failures >= ACCEPT_GIVE_UP {
                         return Err(e);
                     }
@@ -342,7 +344,7 @@ impl Server {
                                 | io::ErrorKind::TimedOut
                         );
                         if !quiet {
-                            eprintln!("session error ({peer}): {e}");
+                            fenec_http::log!("session error ({peer}): {e}");
                         }
                     }
                 });
@@ -352,7 +354,7 @@ impl Server {
             // server itself. Now only that connection drops; the client gets
             // PostgreSQL's "too many clients" code.
             if let Err(e) = spawned {
-                eprintln!("could not create a thread: {e}");
+                fenec_http::log!("could not create a thread: {e}");
                 if let Some(mut s) = refused {
                     refuse(&mut s, "53300", "could not create a thread");
                 }
@@ -429,12 +431,12 @@ fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool)
             match flushed {
                 Ok(Some(durability)) => {
                     if let Err(e) = durability() {
-                        eprintln!("sync error: {e}");
+                        fenec_http::log!("sync error: {e}");
                         write_lock(&db).fail(&e);
                     }
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("sync error: {e}"),
+                Err(e) => fenec_http::log!("sync error: {e}"),
             }
         }
     });
@@ -452,10 +454,10 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     let dirty = g.is_dirty();
     if dirty {
         if let Err(e) = g.sync() {
-            eprintln!("sync error: {e}");
+            fenec_http::log!("sync error: {e}");
         }
     }
-    eprintln!(
+    fenec_http::log!(
         "\nshutting down: {}",
         if dirty {
             "writes were pushed to disk"
@@ -473,8 +475,8 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // a half-written checkpoint cannot corrupt the file.
     if checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
         match g.checkpoint() {
-            Ok(()) => eprintln!("checkpoint written: the HNSW graph is persisted"),
-            Err(e) => eprintln!("could not write the checkpoint: {e}"),
+            Ok(()) => fenec_http::log!("checkpoint written: the HNSW graph is persisted"),
+            Err(e) => fenec_http::log!("could not write the checkpoint: {e}"),
         }
     }
     std::process::exit(0);
@@ -529,9 +531,9 @@ impl Guard<'_> {
         policy: SyncPolicy,
     ) -> fenec_core::error::Result<Option<Durability>> {
         match self {
-            Guard::Write(g) if policy == SyncPolicy::Always => {
-                g.flush().inspect_err(|e| eprintln!("sync error: {e}"))
-            }
+            Guard::Write(g) if policy == SyncPolicy::Always => g
+                .flush()
+                .inspect_err(|e| fenec_http::log!("sync error: {e}")),
             _ => Ok(None),
         }
     }
@@ -1515,7 +1517,7 @@ fn execute_into(
         return;
     };
     if let Err(e) = durability() {
-        eprintln!("sync error: {e}");
+        fenec_http::log!("sync error: {e}");
         // The engine did not see this one fail: it is told, and refuses
         // every later write as after a failure of its own.
         write_lock(db).fail(&e);
