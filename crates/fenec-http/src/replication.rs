@@ -44,8 +44,6 @@
 
 use crate::constant_eq;
 use crate::http::{Request, Response};
-use fenec_core::engine::MAGIC;
-use fenec_core::fs::FileSink;
 use fenec_core::prelude::*;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -323,6 +321,13 @@ impl Sink for Tee {
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.append(bytes)
     }
+    fn sync_existing(&mut self) -> fenec_core::error::Result<()> {
+        self.file.sync_existing()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remapped(&self) -> Option<fenec_core::store::Base> {
+        self.file.remapped()
+    }
     fn record(&mut self, seq: u64, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.record(seq, bytes)?;
         self.feed.push(seq, bytes);
@@ -368,20 +373,10 @@ impl Sink for Tee {
 /// last record it cut short is cut off first, as `fs::open` does; it was
 /// never synced, so no replica was sent it.
 pub fn open(path: &str, buffer: usize) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
-    let (mut file, existing) = FileSink::open(path)?;
-    let mut db = Database::new();
-    if existing.len() > MAGIC.len() {
-        let whole = db.load(&existing)?;
-        if whole < existing.len() {
-            file.cut(whole)?;
-        }
-    }
-    file.sync_existing()?;
     let feed = Feed::new(buffer);
-    db.set_sink(Box::new(Tee {
-        file: Box::new(file),
-        feed: Arc::clone(&feed),
-    }));
+    let made = Arc::clone(&feed);
+    // Mapped like any other file, with the tee between the database and it.
+    let db = fenec_core::fs::open_with(path, move |file| Box::new(Tee { file, feed: made }))?;
     feed.start(db.change_seq());
     Ok((db, feed))
 }

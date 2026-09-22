@@ -102,10 +102,21 @@ auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
 can write real queries.
 
-**No page cache.** The byte sequence on disk and in memory are the same format;
-a read decodes directly over the arena slice. There is no eviction policy, no
-dirty pages, and the whole database is resident — open peak ≈ 2× the file,
-`compact`/`checkpoint` peak ≈ 3×.
+**No page cache, and the file is mapped.** The byte sequence on disk and in
+memory are the same format, so a read decodes straight over the bytes --
+there is no eviction policy, no dirty pages and no cache of fenecdb's own.
+`fs::open` maps the file where the target maps files (unix, 64-bit), so the
+documents stay in it and the process holds what it derived from them: the
+offset index, the hash, ordered and text indexes, the graph, and the writes
+since the open. A 1 GB file of 2.3 million rows with a hash and an ordered
+index holds 188 MB that way against 1 095 read into memory, and its
+`compact` peaks at 423 MB against 2 866; a 10 GB file opens on an 8 GB
+machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`)
+is the other way, for a network file system or to have `--max-memory` cover
+the data. A rewrite -- `checkpoint`, `compact`, an image adopted -- writes
+the new file and points the stores at it (`Database::repoint`), so the old
+one is let go of; a compact over a mapped file never copies a record into
+memory and rebuilds no index, since the documents are the same ones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts

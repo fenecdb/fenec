@@ -142,6 +142,32 @@ type Replay<'a> = dyn FnMut(&mut Store, usize, &[u8], &mut dyn FnMut(DocId)) -> 
 
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
+/// Where an image is written: the file being rewritten, or a buffer. The
+/// counter header's body length is only known once the body is out, so it is
+/// patched where it stands rather than the image being written twice.
+pub trait ImageOut {
+    fn write(&mut self, bytes: &[u8]) -> Result<()>;
+    /// Bytes written so far, which is where the next one lands.
+    fn at(&self) -> u64;
+    /// Overwrites bytes written earlier, in place.
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+}
+
+impl ImageOut for Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn at(&self) -> u64 {
+        self.len() as u64
+    }
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        let at = at as usize;
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
 pub trait Sink: Send {
     fn append(&mut self, bytes: &[u8]) -> Result<()>;
     /// Appends a write, the `seq`th of the change counter. A sink that
@@ -153,6 +179,31 @@ pub trait Sink: Send {
         self.append(bytes)
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
+    /// [`Self::rewrite`] with the image written into the file as it is
+    /// produced rather than built in memory first: a checkpoint of a 1 GB
+    /// database held the whole image beside the data before this. A sink
+    /// with nowhere to stream to -- the browser's -- builds it and rewrites.
+    fn rewrite_with(
+        &mut self,
+        image: &mut dyn FnMut(&mut dyn ImageOut) -> Result<()>,
+    ) -> Result<()> {
+        let mut buf: Vec<u8> = Vec::new();
+        image(&mut buf)?;
+        self.rewrite(&buf)
+    }
+    /// The file this sink holds, mapped read-only: what a database whose
+    /// records are in a mapping points at after a rewrite, so that the file
+    /// it just wrote is the one it reads -- and the old one, unlinked by the
+    /// rename, is let go of. `None` for every sink but a file's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remapped(&self) -> Option<crate::store::Base> {
+        None
+    }
+    /// Pushes to disk what an earlier process wrote and never synced: a
+    /// primary calls it before it tells a replica those bytes exist.
+    fn sync_existing(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
@@ -182,6 +233,15 @@ pub type Durability = Box<dyn FnOnce() -> Result<()> + Send>;
 /// through `Hub`; in a database with no subscribers the cost is zero.
 pub trait Watcher: Send + Sync {
     fn notify(&self, seq: u64);
+}
+
+/// `[kind][collection][length]`, the head every record but the counter has.
+fn record_head(kind: u8, cid: u32, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.push(kind);
+    put_uvarint(&mut out, cid as u64);
+    put_uvarint(&mut out, len as u64);
+    out
 }
 
 /// A sink that writes nowhere (pure in-memory / browser session).
@@ -811,6 +871,12 @@ pub struct Database {
     /// Which history the writes belong to, and whether they come from a
     /// primary; see [`History`].
     history: History,
+    /// Whether the documents are read from a mapped file rather than held in
+    /// memory (`fs::open`). It outlives the stores it was set for: a
+    /// rewrite, a compaction and an image adopted all end with the stores
+    /// pointed at the file again.
+    #[cfg(not(target_arch = "wasm32"))]
+    mapped: bool,
     /// The writes a `create index` or `compact` running beside the database
     /// has to catch up with once it is built (see `maintenance`). A `Mutex`
     /// for the reason `sink` is one: it is registered under the read lock,
@@ -839,6 +905,8 @@ impl Database {
             changes: ChangeLog::default(),
             watcher: None,
             history: History::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            mapped: false,
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1075,41 +1143,62 @@ impl Database {
     /// Byte image of the whole database. Used to write to IndexedDB/OPFS in
     /// the browser and to a file on native.
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut out = Vec::from(&MAGIC[..]);
-        // Counter header: a placeholder now, the values after the body.
-        let head_at = out.len();
-        out.push(REC_SEQ);
-        out.extend_from_slice(&self.changes.seq().to_le_bytes());
-        out.extend_from_slice(&0u64.to_le_bytes());
-        let body_at = out.len();
+        let mut out = Vec::new();
+        // A buffer takes every write, so there is nothing to handle -- and
+        // `expect` here pulled the error's `Debug` into the browser module,
+        // 1.3 KB for a message nobody can reach.
+        let _ = self.snapshot_into(&mut out);
+        out
+    }
+
+    /// [`Self::snapshot`] written into `out` as it is produced: the records
+    /// of a collection go straight through, so the image is never a second
+    /// copy of the data (`Sink::rewrite_with`).
+    pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
+        self.image_into(out, &[])
+    }
+
+    /// [`Self::snapshot_into`], leaving out the dead records of the named
+    /// collections: what `compact` writes.
+    fn image_into(&self, out: &mut dyn ImageOut, compacting: &[String]) -> Result<()> {
+        let mut head = Vec::from(&MAGIC[..]);
+        // Counter header: a placeholder now, the body's length once it is
+        // written -- fixed width, so it is patched where it stands.
+        let head_at = head.len() as u64;
+        head.push(REC_SEQ);
+        head.extend_from_slice(&self.changes.seq().to_le_bytes());
+        head.extend_from_slice(&0u64.to_le_bytes());
+        out.write(&head)?;
+        let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
-            out.extend_from_slice(&self.history.record());
+            out.write(&self.history.record())?;
         }
 
         for name in &self.order {
             let c = &self.collections[name];
             let sc = c.schema.encode();
-            out.push(REC_CREATE);
-            put_uvarint(&mut out, c.id as u64);
-            put_uvarint(&mut out, sc.len() as u64);
-            out.extend_from_slice(&sc);
+            out.write(&record_head(REC_CREATE, c.id, sc.len()))?;
+            out.write(&sc)?;
 
             // The counter comes right after the schema: the collection has to
             // exist, and its data can only carry the counter forward.
             let mut counter = Vec::with_capacity(9);
             put_uvarint(&mut counter, c.store.next_id());
-            out.push(REC_NEXTID);
-            put_uvarint(&mut out, c.id as u64);
-            put_uvarint(&mut out, counter.len() as u64);
-            out.extend_from_slice(&counter);
+            out.write(&record_head(REC_NEXTID, c.id, counter.len()))?;
+            out.write(&counter)?;
 
-            let image = c.store.image();
-            if !image.is_empty() {
-                out.push(REC_DATA);
-                put_uvarint(&mut out, c.id as u64);
-                put_uvarint(&mut out, image.len() as u64);
-                out.extend_from_slice(&image);
+            let compact = compacting.iter().any(|n| n == name);
+            let bytes = match compact {
+                true => c.store.live_len(),
+                false => c.store.image_len(),
+            };
+            if bytes > 0 {
+                out.write(&record_head(REC_DATA, c.id, bytes))?;
+                match compact {
+                    true => c.store.write_live(out)?,
+                    false => c.store.write_image(out)?,
+                }
             }
 
             // The graph comes *after* the data records: to look the vectors
@@ -1121,15 +1210,77 @@ impl Database {
                 let mut payload = Vec::new();
                 crate::codec::encode_str(&mut payload, field);
                 payload.extend_from_slice(&ix.serialize_graph());
-                out.push(REC_GRAPH);
-                put_uvarint(&mut out, c.id as u64);
-                put_uvarint(&mut out, payload.len() as u64);
-                out.extend_from_slice(&payload);
+                out.write(&record_head(REC_GRAPH, c.id, payload.len()))?;
+                out.write(&payload)?;
             }
         }
-        let body_len = (out.len() - body_at) as u64;
-        out[head_at + 9..head_at + REC_SEQ_LEN].copy_from_slice(&body_len.to_le_bytes());
-        out
+        let body_len = out.at() - body_at;
+        out.patch(head_at + 9, &body_len.to_le_bytes())
+    }
+
+    /// Points the stores at the file the sink has just rewritten: the same
+    /// documents, in their new places. The hash, ordered, text and vector
+    /// indexes stand -- nothing about the documents changed, only where
+    /// their bytes are -- so this is a pass over the new file's record
+    /// heads, not a rebuild.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repoint(&mut self) -> Result<()> {
+        if !self.mapped {
+            return Ok(());
+        }
+        let Some(base) = self.sink_mut().remapped() else {
+            return Ok(());
+        };
+        let keep = base.clone();
+        let bytes = (*keep).as_ref();
+        if bytes.len() < MAGIC.len() {
+            return Err(Error::Corrupt("the rewritten file is empty".into()));
+        }
+        let mut by_id: HashMap<u32, String> = HashMap::new();
+        let mut fresh: HashMap<String, Store> = HashMap::new();
+        let mut pos = MAGIC.len();
+        while pos < bytes.len() {
+            if !whole_record(bytes, pos)? {
+                break;
+            }
+            let rec = bytes[pos];
+            pos += 1;
+            if rec == REC_SEQ {
+                pos += REC_SEQ_LEN - 1;
+                continue;
+            }
+            let cid = get_uvarint(bytes, &mut pos)? as u32;
+            let len = get_uvarint(bytes, &mut pos)? as usize;
+            let at = pos;
+            pos += len;
+            match rec {
+                REC_CREATE => {
+                    let mut sp = 0usize;
+                    let schema = Schema::decode(&bytes[at..at + len], &mut sp)?;
+                    by_id.insert(cid, schema.name.clone());
+                    fresh.insert(schema.name, Store::new());
+                }
+                REC_NEXTID => {
+                    let mut np = 0usize;
+                    let next = get_uvarint(&bytes[at..at + len], &mut np)?;
+                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
+                        store.raise_next_id(next);
+                    }
+                }
+                REC_DATA => {
+                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
+                        store.replay_mapped(&base, at as u64, len as u64, &mut |_| {})?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (name, store) in fresh {
+            if let Some(c) = self.collections.get_mut(&name) {
+                c.store = store;
+            }
+        }
+        Ok(())
     }
 
     /// Builds the database from a byte image, and returns how much of it
@@ -1149,6 +1300,7 @@ impl Database {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_mapped(&mut self, file: crate::store::Base) -> Result<usize> {
         let keep = file.clone();
+        self.mapped = true;
         self.load_from((*keep).as_ref(), Some(&file))
     }
 
@@ -1591,11 +1743,17 @@ impl Database {
     /// have to rebuild the indexes.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.refuse_if_failed()?;
-        let image = self.snapshot();
-        let r = self.sink_mut().rewrite(&image);
+        // The sink is behind a lock, so the image can be written from `self`
+        // while the sink takes it: both are shared borrows here.
+        let r = {
+            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+            sink.rewrite_with(&mut |out| self.snapshot_into(out))
+        };
         self.storage(r)?;
         let r = self.sink_mut().sync();
         self.storage(r)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         self.dirty = false;
         Ok(())
     }
@@ -1898,6 +2056,10 @@ impl Database {
         self.history = fresh.history;
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
+        // The image is the file now: a mapped database reads the documents
+        // from there rather than holding the copy it was handed.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         self.dirty = false;
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
@@ -3790,17 +3952,37 @@ impl Database {
             }
             None => self.order.clone(),
         };
-        let mut reclaimed = 0usize;
-        for name in targets {
-            let c = self.collections.get_mut(&name).unwrap();
-            reclaimed += c.store.dead_bytes();
-            c.store.compact()?;
+        let reclaimed: usize = targets
+            .iter()
+            .map(|n| self.collections[n].store.dead_bytes())
+            .sum();
+        // Over a mapped file the records never come into memory: the live
+        // ones are written into the new file, and the stores are pointed at
+        // it. The documents are the same ones, so no index is rebuilt.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mapped = self.mapped;
+        #[cfg(target_arch = "wasm32")]
+        let mapped = false;
+        if !mapped {
+            for name in &targets {
+                let c = self.collections.get_mut(name).unwrap();
+                c.store.compact()?;
+            }
         }
-        self.rebuild_indexes()?;
+        // No index is rebuilt either way. A compact drops dead records and
+        // moves the live ones; the documents are the same, and every index
+        // is keyed by id. The graph keeps its tombstones, whose own vectors
+        // travel with them, so it describes the documents as it did -- and
+        // rebuilding it took 50 s at 100 000 x 768 for nothing.
         // After compaction the persisted image is rewritten from scratch.
-        let image = self.snapshot();
-        let r = self.sink_mut().rewrite(&image);
+        let r = {
+            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+            let compacting: &[String] = if mapped { &targets } else { &[] };
+            sink.rewrite_with(&mut |out| self.image_into(out, compacting))
+        };
         self.storage(r)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))

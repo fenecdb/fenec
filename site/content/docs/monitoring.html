@@ -55,7 +55,7 @@ so a <code>get</code> sent through <code>POST /query</code> is a read.</p>
 <tr><td><code>fenec_connections{transport}</code></td><td>gauge</td><td>connections open now; a scrape is not one</td></tr>
 <tr><td><code>fenec_documents{collection}</code></td><td>gauge</td><td>documents in a collection</td></tr>
 <tr><td><code>fenec_data_bytes{collection}</code>, <code>fenec_dead_bytes{collection}</code></td><td>gauge</td><td>live records, and the overwritten and deleted ones <code>compact</code> gives back</td></tr>
-<tr><td><code>fenec_memory_bytes</code></td><td>gauge</td><td>the data footprint <code>--max-memory</code> holds to — not RSS: opening peaks at about twice the file, <code>compact</code> at three times</td></tr>
+<tr><td><code>fenec_memory_bytes</code></td><td>gauge</td><td>what the process holds of the database and <code>--max-memory</code> counts: the indexes, and the documents too where the file is not mapped (<code>--no-mmap</code>)</td></tr>
 <tr><td><code>fenec_change_sequence</code></td><td>gauge</td><td>the last write's sequence number; its rate is the writes per second, from any transport</td></tr>
 <tr><td><code>fenec_storage_failed</code></td><td>gauge</td><td>1 once the disk refused a write: writes stop until the file is reopened, reads go on</td></tr>
 <tr><td><code>fenec_replicas</code></td><td>gauge</td><td>on a primary, the replicas streaming from it</td></tr>

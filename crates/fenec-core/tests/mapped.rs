@@ -1,12 +1,13 @@
-//! A file opened mapped (`fs::open_mapped`) answers every query as the same
-//! file opened by reading it (`fs::open`): the documents are decoded from the
-//! file's pages instead of from copies, and nothing else may differ -- not
-//! the checkpoint's image, not the tail after it, not what a write, a
-//! checkpoint or a compact on the mapped database leaves behind.
+//! A file opened mapped (`fs::open`, which maps where the target can)
+//! answers every query as the same file read into memory
+//! (`fs::open_in_memory`): the documents are decoded from the file's pages
+//! instead of from copies, and nothing else may differ -- not the
+//! checkpoint's image, not the tail after it, not what a write, a checkpoint
+//! or a compact on the mapped database leaves behind.
 
 #![cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 
-use fenec_core::fs::{open, open_mapped};
+use fenec_core::fs::{open_in_memory as open, open_mapped};
 use fenec_core::prelude::*;
 use std::path::PathBuf;
 

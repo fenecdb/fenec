@@ -4,7 +4,7 @@
 //! byte image. A write = append to the file. Open = a single replay pass.
 //! No separate WAL + data file pair, no checkpoint, no page cache.
 
-use crate::engine::{Database, Durability, Sink, MAGIC};
+use crate::engine::{Database, Durability, ImageOut, Sink, MAGIC};
 use crate::error::Result;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -153,16 +153,6 @@ impl FileSink {
         disk.file.seek(SeekFrom::End(0))?;
         Ok(())
     }
-
-    /// Pushes the whole file to disk, the bytes an earlier process wrote
-    /// and never synced included. After a crash of the process alone they
-    /// are in the file but may be only in the kernel's cache: a primary
-    /// calls this before it tells a replica they exist.
-    pub fn sync_existing(&mut self) -> Result<()> {
-        let disk = lock(&self.disk);
-        disk.file.sync_data()?;
-        Ok(())
-    }
 }
 
 impl Sink for FileSink {
@@ -179,6 +169,13 @@ impl Sink for FileSink {
         Ok(())
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
+        self.rewrite_with(&mut |out| out.write(bytes))
+    }
+
+    fn rewrite_with(
+        &mut self,
+        image: &mut dyn FnMut(&mut dyn ImageOut) -> Result<()>,
+    ) -> Result<()> {
         let mut disk = lock(&self.disk);
         if let Some(e) = &disk.failed {
             return Err(e.clone());
@@ -189,9 +186,13 @@ impl Sink for FileSink {
         // Atomic replace: write to a side file first, then rename.
         let tmp = self.path.with_extension("fenec.compacting");
         {
-            let mut f = BufWriter::with_capacity(WRITE_BUF, File::create(&tmp)?);
-            f.write_all(bytes)?;
-            f.into_inner()
+            let mut out = FileImage {
+                w: BufWriter::with_capacity(WRITE_BUF, File::create(&tmp)?),
+                at: 0,
+            };
+            image(&mut out)?;
+            out.w
+                .into_inner()
                 .map_err(|e| crate::error::Error::Io(e.to_string()))?
                 .sync_all()?;
         }
@@ -209,6 +210,32 @@ impl Sink for FileSink {
     /// buffer, the last writes can be lost if the process dies before `sync`
     /// is called; fenecdb never fsyncs every write anyway -- this buffer
     /// extends that model.
+    /// The file as it stands, mapped read-only: what a mapped database
+    /// points its stores at after a rewrite. The mapping it had covers the
+    /// file the rename replaced, which is unlinked and goes when the last
+    /// location pointing into it does.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    fn remapped(&self) -> Option<crate::store::Base> {
+        let disk = lock(&self.disk);
+        let len = disk.file.metadata().ok()?.len() as usize;
+        if len == 0 {
+            return None;
+        }
+        Mapping::of(&disk.file, len)
+            .ok()
+            .map(|m| Arc::new(m) as crate::store::Base)
+    }
+
+    /// Pushes the whole file to disk, the bytes an earlier process wrote
+    /// and never synced included. After a crash of the process alone they
+    /// are in the file but may be only in the kernel's cache: a primary
+    /// calls this before it tells a replica they exist.
+    fn sync_existing(&mut self) -> Result<()> {
+        let disk = lock(&self.disk);
+        disk.file.sync_data()?;
+        Ok(())
+    }
+
     fn sync(&mut self) -> Result<()> {
         lock(&self.disk).sync(&self.pending, self.appended)
     }
@@ -221,6 +248,36 @@ impl Sink for FileSink {
             self.appended,
         );
         Ok(Some(Box::new(move || lock(&disk).sync(&pending, upto))))
+    }
+}
+
+/// The image written straight into the side file a rewrite renames over the
+/// database: `at` counts what went in, and a patch seeks back to it.
+struct FileImage {
+    w: BufWriter<File>,
+    at: u64,
+}
+
+impl ImageOut for FileImage {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.w.write_all(bytes)?;
+        self.at += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn at(&self) -> u64 {
+        self.at
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        // What is buffered has to be in the file before the seek moves off
+        // its end.
+        self.w.flush()?;
+        let f = self.w.get_mut();
+        f.seek(SeekFrom::Start(at))?;
+        f.write_all(bytes)?;
+        f.seek(SeekFrom::End(0))?;
+        Ok(())
     }
 }
 
@@ -297,16 +354,28 @@ impl Drop for Mapping {
     }
 }
 
-/// [`open`], with the documents left in the file: it is mapped rather than
-/// read, and a document is decoded from its pages. What the process holds is
-/// what is derived from the documents -- the offset index, the hash, ordered
-/// and text indexes, the graph -- and the writes made since the open.
+/// [`open_in_memory`], with the documents left in the file: it is mapped
+/// rather than read, and a document is decoded from its pages. What the
+/// process holds is what is derived from the documents -- the offset index,
+/// the hash, ordered and text indexes, the graph -- and the writes made
+/// since the open. A rewrite (`checkpoint`, `compact`) writes the new file
+/// and the stores are pointed at it, so the old one is let go of.
 ///
-/// A prototype, which no server opens files with yet. A `checkpoint` leaves
-/// the records in the old file's pages, and the old file's disk space held
-/// until the database is dropped; a `compact` copies them into memory.
+/// This is what [`open`] does where the target maps files, which is every
+/// one fenecdb serves from.
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
+    open_mapped_with(path, |file| file)
+}
+
+/// [`open_mapped`], with the file's sink wrapped before the database takes
+/// it: a primary's `Tee` (fenec-http) goes around it here, so a file with
+/// replicas is mapped as any other is.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub fn open_mapped_with(
+    path: impl AsRef<Path>,
+    wrap: impl FnOnce(Box<dyn Sink>) -> Box<dyn Sink>,
+) -> Result<Database> {
     let (mut file, path) = FileSink::create(path)?;
     let len = file.seek(SeekFrom::End(0))? as usize;
     let mapping = Mapping::of(&file, len)?;
@@ -320,13 +389,50 @@ pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
             sink.cut(whole)?;
         }
     }
-    db.set_sink(Box::new(sink));
+    let mut sink = wrap(Box::new(sink));
+    sink.sync_existing()?;
+    db.set_sink(sink);
     Ok(db)
 }
 
-/// Opens a fenecdb file (creating it when missing) and loads its contents;
-/// a last record a crash cut short is cut off the file.
+/// Opens a fenecdb file (creating it when missing): mapped where the target
+/// maps files, read into memory where it does not. A 1 GB file of 2.3
+/// million rows with a hash and an ordered index opened this way holds 188
+/// MB rather than 1 095, and its `compact` peaks at 423 MB rather than
+/// 2 866.
 pub fn open(path: impl AsRef<Path>) -> Result<Database> {
+    open_with(path, |file| file)
+}
+
+/// [`open`], with the file's sink wrapped before the database takes it.
+pub fn open_with(
+    path: impl AsRef<Path>,
+    wrap: impl FnOnce(Box<dyn Sink>) -> Box<dyn Sink>,
+) -> Result<Database> {
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    {
+        open_mapped_with(path, wrap)
+    }
+    #[cfg(not(all(unix, target_pointer_width = "64")))]
+    {
+        let (mut sink, existing) = FileSink::open(path)?;
+        let mut db = Database::new();
+        if existing.len() > MAGIC.len() {
+            let whole = db.load(&existing)?;
+            if whole < existing.len() {
+                sink.cut(whole)?;
+            }
+        }
+        let mut sink = wrap(Box::new(sink));
+        sink.sync_existing()?;
+        db.set_sink(sink);
+        Ok(db)
+    }
+}
+
+/// Opens a fenecdb file (creating it when missing) and reads it into memory,
+/// records and all; a last record a crash cut short is cut off the file.
+pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Database> {
     let (mut sink, existing) = FileSink::open(path)?;
     let mut db = Database::new();
     if existing.len() > MAGIC.len() {

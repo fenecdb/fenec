@@ -694,6 +694,75 @@ impl Store {
         Ok(fresh)
     }
 
+    /// Bytes [`Self::write_image`] writes: the record bytes this store
+    /// holds, mapped and in memory together.
+    pub fn image_len(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Bytes [`Self::write_live`] writes. Counted rather than taken from
+    /// `total_bytes - dead_bytes`: a superseded record leaves its payload's
+    /// length behind in `dead_bytes`, not its frame's, and a length that is
+    /// off makes the record after the data one unreadable.
+    pub fn live_len(&self) -> usize {
+        let mut head = Vec::with_capacity(16);
+        let mut total = 0usize;
+        for id in self.index.iter() {
+            let Some(loc) = self.index.get(id) else {
+                continue;
+            };
+            head.clear();
+            head.push(OP_PUT);
+            put_uvarint(&mut head, id);
+            put_uvarint(&mut head, loc.len as u64);
+            total += head.len() + loc.len as usize;
+        }
+        total
+    }
+
+    /// The live records, framed afresh, in id order: what `compact` writes
+    /// into the new file. Nothing is gathered in memory on the way.
+    pub fn write_live(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
+        let mut head = Vec::with_capacity(16);
+        for id in self.index.iter() {
+            let Some(loc) = self.index.get(id) else {
+                continue;
+            };
+            let payload = self.payload(loc)?;
+            head.clear();
+            head.push(OP_PUT);
+            put_uvarint(&mut head, id);
+            put_uvarint(&mut head, payload.len() as u64);
+            out.write(&head)?;
+            out.write(payload)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the records are read from a mapped file rather than held in
+    /// memory (`fs::open_mapped`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_mapped(&self) -> bool {
+        self.base.is_some()
+    }
+
+    /// The records, written into `out` rather than gathered into a `Vec`:
+    /// what a checkpoint of a large collection would otherwise hold beside
+    /// the data.
+    pub fn write_image(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((base, stretches)) = &self.base {
+            let file = (**base).as_ref();
+            for &(at, len) in stretches {
+                out.write(&file[at as usize..(at + len) as usize])?;
+            }
+        }
+        for s in &self.segments {
+            out.write(&s.data)?;
+        }
+        Ok(())
+    }
+
     /// Byte image of the whole store (to persist or to move it).
     pub fn image(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.total_bytes);

@@ -30,10 +30,43 @@ of the locking cost all follow from that one structure.</p>
 <p>No eviction policy, no dirty pages, no warm-up. Dead bytes are reclaimed by
 <code>compact</code>.</p>
 
-<p><b>What it costs.</b> The whole file is resident — not just the vector
-arena. Open peak is about 2× the file, and <code>compact</code> or
-<code>checkpoint</code> peaks at about 3×. Scale is bounded by memory, and the
-numbers are in <a href="limits.html#memory-and-scale">Limits</a>.</p>
+<h3 id="the-file-is-mapped">The file is mapped</h3>
+
+<p>Because the format on disk is the format in memory, the file can be the
+memory: <code>fs::open</code> maps it where the target maps files, and a
+document is decoded from the pages the operating system brings in — and can
+drop again. What the process holds is what it derived from the documents: the
+offset index, the hash, ordered and text indexes, the graph, and the writes
+since the open. One file of 1 GB, 2.3 million rows with a hash and an ordered
+index (<code>make open-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">read into memory</th><th class="n">mapped</th></tr></thead>
+<tbody>
+<tr><td>open</td><td class="n">2.26 s, 1 095 MB held</td><td class="n"><b>2.13 s, 188 MB</b></td></tr>
+<tr><td><code>compact</code></td><td class="n">1.69 s, peak 2 866 MB</td><td class="n"><b>0.60 s, peak 423 MB</b></td></tr>
+<tr><td>held afterwards</td><td class="n">969 MB</td><td class="n"><b>117 MB</b></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A 10 GB file of 23 million rows opens on an 8 GB machine this way, which
+reading it cannot: that would want about 20 GB. What it does not change is the
+open's cost — the records are still walked to build the offset index and the
+indexes are still built from the documents, so opening is proportional to the
+file either way.</p>
+
+<p>A rewrite writes the new file and points the stores at it, so the file just
+written is the one being read and the old one is let go of. A
+<code>compact</code> over a mapped file therefore copies no record into
+memory, and rebuilds no index: the documents are the same ones, every index is
+keyed by id, and the graph keeps the tombstones whose vectors travel with
+them.</p>
+
+<p><code>fenec-pg --no-mmap</code> reads the file into memory instead — over a
+network file system, where mapping is a bad bet, or to have
+<code>--max-memory</code> cover the data as well as the indexes.</p>
 
 <h2>Vectors are first-class</h2>
 

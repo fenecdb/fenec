@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — a vector database that fits in a browser tab
-description: Minimal, vector-native embedded database. Written in Rust, compiles to 453 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
+description: Minimal, vector-native embedded database. Written in Rust, compiles to 456 KB of WebAssembly, has its own query language and speaks the PostgreSQL protocol.
 -->
 
 <section class="hero">
@@ -47,7 +47,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
   <div class="hero-in">
     <div class="hero-col">
       <h1 class="hero-say reveal">A vector database that fits in a browser tab.</h1>
-      <p class="hero-sub reveal">453 KB of WebAssembly with no dependencies.
+      <p class="hero-sub reveal">456 KB of WebAssembly with no dependencies.
         Vectors are a type, <code>near</code> is a clause, and the HNSW index is
         built in the same tab that asks the question. The same engine runs as a
         process that speaks the PostgreSQL protocol.</p>
@@ -147,8 +147,9 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
           <p>The bytes on disk and the bytes in memory are the same format, so a
             read decodes directly over the arena. No eviction policy, no dirty
             pages, no warm-up.</p>
-          <p class="bill"><b>The bill:</b> the whole file is resident. Your data
-            has to fit in memory.</p>
+          <p class="bill"><b>The bill:</b> the indexes are in memory, and the
+            file is mapped, so opening still reads every record. In the
+            browser there is no mapping: there the whole file is resident.</p>
         </div>
       </div>
 
@@ -171,7 +172,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <div class="stratum-v">
           <p>Own codec, own JSON, own HNSW, own lexer and parser, own SCRAM. The
             core is <code>std</code> and nothing else, which is why the
-            WebAssembly output is 453 KB and auditable in an afternoon.</p>
+            WebAssembly output is 456 KB and auditable in an afternoon.</p>
           <p class="bill"><b>The bill:</b> every bug is ours.</p>
         </div>
       </div>

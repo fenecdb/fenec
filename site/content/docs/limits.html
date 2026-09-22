@@ -75,30 +75,35 @@ right.</p>
 
 <h2>Memory and scale</h2>
 
-<p><b>The whole database is in memory</b>, not just the vector arena: the
-segment bytes sit in RAM in their on-file form. That is the other side of
-saying there is no page cache, and it has three consequences.</p>
+<p><b>The documents stay in the file and the indexes are in memory.</b> The
+file is mapped (<a href="concepts.html#the-file-is-mapped">The file is
+mapped</a>), so a document is read from the pages the operating system holds
+and can drop; what the process holds is the offset index, the hash, ordered
+and text indexes, the graph, and the writes since the open.</p>
 
 <ul>
-  <li><b>Open peaks at about 2× the file.</b> The file is read in one go, then
-    copied into segments, and the indexes are built from each document's
-    indexed fields alone. Measured: a 30.5 MB vector-free file reaches 65.5 MB
-    peak RSS; a 1 GB file of 2.3 million rows with a hash and an ordered
-    index, 2.3 GB of heap.</li>
-  <li><b><code>checkpoint</code> and <code>compact</code> peak at about 3×.</b>
-    The whole image is produced in memory and written to a side file. On the
-    same file: 95.8 MB.</li>
-  <li><b>Open cost is proportional to data size, not constant.</b> 100 000 ×
-    128 with the graph in the file takes about 110 ms. In a process that runs
-    fewer than five vector queries, SQLite gives the faster total.</li>
+  <li><b>What a file costs to hold.</b> A 1 GB file of 2.3 million rows with
+    a hash and an ordered index: 188 MB mapped, against 1 095 MB read into
+    memory (<code>--no-mmap</code>). A 10 GB file of 23 million rows opens on
+    an 8 GB machine, which reading it cannot.</li>
+  <li><b><code>compact</code> peaks at the indexes, not the data.</b> On that
+    1 GB file: 423 MB and 0.60 s mapped, 2 866 MB and 1.69 s read — the
+    mapped one writes the live records into the new file and points at it,
+    copying nothing and rebuilding no index. A <code>checkpoint</code> is the
+    same path with the dead records kept.</li>
+  <li><b>Open cost is proportional to data size, not constant.</b> The records
+    are walked to build the offset index and the indexes are built from the
+    documents, mapped or not. 100 000 × 128 with the graph in the file takes
+    about 110 ms; in a process that runs fewer than five vector queries,
+    SQLite gives the faster total.</li>
 </ul>
 
 <p>The vector arena is the largest item: one million 768-dimension vectors is
 about 3 GB, or 1.5 GB with <code>f16</code>, 772 MB as int8 codes and 96 MB
 as bit codes (<a href="concepts.html#quantized-indexes"><code>quant=</code></a>)
-— the documents keep their vectors either way. In the browser the WASM32 address
-space of 4 GB is the upper bound, and the 2–3× factors above come out of it
-too, so the real ceiling is lower.</p>
+— the documents keep their vectors either way. In the browser nothing is
+mapped: there the whole file is in memory, inside WASM32's 4 GB address
+space, which is the real ceiling there.</p>
 
 <p><code>Database::memory_bytes()</code> sums the segment bytes, the offset
 indexes, the vector arenas, the graph links, the text postings and the

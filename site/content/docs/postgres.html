@@ -125,9 +125,9 @@ that succeeds would prove nothing.</p>
 graph lands in the file and the next open does not rebuild it — 110 ms instead
 of 10.2 s at 100 000 × 128.</p>
 
-<p>The cost is that the whole image is produced in memory right then (peak
-about 3× the file) and that shutdown takes longer on a large database.
-<code>--no-checkpoint</code> turns it off.</p>
+<p>The cost is that shutdown takes longer on a large database: the image is
+written into the new file as it is produced, so it is a copy on disk rather
+than one in memory. <code>--no-checkpoint</code> turns it off.</p>
 
 <p>The order is deliberate. The sync comes first, so even if the process is
 killed while the checkpoint is being written, the data is already on disk and
@@ -278,8 +278,8 @@ FENECPG_PASSWORD=secret docker compose up -d
     out and exits. Give <code>FENECPG_PASSWORD</code>, a Docker secret works
     too, or add <code>--insecure</code> deliberately.</li>
   <li><b>The memory limit comes from the data.</b> With no page cache there is
-    no knob to tune: open peaks at about 2× the file and
-    <code>compact</code>/<code>checkpoint</code> at about 3×. Below that the
+    no knob to tune: the file is mapped and what the process holds is the
+    indexes, which is what <code>--max-memory</code> counts. Below that the
     cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
     one sync interval is lost. Set <code>--max-memory</code> to a third of the
     container limit to bring that forward.</li>

@@ -3,6 +3,7 @@
 //! ```text
 //! cargo run --release -p fenec-core --example open -- write <path> <docs> <body bytes> [h|s|hs|none]
 //! cargo run --release -p fenec-core --example open -- open <path> read|mapped [quick]
+//! cargo run --release -p fenec-core --example open -- compact <path> read|mapped
 //! ```
 //!
 //! `write` streams a file the way a server that never checkpointed leaves
@@ -318,6 +319,51 @@ fn open(path: &str, how: &str, queries: bool) {
     }
 }
 
+/// What a `compact` costs: the file is opened, a tenth of the rows deleted
+/// so there is something to reclaim, and the compaction timed.
+fn compact(path: &str, how: &str) {
+    let before = std::fs::metadata(path).unwrap().len() as f64 / 1e9;
+    PEAK.store(HEAP.load(Ordering::Relaxed), Ordering::Relaxed);
+    let t = Instant::now();
+    let mut db = match how {
+        "read" => fenec_core::fs::open(path),
+        "mapped" => fenec_core::fs::open_mapped(path),
+        other => panic!("read or mapped, not {other}"),
+    }
+    .unwrap();
+    println!(
+        "{how}, {before:.2} GB file: open {:9.1} ms   heap {:.0} MB",
+        ms(t.elapsed()),
+        heap_mb()
+    );
+    let opened = heap_mb();
+    let del = fenec_ql::parse_one("del docs where n < $1").unwrap();
+    let t = Instant::now();
+    db.execute_with(&del, &[Value::Int(1 << 37)]).unwrap();
+    println!(
+        "  del a tenth       {:9.1} ms   heap {:.0} MB",
+        ms(t.elapsed()),
+        heap_mb()
+    );
+    let t = Instant::now();
+    db.execute(&fenec_ql::parse_one("compact").unwrap())
+        .unwrap();
+    let took = t.elapsed();
+    let after = std::fs::metadata(path).unwrap().len() as f64 / 1e9;
+    println!(
+        "  compact           {:9.1} ms   heap peak {:7.0} MB, after {:7.0} MB (open left {opened:.0}); \
+         RSS peak {:.0} MB; file {before:.2} -> {after:.2} GB",
+        ms(took),
+        peak_heap_mb(),
+        heap_mb(),
+        peak_mb(),
+    );
+    let r = db
+        .query(&fenec_ql::parse_one("get docs count").unwrap(), &[])
+        .unwrap();
+    println!("  rows left: {:?}", r.rows().unwrap().rows[0].values[0]);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -332,6 +378,10 @@ fn main() {
             args.get(2).map_or("read", String::as_str),
             args.get(3).map(String::as_str) != Some("quick"),
         ),
-        _ => eprintln!("open write <path> <docs> <body bytes> | open open <path> read|mapped"),
+        Some("compact") => compact(&args[1], args.get(2).map_or("read", String::as_str)),
+        _ => eprintln!(
+            "open write <path> <docs> <body bytes> | open open <path> read|mapped | \
+             open compact <path> read|mapped"
+        ),
     }
 }

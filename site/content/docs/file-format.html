@@ -138,10 +138,10 @@ web/            fenec.js (builder + sync layer), fenec.d.ts,
 <table>
 <thead><tr><th>Operation</th><th>What it does</th><th>Peak memory</th></tr></thead>
 <tbody>
-<tr><td><code>snapshot</code></td><td>Writes a fresh image including the graph and the id counter</td><td class="n">≈ 3× the file</td></tr>
-<tr><td><code>checkpoint</code></td><td>Lands the graph in the file so the next open does not rebuild it</td><td class="n">≈ 3× the file</td></tr>
-<tr><td><code>compact</code></td><td>Full rebuild: drops dead bytes and rebuilds every index</td><td class="n">≈ 3× the file</td></tr>
-<tr><td>open</td><td>Reads the file, then copies it into segments</td><td class="n">≈ 2× the file</td></tr>
+<tr><td><code>snapshot</code></td><td>Builds the image in memory: what the browser persists, and what a tenant's move and a replica's first stream send</td><td class="n">≈ 1× the file</td></tr>
+<tr><td><code>checkpoint</code></td><td>Lands the graph in the file so the next open does not rebuild it; written into the new file as it is produced</td><td class="n">the indexes</td></tr>
+<tr><td><code>compact</code></td><td>Drops the dead records, keeping every index: the documents are the same ones</td><td class="n">the indexes</td></tr>
+<tr><td>open</td><td>Maps the file and builds the indexes from the documents</td><td class="n">the indexes</td></tr>
 </tbody>
 </table>
 </div>

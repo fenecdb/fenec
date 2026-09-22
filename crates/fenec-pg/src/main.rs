@@ -28,6 +28,11 @@ usage: fenec-pg [options]
                             freeze and move tenants. Without it, off
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
+      --no-mmap             read the file into memory instead of mapping it.
+                            Mapping leaves the documents in the file and
+                            holds only what is derived from them; read it
+                            instead over a network file system, or to have
+                            --max-memory cover the data as well
 
   -W, --password <password> turn on password authentication
       --password-file <path> read the password from a file (argv shows up in `ps`)
@@ -173,6 +178,7 @@ fn main() {
     let mut cfg = Config::default();
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
+    let mut mmap = true;
     // `--dir` opens the pg listener only when an address was named: a node
     // that serves tenants over HTTP alone should not take the default port.
     let mut listen_given = false;
@@ -323,6 +329,7 @@ fn main() {
                 replication_buffer = mib << 20;
             }
             "--ping" => ping = true,
+            "--no-mmap" => mmap = false,
             "--insecure" => cfg.insecure = true,
             "--help" | "-h" => {
                 fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
@@ -433,8 +440,10 @@ fn main() {
                     feed = Some(f);
                     db
                 })
-            } else {
+            } else if mmap {
                 fenec_core::fs::open(path)
+            } else {
+                fenec_core::fs::open_in_memory(path)
             };
             match opened {
                 Ok(db) => {
