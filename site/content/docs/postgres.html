@@ -66,13 +66,14 @@ memory ceiling to the client.</p>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td><code>57P05</code> on a session that has gone quiet</td></tr>
 <tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>the length is read before the body, so an oversized body is never allocated</td></tr>
 <tr><td>startup packet</td><td class="n">10 000 B</td><td>the same as PostgreSQL; the only allocation before authentication</td></tr>
-<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data</td></tr>
+<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data, <code>507</code> over HTTP</td></tr>
 </tbody>
 </table>
 </div>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
-statements that <b>grow</b> the data are rejected while reads,
+statements that <b>grow</b> the data are rejected — over this protocol and
+over the HTTP listener alike — while reads,
 <code>del</code> and <code>compact</code> keep working — hitting a ceiling with
 no way out would be no better than a cgroup OOM. The point is to bring the OOM
 forward: nobody warns you about a process felled by <code>SIGKILL</code>, and

@@ -427,6 +427,7 @@ fn main() {
         http_cfg.max_connections = cfg.max_connections;
         http_cfg.idle_timeout = cfg.idle_timeout;
         http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
+        http_cfg.max_memory = cfg.max_memory;
         let repl = replication_token.filter(|_| replicating).map(|token| {
             fenec_http::tenants::Replicated {
                 token,
@@ -552,8 +553,10 @@ fn main() {
         http_cfg.insecure = cfg.insecure;
         http_cfg.max_connections = cfg.max_connections;
         http_cfg.idle_timeout = cfg.idle_timeout;
-        // `--sync always` must hold for HTTP writes too.
+        // `--sync always` must hold for HTTP writes too, and so must
+        // `--max-memory`.
         http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
+        http_cfg.max_memory = cfg.max_memory;
         let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
         if let Some(repl) = repl {
             http_server = http_server.with_replication(repl);

@@ -603,7 +603,7 @@ fn maintain(
     stmt: &Statement,
     out: &mut Writer,
 ) -> Option<(Durability, Option<usize>)> {
-    if let Some(msg) = over_memory_cap(cfg, &read_lock(db), stmt) {
+    if let Some(msg) = fenec_http::over_ceiling(cfg.max_memory, &read_lock(db), stmt) {
         out.error("53200", &msg);
         return None;
     }
@@ -1105,40 +1105,6 @@ fn session(
                 out.flush_to(&mut w)?;
             }
         }
-    }
-}
-
-/// Cleans the record up when the session ends (on a panic too).
-/// Whether the data ceiling is exceeded. Only statements that *grow* the
-/// data are stopped: `del` and `compact` are deliberately left out, because
-/// they are the way out of a database that has hit the ceiling. Reads are
-/// unaffected anyway.
-fn over_memory_cap(cfg: &Config, db: &Database, stmt: &Statement) -> Option<String> {
-    let grows = matches!(
-        stmt,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
-    );
-    if cfg.max_memory == 0 || !grows {
-        return None;
-    }
-    let used = db.memory_bytes();
-    if used < cfg.max_memory {
-        return None;
-    }
-    Some(format!(
-        "data ceiling exceeded: {} / {}. Writes have stopped; run `del` + \
-         `compact` to make room, or raise --max-memory",
-        human(used),
-        human(cfg.max_memory)
-    ))
-}
-
-/// Write KiB rather than saying `0 MiB` for small values.
-fn human(bytes: usize) -> String {
-    if bytes >= 1 << 20 {
-        format!("{} MiB", bytes >> 20)
-    } else {
-        format!("{} KiB", bytes >> 10)
     }
 }
 
@@ -1807,7 +1773,7 @@ fn run_locked(
         }
         // The memory ceiling is checked *before* the statement: the overshoot
         // is at most one statement, whose body is capped by `--max-message`.
-        if let Some(msg) = over_memory_cap(cfg, guard.db(), stmt) {
+        if let Some(msg) = fenec_http::over_ceiling(cfg.max_memory, guard.db(), stmt) {
             let durability = guard.flush_if_needed(cfg.sync).ok().flatten();
             out.error("53200", &msg);
             return durability.map(|d| (d, None));

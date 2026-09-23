@@ -99,7 +99,8 @@ no tenant of this node is refused at connect.</p>
     Opening one more over the ceiling first closes idle tenants, least recently
     used first. With everything busy the open goes ahead anyway: refusing a
     read because other tenants are busy would turn a memory warning into an
-    outage.</li>
+    outage. A write that grows a tenant is refused once that tenant alone is
+    past the ceiling, over either listener.</li>
   <li><b>Shutdown</b> syncs every open tenant and checkpoints the ones with a
     graph, holding their write locks until exit.</li>
 </ul>
