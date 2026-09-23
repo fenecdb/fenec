@@ -226,7 +226,7 @@ impl Database {
             collection: collection.to_string(),
             field: field.to_string(),
             pos,
-            kind: kind.clone(),
+            kind: kind.resolved(),
             ty: c.schema.fields[pos].ty.clone(),
             values,
         }))

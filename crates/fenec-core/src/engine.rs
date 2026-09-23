@@ -2506,7 +2506,7 @@ impl Database {
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
         let pos = c.schema.field_pos(field).unwrap();
-        c.schema.fields[pos].index = kind.clone();
+        c.schema.fields[pos].index = kind.resolved();
         build_index(c, pos)?;
 
         let encoded = c.schema.encode();

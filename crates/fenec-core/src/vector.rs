@@ -1184,6 +1184,7 @@ impl VectorIndex {
     }
 
     pub fn with_precision(dim: usize, spec: VectorIndexSpec, prec: VecPrec) -> VectorIndex {
+        let spec = spec.resolved();
         VectorIndex {
             dim,
             spec,

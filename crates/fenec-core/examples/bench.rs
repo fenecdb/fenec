@@ -48,7 +48,7 @@ fn main() {
         .position(|a| a == "--ef")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
-        .unwrap_or(VectorIndexSpec::default().ef_search);
+        .unwrap_or(fenec_core::schema::DEFAULT_EF_SEARCH);
     let efc: usize = args
         .iter()
         .position(|a| a == "--efc")

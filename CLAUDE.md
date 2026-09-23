@@ -331,7 +331,10 @@ ranked by its codes and its beam's worth ordered the same way -- read whole it
 was up to 12 800 vectors a query under bit codes -- and `exact` reads every
 vector. Bit codes need the wider beam `BIT_EF_SEARCH` -- 400: over a million
 clustered 768-dim vectors a beam of 100 held 82.5% of the true ten, 400 held
-98.4%, int8 codes 97.1% at 100 (`make quant-bench`). How well bits estimate
+98.4%, int8 codes 97.1% at 100 (`make quant-bench`). The core settles it
+wherever a spec comes in -- `VectorIndexSpec::default()` leaves `ef_search`
+0 for `resolved` to fill by the codes -- since only the parser knew it once,
+and the Rust API's bit indexes searched 100. How well bits estimate
 depends on the vectors: spread in every dimension, 36% at 100. The code
 kernels add in `strip8!`'s order on every target, so a graph over codes is the
 browser's graph bit for bit; on aarch64 the int8 strips are NEON intrinsics

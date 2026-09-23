@@ -666,7 +666,7 @@ mod tests {
             panic!()
         };
         assert_eq!(name, "embed");
-        assert_eq!(v, VectorIndexSpec::default());
+        assert_eq!(v, VectorIndexSpec::default().resolved());
 
         let (_, IndexKind::Vector(v)) =
             parse_index("embed@hnsw(l2, m=32, ef_construction=400, ef_search=64)").unwrap()

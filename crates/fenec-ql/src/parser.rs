@@ -24,9 +24,7 @@ use crate::lexer::{tokenize, Tok, Token};
 use fenec_core::collate::Collation;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
-use fenec_core::schema::{
-    Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec, BIT_EF_SEARCH,
-};
+use fenec_core::schema::{Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec};
 use fenec_core::value::{DataType, Value, VecPrec};
 
 /// The maximum nesting level of an expression.
@@ -377,10 +375,9 @@ impl Parser {
     fn hnsw_args(&mut self) -> Result<VectorIndexSpec> {
         let mut spec = VectorIndexSpec::default();
         if !matches!(self.peek(), Tok::LParen) {
-            return Ok(spec);
+            return Ok(spec.resolved());
         }
         self.next();
-        let mut ef_given = false;
         loop {
             if matches!(self.peek(), Tok::RParen) {
                 break;
@@ -402,10 +399,7 @@ impl Parser {
                     match key.to_ascii_lowercase().as_str() {
                         "m" => spec.m = v.max(2),
                         "ef_construction" | "ef_c" => spec.ef_construction = v.max(8),
-                        "ef_search" | "ef" => {
-                            spec.ef_search = v.max(1);
-                            ef_given = true;
-                        }
+                        "ef_search" | "ef" => spec.ef_search = v.max(1),
                         other => return self.err(format!("unknown hnsw parameter `{other}`")),
                     }
                 }
@@ -422,10 +416,7 @@ impl Parser {
             self.next();
         }
         self.expect(Tok::RParen)?;
-        if spec.quant == Quant::Bit && !ef_given {
-            spec.ef_search = BIT_EF_SEARCH;
-        }
-        Ok(spec)
+        Ok(spec.resolved())
     }
 
     fn data_type(&mut self) -> Result<DataType> {

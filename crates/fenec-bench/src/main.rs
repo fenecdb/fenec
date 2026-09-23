@@ -537,7 +537,7 @@ fn run_postgres(
     // ANN: the same ef_search as fenecdb's default
     cl.batch_execute(&format!(
         "SET enable_indexscan = on; SET enable_indexonlyscan = on; SET hnsw.ef_search = {};",
-        VectorIndexSpec::default().ef_search
+        fenec_core::schema::DEFAULT_EF_SEARCH
     ))?;
     let mut lat = Vec::new();
     let mut hits = 0usize;

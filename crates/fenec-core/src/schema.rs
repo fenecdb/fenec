@@ -99,6 +99,12 @@ impl Quant {
 /// vectors 97.4% (`make quant-bench`).
 pub const BIT_EF_SEARCH: usize = 400;
 
+/// `ef_search` for every other index that names none. recall@10 measured at
+/// 100 is 100%; at 64 it is 99%. ANN latency rises from 0.10 -> 0.13 ms,
+/// which is still ~7x faster than the engines we compare against. The
+/// accuracy is worth the trade.
+pub const DEFAULT_EF_SEARCH: usize = 100;
+
 /// HNSW parameters. The defaults were picked targeting ~95% recall /
 /// a few hundred microseconds on 1M-scale collections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,13 +114,32 @@ pub struct VectorIndexSpec {
     pub m: usize,
     /// Candidate list width during construction.
     pub ef_construction: usize,
-    /// Default candidate list width at query time.
+    /// Default candidate list width at query time. 0 -- what `Default`
+    /// gives -- until a schema or an index takes the spec, which settles it
+    /// by the codes ([`VectorIndexSpec::resolved`]).
     pub ef_search: usize,
     /// What the index holds of each vector.
     pub quant: Quant,
 }
 
 impl VectorIndexSpec {
+    /// The spec with `ef_search` settled: one left at 0 takes the beam its
+    /// codes want, [`BIT_EF_SEARCH`] over bit codes and
+    /// [`DEFAULT_EF_SEARCH`] otherwise. Only the parser used to know the bit
+    /// beam, so an index built through the Rust API with `quant: Bit`
+    /// searched a beam of 100: 82.5% of the true ten over a million
+    /// vectors, where 400 held 98.4%. Settled wherever a spec comes in -- a
+    /// schema, a `create index`, a graph -- the file holds the number.
+    pub fn resolved(mut self) -> VectorIndexSpec {
+        if self.ef_search == 0 {
+            self.ef_search = match self.quant {
+                Quant::Bit => BIT_EF_SEARCH,
+                _ => DEFAULT_EF_SEARCH,
+            };
+        }
+        self
+    }
+
     /// `, quant=int8` for a quantized index and nothing for the rest: how
     /// the option is written back wherever the others are.
     pub fn quant_arg(&self) -> &'static str {
@@ -132,10 +157,8 @@ impl Default for VectorIndexSpec {
             metric: Metric::Cosine,
             m: 16,
             ef_construction: 200,
-            // recall@10 measured at 100 is 100%; at 64 it is 99%. ANN latency
-            // rises from 0.10 -> 0.13 ms, which is still ~7x faster than the
-            // engines we compare against. The accuracy is worth the trade.
-            ef_search: 100,
+            // Settled by the codes when a schema or an index takes it.
+            ef_search: 0,
             quant: Quant::None,
         }
     }
@@ -225,6 +248,15 @@ pub enum IndexKind {
 }
 
 impl IndexKind {
+    /// The kind with a vector index's `ef_search` settled
+    /// ([`VectorIndexSpec::resolved`]).
+    pub fn resolved(&self) -> IndexKind {
+        match self {
+            IndexKind::Vector(spec) => IndexKind::Vector(spec.resolved()),
+            other => other.clone(),
+        }
+    }
+
     /// Whether this index can be built over `field`, of type `ty`: the one
     /// rule `create collection`, `create index` and `fenec import --index`
     /// all go through. `quant=bit` was refused with l2 and dot only where a
@@ -311,10 +343,11 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn new(name: impl Into<String>, fields: Vec<Field>) -> Result<Schema> {
+    pub fn new(name: impl Into<String>, mut fields: Vec<Field>) -> Result<Schema> {
         let name = name.into();
         let mut seen = Vec::new();
-        for f in &fields {
+        for f in &mut fields {
+            f.index = f.index.resolved();
             if f.name == "id" {
                 return Err(Error::Query(
                     "`id` is a reserved field, it cannot be declared in a schema".into(),
@@ -432,7 +465,7 @@ impl Schema {
                         spec.quant = Quant::from_code(c)
                             .ok_or_else(|| Error::Corrupt(format!("unknown quantization {c}")))?;
                     }
-                    IndexKind::Vector(spec)
+                    IndexKind::Vector(spec.resolved())
                 }
                 3 => IndexKind::Text(TextIndexSpec {
                     k1_pct: get_uvarint(buf, pos)? as u16,
