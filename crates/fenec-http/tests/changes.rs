@@ -337,8 +337,10 @@ fn resume_from_cursor_skips_the_seed() {
 
 #[test]
 fn a_stale_cursor_is_reseeded() {
-    let mut cfg = Config::default();
-    cfg.change_capacity = 2;
+    let cfg = Config {
+        change_capacity: 2,
+        ..Config::default()
+    };
     let h = start(cfg);
 
     // Overflow the ring.
@@ -390,8 +392,10 @@ fn projection_is_honoured_and_keeps_id() {
 
 #[test]
 fn the_stream_needs_a_token_too() {
-    let mut cfg = Config::default();
-    cfg.token = Some("secret".into());
+    let cfg = Config {
+        token: Some("secret".into()),
+        ..Config::default()
+    };
     let h = start(cfg);
 
     assert_eq!(Sub::open(h.port, "/tasks/changes").status, 401);
@@ -405,8 +409,10 @@ fn the_stream_needs_a_token_too() {
 
 #[test]
 fn stream_cap_is_separate_from_connection_cap() {
-    let mut cfg = Config::default();
-    cfg.max_streams = 1;
+    let cfg = Config {
+        max_streams: 1,
+        ..Config::default()
+    };
     let h = start(cfg);
 
     let mut first = Sub::open(h.port, "/tasks/changes");
@@ -461,8 +467,10 @@ fn batch_stops_at_the_first_error_and_says_how_far_it_got() {
 
 #[test]
 fn batch_respects_read_only() {
-    let mut cfg = Config::default();
-    cfg.read_only = true;
+    let cfg = Config {
+        read_only: true,
+        ..Config::default()
+    };
     let h = start(cfg);
     let (st, _) = post(
         h.port,
@@ -512,8 +520,10 @@ fn a_quiet_collection_keeps_its_cursor_fresh() {
     // writes, its cursor would stay put and it would be reseeded once the
     // ring overflowed. This test sets up exactly that scenario: a 4-entry
     // ring and 12 writes into a neighbouring collection.
-    let mut cfg = Config::default();
-    cfg.change_capacity = 4;
+    let cfg = Config {
+        change_capacity: 4,
+        ..Config::default()
+    };
     let h = start(cfg);
 
     let mut s = Sub::open(h.port, "/tasks/changes");

@@ -629,7 +629,7 @@ mod tests {
                     // Skewed, as a model's weights are, and coarse so ties
                     // happen.
                     let mut w = ((next() % 64) as f32 / 8.0).powi(2) / 8.0 + 0.125;
-                    if signed && next() % 3 == 0 {
+                    if signed && next().is_multiple_of(3) {
                         w = -w;
                     }
                     e.push((i, w));

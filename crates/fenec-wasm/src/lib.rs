@@ -70,8 +70,13 @@ pub extern "C" fn fenec_alloc(len: usize) -> *mut u8 {
 }
 
 /// Frees a `fenec_alloc` buffer or a returned one.
+///
+/// # Safety
+/// `ptr` must come from `fenec_alloc(len)`, or be a returned buffer with
+/// `len` its whole length (`4 +` the one written at its front), and not be
+/// freed twice.
 #[no_mangle]
-pub extern "C" fn fenec_free(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn fenec_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
         return;
     }

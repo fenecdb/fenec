@@ -92,11 +92,11 @@ fn decode_text(b: &[u8], enc: Encoding) -> String {
     match enc {
         Encoding::Utf8 => String::from_utf8_lossy(b).into_owned(),
         Encoding::Utf16Le | Encoding::Utf16Be => {
-            let units = b.chunks_exact(2).map(|c| {
+            let units = b.as_chunks::<2>().0.iter().map(|c| {
                 if enc == Encoding::Utf16Le {
-                    u16::from_le_bytes([c[0], c[1]])
+                    u16::from_le_bytes(*c)
                 } else {
-                    u16::from_be_bytes([c[0], c[1]])
+                    u16::from_be_bytes(*c)
                 }
             });
             char::decode_utf16(units)
@@ -427,7 +427,7 @@ fn parse_create(sql: &str) -> Result<Vec<Decl>> {
             continue;
         }
         let (ty, tail) = take_type(rest);
-        let rowid_alias = ty.trim().eq_ignore_ascii_case("INTEGER") && has_primary_key(&tail);
+        let rowid_alias = ty.trim().eq_ignore_ascii_case("INTEGER") && has_primary_key(tail);
         decls.push(Decl {
             name,
             ty: ty.trim().to_string(),

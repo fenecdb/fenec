@@ -614,7 +614,7 @@ fn an_error_skips_the_rest_of_the_pipeline_to_the_sync() {
     // on it before sending more reads it. What follows is still dropped,
     // a simple query too.
     c.s.write_all(&Client::step("get nosuch select x")).unwrap();
-    for want in [b'1', b'2', b'E'] {
+    for want in *b"12E" {
         assert_eq!(c.read_msg().unwrap().tag, want);
     }
     let mut pipe = Client::step("put t {name: \"dropped\"}");

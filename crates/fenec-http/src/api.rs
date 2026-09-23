@@ -489,7 +489,7 @@ const OPS: [&str; 13] = [
 /// off; otherwise the operator is `eq` and the whole value is preserved.
 fn split_op(raw: &str) -> (&str, &str) {
     match raw.split_once('.') {
-        Some((head, rest)) if head == "not" => ("not", rest),
+        Some(("not", rest)) => ("not", rest),
         Some((head, rest)) if OPS.contains(&head) => (head, rest),
         _ => ("eq", raw),
     }
@@ -951,7 +951,7 @@ pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
                 .rows
                 .first()
                 .and_then(|r| r.values.first())
-                .map(|v| json::to_string(v))
+                .map(json::to_string)
                 .unwrap_or_else(|| "0".into());
             Response::json(200, format!("{{\"count\":{n}}}"))
         }

@@ -247,8 +247,8 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             let n = get_uvarint(buf, pos)? as usize;
             let raw = take(buf, pos, n * 4)?;
             let mut v = Vec::with_capacity(n);
-            for chunk in raw.chunks_exact(4) {
-                v.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in raw.as_chunks::<4>().0 {
+                v.push(f32::from_le_bytes(*chunk));
             }
             Ok(Value::Vector(v))
         }
@@ -256,8 +256,8 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             let n = get_uvarint(buf, pos)? as usize;
             let raw = take(buf, pos, n * 2)?;
             let mut v = Vec::with_capacity(n);
-            for chunk in raw.chunks_exact(2) {
-                v.push(f32_from_f16(u16::from_le_bytes(chunk.try_into().unwrap())));
+            for chunk in raw.as_chunks::<2>().0 {
+                v.push(f32_from_f16(u16::from_le_bytes(*chunk)));
             }
             Ok(Value::Vector(v))
         }
@@ -279,8 +279,8 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
                 entries.push((at, 0.0));
             }
             let raw = take(buf, pos, n * 4)?;
-            for (e, w) in entries.iter_mut().zip(raw.chunks_exact(4)) {
-                e.1 = f32::from_le_bytes(w.try_into().unwrap());
+            for (e, w) in entries.iter_mut().zip(raw.as_chunks::<4>().0) {
+                e.1 = f32::from_le_bytes(*w);
             }
             Ok(Value::Sparse(dim, entries))
         }

@@ -127,8 +127,8 @@ fn near_over_codes_finds_the_exact_ten_in_exact_order() {
         let db = shared(index);
         let (mut hit, mut total) = (0, 0);
         for q in queries() {
-            let exact = hits(&plain, "get docs near v $1 exact limit 10", &q);
-            let got = hits(&db, "get docs near v $1 limit 10", &q);
+            let exact = hits(plain, "get docs near v $1 exact limit 10", &q);
+            let got = hits(db, "get docs near v $1 limit 10", &q);
             assert!(
                 got.windows(2).all(|w| w[0].1 >= w[1].1),
                 "{index}: out of order"
@@ -148,7 +148,7 @@ fn exact_over_codes_reads_every_vector() {
         let db = shared(index);
         for q in queries().iter().take(20) {
             let sql = "get docs near v $1 exact limit 10";
-            let (want, got) = (hits(&plain, sql, q), hits(&db, sql, q));
+            let (want, got) = (hits(plain, sql, q), hits(db, sql, q));
             assert_eq!(found(&got, &want), want.len(), "{index}");
         }
     }
@@ -161,24 +161,24 @@ fn a_filtered_near_over_codes() {
     let a = |id: u64| id % 3 == 1;
     for q in queries().iter().take(20) {
         let exact = hits(
-            &plain,
+            plain,
             r#"get docs where kind = "a" near v $1 exact limit 10"#,
             q,
         );
         // A thousand rows, under the budget of 100 x 32: searched exactly.
-        let got = hits(&db, r#"get docs where kind = "a" near v $1 limit 10"#, q);
+        let got = hits(db, r#"get docs where kind = "a" near v $1 limit 10"#, q);
         assert_eq!(found(&got, &exact), 10);
         // A beam of 10 makes the budget 320: the ANN, each candidate tested,
         // in the order the documents' vectors give.
         let got = hits(
-            &db,
+            db,
             r#"get docs where kind = "a" near v $1 ef 10 limit 10"#,
             q,
         );
         assert!(got.iter().all(|(id, _)| a(*id)));
         assert!(got.windows(2).all(|w| w[0].1 >= w[1].1));
         let scores = hits(
-            &plain,
+            plain,
             r#"get docs where kind = "a" near v $1 exact limit 1000"#,
             q,
         );
@@ -296,7 +296,7 @@ fn the_quantization_is_part_of_the_index() {
     assert_eq!(arena(&db), ROWS * (DIM + 4));
     let plain = shared("@hnsw(cosine)");
     for q in queries().iter().take(10) {
-        let exact = hits(&plain, "get docs near v $1 exact limit 10", q);
+        let exact = hits(plain, "get docs near v $1 exact limit 10", q);
         let got = hits(&db, "get docs near v $1 limit 10", q);
         assert!(found(&got, &exact) >= 9);
     }

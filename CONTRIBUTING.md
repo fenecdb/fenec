@@ -83,6 +83,10 @@ empty.
   `crates/fenec-core/examples/` and are wired to `make`, not to CI.
 - Run `cargo fmt --all` before you push; CI checks it. rustfmt settles
   formatting so that review can be about the change itself.
+- CI also runs clippy with warnings denied, natively and for the browser
+  build: `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo clippy -p fenec-wasm -p fenec-core -p fenec-ql --target
+  wasm32-unknown-unknown -- -D warnings`.
 
 ## Performance claims
 

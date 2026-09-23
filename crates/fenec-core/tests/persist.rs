@@ -307,8 +307,7 @@ fn a_read_only_open_leaves_the_file_as_it_is() {
     assert_eq!(ids(&mut db, "t"), vec![1]);
     let err = db
         .execute(&fenec_ql::parse_one(r#"put t {a: "no"}"#).unwrap())
-        .err()
-        .expect("a write went through");
+        .expect_err("a write went through");
     assert!(
         matches!(err, fenec_core::error::Error::ReadOnly(_)),
         "{err}"

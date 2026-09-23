@@ -147,19 +147,13 @@ fn unit(v: &[f32]) -> Vec<f32> {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0.0f32; 8];
-    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-    for (x, y) in ca.zip(cb) {
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in ca.iter().zip(cb) {
         for k in 0..8 {
             acc[k] += x[k] * y[k];
         }
     }
-    acc.iter().sum::<f32>()
-        + a.chunks_exact(8)
-            .remainder()
-            .iter()
-            .zip(b.chunks_exact(8).remainder())
-            .map(|(x, y)| x * y)
-            .sum::<f32>()
+    acc.iter().sum::<f32>() + ra.iter().zip(rb).map(|(x, y)| x * y).sum::<f32>()
 }
 
 /// The exact ten of each query, by cosine over the stored vectors: a range

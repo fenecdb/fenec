@@ -227,6 +227,7 @@ pub fn main(args: &[String]) -> i32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     source: &str,
     table: &str,

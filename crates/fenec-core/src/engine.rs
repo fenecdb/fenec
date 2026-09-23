@@ -1429,7 +1429,7 @@ impl Database {
     /// The pass over a file's records; `replay` takes a data record's frames
     /// into a collection's store.
     fn load_records(&mut self, bytes: &[u8], replay: &mut Replay<'_>) -> Result<usize> {
-        if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != &MAGIC[..] {
+        if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
         let mut pos = MAGIC.len();
@@ -1754,7 +1754,7 @@ impl Database {
                 // The document count is known, so the arena is sized in one go.
                 ix.reserve(ids.len());
             }
-            for (_, m) in c.hashes.iter_mut() {
+            for m in c.hashes.values_mut() {
                 m.clear();
             }
             for t in c.texts.values_mut() {
