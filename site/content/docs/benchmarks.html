@@ -189,7 +189,10 @@ make beir BEIR=path/to/scifact
 test queries, and FiQA, 57 638 and 648 — with every document and query
 embedded by all-MiniLM-L6-v2 the way sentence-transformers does it, and
 encoded by SPLADE++ (<code>prithivida/Splade_PP_en_v1</code>) into a
-<code>sparse&lt;30522&gt;</code> field, both cut at 256 tokens. Each of the
+<code>sparse&lt;30522&gt;</code> field, both cut at 256 tokens with the
+closing <code>[SEP]</code> kept. transformers.js drops it when it cuts a
+text, so both scripts cut texts themselves: for SPLADE that was worth 0.46
+of SciFact's nDCG@10, for the dense vectors up to 0.003. Each of the
 engine's ways of ranking ten documents is then scored by nDCG@10, through
 FenecQL: the answers are the engine's own.</p>
 
@@ -198,17 +201,17 @@ FenecQL: the answers are the engine's own.</p>
 <thead><tr><th>&nbsp;</th><th class="n">SciFact</th><th class="n">FiQA</th><th class="n">FiQA p50</th></tr></thead>
 <tbody>
 <tr><td><code>match</code>, BM25</td><td class="n">0.662</td><td class="n">0.232</td><td class="n">0.26 ms</td></tr>
-<tr><td><code>near</code>, the graph</td><td class="n">0.645</td><td class="n">0.365</td><td class="n">0.38 ms</td></tr>
-<tr><td><code>near … exact</code></td><td class="n">0.645</td><td class="n">0.368</td><td class="n">4.98 ms</td></tr>
-<tr><td><code>match … rerank</code>, 50 candidates</td><td class="n">0.654</td><td class="n">0.337</td><td class="n">0.46 ms</td></tr>
-<tr><td><code>match … rerank</code>, 200 (default)</td><td class="n">0.643</td><td class="n">0.360</td><td class="n">0.80 ms</td></tr>
-<tr><td><code>match … rerank</code>, 1 000</td><td class="n">0.647</td><td class="n">0.368</td><td class="n">1.89 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, 10 a side</td><td class="n"><b>0.701</b></td><td class="n">0.364</td><td class="n">0.67 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.699</td><td class="n">0.366</td><td class="n">0.78 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.687</td><td class="n">0.358</td><td class="n">0.98 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.689</td><td class="n">0.363</td><td class="n">4.09 ms</td></tr>
-<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">2.62 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">3.22 ms</td></tr>
+<tr><td><code>near</code>, the graph</td><td class="n">0.645</td><td class="n">0.366</td><td class="n">0.37 ms</td></tr>
+<tr><td><code>near … exact</code></td><td class="n">0.645</td><td class="n">0.369</td><td class="n">4.99 ms</td></tr>
+<tr><td><code>match … rerank</code>, 50 candidates</td><td class="n">0.656</td><td class="n">0.337</td><td class="n">0.45 ms</td></tr>
+<tr><td><code>match … rerank</code>, 200 (default)</td><td class="n">0.646</td><td class="n">0.361</td><td class="n">0.78 ms</td></tr>
+<tr><td><code>match … rerank</code>, 1 000</td><td class="n">0.649</td><td class="n">0.369</td><td class="n">1.82 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 10 a side</td><td class="n"><b>0.700</b></td><td class="n">0.364</td><td class="n">0.67 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.700</td><td class="n">0.366</td><td class="n">0.74 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.688</td><td class="n">0.359</td><td class="n">0.97 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.690</td><td class="n">0.364</td><td class="n">4.03 ms</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">2.58 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">3.20 ms</td></tr>
 </tbody>
 </table>
 </div>

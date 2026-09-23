@@ -450,11 +450,11 @@ to their own depth -- `candidates`, 20 unless given, never under the page --
 with the filter applied to each, and a document scores `1 / (k + rank)` from
 each list it is on (`k` 60). A BM25 score and a cosine distance share no
 scale, and a weight between them would need retuning per corpus. Measured
-with `make beir` (nDCG@10): SciFact 0.699 against 0.662 for `match` and 0.645
-for `near`; FiQA 0.366 against 0.232 and 0.365 -- the one path near the top
+with `make beir` (nDCG@10): SciFact 0.700 against 0.662 for `match` and 0.645
+for `near`; FiQA 0.366 against 0.232 and 0.366 -- the one path near the top
 of both. The depth is the knob that matters: up to 61 a side a document both
 searches found outranks every document only one found, and at 100 a side
-both scores fall (0.687, 0.358). It is built from what the engine already
+both scores fall (0.688, 0.359). It is built from what the engine already
 had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
@@ -476,10 +476,11 @@ it is derived and never persisted. It sorts through the engine's one
 `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.365), at 2.6 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. The script cuts texts
-itself: transformers.js drops the closing [SEP] when it truncates, and
-SPLADE without it took SciFact to 0.23.
+0.232 (the dense vectors 0.366), at 2.6 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut
+texts themselves: transformers.js drops the closing [SEP] when it truncates,
+SPLADE without it took SciFact to 0.23, and the dense vectors (`embed.mjs`)
+moved by up to 0.003.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change
