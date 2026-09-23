@@ -256,14 +256,80 @@ impl Sink for NullSink {
     }
 }
 
+/// A `@hash` index: a value's encoding -> the documents holding it.
+///
+/// It counts the bytes its keys and buckets hold as they change, so
+/// `memory_bytes` -- which `--max-memory` asks before every write that
+/// grows the data -- reads a number rather than walking every bucket. A
+/// bucket its last document leaves goes with it: kept, the keys of values
+/// that come and go (a token, a session id) piled up until the file was
+/// opened again.
+#[derive(Default)]
+pub struct HashIndex {
+    map: HashMap<Vec<u8>, Vec<DocId>>,
+    heap: usize,
+}
+
+// The keys are taken as `&Vec<u8>`, the type the map holds, rather than
+// `&[u8]`: looked up as a slice, the map's search and hash were compiled a
+// second time, 650 bytes of the browser module.
+#[allow(clippy::ptr_arg)]
+impl HashIndex {
+    /// The documents under `key`, in the order they were added.
+    pub fn get(&self, key: &Vec<u8>) -> Option<&Vec<DocId>> {
+        self.map.get(key)
+    }
+
+    /// The distinct values held.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn add(&mut self, key: Vec<u8>, id: DocId) {
+        let key_bytes = key.capacity();
+        let bucket = self.map.entry(key).or_default();
+        let before = bucket.capacity();
+        if before == 0 {
+            self.heap += key_bytes;
+        }
+        bucket.push(id);
+        self.heap += (bucket.capacity() - before) * std::mem::size_of::<DocId>();
+    }
+
+    fn remove(&mut self, key: &Vec<u8>, id: DocId) {
+        let Some(bucket) = self.map.get_mut(key) else {
+            return;
+        };
+        bucket.retain(|d| *d != id);
+        if bucket.is_empty() {
+            if let Some((k, b)) = self.map.remove_entry(key) {
+                self.heap -= k.capacity() + b.capacity() * std::mem::size_of::<DocId>();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = HashIndex::default();
+    }
+
+    /// The table, the keys and the buckets as they sit in memory.
+    pub fn memory_bytes(&self) -> usize {
+        self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Vec<DocId>)>() + 1) + self.heap
+    }
+}
+
 pub struct Collection {
     pub id: u32,
     pub schema: Schema,
     pub store: Store,
     /// field name -> HNSW index
     pub vectors: HashMap<String, VectorIndex>,
-    /// field name -> (encoded value -> document ids)
-    pub hashes: HashMap<String, HashMap<Vec<u8>, Vec<DocId>>>,
+    /// field name -> hash index
+    pub hashes: HashMap<String, HashIndex>,
     /// field name -> inverted index
     pub texts: HashMap<String, TextIndex>,
     /// field name -> ordered index, in schema order. A `Vec` rather than a
@@ -292,7 +358,7 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    hashes.insert(f.name.clone(), HashMap::new());
+                    hashes.insert(f.name.clone(), HashIndex::default());
                 }
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
@@ -341,7 +407,7 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    self.hashes.insert(f.name.clone(), HashMap::new());
+                    self.hashes.insert(f.name.clone(), HashIndex::default());
                 }
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
@@ -385,10 +451,9 @@ impl Collection {
 
     /// Hash and full-text indexes. Vectors are left to the batch path.
     fn index_scalar(&mut self, doc: &Document) {
-        for (name, map) in self.hashes.iter_mut() {
+        for (name, ix) in self.hashes.iter_mut() {
             if let Some(v) = doc.get(name) {
-                let key = hash_key(v);
-                map.entry(key).or_default().push(doc.id);
+                ix.add(hash_key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
@@ -432,11 +497,9 @@ impl Collection {
                 ix.remove(doc.id);
             }
         }
-        for (name, map) in self.hashes.iter_mut() {
+        for (name, ix) in self.hashes.iter_mut() {
             if let Some(v) = doc.get(name) {
-                if let Some(bucket) = map.get_mut(&hash_key(v)) {
-                    bucket.retain(|d| *d != doc.id);
-                }
+                ix.remove(&hash_key(v), doc.id);
             }
         }
         // Every caller reads the *stored* document before unindexing, so the
@@ -667,7 +730,7 @@ enum Probe<'a> {
     /// tenable rather than obstructive.
     Id,
     /// A `@hash` bucket, borrowed for the whole query.
-    Hash(&'a HashMap<Vec<u8>, Vec<DocId>>, &'a DataType),
+    Hash(&'a HashIndex, &'a DataType),
 }
 
 impl<'a> Probe<'a> {
@@ -1146,8 +1209,10 @@ impl Database {
     }
 
     /// In-memory data footprint (bytes): segment bytes, offset indexes,
-    /// vector arenas and graph links. Read from counters, so the cost is
-    /// proportional to the number of collections.
+    /// vector arenas and graph links, and the text, sparse, hash and ordered
+    /// indexes. Read from counters the indexes keep as they change, so the
+    /// cost is proportional to the number of collections -- `--max-memory`
+    /// asks before every write that grows the data.
     ///
     /// **This is not RSS.** Left out: the allocator's leftovers, session
     /// buffers, upper-level neighbour allocations (~3% of l0) and temporary
@@ -1162,6 +1227,10 @@ impl Database {
                     + c.vectors
                         .values()
                         .map(|ix| ix.arena_bytes() + ix.graph_bytes())
+                        .sum::<usize>()
+                    + c.hashes
+                        .values()
+                        .map(HashIndex::memory_bytes)
                         .sum::<usize>()
                     + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
                     + c.sorted
@@ -1772,8 +1841,8 @@ impl Database {
                 if !store.read_fields(id, &positions, &mut vals)? {
                     continue;
                 }
-                for (p, map) in hash_ix.iter_mut() {
-                    map.entry(hash_key(&vals[slot(*p)])).or_default().push(id);
+                for (p, ix) in hash_ix.iter_mut() {
+                    ix.add(hash_key(&vals[slot(*p)]), id);
                 }
                 for (p, ix) in text_ix.iter_mut() {
                     if let Value::Text(t) = &vals[slot(*p)] {
@@ -4245,13 +4314,13 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash => {
-            let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+            let mut ix = HashIndex::default();
             for id in c.store.ids() {
                 if let Some(v) = c.store.read_field(id, pos)? {
-                    map.entry(hash_key(&v)).or_default().push(id);
+                    ix.add(hash_key(&v), id);
                 }
             }
-            c.hashes.insert(field, map);
+            c.hashes.insert(field, ix);
         }
         IndexKind::Text(spec) => {
             let mut ix = TextIndex::new(spec);

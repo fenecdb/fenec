@@ -59,7 +59,7 @@ struct IndexCopy {
 
 enum Built {
     Vector(VectorIndex),
-    Hash(HashMap<Vec<u8>, Vec<DocId>>),
+    Hash(HashIndex),
     Text(TextIndex),
     Sorted(SortedIndex),
     Sparse(SparseIndex),
@@ -269,18 +269,16 @@ impl Database {
                 }
                 c.vectors.insert(copy.field.clone(), ix);
             }
-            Built::Hash(mut map) => {
+            Built::Hash(mut ix) => {
                 for id in ids {
                     if let Some(v) = old(id) {
-                        if let Some(bucket) = map.get_mut(&hash_key(v)) {
-                            bucket.retain(|d| *d != id);
-                        }
+                        ix.remove(&hash_key(v), id);
                     }
                     if let Some(v) = c.store.read_field(id, pos)? {
-                        map.entry(hash_key(&v)).or_default().push(id);
+                        ix.add(hash_key(&v), id);
                     }
                 }
-                c.hashes.insert(copy.field.clone(), map);
+                c.hashes.insert(copy.field.clone(), ix);
             }
             Built::Text(mut ix) => {
                 for id in ids {
@@ -515,13 +513,13 @@ impl IndexCopy {
                 Built::Vector(ix)
             }
             IndexKind::Hash => {
-                let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+                let mut ix = HashIndex::default();
                 for (id, v) in &self.values {
                     if let Some(v) = v {
-                        map.entry(hash_key(v)).or_default().push(*id);
+                        ix.add(hash_key(v), *id);
                     }
                 }
-                Built::Hash(map)
+                Built::Hash(ix)
             }
             IndexKind::Text(spec) => {
                 let mut ix = TextIndex::new(*spec);

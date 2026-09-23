@@ -285,6 +285,10 @@ pub struct TextIndex {
     /// document -> term count, for the length normalisation.
     lengths: DocLengths,
     total_terms: u64,
+    /// What the dictionary and the postings hold, as `memory_bytes` counts
+    /// it, kept as they change: summed over every term it cost 0.42 ms at
+    /// 200 000 documents, and `--max-memory` asks before every write.
+    heap: usize,
 }
 
 impl TextIndex {
@@ -294,6 +298,7 @@ impl TextIndex {
             postings: HashMap::new(),
             lengths: DocLengths::default(),
             total_terms: 0,
+            heap: 0,
         }
     }
 
@@ -316,12 +321,12 @@ impl TextIndex {
     /// Postings, the term dictionary and the length table, as they sit in
     /// memory. Not RSS -- the same caveat as `Database::memory_bytes`.
     pub fn memory_bytes(&self) -> usize {
-        let postings: usize = self
-            .postings
-            .iter()
-            .map(|(t, p)| t.len() + 32 + p.bytes())
-            .sum();
-        postings + self.lengths.bytes()
+        self.heap + self.lengths.bytes()
+    }
+
+    /// What one term costs: its dictionary entry and its postings.
+    fn term_bytes(term: &str, p: &Postings) -> usize {
+        term.len() + 32 + p.bytes()
     }
 
     pub fn insert(&mut self, doc: DocId, text: &str) {
@@ -340,10 +345,20 @@ impl TextIndex {
             return;
         }
         for (term, count) in tf {
+            let len = term.len();
             // Ascending by document id. Ingest hands ids out in order, so the
             // search lands at the end and this is a push; only an update to an
             // older document pays for the shift.
-            self.postings.entry(term).or_default().set(doc, count);
+            let p = self.postings.entry(term).or_default();
+            // A list is empty only as it is made: the last document out
+            // takes it with it.
+            let before = if p.is_empty() {
+                0
+            } else {
+                len + 32 + p.bytes()
+            };
+            p.set(doc, count);
+            self.heap += len + 32 + p.bytes() - before;
         }
         if let Some(old) = self.lengths.insert(doc, n) {
             self.total_terms -= old as u64;
@@ -353,14 +368,21 @@ impl TextIndex {
 
     /// Removes a document. `text` must be what was indexed -- every caller
     /// reads the stored document first, so the terms are the right ones.
+    ///
+    /// A list the document leaves empty goes as the document leaves it:
+    /// `retain` over the dictionary afterwards walked every term, 0.38 ms a
+    /// delete -- or an update of any field -- at 200 000 documents.
     pub fn remove(&mut self, doc: DocId, text: &str) {
         let spec = self.spec;
         for_each_indexed_term(text, &spec, |t| {
             if let Some(list) = self.postings.get_mut(t) {
                 list.drop_doc(doc);
+                if list.is_empty() {
+                    self.heap -= TextIndex::term_bytes(t, list);
+                    self.postings.remove(t);
+                }
             }
         });
-        self.postings.retain(|_, p| !p.is_empty());
         if let Some(n) = self.lengths.remove(doc) {
             self.total_terms -= n as u64;
         }
@@ -375,8 +397,10 @@ impl TextIndex {
     /// Called where the index is known to be complete: a rebuild on open, and
     /// `create index`.
     pub fn shrink_to_fit(&mut self) {
-        for list in self.postings.values_mut() {
+        self.heap = 0;
+        for (term, list) in self.postings.iter_mut() {
             list.shrink();
+            self.heap += TextIndex::term_bytes(term, list);
         }
         self.postings.shrink_to_fit();
         self.lengths.shrink_to_fit();
@@ -386,6 +410,7 @@ impl TextIndex {
         self.postings.clear();
         self.lengths.clear();
         self.total_terms = 0;
+        self.heap = 0;
     }
 
     fn avgdl(&self) -> f32 {
@@ -883,6 +908,51 @@ mod tests {
         assert!(ix.is_empty());
         assert_eq!(ix.terms(), 0, "the dictionary must not keep empty lists");
         assert_eq!(ix.total_terms, 0);
+    }
+
+    /// The count `memory_bytes` reads is the sum over every term it
+    /// replaced, through inserts, updates, removals and a shrink.
+    #[test]
+    fn the_byte_count_is_the_walk_it_replaced() {
+        let walked = |ix: &TextIndex| {
+            ix.postings
+                .iter()
+                .map(|(t, p)| TextIndex::term_bytes(t, p))
+                .sum::<usize>()
+                + ix.lengths.bytes()
+        };
+        let mut ix = TextIndex::new(spec());
+        let mut seed = 0x51ED_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut docs: Vec<(DocId, String)> = Vec::new();
+        for round in 0..2000u64 {
+            let id = 1 + next() % 300;
+            if let Some(at) = docs.iter().position(|d| d.0 == id) {
+                let (_, old) = docs.remove(at);
+                ix.remove(id, &old);
+            }
+            if round % 3 != 0 {
+                let words: Vec<String> = (0..1 + next() % 6)
+                    .map(|_| format!("w{}", next() % 40))
+                    .collect();
+                let text = words.join(" ");
+                ix.insert(id, &text);
+                docs.push((id, text));
+            }
+            assert_eq!(ix.memory_bytes(), walked(&ix), "round {round}");
+        }
+        ix.shrink_to_fit();
+        assert_eq!(ix.memory_bytes(), walked(&ix));
+        for (id, text) in docs {
+            ix.remove(id, &text);
+        }
+        assert_eq!(ix.terms(), 0);
+        assert_eq!(ix.memory_bytes(), ix.lengths.bytes());
     }
 
     #[test]
