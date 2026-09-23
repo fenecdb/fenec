@@ -232,8 +232,11 @@ fn a_compact_beside_a_mapped_database_copies_no_record() {
             );
         }
         run(db, "del docs where n >= 300");
-        // A rewrite of every document with a vector: a tombstone each.
-        run(db, "set docs {kind: \"k1\"} where n < 100");
+        // A hundred vectors rewritten: a tombstone each.
+        run(
+            db,
+            "set docs {kind: \"k1\", v: [2.0, 1.0, 1.0, 0.5]} where n < 100",
+        );
         db.sync().unwrap();
     };
     let meanwhile = |db: &mut Database| {
@@ -265,9 +268,10 @@ fn a_compact_beside_a_mapped_database_copies_no_record() {
     let c = db.collection("docs").unwrap();
     assert!(c.store.is_mapped());
     assert_eq!(c.store.heap_bytes(), 0);
-    // The rebuilt graph holds a tombstone for each document rewritten or
-    // deleted meanwhile, and none of the hundred rewritten before.
-    assert_eq!(c.vectors["v"].dead(), 2);
+    // The rebuilt graph holds a tombstone for the document deleted
+    // meanwhile -- the one rewritten meanwhile kept its vector, and with it
+    // its node -- and none of the hundred rewritten before.
+    assert_eq!(c.vectors["v"].dead(), 1);
 
     let mut twin = open_mapped(&twin_path).unwrap();
     meanwhile(&mut twin);

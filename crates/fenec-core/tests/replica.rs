@@ -378,3 +378,46 @@ fn a_write_that_is_not_there_to_apply_is_refused() {
     // A collection made twice.
     assert!(matches!(replica.apply(&w[0].1), Err(Error::Corrupt(_))));
 }
+
+/// A replica applies a write through the write path's index upkeep, so an
+/// update of another field keeps the vector's node there as on its primary:
+/// it retired the node and inserted it again, a tombstone per update.
+#[test]
+fn a_replica_keeps_the_nodes_of_vectors_a_rewrite_leaves_alone() {
+    let primary_file = Tap::default();
+    let mut primary = primary_file.database();
+    let mut rng = Rng(7);
+    exec(
+        &mut primary,
+        "create collection notes (title text, v vector<8> @hnsw(cosine, m=8))",
+        &[],
+    );
+    for i in 0..50 {
+        let title = Value::Text(format!("t{i}"));
+        exec(
+            &mut primary,
+            "put notes {title: $1, v: $2}",
+            &[title, rng.vector(DIM)],
+        );
+    }
+    exec(&mut primary, "set notes {title: \"renamed\"}", &[]);
+
+    let replica_file = Tap::default();
+    let mut replica = replica_file.database();
+    replica.follow(vec![(7, 0)]).unwrap();
+    let mut records = Vec::new();
+    for (_, bytes) in primary_file.since(0) {
+        records.extend_from_slice(&bytes);
+    }
+    replica.apply(&records).unwrap();
+    let dead = |db: &Database| db.collection("notes").unwrap().vectors["v"].dead();
+    assert_eq!(dead(&primary), 0);
+    assert_eq!(dead(&replica), 0);
+    let probe = rng.vector(DIM);
+    assert_eq!(answers(&replica, &probe), answers(&primary, &probe));
+    let near = "get notes select id near v $1 limit 5";
+    assert_eq!(
+        rows(&replica, near, std::slice::from_ref(&probe)),
+        rows(&primary, near, std::slice::from_ref(&probe))
+    );
+}

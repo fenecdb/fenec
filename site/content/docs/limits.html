@@ -179,10 +179,14 @@ so a node that is down takes its tenants with it.</p>
     fails it with a request to run it again, since what was built no longer
     fits. It cannot be cancelled once begun.</li>
   <li>A delete is a tombstone and the graph node stays in memory until
-    <code>compact</code>. Updating a document also marks the old node deleted
-    and adds a new one, so in collections whose documents change, the graph
-    grows until compaction — and the tombstones take places in the beam
-    <code>near</code> walks. A page they cut short is walked again with the
+    <code>compact</code>. Changing a document's vector also marks the old
+    node deleted and adds a new one, so in collections whose vectors change,
+    the graph grows until compaction — and the tombstones take places in the
+    beam
+    <code>near</code> walks. An update of the other fields leaves the node
+    where it is: 0.006 ms for a title at 20 000 × 768, where taking the
+    vector out and back in cost 1.89 ms and a tombstone. A page tombstones
+    cut short is walked again with the
     beam wider by their number, or searched exactly where that walk would
     cost more than reading every vector, so the answer is whole and only
     slower until the compact.</li>

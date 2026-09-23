@@ -132,8 +132,8 @@ for the newest 23%.</p>
   thousands of documents match.</p>
 </div>
 
-<p>Deleted documents do the same without a filter. Every rewrite or deletion
-of a document with a vector leaves a tombstone in the graph until
+<p>Deleted documents do the same without a filter. Every write that changes
+or deletes a document's vector leaves a tombstone in the graph until
 <code>compact</code>, and a beam full of them holds fewer live rows than the
 page. A short answer is walked again with the beam wider by the tombstones,
 since no more than all of them can be in it — or, where a walk that wide

@@ -437,35 +437,41 @@ impl Collection {
             .map(|(_, ix)| ix)
     }
 
-    /// Inlined for the reason [`Self::reset_index_structures`] is: a
-    /// compact beside the database calls it too.
+    /// Puts `doc` into the indexes, `old` the version it replaces. Inlined
+    /// for the reason [`Self::reset_index_structures`] is: a compact beside
+    /// the database calls it too.
     #[inline(always)]
-    fn index_doc(&mut self, doc: &Document) {
+    fn index_doc(&mut self, doc: &Document, old: Option<&Document>) {
         for (name, ix) in self.vectors.iter_mut() {
             if let Some(Value::Vector(v)) = doc.get(name) {
                 ix.insert(doc.id, v);
             }
         }
-        self.index_scalar(doc);
+        self.index_scalar(doc, old);
     }
 
-    /// Hash and full-text indexes. Vectors are left to the batch path.
-    fn index_scalar(&mut self, doc: &Document) {
+    /// Hash, text, ordered and sparse indexes; vectors are left to the batch
+    /// path. A field `old` held as it is, `unindex_doc` left in place, and
+    /// it is left here too.
+    fn index_scalar(&mut self, doc: &Document, old: Option<&Document>) {
+        let kept = |name: &str| old.is_some_and(|o| same(o.get(name), doc.get(name)));
         for (name, ix) in self.hashes.iter_mut() {
-            if let Some(v) = doc.get(name) {
+            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.add(hash_key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
-            if let Some(Value::Text(t)) = doc.get(name) {
+            if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
-            ix.insert(doc.id, doc.get(name));
+            if !kept(name) {
+                ix.insert(doc.id, doc.get(name));
+            }
         }
         for (name, ix) in self.sparse.iter_mut() {
-            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+            if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, e);
             }
         }
@@ -491,29 +497,39 @@ impl Collection {
         }
     }
 
-    fn unindex_doc(&mut self, doc: &Document) {
+    /// Takes the stored `doc` out of the indexes: out of all of them for a
+    /// deletion, and for a rewrite into `new` out of those whose field
+    /// changes. An update of one field took the document out of every index
+    /// and put it back -- its vector included, 1.89 ms at 20 000 x 768 and a
+    /// tombstone each time. A vector stays while `new` has one in its field:
+    /// `insert` keeps the node that holds it or retires it for the new one.
+    fn unindex_doc(&mut self, doc: &Document, new: Option<&Document>) {
+        let kept = |name: &str| new.is_some_and(|n| same(doc.get(name), n.get(name)));
         for (name, ix) in self.vectors.iter_mut() {
-            if doc.get(name).is_some() {
+            let replaced = new.is_some_and(|n| matches!(n.get(name), Some(Value::Vector(_))));
+            if doc.get(name).is_some() && !replaced {
                 ix.remove(doc.id);
             }
         }
         for (name, ix) in self.hashes.iter_mut() {
-            if let Some(v) = doc.get(name) {
+            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(&hash_key(v), doc.id);
             }
         }
         // Every caller reads the *stored* document before unindexing, so the
         // terms here are the ones that went in.
         for (name, ix) in self.texts.iter_mut() {
-            if let Some(Value::Text(t)) = doc.get(name) {
+            if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
-            ix.remove(doc.id, doc.get(name));
+            if !kept(name) {
+                ix.remove(doc.id, doc.get(name));
+            }
         }
         for (name, ix) in self.sparse.iter_mut() {
-            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+            if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, e);
             }
         }
@@ -646,6 +662,17 @@ fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     crate::codec::encode_value(&mut out, v);
     out
+}
+
+/// Whether an index files `a` and `b` as one entry: the same encoding, which
+/// is equal to the bit -- `==` says -0.0 is 0.0, and a hash key is the
+/// encoding. `==` itself was 570 bytes of the browser module besides.
+fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => hash_key(a) == hash_key(b),
+        _ => false,
+    }
 }
 
 /// One resolved level of a `lookup` chain: the parts that do not depend on
@@ -1713,8 +1740,10 @@ impl Database {
                 |field: &str| !fresh && restored.iter().any(|(n, f)| *n == name && f == field);
 
             // 1) The restored graphs take the tail's writes the way the write
-            // path took them: the node a touched document had is retired,
-            // and the vector it holds now, if any, goes in anew.
+            // path took them: a touched document keeps its node while it
+            // holds the vector the checkpoint had -- `insert` sees to it --
+            // has it retired for the one it holds now otherwise, and leaves
+            // the graph without one.
             let mut tail = touched
                 .iter()
                 .find(|(n, _)| *n == name)
@@ -1727,17 +1756,20 @@ impl Database {
                     continue;
                 };
                 let mut items: Vec<(DocId, Vec<f32>)> = Vec::new();
+                let mut gone = Vec::new();
                 let mut buf = Vec::new();
                 for &id in &tail {
                     if c.store.read_vector_into(id, pos, &mut buf)? {
                         items.push((id, buf.clone()));
+                    } else {
+                        gone.push(id);
                     }
                 }
                 let ix = c
                     .vectors
                     .get_mut(field)
                     .expect("a restored field has its index");
-                for &id in &tail {
+                for id in gone {
                     ix.remove(id);
                 }
                 ix.insert_batch(&items);
@@ -2138,13 +2170,17 @@ impl Database {
                     let id = get_uvarint(body, &mut p)?;
                     let plen = get_uvarint(body, &mut p)? as usize;
                     let payload = body.get(p..p + plen).ok_or_else(cut)?;
-                    if let Some(old) = c.store.read(&c.schema, id)? {
-                        c.unindex_doc(&old);
-                    }
+                    let old = c.store.read(&c.schema, id)?;
                     c.store.append(op, id, payload);
-                    if op == OP_PUT {
-                        let doc = c.store.read(&c.schema, id)?.ok_or_else(cut)?;
-                        c.index_scalar(&doc);
+                    let new = match op == OP_PUT {
+                        true => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
+                        false => None,
+                    };
+                    if let Some(old) = &old {
+                        c.unindex_doc(old, new.as_ref());
+                    }
+                    if let Some(doc) = new {
+                        c.index_scalar(&doc, old.as_ref());
                         if !c.vectors.is_empty() {
                             batch.cid = cid;
                             batch.ids.insert(id);
@@ -2438,14 +2474,16 @@ impl Database {
                 h.before_write(collection, op, &mut doc)?;
             }
             // Drop the old index entries when overwriting.
-            if op == WriteOp::Update {
-                if let Some(old) = c.store.read(&schema, doc.id)? {
-                    c.unindex_doc(&old);
-                }
+            let old = match op {
+                WriteOp::Update => c.store.read(&schema, doc.id)?,
+                _ => None,
+            };
+            if let Some(old) = &old {
+                c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
             let frame = c.store.append(OP_PUT, doc.id, &payload);
-            c.index_scalar(&doc);
+            c.index_scalar(&doc, old.as_ref());
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, doc.id);
             for h in &hooks {
@@ -4157,12 +4195,13 @@ impl Database {
             for h in &hooks {
                 h.before_write(collection, WriteOp::Update, &mut doc)?;
             }
-            if let Some(old) = c.store.read(&schema, id)? {
-                c.unindex_doc(&old);
+            let old = c.store.read(&schema, id)?;
+            if let Some(old) = &old {
+                c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
             let frame = c.store.append(OP_PUT, id, &payload);
-            c.index_doc(&doc);
+            c.index_doc(&doc, old.as_ref());
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, id);
             for h in &hooks {
@@ -4190,7 +4229,7 @@ impl Database {
                 for h in &hooks {
                     h.after_write(collection, WriteOp::Delete, &doc)?;
                 }
-                c.unindex_doc(&doc);
+                c.unindex_doc(&doc, None);
             }
             let frame = c.store.append(OP_DEL, id, &[]);
             self.wal(REC_DATA, cid, &frame)?;
