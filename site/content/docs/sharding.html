@@ -327,7 +327,10 @@ database gets, and the same rule after it: the old primary rejoins with
 it yet, which is one write and a sync: placements change when someone places,
 moves or deletes a tenant, not when clients read and write. Nothing of the
 tenants' own data goes through the router's directory, so a standby that is a
-second behind still forwards every request correctly.</p>
+second behind still forwards every request correctly. One whose directory has
+not arrived at all — just started, its primary not yet reached — answers
+<code>503</code> with <code>Retry-After</code> rather than <code>404</code>:
+it knows of no tenant, which is not knowing there is none.</p>
 
 <h2>Tokens</h2>
 

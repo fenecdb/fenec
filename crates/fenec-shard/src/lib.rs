@@ -260,6 +260,16 @@ impl Router {
                 .and_then(|p| dir.node(&p.node).map(|n| (p.node.clone(), n.addr.clone())));
             match node {
                 Some(n) => n,
+                // A standby whose maps have not come from the primary yet
+                // cannot say a tenant does not exist: 404 tells a client to
+                // stop asking, this to ask again.
+                None if !dir.arrived() => {
+                    return reply(
+                        out,
+                        Response::error(503, "the directory has not arrived from the primary yet")
+                            .header("Retry-After", "1"),
+                    )
+                }
                 None => {
                     return reply(
                         out,
