@@ -120,7 +120,12 @@ data. A new file is mapped from the start. A rewrite -- `checkpoint`,
 it (`Database::repoint`), so the old one is let go of; a compact over a
 mapped file never copies a record into memory, on a server either, and
 rebuilds no index but a graph holding tombstones, since the documents are
-the same ones.
+the same ones. An image this database writes records where each
+collection's data went (`image_into`'s `placed`), and each store works its
+new places out from its own (`Store::relocate_image`, `relocate_live`):
+walking the new file's record heads read the whole of it back, 1.8 to 2.3 s
+of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
+image, written elsewhere, is walked.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts

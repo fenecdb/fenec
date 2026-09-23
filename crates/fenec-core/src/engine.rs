@@ -1300,12 +1300,20 @@ impl Database {
     /// of a collection go straight through, so the image is never a second
     /// copy of the data (`Sink::rewrite_with`).
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
-        self.image_into(out, &[])
+        self.image_into(out, &[], &mut Vec::new())
     }
 
     /// [`Self::snapshot_into`], leaving out the dead records of the named
-    /// collections: what `compact` writes.
-    fn image_into(&self, out: &mut dyn ImageOut, compacting: &[String]) -> Result<()> {
+    /// collections: what `compact` writes. Where each collection's data
+    /// record starts is put in `placed`, which is all [`Self::repoint`]
+    /// needs to point the stores at the new file.
+    fn image_into(
+        &self,
+        out: &mut dyn ImageOut,
+        compacting: &[String],
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables, clippy::ptr_arg))]
+        placed: &mut Vec<(u32, u64)>,
+    ) -> Result<()> {
         let mut head = Vec::from(&MAGIC[..]);
         // Counter header: a placeholder now, the body's length once it is
         // written -- fixed width, so it is patched where it stands.
@@ -1340,6 +1348,9 @@ impl Database {
             };
             if bytes > 0 {
                 out.write(&record_head(REC_DATA, c.id, bytes))?;
+                // The browser maps no file, and its module keeps no list.
+                #[cfg(not(target_arch = "wasm32"))]
+                placed.push((c.id, out.at()));
                 match compact {
                     true => c.store.write_live(out)?,
                     false => c.store.write_image(out)?,
@@ -1366,16 +1377,29 @@ impl Database {
     /// Points the stores at the file the sink has just rewritten: the same
     /// documents, in their new places. The hash, ordered, text and vector
     /// indexes stand -- nothing about the documents changed, only where
-    /// their bytes are -- so this is a pass over the new file's record
-    /// heads, not a rebuild.
+    /// their bytes are. An image this database wrote says where each
+    /// collection's data record went, `placed`, and the collections named
+    /// had their live records alone written; the stores then work their new
+    /// places out without reading the file. One handed over from elsewhere
+    /// is walked, record head by record head.
     #[cfg(not(target_arch = "wasm32"))]
-    fn repoint(&mut self) -> Result<()> {
+    fn repoint(&mut self, placed: Option<&[(u32, u64)]>, compacted: &[String]) -> Result<()> {
         if !self.mapped {
             return Ok(());
         }
         let Some(base) = self.sink_mut().remapped() else {
             return Ok(());
         };
+        if let Some(placed) = placed {
+            for (name, c) in self.collections.iter_mut() {
+                match placed.iter().find(|(cid, _)| *cid == c.id) {
+                    Some(&(_, at)) if compacted.contains(name) => c.store.relocate_live(&base, at),
+                    Some(&(_, at)) => c.store.relocate_image(&base, at),
+                    None => c.store.let_go(),
+                }
+            }
+            return Ok(());
+        }
         let keep = base.clone();
         let bytes = (*keep).as_ref();
         if bytes.len() < MAGIC.len() {
@@ -1934,15 +1958,16 @@ impl Database {
         self.refuse_if_failed()?;
         // The sink is behind a lock, so the image can be written from `self`
         // while the sink takes it: both are shared borrows here.
+        let mut placed = Vec::new();
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.snapshot_into(out))
+            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut placed))
         };
         self.storage(r)?;
         let r = self.sink_mut().sync();
         self.storage(r)?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(Some(&placed), &[])?;
         self.dirty = false;
         Ok(())
     }
@@ -2258,9 +2283,10 @@ impl Database {
         self.changes.set_capacity(cap);
         self.adoptions += 1;
         // The image is the file now: a mapped database reads the documents
-        // from there rather than holding the copy it was handed.
+        // from there rather than holding the copy it was handed. Written
+        // elsewhere, it is walked to find them.
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(None, &[])?;
         self.dirty = false;
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
@@ -4303,14 +4329,15 @@ impl Database {
             }
         }
         // After compaction the persisted image is rewritten from scratch.
+        let compacting: &[String] = if mapped { &targets } else { &[] };
+        let mut placed = Vec::new();
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            let compacting: &[String] = if mapped { &targets } else { &[] };
-            sink.rewrite_with(&mut |out| self.image_into(out, compacting))
+            sink.rewrite_with(&mut |out| self.image_into(out, compacting, &mut placed))
         };
         self.storage(r)?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(Some(&placed), compacting)?;
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))

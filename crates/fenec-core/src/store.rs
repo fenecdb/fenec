@@ -243,6 +243,24 @@ impl IdIndex {
             .map(|(i, _)| i as u64 + 1)
             .chain(extra)
     }
+
+    /// Replaces every location with `f`'s, visiting the ids in `iter`'s
+    /// order.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
+        for (i, l) in self.dense.iter_mut().enumerate() {
+            if !l.is_empty() {
+                *l = f(i as u64 + 1, *l);
+            }
+        }
+        let mut extra: Vec<DocId> = self.sparse.keys().copied().collect();
+        extra.sort_unstable();
+        for id in extra {
+            if let Some(l) = self.sparse.get_mut(&id) {
+                *l = f(id, *l);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -667,6 +685,76 @@ impl Store {
         let (_, stretches) = self.base.get_or_insert_with(|| (base.clone(), Vec::new()));
         stretches.push((at, pos as u64));
         Ok(count)
+    }
+
+    /// Points the store at the file a checkpoint has just written its image
+    /// into, `at` where its data record's body starts. The image is the
+    /// store's frames as they stand -- the mapped stretches, then the
+    /// segments -- so each location moves by where its stretch or segment
+    /// landed, and the new file is not read: walking its frames took 1.8 to
+    /// 2.3 s of a 1 GB file's checkpoint, all of it under the write lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn relocate_image(&mut self, base: &Base, at: u64) {
+        // Where each stretch started, and where it starts now.
+        let mut stretches: Vec<(u64, u64)> = Vec::new();
+        let mut to = at;
+        if let Some((_, old)) = &self.base {
+            for &(from, len) in old {
+                stretches.push((from, to));
+                to += len;
+            }
+        }
+        let mut segments = Vec::with_capacity(self.segments.len());
+        for s in &self.segments {
+            segments.push(to);
+            to += s.data.len() as u64;
+        }
+        self.index.relocate(|_, l| {
+            let moved = match l.seg & MAPPED != 0 {
+                true => {
+                    let from = ((l.seg & !MAPPED) as u64) << 32 | l.off as u64;
+                    let k = stretches.partition_point(|s| s.0 <= from) - 1;
+                    stretches[k].1 + (from - stretches[k].0)
+                }
+                false => segments[l.seg as usize] + l.off as u64,
+            };
+            Loc::mapped(moved, l.len)
+        });
+        self.base = Some((base.clone(), vec![(at, to - at)]));
+        self.segments = vec![Segment::default()];
+    }
+
+    /// [`Self::relocate_image`] for the image [`Self::write_live`] wrote: the
+    /// live documents alone, in `iter`'s order, each a put -- so each lands
+    /// where the frames before it end.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn relocate_live(&mut self, base: &Base, at: u64) {
+        let mut head = Vec::with_capacity(16);
+        let mut to = at;
+        self.index.relocate(|id, l| {
+            head.clear();
+            head.push(OP_PUT);
+            put_uvarint(&mut head, id);
+            put_uvarint(&mut head, l.len as u64);
+            to += head.len() as u64;
+            let moved = Loc::mapped(to, l.len);
+            to += l.len as u64;
+            moved
+        });
+        self.total_bytes = (to - at) as usize;
+        self.dead_bytes = 0;
+        self.base = Some((base.clone(), vec![(at, to - at)]));
+        self.segments = vec![Segment::default()];
+    }
+
+    /// A store the rewrite wrote no data record for: nothing live, and no
+    /// hold on the file it read from.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn let_go(&mut self) {
+        self.base = None;
+        self.segments = vec![Segment::default()];
+        self.total_bytes = 0;
+        self.dead_bytes = 0;
     }
 
     /// Moves the live records into fresh segments and drops the tombstones.

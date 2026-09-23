@@ -329,3 +329,72 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
     assert_eq!(answer(&db, "get other select x", &[]).rows.len(), 2);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A rewrite this database wrote -- a checkpoint, a compact -- tells the
+/// stores where their records went, and they point at the new file without
+/// reading it: walking its record heads instead took 1.8 to 2.3 s of a 1 GB
+/// file's checkpoint under the write lock. Each store must then be the one
+/// the walk gives, read straight after the rewrite as well as reopened.
+#[test]
+fn a_rewrite_points_the_stores_where_the_file_has_them() {
+    let path = tmp("relocate");
+    fill(&path);
+    let twin = tmp("relocate-twin");
+    std::fs::copy(&path, &twin).unwrap();
+    let mut mapped = open_mapped(&path).unwrap();
+    let mut read = open(&twin).unwrap();
+    // Records in the file's stretches and in segments: overwrites,
+    // deletions, and an id far past the others, which the index holds apart.
+    for db in [&mut mapped, &mut read] {
+        run(db, "put docs {title: \"after\", kind: \"a\", n: 2000, body: \"gamma after\", v: [0, 1, 0, 1]}");
+        run(db, "put docs {id: 5000000, title: \"far\", kind: \"b\", n: 3000, body: \"beta far\", v: [1, 0, 0, 1]}");
+        run(db, "del docs where n >= 200 and n < 210");
+        run(
+            db,
+            "set docs {title: \"again\"} where kind = \"a\" and n < 60",
+        );
+    }
+    let walked = |p: &PathBuf| {
+        let copy = tmp("relocate-walked");
+        std::fs::copy(p, &copy).unwrap();
+        let db = open_mapped(&copy).unwrap();
+        let _ = std::fs::remove_file(&copy);
+        db
+    };
+    let stats = |db: &Database| {
+        db.stats()
+            .into_iter()
+            .map(|c| (c.name, c.documents, c.bytes, c.dead_bytes))
+            .collect::<Vec<_>>()
+    };
+    for step in ["checkpoint", "compact"] {
+        match step {
+            "checkpoint" => mapped.checkpoint().unwrap(),
+            _ => run(&mut mapped, "compact"),
+        }
+        let fresh = walked(&path);
+        assert_eq!(stats(&mapped), stats(&fresh), "after the {step}");
+        for q in ["get docs order id", "get other order id"] {
+            assert_eq!(
+                answer(&mapped, q, &[]),
+                answer(&fresh, q, &[]),
+                "{q}, {step}"
+            );
+        }
+        // Writes go on from where the store stands: the next id, and a
+        // document written again.
+        for db in [&mut mapped, &mut read] {
+            run(db, "put docs {title: \"next\", kind: \"c\", n: 4000, body: \"delta next\", v: [0, 0, 1, 1]}");
+            run(db, "set docs {n: 4001} where title = \"far\"");
+        }
+        assert_eq!(
+            answer(&mapped, "get docs order id", &[]),
+            answer(&read, "get docs order id", &[]),
+            "writes after the {step}"
+        );
+    }
+    drop(mapped);
+    drop(read);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&twin);
+}

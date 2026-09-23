@@ -405,7 +405,7 @@ impl Database {
         // streamed into the new file rather than built beside the data.
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.image_into(out, &[]))
+            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut Vec::new()))
         };
         self.storage(r)?;
         Ok(Response::Ok(format!(

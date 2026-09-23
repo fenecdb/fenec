@@ -107,8 +107,10 @@ holds what it derived from them (1 GB file, hash and ordered index: 188 MB
 against 1 095 read in; `compact` peaks at 236 MB against 2 012).
 `fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
 tenants included) is the other way. A rewrite points the stores at the file
-it just wrote (`Database::repoint`), and a compact over a mapped file copies
-no record -- on a server either -- and rebuilds only a graph holding
+it just wrote (`Database::repoint`) from where it put each record, without
+reading the file back (1.8-2.3 s of a 1 GB checkpoint, now 19 ms; an
+adopted image is still walked), and a compact over a mapped file copies no
+record -- on a server either -- and rebuilds only a graph holding
 tombstones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
