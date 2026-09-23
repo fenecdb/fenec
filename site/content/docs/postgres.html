@@ -66,13 +66,14 @@ memory ceiling to the client.</p>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td><code>57P05</code> on a session that has gone quiet</td></tr>
 <tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>the length is read before the body, so an oversized body is never allocated</td></tr>
 <tr><td>startup packet</td><td class="n">10 000 B</td><td>the same as PostgreSQL; the only allocation before authentication</td></tr>
-<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data</td></tr>
+<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data, <code>507</code> over HTTP</td></tr>
 </tbody>
 </table>
 </div>
 
 <p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
-statements that <b>grow</b> the data are rejected while reads,
+statements that <b>grow</b> the data are rejected — over this protocol and
+over the HTTP listener alike — while reads,
 <code>del</code> and <code>compact</code> keep working — hitting a ceiling with
 no way out would be no better than a cgroup OOM. The point is to bring the OOM
 forward: nobody warns you about a process felled by <code>SIGKILL</code>, and
@@ -188,10 +189,19 @@ wrong secret key, is ignored.</p>
 
 <p><code>Describe</code> is answered without running the query: the parameter
 count comes from the largest <code>$n</code> in the statement, and the columns
-and type OIDs from the schema — with <code>near</code>, <code>_score</code> is
-reported too. Parameter types are left unspecified; the client sends text and
+and type OIDs from the schema — with <code>near</code> or <code>match</code>,
+<code>_score</code> is reported too. Parameter types are left unspecified; the client sends text and
 the server infers. <code>RowDescription</code> goes exactly once, on
 <code>Execute</code> when <code>Describe</code> is skipped.</p>
+
+<p>An error drops every message after it up to the next <code>Sync</code>,
+as PostgreSQL does, and is sent at once rather than at the
+<code>Sync</code>. A pipelining client — libpq's pipeline mode, pgx's
+batches, JDBC's — writes off what it queued behind a failure, so none of it
+runs: run anyway, a write the client counted as aborted would be made, and
+psycopg 3, reading answers it did not expect, fails with <i>cannot exit
+pipeline mode while busy</i>. What ran <i>before</i> the error stays
+written: there are no transactions to roll it back.</p>
 
 <h2 id="catalog">The catalog</h2>
 

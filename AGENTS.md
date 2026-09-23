@@ -204,7 +204,10 @@ its current vector inserted) -- restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`, which
-rebuilds a graph holding tombstones (nothing else takes one out).
+rebuilds a graph holding tombstones (nothing else takes one out). An unfiltered
+`near` the tombstones cut short walks again with the beam wider by their
+number, or searches exactly where that walk costs more than reading every
+vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,

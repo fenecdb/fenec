@@ -108,10 +108,15 @@ mapped: there the whole file is in memory, inside WASM32's 4 GB address
 space, which is the real ceiling there.</p>
 
 <p><code>Database::memory_bytes()</code> sums the segment bytes, the offset
-indexes, the vector arenas, the graph links, the text postings and the
-ordered indexes from counters, and <code>--max-memory</code> uses it. It is
-not RSS: allocator slack, HNSW build buffers, upper-level neighbour
-allocations (~3% of level 0) and the transient peaks all sit outside it.</p>
+indexes, the vector arenas, the graph links, and the text, sparse, hash and
+ordered indexes, and <code>--max-memory</code> uses it before every write
+that grows the data. Each index keeps its count as it changes, so asking
+costs nothing next to the write: summed over every term instead, a text
+index of 200 000 documents took 0.42 ms a call. It is not RSS: allocator
+slack, HNSW build buffers, upper-level neighbour allocations (~3% of level
+0) and the transient peaks all sit outside it. On the 1 GB file above,
+opened mapped, it counts 197 MB where the heap holds 188, 34 of them the
+hash index.</p>
 
 <div class="tbl">
 <table>
@@ -177,7 +182,10 @@ so a node that is down takes its tenants with it.</p>
     <code>compact</code>. Updating a document also marks the old node deleted
     and adds a new one, so in collections whose documents change, the graph
     grows until compaction — and the tombstones take places in the beam
-    <code>near</code> walks.</li>
+    <code>near</code> walks. A page they cut short is walked again with the
+    beam wider by their number, or searched exactly where that walk would
+    cost more than reading every vector, so the answer is whole and only
+    slower until the compact.</li>
   <li>Documents inside one batch cannot see each other as neighbours. The batch
     is 1/16 of the graph size (64–512), so there is no measured recall loss —
     but very small collections fall to the serial path below 1024 vectors.</li>

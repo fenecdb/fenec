@@ -843,7 +843,7 @@ fn timestamps_accept_text_and_epoch() {
     // Two different spellings of the same instant must be equal.
     let ts = |db: &mut Database, name: &str| -> Value {
         run(
-            &mut db_ref(db),
+            db_ref(db),
             &format!(r#"get event select t where name = "{name}""#),
         )
         .rows()
@@ -1436,10 +1436,7 @@ fn required_drops_the_parents_no_child_matches() {
         .collect();
     assert_eq!(kept, want);
     assert!(kept_n.iter().all(|n| *n > 0));
-    assert!(
-        all_n.iter().any(|n| *n == 0),
-        "the fixture must exercise both"
-    );
+    assert!(all_n.contains(&0), "the fixture must exercise both");
 
     // The page is filled after the drop, not before.
     let (page, _) = sizes(&mut db, &format!("get products limit 1 {base} required"));

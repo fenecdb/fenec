@@ -415,10 +415,7 @@ fn required_keeps_only_the_parents_a_child_matches() {
         .collect();
     assert_eq!(kept_ids, want);
     assert!(kept_sizes.iter().all(|n| *n > 0));
-    assert!(
-        all_sizes.iter().any(|n| *n == 0),
-        "the fixture must exercise both"
-    );
+    assert!(all_sizes.contains(&0), "the fixture must exercise both");
 }
 
 /// `required` decides who is on the page, so it has to run before `limit`:

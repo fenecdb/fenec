@@ -82,7 +82,7 @@ fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-fn p50(v: &mut Vec<f64>) -> f64 {
+fn p50(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[v.len() / 2]
 }
@@ -215,7 +215,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
         let t = Instant::now();
         let r = db.execute(&Statement::Select(scalar.clone())).unwrap();
         lat.push(ms(t.elapsed()));
-        assert!(r.rows().unwrap().rows.len() > 0);
+        assert!(!r.rows().unwrap().rows.is_empty());
     }
     let scalar_p50 = p50(&mut lat);
 
@@ -288,8 +288,10 @@ fn blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 fn unblob(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -600,7 +602,7 @@ fn main() {
     };
 
     let col = |r: &Option<Result_>, f: &dyn Fn(&Result_) -> String| -> String {
-        r.as_ref().map(|x| f(x)).unwrap_or_else(|| "-".into())
+        r.as_ref().map(f).unwrap_or_else(|| "-".into())
     };
     let v = Some(v);
     let s = Some(s);
@@ -680,8 +682,11 @@ fn main() {
     );
     println!("{}", "-".repeat(71));
 
-    let v = v.unwrap();
-    let s = s.unwrap();
+    // Both arms always ran: they are options only to share `col` with the
+    // PostgreSQL one, which may be skipped.
+    let (Some(v), Some(s)) = (v, s) else {
+        unreachable!()
+    };
 
     // The open cost is paid once, the query cost on every query.
     // At which point do the two totals even out?

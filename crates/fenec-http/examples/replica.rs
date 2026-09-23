@@ -18,7 +18,7 @@ use fenec_http::replication::{self, fresh_id, Follower, Replication, Upstream};
 use fenec_http::{Config, Server};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,7 @@ struct Primary {
     addr: String,
 }
 
-fn primary(path: &PathBuf, buffer: usize, sync_on_write: bool) -> Primary {
+fn primary(path: &Path, buffer: usize, sync_on_write: bool) -> Primary {
     let (mut db, feed) = replication::open(path.to_str().unwrap(), buffer).unwrap();
     if db.history().lineage.is_empty() {
         db.fork(fresh_id()).unwrap();
@@ -107,7 +107,7 @@ struct Replica {
     seen: Arc<Seen>,
 }
 
-fn replica(path: &PathBuf, upstream: &str) -> Replica {
+fn replica(path: &Path, upstream: &str) -> Replica {
     let (mut db, feed) =
         replication::open(path.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
     let lineage = db.history().lineage.clone();

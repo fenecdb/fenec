@@ -56,7 +56,8 @@ rebuild took 8.8 s.</p>
 <h2>Measuring the footprint</h2>
 
 <p><code>Database::memory_bytes()</code> sums the segment bytes, offset
-indexes, vector arenas and graph links from counters. It is not RSS —
+indexes, vector arenas, graph links and every other index from counters
+they keep as they change, so it costs nothing to ask. It is not RSS —
 allocator slack, HNSW build buffers, upper-level neighbour allocations and the
 2–3× transient peaks all sit outside it. Measured ratios are in
 <a href="limits.html#memory-and-scale">Limits</a>.</p>

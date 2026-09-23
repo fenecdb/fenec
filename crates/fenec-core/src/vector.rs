@@ -139,15 +139,15 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     // Strips of 8: no bounds check in the loop body, LLVM turns this
     // straight into SIMD. The accumulator array breaks the dependency chain.
     let mut acc = [0.0f32; 8];
-    let mut ia = a.chunks_exact(8);
-    let mut ib = b.chunks_exact(8);
-    for (x, y) in ia.by_ref().zip(ib.by_ref()) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for k in 0..8 {
             acc[k] += x[k] * y[k];
         }
     }
     let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for (x, y) in ia.remainder().iter().zip(ib.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         s += x * y;
     }
     s
@@ -158,16 +158,16 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0.0f32; 8];
-    let mut ia = a.chunks_exact(8);
-    let mut ib = b.chunks_exact(8);
-    for (x, y) in ia.by_ref().zip(ib.by_ref()) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for k in 0..8 {
             let d = x[k] - y[k];
             acc[k] += d * d;
         }
     }
     let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for (x, y) in ia.remainder().iter().zip(ib.remainder()) {
+    for (x, y) in ra.iter().zip(rb) {
         let d = x - y;
         s += d * d;
     }
@@ -339,9 +339,9 @@ fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
 #[inline]
 fn dot_bits(bits: &[u64], q: &[f32]) -> f32 {
     let mut acc = [0.0f32; 8];
-    let mut iq = q.chunks_exact(8);
+    let (cq, rq) = q.as_chunks::<8>();
     let mut at = 0usize;
-    for x in iq.by_ref() {
+    for x in cq {
         let byte = (bits[at / 64] >> (at % 64)) as u32;
         for k in 0..8 {
             let flip = (!byte >> k & 1) << 31;
@@ -350,7 +350,7 @@ fn dot_bits(bits: &[u64], q: &[f32]) -> f32 {
         at += 8;
     }
     let mut s = (acc[0] + acc[1]) + (acc[2] + acc[3]) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for x in iq.remainder() {
+    for x in rq {
         let flip = ((!(bits[at / 64] >> (at % 64)) & 1) as u32) << 31;
         s += f32::from_bits(x.to_bits() ^ flip);
         at += 1;
@@ -359,6 +359,10 @@ fn dot_bits(bits: &[u64], q: &[f32]) -> f32 {
 }
 
 // ----------------------------------------------------------------- arena
+
+/// Per node of a batch insert: its id, its level, and the neighbours found
+/// for it at each level -- what the parallel half hands the serial one.
+type Candidates = Vec<(u32, usize, Vec<(usize, Vec<u32>)>)>;
 
 /// Vector arena: every vector in one contiguous array, strided by `node * dim`.
 ///
@@ -1345,7 +1349,7 @@ impl VectorIndex {
         &self,
         pending: &[(u32, usize, Option<Vec<f32>>)],
         _threads: usize,
-    ) -> Vec<(u32, usize, Vec<(usize, Vec<u32>)>)> {
+    ) -> Candidates {
         let (efc, m) = (self.spec.ef_construction, self.spec.m);
         let view = self.view();
         let mut sc = Scratch::new();
@@ -1368,7 +1372,7 @@ impl VectorIndex {
         &self,
         pending: &[(u32, usize, Option<Vec<f32>>)],
         threads: usize,
-    ) -> Vec<(u32, usize, Vec<(usize, Vec<u32>)>)> {
+    ) -> Candidates {
         let (efc, m) = (self.spec.ef_construction, self.spec.m);
         let view = self.view();
         let per = pending.len().div_ceil(threads);

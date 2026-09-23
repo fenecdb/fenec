@@ -134,8 +134,8 @@ impl Sha256 {
             v[1] = v[0];
             v[0] = t1.wrapping_add(t2);
         }
-        for i in 0..8 {
-            self.h[i] = self.h[i].wrapping_add(v[i]);
+        for (h, v) in self.h.iter_mut().zip(v) {
+            *h = h.wrapping_add(v);
         }
     }
 }
@@ -205,7 +205,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn b64_encode(data: &[u8]) -> String {
-    let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [
             chunk[0],

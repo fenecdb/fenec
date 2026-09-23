@@ -79,6 +79,10 @@ pub struct Directory {
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
     pairs: Pairs,
+    /// Whether the maps exist: a standby's arrive with the primary's first
+    /// writes, and until then it knows of no tenant rather than that there
+    /// is none.
+    arrived: bool,
 }
 
 impl Directory {
@@ -112,6 +116,7 @@ impl Directory {
             nodes: BTreeMap::new(),
             tenants: HashMap::new(),
             pairs: Pairs::new(),
+            arrived: false,
         };
         d.reload()?;
         Ok(d)
@@ -174,7 +179,13 @@ impl Directory {
         self.nodes = nodes;
         self.tenants = tenants;
         self.pairs = pairs;
+        self.arrived = g.collection("tenants").is_ok();
         Ok(())
+    }
+
+    /// Whether the maps have arrived; see the field.
+    pub fn arrived(&self) -> bool {
+        self.arrived
     }
 
     /// The node `name`'s tenants are replicated to, if any.

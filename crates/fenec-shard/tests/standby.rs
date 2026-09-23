@@ -298,3 +298,29 @@ fn a_standby_that_takes_an_image_at_the_same_change_reads_its_maps_again() {
     assert!(!tenants.contains("xa"), "{tenants}");
     drop(files);
 }
+
+/// A standby whose maps have not come from the primary yet knows of no
+/// tenant, which is not knowing there is none: it answered 404, and a client
+/// that believes it stops asking. Until the directory arrives the answer is
+/// 503 with a `Retry-After`.
+#[test]
+fn a_standby_without_its_directory_asks_to_be_asked_again() {
+    let files = Files(dir_file("early", "x").parent().unwrap().to_path_buf());
+    // A primary that is not there: nothing ever arrives.
+    let standby = router(
+        &dir_file("early", "standby.fenec"),
+        Some("http://127.0.0.1:9"),
+    );
+    let mut s = TcpStream::connect(("127.0.0.1", standby)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "GET /t/acme/collections HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 503"), "{out}");
+    assert!(out.contains("Retry-After: 1\r\n"), "{out}");
+    drop(files);
+}

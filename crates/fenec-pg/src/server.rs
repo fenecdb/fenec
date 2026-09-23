@@ -603,7 +603,7 @@ fn maintain(
     stmt: &Statement,
     out: &mut Writer,
 ) -> Option<(Durability, Option<usize>)> {
-    if let Some(msg) = over_memory_cap(cfg, &read_lock(db), stmt) {
+    if let Some(msg) = fenec_http::over_ceiling(cfg.max_memory, &read_lock(db), stmt) {
         out.error("53200", &msg);
         return None;
     }
@@ -866,8 +866,25 @@ fn session(
     let mut described_stmts: HashSet<String> = HashSet::new();
     let mut described_portals: HashSet<String> = HashSet::new();
     let mut tx = TxState::default();
+    // After an error in the extended protocol everything up to the next Sync
+    // is read and dropped, as PostgreSQL does. A pipelining client has
+    // written off what it queued behind the failure and reads no answer for
+    // it: run anyway, a write it counted as aborted was made, and its
+    // answers were read as the next query's.
+    let mut skipping = false;
+    // The error count before the extended message just handled, to tell
+    // whether it failed. Checked at the top of the loop, which every arm
+    // reaches -- a refusal `continue`s -- and before waiting on the client.
+    let mut before: Option<u64> = None;
 
     loop {
+        if before.take().is_some_and(|n| out.errors() > n) {
+            skipping = true;
+            // Sent as it happens rather than at the Sync, as PostgreSQL
+            // sends one: a client that waits on it before sending more
+            // would otherwise wait for good.
+            out.flush_to(&mut w)?;
+        }
         let m = match read_message_max(&mut r, cfg.max_message) {
             Ok(m) => m,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
@@ -887,6 +904,12 @@ fn session(
             }
             Err(e) => return Err(e),
         };
+        if skipping && !matches!(m.tag, b'S' | b'X') {
+            continue;
+        }
+        if matches!(m.tag, b'P' | b'B' | b'D' | b'E' | b'C') {
+            before = Some(out.errors());
+        }
 
         match m.tag {
             // ------------------------------------------------ simple query
@@ -1068,6 +1091,7 @@ fn session(
                 out.close_complete();
             }
             b'S' => {
+                skipping = false;
                 out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
@@ -1081,40 +1105,6 @@ fn session(
                 out.flush_to(&mut w)?;
             }
         }
-    }
-}
-
-/// Cleans the record up when the session ends (on a panic too).
-/// Whether the data ceiling is exceeded. Only statements that *grow* the
-/// data are stopped: `del` and `compact` are deliberately left out, because
-/// they are the way out of a database that has hit the ceiling. Reads are
-/// unaffected anyway.
-fn over_memory_cap(cfg: &Config, db: &Database, stmt: &Statement) -> Option<String> {
-    let grows = matches!(
-        stmt,
-        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
-    );
-    if cfg.max_memory == 0 || !grows {
-        return None;
-    }
-    let used = db.memory_bytes();
-    if used < cfg.max_memory {
-        return None;
-    }
-    Some(format!(
-        "data ceiling exceeded: {} / {}. Writes have stopped; run `del` + \
-         `compact` to make room, or raise --max-memory",
-        human(used),
-        human(cfg.max_memory)
-    ))
-}
-
-/// Write KiB rather than saying `0 MiB` for small values.
-fn human(bytes: usize) -> String {
-    if bytes >= 1 << 20 {
-        format!("{} MiB", bytes >> 20)
-    } else {
-        format!("{} KiB", bytes >> 10)
     }
 }
 
@@ -1427,7 +1417,9 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
             );
         }
     }
-    if sel.near.is_some() {
+    // Every ranking carries its score: `near`, `match`, and what is built
+    // on them (`rerank`, `fuse`).
+    if sel.near.is_some() || sel.matcher.is_some() {
         cols.push(("_score".to_string(), OID_FLOAT8));
     }
     Some(cols)
@@ -1781,7 +1773,7 @@ fn run_locked(
         }
         // The memory ceiling is checked *before* the statement: the overshoot
         // is at most one statement, whose body is capped by `--max-message`.
-        if let Some(msg) = over_memory_cap(cfg, guard.db(), stmt) {
+        if let Some(msg) = fenec_http::over_ceiling(cfg.max_memory, guard.db(), stmt) {
             let durability = guard.flush_if_needed(cfg.sync).ok().flatten();
             out.error("53200", &msg);
             return durability.map(|d| (d, None));

@@ -257,7 +257,10 @@ tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`.
 `compact` rebuilds a graph holding tombstones and leaves the rest: nothing
 else takes one out, every rewrite of a document with a vector leaves one, and
-they crowd the beam `near` walks.
+they crowd the beam `near` walks. An unfiltered `near` they cut short walks
+again with the beam wider by their number -- no more than all of them can be
+in it -- or searches exactly where that walk costs more than reading every
+vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;

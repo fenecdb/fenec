@@ -489,7 +489,7 @@ const OPS: [&str; 13] = [
 /// off; otherwise the operator is `eq` and the whole value is preserved.
 fn split_op(raw: &str) -> (&str, &str) {
     match raw.split_once('.') {
-        Some((head, rest)) if head == "not" => ("not", rest),
+        Some(("not", rest)) => ("not", rest),
         Some((head, rest)) if OPS.contains(&head) => (head, rest),
         _ => ("eq", raw),
     }
@@ -913,10 +913,16 @@ pub fn render_batch(results: &[Response2], version: &str) -> Response {
 /// A silent error would permanently separate the client's optimistic local
 /// state from the server.
 pub fn render_batch_error(e: &Error, completed: usize, version: &str) -> Response {
+    render_batch_stop(status_of(e), &e.to_string(), completed, version)
+}
+
+/// A batch stopped at statement `completed` with `status` and `why`: an
+/// error, or a write the data ceiling refused.
+pub fn render_batch_stop(status: u16, why: &str, completed: usize, version: &str) -> Response {
     let mut out = String::from("{\"error\":");
-    json::escape_into(&mut out, &e.to_string());
+    json::escape_into(&mut out, why);
     out.push_str(&format!(",\"completed\":{completed}}}"));
-    Response::json(status_of(e), out).header("X-Fenecdb-Version", version)
+    Response::json(status, out).header("X-Fenecdb-Version", version)
 }
 
 /// The JSON form of a raw query response: the shape follows the statement.
@@ -945,7 +951,7 @@ pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
                 .rows
                 .first()
                 .and_then(|r| r.values.first())
-                .map(|v| json::to_string(v))
+                .map(json::to_string)
                 .unwrap_or_else(|| "0".into());
             Response::json(200, format!("{{\"count\":{n}}}"))
         }

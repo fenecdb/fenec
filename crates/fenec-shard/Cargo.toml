@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-fenec-core.workspace = true
+fenec-core = { workspace = true, features = ["std-fs"] }
 fenec-ql.workspace = true
 fenec-http.workspace = true
 

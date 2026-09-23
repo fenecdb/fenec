@@ -108,10 +108,12 @@ impl FileSink {
     /// alone when it is missing or empty.
     fn create(path: impl AsRef<Path>) -> Result<(File, PathBuf)> {
         let path = path.as_ref().to_path_buf();
+        // An existing file is the database: never truncated.
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)?;
         if file.metadata()?.len() == 0 {
             file.write_all(&MAGIC[..])?;

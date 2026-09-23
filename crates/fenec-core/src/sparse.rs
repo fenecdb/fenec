@@ -256,6 +256,9 @@ pub struct SparseIndex {
     /// given back; the dimension is likely to come again.
     lists: Vec<List>,
     docs: usize,
+    /// What the lists hold, kept as they change rather than summed over
+    /// every dimension when `--max-memory` asks, before every write.
+    heap: usize,
 }
 
 impl SparseIndex {
@@ -284,7 +287,7 @@ impl SparseIndex {
     /// The lists and the map to them as they sit in memory. Not RSS -- the
     /// same caveat as `Database::memory_bytes`.
     pub fn memory_bytes(&self) -> usize {
-        self.lists.iter().map(List::bytes).sum::<usize>()
+        self.heap
             + self.lists.capacity() * std::mem::size_of::<List>()
             + self.at.capacity() * (std::mem::size_of::<DocId>() + 4 + 1)
     }
@@ -303,10 +306,14 @@ impl SparseIndex {
                 None => {
                     self.at.insert(i as DocId, self.lists.len() as u32);
                     self.lists.push(List::default());
+                    self.heap += List::default().bytes();
                     self.lists.len() - 1
                 }
             };
-            self.lists[k].set(doc, w);
+            let list = &mut self.lists[k];
+            let before = list.bytes();
+            list.set(doc, w);
+            self.heap += list.bytes() - before;
         }
         self.docs += 1;
     }
@@ -322,6 +329,7 @@ impl SparseIndex {
                 let list = &mut self.lists[*k as usize];
                 list.drop_doc(doc);
                 if list.docs.is_empty() {
+                    self.heap -= list.bytes() - List::default().bytes();
                     *list = List::default();
                 }
             }
@@ -332,9 +340,11 @@ impl SparseIndex {
     /// Gives back the growth slack of every list, where the index is known
     /// complete: a rebuild on open, and `create index`.
     pub fn shrink_to_fit(&mut self) {
+        self.heap = 0;
         for list in self.lists.iter_mut() {
             list.docs.shrink_to_fit();
             list.weights.shrink_to_fit();
+            self.heap += list.bytes();
         }
         self.lists.shrink_to_fit();
     }
@@ -619,7 +629,7 @@ mod tests {
                     // Skewed, as a model's weights are, and coarse so ties
                     // happen.
                     let mut w = ((next() % 64) as f32 / 8.0).powi(2) / 8.0 + 0.125;
-                    if signed && next() % 3 == 0 {
+                    if signed && next().is_multiple_of(3) {
                         w = -w;
                     }
                     e.push((i, w));
@@ -647,6 +657,13 @@ mod tests {
                 }
             }
             docs.sort_by_key(|d| d.0);
+            // The count `memory_bytes` reads is the sum it replaced.
+            let walked = |ix: &SparseIndex| ix.lists.iter().map(List::bytes).sum::<usize>();
+            assert_eq!(ix.heap, walked(&ix), "round {round}");
+            if round % 50 == 0 {
+                ix.shrink_to_fit();
+                assert_eq!(ix.heap, walked(&ix), "round {round}, shrunk");
+            }
             for _ in 0..8 {
                 let q = entries(12, &mut next);
                 let k = [1, 3, 10, 50][(next() % 4) as usize];

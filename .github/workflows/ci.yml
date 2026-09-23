@@ -23,6 +23,36 @@ jobs:
 
       - run: cargo fmt --all --check
 
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml follows stable, so a new release can bring a new
+      # lint; this job is where that shows, rather than in someone's editor.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustup component add clippy
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-clippy-
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The browser build compiles code the native one does not: the SIMD
+      # kernels, the graph builder without threads, fenec-core without
+      # std-fs.
+      - run: cargo clippy -p fenec-wasm -p fenec-core -p fenec-ql --target wasm32-unknown-unknown -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -82,8 +112,9 @@ jobs:
           key: ubuntu-latest-build-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ubuntu-latest-build-
 
-      # `make small` is the smallest shell binary and also the only build that
-      # exercises --no-default-features, i.e. fenec-core without std-fs.
+      # `make small` is the smallest shell binary and the only build of the
+      # CLI without its default features, import and backup. fenec-core
+      # without std-fs is the browser build's, in the test and clippy jobs.
       - name: Build the CLI (cli profile, no default features)
         run: make small
 

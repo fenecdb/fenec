@@ -185,7 +185,7 @@ fn counter_survives_snapshot_and_reload() {
 fn writes_after_a_checkpoint_move_the_counter() {
     // Records appended *after* the REC_SEQ at the end of the image must carry
     // the counter forward: file = checkpoint + tail.
-    let mut db = seeded();
+    let db = seeded();
     let image = db.snapshot();
     let base = db.change_seq();
 

@@ -435,6 +435,59 @@ fn insert_update_delete() {
     assert_eq!(get(h.port, "/articles?count").body.trim(), "{\"count\":3}");
 }
 
+/// `--max-memory` holds the HTTP listener's writes as it holds the pg
+/// wire's: above the ceiling a write that grows the data is refused with 507
+/// -- REST, a raw query and a batch alike -- while reads, `del` and
+/// `compact` go on, since they are the way out. The listener took no ceiling
+/// at all, and a client writing over HTTP never met the server's.
+#[test]
+fn the_data_ceiling_holds_http_writes_too() {
+    let h = start(Config {
+        max_memory: 1,
+        ..Config::default()
+    });
+    let refused = |r: Res| {
+        assert_eq!(r.status, 507, "{}", r.body);
+        assert!(r.body.contains("data ceiling exceeded"), "{}", r.body);
+        r
+    };
+    refused(call(
+        h.port,
+        "POST",
+        "/articles",
+        Some(r#"{"title":"new","year":2025}"#),
+    ));
+    refused(call(
+        h.port,
+        "PATCH",
+        "/articles?year=eq.2024",
+        Some(r#"{"summary":"x"}"#),
+    ));
+    refused(call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"put articles {title: \"q\"}"}"#),
+    ));
+    refused(call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"create index on remarks (stars) @sorted"}"#),
+    ));
+    let batch = "{\"query\":\"del remarks where stars = 2\"}\n\
+                 {\"query\":\"put remarks {stars: 4}\"}\n";
+    let r = refused(call(h.port, "POST", "/batch", Some(batch)));
+    assert!(r.body.contains("\"completed\":1"), "{}", r.body);
+    assert_eq!(get(h.port, "/articles?count").body.trim(), "{\"count\":3}");
+    assert_eq!(get(h.port, "/remarks?count").body.trim(), "{\"count\":2}");
+
+    let r = call(h.port, "DELETE", "/articles?year=eq.1999", None);
+    assert_eq!(r.body.trim(), "{\"deleted\":1}");
+    let r = call(h.port, "POST", "/query", Some(r#"{"query":"compact"}"#));
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
 /// An unfiltered write accidentally covers the whole collection; we require
 /// an explicit path.
 #[test]

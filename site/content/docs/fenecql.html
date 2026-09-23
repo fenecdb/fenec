@@ -598,7 +598,7 @@ came up short and fell back. The steps name each of them.</p>
 <tbody>
 <tr><td><code>filter:</code></td><td>which index narrowed the filter — the id index, a hash index, an <code>in</code> over one, an ordered index's range — or that it was a full scan, how many rows were tested, and whether the scan stopped at the page</td></tr>
 <tr><td><code>order:</code></td><td>a walk along an ordered index and how many rows it tested, why one was not walked, or the sort: how many matches, how many put in order</td></tr>
-<tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, and the fallback when the ANN came up short</td></tr>
+<tr><td><code>near:</code></td><td>the ANN and its <code>ef</code>, the filter's set searched exactly, the probe that stopped past the budget, the fallback when the ANN came up short, and the wider beam or exact search when tombstones cut it short</td></tr>
 <tr><td><code>match:</code>, <code>rerank:</code></td><td>the text index and how many rows it ranked, the vectors read for the rerank</td></tr>
 <tr><td><code>fuse:</code></td><td>the rank offset, and how many candidates each side brought — after its own <code>match:</code> and <code>near:</code> steps</td></tr>
 <tr><td><code>lookup:</code>, <code>required:</code></td><td>the probe per parent and how many children it attached; which side <code>required</code> was answered from</td></tr>

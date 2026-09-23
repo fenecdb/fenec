@@ -256,14 +256,80 @@ impl Sink for NullSink {
     }
 }
 
+/// A `@hash` index: a value's encoding -> the documents holding it.
+///
+/// It counts the bytes its keys and buckets hold as they change, so
+/// `memory_bytes` -- which `--max-memory` asks before every write that
+/// grows the data -- reads a number rather than walking every bucket. A
+/// bucket its last document leaves goes with it: kept, the keys of values
+/// that come and go (a token, a session id) piled up until the file was
+/// opened again.
+#[derive(Default)]
+pub struct HashIndex {
+    map: HashMap<Vec<u8>, Vec<DocId>>,
+    heap: usize,
+}
+
+// The keys are taken as `&Vec<u8>`, the type the map holds, rather than
+// `&[u8]`: looked up as a slice, the map's search and hash were compiled a
+// second time, 650 bytes of the browser module.
+#[allow(clippy::ptr_arg)]
+impl HashIndex {
+    /// The documents under `key`, in the order they were added.
+    pub fn get(&self, key: &Vec<u8>) -> Option<&Vec<DocId>> {
+        self.map.get(key)
+    }
+
+    /// The distinct values held.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn add(&mut self, key: Vec<u8>, id: DocId) {
+        let key_bytes = key.capacity();
+        let bucket = self.map.entry(key).or_default();
+        let before = bucket.capacity();
+        if before == 0 {
+            self.heap += key_bytes;
+        }
+        bucket.push(id);
+        self.heap += (bucket.capacity() - before) * std::mem::size_of::<DocId>();
+    }
+
+    fn remove(&mut self, key: &Vec<u8>, id: DocId) {
+        let Some(bucket) = self.map.get_mut(key) else {
+            return;
+        };
+        bucket.retain(|d| *d != id);
+        if bucket.is_empty() {
+            if let Some((k, b)) = self.map.remove_entry(key) {
+                self.heap -= k.capacity() + b.capacity() * std::mem::size_of::<DocId>();
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = HashIndex::default();
+    }
+
+    /// The table, the keys and the buckets as they sit in memory.
+    pub fn memory_bytes(&self) -> usize {
+        self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Vec<DocId>)>() + 1) + self.heap
+    }
+}
+
 pub struct Collection {
     pub id: u32,
     pub schema: Schema,
     pub store: Store,
     /// field name -> HNSW index
     pub vectors: HashMap<String, VectorIndex>,
-    /// field name -> (encoded value -> document ids)
-    pub hashes: HashMap<String, HashMap<Vec<u8>, Vec<DocId>>>,
+    /// field name -> hash index
+    pub hashes: HashMap<String, HashIndex>,
     /// field name -> inverted index
     pub texts: HashMap<String, TextIndex>,
     /// field name -> ordered index, in schema order. A `Vec` rather than a
@@ -292,7 +358,7 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    hashes.insert(f.name.clone(), HashMap::new());
+                    hashes.insert(f.name.clone(), HashIndex::default());
                 }
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
@@ -341,7 +407,7 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    self.hashes.insert(f.name.clone(), HashMap::new());
+                    self.hashes.insert(f.name.clone(), HashIndex::default());
                 }
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
@@ -385,10 +451,9 @@ impl Collection {
 
     /// Hash and full-text indexes. Vectors are left to the batch path.
     fn index_scalar(&mut self, doc: &Document) {
-        for (name, map) in self.hashes.iter_mut() {
+        for (name, ix) in self.hashes.iter_mut() {
             if let Some(v) = doc.get(name) {
-                let key = hash_key(v);
-                map.entry(key).or_default().push(doc.id);
+                ix.add(hash_key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
@@ -432,11 +497,9 @@ impl Collection {
                 ix.remove(doc.id);
             }
         }
-        for (name, map) in self.hashes.iter_mut() {
+        for (name, ix) in self.hashes.iter_mut() {
             if let Some(v) = doc.get(name) {
-                if let Some(bucket) = map.get_mut(&hash_key(v)) {
-                    bucket.retain(|d| *d != doc.id);
-                }
+                ix.remove(&hash_key(v), doc.id);
             }
         }
         // Every caller reads the *stored* document before unindexing, so the
@@ -667,7 +730,7 @@ enum Probe<'a> {
     /// tenable rather than obstructive.
     Id,
     /// A `@hash` bucket, borrowed for the whole query.
-    Hash(&'a HashMap<Vec<u8>, Vec<DocId>>, &'a DataType),
+    Hash(&'a HashIndex, &'a DataType),
 }
 
 impl<'a> Probe<'a> {
@@ -1146,8 +1209,10 @@ impl Database {
     }
 
     /// In-memory data footprint (bytes): segment bytes, offset indexes,
-    /// vector arenas and graph links. Read from counters, so the cost is
-    /// proportional to the number of collections.
+    /// vector arenas and graph links, and the text, sparse, hash and ordered
+    /// indexes. Read from counters the indexes keep as they change, so the
+    /// cost is proportional to the number of collections -- `--max-memory`
+    /// asks before every write that grows the data.
     ///
     /// **This is not RSS.** Left out: the allocator's leftovers, session
     /// buffers, upper-level neighbour allocations (~3% of l0) and temporary
@@ -1162,6 +1227,10 @@ impl Database {
                     + c.vectors
                         .values()
                         .map(|ix| ix.arena_bytes() + ix.graph_bytes())
+                        .sum::<usize>()
+                    + c.hashes
+                        .values()
+                        .map(HashIndex::memory_bytes)
                         .sum::<usize>()
                     + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
                     + c.sorted
@@ -1360,7 +1429,7 @@ impl Database {
     /// The pass over a file's records; `replay` takes a data record's frames
     /// into a collection's store.
     fn load_records(&mut self, bytes: &[u8], replay: &mut Replay<'_>) -> Result<usize> {
-        if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != &MAGIC[..] {
+        if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
         let mut pos = MAGIC.len();
@@ -1685,7 +1754,7 @@ impl Database {
                 // The document count is known, so the arena is sized in one go.
                 ix.reserve(ids.len());
             }
-            for (_, m) in c.hashes.iter_mut() {
+            for m in c.hashes.values_mut() {
                 m.clear();
             }
             for t in c.texts.values_mut() {
@@ -1772,8 +1841,8 @@ impl Database {
                 if !store.read_fields(id, &positions, &mut vals)? {
                     continue;
                 }
-                for (p, map) in hash_ix.iter_mut() {
-                    map.entry(hash_key(&vals[slot(*p)])).or_default().push(id);
+                for (p, ix) in hash_ix.iter_mut() {
+                    ix.add(hash_key(&vals[slot(*p)]), id);
                 }
                 for (p, ix) in text_ix.iter_mut() {
                     if let Value::Text(t) = &vals[slot(*p)] {
@@ -2979,14 +3048,28 @@ impl Database {
 
         let sp = Space::new(c, ix, &near.field);
         let hits = match &sel.filter {
-            // No filter: ANN directly, or a full scan when asked for.
-            None if near.exact => {
-                plan(|| format!("near: exact scan over every vector in {}", near.field));
-                sp.search_exact(&qv, want, &|_| true)?
-            }
+            // No filter: ANN directly, or a full scan when asked for -- or
+            // when tombstones cut the ANN's answer short. One call each to
+            // the walk and the scan: a second call site inlined the walk
+            // again, 819 bytes of the browser module.
             None => {
-                plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                sp.search(&qv, want, near.ef, &|_| true)?
+                if near.exact {
+                    plan(|| format!("near: exact scan over every vector in {}", near.field));
+                } else {
+                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                }
+                let (mut ef, mut exact, mut widened) = (near.ef, near.exact, false);
+                loop {
+                    if exact {
+                        break sp.search_exact(&qv, want, &|_| true)?;
+                    }
+                    let hits = sp.search(&qv, want, ef, &|_| true)?;
+                    match past_tombstones(ix, near, want, hits.len(), widened) {
+                        Short::Whole => break hits,
+                        Short::Wider(wider) => (ef, widened) = (Some(wider), true),
+                        Short::Exact => exact = true,
+                    }
+                }
             }
             Some(f) => self.filtered_near(c, &sp, f, &qv, want, near, params, ctx)?,
         };
@@ -4231,13 +4314,13 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash => {
-            let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+            let mut ix = HashIndex::default();
             for id in c.store.ids() {
                 if let Some(v) = c.store.read_field(id, pos)? {
-                    map.entry(hash_key(&v)).or_default().push(id);
+                    ix.add(hash_key(&v), id);
                 }
             }
-            c.hashes.insert(field, map);
+            c.hashes.insert(field, ix);
         }
         IndexKind::Text(spec) => {
             let mut ix = TextIndex::new(spec);
@@ -4587,6 +4670,49 @@ fn beam(ix: &VectorIndex, near: &Near, want: usize) -> String {
     } else {
         format!("ef {ef}")
     }
+}
+
+/// What an unfiltered ANN answer of `found` rows still needs.
+enum Short {
+    Whole,
+    /// Walked again with this `ef`.
+    Wider(usize),
+    Exact,
+}
+
+/// Every rewrite or deletion of a document with a vector leaves a tombstone
+/// in the graph until a compact, and the walk passes through them: a beam
+/// of `ef` around many of them held fewer live nodes than the page, and a
+/// `limit 10` answered 4 rows. No more than every tombstone can be in the
+/// beam, so one wider by their number holds `ef` live nodes -- unless
+/// walking that wide costs more than reading every vector: a step measures
+/// about `2m` neighbours, so past `live / 2m` steps the exact search is
+/// cheaper, and it is also the answer when the wider beam comes up short.
+fn past_tombstones(
+    ix: &VectorIndex,
+    near: &Near,
+    want: usize,
+    found: usize,
+    widened: bool,
+) -> Short {
+    let live = ix.len();
+    if found >= want.min(live) {
+        return Short::Whole;
+    }
+    let dead = ix.dead();
+    let ef = near.ef.unwrap_or(ix.spec.ef_search).max(want) + dead;
+    if !widened && dead > 0 && ef.saturating_mul(2 * ix.spec.m) < live {
+        plan(|| {
+            format!(
+                "near: the ANN came up short past {dead} tombstones, the beam widened to ef {ef}"
+            )
+        });
+        return Short::Wider(ef);
+    }
+    plan(|| {
+        format!("near: the ANN came up short past {dead} tombstones, every vector searched exactly")
+    });
+    Short::Exact
 }
 
 /// Whether the stored row `id` passes the filter.

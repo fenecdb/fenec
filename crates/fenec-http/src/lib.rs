@@ -106,6 +106,9 @@ pub struct Config {
     pub max_import: usize,
     /// JSON Web Tokens and the policy they are held to; see [`access`].
     pub access: Option<Arc<access::Access>>,
+    /// Data footprint ceiling in bytes (0 = off): fenec-pg's `--max-memory`,
+    /// held on this listener's writes as on its own; see [`over_ceiling`].
+    pub max_memory: usize,
 }
 
 impl Default for Config {
@@ -127,6 +130,7 @@ impl Default for Config {
             admin_token: None,
             max_import: 1 << 30,
             access: None,
+            max_memory: 0,
         }
     }
 }
@@ -662,6 +666,9 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(s) => s,
             Err(e) => return error_response(&e),
         };
+        if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
+            return refused(why);
+        }
         let result = access::within(&who, || guard.execute_with(&stmt, &[]));
         let durability = match result {
             Ok(_) => match flush_for(cfg, &mut guard) {
@@ -717,6 +724,12 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         metrics::wrote();
     }
 
+    if !stmt.is_read_only() {
+        let guard = db.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
+            return refused(why);
+        }
+    }
     let result = if stmt.is_read_only() {
         db.read()
             .unwrap_or_else(|e| e.into_inner())
@@ -790,9 +803,16 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
     let mut results = Vec::with_capacity(stmts.len());
     for (stmt, params) in &stmts {
-        match access::within(who, || guard.execute_with(stmt, params)) {
+        // Measured before each statement, as a lone one is: the batch
+        // stops at the first the ceiling refuses, as at an error.
+        let r = match over_ceiling(cfg.max_memory, &guard, stmt) {
+            Some(why) => Err((507, why)),
+            None => access::within(who, || guard.execute_with(stmt, params))
+                .map_err(|e| (api::status_of(&e), e.to_string())),
+        };
+        match r {
             Ok(r) => results.push(visible(who, r)),
-            Err(e) => {
+            Err((status, why)) => {
                 // Sync on the error path too: whatever was applied is durable.
                 // The statement's error is the one reported.
                 if !results.is_empty() {
@@ -800,7 +820,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                     drop(guard);
                     let _ = await_durable(db, durability);
                 }
-                return api::render_batch_error(&e, results.len(), fenec_core::VERSION);
+                return api::render_batch_stop(status, &why, results.len(), fenec_core::VERSION);
             }
         }
     }
@@ -813,6 +833,44 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         return error_response(&e);
     }
     api::render_batch(&results, fenec_core::VERSION)
+}
+
+/// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.
+///
+/// Only a statement that grows the data is stopped: `del` and `compact` are
+/// the way out of a database at the ceiling, and reads are unaffected. It is
+/// measured before the statement, so the overshoot is at most one. One rule
+/// for both listeners: fenec-pg held only its own writes to it, and a client
+/// writing over HTTP never met it.
+pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
+    let grows = matches!(
+        stmt,
+        Statement::Put { .. } | Statement::Update { .. } | Statement::CreateIndex { .. }
+    );
+    if max == 0 || !grows {
+        return None;
+    }
+    let used = db.memory_bytes();
+    if used < max {
+        return None;
+    }
+    // KiB rather than `0 MiB` for small values.
+    let human = |b: usize| match b >= 1 << 20 {
+        true => format!("{} MiB", b >> 20),
+        false => format!("{} KiB", b >> 10),
+    };
+    Some(format!(
+        "data ceiling exceeded: {} / {}. Writes have stopped; run `del` + \
+         `compact` to make room, or raise --max-memory",
+        human(used),
+        human(max)
+    ))
+}
+
+/// The answer to a write [`over_ceiling`] refuses: 507, which is what
+/// *insufficient storage* is for.
+fn refused(why: String) -> Response {
+    Response::error(507, &why)
 }
 
 /// Under `sync_on_write`, hands the writes over while the write lock is

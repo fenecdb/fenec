@@ -193,6 +193,16 @@ deliberately does not accept nested objects, so
 writing a second parser, the boundary was put at the end of a line — by the
 escaping rules no JSON encoder can write a bare newline into the body.</p>
 
+<h2>The data ceiling</h2>
+
+<p>Inside <code>fenec-pg</code> started with <code>--max-memory</code>, the
+listener holds its writes to the ceiling the pg wire holds its own to: above
+it, a statement that grows the data — a put, a patch, a <code>create
+index</code> — is refused with <code>507</code>, a batch stops there as at an
+error, and reads, deletes and <code>compact</code> go on, since they are the
+way out. The rule and why it is there are under
+<a href="postgres.html">PostgreSQL server</a>.</p>
+
 <h2>Subscriptions</h2>
 
 <p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: a seed
