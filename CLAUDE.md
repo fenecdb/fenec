@@ -25,11 +25,13 @@ make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
-make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants, HTTP only
+make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds the pg wire)
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make maintenance-bench   # reads and writes during create index / compact
+make open-bench          # opening a 1 GB file, read into memory or mapped
+make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 ```
 
 Single tests:
@@ -100,10 +102,24 @@ auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
 can write real queries.
 
-**No page cache.** The byte sequence on disk and in memory are the same format;
-a read decodes directly over the arena slice. There is no eviction policy, no
-dirty pages, and the whole database is resident — open peak ≈ 2× the file,
-`compact`/`checkpoint` peak ≈ 3×.
+**No page cache, and the file is mapped.** The byte sequence on disk and in
+memory are the same format, so a read decodes straight over the bytes --
+there is no eviction policy, no dirty pages and no cache of fenecdb's own.
+`fs::open` maps the file where the target maps files (unix, 64-bit), so the
+documents stay in it and the process holds what it derived from them: the
+offset index, the hash, ordered and text indexes, the graph, and the writes
+since the open. A 1 GB file of 2.3 million rows with a hash and an ordered
+index holds 188 MB that way against 1 095 read into memory, and its
+`compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
+machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
+which reaches a replicated file and a `--dir` node's tenants as well) is the
+other way, for a network file system or to have `--max-memory` cover the
+data. A new file is mapped from the start. A rewrite -- `checkpoint`,
+`compact`, an image adopted -- writes the new file and points the stores at
+it (`Database::repoint`), so the old one is let go of; a compact over a
+mapped file never copies a record into memory, on a server either, and
+rebuilds no index but a graph holding tombstones, since the documents are
+the same ones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
@@ -114,7 +130,11 @@ listener inside `fenec-pg`, never its own binary.
 
 **A storage error stops writes.** Once the sink refuses an append, a sync or a
 rewrite, every later write and sync returns `Error::Io` until the file is
-reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
+reopened (`Database::failure`); reads go on, from memory and from the
+mapped file's pages. A page that cannot be read in is the process's end
+(`SIGBUS`), not an error -- which is what `--no-mmap` is for on a disk that
+fails reads or a network file system -- and a mapped file is only ever
+replaced by rename: a copy over it in place took a server down. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
@@ -146,9 +166,12 @@ with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
 that, so a restore is a concatenation checked by opening it.
 
-**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
+**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
+whose directory replicates to a standby router like any other file;
 `site/content/docs/sharding.html`). The tenant comes from the path
-(`/t/<tenant>/`), never from the query, so tenants cannot share a file -- they
+(`/t/<tenant>/`), or over the pg wire from the startup packet's database
+(`--listen` in `--dir` mode; looked up again per statement, so a move, an idle
+close or a delete between two of them is seen), never from the query, so tenants cannot share a file -- they
 would read each other's rows. A file each also keeps ids, the change sequence,
 BM25 statistics and `lookup` per tenant, which is why the router forwards bytes
 and never parses a query. The registry (`fenec-http/src/tenants.rs`) opens a
@@ -158,7 +181,24 @@ exactly as a second process would. `freeze` takes a per-tenant gate
 exclusively so a write that passed the frozen check cannot land after the final
 export. A move is freeze, copy the image, install, flip the directory in one
 statement, delete the source; the change sequence travels in the image, so a
-caught-up subscriber resumes on the target without a reseed.
+caught-up subscriber resumes on the target without a reseed. A node's tenants
+are replicated to its standby, each through its own feed at
+`/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
+them there one at a time -- separate databases, nothing to make atomic
+between them. A tenant's role is its file's, not the node's `--replica-of`:
+a replica's file follows, a primary's stays one, and a file new to a replica
+node follows (the standby copy the router made). Every file on a replica
+node was made to follow once, so an idle close or a restart undid a
+promotion and the old primary's image wiped the writes since. A rejoining
+node's tenants follow when the router records the pair
+(`POST /_admin/tenants/<t>/follow`, each), a failover that moved every
+tenant ends the pair, and no tenant is placed on or moved to a standby. A
+tenant whose follower runs is never closed as idle: the follower holds the
+database rather than the tenant, and a close left it writing the file under
+the next instance. The router never promotes on its own: it cannot tell a node
+that is gone from one it cannot reach, and guessing makes two primaries. A
+write is on the standby 0.089 ms after the primary answered it (p99 0.448),
+and 20 tenants failed over in 60 ms (`make shard-bench`).
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement
@@ -182,13 +222,24 @@ maintenance on that collection -- so a write path that skipped `note` would
 leave a built index missing it. A schema change there (another index, a drop)
 fails the maintenance rather than installing what no longer fits. At 100 000 x
 128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
-(file rewrite included), against the full ~20 s under the write lock. Only a
-lone statement takes this path; a batch, the shell and `execute` hold the lock.
+(file rewrite included), against the full ~20 s under the write lock. Over a
+mapped file a compact copies no record: the graphs holding tombstones are
+rebuilt beside the database, and the live records streamed into the new file
+under the write lock. Only a lone statement takes this path; a batch, the
+shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
-record kind. The change counter record (kind 6) is at the front and fixed width;
+record kind. A last record a crash cut short is cut off the file on open
+(`Database::load` says where, `fs::open` and `replication::open` cut): only
+skipped, it swallowed the next append, an acknowledged write lost on the open
+after. Only past the checkpoint image, though: an image is renamed into place
+whole, so a record cut short inside it -- or an image longer than the file --
+is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
+every record after it. A tool that only looks (`fenec types`) opens with
+`fs::open_read_only`, which cuts, creates and writes nothing: a server's
+append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) is the one appended record that is not a write.
 
@@ -203,6 +254,9 @@ its current vector inserted) -- restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`.
+`compact` rebuilds a graph holding tombstones and leaves the rest: nothing
+else takes one out, every rewrite of a document with a vector leaves one, and
+they crowd the beam `near` walks.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
@@ -221,6 +275,20 @@ built at `opt-level = "z"`, where LLVM does not vectorise the scalar strips
 eight accumulators and reduction order, so a graph built in the browser is the
 graph built natively; `web/fenec.test.js` checks that order against a
 `Math.fround` reference.
+
+**A quantized index holds codes, and `near` orders by the documents'
+vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
+vector, `quant=bit` the signs (cosine only). A code only estimates a distance,
+so `Space` (`engine.rs`) takes the beam's `ef` candidates and puts them in
+order by the vectors read out of the store, as `rerank` does; `exact` and a
+filtered set searched exactly read the store as well, so every score is exact.
+Bit codes need the wider beam `BIT_EF_SEARCH` -- 400: over a million
+clustered 768-dim vectors a beam of 100 held 82.5% of the true ten, 400 held
+98.4%, int8 codes 97.1% at 100 (`make quant-bench`). How well bits estimate
+depends on the vectors: spread in every dimension, 36% at 100. The code kernels are scalar on
+every target in `strip8!`'s order, so they need no SIMD twin to agree with the
+browser. A graph over codes is record version 4; every other graph stays 3,
+so no file is rebuilt for the feature.
 
 **Filtered `near` needs its fallback.** The filter's rows are probed first -- in
 blocks spread over the collection, and only until more than `ef × m0` match,

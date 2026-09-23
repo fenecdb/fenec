@@ -21,7 +21,7 @@ options
   --into <name>           target collection (default: the --table value)
   --file <path>           target fenec file (default: <into>.fenec)
   --vector <field>:<N>    take a bytes or array field as vector<N>
-  --index <field>@hnsw(metric, m=.., ef_construction=.., ef_search=..)
+  --index <field>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)
   --index <field>@hash    builds the index once the load finishes
   --cast <field>=<type>   force the type mapping (int, float, text, bytes,
                           bool, timestamp, vector<N>, [type])
@@ -543,11 +543,12 @@ fn index_name(kind: &IndexKind) -> String {
         IndexKind::Hash => "@hash".into(),
         IndexKind::Sorted => "@sorted".into(),
         IndexKind::Vector(s) => format!(
-            "@hnsw({}, m={}, ef_construction={}, ef_search={})",
+            "@hnsw({}, m={}, ef_construction={}, ef_search={}{})",
             s.metric.name(),
             s.m,
             s.ef_construction,
-            s.ef_search
+            s.ef_search,
+            s.quant_arg()
         ),
         IndexKind::Text(s) => format!("@text(k1={}, b={})", s.k1(), s.b()),
         IndexKind::None => String::new(),
@@ -613,7 +614,7 @@ fn parse_cast(s: &str) -> std::result::Result<(String, DataType), String> {
     Ok((name.to_string(), ty))
 }
 
-/// `field@hash`, `field@sorted` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=..)]`
+/// `field@hash`, `field@sorted` or `field@hnsw[(metric, m=.., ef_construction=.., ef_search=.., quant=..)]`
 fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
     let (name, spec) = s.split_once('@').ok_or_else(|| {
         format!("--index expects `field@hash`, `field@sorted` or `field@hnsw(...)`, got `{s}`")
@@ -621,50 +622,14 @@ fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
     if name.is_empty() {
         return Err(format!("invalid --index: `{s}`"));
     }
-    let spec = spec.trim();
-    if spec.eq_ignore_ascii_case("hash") {
-        return Ok((name.to_string(), IndexKind::Hash));
+    // The index is read by FenecQL's own parser, as `--where` is: a copy of
+    // it here had drifted -- no clamping of `m` and `ef`, no `ef` and `ef_c`,
+    // a `quant` spelt one way, no `@text`.
+    match fenec_ql::parse_one(&format!("create index on imported ({name}) @{spec}")) {
+        Ok(Statement::CreateIndex { field, kind, .. }) => Ok((field, kind)),
+        Ok(_) => Err(format!("invalid --index: `{s}`")),
+        Err(e) => Err(format!("--index `{s}`: {e}")),
     }
-    if spec.eq_ignore_ascii_case("sorted") {
-        return Ok((name.to_string(), IndexKind::Sorted));
-    }
-    let args = match spec.strip_prefix("hnsw").map(str::trim) {
-        None => return Err(format!("unknown index kind: `{spec}`")),
-        Some("") => "",
-        Some(rest) => rest
-            .strip_prefix('(')
-            .and_then(|r| r.strip_suffix(')'))
-            .ok_or_else(|| format!("the --index parenthesis does not close: `{s}`"))?,
-    };
-    let mut v = VectorIndexSpec::default();
-    for (n, arg) in args.split(',').map(str::trim).enumerate() {
-        if arg.is_empty() {
-            continue;
-        }
-        match arg.split_once('=') {
-            None => {
-                // A single positional argument is the metric.
-                if n != 0 {
-                    return Err(format!("--index unexpected argument: `{arg}`"));
-                }
-                v.metric = Metric::parse(arg)
-                    .ok_or_else(|| format!("unknown metric: `{arg}` (cosine, l2, dot)"))?;
-            }
-            Some((k, val)) => {
-                let num: usize = val
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("--index `{k}` expects a number, got `{val}`"))?;
-                match k.trim() {
-                    "m" => v.m = num,
-                    "ef_construction" => v.ef_construction = num,
-                    "ef_search" => v.ef_search = num,
-                    other => return Err(format!("--index unknown parameter: `{other}`")),
-                }
-            }
-        }
-    }
-    Ok((name.to_string(), IndexKind::Vector(v)))
 }
 
 #[cfg(test)]
@@ -710,6 +675,20 @@ mod tests {
         assert_eq!(v.m, 32);
         assert_eq!(v.ef_construction, 400);
         assert_eq!(v.ef_search, 64);
+
+        // Bit codes take a wider beam unless one is named, as in FenecQL.
+        let (_, IndexKind::Vector(v)) = parse_index("embed@hnsw(cosine, quant=bit)").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((v.quant, v.ef_search), (Quant::Bit, 400));
+        let (_, IndexKind::Vector(v)) =
+            parse_index("embed@hnsw(cosine, quant=int8, ef_search=64)").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((v.quant, v.ef_search), (Quant::Int8, 64));
+        assert!(parse_index("embed@hnsw(cosine, quant=pq)").is_err());
     }
 
     #[test]

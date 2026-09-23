@@ -186,25 +186,7 @@ impl Database {
             }
             return Err(Error::Exists(format!("an index on field `{field}`")));
         }
-        if let IndexKind::Vector(_) = kind {
-            if !matches!(f.ty, DataType::Vector(..)) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not vector<N>, no vector index can be built"
-                )));
-            }
-        }
-        if let IndexKind::Text(_) = kind {
-            if !matches!(f.ty, DataType::Text) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not text, no full-text index can be built"
-                )));
-            }
-        }
-        if *kind == IndexKind::Sorted && !SortedIndex::supports(&f.ty) {
-            return Err(Error::Type(format!(
-                "field `{field}` is not int, float, timestamp or text, no ordered index can be built"
-            )));
-        }
+        kind.check(field, &f.ty)?;
         Ok(None)
     }
 
@@ -405,13 +387,96 @@ impl Database {
             reclaimed += p.reclaimed;
             self.collections.insert(p.name, p.collection);
         }
-        // After compaction the persisted image is rewritten from scratch.
-        let image = self.snapshot();
-        let r = self.sink_mut().rewrite(&image);
+        // After compaction the persisted image is rewritten from scratch,
+        // streamed into the new file rather than built beside the data.
+        let r = {
+            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+            sink.rewrite_with(&mut |out| self.image_into(out, &[]))
+        };
         self.storage(r)?;
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))
+    }
+
+    /// The graphs a compact of a mapped database rebuilds: those of `which`
+    /// holding tombstones, their vectors copied as `create index` copies
+    /// them. Nothing else is: the records stay in the file until the
+    /// rewrite streams the live ones into the new one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_graphs(&self, which: Option<&str>) -> Result<Vec<IndexCopy>> {
+        self.may_write(true)?;
+        let targets: Vec<String> = match which {
+            Some(n) => {
+                self.collection(n)?;
+                vec![n.to_string()]
+            }
+            None => self.order.clone(),
+        };
+        let mut copies = Vec::new();
+        for name in targets {
+            let c = &self.collections[&name];
+            for (field, ix) in &c.vectors {
+                if ix.dead() == 0 {
+                    continue;
+                }
+                let pos = c.schema.field_pos(field).unwrap();
+                let mut values = Vec::with_capacity(c.store.len());
+                for id in c.store.iter_ids() {
+                    values.push((id, c.store.read_field(id, pos)?));
+                }
+                copies.push(IndexCopy {
+                    token: 0,
+                    cid: c.id,
+                    collection: name.clone(),
+                    field: field.clone(),
+                    pos,
+                    kind: c.schema.fields[pos].index.clone(),
+                    ty: c.schema.fields[pos].ty.clone(),
+                    values,
+                });
+            }
+        }
+        for copy in &mut copies {
+            copy.token = self.watch(copy.cid);
+        }
+        Ok(copies)
+    }
+
+    /// Puts the rebuilt graphs in place, each caught up with the writes
+    /// made while it was built, and runs the compact itself: the live
+    /// records streamed into the new file and the stores pointed at it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_graphs(&mut self, which: Option<&str>, built: Vec<BuiltIndex>) -> Result<Response> {
+        let tails: Vec<Option<Tail>> = built.iter().map(|b| self.unwatch(b.copy.token)).collect();
+        self.refuse_if_failed()?;
+        for (b, t) in built.into_iter().zip(tails) {
+            let moved = t.as_ref().is_none_or(|t| t.schema);
+            if moved || self.named(b.copy.cid).as_deref() != Some(&b.copy.collection) {
+                return Err(Error::Query(format!(
+                    "`{}` changed while it was compacted; run `compact` again",
+                    b.copy.collection
+                )));
+            }
+            let Built::Vector(mut ix) = b.index else {
+                unreachable!("only graphs are rebuilt beside a mapped compact")
+            };
+            let c = self.collections.get_mut(&b.copy.collection).unwrap();
+            let mut ids = t.unwrap().ids;
+            ids.sort_unstable();
+            ids.dedup();
+            for id in ids {
+                ix.remove(id);
+                if let Some(Value::Vector(v)) = c.store.read_field(id, b.copy.pos)? {
+                    ix.insert(id, &v);
+                }
+            }
+            c.vectors.insert(b.copy.field, ix);
+        }
+        // The writes made meanwhile may have left the new graphs a tombstone
+        // or two; those wait for the next compact rather than having the
+        // graph rebuilt again under the lock.
+        self.compact(which, false)
     }
 }
 
@@ -494,6 +559,25 @@ fn compact_online(
     which: Option<&str>,
     during: &mut dyn FnMut(),
 ) -> Result<Response> {
+    // A mapped database copies no record: the graphs holding tombstones are
+    // rebuilt here, beside it, and the rewrite -- the live records streamed
+    // from the old file into the new one, 2.1 s for 1 GB -- is left to the
+    // write lock. Copying every record into a fresh store, as the rest of
+    // this does, took a 427 MB file to +899 MB of heap and left the
+    // collection in memory until the process ended.
+    #[cfg(not(target_arch = "wasm32"))]
+    if read(db).mapped {
+        let copies = read(db).begin_graphs(which)?;
+        let mut watching = Watching {
+            db,
+            tokens: copies.iter().map(|c| c.token).collect(),
+        };
+        during();
+        let built: Vec<BuiltIndex> = copies.into_iter().map(IndexCopy::build).collect();
+        let r = write(db).finish_graphs(which, built);
+        watching.tokens.clear();
+        return r;
+    }
     let mut parts = read(db).begin_compact(which)?;
     let mut watching = Watching {
         db,

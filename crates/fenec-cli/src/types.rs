@@ -54,7 +54,9 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     };
 
-    let db = match fenec_core::fs::open(path) {
+    // Read only: the file is often a running server's, and an open that may
+    // cut or create would write to it.
+    let db = match fenec_core::fs::open_read_only(path) {
         Ok(db) => db,
         Err(e) => return fail(&format!("could not open {path}: {e}")),
     };
@@ -185,10 +187,11 @@ fn index_note(k: &IndexKind) -> Option<String> {
         IndexKind::Hash => Some(" @hash".into()),
         IndexKind::Sorted => Some(" @sorted".into()),
         IndexKind::Vector(spec) => Some(format!(
-            " @hnsw({}, m={}, ef_search={})",
+            " @hnsw({}, m={}, ef_search={}{})",
             spec.metric.name(),
             spec.m,
-            spec.ef_search
+            spec.ef_search,
+            spec.quant_arg()
         )),
         IndexKind::Text(spec) => Some(format!(" @text(k1={}, b={})", spec.k1(), spec.b())),
     }

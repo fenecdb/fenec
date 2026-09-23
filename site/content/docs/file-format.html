@@ -20,8 +20,15 @@ exception are worth knowing before you touch the reader.</p>
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>.
-A half-written final record is truncated on open, so there is no separate
-recovery step after a crash.</p>
+A crash in the middle of an append leaves the last record cut short, in its
+header or its body: the open loads everything before it and cuts it off the
+file, so there is no separate recovery step after a crash.</p>
+
+<div class="note trap">
+  <p><b>A record cut short is cut off the file, not only skipped.</b> Left in
+  place, the first write appended after it is read back as the rest of it:
+  the write was acknowledged, and the next open loses it.</p>
+</div>
 
 <div class="note trap">
   <p><b>The length is written even for an empty body</b> — a
@@ -131,18 +138,19 @@ web/            fenec.js (builder + sync layer), fenec.d.ts,
 <table>
 <thead><tr><th>Operation</th><th>What it does</th><th>Peak memory</th></tr></thead>
 <tbody>
-<tr><td><code>snapshot</code></td><td>Writes a fresh image including the graph and the id counter</td><td class="n">≈ 3× the file</td></tr>
-<tr><td><code>checkpoint</code></td><td>Lands the graph in the file so the next open does not rebuild it</td><td class="n">≈ 3× the file</td></tr>
-<tr><td><code>compact</code></td><td>Full rebuild: drops dead bytes and rebuilds every index</td><td class="n">≈ 3× the file</td></tr>
-<tr><td>open</td><td>Reads the file, then copies it into segments</td><td class="n">≈ 2× the file</td></tr>
+<tr><td><code>snapshot</code></td><td>Builds the image in memory: what the browser persists, and what a tenant's move and a replica's first stream send</td><td class="n">≈ 1× the file</td></tr>
+<tr><td><code>checkpoint</code></td><td>Lands the graph in the file so the next open does not rebuild it; written into the new file as it is produced</td><td class="n">the indexes</td></tr>
+<tr><td><code>compact</code></td><td>Drops the dead records, keeping every index but a graph holding tombstones: the documents are the same ones</td><td class="n">the indexes</td></tr>
+<tr><td>open</td><td>Maps the file and builds the indexes from the documents</td><td class="n">the indexes</td></tr>
 </tbody>
 </table>
 </div>
 
-<p><code>compact</code> is not a garbage collection. Even with zero dead bytes
-every index is built from scratch, and writes block throughout: 20 000 × 32
-takes 0.94 s, against 0.05 s on a vector-free text collection of the same
-size.</p>
+<p>A graph holding tombstones is rebuilt by <code>compact</code> from the live
+vectors: nothing else takes a tombstone out, and every rewrite of a document
+with a vector leaves one. A graph without them is kept as it is.</p>
 
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
-cannot corrupt the database.</p>
+cannot corrupt the database — and since an image is only ever whole, a record
+cut short inside it, or an image longer than the file, is refused as a damaged
+file rather than cut off as a crash's torn tail is.</p>

@@ -111,6 +111,61 @@ const REC_NEXTID: u8 = 7;
 /// replica never receives it as one; see [`History`].
 const REC_HISTORY: u8 = crate::history::RECORD;
 
+/// Whether the record at `at` is all there, rather than cut short where the
+/// bytes end -- in its header or its body -- as a crash in the middle of an
+/// append leaves the last one. Only the kinds written with a length are
+/// judged: a kind this version does not know is the loader's to refuse, and
+/// the counter header is only ever written by a rewrite, whole or not at all.
+fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
+    if !matches!(
+        bytes[at],
+        REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY
+    ) {
+        return Ok(true);
+    }
+    let mut pos = at + 1;
+    let mut len = 0;
+    // The collection's id, then the body's length.
+    for _ in 0..2 {
+        len = match get_uvarint(bytes, &mut pos) {
+            Ok(v) => v,
+            Err(_) if pos >= bytes.len() => return Ok(false),
+            Err(e) => return Err(e),
+        };
+    }
+    Ok(len <= (bytes.len() - pos) as u64)
+}
+
+/// Takes a data record's frames into a collection's store: the record's
+/// offset in the file, its bytes, and what to tell of each document's id.
+type Replay<'a> = dyn FnMut(&mut Store, usize, &[u8], &mut dyn FnMut(DocId)) -> Result<usize> + 'a;
+
+/// Where an image is written: the file being rewritten, or a buffer. The
+/// counter header's body length is only known once the body is out, so it is
+/// patched where it stands rather than the image being written twice.
+pub trait ImageOut {
+    fn write(&mut self, bytes: &[u8]) -> Result<()>;
+    /// Bytes written so far, which is where the next one lands.
+    fn at(&self) -> u64;
+    /// Overwrites bytes written earlier, in place.
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+}
+
+impl ImageOut for Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn at(&self) -> u64 {
+        self.len() as u64
+    }
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        let at = at as usize;
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
@@ -124,6 +179,31 @@ pub trait Sink: Send {
         self.append(bytes)
     }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
+    /// [`Self::rewrite`] with the image written into the file as it is
+    /// produced rather than built in memory first: a checkpoint of a 1 GB
+    /// database held the whole image beside the data before this. A sink
+    /// with nowhere to stream to -- the browser's -- builds it and rewrites.
+    fn rewrite_with(
+        &mut self,
+        image: &mut dyn FnMut(&mut dyn ImageOut) -> Result<()>,
+    ) -> Result<()> {
+        let mut buf: Vec<u8> = Vec::new();
+        image(&mut buf)?;
+        self.rewrite(&buf)
+    }
+    /// The file this sink holds, mapped read-only: what a database whose
+    /// records are in a mapping points at after a rewrite, so that the file
+    /// it just wrote is the one it reads -- and the old one, unlinked by the
+    /// rename, is let go of. `None` for every sink but a file's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remapped(&self) -> Option<crate::store::Base> {
+        None
+    }
+    /// Pushes to disk what an earlier process wrote and never synced: a
+    /// primary calls it before it tells a replica those bytes exist.
+    fn sync_existing(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
@@ -153,6 +233,15 @@ pub type Durability = Box<dyn FnOnce() -> Result<()> + Send>;
 /// through `Hub`; in a database with no subscribers the cost is zero.
 pub trait Watcher: Send + Sync {
     fn notify(&self, seq: u64);
+}
+
+/// `[kind][collection][length]`, the head every record but the counter has.
+fn record_head(kind: u8, cid: u32, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.push(kind);
+    put_uvarint(&mut out, cid as u64);
+    put_uvarint(&mut out, len as u64);
+    out
 }
 
 /// A sink that writes nowhere (pure in-memory / browser session).
@@ -782,6 +871,12 @@ pub struct Database {
     /// Which history the writes belong to, and whether they come from a
     /// primary; see [`History`].
     history: History,
+    /// Whether the documents are read from a mapped file rather than held in
+    /// memory (`fs::open`). It outlives the stores it was set for: a
+    /// rewrite, a compaction and an image adopted all end with the stores
+    /// pointed at the file again.
+    #[cfg(not(target_arch = "wasm32"))]
+    mapped: bool,
     /// The writes a `create index` or `compact` running beside the database
     /// has to catch up with once it is built (see `maintenance`). A `Mutex`
     /// for the reason `sink` is one: it is registered under the read lock,
@@ -789,6 +884,9 @@ pub struct Database {
     tails: Mutex<maintenance::Tails>,
     /// Whether `tails` holds any: the one thing every write looks at.
     watched: std::sync::atomic::AtomicBool,
+    /// Images adopted: each replaces the contents wholesale, possibly at
+    /// the change the database already stood at.
+    adoptions: u64,
 }
 
 impl Default for Database {
@@ -810,8 +908,11 @@ impl Database {
             changes: ChangeLog::default(),
             watcher: None,
             history: History::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            mapped: false,
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
+            adoptions: 0,
         }
     }
 
@@ -1026,7 +1127,7 @@ impl Database {
         self.collections
             .values()
             .map(|c| {
-                c.store.total_bytes()
+                c.store.heap_bytes()
                     + c.store.index_bytes()
                     + c.vectors
                         .values()
@@ -1046,41 +1147,62 @@ impl Database {
     /// Byte image of the whole database. Used to write to IndexedDB/OPFS in
     /// the browser and to a file on native.
     pub fn snapshot(&self) -> Vec<u8> {
-        let mut out = Vec::from(&MAGIC[..]);
-        // Counter header: a placeholder now, the values after the body.
-        let head_at = out.len();
-        out.push(REC_SEQ);
-        out.extend_from_slice(&self.changes.seq().to_le_bytes());
-        out.extend_from_slice(&0u64.to_le_bytes());
-        let body_at = out.len();
+        let mut out = Vec::new();
+        // A buffer takes every write, so there is nothing to handle -- and
+        // `expect` here pulled the error's `Debug` into the browser module,
+        // 1.3 KB for a message nobody can reach.
+        let _ = self.snapshot_into(&mut out);
+        out
+    }
+
+    /// [`Self::snapshot`] written into `out` as it is produced: the records
+    /// of a collection go straight through, so the image is never a second
+    /// copy of the data (`Sink::rewrite_with`).
+    pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
+        self.image_into(out, &[])
+    }
+
+    /// [`Self::snapshot_into`], leaving out the dead records of the named
+    /// collections: what `compact` writes.
+    fn image_into(&self, out: &mut dyn ImageOut, compacting: &[String]) -> Result<()> {
+        let mut head = Vec::from(&MAGIC[..]);
+        // Counter header: a placeholder now, the body's length once it is
+        // written -- fixed width, so it is patched where it stands.
+        let head_at = head.len() as u64;
+        head.push(REC_SEQ);
+        head.extend_from_slice(&self.changes.seq().to_le_bytes());
+        head.extend_from_slice(&0u64.to_le_bytes());
+        out.write(&head)?;
+        let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
-            out.extend_from_slice(&self.history.record());
+            out.write(&self.history.record())?;
         }
 
         for name in &self.order {
             let c = &self.collections[name];
             let sc = c.schema.encode();
-            out.push(REC_CREATE);
-            put_uvarint(&mut out, c.id as u64);
-            put_uvarint(&mut out, sc.len() as u64);
-            out.extend_from_slice(&sc);
+            out.write(&record_head(REC_CREATE, c.id, sc.len()))?;
+            out.write(&sc)?;
 
             // The counter comes right after the schema: the collection has to
             // exist, and its data can only carry the counter forward.
             let mut counter = Vec::with_capacity(9);
             put_uvarint(&mut counter, c.store.next_id());
-            out.push(REC_NEXTID);
-            put_uvarint(&mut out, c.id as u64);
-            put_uvarint(&mut out, counter.len() as u64);
-            out.extend_from_slice(&counter);
+            out.write(&record_head(REC_NEXTID, c.id, counter.len()))?;
+            out.write(&counter)?;
 
-            let image = c.store.image();
-            if !image.is_empty() {
-                out.push(REC_DATA);
-                put_uvarint(&mut out, c.id as u64);
-                put_uvarint(&mut out, image.len() as u64);
-                out.extend_from_slice(&image);
+            let compact = compacting.iter().any(|n| n == name);
+            let bytes = match compact {
+                true => c.store.live_len(),
+                false => c.store.image_len(),
+            };
+            if bytes > 0 {
+                out.write(&record_head(REC_DATA, c.id, bytes))?;
+                match compact {
+                    true => c.store.write_live(out)?,
+                    false => c.store.write_image(out)?,
+                }
             }
 
             // The graph comes *after* the data records: to look the vectors
@@ -1092,19 +1214,118 @@ impl Database {
                 let mut payload = Vec::new();
                 crate::codec::encode_str(&mut payload, field);
                 payload.extend_from_slice(&ix.serialize_graph());
-                out.push(REC_GRAPH);
-                put_uvarint(&mut out, c.id as u64);
-                put_uvarint(&mut out, payload.len() as u64);
-                out.extend_from_slice(&payload);
+                out.write(&record_head(REC_GRAPH, c.id, payload.len()))?;
+                out.write(&payload)?;
             }
         }
-        let body_len = (out.len() - body_at) as u64;
-        out[head_at + 9..head_at + REC_SEQ_LEN].copy_from_slice(&body_len.to_le_bytes());
-        out
+        let body_len = out.at() - body_at;
+        out.patch(head_at + 9, &body_len.to_le_bytes())
     }
 
-    /// Builds the database from a byte image.
-    pub fn load(&mut self, bytes: &[u8]) -> Result<()> {
+    /// Points the stores at the file the sink has just rewritten: the same
+    /// documents, in their new places. The hash, ordered, text and vector
+    /// indexes stand -- nothing about the documents changed, only where
+    /// their bytes are -- so this is a pass over the new file's record
+    /// heads, not a rebuild.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repoint(&mut self) -> Result<()> {
+        if !self.mapped {
+            return Ok(());
+        }
+        let Some(base) = self.sink_mut().remapped() else {
+            return Ok(());
+        };
+        let keep = base.clone();
+        let bytes = (*keep).as_ref();
+        if bytes.len() < MAGIC.len() {
+            return Err(Error::Corrupt("the rewritten file is empty".into()));
+        }
+        let mut by_id: HashMap<u32, String> = HashMap::new();
+        let mut fresh: HashMap<String, Store> = HashMap::new();
+        let mut pos = MAGIC.len();
+        while pos < bytes.len() {
+            if !whole_record(bytes, pos)? {
+                break;
+            }
+            let rec = bytes[pos];
+            pos += 1;
+            if rec == REC_SEQ {
+                pos += REC_SEQ_LEN - 1;
+                continue;
+            }
+            let cid = get_uvarint(bytes, &mut pos)? as u32;
+            let len = get_uvarint(bytes, &mut pos)? as usize;
+            let at = pos;
+            pos += len;
+            match rec {
+                REC_CREATE => {
+                    let mut sp = 0usize;
+                    let schema = Schema::decode(&bytes[at..at + len], &mut sp)?;
+                    by_id.insert(cid, schema.name.clone());
+                    fresh.insert(schema.name, Store::new());
+                }
+                REC_NEXTID => {
+                    let mut np = 0usize;
+                    let next = get_uvarint(&bytes[at..at + len], &mut np)?;
+                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
+                        store.raise_next_id(next);
+                    }
+                }
+                REC_DATA => {
+                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
+                        store.replay_mapped(&base, at as u64, len as u64, &mut |_| {})?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (name, store) in fresh {
+            if let Some(c) = self.collections.get_mut(&name) {
+                c.store = store;
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds the database from a byte image, and returns how much of it
+    /// that took: all of it, or the bytes before a last record cut short --
+    /// what a crash in the middle of an append leaves. A file is cut back
+    /// there before anything is appended to it (`fs::open`): a write
+    /// appended after the torn bytes is read back as the rest of them, and
+    /// the next open lost it.
+    pub fn load(&mut self, bytes: &[u8]) -> Result<usize> {
+        self.load_from(bytes, None)
+    }
+
+    /// [`Self::load`] over a mapped file (`fs::open_mapped`): the documents
+    /// stay in the file, read through the pages the operating system maps
+    /// in, and only what is derived from them -- the offset index, the hash,
+    /// ordered and text indexes, the graph -- is built in memory.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_mapped(&mut self, file: crate::store::Base) -> Result<usize> {
+        let keep = file.clone();
+        self.mapped = true;
+        self.load_from((*keep).as_ref(), Some(&file))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
+        self.load_records(bytes, &mut |store, chunk_at, chunk, note| match base {
+            Some(b) => store.replay_mapped(b, chunk_at as u64, chunk.len() as u64, note),
+            None => store.replay_noting(chunk, note),
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_from(&mut self, bytes: &[u8], _base: Option<&()>) -> Result<usize> {
+        self.load_records(bytes, &mut |store, _, chunk, note| {
+            store.replay_noting(chunk, note)
+        })
+    }
+
+    /// The pass over a file's records; `replay` takes a data record's frames
+    /// into a collection's store.
+    fn load_records(&mut self, bytes: &[u8], replay: &mut Replay<'_>) -> Result<usize> {
         if bytes.len() < MAGIC.len() || &bytes[..MAGIC.len()] != &MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
@@ -1136,7 +1357,23 @@ impl Database {
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         // Collections whose indexes the tail reset or replaced.
         let mut reset: Vec<String> = Vec::new();
+        let mut whole = bytes.len();
         while pos < bytes.len() {
+            if !whole_record(bytes, pos)? {
+                // A crash in the middle of an append leaves the last record
+                // cut short, and only past the image: an image is written
+                // beside the file and renamed over it whole. One cut short
+                // inside it is a damaged or truncated file, and cutting the
+                // file there -- as a torn tail is cut -- destroyed every
+                // record after it, intact ones included.
+                if pos < body_end {
+                    return Err(Error::Corrupt(
+                        "a record of the checkpoint image runs past the end of the file".into(),
+                    ));
+                }
+                whole = pos;
+                break;
+            }
             let tail = pos >= body_end;
             if tail && has_header && restored.is_none() {
                 restored = Some(self.restore_graphs(&graphs)?);
@@ -1147,9 +1384,6 @@ impl Database {
                 REC_CREATE => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut sp = 0usize;
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
@@ -1171,9 +1405,6 @@ impl Database {
                     // byte is read as the next record kind and the whole file
                     // becomes unopenable with "unknown record kind 0".
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break; // half-written tail
-                    }
                     pos += len;
                     seq_seen += tail as u64;
                     if let Some(name) = by_id.remove(&cid) {
@@ -1185,13 +1416,11 @@ impl Database {
                 REC_DATA => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break; // half-written tail
-                    }
                     let name = by_id
                         .get(&cid)
                         .cloned()
                         .ok_or_else(|| Error::Corrupt(format!("unknown collection {cid}")))?;
+                    let chunk_at = pos;
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let c = self.collections.get_mut(&name).unwrap();
@@ -1204,9 +1433,9 @@ impl Database {
                             }
                         };
                         let ids = &mut touched[at].1;
-                        c.store.replay_noting(chunk, &mut |id| ids.push(id))?
+                        replay(&mut c.store, chunk_at, chunk, &mut |id| ids.push(id))?
                     } else {
-                        c.store.replay(chunk)?
+                        replay(&mut c.store, chunk_at, chunk, &mut |_| {})?
                     } as u64;
                     if tail {
                         seq_seen += frames;
@@ -1215,9 +1444,6 @@ impl Database {
                 REC_ALTER => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut sp = 0usize;
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
@@ -1243,9 +1469,6 @@ impl Database {
                 REC_NEXTID => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let mut np = 0usize;
                     let next = get_uvarint(&bytes[pos..pos + len], &mut np)?;
                     pos += len;
@@ -1259,9 +1482,6 @@ impl Database {
                 REC_GRAPH => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let mut cp = 0usize;
@@ -1273,9 +1493,6 @@ impl Database {
                 REC_HISTORY => {
                     let _ = get_uvarint(bytes, &mut pos)?;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    if pos + len > bytes.len() {
-                        break;
-                    }
                     // Not a write: it does not move `seq`.
                     self.history = History::decode(&bytes[pos..pos + len])?;
                     pos += len;
@@ -1289,7 +1506,15 @@ impl Database {
                     seq_base = u64::from_le_bytes(w);
                     w.copy_from_slice(&bytes[pos + 8..pos + 16]);
                     pos += 16;
-                    body_end = pos + u64::from_le_bytes(w) as usize;
+                    body_end = pos.saturating_add(u64::from_le_bytes(w) as usize);
+                    // An image that says it is longer than the file was cut
+                    // short between two of its records, which no record's own
+                    // length can show.
+                    if body_end > bytes.len() {
+                        return Err(Error::Corrupt(
+                            "the checkpoint image is longer than the file".into(),
+                        ));
+                    }
                     has_header = true;
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
@@ -1307,7 +1532,7 @@ impl Database {
             None => self.restore_graphs(&graphs)?,
         };
         self.rebuild_indexes_with(&restored, &reset, &touched)?;
-        Ok(())
+        Ok(whole)
     }
 
     /// Restores each persisted graph against the documents as they stand,
@@ -1331,6 +1556,9 @@ impl Database {
             let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
                 continue;
             };
+            let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+                continue;
+            };
             if !c.vectors.contains_key(field) {
                 continue;
             }
@@ -1340,6 +1568,11 @@ impl Database {
             }) else {
                 continue;
             };
+            // Built with other parameters -- another quantization, whose
+            // arena holds other codes -- it is not this index's graph.
+            if ix.spec != spec {
+                continue;
+            }
             let mut with_vector = 0;
             for id in store.iter_ids() {
                 with_vector += store.has_vector(id, pos)? as usize;
@@ -1431,49 +1664,99 @@ impl Database {
             {
                 continue; // everything restored, no need to read the documents
             }
-            // The rebuild goes through the batch path as well.
-            let mut docs: Vec<Document> = Vec::with_capacity(ids.len());
-            for id in ids {
-                if let Some(doc) = c.store.read(&c.schema, id)? {
-                    for (field, map) in c.hashes.iter_mut() {
-                        if let Some(v) = doc.get(field) {
-                            map.entry(hash_key(v)).or_default().push(doc.id);
-                        }
-                    }
-                    for (field, ix) in c.texts.iter_mut() {
-                        if let Some(Value::Text(t)) = doc.get(field) {
-                            ix.insert(doc.id, t);
-                        }
-                    }
-                    docs.push(doc);
+            // The documents are read one at a time, and of each only the
+            // fields an index is built from. Decoding every document first
+            // held the collection a second time, bodies, field names and all:
+            // a 1 GB file of 2.3 million rows with a hash and an ordered
+            // index, which want one short field a row each, peaked at 4.2 GB
+            // of heap opening; read this way, at 2.3 GB.
+            let Collection {
+                schema,
+                store,
+                vectors,
+                hashes,
+                texts,
+                sorted,
+                ..
+            } = c;
+            // Each index beside its field's position, the ordered and vector
+            // ones with the rows they are built from afterwards. Pushed in
+            // loops: collected, the four lists were 2.5 KB of the browser
+            // module.
+            let mut hash_ix = Vec::new();
+            for (f, m) in hashes.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    hash_ix.push((p, m));
                 }
             }
-            for ix in c.texts.values_mut() {
+            let mut text_ix = Vec::new();
+            for (f, t) in texts.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    text_ix.push((p, t));
+                }
+            }
+            let mut sorted_ix = Vec::new();
+            for (f, ix) in sorted.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    sorted_ix.push((p, ix, Vec::new()));
+                }
+            }
+            let mut vector_ix = Vec::new();
+            for (f, ix) in vectors.iter_mut() {
+                if let Some(p) = schema.field_pos(f).filter(|_| !kept(f)) {
+                    vector_ix.push((p, ix, Vec::new()));
+                }
+            }
+            // In field order, as `read_fields` wants them; walked rather than
+            // sorted, since a sort was 2 KB of the browser module.
+            let mut positions = Vec::new();
+            for p in 0..schema.fields.len() {
+                if hash_ix.iter().any(|(q, _)| *q == p)
+                    || text_ix.iter().any(|(q, _)| *q == p)
+                    || sorted_ix.iter().any(|(q, ..)| *q == p)
+                    || vector_ix.iter().any(|(q, ..)| *q == p)
+                {
+                    positions.push(p);
+                }
+            }
+            let slot = |p: usize| positions.iter().position(|&q| q == p).unwrap_or(0);
+            // One field has one index, so each value is taken by one of them.
+            let mut vals = Vec::with_capacity(positions.len());
+            for id in ids {
+                if !store.read_fields(id, &positions, &mut vals)? {
+                    continue;
+                }
+                for (p, map) in hash_ix.iter_mut() {
+                    map.entry(hash_key(&vals[slot(*p)])).or_default().push(id);
+                }
+                for (p, ix) in text_ix.iter_mut() {
+                    if let Value::Text(t) = &vals[slot(*p)] {
+                        ix.insert(id, t);
+                    }
+                }
+                for (p, _, rows) in sorted_ix.iter_mut() {
+                    let v = std::mem::replace(&mut vals[slot(*p)], Value::Null);
+                    rows.push((id, Some(v)));
+                }
+                for (p, _, rows) in vector_ix.iter_mut() {
+                    if let Value::Vector(v) = std::mem::replace(&mut vals[slot(*p)], Value::Null) {
+                        rows.push((id, v));
+                    }
+                }
+            }
+            for (_, ix) in text_ix.iter_mut() {
                 ix.shrink_to_fit();
             }
-            // Built from the documents in one pass each, sorted once rather
-            // than inserted row by row.
-            for (field, ix) in c.sorted.iter_mut() {
-                let Some(fd) = c.schema.field(field) else {
-                    continue;
-                };
-                *ix = SortedIndex::build(
-                    &fd.ty,
-                    &mut docs.iter().map(|d| (d.id, d.get(field).cloned())),
+            // Each ordered index is sorted once from its keys rather than
+            // inserted row by row.
+            for (p, ix, rows) in sorted_ix.iter_mut() {
+                **ix = SortedIndex::build(
+                    &schema.fields[*p].ty,
+                    &mut std::mem::take(rows).into_iter(),
                 );
             }
-            for (field, ix) in c.vectors.iter_mut() {
-                if kept(field) {
-                    continue;
-                }
-                let items: Vec<(DocId, Vec<f32>)> = docs
-                    .iter()
-                    .filter_map(|d| match d.get(field) {
-                        Some(Value::Vector(v)) => Some((d.id, v.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                ix.insert_batch(&items);
+            for (_, ix, rows) in vector_ix.iter_mut() {
+                ix.insert_batch(rows);
             }
         }
         Ok(())
@@ -1483,11 +1766,17 @@ impl Database {
     /// have to rebuild the indexes.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.refuse_if_failed()?;
-        let image = self.snapshot();
-        let r = self.sink_mut().rewrite(&image);
+        // The sink is behind a lock, so the image can be written from `self`
+        // while the sink takes it: both are shared borrows here.
+        let r = {
+            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+            sink.rewrite_with(&mut |out| self.snapshot_into(out))
+        };
         self.storage(r)?;
         let r = self.sink_mut().sync();
         self.storage(r)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         self.dirty = false;
         Ok(())
     }
@@ -1779,6 +2068,13 @@ impl Database {
     /// primary no longer holds the writes it missed. The sink, the watcher,
     /// the plugins and the change ring's size stay. The ring's marks do not,
     /// so every subscriber reseeds.
+    /// How many images [`Self::adopt`] took. What was read from the database
+    /// is stale when this moves, whatever the change counter says: an image
+    /// can land on the very change the old contents stood at.
+    pub fn adoptions(&self) -> u64 {
+        self.adoptions
+    }
+
     pub fn adopt(&mut self, fresh: Database, image: &[u8]) -> Result<()> {
         self.refuse_if_failed()?;
         let r = self.sink_mut().rewrite(image);
@@ -1790,6 +2086,11 @@ impl Database {
         self.history = fresh.history;
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
+        self.adoptions += 1;
+        // The image is the file now: a mapped database reads the documents
+        // from there rather than holding the copy it was handed.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         self.dirty = false;
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
@@ -1880,7 +2181,7 @@ impl Database {
                 .collection(name)?
                 .schema
                 .clone()])),
-            Statement::Compact(which) => self.compact(which.as_deref()),
+            Statement::Compact(which) => self.compact(which.as_deref(), true),
         }
     }
 
@@ -2344,7 +2645,7 @@ impl Database {
     fn filtered_near(
         &self,
         c: &Collection,
-        ix: &VectorIndex,
+        sp: &Space,
         f: &Expr,
         qv: &[f32],
         want: usize,
@@ -2352,6 +2653,7 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
+        let ix = sp.ix;
         let budget = ix.probe_budget(near.ef);
         let mut probe = match self.filter_candidates(c, f, params, usize::MAX)? {
             Some((rows, true)) => FilterProbe::done(rows),
@@ -2386,7 +2688,7 @@ impl Database {
                 plan(|| {
                     format!("near: exact scan over every vector in {field}, the set as a test")
                 });
-                ix.search_exact(qv, want, accept)
+                sp.search_exact(qv, want, &accept)?
             } else if ids.len() <= budget {
                 // The set is smaller than the number of candidates the ANN
                 // walk would measure anyway: the walk buys nothing, and
@@ -2397,9 +2699,9 @@ impl Database {
                         ids.len()
                     )
                 });
-                ix.search_ids(qv, want, &ids)
+                sp.search_ids(qv, want, &ids)?
             } else {
-                let hits = ix.search(qv, want, near.ef, accept);
+                let hits = sp.search(qv, want, near.ef, &accept)?;
                 plan(|| {
                     format!(
                         "near: ANN over {field}, the set as a test, {} kept",
@@ -2413,7 +2715,7 @@ impl Database {
                             ids.len()
                         )
                     });
-                    ix.search_ids(qv, want, &ids)
+                    sp.search_ids(qv, want, &ids)?
                 } else {
                     hits
                 }
@@ -2425,7 +2727,7 @@ impl Database {
         let ef = near.ef.unwrap_or(ix.spec.ef_search);
         let mut hits = Vec::with_capacity(want);
         let mut tested = 0;
-        for (id, score) in ix.search(qv, want.max(ef), near.ef, |_| true) {
+        for (id, score) in sp.search(qv, want.max(ef), near.ef, &|_| true)? {
             if hits.len() == want {
                 break;
             }
@@ -2455,7 +2757,7 @@ impl Database {
                         ids.len()
                     )
                 });
-                return Ok(ix.search_ids(qv, want, &ids));
+                return sp.search_ids(qv, want, &ids);
             }
         }
         Ok(hits)
@@ -2618,17 +2920,18 @@ impl Database {
             )));
         }
 
+        let sp = Space::new(c, ix, &near.field);
         let hits = match &sel.filter {
             // No filter: ANN directly, or a full scan when asked for.
             None if near.exact => {
                 plan(|| format!("near: exact scan over every vector in {}", near.field));
-                ix.search_exact(&qv, want, |_| true)
+                sp.search_exact(&qv, want, &|_| true)?
             }
             None => {
                 plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                ix.search(&qv, want, near.ef, |_| true)
+                sp.search(&qv, want, near.ef, &|_| true)?
             }
-            Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, ctx)?,
+            Some(f) => self.filtered_near(c, &sp, f, &qv, want, near, params, ctx)?,
         };
         Ok(hits)
     }
@@ -2782,11 +3085,6 @@ impl Database {
                 qv.len()
             )));
         }
-        let qv = match metric {
-            Metric::Cosine => normalized(&qv),
-            _ => qv,
-        };
-
         let hits = ix.search(&query, candidates, accept);
         plan(|| {
             format!(
@@ -2796,42 +3094,14 @@ impl Database {
             )
         });
         plan(|| format!("rerank: {}, exact distance read from the store", rr.field));
-        let mut out: Vec<(DocId, f32)> = Vec::with_capacity(hits.len());
-        let mut buf: Vec<f32> = Vec::with_capacity(dim);
-        for (id, _) in hits {
-            if !c.store.read_vector_into(id, pos, &mut buf)? {
-                continue; // no vector on this document: it cannot be ordered
-            }
-            if buf.len() != dim {
-                continue;
-            }
-            // The store holds vectors as they were written; the HNSW arena is
-            // what normalises on insert, and it is not in play here. With the
-            // query already unit length, cosine only needs the candidate's
-            // own norm -- computing it beside the dot product costs one pass
-            // and saves a `Vec` per candidate, which at a thousand candidates
-            // a query is the difference between an allocation-free scan and a
-            // thousand allocations.
-            let d = match metric {
-                Metric::Cosine => {
-                    let n = norm(&buf);
-                    if n == 0.0 {
-                        1.0
-                    } else {
-                        1.0 - dot(&qv, &buf) / n
-                    }
-                }
-                _ => distance(metric, &qv, &buf),
-            };
-            out.push((id, d));
-        }
-        // Ascending distance, ties on the id so the answer is stable.
-        out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        out.truncate(want);
-        for h in &mut out {
-            h.1 = score_from_distance(metric, h.1);
-        }
-        Ok(out)
+        order_exactly(
+            &c.store,
+            pos,
+            metric,
+            &qv,
+            &mut hits.into_iter().map(|h| h.0),
+            want,
+        )
     }
 
     /// Collects the children of each parent row.
@@ -3705,7 +3975,11 @@ impl Database {
         Ok(Response::Affected(n))
     }
 
-    fn compact(&mut self, which: Option<&str>) -> Result<Response> {
+    /// Drops the dead records of `which` (every collection when `None`) and
+    /// rewrites the file. `graphs`: whether a graph holding tombstones is
+    /// rebuilt here -- a compact beside the database has rebuilt them
+    /// already, without the lock.
+    fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -3713,17 +3987,55 @@ impl Database {
             }
             None => self.order.clone(),
         };
-        let mut reclaimed = 0usize;
-        for name in targets {
-            let c = self.collections.get_mut(&name).unwrap();
-            reclaimed += c.store.dead_bytes();
-            c.store.compact()?;
+        let reclaimed: usize = targets
+            .iter()
+            .map(|n| self.collections[n].store.dead_bytes())
+            .sum();
+        // Over a mapped file the records never come into memory: the live
+        // ones are written into the new file, and the stores are pointed at
+        // it. The documents are the same ones, so no index is rebuilt.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mapped = self.mapped;
+        #[cfg(target_arch = "wasm32")]
+        let mapped = false;
+        if !mapped {
+            for name in &targets {
+                let c = self.collections.get_mut(name).unwrap();
+                c.store.compact()?;
+            }
         }
-        self.rebuild_indexes()?;
+        // A compact drops dead records and moves the live ones; the
+        // documents are the same, and every index is keyed by id, so none
+        // needs rebuilding for that -- a graph without tombstones took 50 s
+        // at 100 000 x 768 to rebuild for nothing. A graph with them is
+        // rebuilt: nothing else ever takes one out, every rewrite of a
+        // document with a vector leaves one, and they crowd the beam `near`
+        // walks (a `limit 10` answered 4 rows once enough had gathered).
+        if graphs {
+            for name in &targets {
+                let c = self.collections.get_mut(name).unwrap();
+                // By position, not by collecting the names: the list of
+                // strings was 440 bytes of the browser module.
+                for pos in 0..c.schema.fields.len() {
+                    let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+                        continue;
+                    };
+                    let field = &c.schema.fields[pos].name;
+                    if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
+                        build_graph(c, pos, spec)?;
+                    }
+                }
+            }
+        }
         // After compaction the persisted image is rewritten from scratch.
-        let image = self.snapshot();
-        let r = self.sink_mut().rewrite(&image);
+        let r = {
+            let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+            let compacting: &[String] = if mapped { &targets } else { &[] };
+            sink.rewrite_with(&mut |out| self.image_into(out, compacting))
+        };
         self.storage(r)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.repoint()?;
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))
@@ -3743,6 +4055,30 @@ fn missing(cid: u32) -> Error {
     Error::Corrupt(format!("a write to collection {cid}, which is not here"))
 }
 
+/// Builds the graph of the vector field at `pos` from the documents' vectors.
+/// Not inlined, as `build_index` is: `compact` rebuilds a graph holding
+/// tombstones through it too, and a second inlined copy of `build_index`
+/// was 3 KB of the browser module.
+#[inline(never)]
+fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexSpec) -> Result<()> {
+    let field = &c.schema.fields[pos].name;
+    let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+        return Err(Error::Type(format!("field `{field}` is not vector<N>")));
+    };
+    let mut ix = VectorIndex::with_precision(dim, spec, prec);
+    let ids: Vec<DocId> = c.store.ids();
+    ix.reserve(ids.len());
+    let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
+            items.push((*id, v));
+        }
+    }
+    ix.insert_batch(&items);
+    c.vectors.insert(field.clone(), ix);
+    Ok(())
+}
+
 /// Builds the index the schema declares on the field at `pos` and fills it
 /// from the collection's documents: what `create index` does, and what a
 /// replica does with the primary's. Inlined for the reason
@@ -3751,22 +4087,7 @@ fn missing(cid: u32) -> Error {
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     let field = c.schema.fields[pos].name.clone();
     match c.schema.fields[pos].index.clone() {
-        IndexKind::Vector(spec) => {
-            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
-                return Err(Error::Type(format!("field `{field}` is not vector<N>")));
-            };
-            let mut ix = VectorIndex::with_precision(dim, spec, prec);
-            let ids: Vec<DocId> = c.store.ids();
-            ix.reserve(ids.len());
-            let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
-            for id in &ids {
-                if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
-                    items.push((*id, v));
-                }
-            }
-            ix.insert_batch(&items);
-            c.vectors.insert(field, ix);
-        }
+        IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash => {
             let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
             for id in c.store.ids() {
@@ -3962,6 +4283,143 @@ fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
 /// `fuse`: a closure each was a copy each in the browser module.
 fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
     hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
+}
+
+/// The `k` of `ids` nearest `q` by the documents' own vectors, read out of
+/// the store: nearest first, ties to the lower id so the answer is stable.
+/// How `match ... rerank` orders the text index's candidates, and `near` the
+/// candidates a quantized index found.
+fn order_exactly(
+    store: &Store,
+    pos: usize,
+    metric: Metric,
+    q: &[f32],
+    ids: &mut dyn Iterator<Item = DocId>,
+    k: usize,
+) -> Result<Vec<(DocId, f32)>> {
+    let q = match metric {
+        Metric::Cosine => normalized(q),
+        _ => q.to_vec(),
+    };
+    let mut out: Vec<(DocId, f32)> = Vec::new();
+    let mut buf: Vec<f32> = Vec::with_capacity(q.len());
+    for id in ids {
+        // A document without a vector cannot be ordered.
+        if !store.read_vector_into(id, pos, &mut buf)? || buf.len() != q.len() {
+            continue;
+        }
+        // The store holds vectors as they were written; the HNSW arena is
+        // what normalises on insert, and it is not in play here. With the
+        // query already unit length, cosine only needs the candidate's own
+        // norm -- computing it beside the dot product costs one pass and
+        // saves a `Vec` per candidate, which at a thousand candidates a
+        // query is the difference between an allocation-free scan and a
+        // thousand allocations.
+        let d = match metric {
+            Metric::Cosine => {
+                let n = norm(&buf);
+                if n == 0.0 {
+                    1.0
+                } else {
+                    1.0 - dot(&q, &buf) / n
+                }
+            }
+            _ => distance(metric, &q, &buf),
+        };
+        out.push((id, d));
+    }
+    out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(k);
+    for h in &mut out {
+        h.1 = score_from_distance(metric, h.1);
+    }
+    Ok(out)
+}
+
+/// What `near` searches: a vector index, and when the index holds codes
+/// rather than vectors (`quant=`) the store the field's vectors are in. The
+/// codes find the candidates, the beam's worth of them, and the documents'
+/// own vectors put those in order -- so a search over codes answers in exact
+/// distances, and an exact search reads every vector it ranks.
+struct Space<'a> {
+    ix: &'a VectorIndex,
+    /// The store and the field's position, over codes.
+    exact: Option<(&'a Store, usize)>,
+}
+
+impl<'a> Space<'a> {
+    fn new(c: &'a Collection, ix: &'a VectorIndex, field: &str) -> Space<'a> {
+        let exact = match ix.quantized() {
+            true => c.schema.field_pos(field).map(|p| (&c.store, p)),
+            false => None,
+        };
+        Space { ix, exact }
+    }
+
+    fn order(
+        &self,
+        (store, pos): (&Store, usize),
+        q: &[f32],
+        ids: &mut dyn Iterator<Item = DocId>,
+        k: usize,
+    ) -> Result<Vec<(DocId, f32)>> {
+        order_exactly(store, pos, self.ix.spec.metric, q, ids, k)
+    }
+
+    /// [`VectorIndex::search`]; over codes, every candidate of the beam
+    /// ordered again, and the first `k` of them. One call to the index
+    /// either way: a second one in the other branch doubled its inlined
+    /// body in the browser module.
+    fn search(
+        &self,
+        q: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        accept: &dyn Fn(DocId) -> bool,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let (n, ef) = match self.exact {
+            None => (k, ef),
+            Some(_) => {
+                let ef = ef.unwrap_or(self.ix.spec.ef_search).max(k);
+                (ef, Some(ef))
+            }
+        };
+        let found = self.ix.search(q, n, ef, accept);
+        let Some(exact) = self.exact else {
+            return Ok(found);
+        };
+        plan(|| {
+            format!(
+                "near: the {} candidates of the codes ordered by exact distance read from the store",
+                found.len()
+            )
+        });
+        self.order(exact, q, &mut found.into_iter().map(|h| h.0), k)
+    }
+
+    /// [`VectorIndex::search_ids`], exactly over codes as well.
+    fn search_ids(&self, q: &[f32], k: usize, ids: &[DocId]) -> Result<Vec<(DocId, f32)>> {
+        match self.exact {
+            None => Ok(self.ix.search_ids(q, k, ids)),
+            Some(exact) => self.order(exact, q, &mut ids.iter().copied(), k),
+        }
+    }
+
+    /// [`VectorIndex::search_exact`], exactly over codes as well.
+    fn search_exact(
+        &self,
+        q: &[f32],
+        k: usize,
+        accept: &dyn Fn(DocId) -> bool,
+    ) -> Result<Vec<(DocId, f32)>> {
+        match self.exact {
+            None => Ok(self.ix.search_exact(q, k, accept)),
+            Some(exact) => {
+                let mut ids = exact.0.ids().into_iter().filter(|id| accept(*id));
+                self.order(exact, q, &mut ids, k)
+            }
+        }
+    }
 }
 
 /// The ANN's beam as `explain` states it: the `ef` in force, and the page

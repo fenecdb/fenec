@@ -13,10 +13,15 @@
 use fenec_core::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
-const SCHEMA: [&str; 2] = [
+const SCHEMA: [&str; 3] = [
     "create collection if not exists nodes (name text @hash, addr text, token text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
+    // Which node replicates which. A collection of its own rather than a
+    // field on `nodes`: a directory written before this existed opens as it
+    // is, and the engine has no schema migration to add one.
+    "create collection if not exists pairs (node text @hash, standby text)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,29 +62,91 @@ pub struct Placement {
     pub state: State,
 }
 
+/// Which node a node's tenants are replicated to.
+pub type Pairs = HashMap<String, String>;
+
 pub struct Directory {
-    db: Database,
+    /// Shared, because a standby follows it: the follower thread applies the
+    /// primary's writes to the same database (`fenec-shard --replica-of`).
+    db: Arc<RwLock<Database>>,
+    /// The change counter the maps were read at, and the images adopted by
+    /// then. A standby's database moves under them as the primary's writes
+    /// arrive, and [`Self::refresh`] reads them again when it has. The
+    /// counter alone missed an image landing on the change it stood at: a
+    /// router rejoining as a standby kept routing from its old maps.
+    seq: u64,
+    adopted: u64,
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
+    pairs: Pairs,
 }
 
 impl Directory {
     /// Opens (or creates) the directory file.
     pub fn open(path: impl AsRef<Path>) -> Result<Directory> {
-        Directory::load(fenec_core::fs::open(path)?)
+        Directory::load(Arc::new(RwLock::new(fenec_core::fs::open(path)?)))
     }
 
     /// A directory that lives only as long as the process: tests.
     pub fn in_memory() -> Directory {
-        Directory::load(Database::new()).expect("an empty database loads")
+        Directory::load(Arc::new(RwLock::new(Database::new()))).expect("an empty database loads")
     }
 
-    fn load(mut db: Database) -> Result<Directory> {
-        for sql in SCHEMA {
-            db.execute(&fenec_ql::parse_one(sql)?)?;
+    /// A directory over a database the caller already owns -- the one a
+    /// standby's follower writes into, and a primary's feed reads from.
+    pub fn load(db: Arc<RwLock<Database>>) -> Result<Directory> {
+        {
+            let mut g = write(&db);
+            // A standby's collections arrive with the primary's writes; it
+            // refuses writes of its own, this one included.
+            if !g.history().following {
+                for sql in SCHEMA {
+                    g.execute(&fenec_ql::parse_one(sql)?)?;
+                }
+            }
         }
+        let mut d = Directory {
+            db,
+            seq: 0,
+            adopted: 0,
+            nodes: BTreeMap::new(),
+            tenants: HashMap::new(),
+            pairs: Pairs::new(),
+        };
+        d.reload()?;
+        Ok(d)
+    }
+
+    /// The database itself: what the replication endpoints stream from and
+    /// the follower applies to.
+    pub fn db(&self) -> &Arc<RwLock<Database>> {
+        &self.db
+    }
+
+    /// Whether this directory follows another router's.
+    pub fn following(&self) -> bool {
+        read(&self.db).history().following
+    }
+
+    /// Whether the database has moved since the maps were read: on a standby
+    /// every write the primary sent moves it.
+    pub fn stale(&self) -> bool {
+        let g = read(&self.db);
+        g.change_seq() != self.seq || g.adoptions() != self.adopted
+    }
+
+    /// Reads the maps again when the database has moved.
+    pub fn refresh(&mut self) -> Result<()> {
+        if self.stale() {
+            self.reload()?;
+        }
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<()> {
+        let g = read(&self.db);
         let mut nodes = BTreeMap::new();
-        for row in rows(&db, "get nodes select name, addr, token")? {
+        for row in rows(&g, "get nodes select name, addr, token")? {
             nodes.insert(
                 text(&row[0]),
                 Node {
@@ -89,7 +156,7 @@ impl Directory {
             );
         }
         let mut tenants = HashMap::new();
-        for row in rows(&db, "get tenants select name, node, state")? {
+        for row in rows(&g, "get tenants select name, node, state")? {
             tenants.insert(
                 text(&row[0]),
                 Placement {
@@ -98,7 +165,48 @@ impl Directory {
                 },
             );
         }
-        Ok(Directory { db, nodes, tenants })
+        let mut pairs = Pairs::new();
+        for row in rows(&g, "get pairs select node, standby")? {
+            pairs.insert(text(&row[0]), text(&row[1]));
+        }
+        self.seq = g.change_seq();
+        self.adopted = g.adoptions();
+        self.nodes = nodes;
+        self.tenants = tenants;
+        self.pairs = pairs;
+        Ok(())
+    }
+
+    /// The node `name`'s tenants are replicated to, if any.
+    pub fn standby(&self, name: &str) -> Option<&str> {
+        self.pairs.get(name).map(String::as_str)
+    }
+
+    /// Whether `name` is some node's standby: its tenants follow that
+    /// node's, so a tenant is never placed or moved there -- it would open
+    /// as a replica of one the other node does not have.
+    pub fn is_standby(&self, name: &str) -> bool {
+        self.pairs.values().any(|s| s == name)
+    }
+
+    /// Records (or clears) the node a node's tenants are replicated to.
+    pub fn set_standby(&mut self, node: &str, standby: Option<&str>) -> Result<()> {
+        match standby {
+            None => {
+                self.run("del pairs where node = $1", &[Value::Text(node.into())])?;
+                self.pairs.remove(node);
+            }
+            Some(s) => {
+                let params = [Value::Text(node.into()), Value::Text(s.into())];
+                if self.pairs.contains_key(node) {
+                    self.run("set pairs {standby: $2} where node = $1", &params)?;
+                } else {
+                    self.run("put pairs {node: $1, standby: $2}", &params)?;
+                }
+                self.pairs.insert(node.into(), s.into());
+            }
+        }
+        Ok(())
     }
 
     pub fn nodes(&self) -> &BTreeMap<String, Node> {
@@ -150,6 +258,17 @@ impl Directory {
         }
         self.run("del nodes where name = $1", &[Value::Text(name.into())])?;
         self.nodes.remove(name);
+        // The pairs it was on either side of go with it.
+        self.set_standby(name, None)?;
+        let holders: Vec<String> = self
+            .pairs
+            .iter()
+            .filter(|(_, s)| s.as_str() == name)
+            .map(|(n, _)| n.clone())
+            .collect();
+        for n in holders {
+            self.set_standby(&n, None)?;
+        }
         Ok(())
     }
 
@@ -185,15 +304,32 @@ impl Directory {
     /// acknowledged is on disk.
     fn run(&mut self, sql: &str, params: &[Value]) -> Result<()> {
         let stmt = fenec_ql::parse_one(sql)?;
-        self.db.execute_with(&stmt, params)?;
-        self.db.sync()
+        let mut g = write(&self.db);
+        g.execute_with(&stmt, params)?;
+        g.sync()?;
+        // The maps are updated by the caller; the counter moved here.
+        self.seq = g.change_seq();
+        self.adopted = g.adoptions();
+        Ok(())
     }
 }
 
+fn read(db: &Arc<RwLock<Database>>) -> std::sync::RwLockReadGuard<'_, Database> {
+    db.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write(db: &Arc<RwLock<Database>>) -> std::sync::RwLockWriteGuard<'_, Database> {
+    db.write().unwrap_or_else(|e| e.into_inner())
+}
+
 fn rows(db: &Database, sql: &str) -> Result<Vec<Vec<Value>>> {
-    match db.query(&fenec_ql::parse_one(sql)?, &[])? {
-        Response::Rows(rs) => Ok(rs.rows.into_iter().map(|r| r.values).collect()),
-        _ => Ok(Vec::new()),
+    match db.query(&fenec_ql::parse_one(sql)?, &[]) {
+        Ok(Response::Rows(rs)) => Ok(rs.rows.into_iter().map(|r| r.values).collect()),
+        Ok(_) => Ok(Vec::new()),
+        // A standby's collections arrive with the primary's first writes.
+        // Until they do the directory is empty, not broken.
+        Err(Error::NotFound(_)) => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
 }
 

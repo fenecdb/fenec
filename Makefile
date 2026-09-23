@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -71,6 +71,7 @@ pg:
 ## make node HTTP=127.0.0.1:8081 ADMIN=secret
 node:
 	$(CARGO) run --release -p fenec-pg -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
+	  $(if $(PG),--listen $(PG),) \
 	  --admin-token $(or $(ADMIN),$(error ADMIN=<token> is required)) --sync 250
 
 ## The router in front of the nodes; the directory lives in ./shard.fenec.
@@ -183,6 +184,25 @@ docker-down:
 ## running database: under the write lock, then beside it.
 maintenance-bench:
 	$(CARGO) run --release -p fenec-core --example maintenance -- 100000 128
+
+## What opening a file costs, read into memory or mapped: a 1 GB file of
+## 2.3 million rows, written once, then opened each way in a process of its
+## own. OPEN_ROWS=23000000 makes it 10 GB.
+OPEN_ROWS ?= 2300000
+OPEN_FILE ?= target/open-$(OPEN_ROWS).fenec
+open-bench:
+	$(CARGO) build --release -p fenec-core --example open
+	test -f $(OPEN_FILE) || ./target/release/examples/open write $(OPEN_FILE) $(OPEN_ROWS) 400 hs
+	./target/release/examples/open open $(OPEN_FILE) read
+	./target/release/examples/open open $(OPEN_FILE) mapped
+
+## Quantized vector indexes against full vectors: the arena, the heap,
+## recall@10 and latency at beams of 100, 200 and 400. QUANT_ROWS=1000000 is
+## the million the docs quote; each mode runs in a process of its own.
+QUANT_ROWS ?= 100000
+quant-bench:
+	$(CARGO) build --release -p fenec-core --example quant
+	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32; done
 
 ## Memory footprint (for calibrating --max-memory)
 memory:

@@ -43,6 +43,62 @@ impl Metric {
     }
 }
 
+/// What a vector index holds of each vector (`quant=` in `@hnsw`). The
+/// documents keep their vectors whole either way: a search over codes
+/// orders the candidates it found again by the documents' own vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quant {
+    /// The vector itself, at the field's precision.
+    #[default]
+    None,
+    /// A byte a component, over a scale a vector: a quarter of `f32`.
+    Int8,
+    /// A bit a component, its sign: a thirty-second of `f32`. The signs
+    /// of a unit vector, so cosine only.
+    Bit,
+}
+
+impl Quant {
+    pub fn parse(s: &str) -> Option<Quant> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Quant::None),
+            "int8" | "i8" => Some(Quant::Int8),
+            "bit" | "binary" => Some(Quant::Bit),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Quant::None => "none",
+            Quant::Int8 => "int8",
+            Quant::Bit => "bit",
+        }
+    }
+    pub fn code(&self) -> u8 {
+        match self {
+            Quant::None => 0,
+            Quant::Int8 => 1,
+            Quant::Bit => 2,
+        }
+    }
+    pub fn from_code(c: u8) -> Option<Quant> {
+        match c {
+            0 => Some(Quant::None),
+            1 => Some(Quant::Int8),
+            2 => Some(Quant::Bit),
+            _ => None,
+        }
+    }
+}
+
+/// `ef_search` for a `quant=bit` index that names none. Its codes estimate
+/// distances coarsely, so the beam has to be wider to hold the true
+/// neighbours for the documents' own vectors to put in order: over a million
+/// clustered 768-dimension vectors a beam of 100 held 82.5% of the true ten
+/// and one of 400 held 98.4%, where int8 codes held 97.1% at 100 and full
+/// vectors 97.4% (`make quant-bench`).
+pub const BIT_EF_SEARCH: usize = 400;
+
 /// HNSW parameters. The defaults were picked targeting ~95% recall /
 /// a few hundred microseconds on 1M-scale collections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +110,20 @@ pub struct VectorIndexSpec {
     pub ef_construction: usize,
     /// Default candidate list width at query time.
     pub ef_search: usize,
+    /// What the index holds of each vector.
+    pub quant: Quant,
+}
+
+impl VectorIndexSpec {
+    /// `, quant=int8` for a quantized index and nothing for the rest: how
+    /// the option is written back wherever the others are.
+    pub fn quant_arg(&self) -> &'static str {
+        match self.quant {
+            Quant::None => "",
+            Quant::Int8 => ", quant=int8",
+            Quant::Bit => ", quant=bit",
+        }
+    }
 }
 
 impl Default for VectorIndexSpec {
@@ -66,6 +136,7 @@ impl Default for VectorIndexSpec {
             // rises from 0.10 -> 0.13 ms, which is still ~7x faster than the
             // engines we compare against. The accuracy is worth the trade.
             ef_search: 100,
+            quant: Quant::None,
         }
     }
 }
@@ -150,6 +221,45 @@ pub enum IndexKind {
     Sorted,
 }
 
+impl IndexKind {
+    /// Whether this index can be built over `field`, of type `ty`: the one
+    /// rule `create collection`, `create index` and `fenec import --index`
+    /// all go through. `quant=bit` was refused with l2 and dot only where a
+    /// collection was created, and a `create index` taking it silently
+    /// answered `near` from candidates chosen by sign alone.
+    pub fn check(&self, field: &str, ty: &DataType) -> Result<()> {
+        match self {
+            IndexKind::Vector(spec) => {
+                if !matches!(ty, DataType::Vector(..)) {
+                    return Err(Error::Type(format!(
+                        "field `{field}` is not vector<N>, no vector index can be built"
+                    )));
+                }
+                if spec.quant == Quant::Bit && spec.metric != Metric::Cosine {
+                    return Err(Error::Query(format!(
+                        "`{field}`: quant=bit keeps the signs of unit vectors, so it needs \
+                         the cosine metric, not {}",
+                        spec.metric.name()
+                    )));
+                }
+            }
+            IndexKind::Text(_) if !matches!(ty, DataType::Text) => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not text, no full-text index can be built"
+                )));
+            }
+            IndexKind::Sorted if !crate::sorted::SortedIndex::supports(ty) => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not int, float, timestamp or text, no ordered index \
+                     can be built"
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub name: String,
@@ -196,28 +306,7 @@ impl Schema {
             if seen.contains(&f.name) {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
-            if let IndexKind::Vector(_) = f.index {
-                if !matches!(f.ty, DataType::Vector(..)) {
-                    return Err(Error::Type(format!(
-                        "field `{}` is not vector<N>, no vector index can be built",
-                        f.name
-                    )));
-                }
-            }
-            if let IndexKind::Text(_) = f.index {
-                if !matches!(f.ty, DataType::Text) {
-                    return Err(Error::Type(format!(
-                        "field `{}` is not text, no full-text index can be built",
-                        f.name
-                    )));
-                }
-            }
-            if f.index == IndexKind::Sorted && !crate::sorted::SortedIndex::supports(&f.ty) {
-                return Err(Error::Type(format!(
-                    "field `{}` is not int, float, timestamp or text, no ordered index can be built",
-                    f.name
-                )));
-            }
+            f.index.check(&f.name, &f.ty)?;
             seen.push(f.name.clone());
         }
         Ok(Schema { name, fields })
@@ -267,11 +356,18 @@ impl Schema {
                 IndexKind::None => out.push(0),
                 IndexKind::Hash => out.push(1),
                 IndexKind::Vector(spec) => {
-                    out.push(2);
+                    // A quantized index is a kind of its own, so that a version
+                    // that knows no quantization refuses the file rather than
+                    // reading it as full vectors; every other index is written
+                    // as it always was.
+                    out.push(if spec.quant == Quant::None { 2 } else { 5 });
                     out.push(spec.metric.code());
                     put_uvarint(&mut out, spec.m as u64);
                     put_uvarint(&mut out, spec.ef_construction as u64);
                     put_uvarint(&mut out, spec.ef_search as u64);
+                    if spec.quant != Quant::None {
+                        out.push(spec.quant.code());
+                    }
                 }
                 IndexKind::Text(spec) => {
                     out.push(3);
@@ -300,15 +396,25 @@ impl Schema {
             let index = match kind {
                 0 => IndexKind::None,
                 1 => IndexKind::Hash,
-                2 => {
+                2 | 5 => {
                     let metric = Metric::from_code(buf[*pos])?;
                     *pos += 1;
-                    IndexKind::Vector(VectorIndexSpec {
+                    let mut spec = VectorIndexSpec {
                         metric,
                         m: get_uvarint(buf, pos)? as usize,
                         ef_construction: get_uvarint(buf, pos)? as usize,
                         ef_search: get_uvarint(buf, pos)? as usize,
-                    })
+                        quant: Quant::None,
+                    };
+                    if kind == 5 {
+                        let c = *buf
+                            .get(*pos)
+                            .ok_or_else(|| Error::Corrupt("schema ended early".into()))?;
+                        *pos += 1;
+                        spec.quant = Quant::from_code(c)
+                            .ok_or_else(|| Error::Corrupt(format!("unknown quantization {c}")))?;
+                    }
+                    IndexKind::Vector(spec)
                 }
                 3 => IndexKind::Text(TextIndexSpec {
                     k1_pct: get_uvarint(buf, pos)? as u16,

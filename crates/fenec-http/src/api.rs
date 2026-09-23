@@ -997,10 +997,11 @@ fn schemas_json(list: &[Schema]) -> String {
                 IndexKind::Vector(spec) => json::escape_into(
                     &mut out,
                     &format!(
-                        "hnsw({}, m={}, ef_search={})",
+                        "hnsw({}, m={}, ef_search={}{})",
                         spec.metric.name(),
                         spec.m,
-                        spec.ef_search
+                        spec.ef_search,
+                        spec.quant_arg()
                     ),
                 ),
                 IndexKind::Text(spec) => {

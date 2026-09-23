@@ -62,7 +62,9 @@ pub mod prelude {
         Agg, CmpOp, Expr, Fuse, Lookup, Match, Near, Nested, Rerank, Response, ResultSet, Row,
         Select, Sort, Statement,
     };
-    pub use crate::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};
+    pub use crate::schema::{
+        Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec,
+    };
     pub use crate::value::{DataType, DocId, Document, Value, VecPrec};
 }
 

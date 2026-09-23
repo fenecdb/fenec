@@ -452,10 +452,15 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             (None, Backend::Single { db, hub, .. }) => (db, hub),
             (None, Backend::Tenants(_) | Backend::Metrics { .. }) => unreachable!("routed above"),
         };
-        if let Backend::Single {
-            repl: Some(repl), ..
-        } = backend
-        {
+        // A tenant's own replication, where the node replicates its tenants:
+        // `/t/<tenant>/_replication` is the tenant's `/_replication`, and the
+        // path was stripped above.
+        let repl = match (&tenant, backend) {
+            (Some(t), _) => t.repl.as_ref(),
+            (None, Backend::Single { repl, .. }) => repl.as_ref(),
+            (None, _) => None,
+        };
+        if let Some(repl) = repl {
             if req.segments().first() == Some(&"_replication") {
                 // A replica's stream is a body with no end, like a
                 // subscription: it takes the connection over.
@@ -561,7 +566,24 @@ fn route_tenant(
     };
     // The token is checked before the tenant is looked up: otherwise a 404
     // against a 401 would tell an unauthenticated caller which tenants exist.
-    authenticate(cfg, req)?;
+    // A tenant's replication stream carries the node's replication token
+    // rather than the data one -- a replica is not a client -- so that is
+    // the one asked for there.
+    if segs.get(2) == Some(&"_replication") {
+        let given = req
+            .header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let ok = tenants
+            .replication_token()
+            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()));
+        if !ok {
+            return Err(Response::error(401, "invalid or missing replication token")
+                .header("WWW-Authenticate", "Bearer"));
+        }
+    } else {
+        authenticate(cfg, req)?;
+    }
     let t = tenants
         .get(&name)
         .map_err(|Refused(status, msg)| Response::error(status, &msg))?;

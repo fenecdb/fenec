@@ -376,10 +376,11 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         IndexKind::Hash => "  @hash".into(),
                         IndexKind::Sorted => "  @sorted".into(),
                         IndexKind::Vector(sp) => format!(
-                            "  @hnsw({}, m={}, ef_search={})",
+                            "  @hnsw({}, m={}, ef_search={}{})",
                             sp.metric.name(),
                             sp.m,
-                            sp.ef_search
+                            sp.ef_search,
+                            sp.quant_arg()
                         ),
                         IndexKind::Text(sp) => {
                             format!("  @text(k1={}, b={})", sp.k1(), sp.b())

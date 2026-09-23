@@ -44,8 +44,6 @@
 
 use crate::constant_eq;
 use crate::http::{Request, Response};
-use fenec_core::engine::MAGIC;
-use fenec_core::fs::FileSink;
 use fenec_core::prelude::*;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -125,6 +123,9 @@ struct Ring {
     /// Moves when what the ring holds stops leading to the database -- a
     /// replica that took an image: a stream begun before it ends.
     epoch: u64,
+    /// The database is going: every stream ends rather than holding it open
+    /// (a tenant being deleted or moved).
+    closed: bool,
 }
 
 /// Consecutive records, the first numbered `first`.
@@ -144,6 +145,8 @@ enum Next {
     Behind,
     /// The feed started over.
     Moved,
+    /// The database this feed belongs to is going.
+    Gone,
 }
 
 impl Feed {
@@ -157,6 +160,7 @@ impl Feed {
                 seq: 0,
                 durable: 0,
                 epoch: 0,
+                closed: false,
             }),
             cv: Condvar::new(),
         })
@@ -173,6 +177,19 @@ impl Feed {
         r.epoch += 1;
         drop(r);
         self.cv.notify_all();
+    }
+
+    /// Ends every stream reading from this feed. A tenant being deleted or
+    /// moved is held open by its replicas otherwise, and the delete waits
+    /// for them until it gives up.
+    pub fn close(&self) {
+        lock(&self.ring).closed = true;
+        self.cv.notify_all();
+    }
+
+    /// Takes streams again after a [`Self::close`] whose reason fell through.
+    pub fn reopen(&self) {
+        lock(&self.ring).closed = false;
     }
 
     /// The last write appended.
@@ -243,6 +260,9 @@ impl Feed {
     /// The durable records after `cursor`, up to about `max` bytes.
     fn next(&self, cursor: u64, epoch: u64, max: usize) -> Next {
         let r = lock(&self.ring);
+        if r.closed {
+            return Next::Gone;
+        }
         if r.epoch != epoch {
             return Next::Moved;
         }
@@ -306,6 +326,13 @@ impl Sink for Tee {
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.append(bytes)
     }
+    fn sync_existing(&mut self) -> fenec_core::error::Result<()> {
+        self.file.sync_existing()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn remapped(&self) -> Option<fenec_core::store::Base> {
+        self.file.remapped()
+    }
     fn record(&mut self, seq: u64, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.record(seq, bytes)?;
         self.feed.push(seq, bytes);
@@ -315,6 +342,20 @@ impl Sink for Tee {
         // The image holds every write, and is fsynced before it replaces
         // the file.
         self.file.rewrite(bytes)?;
+        self.feed.mark_durable(self.feed.seq());
+        Ok(())
+    }
+    /// Passed on, so the file streams the image into place as it would
+    /// without replicas. Left to the default, a checkpoint built the whole
+    /// image in memory first: +40.4 MB of heap on a 40 MB file, against
+    /// +1.0 MB through the file alone.
+    fn rewrite_with(
+        &mut self,
+        image: &mut dyn FnMut(
+            &mut dyn fenec_core::engine::ImageOut,
+        ) -> fenec_core::error::Result<()>,
+    ) -> fenec_core::error::Result<()> {
+        self.file.rewrite_with(image)?;
         self.feed.mark_durable(self.feed.seq());
         Ok(())
     }
@@ -347,20 +388,82 @@ impl Sink for Tee {
 /// going through a [`Tee`] to a feed of `buffer` bytes.
 ///
 /// The file is fsynced as it is: a process that died leaves bytes it wrote
-/// but never synced, and those are the first a replica could be sent.
+/// but never synced, and those are the first a replica could be sent. A
+/// last record it cut short is cut off first, as `fs::open` does; it was
+/// never synced, so no replica was sent it.
 pub fn open(path: &str, buffer: usize) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
-    let (mut file, existing) = FileSink::open(path)?;
-    file.sync_existing()?;
+    open_with(path, buffer, true)
+}
+
+/// [`open`], mapped like any other file or -- `mapped` false, `fenec-pg
+/// --no-mmap` -- read into memory.
+pub fn open_with(
+    path: &str,
+    buffer: usize,
+    mapped: bool,
+) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
     let feed = Feed::new(buffer);
-    let mut db = Database::with_sink(Box::new(Tee {
-        file: Box::new(file),
-        feed: Arc::clone(&feed),
-    }));
-    if existing.len() > MAGIC.len() {
-        db.load(&existing)?;
-    }
+    let made = Arc::clone(&feed);
+    let db = fenec_core::fs::open_with(
+        path,
+        mapped,
+        Box::new(move |mut file| {
+            file.sync_existing()?;
+            Ok(Box::new(Tee { file, feed: made }) as Box<dyn Sink>)
+        }),
+    )?;
     feed.start(db.change_seq());
     Ok((db, feed))
+}
+
+/// Puts a server's file's history where its flags say before anyone is
+/// served -- one rule, where the database server and the router each kept a
+/// copy. `--replica-of` has the file follow: a replica marks its file as one
+/// before it has heard from its primary. A replica's file opens as a
+/// primary only when `--promote` says so, and its history forks there, so
+/// no replica of the old primary is streamed the new one's writes as if
+/// they were its own; without either flag it is refused rather than opened
+/// refusing every write. A primary gets a history of its own the first time
+/// it has replicas -- the root history is every database's. `role` is what
+/// a replica's file is to the server ("a replica's file", "a standby's
+/// directory"), `takes` what a primary takes ("writes").
+pub fn settle_history(
+    db: &mut Database,
+    path: &str,
+    (role, takes): (&str, &str),
+    replicating: bool,
+    follows: bool,
+    promote: bool,
+) -> std::result::Result<(), String> {
+    let following = db.history().following;
+    let result = if follows {
+        let lineage = db.history().lineage.clone();
+        db.follow(lineage)
+    } else if promote {
+        if !following {
+            crate::log!("--promote: {path} is not {role}; it opens as it is");
+            return Ok(());
+        }
+        let id = fresh_id();
+        let r = db.fork(id).and_then(|_| db.sync());
+        if r.is_ok() {
+            crate::log!(
+                "promoted: {path} takes {takes} from change {} on, history {id:016x}",
+                db.change_seq()
+            );
+        }
+        r
+    } else if following {
+        return Err(format!(
+            "{path} is {role}. Start it with --replica-of <primary> to go on following, \
+             or with --promote to take {takes} -- its history forks there"
+        ));
+    } else if replicating && db.history().lineage.is_empty() {
+        db.fork(fresh_id()).and_then(|_| db.sync())
+    } else {
+        Ok(())
+    };
+    result.map_err(|e| format!("could not settle {path}'s history: {e}"))
 }
 
 // ------------------------------------------------------------- the primary
@@ -395,6 +498,45 @@ impl Replication {
             follower,
             streams: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Ends the streams replicas are reading, and stops the follower: the
+    /// database is going (a tenant deleted or moved).
+    pub fn close_streams(&self) {
+        if let Some(feed) = &self.feed {
+            feed.close();
+        }
+        if let Some(f) = &self.follower {
+            f.halt();
+        }
+    }
+
+    /// Undoes [`Self::close_streams`] when the database stays after all -- a
+    /// tenant delete that gave up with 409. Left closed, the tenant went on
+    /// taking writes its replicas were never sent, and a replica stopped
+    /// following for good.
+    pub fn reopen_streams(&self, follower_name: String) {
+        if let Some(feed) = &self.feed {
+            feed.reopen();
+        }
+        if let Some(f) = &self.follower {
+            let following =
+                f.db.read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .history()
+                    .following;
+            if following {
+                if let Err(e) = f.start(follower_name) {
+                    crate::log!("could not follow again: {e}");
+                }
+            }
+        }
+    }
+
+    /// The follower, on a server that follows one: what a promotion goes
+    /// through (`/_admin/tenants/<t>/promote` on a replica node).
+    pub fn follower(&self) -> Option<&Arc<Follower>> {
+        self.follower.as_ref()
     }
 
     fn authorized(&self, req: &Request) -> bool {
@@ -672,6 +814,11 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
                     .and_then(|_| w.flush());
                 return;
             }
+            Next::Gone => {
+                let _ =
+                    message(&mut w, b'E', &[b"the database is closing"]).and_then(|_| w.flush());
+                return;
+            }
         }
     }
 }
@@ -691,6 +838,9 @@ impl Drop for Unlist<'_> {
 pub struct Upstream {
     url: String,
     addr: String,
+    /// What the stream hangs off: nothing for a file, `/t/<tenant>` for one
+    /// tenant of a node that replicates its tenants.
+    base: String,
     token: String,
 }
 
@@ -718,25 +868,45 @@ pub enum Message {
 }
 
 impl Upstream {
-    /// `url` is the primary's HTTP address, `http://host:port`. There is no
-    /// TLS here either: across an open network, a tunnel carries it.
+    /// `url` is the primary's HTTP address, `http://host:port`, and for one
+    /// tenant of a node `http://host:port/t/<tenant>`. There is no TLS here
+    /// either: across an open network, a tunnel carries it.
     pub fn new(url: &str, token: String) -> std::result::Result<Upstream, String> {
         let rest = url.strip_prefix("http://").ok_or_else(|| {
             format!("a primary is http://host:port, not `{url}` (there is no TLS)")
         })?;
-        let addr = rest.trim_end_matches('/').to_string();
-        if addr.is_empty() || addr.contains('/') {
+        let rest = rest.trim_end_matches('/');
+        let (addr, base) = match rest.split_once('/') {
+            None => (rest.to_string(), String::new()),
+            Some((a, path)) => (a.to_string(), format!("/{path}")),
+        };
+        if addr.is_empty() {
             return Err(format!("a primary is http://host:port, not `{url}`"));
         }
         Ok(Upstream {
             url: url.trim_end_matches('/').to_string(),
             addr,
+            base,
             token,
         })
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Checks an address given as `--replica-of`: `http://host:port`, and
+    /// nothing after it. A path is how a tenant's own stream is reached
+    /// (`/t/<tenant>`), never what an operator names -- and one typed by
+    /// mistake was followed, against a 404 forever, rather than refused at
+    /// start.
+    pub fn check_node(url: &str) -> std::result::Result<(), String> {
+        if !Upstream::new(url, String::new())?.base.is_empty() {
+            return Err(format!(
+                "--replica-of names a node, http://host:port, not a path on one: `{url}`"
+            ));
+        }
+        Ok(())
     }
 
     /// Opens the stream for a database `since` changes in on `history`;
@@ -746,8 +916,9 @@ impl Upstream {
         s.set_read_timeout(Some(SILENCE))?;
         s.set_write_timeout(Some(SILENCE))?;
         let request = format!(
-            "GET /_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
+            "GET {}/_replication?since={since}&history={history:016x}{} HTTP/1.1\r\n\
              Host: {}\r\nAuthorization: Bearer {}\r\n\r\n",
+            self.base,
             if image { "&image=1" } else { "" },
             self.addr,
             self.token
@@ -1013,6 +1184,30 @@ impl Follower {
         }
     }
 
+    /// Runs the follower on a thread of its own, named `name` -- and again
+    /// after [`Self::halt`], from where it stopped. Nothing is started when
+    /// it is running already. The three servers started it each their own
+    /// way, and a tenant's dropped a failed start without a word: a replica
+    /// that never followed, refusing writes, with nothing in the log.
+    pub fn start(self: &Arc<Self>, name: String) -> io::Result<()> {
+        let mut ended = lock(&self.ended.0);
+        if !*ended {
+            return Ok(());
+        }
+        self.stop.store(false, Ordering::SeqCst);
+        *ended = false;
+        drop(ended);
+        let run = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name(name)
+            .spawn(move || run.run());
+        if let Err(e) = spawned {
+            *lock(&self.ended.0) = true;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Stops following and starts taking writes, on a history of its own:
     /// `id`, forked where the replica stands. Returns that change and `id`.
     pub fn promote(&self, id: u64) -> fenec_core::error::Result<(u64, u64)> {
@@ -1039,6 +1234,11 @@ impl Follower {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+    }
+
+    /// Whether the follower's thread is running: started, and not halted.
+    pub fn running(&self) -> bool {
+        !*lock(&self.ended.0)
     }
 
     /// Whether the replica is connected, and how far behind the primary's

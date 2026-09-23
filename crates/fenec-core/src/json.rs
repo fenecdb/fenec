@@ -231,7 +231,12 @@ pub fn response_to_string(r: &Response) -> String {
                             crate::schema::IndexKind::Hash => "hash".to_string(),
                             crate::schema::IndexKind::Sorted => "sorted".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {
-                                format!("hnsw({}, m={})", spec.metric.name(), spec.m)
+                                format!(
+                                    "hnsw({}, m={}{})",
+                                    spec.metric.name(),
+                                    spec.m,
+                                    spec.quant_arg()
+                                )
                             }
                             crate::schema::IndexKind::Text(spec) => {
                                 format!("text(k1={}, b={})", spec.k1(), spec.b())

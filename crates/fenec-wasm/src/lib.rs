@@ -305,7 +305,7 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
     }
     let bytes = std::slice::from_raw_parts(ptr, len);
     match with_db(handle, |db| db.load(bytes)) {
-        Some(Ok(())) => 0,
+        Some(Ok(_)) => 0,
         _ => 1,
     }
 }

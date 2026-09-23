@@ -6,8 +6,8 @@
 //! ```
 
 use fenec_core::prelude::*;
-use fenec_http::replication::{self, fresh_id, Follower, Replication};
-use fenec_http::tenants::Tenants;
+use fenec_http::replication::{self, Follower, Replication};
+use fenec_http::tenants::{Refused, Tenants};
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::{self, Auth, SyncPolicy};
 use fenec_pg::{Config, PgPlugin, Server};
@@ -20,12 +20,19 @@ usage: fenec-pg [options]
   -l, --listen <address>    default 127.0.0.1:5433
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
       --dir <path>          one file per tenant in this directory, served over
-                            HTTP under /t/<tenant>/. Needs --http; the pg
-                            listener is off in this mode
+                            HTTP under /t/<tenant>/. Needs --http. With
+                            --listen it serves the pg wire as well, where the
+                            database in the startup packet is the tenant
+                            (psql postgres://host:port/acme)
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
+      --no-mmap             read the file into memory instead of mapping it.
+                            Mapping leaves the documents in the file and
+                            holds only what is derived from them; read it
+                            instead over a network file system, or to have
+                            --max-memory cover the data as well
 
   -W, --password <password> turn on password authentication
       --password-file <path> read the password from a file (argv shows up in `ps`)
@@ -95,10 +102,15 @@ usage: fenec-pg [options]
       --replication-token <value>  turn replication on: /_replication on the
                             HTTP listener feeds replicas the writes on this
                             file's disk, reports status, and promotes a
-                            replica. Needs --file; refuses --sync off. Also
-                            read from FENEC_REPLICATION_TOKEN
-      --replica-of <url>    follow the primary at http://host:port into
-                            --file, and take no write of its own (25006)
+                            replica. With --dir every tenant has one of its
+                            own under /t/<tenant>/_replication. Refuses
+                            --sync off. Also read from
+                            FENEC_REPLICATION_TOKEN
+      --replica-of <url>    follow the primary at http://host:port and take
+                            no write of its own (25006). With --dir it
+                            follows that node's tenant of the same name, and
+                            a failover promotes them one at a time
+                            (POST /_admin/tenants/<t>/promote)
       --promote             open a replica's file to take writes: its history
                             forks here. A replica's file opens only with
                             --replica-of or this
@@ -166,6 +178,10 @@ fn main() {
     let mut cfg = Config::default();
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
+    let mut mmap = true;
+    // `--dir` opens the pg listener only when an address was named: a node
+    // that serves tenants over HTTP alone should not take the default port.
+    let mut listen_given = false;
     let mut idle_close = Duration::from_secs(300);
     let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
     let mut method = "scram".to_string();
@@ -193,7 +209,10 @@ fn main() {
     };
     while i < args.len() {
         match args[i].as_str() {
-            "--listen" | "-l" => cfg.addr = next(&mut i, "--listen"),
+            "--listen" | "-l" => {
+                cfg.addr = next(&mut i, "--listen");
+                listen_given = true;
+            }
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
             "--dir" => dir = Some(next(&mut i, "--dir")),
             "--admin-token" => http_cfg.admin_token = Some(next(&mut i, "--admin-token")),
@@ -300,7 +319,13 @@ fn main() {
                     .unwrap_or_else(|_| fail(&format!("--changes expects a number, got `{v}`")))
             }
             "--replication-token" => replication_token = Some(next(&mut i, "--replication-token")),
-            "--replica-of" => replica_of = Some(next(&mut i, "--replica-of")),
+            "--replica-of" => {
+                let url = next(&mut i, "--replica-of");
+                if let Err(e) = fenec_http::replication::Upstream::check_node(&url) {
+                    fail(&e);
+                }
+                replica_of = Some(url)
+            }
             "--promote" => promote = true,
             "--replication-buffer" => {
                 let v = next(&mut i, "--replication-buffer");
@@ -310,6 +335,7 @@ fn main() {
                 replication_buffer = mib << 20;
             }
             "--ping" => ping = true,
+            "--no-mmap" => mmap = false,
             "--insecure" => cfg.insecure = true,
             "--help" | "-h" => {
                 fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
@@ -353,8 +379,8 @@ fn main() {
     if replica_of.is_some() && promote {
         fail("--replica-of follows a primary and --promote stops following: pick one");
     }
-    if (replicating || promote) && file.is_none() {
-        fail("replication works on a file: give --file");
+    if (replicating || promote) && file.is_none() && dir.is_none() {
+        fail("replication works on a file or a directory of them: give --file or --dir");
     }
     if replicating && cfg.sync == SyncPolicy::Off {
         fail(
@@ -366,9 +392,24 @@ fn main() {
         fail("replicas are fed over HTTP: give --http <address>");
     }
 
+    cfg.auth = match &password {
+        Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
+        Some(pw) => match Auth::parse(&method, pw) {
+            Ok(a) => a,
+            Err(e) => fail(&e),
+        },
+        None => Auth::Trust,
+    };
+
     if let Some(dir) = dir {
-        if replicating || promote {
-            fail("replication is per file: a --dir node cannot have replicas yet");
+        if promote {
+            fail(
+                "a tenant is promoted one at a time, by the router: \
+                 POST /_admin/tenants/<tenant>/promote",
+            );
+        }
+        if replica_of.is_some() && !replicating {
+            fail("--replica-of needs --replication-token: the node it follows asks for it");
         }
         if file.is_some() {
             fail(
@@ -386,28 +427,29 @@ fn main() {
         http_cfg.max_connections = cfg.max_connections;
         http_cfg.idle_timeout = cfg.idle_timeout;
         http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
-        serve_dir(&dir, http_cfg, &cfg, idle_close);
+        let repl = replication_token.filter(|_| replicating).map(|token| {
+            fenec_http::tenants::Replicated {
+                token,
+                buffer: replication_buffer,
+                upstream: replica_of.clone(),
+                sync_on_write: cfg.sync == SyncPolicy::Always,
+            }
+        });
+        serve_dir(&dir, http_cfg, cfg, idle_close, listen_given, mmap, repl);
     }
-
-    cfg.auth = match &password {
-        Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
-        Some(pw) => match Auth::parse(&method, pw) {
-            Ok(a) => a,
-            Err(e) => fail(&e),
-        },
-        None => Auth::Trust,
-    };
 
     let mut feed = None;
     let mut db = match &file {
         Some(path) => {
             let opened = if replicating {
-                replication::open(path, replication_buffer).map(|(db, f)| {
+                replication::open_with(path, replication_buffer, mmap).map(|(db, f)| {
                     feed = Some(f);
                     db
                 })
-            } else {
+            } else if mmap {
                 fenec_core::fs::open(path)
+            } else {
+                fenec_core::fs::open_in_memory(path)
             };
             match opened {
                 Ok(db) => {
@@ -438,7 +480,14 @@ fn main() {
     }
 
     if let Some(path) = &file {
-        if let Err(e) = settle_history(&mut db, path, replicating, replica_of.is_some(), promote) {
+        if let Err(e) = replication::settle_history(
+            &mut db,
+            path,
+            ("a replica's file", "writes"),
+            replicating,
+            replica_of.is_some(),
+            promote,
+        ) {
             fenec_http::log!("{e}");
             std::process::exit(1);
         }
@@ -457,10 +506,7 @@ fn main() {
             cfg.sync == SyncPolicy::Always,
         )
         .unwrap_or_else(|e| fail(&e));
-        let run = Arc::clone(&f);
-        std::thread::Builder::new()
-            .name("fenec-replica".into())
-            .spawn(move || run.run())
+        f.start("fenec-replica".into())
             .unwrap_or_else(|e| fail(&format!("could not start the replica thread: {e}")));
         fenec_http::log!("following: {url}");
         f
@@ -536,71 +582,71 @@ fn main() {
     }
 }
 
-/// Puts the file's history where the flags say it has to be before anyone
-/// is served. A replica's file opens as a primary only when `--promote` says
-/// so -- its history forks there, so no replica of the old primary is
-/// streamed the new one's writes as if they were its own. A replica marks
-/// its file as one before it has heard from its primary, and a primary gets
-/// a history of its own the first time it has replicas: the root history is
-/// every database's.
-fn settle_history(
-    db: &mut Database,
-    path: &str,
-    replicating: bool,
-    follows: bool,
-    promote: bool,
-) -> std::result::Result<(), String> {
-    let following = db.history().following;
-    let result = if follows {
-        let lineage = db.history().lineage.clone();
-        db.follow(lineage)
-    } else if promote {
-        if !following {
-            fenec_http::log!("--promote: {path} is not a replica's file; it opens as it is");
-            return Ok(());
-        }
-        let id = fresh_id();
-        let r = db.fork(id).and_then(|_| db.sync());
-        if r.is_ok() {
-            fenec_http::log!(
-                "promoted: {path} takes writes from change {} on, history {id:016x}",
-                db.change_seq()
-            );
-        }
-        r
-    } else if following {
-        return Err(format!(
-            "{path} is a replica's file. Start it with --replica-of <primary> to go on \
-             following, or with --promote to take writes -- its history forks there"
-        ));
-    } else if replicating && db.history().lineage.is_empty() {
-        db.fork(fresh_id()).and_then(|_| db.sync())
-    } else {
-        Ok(())
-    };
-    result.map_err(|e| format!("could not settle {path}'s history: {e}"))
-}
-
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
 /// thread the syncer that a single file gets from the pg server -- periodic
 /// sync, idle close, and on the shutdown signal a final sync and checkpoint
 /// of every open tenant.
-fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: Duration) -> ! {
+fn serve_dir(
+    dir: &str,
+    http_cfg: fenec_http::Config,
+    cfg: Config,
+    idle_close: Duration,
+    pg: bool,
+    mmap: bool,
+    repl: Option<fenec_http::tenants::Replicated>,
+) -> ! {
     let tenants = match Tenants::new(dir) {
         Ok(t) => t,
         Err(e) => fail(&format!("could not use {dir}: {e}")),
     };
-    let tenants = Arc::new(
-        tenants
-            .with_setup(|db| db.install_plugin(&PgPlugin))
-            .with_change_capacity(http_cfg.change_capacity)
-            .with_max_memory(cfg.max_memory)
-            .with_checkpoint(cfg.checkpoint_on_exit),
-    );
+    let mut tenants = tenants
+        .with_setup(|db| db.install_plugin(&PgPlugin))
+        .with_change_capacity(http_cfg.change_capacity)
+        .with_max_memory(cfg.max_memory)
+        .with_checkpoint(cfg.checkpoint_on_exit)
+        .with_mmap(mmap);
+    let follows = repl.as_ref().and_then(|r| r.upstream.clone());
+    if let Some(r) = repl {
+        tenants = tenants.with_replication(r);
+    }
+    let tenants = Arc::new(tenants);
     fenec_http::log!(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
+    // A replica node's tenants have to be open to follow: nothing else
+    // touches them there, and a follower that is not running is a replica
+    // falling behind. Opening one starts its follower.
+    if let Some(url) = &follows {
+        fenec_http::log!("following the tenants of: {url}");
+        for name in tenants.names() {
+            if let Err(Refused(status, msg)) = tenants.get(&name) {
+                fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
+            }
+        }
+    }
+
+    // The pg listener, when an address was named: there the database in the
+    // startup packet is the tenant (`psql postgres://host:port/acme`). It
+    // runs no syncer -- the loop below is this node's, over every open
+    // tenant -- and the same --password guards it as guards a file server.
+    let sync = cfg.sync;
+    if pg {
+        let server = Server::with_tenants(Arc::clone(&tenants), cfg);
+        let listener = match server.bind() {
+            Ok(l) => l,
+            Err(e) => fail(&format!("could not open the pg endpoint: {e}")),
+        };
+        std::thread::Builder::new()
+            .name("fenec-pg".into())
+            .spawn(move || {
+                if let Err(e) = server.serve_on(listener) {
+                    fenec_http::log!("pg server error: {e}");
+                    std::process::exit(1);
+                }
+            })
+            .unwrap_or_else(|e| fail(&format!("could not start the pg thread: {e}")));
+    }
 
     let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
     let listener = match http_server.bind() {
@@ -620,7 +666,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    let tick = match cfg.sync {
+    let tick = match sync {
         SyncPolicy::Interval(d) if !d.is_zero() => d,
         _ => Duration::from_millis(200),
     };
@@ -633,7 +679,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(0);
         }
-        if matches!(cfg.sync, SyncPolicy::Interval(_)) {
+        if matches!(sync, SyncPolicy::Interval(_)) {
             tenants.sync_dirty();
         }
         if !idle_close.is_zero() {

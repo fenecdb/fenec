@@ -70,10 +70,21 @@ node's memory.</p>
 <h2>The node: <code>fenec-pg --dir</code></h2>
 
 <p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
-files over HTTP instead of one file. It is still one process per directory — the
+files instead of one file. It is still one process per directory — the
 single-writer rule is per file, and one process owning all of them is what keeps
-it. The PostgreSQL listener is off in this mode; <code>--http</code> is
-required.</p>
+it. <code>--http</code> is required; <code>--listen</code> opens the PostgreSQL
+wire as well, where the database in the startup packet is the tenant:</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
+psql postgres://fenec@127.0.0.1:5433/acme
+</pre>
+
+<p>A session is bound to its tenant for its lifetime, and the tenant is looked
+up again for every statement — so one created after the session opened is
+there for it, one closed as idle reopens, one deleted meanwhile answers
+<code>3D000</code> as an unknown database does, and one frozen for a move
+refuses writes with <code>57P03</code> while its reads go on. A name that is
+no tenant of this node is refused at connect.</p>
 
 <ul>
   <li><b>Opened on first use.</b> Open cost is proportional to the file, so a
@@ -111,6 +122,8 @@ image:</p>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>a primary's file follows the node's <code>--replica-of</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -208,19 +221,113 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
 <h2>What it does not do</h2>
 
 <ul>
-  <li><b>No replicas of tenants.</b> A single file has
-    <a href="/docs/replication">read replicas</a>; a <code>--dir</code> node
-    does not yet, so a node that is down takes its tenants with it and the
-    router answers 502 for them until it is back. Tenant files are ordinary
-    files, so backups are file copies.</li>
+  <li><b>Failover is asked for, not decided.</b> The router does not watch
+    the nodes and promote on its own: a router that guesses wrong about a
+    node it cannot reach would have two primaries for one tenant. Someone
+    who knows the node is gone calls the failover.</li>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
-  <li><b>No PostgreSQL wire in <code>--dir</code> mode.</b> Picking the tenant
-    from the startup packet's <code>database</code> is possible and not done.</li>
-  <li><b>One router.</b> Its directory is a single-writer file like any other;
-    several routers would need a shared one.</li>
+  <li><b>One router takes changes at a time.</b> A standby follows its
+    directory and forwards from the same placements, but only the primary
+    places, moves and deletes; promoting the standby is a decision someone
+    makes, not a vote the routers hold.</li>
 </ul>
+
+<h2>Replicas of tenants</h2>
+
+<p>Every tenant file has a feed of its own, so a node's tenants are followed
+by another node's — the standby — tenant by tenant, through
+<code>/t/&lt;tenant&gt;/_replication</code>:</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --replication-token r1 --sync always
+fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 \
+         --replication-token r1 --replica-of http://127.0.0.1:8081
+
+curl -X PUT localhost:8090/_shard/nodes/n1 \
+  -d '{"addr":"127.0.0.1:8081","token":"a1","standby":"n2"}'
+</pre>
+
+<p>The router creates a tenant on both, so the replica has a file to follow
+into, and deletes it from both; a move takes the replica with it. Recording a
+pair gives the standby a following copy of every tenant already on the node.
+A replica node opens every tenant it holds at start and keeps them open — a
+follower that is not running is a replica falling behind — so
+<code>--idle-close</code> does not apply to them. No tenant is placed on a
+standby or moved to one: it would open there as a replica of a tenant the
+other node does not have.</p>
+
+<p>A tenant's role is its file's, not the node's. On a node started with
+<code>--replica-of</code>, a replica's file follows and a new one follows,
+but a primary's file stays a primary — a tenant a failover promoted there
+included, whatever the node restarts with. Were every file on such a node
+made to follow, a restart with the same flags would undo the failover, and
+the old primary's copy would wipe the writes taken since.</p>
+
+<p>When a node is gone, <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
+promotes its tenants on the standby, one at a time, and points the directory
+at it. They are separate databases: there is nothing to make atomic between
+them, so the answer lists what was promoted and what was not.</p>
+
+<pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
+{"node":"n1","to":"n2","promoted":["acme","beta"],"failed":[]}
+</pre>
+
+<p>Measured with <code>make shard-bench</code>, node, standby and router in
+one process on loopback: a write through the router is answered in 2.93 ms
+(<code>--sync always</code> on the primary, which is an fsync a write) and is
+on the standby 0.089 ms later, 0.448 ms at p99 — timed by reading the
+standby's own copy. A failover of 20 tenants took 60 ms, 3.0 ms each, and the
+first write on the promoted node 0.18 ms.</p>
+
+<p>A promoted tenant's history forks where the replica stood, so what the
+primary had not sent is gone — the same trade a database's failover makes,
+and <code>--sync always</code> on the primary is what makes it none. A
+failover that moved every tenant ends the pair; one that left a tenant behind
+keeps it, so a second call can take it. The old node rejoins as the standby of
+the new one: point its <code>--replica-of</code> there and record the pair the
+other way round. The router then has each of its tenants follow
+(<code>POST /_admin/tenants/&lt;t&gt;/follow</code>) — its own files are a
+primary's, and follow only when told to — and the writes it took that were
+never sent are gone.</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --replication-token r1 --replica-of http://127.0.0.1:8082
+curl -X PUT localhost:8090/_shard/nodes/n2 \
+  -d '{"addr":"127.0.0.1:8082","token":"a2","standby":"n1"}'
+{"node":"n2","unreplicated":[]}
+</pre>
+
+<p>A tenant file that still follows on a node that follows nobody — a failover
+that left it behind, and the node restarted without <code>--replica-of</code>
+— refuses writes, says so in the log, and is promoted where it stands with
+<code>POST /_admin/tenants/&lt;t&gt;/promote</code>.</p>
+
+<h2>A standby router</h2>
+
+<p>The directory is a fenecdb file, so it replicates the way any other does.
+A second router follows it and forwards from the same placements; the
+primary is the one that changes it.</p>
+
+<pre data-lang="bash">fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replication-token r1
+fenec-shard --listen 127.0.0.1:8091 --directory standby.fenec --replication-token r1 \
+            --replica-of http://127.0.0.1:8090
+</pre>
+
+<p>Both forward <code>/t/&lt;tenant&gt;/...</code>; the standby's
+<code>/_shard/</code> answers reads and refuses changes with 409, since its
+directory takes no write of its own. When the primary is gone,
+<code>POST /_replication/promote</code> on the standby forks its directory's
+history and it starts taking them — the same promotion a replica of a
+database gets, and the same rule after it: the old primary rejoins with
+<code>--replica-of</code> pointed at the new one, or its file is refused.</p>
+
+<p>A standby is behind by whatever the last directory change has not reached
+it yet, which is one write and a sync: placements change when someone places,
+moves or deletes a tenant, not when clients read and write. Nothing of the
+tenants' own data goes through the router's directory, so a standby that is a
+second behind still forwards every request correctly.</p>
 
 <h2>Tokens</h2>
 
