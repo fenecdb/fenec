@@ -1,8 +1,10 @@
 //! A quantized index (`@hnsw(..., quant=int8|bit)`) holds codes rather than
 //! vectors. The codes find the candidates and the documents' own vectors put
-//! them in order, so `near` answers in exact distances, `exact` reads every
-//! vector, a filtered set under the ANN budget is searched exactly, and a
-//! checkpoint keeps a graph over codes as it keeps one over vectors.
+//! them in order, so `near` answers in exact distances; an int8 code reads
+//! only the candidates that can still make the page, `exact` reads every
+//! vector, a filtered set under the ANN budget is ranked by its codes and
+//! reads the beam's worth, and a checkpoint keeps a graph over codes as it
+//! keeps one over vectors.
 
 use fenec_core::prelude::*;
 
@@ -99,6 +101,28 @@ fn queries() -> Vec<[Value; 1]> {
         .collect()
 }
 
+/// How many documents' vectors `sql` read, and of how many candidates, as
+/// `explain` states it: "near: 12 of the 100 candidates of the codes read".
+fn reads(db: &Database, sql: &str, params: &[Value]) -> (usize, usize) {
+    let stmt = fenec_ql::parse_one(&format!("explain {sql}")).expect("parse");
+    let r = db.query(&stmt, params).unwrap();
+    for row in &r.rows().unwrap().rows {
+        let [Value::Text(step)] = &row.values[..] else {
+            continue;
+        };
+        let Some((read, rest)) = step
+            .strip_prefix("near: ")
+            .and_then(|s| s.split_once(" of the "))
+        else {
+            continue;
+        };
+        if let Some((of, _)) = rest.split_once(" candidates of the codes read") {
+            return (read.parse().unwrap(), of.parse().unwrap());
+        }
+    }
+    panic!("{sql}: no step read the documents' vectors");
+}
+
 /// The share of `exact`'s rows `got` found; every score `got` gave for a row
 /// both hold must be the exact one, since the documents' vectors ordered it.
 fn found(got: &[(u64, f32)], exact: &[(u64, f32)]) -> usize {
@@ -165,7 +189,8 @@ fn a_filtered_near_over_codes() {
             r#"get docs where kind = "a" near v $1 exact limit 10"#,
             q,
         );
-        // A thousand rows, under the budget of 100 x 32: searched exactly.
+        // A thousand rows, under the budget of 100 x 32: ranked by their
+        // codes, and what can make the page read.
         let got = hits(db, r#"get docs where kind = "a" near v $1 limit 10"#, q);
         assert_eq!(found(&got, &exact), 10);
         // A beam of 10 makes the budget 320: the ANN, each candidate tested,
@@ -183,6 +208,78 @@ fn a_filtered_near_over_codes() {
             q,
         );
         assert_eq!(found(&got, &scores), got.len());
+    }
+}
+
+/// An int8 code knows how far off its estimate can be, so a candidate of
+/// the beam is read only while it can still make the page, nearest estimate
+/// first. What is left unread changes nothing: a page as long as the beam
+/// reads all of it, and its first ten are the ten -- under every metric the
+/// codes take. Bit codes bound nothing and read the whole beam.
+#[test]
+fn a_code_reads_only_what_can_make_the_page() {
+    for (index, ef, most) in [
+        // Measured: 1 421, 1 157 and 1 148 of the 10 000 candidates of a
+        // hundred queries.
+        ("@hnsw(cosine, quant=int8)", 100, 0.25),
+        ("@hnsw(l2, quant=int8)", 100, 0.25),
+        ("@hnsw(dot, quant=int8)", 100, 0.25),
+        ("@hnsw(cosine, quant=bit)", 400, 1.0),
+    ] {
+        let own;
+        let db = match index {
+            "@hnsw(cosine, quant=int8)" | "@hnsw(cosine, quant=bit)" => shared(index),
+            _ => {
+                own = filled(index);
+                &own
+            }
+        };
+        let (mut read_all, mut beam_all) = (0, 0);
+        for q in queries() {
+            let page = "get docs near v $1 limit 10";
+            let beam = &format!("get docs near v $1 limit {ef}");
+            let whole = hits(db, beam, &q);
+            assert_eq!(hits(db, page, &q), whole[..10], "{index}");
+            let (read, of) = reads(db, page, &q);
+            assert_eq!(reads(db, beam, &q), (of, of), "{index}");
+            read_all += read;
+            beam_all += of;
+        }
+        assert!(
+            read_all as f64 <= most * beam_all as f64,
+            "{index}: {read_all} of {beam_all} candidates read"
+        );
+    }
+}
+
+/// A filtered set under the ANN budget is ranked by its codes, every row of
+/// it, and the beam's worth of the nearest put in order as a walk's are:
+/// the thousand rows of a kind read at most a beam, not the thousand.
+#[test]
+fn a_small_set_reads_the_beam_rather_than_the_set() {
+    let plain = shared("@hnsw(cosine)");
+    // Measured: every one of the exact 200 found both ways, int8 codes
+    // reading 239 vectors over the twenty queries, bit codes 8 000.
+    for (index, beam, least, most) in [
+        ("@hnsw(cosine, quant=int8)", 100, 200, 600),
+        ("@hnsw(cosine, quant=bit)", 400, 190, 8000),
+    ] {
+        let db = shared(index);
+        let sql = r#"get docs where kind = "a" near v $1 limit 10"#;
+        let (mut hit, mut read_all) = (0, 0);
+        for q in queries().iter().take(20) {
+            let exact = hits(
+                plain,
+                r#"get docs where kind = "a" near v $1 exact limit 10"#,
+                q,
+            );
+            hit += found(&hits(db, sql, q), &exact);
+            let (read, of) = reads(db, sql, q);
+            assert_eq!(of, beam, "{index}");
+            read_all += read;
+        }
+        assert!(hit >= least, "{index}: {hit} of the exact 200");
+        assert!(read_all <= most, "{index}: {read_all} read");
     }
 }
 

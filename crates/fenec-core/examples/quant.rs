@@ -1,7 +1,7 @@
 //! Quantized vector indexes at scale: `make quant-bench`.
 //!
 //! ```text
-//! cargo run --release -p fenec-core --example quant -- [N] [DIM] [none,int8,bit] [--rank R] [--f32]
+//! cargo run --release -p fenec-core --example quant -- [N] [DIM] [none,int8,bit] [--rank R] [--f32] [--filter ROWS]
 //! ```
 //!
 //! One database for each quantization, in turn, over the same N vectors,
@@ -9,8 +9,12 @@
 //! the process holds afterwards (a counting allocator: on a machine short of
 //! memory the resident set is whatever the pager left), the arena, and
 //! recall@10 and latency of `near` over held-out queries at beams of 100, 200
-//! and 400. The exact ten are found once, by brute force over the vectors as
-//! the store holds them.
+//! and 400, with how many documents' vectors a query read. The exact ten are
+//! found once, by brute force over the vectors as the store holds them.
+//!
+//! `--filter ROWS` puts each row in a group of about ROWS, `g int @hash`,
+//! and measures `near` over one group besides: a set under the ANN budget
+//! of `ef x 2m`, which is searched without the walk.
 //!
 //! The vectors gather around 64 centres. By default each is its centre plus
 //! noise in every dimension, the generator `bench` uses -- as many degrees of
@@ -158,7 +162,10 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 
 /// The exact ten of each query, by cosine over the stored vectors: a range
 /// of the rows to a thread, each keeping its own ten, merged at the end.
-fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<u64>> {
+///
+/// With `groups`, each query's exact ten within its own group follow the
+/// queries' own, query `q` in group `q % groups` as row `i` is in `i % groups`.
+fn truth(data: &Data, n: u64, queries: &[Vec<f32>], groups: u64) -> Vec<Vec<u64>> {
     let qs: Vec<Vec<f32>> = queries.iter().map(|q| unit(q)).collect();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
     let per = n.div_ceil(threads);
@@ -167,17 +174,24 @@ fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<u64>> {
             .map(|t| {
                 let qs = &qs;
                 s.spawn(move || {
-                    let mut best: Vec<Vec<(f32, u64)>> = vec![Vec::new(); qs.len()];
+                    let lists = if groups > 0 { 2 } else { 1 };
+                    let mut best: Vec<Vec<(f32, u64)>> = vec![Vec::new(); qs.len() * lists];
                     let mut v = Vec::new();
                     for i in t * per..((t + 1) * per).min(n) {
                         data.stored(i, &mut v);
                         let norm = dot(&v, &v).sqrt();
-                        for (q, b) in qs.iter().zip(best.iter_mut()) {
+                        for (j, q) in qs.iter().enumerate() {
                             let sim = dot(q, &v) / norm;
-                            if b.len() < 10 || sim > b[9].0 {
-                                b.push((sim, i + 1));
-                                b.sort_by(|x, y| y.0.total_cmp(&x.0));
-                                b.truncate(10);
+                            let keep = |b: &mut Vec<(f32, u64)>| {
+                                if b.len() < 10 || sim > b[9].0 {
+                                    b.push((sim, i + 1));
+                                    b.sort_by(|x, y| y.0.total_cmp(&x.0));
+                                    b.truncate(10);
+                                }
+                            };
+                            keep(&mut best[j]);
+                            if groups > 0 && i % groups == j as u64 % groups {
+                                keep(&mut best[qs.len() + j]);
                             }
                         }
                     }
@@ -187,7 +201,7 @@ fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<u64>> {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    (0..queries.len())
+    (0..parts[0].len())
         .map(|q| {
             let mut all: Vec<(f32, u64)> = parts.iter().flat_map(|p| p[q].clone()).collect();
             all.sort_by(|x, y| y.0.total_cmp(&x.0));
@@ -196,8 +210,66 @@ fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<u64>> {
         .collect()
 }
 
+/// How many documents' vectors the statement read, as `explain` states it:
+/// "near: 12 of the 100 candidates of the codes read ...". None when the
+/// index holds vectors and reads none.
+fn reads(db: &Database, stmt: &Statement, params: &[Value]) -> Option<usize> {
+    let Statement::Select(sel) = stmt else {
+        return None;
+    };
+    let r = db.query(&Statement::Explain(sel.clone()), params).unwrap();
+    r.rows()
+        .unwrap()
+        .rows
+        .iter()
+        .find_map(|row| match &row.values[..] {
+            [Value::Text(s)] if s.contains("candidates of the codes") => s
+                .trim_start_matches("near: ")
+                .split(' ')
+                .next()
+                .and_then(|n| n.parse().ok()),
+            _ => None,
+        })
+}
+
 fn pct(v: &[f64], p: f64) -> f64 {
     v[((v.len() as f64 - 1.0) * p) as usize]
+}
+
+/// recall@10 of `near` over the queries against `want`, the latency of a
+/// second pass, and the vectors a query read on average.
+fn measure(
+    db: &Database,
+    near: &Statement,
+    queries: &[Vec<f32>],
+    want: &[Vec<u64>],
+    group: impl Fn(usize) -> Option<Value>,
+) -> String {
+    let (mut found, mut read, mut lat) = (0, 0, Vec::new());
+    for pass in 0..2 {
+        for (i, (q, want)) in queries.iter().zip(want).enumerate() {
+            let mut params = vec![Value::Vector(q.clone())];
+            params.extend(group(i));
+            let t = Instant::now();
+            let r = db.query(near, &params).unwrap();
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            if pass == 0 {
+                let rows = &r.rows().unwrap().rows;
+                found += rows.iter().filter(|row| want.contains(&row.id)).count();
+                read += reads(db, near, &params).unwrap_or(0);
+            } else {
+                lat.push(ms);
+            }
+        }
+    }
+    lat.sort_by(f64::total_cmp);
+    format!(
+        "recall@10 {:.3}   p50 {:.3} ms, p99 {:.3} ms   {:.1} vectors read",
+        found as f64 / (queries.len() * 10) as f64,
+        pct(&lat, 0.5),
+        pct(&lat, 0.99),
+        read as f64 / queries.len() as f64,
+    )
 }
 
 fn main() {
@@ -217,6 +289,16 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let rows: u64 = args
+        .iter()
+        .position(|a| a == "--filter")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let groups = match rows {
+        0 => 0,
+        r => (n / r).max(1),
+    };
     let data = Data::new(dim, rank, half);
     let prec = if half { ", f16" } else { "" };
     let spread = match rank {
@@ -236,7 +318,8 @@ fn main() {
         })
         .collect();
     let t = Instant::now();
-    let exact = truth(&data, n, &queries);
+    let mut exact = truth(&data, n, &queries, groups);
+    let within = exact.split_off(queries.len());
     println!(
         "exact ten   {} queries by brute force in {:.1} s\n",
         queries.len(),
@@ -250,7 +333,9 @@ fn main() {
         };
         let base = heap_mb();
         let mut db = Database::new();
-        let create = format!("create collection docs (v vector<{dim}{prec}> @hnsw(cosine{quant}))");
+        let group = if groups > 0 { "g int @hash, " } else { "" };
+        let create =
+            format!("create collection docs ({group}v vector<{dim}{prec}> @hnsw(cosine{quant}))");
         db.execute(&fenec_ql::parse_one(&create).unwrap()).unwrap();
 
         let t = Instant::now();
@@ -261,7 +346,12 @@ fn main() {
                 .map(|j| {
                     let mut v = Vec::with_capacity(dim);
                     data.vector(j, &mut v);
-                    vec![("v".to_string(), Expr::Lit(Value::Vector(v)))]
+                    let mut doc = vec![("v".to_string(), Expr::Lit(Value::Vector(v)))];
+                    if groups > 0 {
+                        let g = Value::Int((j % groups) as i64);
+                        doc.push(("g".to_string(), Expr::Lit(g)));
+                    }
+                    doc
                 })
                 .collect();
             db.execute(&Statement::Put {
@@ -282,34 +372,17 @@ fn main() {
             let near =
                 fenec_ql::parse_one(&format!("get docs select id near v $1 ef {ef} limit 10"))
                     .unwrap();
-            let mut found = 0;
-            let mut lat = Vec::new();
-            for pass in 0..2 {
-                for (q, want) in queries.iter().zip(&exact) {
-                    let params = [Value::Vector(q.clone())];
-                    let t = Instant::now();
-                    let r = db.query(&near, &params).unwrap();
-                    let ms = t.elapsed().as_secs_f64() * 1e3;
-                    if pass == 0 {
-                        found += r
-                            .rows()
-                            .unwrap()
-                            .rows
-                            .iter()
-                            .filter(|row| want.contains(&row.id))
-                            .count();
-                    } else {
-                        lat.push(ms);
-                    }
-                }
-            }
-            lat.sort_by(f64::total_cmp);
-            println!(
-                "      ef {ef:3}   recall@10 {:.3}   p50 {:.3} ms, p99 {:.3} ms",
-                found as f64 / (queries.len() * 10) as f64,
-                pct(&lat, 0.5),
-                pct(&lat, 0.99),
-            );
+            let run = measure(&db, &near, &queries, &exact, |_| None);
+            println!("      ef {ef:3}   {run}");
+        }
+        if let Some(per) = n.checked_div(groups) {
+            let near =
+                fenec_ql::parse_one("get docs select id where g = $2 near v $1 ef 100 limit 10")
+                    .unwrap();
+            let run = measure(&db, &near, &queries, &within, |q| {
+                Some(Value::Int((q as u64 % groups) as i64))
+            });
+            println!("      g = one of {groups}, {per} rows, ef 100   {run}");
         }
         drop(db);
     }

@@ -2897,9 +2897,9 @@ impl Database {
                         ids.len()
                     )
                 });
-                sp.search_ids(qv, want, &ids)?
+                sp.search_ids(qv, want, near.ef, &ids)?
             } else {
-                let hits = sp.search(qv, want, near.ef, &accept)?;
+                let hits = sp.search(qv, want, near.ef, &mut |id| Ok(accept(id)))?;
                 plan(|| {
                     format!(
                         "near: ANN over {field}, the set as a test, {} kept",
@@ -2913,27 +2913,20 @@ impl Database {
                             ids.len()
                         )
                     });
-                    sp.search_ids(qv, want, &ids)?
+                    sp.search_ids(qv, want, near.ef, &ids)?
                 } else {
                     hits
                 }
             });
         }
         // More rows match than the budget: the ANN, testing each candidate in
-        // distance order as `search` would test membership. The beam is the
-        // one `search` would use for `want`, so the candidates are the same.
-        let ef = near.ef.unwrap_or(ix.spec.ef_search);
-        let mut hits = Vec::with_capacity(want);
+        // distance order as `search` would test membership -- over codes
+        // only those still able to make the page (`Space::order`).
         let mut tested = 0;
-        for (id, score) in sp.search(qv, want.max(ef), near.ef, &|_| true)? {
-            if hits.len() == want {
-                break;
-            }
+        let hits = sp.search(qv, want, near.ef, &mut |id| {
             tested += 1;
-            if c.store.contains(id) && matches(id)? {
-                hits.push((id, score));
-            }
-        }
+            Ok(c.store.contains(id) && matches(id)?)
+        })?;
         plan(|| {
             format!(
                 "near: ANN over {field}, {}, {tested} candidates tested, {} kept",
@@ -2955,7 +2948,7 @@ impl Database {
                         ids.len()
                     )
                 });
-                return sp.search_ids(qv, want, &ids);
+                return sp.search_ids(qv, want, near.ef, &ids);
             }
         }
         Ok(hits)
@@ -3138,7 +3131,7 @@ impl Database {
                     if exact {
                         break sp.search_exact(&qv, want, &|_| true)?;
                     }
-                    let hits = sp.search(&qv, want, ef, &|_| true)?;
+                    let hits = sp.search(&qv, want, ef, &mut |_| Ok(true))?;
                     match past_tombstones(ix, near, want, hits.len(), widened) {
                         Short::Whole => break hits,
                         Short::Wider(wider) => (ef, widened) = (Some(wider), true),
@@ -3394,13 +3387,12 @@ impl Database {
             )
         });
         plan(|| format!("rerank: {}, exact distance read from the store", rr.field));
-        order_exactly(
-            &c.store,
-            pos,
-            metric,
-            &qv,
-            &mut hits.into_iter().map(|h| h.0),
-            want,
+        let mut ids = hits.into_iter().map(|h| (h.0, f32::NEG_INFINITY));
+        Ok(
+            order_exactly(&c.store, pos, metric, &qv, &mut ids, want, &mut |_| {
+                Ok(true)
+            })?
+            .0,
         )
     }
 
@@ -4601,24 +4593,39 @@ fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
 }
 
 /// The `k` of `ids` nearest `q` by the documents' own vectors, read out of
-/// the store: nearest first, ties to the lower id so the answer is stable.
-/// How `match ... rerank` orders the text index's candidates, and `near` the
-/// candidates a quantized index found.
+/// the store, that `keep` passes: nearest first, ties to the lower id so the
+/// answer is stable. How `match ... rerank` orders the text index's
+/// candidates, and `near` the candidates a quantized index found.
+///
+/// Each id comes with the nearest its vector can lie (`VectorIndex::floor`),
+/// and one that cannot come nearer than the `k` held already is neither
+/// tested nor read; how many were read is the second half of the answer.
 fn order_exactly(
     store: &Store,
     pos: usize,
     metric: Metric,
     q: &[f32],
-    ids: &mut dyn Iterator<Item = DocId>,
+    ids: &mut dyn Iterator<Item = (DocId, f32)>,
     k: usize,
-) -> Result<Vec<(DocId, f32)>> {
+    keep: &mut dyn FnMut(DocId) -> Result<bool>,
+) -> Result<(Vec<(DocId, f32)>, usize)> {
     let q = match metric {
         Metric::Cosine => normalized(q),
         _ => q.to_vec(),
     };
+    // Distances held negated, so the engine's one sort puts the nearest
+    // first, and cut back to the `k` nearest whenever there are twice as
+    // many: `worst` is then what a candidate has to beat, and a scan of
+    // every row holds 2k of them rather than all.
     let mut out: Vec<(DocId, f32)> = Vec::new();
+    let mut worst = f32::INFINITY;
+    let mut read = 0;
     let mut buf: Vec<f32> = Vec::with_capacity(q.len());
-    for id in ids {
+    for (id, floor) in ids {
+        if floor > worst || !keep(id)? {
+            continue;
+        }
+        read += 1;
         // A document without a vector cannot be ordered.
         if !store.read_vector_into(id, pos, &mut buf)? || buf.len() != q.len() {
             continue;
@@ -4641,14 +4648,19 @@ fn order_exactly(
             }
             _ => distance(metric, &q, &buf),
         };
-        out.push((id, d));
+        out.push((id, -d));
+        if out.len() == k || out.len() == 2 * k {
+            out.sort_by(best_first);
+            out.truncate(k);
+            worst = -out[k - 1].1;
+        }
     }
-    out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out.sort_by(best_first);
     out.truncate(k);
     for h in &mut out {
-        h.1 = score_from_distance(metric, h.1);
+        h.1 = score_from_distance(metric, -h.1);
     }
-    Ok(out)
+    Ok((out, read))
 }
 
 /// What `near` searches: a vector index, and when the index holds codes
@@ -4671,56 +4683,96 @@ impl<'a> Space<'a> {
         Space { ix, exact }
     }
 
-    fn order(
-        &self,
-        (store, pos): (&Store, usize),
-        q: &[f32],
-        ids: &mut dyn Iterator<Item = DocId>,
-        k: usize,
-    ) -> Result<Vec<(DocId, f32)>> {
-        order_exactly(store, pos, self.ix.spec.metric, q, ids, k)
-    }
-
-    /// [`VectorIndex::search`]; over codes, every candidate of the beam
-    /// ordered again, and the first `k` of them. One call to the index
-    /// either way: a second one in the other branch doubled its inlined
-    /// body in the browser module.
+    /// The `k` nearest the walk finds that `keep` passes, over a beam `ef`
+    /// wide: the beam's candidates tested in order (`order`). One call to
+    /// the index either way: a second one in the other branch doubled its
+    /// inlined body in the browser module.
     fn search(
         &self,
         q: &[f32],
         k: usize,
         ef: Option<usize>,
-        accept: &dyn Fn(DocId) -> bool,
+        keep: &mut dyn FnMut(DocId) -> Result<bool>,
     ) -> Result<Vec<(DocId, f32)>> {
-        let (n, ef) = match self.exact {
-            None => (k, ef),
-            Some(_) => {
-                let ef = ef.unwrap_or(self.ix.spec.ef_search).max(k);
-                (ef, Some(ef))
+        let n = ef.unwrap_or(self.ix.spec.ef_search).max(k);
+        let found = self.ix.search(q, n, ef, |_| true);
+        self.order(q, found, k, keep)
+    }
+
+    /// [`VectorIndex::search_ids`]: every row of `ids` measured, and over
+    /// codes the beam's worth of the nearest put in order as a walk's are.
+    /// Read whole, a filtered set under the budget of `ef x m0` was up to
+    /// 12 800 vectors a query at the beam bit codes take, 39 MB of them at
+    /// 768 dimensions; a set of 3 000 rows read 12 over int8 codes and 100
+    /// over bit codes at a beam of 100, and answered the same ten.
+    fn search_ids(
+        &self,
+        q: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        ids: &[DocId],
+    ) -> Result<Vec<(DocId, f32)>> {
+        let n = match self.exact {
+            None => k,
+            Some(_) => ef.unwrap_or(self.ix.spec.ef_search).max(k),
+        };
+        let found = self.ix.search_ids(q, n, ids);
+        self.order(q, found, k, &mut |_| Ok(true))
+    }
+
+    /// The first `k` of `found`, the index's candidates nearest first, that
+    /// `keep` passes. Over codes that order is an estimate: the candidates
+    /// are put in the order of the documents' own vectors, read nearest
+    /// estimate first and only while one can still make the `k` -- an int8
+    /// code knows how far off it can be (`VectorIndex::floor`), a bit code
+    /// does not and every candidate is read. Reading every one was a third
+    /// of an int8 query over a million vectors; at 100 000 x 768 a page of
+    /// ten reads 16.8 of a beam of 100, and of 400, with the same answer.
+    fn order(
+        &self,
+        q: &[f32],
+        found: Vec<(DocId, f32)>,
+        k: usize,
+        keep: &mut dyn FnMut(DocId) -> Result<bool>,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let ix = self.ix;
+        let Some((store, pos)) = self.exact else {
+            let mut hits = Vec::with_capacity(k);
+            for (id, score) in found {
+                if hits.len() == k {
+                    break;
+                }
+                if keep(id)? {
+                    hits.push((id, score));
+                }
             }
+            return Ok(hits);
         };
-        let found = self.ix.search(q, n, ef, accept);
-        let Some(exact) = self.exact else {
-            return Ok(found);
+        let n = found.len();
+        // The query as the codes measured it: unit length under cosine.
+        let reach = match ix.spec.metric {
+            Metric::Cosine => 1.0,
+            _ => norm(q),
         };
+        let (hits, read) = order_exactly(
+            store,
+            pos,
+            ix.spec.metric,
+            q,
+            &mut found
+                .into_iter()
+                .map(|(id, score)| (id, ix.floor(id, score, reach))),
+            k,
+            keep,
+        )?;
         plan(|| {
-            format!(
-                "near: the {} candidates of the codes ordered by exact distance read from the store",
-                found.len()
-            )
+            format!("near: {read} of the {n} candidates of the codes read from the store, in exact order")
         });
-        self.order(exact, q, &mut found.into_iter().map(|h| h.0), k)
+        Ok(hits)
     }
 
-    /// [`VectorIndex::search_ids`], exactly over codes as well.
-    fn search_ids(&self, q: &[f32], k: usize, ids: &[DocId]) -> Result<Vec<(DocId, f32)>> {
-        match self.exact {
-            None => Ok(self.ix.search_ids(q, k, ids)),
-            Some(exact) => self.order(exact, q, &mut ids.iter().copied(), k),
-        }
-    }
-
-    /// [`VectorIndex::search_exact`], exactly over codes as well.
+    /// [`VectorIndex::search_exact`], exactly over codes as well: every
+    /// vector read.
     fn search_exact(
         &self,
         q: &[f32],
@@ -4729,9 +4781,14 @@ impl<'a> Space<'a> {
     ) -> Result<Vec<(DocId, f32)>> {
         match self.exact {
             None => Ok(self.ix.search_exact(q, k, accept)),
-            Some(exact) => {
-                let mut ids = exact.0.ids().into_iter().filter(|id| accept(*id));
-                self.order(exact, q, &mut ids, k)
+            Some((store, pos)) => {
+                let mut ids = store
+                    .ids()
+                    .into_iter()
+                    .filter(|id| accept(*id))
+                    .map(|id| (id, f32::NEG_INFINITY));
+                let metric = self.ix.spec.metric;
+                Ok(order_exactly(store, pos, metric, q, &mut ids, k, &mut |_| Ok(true))?.0)
             }
         }
     }
