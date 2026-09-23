@@ -152,8 +152,9 @@ web/            fenec.js (builder + sync layer), fenec.d.ts,
 </div>
 
 <p>A graph holding tombstones is rebuilt by <code>compact</code> from the live
-vectors: nothing else takes a tombstone out, and every rewrite of a document
-with a vector leaves one. A graph without them is kept as it is.</p>
+vectors: nothing else takes a tombstone out, and every write that changes a
+document's vector, or deletes it, leaves one. A graph without them is kept
+as it is.</p>
 
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record

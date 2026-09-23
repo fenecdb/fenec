@@ -204,7 +204,7 @@ fn a_compact_beside_catches_up_and_hands_out_no_id_again() {
     );
 }
 
-/// Every rewrite of a document with a vector leaves a tombstone in the
+/// Every write that changes a document's vector leaves a tombstone in the
 /// graph, and a compact is the one thing that takes them out: by statement
 /// and beside the database alike. A compact that kept them let the graph
 /// grow with every update, and the tombstones crowd the beam `near` walks.
@@ -215,7 +215,7 @@ fn a_compact_takes_the_tombstones_out_of_the_graph() {
     for beside in [false, true] {
         let mut db = seeded();
         exec(&mut db, "create index on c (v) @hnsw(l2, m=8)");
-        exec(&mut db, "set c {n: 1}");
+        exec(&mut db, "set c {v: [1.0, 2.0, 3.0, 4.0]}");
         assert_eq!(dead(&db), 300);
         if beside {
             let lock = RwLock::new(db);

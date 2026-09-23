@@ -105,8 +105,8 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   <p><b>The two stages answer different questions.</b> <code>match</code> is
   recall and knows nothing about meaning; <code>rerank</code> is precision but
   only over what the first stage handed it. Measured on BEIR: on SciFact
-  50 candidates score nDCG@10 0.654 against 0.645 for a full dense scan of the
-  same vectors, and on FiQA 1 000 candidates come within 0.0003 of the full scan —
+  50 candidates score nDCG@10 0.656 against 0.645 for a full dense scan of the
+  same vectors, and on FiQA 1 000 candidates come within 0.0001 of the full scan —
   each while scoring under 2% of the corpus. If the lexical stage cannot find
   the answer at all, no amount of reranking will.</p>
 </div>
@@ -136,13 +136,13 @@ the <code>@hnsw</code> graph <code>near</code> walks.</p>
   <p><b>Measured on BEIR</b>, nDCG@10, all-MiniLM-L6-v2 vectors (<a
   href="benchmarks.html#retrieval-quality">the whole table</a>). On SciFact,
   where a claim shares its words with the evidence, <code>fuse</code> scores
-  0.699 against 0.662 for <code>match</code> and 0.645 for <code>near</code>
+  0.700 against 0.662 for <code>match</code> and 0.645 for <code>near</code>
   alone. On FiQA, where a question shares few words with its answer, it scores
-  0.366 against 0.232 and 0.365: the weak side does not drag the strong one
+  0.366 against 0.232 and 0.366: the weak side does not drag the strong one
   down. Up to 61 candidates a side at <code>k = 60</code>, a document both
   searches found outranks every document only one found; deeper, agreement in
   the middle of both lists starts to outvote the top of one, and at 100 a side
-  the two scores fall to 0.687 and 0.358.</p>
+  the two scores fall to 0.688 and 0.359.</p>
 </div>
 
 <h2>The lookup clause</h2>

@@ -261,10 +261,12 @@ impl Database {
         // have: out with the value the build saw, in with the one there now.
         match index {
             Built::Vector(mut ix) => {
+                // `insert` keeps a node that holds the vector already, and
+                // retires it otherwise.
                 for id in ids {
-                    ix.remove(id);
-                    if let Some(Value::Vector(v)) = c.store.read_field(id, pos)? {
-                        ix.insert(id, &v);
+                    match c.store.read_field(id, pos)? {
+                        Some(Value::Vector(v)) => ix.insert(id, &v),
+                        _ => ix.remove(id),
                     }
                 }
                 c.vectors.insert(copy.field.clone(), ix);
@@ -376,14 +378,16 @@ impl Database {
             // Each document written during the build takes the state it has
             // now, over the one the copy holds.
             for id in ids {
-                if let Some(old) = c.store.read(&c.schema, id)? {
-                    c.unindex_doc(&old);
+                let old = c.store.read(&c.schema, id)?;
+                let now = live.store.read(&live.schema, id)?;
+                if let Some(old) = &old {
+                    c.unindex_doc(old, now.as_ref());
                 }
-                match live.store.read(&live.schema, id)? {
+                match now {
                     Some(doc) => {
                         c.store
                             .append(OP_PUT, id, &Store::encode_doc(&c.schema, &doc));
-                        c.index_doc(&doc);
+                        c.index_doc(&doc, old.as_ref());
                     }
                     None if c.store.contains(id) => {
                         c.store.append(OP_DEL, id, &[]);
@@ -401,7 +405,7 @@ impl Database {
         // streamed into the new file rather than built beside the data.
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.image_into(out, &[]))
+            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut Vec::new()))
         };
         self.storage(r)?;
         Ok(Response::Ok(format!(

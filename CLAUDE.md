@@ -120,7 +120,12 @@ data. A new file is mapped from the start. A rewrite -- `checkpoint`,
 it (`Database::repoint`), so the old one is let go of; a compact over a
 mapped file never copies a record into memory, on a server either, and
 rebuilds no index but a graph holding tombstones, since the documents are
-the same ones.
+the same ones. An image this database writes records where each
+collection's data went (`image_into`'s `placed`), and each store works its
+new places out from its own (`Store::relocate_image`, `relocate_live`):
+walking the new file's record heads read the whole of it back, 1.8 to 2.3 s
+of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
+image, written elsewhere, is walked.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
@@ -168,7 +173,9 @@ archived writes up to a time or a change, forked -- a fenecdb file is exactly
 that, so a restore is a concatenation checked by opening it.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
-whose directory replicates to a standby router like any other file;
+whose directory replicates to a standby router like any other file, the
+standby's maps catching up from the change ring -- 4 us a change at 100 000
+tenants against 38 ms reading them all again under the router's write lock;
 `site/content/docs/sharding.html`). The tenant comes from the path
 (`/t/<tenant>/`), or over the pg wire from the startup packet's database
 (`--listen` in `--dir` mode; looked up again per statement, so a move, an idle
@@ -250,14 +257,20 @@ version, dimension, precision and link bounds are validated, and the live nodes
 against the documents holding a vector; anything off means a silent full
 rebuild. A corrupt graph can therefore never lose data. It is restored where the
 checkpoint's image ends, against the documents it was written with, and the tail
-after it is applied as the write path would (a touched document's node retired,
-its current vector inserted) -- restored after the whole file, one write in the
+after it is applied as the write path would (a touched document keeps its node
+while it holds the same vector, and has it retired for the new one otherwise) --
+restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`.
 `compact` rebuilds a graph holding tombstones and leaves the rest: nothing
-else takes one out, every rewrite of a document with a vector leaves one, and
-they crowd the beam `near` walks. An unfiltered `near` they cut short walks
+else takes one out, every write that changes or deletes a vector leaves one,
+and they crowd the beam `near` walks. A rewrite touches only the indexes
+whose field it changes (`unindex_doc` and `index_scalar` take both versions,
+and `VectorIndex::insert` keeps a node that already holds the vector): an
+update of a title took the vector out of the graph and back in, 1.89 ms at
+20 000 x 768 and a tombstone, against 0.006 ms now. "Unchanged" is to the
+bit, since `==` says -0.0 is 0.0 and a hash key is the value's encoding. An unfiltered `near` they cut short walks
 again with the beam wider by their number -- no more than all of them can be
 in it -- or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
@@ -437,11 +450,11 @@ to their own depth -- `candidates`, 20 unless given, never under the page --
 with the filter applied to each, and a document scores `1 / (k + rank)` from
 each list it is on (`k` 60). A BM25 score and a cosine distance share no
 scale, and a weight between them would need retuning per corpus. Measured
-with `make beir` (nDCG@10): SciFact 0.699 against 0.662 for `match` and 0.645
-for `near`; FiQA 0.366 against 0.232 and 0.365 -- the one path near the top
+with `make beir` (nDCG@10): SciFact 0.700 against 0.662 for `match` and 0.645
+for `near`; FiQA 0.366 against 0.232 and 0.366 -- the one path near the top
 of both. The depth is the knob that matters: up to 61 a side a document both
 searches found outranks every document only one found, and at 100 a side
-both scores fall (0.687, 0.358). It is built from what the engine already
+both scores fall (0.688, 0.359). It is built from what the engine already
 had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
@@ -463,10 +476,11 @@ it is derived and never persisted. It sorts through the engine's one
 `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.365), at 2.6 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. The script cuts texts
-itself: transformers.js drops the closing [SEP] when it truncates, and
-SPLADE without it took SciFact to 0.23.
+0.232 (the dense vectors 0.366), at 2.6 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut
+texts themselves: transformers.js drops the closing [SEP] when it truncates,
+SPLADE without it took SciFact to 0.23, and the dense vectors (`embed.mjs`)
+moved by up to 0.003.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change

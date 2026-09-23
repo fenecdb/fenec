@@ -333,6 +333,12 @@ not arrived at all — just started, its primary not yet reached — answers
 <code>503</code> with <code>Retry-After</code> rather than <code>404</code>:
 it knows of no tenant, which is not knowing there is none.</p>
 
+<p>Each change the primary makes reaches the standby's maps through the
+change ring, as a subscription's rows do: the placements it put or deleted
+since the last one, 4 µs at 100 000 tenants, where reading every map again
+took 38 ms under the router's write lock. An image adopted, or more changes
+than the ring holds, and the maps are read again whole.</p>
+
 <h2>Tokens</h2>
 
 <p>Three, each for a different job. Data requests carry whatever the nodes'

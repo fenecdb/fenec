@@ -1311,11 +1311,11 @@ impl VectorIndex {
         if raw.len() != self.dim {
             return;
         }
-        // If the same document was written again, tombstone the old one.
+        // The same document written again keeps its node when the vector is
+        // the one it holds, and tombstones it otherwise.
         if let Some(&old) = self.by_doc.get(&doc) {
-            if !self.deleted[old as usize] {
-                self.deleted[old as usize] = true;
-                self.deleted_count += 1;
+            if self.retire(old, raw) {
+                return;
             }
         }
         let level = self.random_level();
@@ -1456,9 +1456,8 @@ impl VectorIndex {
                     continue;
                 }
                 if let Some(&old) = self.by_doc.get(doc) {
-                    if !self.deleted[old as usize] {
-                        self.deleted[old as usize] = true;
-                        self.deleted_count += 1;
+                    if self.retire(old, v) {
+                        continue;
                     }
                 }
                 let level = self.random_level();
@@ -1573,6 +1572,32 @@ impl VectorIndex {
             self.max_level = level;
             self.entry = Some(node);
         }
+    }
+
+    /// A document's node met again with `raw`: `true` when it already holds
+    /// that vector and stays, and tombstoned otherwise. An update of any
+    /// other field wrote the vector again, and took it out of the graph and
+    /// back in: 1.89 ms at 20 000 x 768, and a tombstone each time.
+    ///
+    /// Held is to the bit, in the arena's own form: `raw` is stored into an
+    /// empty arena as it would be here and both are written out as the graph
+    /// record writes them -- the code already in the browser module, where
+    /// a comparison per arena kind was 800 bytes more.
+    fn retire(&mut self, node: u32, raw: &[f32]) -> bool {
+        if self.deleted[node as usize] {
+            return false;
+        }
+        let mut probe = Arena::new(self.prec, self.spec.quant);
+        probe.push(raw, self.spec.metric == Metric::Cosine);
+        let (mut held, mut new) = (Vec::new(), Vec::new());
+        self.data.write_stored(node, self.dim, &mut held);
+        probe.write_stored(0, self.dim, &mut new);
+        if held == new {
+            return true;
+        }
+        self.deleted[node as usize] = true;
+        self.deleted_count += 1;
+        false
     }
 
     pub fn remove(&mut self, doc: DocId) {

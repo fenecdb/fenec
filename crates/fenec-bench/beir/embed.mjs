@@ -12,7 +12,7 @@
 //   corpus.f32 / corpus.ids     one vector per document, its id per line
 //   queries.f32 / queries.ids   the same for the queries the test qrels name
 
-import { AutoModel, AutoTokenizer } from '@huggingface/transformers';
+import { AutoModel, AutoTokenizer, Tensor } from '@huggingface/transformers';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,12 +31,42 @@ const model = await AutoModel.from_pretrained(MODEL, { dtype: 'fp32' });
 const lines = (file) =>
   fs.readFileSync(path.join(dir, file), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
+/// A batch as the model takes it, each text cut to `MAX_TOKENS` here rather
+/// than by transformers.js: cutting one, it drops the closing [SEP], which
+/// sentence-transformers keeps -- splade.mjs works around the same fault.
+async function encode(texts) {
+  const rows = [];
+  for (const t of texts) {
+    const { input_ids } = await tokenizer(t);
+    let ids = Array.from(input_ids.data, Number);
+    if (ids.length > MAX_TOKENS) {
+      ids = [...ids.slice(0, MAX_TOKENS - 1), ids[ids.length - 1]];
+    }
+    rows.push(ids);
+  }
+  const n = rows.length;
+  const len = Math.max(...rows.map((r) => r.length));
+  const ids = new BigInt64Array(n * len);
+  const mask = new BigInt64Array(n * len);
+  rows.forEach((r, b) =>
+    r.forEach((id, t) => {
+      ids[b * len + t] = BigInt(id);
+      mask[b * len + t] = 1n;
+    }),
+  );
+  return {
+    input_ids: new Tensor('int64', ids, [n, len]),
+    attention_mask: new Tensor('int64', mask, [n, len]),
+    token_type_ids: new Tensor('int64', new BigInt64Array(n * len), [n, len]),
+  };
+}
+
 async function embed(texts, name) {
   const out = fs.openSync(path.join(dir, `${name}.f32`), 'w');
   const t0 = Date.now();
   for (let i = 0; i < texts.length; i += BATCH) {
     const batch = texts.slice(i, i + BATCH);
-    const enc = await tokenizer(batch, { padding: true, truncation: true, max_length: MAX_TOKENS });
+    const enc = await encode(batch);
     const { last_hidden_state: h } = await model(enc);
     const [n, len, dim] = h.dims;
     const mask = enc.attention_mask.data;

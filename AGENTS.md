@@ -107,8 +107,10 @@ holds what it derived from them (1 GB file, hash and ordered index: 188 MB
 against 1 095 read in; `compact` peaks at 236 MB against 2 012).
 `fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
 tenants included) is the other way. A rewrite points the stores at the file
-it just wrote (`Database::repoint`), and a compact over a mapped file copies
-no record -- on a server either -- and rebuilds only a graph holding
+it just wrote (`Database::repoint`) from where it put each record, without
+reading the file back (1.8-2.3 s of a 1 GB checkpoint, now 19 ms; an
+adopted image is still walked), and a compact over a mapped file copies no
+record -- on a server either -- and rebuilds only a graph holding
 tombstones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
@@ -199,12 +201,16 @@ version, dimension, precision and link bounds are validated, and the live nodes
 against the documents holding a vector; anything off means a silent full
 rebuild. A corrupt graph can therefore never lose data. It is restored where the
 checkpoint's image ends, against the documents it was written with, and the tail
-after it is applied as the write path would (a touched document's node retired,
-its current vector inserted) -- restored after the whole file, one write in the
+after it is applied as the write path would (a touched document keeps its node
+while it holds the same vector, and has it retired for the new one otherwise) --
+restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`, which
-rebuilds a graph holding tombstones (nothing else takes one out). An unfiltered
+rebuilds a graph holding tombstones (nothing else takes one out). A rewrite
+touches only the indexes whose field it changes, so an update of a title no
+longer takes the vector out of the graph and back in (1.89 -> 0.006 ms at
+20 000 x 768, and no tombstone); "unchanged" is to the bit. An unfiltered
 `near` the tombstones cut short walks again with the beam wider by their
 number, or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
@@ -364,11 +370,11 @@ to their own depth -- `candidates`, 20 unless given, never under the page --
 with the filter applied to each, and a document scores `1 / (k + rank)` from
 each list it is on (`k` 60). A BM25 score and a cosine distance share no
 scale, and a weight between them would need retuning per corpus. Measured
-with `make beir` (nDCG@10): SciFact 0.699 against 0.662 for `match` and 0.645
-for `near`; FiQA 0.366 against 0.232 and 0.365 -- the one path near the top
+with `make beir` (nDCG@10): SciFact 0.700 against 0.662 for `match` and 0.645
+for `near`; FiQA 0.366 against 0.232 and 0.366 -- the one path near the top
 of both. The depth is the knob that matters: up to 61 a side a document both
 searches found outranks every document only one found, and at 100 a side
-both scores fall (0.687, 0.358). It is built from what the engine already
+both scores fall (0.688, 0.359). It is built from what the engine already
 had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
@@ -390,10 +396,11 @@ it is derived and never persisted. It sorts through the engine's one
 `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.365), at 2.6 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. The script cuts texts
-itself: transformers.js drops the closing [SEP] when it truncates, and
-SPLADE without it took SciFact to 0.23.
+0.232 (the dense vectors 0.366), at 2.6 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut
+texts themselves: transformers.js drops the closing [SEP] when it truncates,
+SPLADE without it took SciFact to 0.23, and the dense vectors (`embed.mjs`)
+moved by up to 0.003.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change

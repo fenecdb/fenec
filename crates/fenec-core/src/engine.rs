@@ -437,35 +437,41 @@ impl Collection {
             .map(|(_, ix)| ix)
     }
 
-    /// Inlined for the reason [`Self::reset_index_structures`] is: a
-    /// compact beside the database calls it too.
+    /// Puts `doc` into the indexes, `old` the version it replaces. Inlined
+    /// for the reason [`Self::reset_index_structures`] is: a compact beside
+    /// the database calls it too.
     #[inline(always)]
-    fn index_doc(&mut self, doc: &Document) {
+    fn index_doc(&mut self, doc: &Document, old: Option<&Document>) {
         for (name, ix) in self.vectors.iter_mut() {
             if let Some(Value::Vector(v)) = doc.get(name) {
                 ix.insert(doc.id, v);
             }
         }
-        self.index_scalar(doc);
+        self.index_scalar(doc, old);
     }
 
-    /// Hash and full-text indexes. Vectors are left to the batch path.
-    fn index_scalar(&mut self, doc: &Document) {
+    /// Hash, text, ordered and sparse indexes; vectors are left to the batch
+    /// path. A field `old` held as it is, `unindex_doc` left in place, and
+    /// it is left here too.
+    fn index_scalar(&mut self, doc: &Document, old: Option<&Document>) {
+        let kept = |name: &str| old.is_some_and(|o| same(o.get(name), doc.get(name)));
         for (name, ix) in self.hashes.iter_mut() {
-            if let Some(v) = doc.get(name) {
+            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.add(hash_key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
-            if let Some(Value::Text(t)) = doc.get(name) {
+            if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
-            ix.insert(doc.id, doc.get(name));
+            if !kept(name) {
+                ix.insert(doc.id, doc.get(name));
+            }
         }
         for (name, ix) in self.sparse.iter_mut() {
-            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+            if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, e);
             }
         }
@@ -491,29 +497,39 @@ impl Collection {
         }
     }
 
-    fn unindex_doc(&mut self, doc: &Document) {
+    /// Takes the stored `doc` out of the indexes: out of all of them for a
+    /// deletion, and for a rewrite into `new` out of those whose field
+    /// changes. An update of one field took the document out of every index
+    /// and put it back -- its vector included, 1.89 ms at 20 000 x 768 and a
+    /// tombstone each time. A vector stays while `new` has one in its field:
+    /// `insert` keeps the node that holds it or retires it for the new one.
+    fn unindex_doc(&mut self, doc: &Document, new: Option<&Document>) {
+        let kept = |name: &str| new.is_some_and(|n| same(doc.get(name), n.get(name)));
         for (name, ix) in self.vectors.iter_mut() {
-            if doc.get(name).is_some() {
+            let replaced = new.is_some_and(|n| matches!(n.get(name), Some(Value::Vector(_))));
+            if doc.get(name).is_some() && !replaced {
                 ix.remove(doc.id);
             }
         }
         for (name, ix) in self.hashes.iter_mut() {
-            if let Some(v) = doc.get(name) {
+            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(&hash_key(v), doc.id);
             }
         }
         // Every caller reads the *stored* document before unindexing, so the
         // terms here are the ones that went in.
         for (name, ix) in self.texts.iter_mut() {
-            if let Some(Value::Text(t)) = doc.get(name) {
+            if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
-            ix.remove(doc.id, doc.get(name));
+            if !kept(name) {
+                ix.remove(doc.id, doc.get(name));
+            }
         }
         for (name, ix) in self.sparse.iter_mut() {
-            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+            if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, e);
             }
         }
@@ -642,10 +658,32 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
     Some(out)
 }
 
+/// A value's bucket key: its encoding, a float's -0.0 filed as 0.0. The scan
+/// finds the two equal -- PostgreSQL's float hash hashes -0 as 0 for the
+/// same reason -- and under a key of its own a stored -0.0 was missed by
+/// `price = 0.0` through the index alone. The document keeps the value as
+/// it was written. A -0.0 inside a list or a vector keeps its sign: folding
+/// those too was 570 bytes of the browser module, for a hash index on such
+/// a field meeting a -0.0.
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
-    crate::codec::encode_value(&mut out, v);
+    match v {
+        // Adding +0.0 turns -0.0 into 0.0 and leaves every other float alone.
+        Value::Float(f) => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
+        _ => crate::codec::encode_value(&mut out, v),
+    }
     out
+}
+
+/// Whether an index files `a` and `b` as one entry: the same hash key, which
+/// every index's own key follows. `==` would call a NaN changed that files
+/// where it did, and was 570 bytes of the browser module besides.
+fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => hash_key(a) == hash_key(b),
+        _ => false,
+    }
 }
 
 /// One resolved level of a `lookup` chain: the parts that do not depend on
@@ -1262,12 +1300,20 @@ impl Database {
     /// of a collection go straight through, so the image is never a second
     /// copy of the data (`Sink::rewrite_with`).
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
-        self.image_into(out, &[])
+        self.image_into(out, &[], &mut Vec::new())
     }
 
     /// [`Self::snapshot_into`], leaving out the dead records of the named
-    /// collections: what `compact` writes.
-    fn image_into(&self, out: &mut dyn ImageOut, compacting: &[String]) -> Result<()> {
+    /// collections: what `compact` writes. Where each collection's data
+    /// record starts is put in `placed`, which is all [`Self::repoint`]
+    /// needs to point the stores at the new file.
+    fn image_into(
+        &self,
+        out: &mut dyn ImageOut,
+        compacting: &[String],
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables, clippy::ptr_arg))]
+        placed: &mut Vec<(u32, u64)>,
+    ) -> Result<()> {
         let mut head = Vec::from(&MAGIC[..]);
         // Counter header: a placeholder now, the body's length once it is
         // written -- fixed width, so it is patched where it stands.
@@ -1302,6 +1348,9 @@ impl Database {
             };
             if bytes > 0 {
                 out.write(&record_head(REC_DATA, c.id, bytes))?;
+                // The browser maps no file, and its module keeps no list.
+                #[cfg(not(target_arch = "wasm32"))]
+                placed.push((c.id, out.at()));
                 match compact {
                     true => c.store.write_live(out)?,
                     false => c.store.write_image(out)?,
@@ -1328,16 +1377,29 @@ impl Database {
     /// Points the stores at the file the sink has just rewritten: the same
     /// documents, in their new places. The hash, ordered, text and vector
     /// indexes stand -- nothing about the documents changed, only where
-    /// their bytes are -- so this is a pass over the new file's record
-    /// heads, not a rebuild.
+    /// their bytes are. An image this database wrote says where each
+    /// collection's data record went, `placed`, and the collections named
+    /// had their live records alone written; the stores then work their new
+    /// places out without reading the file. One handed over from elsewhere
+    /// is walked, record head by record head.
     #[cfg(not(target_arch = "wasm32"))]
-    fn repoint(&mut self) -> Result<()> {
+    fn repoint(&mut self, placed: Option<&[(u32, u64)]>, compacted: &[String]) -> Result<()> {
         if !self.mapped {
             return Ok(());
         }
         let Some(base) = self.sink_mut().remapped() else {
             return Ok(());
         };
+        if let Some(placed) = placed {
+            for (name, c) in self.collections.iter_mut() {
+                match placed.iter().find(|(cid, _)| *cid == c.id) {
+                    Some(&(_, at)) if compacted.contains(name) => c.store.relocate_live(&base, at),
+                    Some(&(_, at)) => c.store.relocate_image(&base, at),
+                    None => c.store.let_go(),
+                }
+            }
+            return Ok(());
+        }
         let keep = base.clone();
         let bytes = (*keep).as_ref();
         if bytes.len() < MAGIC.len() {
@@ -1713,8 +1775,10 @@ impl Database {
                 |field: &str| !fresh && restored.iter().any(|(n, f)| *n == name && f == field);
 
             // 1) The restored graphs take the tail's writes the way the write
-            // path took them: the node a touched document had is retired,
-            // and the vector it holds now, if any, goes in anew.
+            // path took them: a touched document keeps its node while it
+            // holds the vector the checkpoint had -- `insert` sees to it --
+            // has it retired for the one it holds now otherwise, and leaves
+            // the graph without one.
             let mut tail = touched
                 .iter()
                 .find(|(n, _)| *n == name)
@@ -1727,17 +1791,20 @@ impl Database {
                     continue;
                 };
                 let mut items: Vec<(DocId, Vec<f32>)> = Vec::new();
+                let mut gone = Vec::new();
                 let mut buf = Vec::new();
                 for &id in &tail {
                     if c.store.read_vector_into(id, pos, &mut buf)? {
                         items.push((id, buf.clone()));
+                    } else {
+                        gone.push(id);
                     }
                 }
                 let ix = c
                     .vectors
                     .get_mut(field)
                     .expect("a restored field has its index");
-                for &id in &tail {
+                for id in gone {
                     ix.remove(id);
                 }
                 ix.insert_batch(&items);
@@ -1891,15 +1958,16 @@ impl Database {
         self.refuse_if_failed()?;
         // The sink is behind a lock, so the image can be written from `self`
         // while the sink takes it: both are shared borrows here.
+        let mut placed = Vec::new();
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.snapshot_into(out))
+            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut placed))
         };
         self.storage(r)?;
         let r = self.sink_mut().sync();
         self.storage(r)?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(Some(&placed), &[])?;
         self.dirty = false;
         Ok(())
     }
@@ -2138,13 +2206,17 @@ impl Database {
                     let id = get_uvarint(body, &mut p)?;
                     let plen = get_uvarint(body, &mut p)? as usize;
                     let payload = body.get(p..p + plen).ok_or_else(cut)?;
-                    if let Some(old) = c.store.read(&c.schema, id)? {
-                        c.unindex_doc(&old);
-                    }
+                    let old = c.store.read(&c.schema, id)?;
                     c.store.append(op, id, payload);
-                    if op == OP_PUT {
-                        let doc = c.store.read(&c.schema, id)?.ok_or_else(cut)?;
-                        c.index_scalar(&doc);
+                    let new = match op == OP_PUT {
+                        true => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
+                        false => None,
+                    };
+                    if let Some(old) = &old {
+                        c.unindex_doc(old, new.as_ref());
+                    }
+                    if let Some(doc) = new {
+                        c.index_scalar(&doc, old.as_ref());
                         if !c.vectors.is_empty() {
                             batch.cid = cid;
                             batch.ids.insert(id);
@@ -2211,9 +2283,10 @@ impl Database {
         self.changes.set_capacity(cap);
         self.adoptions += 1;
         // The image is the file now: a mapped database reads the documents
-        // from there rather than holding the copy it was handed.
+        // from there rather than holding the copy it was handed. Written
+        // elsewhere, it is walked to find them.
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(None, &[])?;
         self.dirty = false;
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
@@ -2438,14 +2511,16 @@ impl Database {
                 h.before_write(collection, op, &mut doc)?;
             }
             // Drop the old index entries when overwriting.
-            if op == WriteOp::Update {
-                if let Some(old) = c.store.read(&schema, doc.id)? {
-                    c.unindex_doc(&old);
-                }
+            let old = match op {
+                WriteOp::Update => c.store.read(&schema, doc.id)?,
+                _ => None,
+            };
+            if let Some(old) = &old {
+                c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
             let frame = c.store.append(OP_PUT, doc.id, &payload);
-            c.index_scalar(&doc);
+            c.index_scalar(&doc, old.as_ref());
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, doc.id);
             for h in &hooks {
@@ -4157,12 +4232,13 @@ impl Database {
             for h in &hooks {
                 h.before_write(collection, WriteOp::Update, &mut doc)?;
             }
-            if let Some(old) = c.store.read(&schema, id)? {
-                c.unindex_doc(&old);
+            let old = c.store.read(&schema, id)?;
+            if let Some(old) = &old {
+                c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
             let frame = c.store.append(OP_PUT, id, &payload);
-            c.index_doc(&doc);
+            c.index_doc(&doc, old.as_ref());
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, id);
             for h in &hooks {
@@ -4190,7 +4266,7 @@ impl Database {
                 for h in &hooks {
                     h.after_write(collection, WriteOp::Delete, &doc)?;
                 }
-                c.unindex_doc(&doc);
+                c.unindex_doc(&doc, None);
             }
             let frame = c.store.append(OP_DEL, id, &[]);
             self.wal(REC_DATA, cid, &frame)?;
@@ -4253,14 +4329,15 @@ impl Database {
             }
         }
         // After compaction the persisted image is rewritten from scratch.
+        let compacting: &[String] = if mapped { &targets } else { &[] };
+        let mut placed = Vec::new();
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            let compacting: &[String] = if mapped { &targets } else { &[] };
-            sink.rewrite_with(&mut |out| self.image_into(out, compacting))
+            sink.rewrite_with(&mut |out| self.image_into(out, compacting, &mut placed))
         };
         self.storage(r)?;
         #[cfg(not(target_arch = "wasm32"))]
-        self.repoint()?;
+        self.repoint(Some(&placed), compacting)?;
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))
