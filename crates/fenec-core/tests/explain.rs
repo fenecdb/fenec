@@ -250,7 +250,7 @@ fn every_order_path_names_itself() {
 
 #[test]
 fn every_near_path_names_itself() {
-    let db = db();
+    let mut db = db();
     let q = [Value::Vector(vec![0.3, 0.7, 2.0])];
     check(
         &db,
@@ -317,6 +317,41 @@ fn every_near_path_names_itself() {
         "get a where title = \"t7\" near e $1 exact limit 3",
         &q,
         &["near: exact scan over every vector in e, the set as a test"],
+    );
+    // Tombstones where the walk goes: the beam comes up short, and is
+    // widened by them -- or, past what a walk that wide costs, every vector
+    // is searched.
+    let delete_nearest = |db: &mut Database, n: usize| {
+        let stmt = fenec_ql::parse_one(&format!("get a select id near e $1 exact limit {n}"));
+        let r = db.query(&stmt.unwrap(), &q).unwrap();
+        let ids: Vec<String> = r
+            .rows()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        exec(db, &format!("del a where id in [{}]", ids.join(", ")));
+    };
+    delete_nearest(&mut db, 3);
+    check(
+        &db,
+        "get a near e $1 ef 4 limit 3",
+        &q,
+        &[
+            "came up short past 3 tombstones, the beam widened to ef 7",
+            "rows: 3",
+        ],
+    );
+    delete_nearest(&mut db, 200);
+    check(
+        &db,
+        "get a near e $1 limit 3",
+        &q,
+        &[
+            "came up short past 203 tombstones, every vector searched exactly",
+            "rows: 3",
+        ],
     );
 }
 

@@ -2979,14 +2979,28 @@ impl Database {
 
         let sp = Space::new(c, ix, &near.field);
         let hits = match &sel.filter {
-            // No filter: ANN directly, or a full scan when asked for.
-            None if near.exact => {
-                plan(|| format!("near: exact scan over every vector in {}", near.field));
-                sp.search_exact(&qv, want, &|_| true)?
-            }
+            // No filter: ANN directly, or a full scan when asked for -- or
+            // when tombstones cut the ANN's answer short. One call each to
+            // the walk and the scan: a second call site inlined the walk
+            // again, 819 bytes of the browser module.
             None => {
-                plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                sp.search(&qv, want, near.ef, &|_| true)?
+                if near.exact {
+                    plan(|| format!("near: exact scan over every vector in {}", near.field));
+                } else {
+                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                }
+                let (mut ef, mut exact, mut widened) = (near.ef, near.exact, false);
+                loop {
+                    if exact {
+                        break sp.search_exact(&qv, want, &|_| true)?;
+                    }
+                    let hits = sp.search(&qv, want, ef, &|_| true)?;
+                    match past_tombstones(ix, near, want, hits.len(), widened) {
+                        Short::Whole => break hits,
+                        Short::Wider(wider) => (ef, widened) = (Some(wider), true),
+                        Short::Exact => exact = true,
+                    }
+                }
             }
             Some(f) => self.filtered_near(c, &sp, f, &qv, want, near, params, ctx)?,
         };
@@ -4587,6 +4601,49 @@ fn beam(ix: &VectorIndex, near: &Near, want: usize) -> String {
     } else {
         format!("ef {ef}")
     }
+}
+
+/// What an unfiltered ANN answer of `found` rows still needs.
+enum Short {
+    Whole,
+    /// Walked again with this `ef`.
+    Wider(usize),
+    Exact,
+}
+
+/// Every rewrite or deletion of a document with a vector leaves a tombstone
+/// in the graph until a compact, and the walk passes through them: a beam
+/// of `ef` around many of them held fewer live nodes than the page, and a
+/// `limit 10` answered 4 rows. No more than every tombstone can be in the
+/// beam, so one wider by their number holds `ef` live nodes -- unless
+/// walking that wide costs more than reading every vector: a step measures
+/// about `2m` neighbours, so past `live / 2m` steps the exact search is
+/// cheaper, and it is also the answer when the wider beam comes up short.
+fn past_tombstones(
+    ix: &VectorIndex,
+    near: &Near,
+    want: usize,
+    found: usize,
+    widened: bool,
+) -> Short {
+    let live = ix.len();
+    if found >= want.min(live) {
+        return Short::Whole;
+    }
+    let dead = ix.dead();
+    let ef = near.ef.unwrap_or(ix.spec.ef_search).max(want) + dead;
+    if !widened && dead > 0 && ef.saturating_mul(2 * ix.spec.m) < live {
+        plan(|| {
+            format!(
+                "near: the ANN came up short past {dead} tombstones, the beam widened to ef {ef}"
+            )
+        });
+        return Short::Wider(ef);
+    }
+    plan(|| {
+        format!("near: the ANN came up short past {dead} tombstones, every vector searched exactly")
+    });
+    Short::Exact
 }
 
 /// Whether the stored row `id` passes the filter.

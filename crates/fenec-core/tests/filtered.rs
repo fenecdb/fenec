@@ -47,12 +47,17 @@ impl Rng {
 /// grows with them (the newest rows hold the highest values), and `side`
 /// marks one cluster, so it correlates with the vector.
 fn collection() -> (Database, Vec<Value>) {
+    collection_with("")
+}
+
+/// [`collection`], its index given `options` besides.
+fn collection_with(options: &str) -> (Database, Vec<Value>) {
     let mut db = Database::new();
     exec(
         &mut db,
         &format!(
             "create collection c (k int, late int, side int, tag text @hash, \
-             e vector<8> @hnsw(cosine, m=8, ef_construction=64, ef_search={EF_SEARCH}))"
+             e vector<8> @hnsw(cosine, m=8, ef_construction=64, ef_search={EF_SEARCH}{options}))"
         ),
     );
     let mut r = Rng(0x2545_F491_4F6C_DD1D);
@@ -170,4 +175,63 @@ fn a_probed_filter_gives_the_answer_the_whole_set_gave() {
         }
     }
     assert_eq!(cases, 13 * 4 * 4 * 5);
+}
+
+/// The plan's steps for `sql`.
+fn plan(db: &Database, sql: &str, params: &[Value]) -> Vec<String> {
+    let stmt = fenec_ql::parse_one(&format!("explain {sql}")).expect("parse");
+    let r = db
+        .query(&stmt, params)
+        .unwrap_or_else(|e| panic!("explain {sql}: {e}"));
+    r.rows()
+        .expect("rows")
+        .rows
+        .iter()
+        .map(|r| match &r.values[..] {
+            [Value::Text(s)] => s.clone(),
+            other => panic!("a plan row holds {other:?}"),
+        })
+        .collect()
+}
+
+/// Every rewrite or deletion of a document with a vector leaves a tombstone
+/// in the graph until a compact, and the walk passes through them. With the
+/// rows nearest the query deleted, the beam around it held fewer live rows
+/// than the page and the unfiltered `near` answered short -- a `limit 10`
+/// gave 4 rows in the review of #31. A short answer is searched again with
+/// the beam wider by the tombstones, or exactly where a beam that wide
+/// would cost more than reading every vector.
+#[test]
+fn tombstones_in_the_beam_do_not_cut_the_answer_short() {
+    for (deleted, path, options) in [
+        (35, "widened", ""),
+        (600, "exactly", ""),
+        (35, "widened", ", quant=int8"),
+    ] {
+        let (mut db, queries) = collection_with(options);
+        let q = std::slice::from_ref(&queries[0]);
+        let nearest: Vec<String> = rows(
+            &db,
+            &format!("get c select id near e $1 exact limit {deleted}"),
+            q,
+        )
+        .iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+        exec(
+            &mut db,
+            &format!("del c where id in [{}]", nearest.join(", ")),
+        );
+        let sql = "get c select id near e $1 limit 10";
+        assert_eq!(
+            rows(&db, sql, q),
+            rows(&db, "get c select id near e $1 exact limit 10", q),
+            "{deleted} deleted{options}"
+        );
+        let steps = plan(&db, sql, q);
+        assert!(
+            steps.iter().any(|s| s.contains(path)),
+            "{deleted} deleted{options}: {steps:?}"
+        );
+    }
 }

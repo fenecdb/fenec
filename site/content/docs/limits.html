@@ -177,7 +177,10 @@ so a node that is down takes its tenants with it.</p>
     <code>compact</code>. Updating a document also marks the old node deleted
     and adds a new one, so in collections whose documents change, the graph
     grows until compaction — and the tombstones take places in the beam
-    <code>near</code> walks.</li>
+    <code>near</code> walks. A page they cut short is walked again with the
+    beam wider by their number, or searched exactly where that walk would
+    cost more than reading every vector, so the answer is whole and only
+    slower until the compact.</li>
   <li>Documents inside one batch cannot see each other as neighbours. The batch
     is 1/16 of the graph size (64–512), so there is no measured recall loss —
     but very small collections fall to the serial path below 1024 vectors.</li>
