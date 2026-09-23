@@ -103,6 +103,12 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// Takes subscriptions again after a `close` whose reason fell through:
+    /// a tenant delete that gave up with 409 keeps the tenant.
+    pub fn reopen(&self) {
+        self.closed.store(false, Ordering::SeqCst);
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }

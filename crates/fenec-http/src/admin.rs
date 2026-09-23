@@ -11,6 +11,7 @@
 //! GET    /_admin/tenants/<t>/file      the whole image (octet-stream)
 //! PUT    /_admin/tenants/<t>/file      install an image as a new tenant
 //! POST   /_admin/tenants/<t>/promote   a replica node takes this tenant's writes
+//! POST   /_admin/tenants/<t>/follow    a primary's file follows this node's upstream
 //! ```
 //!
 //! A separate token from the data one: a client that may read and write a
@@ -67,6 +68,11 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 format!("{{\"promoted\":\"{t}\",\"seq\":{seq},\"history\":\"{id:016x}\"}}"),
             )
         }),
+        // The other way: a node rejoining as the standby has its tenants
+        // follow, as the router asks when it records the pair.
+        (Method::Post, ["tenants", t, "follow"]) => tenants
+            .follow(t)
+            .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
         _ => Err(Refused(404, "no such admin endpoint".into())),
     };
     result.unwrap_or_else(|Refused(status, msg)| Response::error(status, &msg))

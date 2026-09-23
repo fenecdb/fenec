@@ -306,8 +306,15 @@ impl Store {
     }
     /// Bytes allocated by the offset index. Small next to the segment bytes,
     /// but a fixed per-document cost: in a collection of small documents it
-    /// can reach a third of the total.
+    /// can reach a third of the total. A mapped store also keeps where each
+    /// of its data records sits in the file, 16 bytes a record -- one a
+    /// write for the tail since the last checkpoint: 16.7 of the 53.8 MB a
+    /// mapped file of a million writes held, and uncounted before.
     pub fn index_bytes(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((_, stretches)) = &self.base {
+            return self.index.bytes() + stretches.capacity() * 16;
+        }
         self.index.bytes()
     }
     pub fn segment_count(&self) -> usize {
@@ -663,20 +670,11 @@ impl Store {
     }
 
     /// Moves the live records into fresh segments and drops the tombstones.
-    /// Returns the new full byte image (to be written over the file).
-    pub fn compact(&mut self) -> Result<Vec<u8>> {
-        let mut fresh = Store::new();
-        fresh.next_id = self.next_id;
-        let mut image = Vec::with_capacity(self.total_bytes - self.dead_bytes);
-        let ids = self.index.ids();
-        fresh.reserve(ids.len());
-        for id in ids {
-            let loc = self.index.get(id).unwrap();
-            let payload = self.payload(loc)?.to_vec();
-            image.extend_from_slice(&fresh.append(OP_PUT, id, &payload));
-        }
-        *self = fresh;
-        Ok(image)
+    /// The image the file gets is written from the store afterwards; one
+    /// built here too was a second copy of the live data, thrown away.
+    pub fn compact(&mut self) -> Result<()> {
+        *self = self.compacted()?;
+        Ok(())
     }
 
     /// The live records in a fresh store, the dead ones left behind -- and
@@ -953,11 +951,11 @@ mod tests {
             st.append(OP_DEL, id, &[]);
         }
         assert!(st.dead_bytes() > 0);
-        let image = st.compact().unwrap();
+        st.compact().unwrap();
         assert_eq!(st.len(), 50);
         assert_eq!(st.dead_bytes(), 0);
         let mut st2 = Store::new();
-        st2.replay(&image).unwrap();
+        st2.replay(&st.image()).unwrap();
         assert_eq!(st2.len(), 50);
     }
 

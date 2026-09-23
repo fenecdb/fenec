@@ -221,6 +221,45 @@ pub enum IndexKind {
     Sorted,
 }
 
+impl IndexKind {
+    /// Whether this index can be built over `field`, of type `ty`: the one
+    /// rule `create collection`, `create index` and `fenec import --index`
+    /// all go through. `quant=bit` was refused with l2 and dot only where a
+    /// collection was created, and a `create index` taking it silently
+    /// answered `near` from candidates chosen by sign alone.
+    pub fn check(&self, field: &str, ty: &DataType) -> Result<()> {
+        match self {
+            IndexKind::Vector(spec) => {
+                if !matches!(ty, DataType::Vector(..)) {
+                    return Err(Error::Type(format!(
+                        "field `{field}` is not vector<N>, no vector index can be built"
+                    )));
+                }
+                if spec.quant == Quant::Bit && spec.metric != Metric::Cosine {
+                    return Err(Error::Query(format!(
+                        "`{field}`: quant=bit keeps the signs of unit vectors, so it needs \
+                         the cosine metric, not {}",
+                        spec.metric.name()
+                    )));
+                }
+            }
+            IndexKind::Text(_) if !matches!(ty, DataType::Text) => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not text, no full-text index can be built"
+                )));
+            }
+            IndexKind::Sorted if !crate::sorted::SortedIndex::supports(ty) => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not int, float, timestamp or text, no ordered index \
+                     can be built"
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub name: String,
@@ -267,36 +306,7 @@ impl Schema {
             if seen.contains(&f.name) {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
-            if let IndexKind::Vector(spec) = f.index {
-                if !matches!(f.ty, DataType::Vector(..)) {
-                    return Err(Error::Type(format!(
-                        "field `{}` is not vector<N>, no vector index can be built",
-                        f.name
-                    )));
-                }
-                if spec.quant == Quant::Bit && spec.metric != Metric::Cosine {
-                    return Err(Error::Query(format!(
-                        "`{}`: quant=bit keeps the signs of unit vectors, so it needs \
-                         the cosine metric, not {}",
-                        f.name,
-                        spec.metric.name()
-                    )));
-                }
-            }
-            if let IndexKind::Text(_) = f.index {
-                if !matches!(f.ty, DataType::Text) {
-                    return Err(Error::Type(format!(
-                        "field `{}` is not text, no full-text index can be built",
-                        f.name
-                    )));
-                }
-            }
-            if f.index == IndexKind::Sorted && !crate::sorted::SortedIndex::supports(&f.ty) {
-                return Err(Error::Type(format!(
-                    "field `{}` is not int, float, timestamp or text, no ordered index can be built",
-                    f.name
-                )));
-            }
+            f.index.check(&f.name, &f.ty)?;
             seen.push(f.name.clone());
         }
         Ok(Schema { name, fields })

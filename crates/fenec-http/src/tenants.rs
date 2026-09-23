@@ -131,6 +131,9 @@ pub struct Tenants {
     change_capacity: usize,
     max_memory: usize,
     checkpoint: bool,
+    /// Whether tenant files are mapped (`fs::open`) or read into memory
+    /// (`fenec-pg --no-mmap`).
+    mapped: bool,
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -161,7 +164,17 @@ impl Tenants {
             change_capacity: fenec_core::changes::DEFAULT_CAPACITY,
             max_memory: 0,
             checkpoint: true,
+            mapped: true,
         })
+    }
+
+    /// Whether tenant files are mapped, as `fs::open` maps a file, or read
+    /// into memory: `fenec-pg --no-mmap`, which a network file system wants
+    /// -- a read error there kills a process reading a mapping -- and which
+    /// has `--max-memory` count the data.
+    pub fn with_mmap(mut self, on: bool) -> Tenants {
+        self.mapped = on;
+        self
     }
 
     /// Runs on every database as it is opened -- `fenec-pg` installs its
@@ -185,11 +198,6 @@ impl Tenants {
     /// replicates its tenants.
     pub fn replication_token(&self) -> Option<&str> {
         Some(self.repl.as_ref()?.token.as_str())
-    }
-
-    /// Whether this node follows another's tenants.
-    pub fn follows(&self) -> Option<&str> {
-        self.repl.as_ref()?.upstream.as_deref()
     }
 
     pub fn with_change_capacity(mut self, n: usize) -> Tenants {
@@ -307,18 +315,60 @@ impl Tenants {
     /// to make atomic between them.
     pub fn promote(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
         let t = self.get(name)?;
-        let Some(repl) = &t.repl else {
+        if let Some(follower) = t.repl.as_ref().and_then(|r| r.follower()) {
+            return follower
+                .promote(fresh_id())
+                .map_err(|e| Refused(500, e.to_string()));
+        }
+        // A replica's file with nothing following for it -- a node started
+        // without --replica-of, after a failover left it unpromoted -- is
+        // promoted where it stands, as `fenec-pg --promote` promotes a file.
+        // It could not be before: it opened refusing writes, and nothing on
+        // the running node could make it take them.
+        let mut g = t.write();
+        if !g.history().following {
+            return Err(Refused(409, format!("tenant `{name}` is not a replica")));
+        }
+        let id = fresh_id();
+        g.fork(id)
+            .and_then(|_| g.sync())
+            .map_err(|e| Refused(500, e.to_string()))?;
+        Ok((g.change_seq(), id))
+    }
+
+    /// Has a tenant follow the node this one is the replica of: a primary's
+    /// file made a replica's. What a node rejoining as the standby of the one
+    /// its tenants failed over to needs -- the writes it took that were never
+    /// sent are gone, the trade a failover makes -- and what the router asks
+    /// of a standby for each tenant as it records the pair.
+    pub fn follow(&self, name: &str) -> std::result::Result<(), Refused> {
+        check_name(name)?;
+        if self.repl.as_ref().is_none_or(|r| r.upstream.is_none()) {
             return Err(Refused(
                 409,
-                format!("tenant `{name}` is not replicated (--replication-token)"),
+                "this node follows no other (--replica-of, --replication-token)".into(),
             ));
-        };
-        let Some(follower) = repl.follower() else {
-            return Err(Refused(409, format!("tenant `{name}` follows no node")));
-        };
-        follower
-            .promote(fresh_id())
-            .map_err(|e| Refused(500, e.to_string()))
+        }
+        self.with_slot(name, |held| {
+            self.refuse_if_shutting_down()?;
+            let path = self.path(name);
+            if let Held::Open(t) = &*held {
+                if t.read().history().following {
+                    return Ok(());
+                }
+                // Closed first: one instance over the file, always.
+                if Arc::strong_count(t) > 1 || t.is_frozen() {
+                    return Err(Refused(409, format!("tenant `{name}` is still in use")));
+                }
+                *held = Held::Closed;
+            }
+            if !path.exists() {
+                return Err(Refused(404, format!("no tenant `{name}` on this node")));
+            }
+            let t = self.open_as(name, &path, true)?;
+            *held = Held::Open(t);
+            Ok(())
+        })
     }
 
     /// Creates an empty tenant. 409 when it exists.
@@ -339,32 +389,67 @@ impl Tenants {
     }
 
     fn open_file(&self, name: &str, path: &Path) -> std::result::Result<Arc<Tenant>, Refused> {
+        self.open_as(name, path, false)
+    }
+
+    /// Opens a tenant's file; `demote` makes a primary's file follow.
+    fn open_as(
+        &self,
+        name: &str,
+        path: &Path,
+        demote: bool,
+    ) -> std::result::Result<Arc<Tenant>, Refused> {
         let failed = |e: fenec_core::error::Error| {
             Refused(500, format!("could not open tenant `{name}`: {e}"))
         };
         let (mut db, feed) = match &self.repl {
-            None => (fenec_core::fs::open(path).map_err(failed)?, None),
+            None => {
+                let db = if self.mapped {
+                    fenec_core::fs::open(path)
+                } else {
+                    fenec_core::fs::open_in_memory(path)
+                };
+                (db.map_err(failed)?, None)
+            }
             Some(r) => {
                 let file = path.to_string_lossy().into_owned();
-                let (db, feed) = crate::replication::open(&file, r.buffer).map_err(failed)?;
+                let (db, feed) =
+                    crate::replication::open_with(&file, r.buffer, self.mapped).map_err(failed)?;
                 (db, Some(feed))
             }
         };
-        if let Some(r) = &self.repl {
-            // The same rule a single file follows: a replica's file goes on
-            // following, a primary's starts a history if it has none. A
-            // tenant promoted by a failover has forked already and is a
-            // primary's file from then on.
-            let history = db.history().clone();
-            let settled = match (&r.upstream, history.following) {
-                (Some(_), _) => db.follow(history.lineage.clone()),
-                (None, false) if history.lineage.is_empty() => {
-                    db.fork(fresh_id()).and_then(|_| db.sync())
-                }
-                (None, _) => Ok(()),
-            };
-            settled.map_err(failed)?;
-        }
+        // A tenant's role is its file's, not the node's. A replica's file
+        // goes on following; a primary's stays one, a tenant a failover
+        // promoted here included; and a file new to a replica node follows,
+        // being the standby copy the router made. Every file on a node with
+        // --replica-of was made to follow once, so a promotion was undone at
+        // the next open -- an idle close, a restart with the same flags --
+        // and the old primary's image then wiped the writes taken since. A
+        // rejoining node's tenants follow when told to (`follow`).
+        let history = db.history().clone();
+        let upstream = self.repl.as_ref().and_then(|r| r.upstream.as_ref());
+        let following = match (upstream, history.following) {
+            (Some(_), true) => true,
+            (Some(_), false) if demote || history.lineage.is_empty() => {
+                db.follow(history.lineage.clone()).map_err(failed)?;
+                true
+            }
+            (Some(_), false) => false,
+            (None, false) if self.repl.is_some() && history.lineage.is_empty() => {
+                db.fork(fresh_id())
+                    .and_then(|_| db.sync())
+                    .map_err(failed)?;
+                false
+            }
+            (None, true) => {
+                crate::log!(
+                    "tenant `{name}` is a replica's file and this node follows no other: \
+                     it takes no write until POST /_admin/tenants/{name}/promote"
+                );
+                false
+            }
+            (None, false) => false,
+        };
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
@@ -372,29 +457,31 @@ impl Tenants {
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
         let db = Arc::new(RwLock::new(db));
-        // The follower applies the primary node's writes for this tenant; it
-        // holds the tenant open, which is what keeps a replica following one
-        // nobody reads here.
-        let repl = self.repl.as_ref().map(|r| {
-            let follower = r.upstream.as_ref().and_then(|url| {
-                let f = Follower::new(
-                    &format!("{}/t/{name}", url.trim_end_matches('/')),
-                    r.token.clone(),
-                    Arc::clone(&db),
-                    feed.clone(),
-                    r.sync_on_write,
+        // The follower applies the primary node's writes for this tenant, and
+        // holds the database -- not the tenant -- while it runs; `close`
+        // therefore keeps a tenant with a running follower open.
+        let mut follower = None;
+        if let (Some(r), Some(url), true) = (&self.repl, upstream, following) {
+            let f = Follower::new(
+                &format!("{}/t/{name}", url.trim_end_matches('/')),
+                r.token.clone(),
+                Arc::clone(&db),
+                feed.clone(),
+                r.sync_on_write,
+            )
+            .map_err(|e| Refused(500, format!("tenant `{name}` cannot follow {url}: {e}")))?;
+            f.start(format!("fenec-replica-{name}")).map_err(|e| {
+                Refused(
+                    500,
+                    format!("tenant `{name}` could not start following: {e}"),
                 )
-                .map_err(|e| crate::log!("tenant `{name}` cannot follow {url}: {e}"))
-                .ok()?;
-                let run = Arc::clone(&f);
-                std::thread::Builder::new()
-                    .name(format!("fenec-replica-{name}"))
-                    .spawn(move || run.run())
-                    .ok()?;
-                Some(f)
-            });
-            Replication::new(r.token.clone(), feed.clone(), follower)
-        });
+            })?;
+            follower = Some(f);
+        }
+        let repl = self
+            .repl
+            .as_ref()
+            .map(|r| Replication::new(r.token.clone(), feed.clone(), follower));
         Ok(Arc::new(Tenant {
             name: name.to_string(),
             db,
@@ -414,6 +501,17 @@ impl Tenants {
             return false;
         };
         if Arc::strong_count(t) > 1 || t.is_frozen() {
+            return false;
+        }
+        // Its follower holds the database rather than the tenant: closed, the
+        // tenant would leave it writing the file, and the next open -- a
+        // failover's promote -- put a second database over it. A replica
+        // node keeps every tenant it follows open.
+        if t.repl
+            .as_ref()
+            .and_then(|r| r.follower())
+            .is_some_and(|f| f.running())
+        {
             return false;
         }
         if self.checkpoint {
@@ -590,6 +688,13 @@ impl Tenants {
                 let deadline = Instant::now() + RELEASE_WAIT;
                 while Arc::strong_count(t) > 1 {
                     if Instant::now() >= deadline {
+                        // The tenant stays, so everything it was told to end
+                        // goes on: left ended, it took writes its replicas
+                        // were never sent.
+                        t.hub.reopen();
+                        if let Some(repl) = &t.repl {
+                            repl.reopen_streams(format!("fenec-replica-{name}"));
+                        }
                         return Err(Refused(409, format!("tenant `{name}` is still in use")));
                     }
                     std::thread::sleep(Duration::from_millis(5));

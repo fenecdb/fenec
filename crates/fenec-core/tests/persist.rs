@@ -203,6 +203,125 @@ fn a_record_cut_short_is_cut_off_before_the_next_write() {
     }
 }
 
+/// A record cut short inside the checkpoint image is not a crash's torn
+/// tail -- an image is written beside the file and renamed over it whole --
+/// but a damaged or truncated file. The open refuses it and leaves every
+/// byte where it was: cut there as a torn tail is, one flipped bit in an
+/// image's length deleted every record after it, intact ones included.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_record_cut_short_inside_the_image_refuses_the_open_and_cuts_nothing() {
+    let (dir, path) = tmp_path("torn-image");
+    {
+        let mut db = fenec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "one"}"#);
+        run(&mut db, r#"put t {a: "two"}"#);
+        db.checkpoint().expect("checkpoint");
+        run(&mut db, r#"put t {a: "three"}"#);
+        db.sync().expect("sync");
+    }
+    let good = std::fs::read(&path).unwrap();
+    // The counter header, then the image's records: find its data record
+    // and have its length promise more than the file holds.
+    let mut pos = 8 + 17;
+    let data = loop {
+        let kind = good[pos];
+        let mut p = pos + 1;
+        let _cid = varint(&good, &mut p);
+        let len_at = p;
+        let len = varint(&good, &mut p);
+        if kind == 3 {
+            break len_at;
+        }
+        pos = p + len as usize;
+    };
+    assert_eq!(good[data] & 0x80, 0, "a one-byte length");
+    let mut bad = good.clone();
+    bad[data] = 0x7f;
+    std::fs::write(&path, &bad).unwrap();
+    let err = fenec_core::fs::open(&path)
+        .err()
+        .expect("the damaged image opened");
+    assert!(err.to_string().contains("checkpoint image"), "{err}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bad,
+        "the open wrote to the file"
+    );
+
+    // A file cut between two of the image's records: every record there is
+    // whole, and only the image's stated length can tell.
+    std::fs::write(&path, &good[..data - 2]).unwrap();
+    let err = fenec_core::fs::open(&path)
+        .err()
+        .expect("the truncated image opened");
+    assert!(err.to_string().contains("checkpoint image"), "{err}");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), (data - 2) as u64);
+
+    // Mended, every row is there, the one after the image included.
+    std::fs::write(&path, &good).unwrap();
+    let mut db = fenec_core::fs::open(&path).expect("the mended file");
+    assert_eq!(ids(&mut db, "t"), vec![1, 2, 3]);
+    cleanup(dir, path);
+}
+
+#[cfg(feature = "std-fs")]
+fn varint(b: &[u8], p: &mut usize) -> u64 {
+    let (mut v, mut shift) = (0u64, 0);
+    loop {
+        let byte = b[*p];
+        *p += 1;
+        v |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return v;
+        }
+        shift += 7;
+    }
+}
+
+/// A tool that only looks at a file -- `fenec types` -- opens it read-only:
+/// a server may be in the middle of appending to it, and from outside that
+/// looks like a torn last record. Nothing is cut, created or written, and a
+/// write is refused.
+#[cfg(feature = "std-fs")]
+#[test]
+fn a_read_only_open_leaves_the_file_as_it_is() {
+    use std::io::Write;
+    let (dir, path) = tmp_path("read-only");
+    {
+        let mut db = fenec_core::fs::open(&path).expect("open");
+        run(&mut db, "create collection t (a text)");
+        run(&mut db, r#"put t {a: "before"}"#);
+        db.sync().expect("sync");
+    }
+    // A record the writer has only half appended.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(&[3, 1, 100, 0, 1, 2]).unwrap();
+    drop(f);
+    let before = std::fs::read(&path).unwrap();
+    let mut db = fenec_core::fs::open_read_only(&path).expect("read-only open");
+    assert_eq!(ids(&mut db, "t"), vec![1]);
+    let err = db
+        .execute(&fenec_ql::parse_one(r#"put t {a: "no"}"#).unwrap())
+        .err()
+        .expect("a write went through");
+    assert!(
+        matches!(err, fenec_core::error::Error::ReadOnly(_)),
+        "{err}"
+    );
+    drop(db);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let missing = dir.join("missing.fenec");
+    assert!(fenec_core::fs::open_read_only(&missing).is_err());
+    assert!(!missing.exists(), "the read-only open created the file");
+    cleanup(dir, path);
+}
+
 /// Dropping a collection must not make the file unopenable.
 ///
 /// The `drop` record carries a length field like every other one (even

@@ -904,14 +904,22 @@ fn session(
                     }
                 };
                 // Held against a move for the length of the statement, as a
-                // request is held on the HTTP path.
-                let _gate = held.as_ref().map(|t| t.enter());
-                let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
-                be.busy.store(true, Ordering::SeqCst);
-                be.canceled.store(false, Ordering::SeqCst);
-                execute_into(&db, frozen, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
-                be.busy.store(false, Ordering::SeqCst);
-                be.canceled.store(false, Ordering::SeqCst);
+                // request is held on the HTTP path -- and let go before the
+                // answer is written. The socket has no write timeout: a
+                // client that stopped reading a large answer held the tenant
+                // through the write, a freeze waited on it, and every
+                // request for the tenant queued behind the freeze.
+                {
+                    let _gate = held.as_ref().map(|t| t.enter());
+                    let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
+                    be.busy.store(true, Ordering::SeqCst);
+                    be.canceled.store(false, Ordering::SeqCst);
+                    execute_into(&db, frozen, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
+                    be.busy.store(false, Ordering::SeqCst);
+                    be.canceled.store(false, Ordering::SeqCst);
+                }
+                drop(held);
+                drop(db);
                 out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
@@ -977,13 +985,15 @@ fn session(
                     portals.get(&name).map(|p| p.sql.clone())
                 };
                 let sql = sql.unwrap_or_default();
+                // An error here is answered as Execute answers one: the
+                // client's Sync brings the ReadyForQuery. Sent here as well,
+                // it made two for one Sync, and libpq read every answer after
+                // it one query late.
                 let (db, held) = match source.open(&tenant) {
                     Ok(v) => v,
                     Err(refused) => {
                         let (code, msg) = tenant_error(refused);
                         out.error(code, &msg);
-                        out.ready(tx.status());
-                        out.flush_to(&mut w)?;
                         continue;
                     }
                 };
@@ -996,8 +1006,6 @@ fn session(
                     Some(s) => s,
                     None => {
                         out.error("57014", "the query was cancelled");
-                        out.ready(tx.status());
-                        out.flush_to(&mut w)?;
                         continue;
                     }
                 };

@@ -622,61 +622,14 @@ fn parse_index(s: &str) -> std::result::Result<(String, IndexKind), String> {
     if name.is_empty() {
         return Err(format!("invalid --index: `{s}`"));
     }
-    let spec = spec.trim();
-    if spec.eq_ignore_ascii_case("hash") {
-        return Ok((name.to_string(), IndexKind::Hash));
+    // The index is read by FenecQL's own parser, as `--where` is: a copy of
+    // it here had drifted -- no clamping of `m` and `ef`, no `ef` and `ef_c`,
+    // a `quant` spelt one way, no `@text`.
+    match fenec_ql::parse_one(&format!("create index on imported ({name}) @{spec}")) {
+        Ok(Statement::CreateIndex { field, kind, .. }) => Ok((field, kind)),
+        Ok(_) => Err(format!("invalid --index: `{s}`")),
+        Err(e) => Err(format!("--index `{s}`: {e}")),
     }
-    if spec.eq_ignore_ascii_case("sorted") {
-        return Ok((name.to_string(), IndexKind::Sorted));
-    }
-    let args = match spec.strip_prefix("hnsw").map(str::trim) {
-        None => return Err(format!("unknown index kind: `{spec}`")),
-        Some("") => "",
-        Some(rest) => rest
-            .strip_prefix('(')
-            .and_then(|r| r.strip_suffix(')'))
-            .ok_or_else(|| format!("the --index parenthesis does not close: `{s}`"))?,
-    };
-    let mut v = VectorIndexSpec::default();
-    let mut ef_given = false;
-    for (n, arg) in args.split(',').map(str::trim).enumerate() {
-        if arg.is_empty() {
-            continue;
-        }
-        match arg.split_once('=') {
-            None => {
-                // A single positional argument is the metric.
-                if n != 0 {
-                    return Err(format!("--index unexpected argument: `{arg}`"));
-                }
-                v.metric = Metric::parse(arg)
-                    .ok_or_else(|| format!("unknown metric: `{arg}` (cosine, l2, dot)"))?;
-            }
-            Some((k, val)) if k.trim() == "quant" => {
-                v.quant = Quant::parse(val.trim())
-                    .ok_or_else(|| format!("unknown quantization: `{val}` (int8, bit, none)"))?;
-            }
-            Some((k, val)) => {
-                let num: usize = val
-                    .trim()
-                    .parse()
-                    .map_err(|_| format!("--index `{k}` expects a number, got `{val}`"))?;
-                match k.trim() {
-                    "m" => v.m = num,
-                    "ef_construction" => v.ef_construction = num,
-                    "ef_search" => {
-                        v.ef_search = num;
-                        ef_given = true;
-                    }
-                    other => return Err(format!("--index unknown parameter: `{other}`")),
-                }
-            }
-        }
-    }
-    if v.quant == Quant::Bit && !ef_given {
-        v.ef_search = fenec_core::schema::BIT_EF_SEARCH;
-    }
-    Ok((name.to_string(), IndexKind::Vector(v)))
 }
 
 #[cfg(test)]

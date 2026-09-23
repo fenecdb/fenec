@@ -268,6 +268,23 @@ fn the_quantization_is_part_of_the_index() {
         .unwrap_err();
     assert!(err.to_string().contains("cosine"), "{err}");
     assert!(fenec_ql::parse_one("create collection d (v vector<8> @hnsw(quant=int4))").is_err());
+    // Nor when the index comes after the collection, under the lock or
+    // beside the database: the rule was `create collection`'s alone.
+    for metric in ["l2", "dot"] {
+        let stmt = fenec_ql::parse_one(&format!(
+            "create index on docs (v) @hnsw({metric}, quant=bit)"
+        ))
+        .unwrap();
+        let mut db = filled("");
+        let err = db.execute(&stmt).unwrap_err();
+        assert!(err.to_string().contains("cosine"), "{metric}: {err}");
+        let db = std::sync::RwLock::new(filled(""));
+        let err = Database::maintain(&db, &stmt).unwrap().unwrap_err();
+        assert!(err.to_string().contains("cosine"), "{metric}: {err}");
+        let g = db.read().unwrap();
+        let schema = &g.collection("docs").unwrap().schema;
+        assert_eq!(schema.field("v").unwrap().index, IndexKind::None);
+    }
 
     // A quantized index is built after the fact as any other is.
     let mut db = filled("");

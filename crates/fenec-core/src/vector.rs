@@ -1099,6 +1099,12 @@ impl VectorIndex {
         self.len() == 0
     }
 
+    /// Tombstones: nodes of documents deleted or rewritten, which stay in the
+    /// graph -- still routing a search through them -- until it is rebuilt.
+    pub fn dead(&self) -> usize {
+        self.deleted_count
+    }
+
     #[inline]
     fn is_deleted(&self, node: u32) -> bool {
         self.deleted.get(node as usize).copied().unwrap_or(false)

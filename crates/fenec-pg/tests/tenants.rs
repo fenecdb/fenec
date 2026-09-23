@@ -205,3 +205,97 @@ fn a_frozen_tenant_refuses_writes_and_answers_reads() {
         vec![vec![Some("2".to_string())]]
     );
 }
+
+/// A pg connection written and read by hand, past the startup handshake.
+fn raw(n: &Node, tenant: &str) -> TcpStream {
+    let mut s = TcpStream::connect(("127.0.0.1", n.pg)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut body = 196_608i32.to_be_bytes().to_vec();
+    for (k, v) in [("user", "fenec"), ("database", tenant)] {
+        body.extend_from_slice(k.as_bytes());
+        body.push(0);
+        body.extend_from_slice(v.as_bytes());
+        body.push(0);
+    }
+    body.push(0);
+    let mut msg = ((body.len() + 4) as i32).to_be_bytes().to_vec();
+    msg.extend_from_slice(&body);
+    s.write_all(&msg).unwrap();
+    while read_message(&mut s).unwrap().0 != b'Z' {}
+    s
+}
+
+fn send(s: &mut TcpStream, tag: u8, body: &[u8]) {
+    let mut msg = vec![tag];
+    msg.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+    msg.extend_from_slice(body);
+    s.write_all(&msg).unwrap();
+}
+
+fn read_message(s: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+    let mut head = [0u8; 5];
+    s.read_exact(&mut head)?;
+    let len = i32::from_be_bytes(head[1..5].try_into().unwrap()) as usize;
+    let mut body = vec![0u8; len - 4];
+    s.read_exact(&mut body)?;
+    Ok((head[0], body))
+}
+
+/// A client that stops reading a large answer does not hold its tenant:
+/// the session lets go of it before writing, as the HTTP path does. The
+/// socket has no write timeout, so the tenant was held through the write --
+/// a freeze waited on it for as long as the client did not read, and every
+/// request for the tenant queued behind the freeze.
+#[test]
+fn a_client_that_stops_reading_does_not_hold_the_tenant() {
+    let n = start("stalled");
+    assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
+    let mut acme = n.connect("acme").expect("acme");
+    rows(&mut acme, "create collection notes (body text)");
+    // Some 4 MB of rows: more than the socket buffers between us hold.
+    let body = "x".repeat(1_000);
+    let batch: Vec<String> = (0..200).map(|_| format!("{{body: \"{body}\"}}")).collect();
+    for _ in 0..20 {
+        rows(&mut acme, &format!("put notes [{}]", batch.join(", ")));
+    }
+    let mut stalled = raw(&n, "acme");
+    send(&mut stalled, b'Q', b"get notes\0");
+    std::thread::sleep(Duration::from_millis(300));
+
+    let t = std::time::Instant::now();
+    assert_eq!(n.admin("POST", "/_admin/tenants/acme/freeze"), 200);
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    assert_eq!(n.admin("POST", "/_admin/tenants/acme/thaw"), 200);
+    assert_eq!(
+        rows(&mut acme, "get notes count"),
+        vec![vec![Some("4000".to_string())]]
+    );
+    drop(stalled);
+}
+
+/// A Describe the tenant cannot answer -- deleted since the connect -- is
+/// answered with the error alone, and the client's Sync brings the one
+/// ReadyForQuery. It sent one of its own as well, and libpq, reading two
+/// for one Sync, stayed an answer behind for the rest of the session.
+#[test]
+fn a_refused_describe_answers_one_ready_for_query_per_sync() {
+    let n = start("describe");
+    assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
+    let mut s = raw(&n, "acme");
+    assert_eq!(n.admin("DELETE", "/_admin/tenants/acme"), 204);
+    send(&mut s, b'P', b"\0get notes\0\0\0");
+    send(&mut s, b'D', b"S\0");
+    send(&mut s, b'S', b"");
+    let mut tags = Vec::new();
+    loop {
+        let (tag, _) = read_message(&mut s).unwrap();
+        tags.push(tag);
+        if tag == b'Z' {
+            break;
+        }
+    }
+    assert_eq!(tags, vec![b'1', b'E', b'Z']);
+    s.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    assert!(read_message(&mut s).is_err(), "a second ReadyForQuery");
+}

@@ -87,10 +87,11 @@ and text indexes, the graph, and the writes since the open.</p>
     memory (<code>--no-mmap</code>). A 10 GB file of 23 million rows opens on
     an 8 GB machine, which reading it cannot.</li>
   <li><b><code>compact</code> peaks at the indexes, not the data.</b> On that
-    1 GB file: 423 MB and 0.60 s mapped, 2 866 MB and 1.69 s read — the
+    1 GB file: 236 MB and 2.08 s mapped, 2 012 MB and 1.52 s read — the
     mapped one writes the live records into the new file and points at it,
-    copying nothing and rebuilding no index. A <code>checkpoint</code> is the
-    same path with the dead records kept.</li>
+    copying nothing and rebuilding no index but a graph holding tombstones.
+    It takes longer and holds a ninth of the memory. A
+    <code>checkpoint</code> is the same path with the dead records kept.</li>
   <li><b>Open cost is proportional to data size, not constant.</b> The records
     are walked to build the offset index and the indexes are built from the
     documents, mapped or not. 100 000 × 128 with the graph in the file takes
@@ -150,10 +151,11 @@ so a node that is down takes its tenants with it.</p>
     0.19 s at 100 000 × 128 and 0.99 s at 100 000 × 768, where rebuilding the
     graph took 8.8 s and 48 s. The time grows with the writes since the
     checkpoint.</li>
-  <li><b><code>compact</code> is a full rebuild, not a garbage collection.</b>
-    Even with zero dead bytes every index is built from scratch: 20 000 × 32
-    takes 0.94 s, against 0.05 s on a vector-free text collection of the same
-    size.</li>
+  <li><b><code>compact</code> rebuilds a graph only when it holds
+    tombstones.</b> The dead records go and the other indexes stand; a vector
+    graph with a deleted or rewritten document's node in it is built again
+    from the live vectors, which is what a <code>create index</code> of it
+    costs — 50 s at 100 000 × 768.</li>
   <li><b>A server builds an index or compacts beside the database.</b> A
     <code>create index</code> or <code>compact</code> sent on its own to
     <code>fenec-pg</code> or <code>POST /query</code> copies what it reads
@@ -162,15 +164,19 @@ so a node that is down takes its tenants with it.</p>
     100 000 × 128, where either takes about 20 s, reads waited at most 21 ms
     through an HNSW build and 69 ms through a compact — the compact's includes
     rewriting the file — against the full 20 s under the write lock, and
-    writes went on at the same pace. One in a batch, or run by the shell or
-    an embedding program, still holds the write lock throughout. A schema
+    writes went on at the same pace. Over a mapped file the compact copies no
+    record: the graphs holding tombstones are rebuilt beside the database,
+    and the live records streamed into the new file under the write lock. One
+    in a batch, or run by the shell or an embedding program, still holds the
+    write lock throughout. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
     fits. It cannot be cancelled once begun.</li>
   <li>A delete is a tombstone and the graph node stays in memory until
     <code>compact</code>. Updating a document also marks the old node deleted
-    and adds a new one, so in collections whose vectors change, the graph grows
-    until compaction.</li>
+    and adds a new one, so in collections whose documents change, the graph
+    grows until compaction — and the tombstones take places in the beam
+    <code>near</code> walks.</li>
   <li>Documents inside one batch cannot see each other as neighbours. The batch
     is 1/16 of the graph size (64–512), so there is no measured recall loss —
     but very small collections fall to the serial path below 1024 vectors.</li>

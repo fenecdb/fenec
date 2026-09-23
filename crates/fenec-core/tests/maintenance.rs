@@ -204,6 +204,35 @@ fn a_compact_beside_catches_up_and_hands_out_no_id_again() {
     );
 }
 
+/// Every rewrite of a document with a vector leaves a tombstone in the
+/// graph, and a compact is the one thing that takes them out: by statement
+/// and beside the database alike. A compact that kept them let the graph
+/// grow with every update, and the tombstones crowd the beam `near` walks.
+#[test]
+fn a_compact_takes_the_tombstones_out_of_the_graph() {
+    let dead = |db: &Database| db.collection("c").unwrap().vectors["v"].dead();
+    let compact = fenec_ql::parse_one("compact").unwrap();
+    for beside in [false, true] {
+        let mut db = seeded();
+        exec(&mut db, "create index on c (v) @hnsw(l2, m=8)");
+        exec(&mut db, "set c {n: 1}");
+        assert_eq!(dead(&db), 300);
+        if beside {
+            let lock = RwLock::new(db);
+            Database::maintain(&lock, &compact).unwrap().unwrap();
+            db = lock.into_inner().unwrap();
+        } else {
+            db.execute(&compact).unwrap();
+        }
+        assert_eq!(dead(&db), 0, "beside: {beside}");
+        assert_eq!(db.collection("c").unwrap().vectors["v"].len(), 300);
+        graph_is_whole(&db);
+        // A graph with nothing to take out is left as it is.
+        exec(&mut db, "compact");
+        assert_eq!(dead(&db), 0);
+    }
+}
+
 #[test]
 fn a_schema_change_meanwhile_is_reported_rather_than_built_over() {
     let db = RwLock::new(seeded());

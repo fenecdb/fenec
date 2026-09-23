@@ -103,10 +103,12 @@ memory are the same format, so a read decodes straight over the bytes: no
 eviction policy, no dirty pages, no cache of fenecdb's own. `fs::open` maps
 the file where the target can, so the documents stay in it and the process
 holds what it derived from them (1 GB file, hash and ordered index: 188 MB
-against 1 095 read in; `compact` peaks at 423 MB against 2 866).
-`fs::open_in_memory` (`fenec-pg --no-mmap`) is the other way. A rewrite
-points the stores at the file it just wrote (`Database::repoint`), and a
-compact over a mapped file copies no record and rebuilds no index.
+against 1 095 read in; `compact` peaks at 236 MB against 2 012).
+`fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
+tenants included) is the other way. A rewrite points the stores at the file
+it just wrote (`Database::repoint`), and a compact over a mapped file copies
+no record -- on a server either -- and rebuilds only a graph holding
+tombstones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
@@ -117,7 +119,9 @@ listener inside `fenec-pg`, never its own binary.
 
 **A storage error stops writes.** Once the sink refuses an append, a sync or a
 rewrite, every later write and sync returns `Error::Io` until the file is
-reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
+reopened (`Database::failure`); reads go on, from memory and the mapped
+file's pages -- a page that cannot be read in is `SIGBUS`, not an error, so
+`--no-mmap` for failing disks, and a mapped file is replaced only by rename. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
@@ -171,7 +175,9 @@ maintenance on that collection -- so a write path that skipped `note` would
 leave a built index missing it. A schema change there (another index, a drop)
 fails the maintenance rather than installing what no longer fits. At 100 000 x
 128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
-(file rewrite included), against the full ~20 s under the write lock. Only a
+(file rewrite included), against the full ~20 s under the write lock. Over a
+mapped file a compact copies no record: graphs holding tombstones are rebuilt
+beside it, the live records streamed into the new file under the lock. Only a
 lone statement takes this path; a batch, the shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
@@ -180,7 +186,9 @@ body and the reader **must** consume it, or the stray byte is read as the next
 record kind. A last record a crash cut short is cut off the file on open
 (`Database::load` says where, `fs::open` and `replication::open` cut): only
 skipped, it swallowed the next append, an acknowledged write lost on the open
-after. The change counter record (kind 6) is at the front and fixed width;
+after. A record cut short inside the checkpoint image is refused as corrupt
+instead (an image is renamed in whole), and `fenec types` opens with
+`fs::open_read_only`, which writes nothing to a server's live file. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) is the one appended record that is not a write.
 
@@ -194,7 +202,8 @@ after it is applied as the write path would (a touched document's node retired,
 its current vector inserted) -- restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
-without that, one `del` rebuilt the graph on every open until `compact`.
+without that, one `del` rebuilt the graph on every open until `compact`, which
+rebuilds a graph holding tombstones (nothing else takes one out).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,

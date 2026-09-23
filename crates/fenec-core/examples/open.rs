@@ -234,7 +234,7 @@ fn open(path: &str, how: &str, queries: bool) {
     PEAK.store(HEAP.load(Ordering::Relaxed), Ordering::Relaxed);
     let t = Instant::now();
     let db = match how {
-        "read" => fenec_core::fs::open(path),
+        "read" => fenec_core::fs::open_in_memory(path),
         "mapped" => fenec_core::fs::open_mapped(path),
         other => panic!("read or mapped, not {other}"),
     }
@@ -326,7 +326,7 @@ fn compact(path: &str, how: &str) {
     PEAK.store(HEAP.load(Ordering::Relaxed), Ordering::Relaxed);
     let t = Instant::now();
     let mut db = match how {
-        "read" => fenec_core::fs::open(path),
+        "read" => fenec_core::fs::open_in_memory(path),
         "mapped" => fenec_core::fs::open_mapped(path),
         other => panic!("read or mapped, not {other}"),
     }
@@ -345,6 +345,8 @@ fn compact(path: &str, how: &str) {
         ms(t.elapsed()),
         heap_mb()
     );
+    // The compact's own peak: counted from the open, it was the open's.
+    PEAK.store(HEAP.load(Ordering::Relaxed), Ordering::Relaxed);
     let t = Instant::now();
     db.execute(&fenec_ql::parse_one("compact").unwrap())
         .unwrap();

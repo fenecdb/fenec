@@ -140,8 +140,6 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
 /// offset in the file, its bytes, and what to tell of each document's id.
 type Replay<'a> = dyn FnMut(&mut Store, usize, &[u8], &mut dyn FnMut(DocId)) -> Result<usize> + 'a;
 
-/// The persistence layer. The engine only says "append these bytes"; where
-/// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 /// Where an image is written: the file being rewritten, or a buffer. The
 /// counter header's body length is only known once the body is out, so it is
 /// patched where it stands rather than the image being written twice.
@@ -168,6 +166,8 @@ impl ImageOut for Vec<u8> {
     }
 }
 
+/// The persistence layer. The engine only says "append these bytes"; where
+/// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
     fn append(&mut self, bytes: &[u8]) -> Result<()>;
     /// Appends a write, the `seq`th of the change counter. A sink that
@@ -884,6 +884,9 @@ pub struct Database {
     tails: Mutex<maintenance::Tails>,
     /// Whether `tails` holds any: the one thing every write looks at.
     watched: std::sync::atomic::AtomicBool,
+    /// Images adopted: each replaces the contents wholesale, possibly at
+    /// the change the database already stood at.
+    adoptions: u64,
 }
 
 impl Default for Database {
@@ -909,6 +912,7 @@ impl Database {
             mapped: false,
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
+            adoptions: 0,
         }
     }
 
@@ -1356,6 +1360,17 @@ impl Database {
         let mut whole = bytes.len();
         while pos < bytes.len() {
             if !whole_record(bytes, pos)? {
+                // A crash in the middle of an append leaves the last record
+                // cut short, and only past the image: an image is written
+                // beside the file and renamed over it whole. One cut short
+                // inside it is a damaged or truncated file, and cutting the
+                // file there -- as a torn tail is cut -- destroyed every
+                // record after it, intact ones included.
+                if pos < body_end {
+                    return Err(Error::Corrupt(
+                        "a record of the checkpoint image runs past the end of the file".into(),
+                    ));
+                }
                 whole = pos;
                 break;
             }
@@ -1491,7 +1506,15 @@ impl Database {
                     seq_base = u64::from_le_bytes(w);
                     w.copy_from_slice(&bytes[pos + 8..pos + 16]);
                     pos += 16;
-                    body_end = pos + u64::from_le_bytes(w) as usize;
+                    body_end = pos.saturating_add(u64::from_le_bytes(w) as usize);
+                    // An image that says it is longer than the file was cut
+                    // short between two of its records, which no record's own
+                    // length can show.
+                    if body_end > bytes.len() {
+                        return Err(Error::Corrupt(
+                            "the checkpoint image is longer than the file".into(),
+                        ));
+                    }
                     has_header = true;
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
@@ -2045,6 +2068,13 @@ impl Database {
     /// primary no longer holds the writes it missed. The sink, the watcher,
     /// the plugins and the change ring's size stay. The ring's marks do not,
     /// so every subscriber reseeds.
+    /// How many images [`Self::adopt`] took. What was read from the database
+    /// is stale when this moves, whatever the change counter says: an image
+    /// can land on the very change the old contents stood at.
+    pub fn adoptions(&self) -> u64 {
+        self.adoptions
+    }
+
     pub fn adopt(&mut self, fresh: Database, image: &[u8]) -> Result<()> {
         self.refuse_if_failed()?;
         let r = self.sink_mut().rewrite(image);
@@ -2056,6 +2086,7 @@ impl Database {
         self.history = fresh.history;
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
+        self.adoptions += 1;
         // The image is the file now: a mapped database reads the documents
         // from there rather than holding the copy it was handed.
         #[cfg(not(target_arch = "wasm32"))]
@@ -2150,7 +2181,7 @@ impl Database {
                 .collection(name)?
                 .schema
                 .clone()])),
-            Statement::Compact(which) => self.compact(which.as_deref()),
+            Statement::Compact(which) => self.compact(which.as_deref(), true),
         }
     }
 
@@ -3944,7 +3975,11 @@ impl Database {
         Ok(Response::Affected(n))
     }
 
-    fn compact(&mut self, which: Option<&str>) -> Result<Response> {
+    /// Drops the dead records of `which` (every collection when `None`) and
+    /// rewrites the file. `graphs`: whether a graph holding tombstones is
+    /// rebuilt here -- a compact beside the database has rebuilt them
+    /// already, without the lock.
+    fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -3969,11 +4004,29 @@ impl Database {
                 c.store.compact()?;
             }
         }
-        // No index is rebuilt either way. A compact drops dead records and
-        // moves the live ones; the documents are the same, and every index
-        // is keyed by id. The graph keeps its tombstones, whose own vectors
-        // travel with them, so it describes the documents as it did -- and
-        // rebuilding it took 50 s at 100 000 x 768 for nothing.
+        // A compact drops dead records and moves the live ones; the
+        // documents are the same, and every index is keyed by id, so none
+        // needs rebuilding for that -- a graph without tombstones took 50 s
+        // at 100 000 x 768 to rebuild for nothing. A graph with them is
+        // rebuilt: nothing else ever takes one out, every rewrite of a
+        // document with a vector leaves one, and they crowd the beam `near`
+        // walks (a `limit 10` answered 4 rows once enough had gathered).
+        if graphs {
+            for name in &targets {
+                let c = self.collections.get_mut(name).unwrap();
+                // By position, not by collecting the names: the list of
+                // strings was 440 bytes of the browser module.
+                for pos in 0..c.schema.fields.len() {
+                    let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+                        continue;
+                    };
+                    let field = &c.schema.fields[pos].name;
+                    if c.vectors.get(field).is_some_and(|ix| ix.dead() > 0) {
+                        build_graph(c, pos, spec)?;
+                    }
+                }
+            }
+        }
         // After compaction the persisted image is rewritten from scratch.
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
@@ -4002,6 +4055,30 @@ fn missing(cid: u32) -> Error {
     Error::Corrupt(format!("a write to collection {cid}, which is not here"))
 }
 
+/// Builds the graph of the vector field at `pos` from the documents' vectors.
+/// Not inlined, as `build_index` is: `compact` rebuilds a graph holding
+/// tombstones through it too, and a second inlined copy of `build_index`
+/// was 3 KB of the browser module.
+#[inline(never)]
+fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexSpec) -> Result<()> {
+    let field = &c.schema.fields[pos].name;
+    let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+        return Err(Error::Type(format!("field `{field}` is not vector<N>")));
+    };
+    let mut ix = VectorIndex::with_precision(dim, spec, prec);
+    let ids: Vec<DocId> = c.store.ids();
+    ix.reserve(ids.len());
+    let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
+            items.push((*id, v));
+        }
+    }
+    ix.insert_batch(&items);
+    c.vectors.insert(field.clone(), ix);
+    Ok(())
+}
+
 /// Builds the index the schema declares on the field at `pos` and fills it
 /// from the collection's documents: what `create index` does, and what a
 /// replica does with the primary's. Inlined for the reason
@@ -4010,22 +4087,7 @@ fn missing(cid: u32) -> Error {
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     let field = c.schema.fields[pos].name.clone();
     match c.schema.fields[pos].index.clone() {
-        IndexKind::Vector(spec) => {
-            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
-                return Err(Error::Type(format!("field `{field}` is not vector<N>")));
-            };
-            let mut ix = VectorIndex::with_precision(dim, spec, prec);
-            let ids: Vec<DocId> = c.store.ids();
-            ix.reserve(ids.len());
-            let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
-            for id in &ids {
-                if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
-                    items.push((*id, v));
-                }
-            }
-            ix.insert_batch(&items);
-            c.vectors.insert(field, ix);
-        }
+        IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash => {
             let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
             for id in c.store.ids() {

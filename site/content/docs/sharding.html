@@ -122,6 +122,8 @@ image:</p>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/thaw</code></td><td>accept writes again</td></tr>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there</td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>a primary's file follows the node's <code>--replica-of</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -248,10 +250,20 @@ curl -X PUT localhost:8090/_shard/nodes/n1 \
 </pre>
 
 <p>The router creates a tenant on both, so the replica has a file to follow
-into, and deletes it from both; a move takes the replica with it. A replica
-node opens every tenant it holds at start and keeps them open — a follower
-that is not running is a replica falling behind — so
-<code>--idle-close</code> does not apply to them.</p>
+into, and deletes it from both; a move takes the replica with it. Recording a
+pair gives the standby a following copy of every tenant already on the node.
+A replica node opens every tenant it holds at start and keeps them open — a
+follower that is not running is a replica falling behind — so
+<code>--idle-close</code> does not apply to them. No tenant is placed on a
+standby or moved to one: it would open there as a replica of a tenant the
+other node does not have.</p>
+
+<p>A tenant's role is its file's, not the node's. On a node started with
+<code>--replica-of</code>, a replica's file follows and a new one follows,
+but a primary's file stays a primary — a tenant a failover promoted there
+included, whatever the node restarts with. Were every file on such a node
+made to follow, a restart with the same flags would undo the failover, and
+the old primary's copy would wipe the writes taken since.</p>
 
 <p>When a node is gone, <code>POST /_shard/nodes/&lt;n&gt;/failover</code>
 promotes its tenants on the standby, one at a time, and points the directory
@@ -271,9 +283,26 @@ first write on the promoted node 0.18 ms.</p>
 
 <p>A promoted tenant's history forks where the replica stood, so what the
 primary had not sent is gone — the same trade a database's failover makes,
-and <code>--sync always</code> on the primary is what makes it none. The old
-node rejoins as the standby of the new one: point its
-<code>--replica-of</code> there, and record the pair the other way round.</p>
+and <code>--sync always</code> on the primary is what makes it none. A
+failover that moved every tenant ends the pair; one that left a tenant behind
+keeps it, so a second call can take it. The old node rejoins as the standby of
+the new one: point its <code>--replica-of</code> there and record the pair the
+other way round. The router then has each of its tenants follow
+(<code>POST /_admin/tenants/&lt;t&gt;/follow</code>) — its own files are a
+primary's, and follow only when told to — and the writes it took that were
+never sent are gone.</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --replication-token r1 --replica-of http://127.0.0.1:8082
+curl -X PUT localhost:8090/_shard/nodes/n2 \
+  -d '{"addr":"127.0.0.1:8082","token":"a2","standby":"n1"}'
+{"node":"n2","unreplicated":[]}
+</pre>
+
+<p>A tenant file that still follows on a node that follows nobody — a failover
+that left it behind, and the node restarted without <code>--replica-of</code>
+— refuses writes, says so in the log, and is promoted where it stands with
+<code>POST /_admin/tenants/&lt;t&gt;/promote</code>.</p>
 
 <h2>A standby router</h2>
 

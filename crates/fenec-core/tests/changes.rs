@@ -242,15 +242,44 @@ fn changed_collections_narrows_to_what_moved() {
     assert_eq!(db.changed_collections_since(db.change_seq()), Some(vec![]));
 }
 
+/// The appends a database makes, kept.
+struct Tail(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Sink for Tail {
+    fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(())
+    }
+    fn rewrite(&mut self, _bytes: &[u8]) -> fenec_core::error::Result<()> {
+        Ok(())
+    }
+}
+
 #[test]
 fn a_truncated_tail_still_loads() {
-    // The counter header sits at the **start** of the image. At the end, a
-    // half-written tail -- fenecdb's normal post-crash state -- would break
-    // opening. This test protects that property.
+    // The counter header sits at the **start** of the image. At the end of
+    // the file, the tail after it half-written -- fenecdb's normal
+    // post-crash state -- would break opening. This test protects that
+    // property. (The image itself is renamed into place whole; one cut
+    // short is a damaged file, which `persist.rs` holds to refusing.)
     let db = seeded();
-    let full = db.snapshot();
+    let image = db.snapshot();
+    let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut writer = Database::new();
+    writer.load(&image).unwrap();
+    writer.set_sink(Box::new(Tail(Arc::clone(&appended))));
+    run(
+        &mut writer,
+        r#"put tasks {key: "d", title: "four", status: "open"}"#,
+    );
+    run(
+        &mut writer,
+        r#"put tasks {key: "e", title: "five", status: "open"}"#,
+    );
+    let mut full = image.clone();
+    full.extend_from_slice(&appended.lock().unwrap());
     assert_eq!(Database::new().load(&full).unwrap(), full.len());
-    for cut in [1usize, 7, 30] {
+    for cut in [1usize, 7, 12] {
         let mut trimmed = full.clone();
         trimmed.truncate(full.len() - cut);
         let mut back = Database::new();
@@ -259,7 +288,12 @@ fn a_truncated_tail_still_loads() {
             .expect("a truncated tail must not break opening");
         // What it took ends where the record cut short begins.
         assert!(whole < trimmed.len(), "{whole} of {}", trimmed.len());
-        assert_eq!(back.change_seq(), db.change_seq());
+        assert!(
+            whole >= image.len(),
+            "{whole} of an image of {}",
+            image.len()
+        );
+        assert_eq!(back.change_seq(), writer.change_seq() - 1);
     }
 }
 

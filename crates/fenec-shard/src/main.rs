@@ -9,8 +9,7 @@
 //! curl localhost:8090/t/acme/
 //! ```
 
-use fenec_core::prelude::*;
-use fenec_http::replication::{self, fresh_id, Follower, Replication};
+use fenec_http::replication::{self, Follower, Replication};
 use fenec_shard::directory::Directory;
 use fenec_shard::{Config, Router};
 use std::sync::{Arc, RwLock};
@@ -46,47 +45,6 @@ The token is also read from the FENEC_SHARD_TOKEN environment variable.
 fn fail(msg: &str) -> ! {
     fenec_http::log!("{msg}");
     std::process::exit(2);
-}
-
-/// Which history the directory file belongs to, as `fenec-pg` settles a
-/// database's: a standby's file follows, `--promote` forks it, and a primary
-/// that has none starts one.
-fn settle_history(
-    db: &mut Database,
-    path: &str,
-    replicating: bool,
-    follows: bool,
-    promote: bool,
-) -> std::result::Result<(), String> {
-    let following = db.history().following;
-    let result = if follows {
-        let lineage = db.history().lineage.clone();
-        db.follow(lineage)
-    } else if promote {
-        if !following {
-            fenec_http::log!("--promote: {path} is not a standby's file; it opens as it is");
-            return Ok(());
-        }
-        let id = fresh_id();
-        let r = db.fork(id).and_then(|_| db.sync());
-        if r.is_ok() {
-            fenec_http::log!(
-                "promoted: {path} takes directory changes from {} on, history {id:016x}",
-                db.change_seq()
-            );
-        }
-        r
-    } else if following {
-        return Err(format!(
-            "{path} is a standby's directory. Start it with --replica-of <primary> to go on \
-             following, or with --promote to take changes -- its history forks there"
-        ));
-    } else if replicating && db.history().lineage.is_empty() {
-        db.fork(fresh_id()).and_then(|_| db.sync())
-    } else {
-        Ok(())
-    };
-    result.map_err(|e| format!("could not settle {path}'s history: {e}"))
 }
 
 fn main() {
@@ -132,7 +90,13 @@ fn main() {
                 cfg.upstream_timeout = Duration::from_secs(secs);
             }
             "--replication-token" => replication_token = Some(next(&mut i, "--replication-token")),
-            "--replica-of" => replica_of = Some(next(&mut i, "--replica-of")),
+            "--replica-of" => {
+                let url = next(&mut i, "--replica-of");
+                if let Err(e) = fenec_http::replication::Upstream::check_node(&url) {
+                    fail(&e);
+                }
+                replica_of = Some(url)
+            }
             "--promote" => promote = true,
             "--replication-buffer" => {
                 let mib = number(next(&mut i, "--replication-buffer"), "--replication-buffer");
@@ -169,7 +133,14 @@ fn main() {
         }
     };
     let mut db = db;
-    if let Err(e) = settle_history(&mut db, &path, replicating, replica_of.is_some(), promote) {
+    if let Err(e) = replication::settle_history(
+        &mut db,
+        &path,
+        ("a standby's directory", "directory changes"),
+        replicating,
+        replica_of.is_some(),
+        promote,
+    ) {
         fail(&e);
     }
     let db = Arc::new(RwLock::new(db));
@@ -189,10 +160,7 @@ fn main() {
             true,
         )
         .unwrap_or_else(|e| fail(&e));
-        let run = Arc::clone(&f);
-        std::thread::Builder::new()
-            .name("fenec-standby".into())
-            .spawn(move || run.run())
+        f.start("fenec-standby".into())
             .unwrap_or_else(|e| fail(&format!("could not start the standby thread: {e}")));
         fenec_http::log!("following: {url}");
         f

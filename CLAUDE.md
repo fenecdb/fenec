@@ -110,13 +110,16 @@ documents stay in it and the process holds what it derived from them: the
 offset index, the hash, ordered and text indexes, the graph, and the writes
 since the open. A 1 GB file of 2.3 million rows with a hash and an ordered
 index holds 188 MB that way against 1 095 read into memory, and its
-`compact` peaks at 423 MB against 2 866; a 10 GB file opens on an 8 GB
-machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`)
-is the other way, for a network file system or to have `--max-memory` cover
-the data. A rewrite -- `checkpoint`, `compact`, an image adopted -- writes
-the new file and points the stores at it (`Database::repoint`), so the old
-one is let go of; a compact over a mapped file never copies a record into
-memory and rebuilds no index, since the documents are the same ones.
+`compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
+machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
+which reaches a replicated file and a `--dir` node's tenants as well) is the
+other way, for a network file system or to have `--max-memory` cover the
+data. A new file is mapped from the start. A rewrite -- `checkpoint`,
+`compact`, an image adopted -- writes the new file and points the stores at
+it (`Database::repoint`), so the old one is let go of; a compact over a
+mapped file never copies a record into memory, on a server either, and
+rebuilds no index but a graph holding tombstones, since the documents are
+the same ones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
 exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
@@ -127,7 +130,11 @@ listener inside `fenec-pg`, never its own binary.
 
 **A storage error stops writes.** Once the sink refuses an append, a sync or a
 rewrite, every later write and sync returns `Error::Io` until the file is
-reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
+reopened (`Database::failure`); reads go on, from memory and from the
+mapped file's pages. A page that cannot be read in is the process's end
+(`SIGBUS`), not an error -- which is what `--no-mmap` is for on a disk that
+fails reads or a network file system -- and a mapped file is only ever
+replaced by rename: a copy over it in place took a server down. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
@@ -178,7 +185,17 @@ caught-up subscriber resumes on the target without a reseed. A node's tenants
 are replicated to its standby, each through its own feed at
 `/t/<tenant>/_replication`, and `POST /_shard/nodes/<n>/failover` promotes
 them there one at a time -- separate databases, nothing to make atomic
-between them. The router never promotes on its own: it cannot tell a node
+between them. A tenant's role is its file's, not the node's `--replica-of`:
+a replica's file follows, a primary's stays one, and a file new to a replica
+node follows (the standby copy the router made). Every file on a replica
+node was made to follow once, so an idle close or a restart undid a
+promotion and the old primary's image wiped the writes since. A rejoining
+node's tenants follow when the router records the pair
+(`POST /_admin/tenants/<t>/follow`, each), a failover that moved every
+tenant ends the pair, and no tenant is placed on or moved to a standby. A
+tenant whose follower runs is never closed as idle: the follower holds the
+database rather than the tenant, and a close left it writing the file under
+the next instance. The router never promotes on its own: it cannot tell a node
 that is gone from one it cannot reach, and guessing makes two primaries. A
 write is on the standby 0.089 ms after the primary answered it (p99 0.448),
 and 20 tenants failed over in 60 ms (`make shard-bench`).
@@ -205,8 +222,11 @@ maintenance on that collection -- so a write path that skipped `note` would
 leave a built index missing it. A schema change there (another index, a drop)
 fails the maintenance rather than installing what no longer fits. At 100 000 x
 128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
-(file rewrite included), against the full ~20 s under the write lock. Only a
-lone statement takes this path; a batch, the shell and `execute` hold the lock.
+(file rewrite included), against the full ~20 s under the write lock. Over a
+mapped file a compact copies no record: the graphs holding tombstones are
+rebuilt beside the database, and the live records streamed into the new file
+under the write lock. Only a lone statement takes this path; a batch, the
+shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
@@ -214,7 +234,12 @@ body and the reader **must** consume it, or the stray byte is read as the next
 record kind. A last record a crash cut short is cut off the file on open
 (`Database::load` says where, `fs::open` and `replication::open` cut): only
 skipped, it swallowed the next append, an acknowledged write lost on the open
-after. The change counter record (kind 6) is at the front and fixed width;
+after. Only past the checkpoint image, though: an image is renamed into place
+whole, so a record cut short inside it -- or an image longer than the file --
+is refused as corrupt; cut there as a torn tail is, one flipped bit deleted
+every record after it. A tool that only looks (`fenec types`) opens with
+`fs::open_read_only`, which cuts, creates and writes nothing: a server's
+append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) is the one appended record that is not a write.
 
@@ -229,6 +254,9 @@ its current vector inserted) -- restored after the whole file, one write in the
 tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`.
+`compact` rebuilds a graph holding tombstones and leaves the rest: nothing
+else takes one out, every rewrite of a document with a vector leaves one, and
+they crowd the beam `near` walks.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;

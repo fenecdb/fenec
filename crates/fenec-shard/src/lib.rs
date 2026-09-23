@@ -481,8 +481,39 @@ impl Router {
         if let Some(s) = &standby {
             dir.set_standby(name, Some(s)).map_err(internal)?;
         }
+        let placed: Vec<String> = dir
+            .tenants()
+            .into_iter()
+            .filter(|(_, p)| p.node == name)
+            .map(|(t, _)| t)
+            .collect();
         drop(dir);
-        Ok(Response::json(201, format!("{{\"node\":{}}}", quote(name))))
+        // The standby gets a following copy of every tenant already here: a
+        // pair recorded after the tenants were placed -- a node rejoining as
+        // the standby of the one its tenants failed over to -- copied
+        // nothing over, and a rejoined node's own files, primaries' files,
+        // took no write from anyone.
+        let mut unfollowed = Vec::new();
+        if standby.is_some() {
+            for t in &placed {
+                let base = format!("/_admin/tenants/{t}");
+                let why = self
+                    .on_standby(name, "PUT", &base)
+                    .or_else(|| self.on_standby(name, "POST", &format!("{base}/follow")));
+                if let Some(w) = why {
+                    fenec_http::log!("tenant `{t}` has no replica yet: {w}");
+                    unfollowed.push(quote(t));
+                }
+            }
+        }
+        Ok(Response::json(
+            201,
+            format!(
+                "{{\"node\":{},\"unreplicated\":[{}]}}",
+                quote(name),
+                unfollowed.join(",")
+            ),
+        ))
     }
 
     /// The call that keeps a node's standby in step: a tenant created here
@@ -497,9 +528,16 @@ impl Router {
             let n = dir.node(&s).cloned()?;
             (s, n)
         };
+        // "Already as asked": a create finding the tenant there (409), a
+        // delete finding it gone (404). A delete answered 409 is a tenant
+        // still in use, which stays -- not one deleted.
+        let done = |status: u16| {
+            status < 300
+                || (method == "PUT" && status == 409)
+                || (method == "DELETE" && status == 404)
+        };
         match self.pool.call(&n.addr, method, target, &n.token, b"") {
-            // 404 and 409 are "already as asked" here: gone, or there.
-            Ok((status, _)) if status < 300 || status == 404 || status == 409 => None,
+            Ok((status, _)) if done(status) => None,
             Ok((status, body)) => Some(format!(
                 "standby `{name}` answered {status}: {}",
                 String::from_utf8_lossy(&body).trim()
@@ -577,6 +615,18 @@ impl Router {
                 )),
             }
         }
+        // Every tenant moved, the pair is over: `to` is a primary now, and
+        // left recorded as `name`'s standby it would take no tenant. `name`
+        // rejoins as the standby of `to`. With a tenant left behind the pair
+        // stays, so a second failover can take it.
+        if failed.is_empty() {
+            if let Err(e) = self.write_dir().set_standby(name, None) {
+                failed.push(format!(
+                    "{{\"tenant\":null,\"why\":{}}}",
+                    quote(&format!("the pair stayed recorded: {}", message(&e)))
+                ));
+            }
+        }
         let body = format!(
             "{{\"node\":{},\"to\":{},\"promoted\":[{}],\"failed\":[{}]}}",
             quote(name),
@@ -618,12 +668,18 @@ impl Router {
     /// Disk rather than memory: memory counts only the open tenants, and
     /// which ones are open is a matter of who asked last.
     fn least_loaded(&self) -> Outcome<String> {
-        let nodes: Vec<(String, Node)> = self
-            .read_dir()
-            .nodes()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // A standby holds its primary's tenants as replicas: one created
+        // there would follow a tenant its primary does not have, and refuse
+        // every write. With no disk of its own yet it looked the least
+        // loaded, and took every tenant nobody placed.
+        let nodes: Vec<(String, Node)> = {
+            let dir = self.read_dir();
+            dir.nodes()
+                .iter()
+                .filter(|(k, _)| !dir.is_standby(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
         if nodes.is_empty() {
             return Err(Fail(
                 409,
@@ -760,6 +816,21 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
         if from == to {
             return Err(Fail(409, format!("tenant `{tenant}` is already on `{to}`")));
+        }
+        // Onto a standby -- the source's own included, which is what a fail
+        // back after a failover looks like -- the tenant would open there as
+        // a replica, and the source's standby copy is deleted on the way:
+        // the tenant was then on no node at all, and the move said
+        // "source_removed". A node takes tenants once it is nobody's standby.
+        if self.read_dir().is_standby(to) {
+            return Err(Fail(
+                409,
+                format!(
+                    "`{to}` is a standby: its tenants follow another node's. Record it \
+                     without one (PUT /_shard/nodes/<node> without \"standby\") to move \
+                     tenants onto it"
+                ),
+            ));
         }
         let src = self.node(&from)?;
         let dst = self.node(to)?;

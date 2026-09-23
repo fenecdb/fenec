@@ -172,6 +172,14 @@ impl Sink for FileSink {
         self.rewrite_with(&mut |out| out.write(bytes))
     }
 
+    /// The image goes to a side file that is renamed over the database, so
+    /// until the rename the old file stands whole: an image that cannot be
+    /// written -- a full disk during `compact` -- leaves the appends still
+    /// pending there to reach the old file, and a durability waiting on them
+    /// finds them on disk. They were cleared before the image once, and a
+    /// failed one then let `--sync always` answer "durable" for a write in
+    /// neither file. From the rename on, the new file holds them; a failure
+    /// after it leaves the sink failed, so nothing waiting is told otherwise.
     fn rewrite_with(
         &mut self,
         image: &mut dyn FnMut(&mut dyn ImageOut) -> Result<()>,
@@ -180,12 +188,8 @@ impl Sink for FileSink {
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
-        // Whatever is pending is in the image already: it would be written
-        // twice.
-        lock(&self.pending).clear();
-        // Atomic replace: write to a side file first, then rename.
         let tmp = self.path.with_extension("fenec.compacting");
-        {
+        let written = (|| -> Result<()> {
             let mut out = FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, File::create(&tmp)?),
                 at: 0,
@@ -195,21 +199,37 @@ impl Sink for FileSink {
                 .into_inner()
                 .map_err(|e| crate::error::Error::Io(e.to_string()))?
                 .sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
-        std::fs::rename(&tmp, &self.path)?;
-        let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        f.seek(SeekFrom::End(0))?;
-        // Everything appended so far is in the image, and the image is on
-        // disk.
-        disk.file = f;
-        disk.written = self.appended;
-        disk.synced = self.appended;
-        Ok(())
+        let swapped = (|| -> Result<File> {
+            std::fs::rename(&tmp, &self.path)?;
+            sync_dir(&self.path)?;
+            let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            f.seek(SeekFrom::End(0))?;
+            Ok(f)
+        })();
+        // Whatever was pending is in the image: written after it, it would
+        // be there twice.
+        lock(&self.pending).clear();
+        match swapped {
+            Ok(f) => {
+                // Everything appended so far is in the image, and the image
+                // is on disk.
+                disk.file = f;
+                disk.written = self.appended;
+                disk.synced = self.appended;
+                Ok(())
+            }
+            Err(e) => {
+                disk.failed = Some(e.clone());
+                Err(e)
+            }
+        }
     }
-    /// Writes the pending appends and pushes them to disk. Because of the
-    /// buffer, the last writes can be lost if the process dies before `sync`
-    /// is called; fenecdb never fsyncs every write anyway -- this buffer
-    /// extends that model.
     /// The file as it stands, mapped read-only: what a mapped database
     /// points its stores at after a rewrite. The mapping it had covers the
     /// file the rename replaced, which is unlinked and goes when the last
@@ -236,6 +256,10 @@ impl Sink for FileSink {
         Ok(())
     }
 
+    /// Writes the pending appends and pushes them to disk. Because of the
+    /// buffer, the last writes can be lost if the process dies before `sync`
+    /// is called; fenecdb never fsyncs every write anyway -- this buffer
+    /// extends that model.
     fn sync(&mut self) -> Result<()> {
         lock(&self.disk).sync(&self.pending, self.appended)
     }
@@ -354,6 +378,73 @@ impl Drop for Mapping {
     }
 }
 
+/// Makes a rename in `path`'s directory durable. The new name is an entry
+/// in the directory, and until the directory is synced a power loss can
+/// bring back the old one: the file from before a `compact`, without the
+/// writes the image had taken in.
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<()> {
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// What wraps a file's sink before the database takes it: a primary's
+/// `Tee` (fenec-http) goes around it here, fsyncing what the file already
+/// holds before a replica can be sent any of it.
+pub type Wrap<'a> = dyn FnOnce(Box<dyn Sink>) -> Result<Box<dyn Sink>> + 'a;
+
+/// Opens a fenecdb file (creating it when missing): mapped where the target
+/// maps files, read into memory where it does not. A 1 GB file of 2.3
+/// million rows with a hash and an ordered index opened this way holds 188
+/// MB rather than 1 095, and its `compact` peaks at 236 MB rather than
+/// 2 012.
+pub fn open(path: impl AsRef<Path>) -> Result<Database> {
+    open_with(path, true, Box::new(Ok))
+}
+
+/// [`open`] -- or [`open_in_memory`] when `mapped` is false -- with the
+/// file's sink wrapped before the database takes it. The flag reaches
+/// every server path (`fenec-pg --no-mmap`), replicated files and tenant
+/// directories included.
+pub fn open_with(path: impl AsRef<Path>, mapped: bool, wrap: Box<Wrap<'_>>) -> Result<Database> {
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    if mapped {
+        return open_mapped_with(path, wrap);
+    }
+    let _ = mapped;
+    open_in_memory_with(path, wrap)
+}
+
+/// Opens a fenecdb file (creating it when missing) and reads it into memory,
+/// records and all; a last record a crash cut short is cut off the file.
+/// What a network file system wants, whose read errors a mapping would turn
+/// into the process's death, and what has `--max-memory` count the data.
+pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Database> {
+    open_in_memory_with(path, Box::new(Ok))
+}
+
+fn open_in_memory_with(path: impl AsRef<Path>, wrap: Box<Wrap<'_>>) -> Result<Database> {
+    let (mut sink, existing) = FileSink::open(path)?;
+    let mut db = Database::new();
+    if existing.len() > MAGIC.len() {
+        let whole = db.load(&existing)?;
+        if whole < existing.len() {
+            sink.cut(whole)?;
+        }
+    }
+    db.set_sink(wrap(Box::new(sink))?);
+    Ok(db)
+}
+
 /// [`open_in_memory`], with the documents left in the file: it is mapped
 /// rather than read, and a document is decoded from its pages. What the
 /// process holds is what is derived from the documents -- the offset index,
@@ -365,84 +456,68 @@ impl Drop for Mapping {
 /// one fenecdb serves from.
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
-    open_mapped_with(path, |file| file)
+    open_mapped_with(path, Box::new(Ok))
 }
 
-/// [`open_mapped`], with the file's sink wrapped before the database takes
-/// it: a primary's `Tee` (fenec-http) goes around it here, so a file with
-/// replicas is mapped as any other is.
 #[cfg(all(unix, target_pointer_width = "64"))]
-pub fn open_mapped_with(
-    path: impl AsRef<Path>,
-    wrap: impl FnOnce(Box<dyn Sink>) -> Box<dyn Sink>,
-) -> Result<Database> {
+fn open_mapped_with(path: impl AsRef<Path>, wrap: Box<Wrap<'_>>) -> Result<Database> {
     let (mut file, path) = FileSink::create(path)?;
     let len = file.seek(SeekFrom::End(0))? as usize;
     let mapping = Mapping::of(&file, len)?;
     let mut sink = FileSink::over(file, path);
     let mut db = Database::new();
-    if len > MAGIC.len() {
-        let whole = db.load_mapped(Arc::new(mapping))?;
-        if whole < len {
-            // The pages past the cut stay mapped and are never read: no
-            // record points there.
-            sink.cut(whole)?;
-        }
+    // A new file is loaded this way too -- it holds the magic by now -- so
+    // the database is a mapped one from the start, and its first rewrite
+    // points the stores at the file it wrote. Left out, a new file, a new
+    // tenant and a replica taking its first image kept everything in
+    // memory until the process restarted.
+    let whole = db.load_mapped(Arc::new(mapping))?;
+    if whole < len {
+        // The pages past the cut stay mapped and are never read: no record
+        // points there.
+        sink.cut(whole)?;
     }
-    let mut sink = wrap(Box::new(sink));
-    sink.sync_existing()?;
-    db.set_sink(sink);
+    db.set_sink(wrap(Box::new(sink))?);
     Ok(db)
 }
 
-/// Opens a fenecdb file (creating it when missing): mapped where the target
-/// maps files, read into memory where it does not. A 1 GB file of 2.3
-/// million rows with a hash and an ordered index opened this way holds 188
-/// MB rather than 1 095, and its `compact` peaks at 423 MB rather than
-/// 2 866.
-pub fn open(path: impl AsRef<Path>) -> Result<Database> {
-    open_with(path, |file| file)
-}
-
-/// [`open`], with the file's sink wrapped before the database takes it.
-pub fn open_with(
-    path: impl AsRef<Path>,
-    wrap: impl FnOnce(Box<dyn Sink>) -> Box<dyn Sink>,
-) -> Result<Database> {
+/// Opens a file to read it, and leaves it as it is: nothing is created,
+/// cut, synced or written, and every write is refused. What a tool that
+/// only looks -- `fenec types` -- opens a file a server may be writing
+/// with: from outside, a record the server is in the middle of appending
+/// looks torn, and cutting it there destroyed that write, and the file with
+/// it once the server's next append landed past the cut.
+pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
+    let mut db = Database::new();
     #[cfg(all(unix, target_pointer_width = "64"))]
     {
-        open_mapped_with(path, wrap)
+        let file = File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len < MAGIC.len() {
+            return Err(crate::error::Error::Corrupt(
+                "invalid fenecdb signature".into(),
+            ));
+        }
+        db.load_mapped(Arc::new(Mapping::of(&file, len)?))?;
     }
     #[cfg(not(all(unix, target_pointer_width = "64")))]
-    {
-        let (mut sink, existing) = FileSink::open(path)?;
-        let mut db = Database::new();
-        if existing.len() > MAGIC.len() {
-            let whole = db.load(&existing)?;
-            if whole < existing.len() {
-                sink.cut(whole)?;
-            }
-        }
-        let mut sink = wrap(Box::new(sink));
-        sink.sync_existing()?;
-        db.set_sink(sink);
-        Ok(db)
-    }
+    db.load(&std::fs::read(path)?)?;
+    db.set_sink(Box::new(ReadOnly));
+    Ok(db)
 }
 
-/// Opens a fenecdb file (creating it when missing) and reads it into memory,
-/// records and all; a last record a crash cut short is cut off the file.
-pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Database> {
-    let (mut sink, existing) = FileSink::open(path)?;
-    let mut db = Database::new();
-    if existing.len() > MAGIC.len() {
-        let whole = db.load(&existing)?;
-        if whole < existing.len() {
-            sink.cut(whole)?;
-        }
+/// The sink of a database [`open_read_only`] opened.
+struct ReadOnly;
+
+impl Sink for ReadOnly {
+    fn append(&mut self, _bytes: &[u8]) -> Result<()> {
+        Err(crate::error::Error::ReadOnly(
+            "the file was opened to be read".into(),
+        ))
     }
-    db.set_sink(Box::new(sink));
-    Ok(db)
+    fn rewrite(&mut self, _bytes: &[u8]) -> Result<()> {
+        self.append(&[])
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +560,38 @@ mod tests {
         sink.append(b" after").unwrap();
         sink.sync().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"IMAGE after");
+
+        drop(sink);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// An image that cannot be written leaves the old file standing, and the
+    /// appends pending when it began still go to it: a durability handed out
+    /// before the rewrite finds its bytes on disk rather than being told
+    /// they are there when they are in neither file.
+    #[test]
+    fn a_failed_rewrite_leaves_the_pending_appends_to_the_old_file() {
+        let dir = std::env::temp_dir().join(format!("fenecdb-fs-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fail.fenec");
+        let _ = std::fs::remove_file(&path);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+
+        sink.append(b"kept").unwrap();
+        let durable = sink.flush().unwrap().unwrap();
+        let err = sink.rewrite_with(&mut |out| {
+            out.write(b"half an ima")?;
+            Err(crate::error::Error::Io("no space left on device".into()))
+        });
+        assert!(err.is_err());
+        durable().unwrap();
+        assert!(std::fs::read(&path).unwrap().ends_with(b"kept"));
+        assert!(!path.with_extension("fenec.compacting").exists());
+        // The sink is not failed: the next append and sync go on.
+        sink.append(b" more").unwrap();
+        sink.sync().unwrap();
+        assert!(std::fs::read(&path).unwrap().ends_with(b"kept more"));
 
         drop(sink);
         let _ = std::fs::remove_file(&path);

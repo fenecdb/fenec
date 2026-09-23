@@ -6,7 +6,7 @@
 //! ```
 
 use fenec_core::prelude::*;
-use fenec_http::replication::{self, fresh_id, Follower, Replication};
+use fenec_http::replication::{self, Follower, Replication};
 use fenec_http::tenants::{Refused, Tenants};
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::{self, Auth, SyncPolicy};
@@ -319,7 +319,13 @@ fn main() {
                     .unwrap_or_else(|_| fail(&format!("--changes expects a number, got `{v}`")))
             }
             "--replication-token" => replication_token = Some(next(&mut i, "--replication-token")),
-            "--replica-of" => replica_of = Some(next(&mut i, "--replica-of")),
+            "--replica-of" => {
+                let url = next(&mut i, "--replica-of");
+                if let Err(e) = fenec_http::replication::Upstream::check_node(&url) {
+                    fail(&e);
+                }
+                replica_of = Some(url)
+            }
             "--promote" => promote = true,
             "--replication-buffer" => {
                 let v = next(&mut i, "--replication-buffer");
@@ -429,14 +435,14 @@ fn main() {
                 sync_on_write: cfg.sync == SyncPolicy::Always,
             }
         });
-        serve_dir(&dir, http_cfg, cfg, idle_close, listen_given, repl);
+        serve_dir(&dir, http_cfg, cfg, idle_close, listen_given, mmap, repl);
     }
 
     let mut feed = None;
     let mut db = match &file {
         Some(path) => {
             let opened = if replicating {
-                replication::open(path, replication_buffer).map(|(db, f)| {
+                replication::open_with(path, replication_buffer, mmap).map(|(db, f)| {
                     feed = Some(f);
                     db
                 })
@@ -474,7 +480,14 @@ fn main() {
     }
 
     if let Some(path) = &file {
-        if let Err(e) = settle_history(&mut db, path, replicating, replica_of.is_some(), promote) {
+        if let Err(e) = replication::settle_history(
+            &mut db,
+            path,
+            ("a replica's file", "writes"),
+            replicating,
+            replica_of.is_some(),
+            promote,
+        ) {
             fenec_http::log!("{e}");
             std::process::exit(1);
         }
@@ -493,10 +506,7 @@ fn main() {
             cfg.sync == SyncPolicy::Always,
         )
         .unwrap_or_else(|e| fail(&e));
-        let run = Arc::clone(&f);
-        std::thread::Builder::new()
-            .name("fenec-replica".into())
-            .spawn(move || run.run())
+        f.start("fenec-replica".into())
             .unwrap_or_else(|e| fail(&format!("could not start the replica thread: {e}")));
         fenec_http::log!("following: {url}");
         f
@@ -572,51 +582,6 @@ fn main() {
     }
 }
 
-/// Puts the file's history where the flags say it has to be before anyone
-/// is served. A replica's file opens as a primary only when `--promote` says
-/// so -- its history forks there, so no replica of the old primary is
-/// streamed the new one's writes as if they were its own. A replica marks
-/// its file as one before it has heard from its primary, and a primary gets
-/// a history of its own the first time it has replicas: the root history is
-/// every database's.
-fn settle_history(
-    db: &mut Database,
-    path: &str,
-    replicating: bool,
-    follows: bool,
-    promote: bool,
-) -> std::result::Result<(), String> {
-    let following = db.history().following;
-    let result = if follows {
-        let lineage = db.history().lineage.clone();
-        db.follow(lineage)
-    } else if promote {
-        if !following {
-            fenec_http::log!("--promote: {path} is not a replica's file; it opens as it is");
-            return Ok(());
-        }
-        let id = fresh_id();
-        let r = db.fork(id).and_then(|_| db.sync());
-        if r.is_ok() {
-            fenec_http::log!(
-                "promoted: {path} takes writes from change {} on, history {id:016x}",
-                db.change_seq()
-            );
-        }
-        r
-    } else if following {
-        return Err(format!(
-            "{path} is a replica's file. Start it with --replica-of <primary> to go on \
-             following, or with --promote to take writes -- its history forks there"
-        ));
-    } else if replicating && db.history().lineage.is_empty() {
-        db.fork(fresh_id()).and_then(|_| db.sync())
-    } else {
-        Ok(())
-    };
-    result.map_err(|e| format!("could not settle {path}'s history: {e}"))
-}
-
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
 /// thread the syncer that a single file gets from the pg server -- periodic
 /// sync, idle close, and on the shutdown signal a final sync and checkpoint
@@ -627,6 +592,7 @@ fn serve_dir(
     cfg: Config,
     idle_close: Duration,
     pg: bool,
+    mmap: bool,
     repl: Option<fenec_http::tenants::Replicated>,
 ) -> ! {
     let tenants = match Tenants::new(dir) {
@@ -637,7 +603,8 @@ fn serve_dir(
         .with_setup(|db| db.install_plugin(&PgPlugin))
         .with_change_capacity(http_cfg.change_capacity)
         .with_max_memory(cfg.max_memory)
-        .with_checkpoint(cfg.checkpoint_on_exit);
+        .with_checkpoint(cfg.checkpoint_on_exit)
+        .with_mmap(mmap);
     let follows = repl.as_ref().and_then(|r| r.upstream.clone());
     if let Some(r) = repl {
         tenants = tenants.with_replication(r);

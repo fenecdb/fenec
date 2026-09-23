@@ -45,14 +45,17 @@ index (<code>make open-bench</code>):</p>
 <thead><tr><th>&nbsp;</th><th class="n">read into memory</th><th class="n">mapped</th></tr></thead>
 <tbody>
 <tr><td>open</td><td class="n">2.26 s, 1 095 MB held</td><td class="n"><b>2.13 s, 188 MB</b></td></tr>
-<tr><td><code>compact</code></td><td class="n">1.69 s, peak 2 866 MB</td><td class="n"><b>0.60 s, peak 423 MB</b></td></tr>
+<tr><td><code>compact</code></td><td class="n">1.52 s, peak 2 012 MB</td><td class="n"><b>2.08 s, peak 236 MB</b></td></tr>
 <tr><td>held afterwards</td><td class="n">969 MB</td><td class="n"><b>117 MB</b></td></tr>
 </tbody>
 </table>
 </div>
 
 <p>A 10 GB file of 23 million rows opens on an 8 GB machine this way, which
-reading it cannot: that would want about 20 GB. What it does not change is the
+reading it cannot: that would want about 20 GB. The trade is the one every
+mapped file makes: a page the disk cannot read ends the process rather than
+the query, and a file copied over in place while it is open does too —
+replace one by rename, as fenecdb's own rewrites do. What it does not change is the
 open's cost — the records are still walked to build the offset index and the
 indexes are still built from the documents, so opening is proportional to the
 file either way.</p>
@@ -60,12 +63,13 @@ file either way.</p>
 <p>A rewrite writes the new file and points the stores at it, so the file just
 written is the one being read and the old one is let go of. A
 <code>compact</code> over a mapped file therefore copies no record into
-memory, and rebuilds no index: the documents are the same ones, every index is
-keyed by id, and the graph keeps the tombstones whose vectors travel with
-them.</p>
+memory — on a server either, where it runs beside the database — and rebuilds
+no index but a graph holding tombstones: the documents are the same ones, and
+every index is keyed by id.</p>
 
-<p><code>fenec-pg --no-mmap</code> reads the file into memory instead — over a
-network file system, where mapping is a bad bet, or to have
+<p><code>fenec-pg --no-mmap</code> reads the file into memory instead — a
+replicated one, and every tenant of a <code>--dir</code> node, as well — over
+a network file system, where mapping is a bad bet, or to have
 <code>--max-memory</code> cover the data as well as the indexes.</p>
 
 <h2>Vectors are first-class</h2>

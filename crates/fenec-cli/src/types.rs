@@ -54,7 +54,9 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     };
 
-    let db = match fenec_core::fs::open(path) {
+    // Read only: the file is often a running server's, and an open that may
+    // cut or create would write to it.
+    let db = match fenec_core::fs::open_read_only(path) {
         Ok(db) => db,
         Err(e) => return fail(&format!("could not open {path}: {e}")),
     };

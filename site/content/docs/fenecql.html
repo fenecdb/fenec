@@ -655,6 +655,8 @@ describe articles
 compact articles
 </pre>
 
-<p><code>compact</code> is a full rebuild rather than a garbage collection:
-every index is built from scratch even with zero dead bytes, and writes block
-throughout. See <a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>
+<p><code>compact</code> drops the dead records and rewrites the file. The
+indexes stand — the documents are the same ones, and every index is keyed by
+id — except a vector graph holding tombstones, which is rebuilt: nothing else
+takes a deleted or rewritten document's node out of it. See
+<a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>

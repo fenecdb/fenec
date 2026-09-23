@@ -258,3 +258,43 @@ fn a_standbys_directory_file_does_not_open_as_a_primary() {
         .is_err());
     drop(files);
 }
+
+/// A router rejoining as the standby of the one promoted over it takes that
+/// one's directory as an image -- and when the image lands on the change
+/// its own maps were read at, it still reads them again. The counter alone
+/// missed it: both routers had made one change since the promotion, and
+/// the rejoined one went on routing from the placements it had made itself.
+#[test]
+fn a_standby_that_takes_an_image_at_the_same_change_reads_its_maps_again() {
+    let n1 = node("rejoin");
+    let files = Files(dir_file("rejoin", "x").parent().unwrap().to_path_buf());
+    let a_path = dir_file("rejoin", "a.fenec");
+    let a = router(&a_path, None);
+    let (status, body) = call(
+        a,
+        "PUT",
+        "/_shard/nodes/n1",
+        &format!(r#"{{"addr":"{}","token":"adm"}}"#, n1.addr),
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let b = router(
+        &dir_file("rejoin", "b.fenec"),
+        Some(&format!("http://127.0.0.1:{a}")),
+    );
+    until(b, "/_shard/nodes", "n1");
+
+    // b is promoted while a is still taking changes: one each.
+    let (status, body) = call(b, "POST", "/_replication/promote", "", Some(TOKEN));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(call(a, "PUT", "/_shard/tenants/xa", "", None).0, 201);
+    assert_eq!(call(b, "PUT", "/_shard/tenants/yb", "", None).0, 201);
+
+    // a comes back as b's standby, from the file it had.
+    let a2_path = dir_file("rejoin", "a2.fenec");
+    std::fs::copy(&a_path, &a2_path).unwrap();
+    let a2 = router(&a2_path, Some(&format!("http://127.0.0.1:{b}")));
+    let tenants = until(a2, "/_shard/tenants", "yb");
+    assert!(!tenants.contains("xa"), "{tenants}");
+    drop(files);
+}

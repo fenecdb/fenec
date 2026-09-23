@@ -436,3 +436,38 @@ fn over_the_memory_ceiling_idle_tenants_make_room() {
     let r = call(n.port, "GET", "/t/a/notes", b"", None);
     assert_eq!(r.text(), r#"[{"id":1,"title":"x"}]"#);
 }
+
+/// With mapping off (`fenec-pg --no-mmap`), a tenant's documents are read
+/// into memory and counted, as a single file's are: the flag reached the
+/// single-file server alone, and a tenant node on a network file system
+/// mapped its files all the same.
+#[test]
+fn tenant_files_are_read_into_memory_with_mapping_off() {
+    let dir = scratch("nommap");
+    {
+        let tenants = Tenants::new(&dir).unwrap();
+        let t = tenants.create("acme").unwrap();
+        let mut g = t.db.write().unwrap();
+        g.execute(&fenec_ql::parse_one("create collection notes (body text)").unwrap())
+            .unwrap();
+        let body = "x".repeat(200);
+        for _ in 0..500 {
+            g.execute(&fenec_ql::parse_one(&format!("put notes {{body: \"{body}\"}}")).unwrap())
+                .unwrap();
+        }
+        g.sync().unwrap();
+    }
+    let held = |tenants: Tenants| {
+        tenants
+            .get("acme")
+            .unwrap()
+            .db
+            .read()
+            .unwrap()
+            .memory_bytes()
+    };
+    let mapped = held(Tenants::new(&dir).unwrap());
+    let read = held(Tenants::new(&dir).unwrap().with_mmap(false));
+    assert!(read > mapped + 500 * 150, "read {read}, mapped {mapped}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

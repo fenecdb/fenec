@@ -69,10 +69,13 @@ pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
     db: Arc<RwLock<Database>>,
-    /// The change counter the maps were read at. A standby's database moves
-    /// under them as the primary's writes arrive, and [`Self::refresh`]
-    /// reads them again when it has.
+    /// The change counter the maps were read at, and the images adopted by
+    /// then. A standby's database moves under them as the primary's writes
+    /// arrive, and [`Self::refresh`] reads them again when it has. The
+    /// counter alone missed an image landing on the change it stood at: a
+    /// router rejoining as a standby kept routing from its old maps.
     seq: u64,
+    adopted: u64,
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
     pairs: Pairs,
@@ -105,6 +108,7 @@ impl Directory {
         let mut d = Directory {
             db,
             seq: 0,
+            adopted: 0,
             nodes: BTreeMap::new(),
             tenants: HashMap::new(),
             pairs: Pairs::new(),
@@ -127,7 +131,8 @@ impl Directory {
     /// Whether the database has moved since the maps were read: on a standby
     /// every write the primary sent moves it.
     pub fn stale(&self) -> bool {
-        read(&self.db).change_seq() != self.seq
+        let g = read(&self.db);
+        g.change_seq() != self.seq || g.adoptions() != self.adopted
     }
 
     /// Reads the maps again when the database has moved.
@@ -165,6 +170,7 @@ impl Directory {
             pairs.insert(text(&row[0]), text(&row[1]));
         }
         self.seq = g.change_seq();
+        self.adopted = g.adoptions();
         self.nodes = nodes;
         self.tenants = tenants;
         self.pairs = pairs;
@@ -176,8 +182,11 @@ impl Directory {
         self.pairs.get(name).map(String::as_str)
     }
 
-    pub fn pairs(&self) -> &Pairs {
-        &self.pairs
+    /// Whether `name` is some node's standby: its tenants follow that
+    /// node's, so a tenant is never placed or moved there -- it would open
+    /// as a replica of one the other node does not have.
+    pub fn is_standby(&self, name: &str) -> bool {
+        self.pairs.values().any(|s| s == name)
     }
 
     /// Records (or clears) the node a node's tenants are replicated to.
@@ -300,6 +309,7 @@ impl Directory {
         g.sync()?;
         // The maps are updated by the caller; the counter moved here.
         self.seq = g.change_seq();
+        self.adopted = g.adoptions();
         Ok(())
     }
 }
