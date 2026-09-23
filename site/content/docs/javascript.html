@@ -211,7 +211,7 @@ value type, access to an unselected field, <code>near</code> applied to a
 non-vector field, and a type mismatch inside <code>insert</code>. Objects
 inside <code>or</code>, <code>and</code> and <code>not</code> are checked
 against the query's collection rather than the first argument. A query using
-<code>near</code> gains <code>_score: number</code>.</p>
+<code>near</code> or <code>match</code> gains <code>_score: number</code>.</p>
 
 <p>A standalone <code>from()</code> cannot know the collection name, since the
 schema lives in the call rather than in <code>db</code>. In TypeScript it binds

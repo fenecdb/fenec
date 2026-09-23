@@ -188,10 +188,19 @@ wrong secret key, is ignored.</p>
 
 <p><code>Describe</code> is answered without running the query: the parameter
 count comes from the largest <code>$n</code> in the statement, and the columns
-and type OIDs from the schema — with <code>near</code>, <code>_score</code> is
-reported too. Parameter types are left unspecified; the client sends text and
+and type OIDs from the schema — with <code>near</code> or <code>match</code>,
+<code>_score</code> is reported too. Parameter types are left unspecified; the client sends text and
 the server infers. <code>RowDescription</code> goes exactly once, on
 <code>Execute</code> when <code>Describe</code> is skipped.</p>
+
+<p>An error drops every message after it up to the next <code>Sync</code>,
+as PostgreSQL does, and is sent at once rather than at the
+<code>Sync</code>. A pipelining client — libpq's pipeline mode, pgx's
+batches, JDBC's — writes off what it queued behind a failure, so none of it
+runs: run anyway, a write the client counted as aborted would be made, and
+psycopg 3, reading answers it did not expect, fails with <i>cannot exit
+pipeline mode while busy</i>. What ran <i>before</i> the error stays
+written: there are no transactions to roll it back.</p>
 
 <h2 id="catalog">The catalog</h2>
 

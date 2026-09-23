@@ -337,6 +337,28 @@ impl Client {
         self.until_ready()
     }
 
+    /// Parse, Bind and Execute of one statement over the unnamed statement
+    /// and portal, with no Sync after them: one step of a pipeline.
+    fn step(sql: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut p = Vec::new();
+        cstr(&mut p, "");
+        cstr(&mut p, sql);
+        p.extend_from_slice(&0i16.to_be_bytes());
+        out.extend_from_slice(&framed(b'P', &p));
+        let mut bind = Vec::new();
+        cstr(&mut bind, "");
+        cstr(&mut bind, "");
+        // no parameter formats, no parameters, no result formats
+        bind.extend_from_slice(&[0; 6]);
+        out.extend_from_slice(&framed(b'B', &bind));
+        let mut e = Vec::new();
+        cstr(&mut e, "");
+        e.extend_from_slice(&0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'E', &e));
+        out
+    }
+
     /// Sends the query without waiting for a response.
     fn send(&mut self, sql: &str) {
         let mut b = Vec::new();
@@ -538,6 +560,77 @@ fn row_description_sent_exactly_once() {
         tags(&without)
     );
     assert_eq!(tags(&without), vec!['1', '2', 'T', 'D', 'C']);
+}
+
+/// `match` ranks as `near` does, and its score travels the same way: the
+/// column was described for `near` alone, so over the wire a BM25 ranking
+/// arrived without the number it was ranked by.
+#[test]
+fn match_carries_its_score() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection d (body text @text)");
+    c.simple("put d {body: \"the quick brown fox\"}");
+    c.simple("put d {body: \"a lazy dog\"}");
+    let columns = vec![("body".to_string(), 25), ("_score".to_string(), 701)];
+
+    let r = c.extended("get d select body match body $1 limit 5", &["fox"], true);
+    assert_eq!(find(&r, b'T').unwrap().columns(), columns);
+    let cells = find(&r, b'D').unwrap().cells();
+    assert_eq!(cells[0].as_deref(), Some("the quick brown fox"));
+    assert!(cells[1].as_deref().unwrap().parse::<f32>().unwrap() > 0.0);
+
+    let r = c.simple("get d select body match body \"fox\"");
+    assert_eq!(find(&r, b'T').unwrap().columns(), columns);
+    assert_eq!(find(&r, b'D').unwrap().cells().len(), 2);
+}
+
+/// An error in the extended protocol drops everything up to the next Sync,
+/// as PostgreSQL does. A pipelining client -- libpq's pipeline mode, pgx's
+/// batches, JDBC's -- writes off what it queued behind the failure and
+/// reads no answer for it; run anyway, a write the client counted as
+/// aborted was made, and its answers were read as the next query's.
+#[test]
+fn an_error_skips_the_rest_of_the_pipeline_to_the_sync() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    let count = |c: &mut Client| {
+        let r = c.simple("get t count");
+        find(&r, b'D').unwrap().cells()
+    };
+
+    let mut pipe = Client::step("get nosuch select x");
+    pipe.extend(Client::step("put t {name: \"behind the error\"}"));
+    pipe.extend(framed(b'S', &[]));
+    c.s.write_all(&pipe).unwrap();
+    let r = c.until_ready();
+    assert_eq!(tags(&r), vec!['1', '2', 'E']);
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
+    // One ReadyForQuery for the one Sync, so this answer is this query's.
+    assert_eq!(count(&mut c), vec![Some("0".to_string())]);
+
+    // The error goes out as it happens, not at the Sync: a client waiting
+    // on it before sending more reads it. What follows is still dropped,
+    // a simple query too.
+    c.s.write_all(&Client::step("get nosuch select x")).unwrap();
+    for want in [b'1', b'2', b'E'] {
+        assert_eq!(c.read_msg().unwrap().tag, want);
+    }
+    let mut pipe = Client::step("put t {name: \"dropped\"}");
+    pipe.extend(framed(b'H', &[]));
+    let mut q = Vec::new();
+    cstr(&mut q, "put t {name: \"dropped too\"}");
+    pipe.extend(framed(b'Q', &q));
+    pipe.extend(framed(b'S', &[]));
+    c.s.write_all(&pipe).unwrap();
+    assert_eq!(tags(&c.until_ready()), Vec::<char>::new());
+    assert_eq!(count(&mut c), vec![Some("0".to_string())]);
+
+    // Past the Sync the session is what it was.
+    let r = c.extended("put t {name: \"x\"}", &[], false);
+    assert_eq!(tags(&r), vec!['1', '2', 'C']);
+    assert_eq!(count(&mut c), vec![Some("1".to_string())]);
 }
 
 #[test]

@@ -866,8 +866,25 @@ fn session(
     let mut described_stmts: HashSet<String> = HashSet::new();
     let mut described_portals: HashSet<String> = HashSet::new();
     let mut tx = TxState::default();
+    // After an error in the extended protocol everything up to the next Sync
+    // is read and dropped, as PostgreSQL does. A pipelining client has
+    // written off what it queued behind the failure and reads no answer for
+    // it: run anyway, a write it counted as aborted was made, and its
+    // answers were read as the next query's.
+    let mut skipping = false;
+    // The error count before the extended message just handled, to tell
+    // whether it failed. Checked at the top of the loop, which every arm
+    // reaches -- a refusal `continue`s -- and before waiting on the client.
+    let mut before: Option<u64> = None;
 
     loop {
+        if before.take().is_some_and(|n| out.errors() > n) {
+            skipping = true;
+            // Sent as it happens rather than at the Sync, as PostgreSQL
+            // sends one: a client that waits on it before sending more
+            // would otherwise wait for good.
+            out.flush_to(&mut w)?;
+        }
         let m = match read_message_max(&mut r, cfg.max_message) {
             Ok(m) => m,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
@@ -887,6 +904,12 @@ fn session(
             }
             Err(e) => return Err(e),
         };
+        if skipping && !matches!(m.tag, b'S' | b'X') {
+            continue;
+        }
+        if matches!(m.tag, b'P' | b'B' | b'D' | b'E' | b'C') {
+            before = Some(out.errors());
+        }
 
         match m.tag {
             // ------------------------------------------------ simple query
@@ -1068,6 +1091,7 @@ fn session(
                 out.close_complete();
             }
             b'S' => {
+                skipping = false;
                 out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
@@ -1427,7 +1451,9 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
             );
         }
     }
-    if sel.near.is_some() {
+    // Every ranking carries its score: `near`, `match`, and what is built
+    // on them (`rerank`, `fuse`).
+    if sel.near.is_some() || sel.matcher.is_some() {
         cols.push(("_score".to_string(), OID_FLOAT8));
     }
     Some(cols)
