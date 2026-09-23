@@ -387,7 +387,11 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         }
                         IndexKind::Inverted => "  @inverted".into(),
                     };
-                    println!("  {:<14} {:<14}{ix}", f.name, f.ty.name());
+                    let ty = match f.collate {
+                        Some(c) => format!("{} collate {}", f.ty.name(), c.name()),
+                        None => f.ty.name().to_string(),
+                    };
+                    println!("  {:<14} {:<14}{ix}", f.name, ty);
                 }
             }
         }

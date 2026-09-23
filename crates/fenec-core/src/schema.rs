@@ -1,4 +1,5 @@
 use crate::codec::*;
+use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::value::DataType;
 
@@ -315,6 +316,11 @@ pub struct Field {
     pub ty: DataType,
     pub index: IndexKind,
     pub required: bool,
+    /// `collate tr`: the order its text compares in, wherever it compares
+    /// -- `order`, `<` and `>`, `min` and `max`, a `@sorted` index -- rather
+    /// than the order of its bytes. Equality stays the bytes', since the
+    /// collation tells every two different strings apart.
+    pub collate: Option<Collation>,
 }
 
 impl Field {
@@ -324,6 +330,7 @@ impl Field {
             ty,
             index: IndexKind::None,
             required: false,
+            collate: None,
         }
     }
     pub fn indexed(mut self, kind: IndexKind) -> Field {
@@ -333,6 +340,20 @@ impl Field {
     pub fn required(mut self) -> Field {
         self.required = true;
         self
+    }
+    pub fn collated(mut self, c: Collation) -> Field {
+        self.collate = Some(c);
+        self
+    }
+}
+
+/// Text, or a list of it -- which compares element by element: what a
+/// collation orders.
+pub fn collatable(t: &DataType) -> bool {
+    match t {
+        DataType::Text => true,
+        DataType::List(t) => **t == DataType::Text,
+        _ => false,
     }
 }
 
@@ -355,6 +376,14 @@ impl Schema {
             }
             if seen.contains(&f.name) {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
+            }
+            if let Some(c) = f.collate.filter(|_| !collatable(&f.ty)) {
+                return Err(Error::Query(format!(
+                    "`collate {}` orders text; `{}` is {}",
+                    c.name(),
+                    f.name,
+                    f.ty.name()
+                )));
             }
             f.index.check(&f.name, &f.ty)?;
             seen.push(f.name.clone());
@@ -400,6 +429,10 @@ impl Schema {
         put_uvarint(&mut out, self.fields.len() as u64);
         for f in &self.fields {
             encode_str(&mut out, &f.name);
+            if let Some(c) = f.collate {
+                out.push(TAG_COLLATED);
+                out.push(c.code());
+            }
             encode_type(&mut out, &f.ty);
             out.push(f.required as u8);
             match &f.index {
@@ -439,6 +472,19 @@ impl Schema {
         let mut fields = Vec::with_capacity(n);
         for _ in 0..n {
             let fname = decode_str(buf, pos)?;
+            let collate = match buf.get(*pos) {
+                Some(&TAG_COLLATED) => {
+                    let c = *buf
+                        .get(*pos + 1)
+                        .ok_or_else(|| Error::Corrupt("schema ended early".into()))?;
+                    *pos += 2;
+                    Some(
+                        Collation::from_code(c)
+                            .ok_or_else(|| Error::Corrupt(format!("unknown collation {c}")))?,
+                    )
+                }
+                _ => None,
+            };
             let ty = decode_type(buf, pos)?;
             let required = buf[*pos] != 0;
             *pos += 1;
@@ -482,6 +528,7 @@ impl Schema {
                 ty,
                 index,
                 required,
+                collate,
             });
         }
         Ok(Schema { name, fields })

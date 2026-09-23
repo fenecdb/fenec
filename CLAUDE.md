@@ -386,9 +386,9 @@ The structure is a sorted `Vec` of chunks of at most 512 entries, not a
 every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built on open, never in the file.
 
-**`collate tr` is ICU's order, and `order`'s alone.** Its weights are ICU's
-own -- `tools/collate/gen.py` reads them out of macOS's libicucore into
-`collate/table.rs`, one `u32` per code point over the Latin script, the
+**`collate tr` is ICU's order, a query's or a field's.** Its weights are
+ICU's own -- `tools/collate/gen.py` reads them out of macOS's libicucore
+into `collate/table.rs`, one `u32` per code point over the Latin script, the
 combining marks and general punctuation -- and a comparison walks ICU's three
 levels, letters then accents then case, over the whole string before it falls
 back to the bytes, so the order is total. `web/fenec.test.js` holds it to
@@ -396,10 +396,21 @@ back to the bytes, so the order is total. `web/fenec.test.js` holds it to
 normalisation, so two marks on one letter out of canonical order can sort
 apart. A comparison starts at the first byte the two strings do not share, a
 character earlier when that is a mark, since `c` and U+0327 are one letter:
-68 -> 30 ns a comparison over a million names. A `@sorted` field keeps byte
-order and is never walked for a collated key, and `where` compares bytes --
-collating a comparison would need an index that orders the same way. It
-costs the browser module 8.5 KB, 3.2 KB brotli.
+68 -> 30 ns a comparison over a million names. `order name collate tr`
+names it for one key; a field declared `name text collate tr` has it
+wherever its text compares -- `order` naming none, `<` and `>` in `where`
+(`RowAccess::collation`), `min` and `max`, and a `@sorted` index over it,
+whose chunks order through `sorted::Entry` with the collation passed in
+(a key type of its own would have been a third copy of the module). So a
+Turkish list pages by its last row, and the index answers as the scan does;
+equality stays the bytes', since the collation ties no two strings. A
+`@sorted` field without one keeps byte order and is never walked for a
+collated key. The schema writes a collated field behind type tag 11
+(`TAG_COLLATED`), which an older binary refuses rather than read the field
+in byte order, and `\d` shows it as `tr-x-icu`. The collation costs the
+browser module 8.5 KB, 3.2 KB brotli, and the field's 1.9 KB, 0.7 KB more:
+two sort closures in `SortedIndex::build` had been two copies of the sort,
+4.5 KB.
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

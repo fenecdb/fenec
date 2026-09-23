@@ -9,6 +9,7 @@
 //! fenecdb speak like a PostgreSQL server.
 
 use crate::error::{Error, Result};
+use crate::schema::Schema;
 use crate::value::{Document, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,9 +45,12 @@ pub enum WriteOp {
 
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
-    /// Called before a write. The document may be modified (embedding
-    /// generation, for instance). Returning `Err` aborts the write.
-    fn before_write(&self, _collection: &str, _op: WriteOp, _doc: &mut Document) -> Result<()> {
+    /// Called before a write into the collection `schema` describes. The
+    /// document may be modified (embedding generation, for instance).
+    /// Returning `Err` aborts the write. The schema rather than the name:
+    /// a filter evaluated over the document has to compare a field in its
+    /// collation, as the same filter does when it reads.
+    fn before_write(&self, _schema: &Schema, _op: WriteOp, _doc: &mut Document) -> Result<()> {
         Ok(())
     }
     fn after_write(&self, _collection: &str, _op: WriteOp, _doc: &Document) -> Result<()> {

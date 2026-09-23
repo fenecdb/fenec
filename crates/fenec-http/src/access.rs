@@ -463,8 +463,8 @@ impl Scope {
 
     /// Whether `doc`, as it would be written to `collection`, is one this
     /// token may write.
-    fn admits(&self, collection: &str, doc: &Document, registry: &Registry) -> Result<bool> {
-        match self.filter(collection, true) {
+    fn admits(&self, schema: &Schema, doc: &Document, registry: &Registry) -> Result<bool> {
+        match self.filter(&schema.name, true) {
             None => Ok(false),
             Some(None) => Ok(true),
             Some(Some(f)) => {
@@ -472,13 +472,16 @@ impl Scope {
                     params: &[],
                     registry,
                 };
-                Ok(truthy(&eval(&f, &mut Written(doc), &ctx)?))
+                Ok(truthy(&eval(&f, &mut Written(doc, schema), &ctx)?))
             }
         }
     }
 }
 
-struct Written<'a>(&'a Document);
+/// A document being written, read as the filter reads a stored one: a
+/// field in a collation compares in it here too, or a token could write a
+/// row it would not be shown.
+struct Written<'a>(&'a Document, &'a Schema);
 
 impl RowAccess for Written<'_> {
     fn id(&self) -> DocId {
@@ -489,6 +492,9 @@ impl RowAccess for Written<'_> {
             return Ok(Value::Int(self.0.id as i64));
         }
         Ok(self.0.get(name).cloned().unwrap_or(Value::Null))
+    }
+    fn collation(&self, name: &str) -> Option<Collation> {
+        self.1.field(name).and_then(|f| f.collate)
     }
 }
 
@@ -528,15 +534,16 @@ impl Hook for Check {
     fn name(&self) -> &str {
         "access"
     }
-    fn before_write(&self, collection: &str, op: WriteOp, doc: &mut Document) -> Result<()> {
+    fn before_write(&self, schema: &Schema, op: WriteOp, doc: &mut Document) -> Result<()> {
         let Some(scope) = CURRENT.with(|c| c.borrow().clone()) else {
             return Ok(());
         };
-        if op == WriteOp::Delete || scope.admits(collection, doc, &self.registry)? {
+        if op == WriteOp::Delete || scope.admits(schema, doc, &self.registry)? {
             return Ok(());
         }
         Err(denied(format!(
-            "the document is outside what this token may write to `{collection}`"
+            "the document is outside what this token may write to `{}`",
+            schema.name
         )))
     }
 }

@@ -1025,6 +1025,11 @@ fn schemas_json(list: &[Schema]) -> String {
             }
             out.push_str(",\"required\":");
             out.push_str(if f.required { "true" } else { "false" });
+            // Only where there is one, so a schema without stays as it was.
+            if let Some(c) = f.collate {
+                out.push_str(",\"collate\":");
+                json::escape_into(&mut out, c.name());
+            }
             out.push('}');
         }
         out.push_str("]}");

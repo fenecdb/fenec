@@ -86,6 +86,11 @@ is nothing of theirs to validate or to go stale. An old binary cannot open a fil
 schema uses a newer kind and reports <code>unknown index kind 4</code>, the
 same refusal as for a record kind it does not know.</p>
 
+<p>A field whose text orders in a collation (<code>name text collate
+tr</code>) is written with type tag 11 and the collation's code in front of
+its type. An older binary meets a type tag it does not know and refuses the
+file, rather than read the field and order it by its bytes.</p>
+
 <h2>The change counter, and why it is at the front</h2>
 
 <p>Record kind 6 sits at the front of the file and is fixed width. Both are

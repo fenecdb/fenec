@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
-use crate::schema::{IndexKind, Metric, Schema};
+use crate::schema::{collatable, IndexKind, Metric, Schema};
 use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::sparse::SparseIndex;
 use crate::store::{Store, OP_DEL, OP_PUT};
@@ -364,7 +364,7 @@ impl Collection {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
-                    sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                    sorted.push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     sparse.push((f.name.clone(), SparseIndex::new()));
@@ -413,7 +413,8 @@ impl Collection {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
-                    self.sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                    self.sorted
+                        .push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     self.sparse.push((f.name.clone(), SparseIndex::new()));
@@ -946,16 +947,22 @@ impl<'a> RowAccess for StoreRow<'a> {
         self.memo.push((pos, v.clone()));
         Ok(v)
     }
+    fn collation(&self, name: &str) -> Option<Collation> {
+        self.schema.field(name).and_then(|f| f.collate)
+    }
 }
 
 /// Access that uses the document as its source (on the put/update path).
-struct DocRow<'a>(&'a Document);
+struct DocRow<'a>(&'a Document, &'a Schema);
 impl<'a> RowAccess for DocRow<'a> {
     fn id(&self) -> DocId {
         self.0.id
     }
     fn field(&mut self, name: &str) -> Result<Value> {
         Ok(self.0.get(name).cloned().unwrap_or(Value::Null))
+    }
+    fn collation(&self, name: &str) -> Option<Collation> {
+        self.1.field(name).and_then(|f| f.collate)
     }
 }
 
@@ -2014,6 +2021,7 @@ impl Database {
             for (p, ix, rows) in sorted_ix.iter_mut() {
                 **ix = SortedIndex::build(
                     &schema.fields[*p].ty,
+                    schema.fields[*p].collate,
                     &mut std::mem::take(rows).into_iter(),
                 );
             }
@@ -2583,7 +2591,7 @@ impl Database {
                 WriteOp::Insert
             };
             for h in &hooks {
-                h.before_write(collection, op, &mut doc)?;
+                h.before_write(&schema, op, &mut doc)?;
             }
             // Drop the old index entries when overwriting.
             let old = match op {
@@ -2854,7 +2862,7 @@ impl Database {
                 let Some(fd) = c.schema.field(field) else {
                     continue;
                 };
-                let Some((range, exact)) = sorted_range(&fd.ty, field, f, params) else {
+                let Some((range, exact)) = sorted_range(fd, field, f, params) else {
                     continue;
                 };
                 let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
@@ -3045,15 +3053,20 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
-        // The index holds the bytes' order, so a collated key sorts.
         let [Sort {
             field,
             asc,
-            collate: None,
+            collate,
         }] = sel.order.as_slice()
         else {
             return Ok(None);
         };
+        // The index holds its field's order -- a collation's, or the
+        // bytes' -- so a key in another one sorts.
+        let own = c.schema.field(field).and_then(|f| f.collate);
+        if collate.is_some_and(|c| Some(c) != own) {
+            return Ok(None);
+        }
         let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
             return Ok(None);
         };
@@ -3088,7 +3101,7 @@ impl Database {
                 let (Some(other), Some(fd)) = (c.sorted_index(name), c.schema.field(name)) else {
                     continue;
                 };
-                if let Some((r, _)) = sorted_range(&fd.ty, name, f, params) {
+                if let Some((r, _)) = sorted_range(fd, name, f, params) {
                     if other.range_ids(&r, 4096).is_some() {
                         plan(|| {
                             format!(
@@ -3104,7 +3117,7 @@ impl Database {
                 .schema
                 .field(field)
                 .expect("an ordered index has its field");
-            let own = sorted_range(&fd.ty, field, f, params);
+            let own = sorted_range(fd, field, f, params);
             bare = matches!(&own, Some((_, true))) && f.only_ranges_on(field, params);
             range = own.map(|(r, _)| r);
         }
@@ -4040,10 +4053,11 @@ impl Database {
                     // Built by hand: `join` brought a 1.2 KB copy of its own
                     // into the browser module for this one line.
                     let mut by = String::new();
-                    for (i, s) in sel.order.iter().enumerate() {
+                    // The collation in force, named or the field's.
+                    for (i, (s, key)) in sel.order.iter().zip(&keys).enumerate() {
                         by.push_str(if i == 0 { "" } else { ", " });
                         by.push_str(&s.field);
-                        if let Some(c) = s.collate {
+                        if let Some(c) = key.2 {
                             by.push_str(" collate ");
                             by.push_str(c.name());
                         }
@@ -4132,11 +4146,12 @@ impl Database {
                 Some(f) => {
                     let pos = pos_of(f)?;
                     slots.push(Some(slot_of(pos)));
-                    start.push(Fold::new(a, &c.schema.fields[pos].ty)?);
+                    let f = &c.schema.fields[pos];
+                    start.push(Fold::new(a, &f.ty, f.collate)?);
                 }
                 None => {
                     slots.push(None);
-                    start.push(Fold::new(a, &DataType::Int)?);
+                    start.push(Fold::new(a, &DataType::Int, None)?);
                 }
             }
         }
@@ -4241,8 +4256,16 @@ impl Database {
                     )));
                 }
             }
+            // The group key, `min` and `max` carry a field's values, and
+            // order in its collation when the query names none.
+            let field = match &sel.aggregate[at] {
+                Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => {
+                    c.schema.field(f).and_then(|f| f.collate)
+                }
+                _ => None,
+            };
             picked.push(at);
-            order.push((None, s.asc, s.collate));
+            order.push((None, s.asc, s.collate.or(field)));
         }
         order.push((None, true, None));
         let w = order.len();
@@ -4300,13 +4323,13 @@ impl Database {
                     let f = schema
                         .field(k)
                         .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
-                    let v = eval(e, &mut DocRow(&snapshot), &ctx)?;
+                    let v = eval(e, &mut DocRow(&snapshot, &schema), &ctx)?;
                     doc.set(k, v.coerce(&f.ty)?);
                 }
             }
             let c = self.collections.get_mut(collection).unwrap();
             for h in &hooks {
-                h.before_write(collection, WriteOp::Update, &mut doc)?;
+                h.before_write(&schema, WriteOp::Update, &mut doc)?;
             }
             let old = c.store.read(&schema, id)?;
             if let Some(old) = &old {
@@ -4491,7 +4514,8 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             for id in c.store.ids() {
                 rows.push((id, c.store.read_field(id, pos)?));
             }
-            let ix = SortedIndex::build(&ty, &mut rows.into_iter());
+            let coll = c.schema.fields[pos].collate;
+            let ix = SortedIndex::build(&ty, coll, &mut rows.into_iter());
             match c.sorted.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
                 None => c.sorted.push((field, ix)),
@@ -4524,12 +4548,12 @@ enum Fold {
     SumInt(i64, u64),
     SumFloat(f64, u64),
     Avg(f64, u64),
-    /// `true` for `max`.
-    Extreme(Option<Value>, bool),
+    /// `true` for `max`; the field's collation, which its text orders in.
+    Extreme(Option<Value>, bool, Option<Collation>),
 }
 
 impl Fold {
-    fn new(a: &Agg, ty: &DataType) -> Result<Fold> {
+    fn new(a: &Agg, ty: &DataType, coll: Option<Collation>) -> Result<Fold> {
         let numeric = |what: &str, f: &str| {
             Error::Type(format!(
                 "`{what}({f})` needs an int or float field; `{f}` is {}",
@@ -4552,7 +4576,7 @@ impl Fold {
                 | DataType::Float
                 | DataType::Timestamp
                 | DataType::Text
-                | DataType::Bool => Fold::Extreme(None, matches!(a, Agg::Max(_))),
+                | DataType::Bool => Fold::Extreme(None, matches!(a, Agg::Max(_)), coll),
                 _ => {
                     return Err(Error::Type(format!(
                         "`{}` needs a field with an order; `{f}` is {}",
@@ -4586,11 +4610,14 @@ impl Fold {
                 *sum += x;
                 *n += 1;
             }
-            Fold::Extreme(best, max) => {
+            Fold::Extreme(best, max, coll) => {
                 let better = match best {
                     None => true,
                     Some(b) => {
-                        let o = v.cmp_value(b);
+                        let o = match coll {
+                            Some(c) => c.compare_values(v, b),
+                            None => v.cmp_value(b),
+                        };
                         if *max {
                             o == Ordering::Greater
                         } else {
@@ -4613,7 +4640,7 @@ impl Fold {
             Fold::SumInt(s, _) => Value::Int(s),
             Fold::SumFloat(s, _) => Value::Float(s),
             Fold::Avg(s, n) => Value::Float(s / n as f64),
-            Fold::Extreme(v, _) => v.unwrap_or(Value::Null),
+            Fold::Extreme(v, ..) => v.unwrap_or(Value::Null),
         }
     }
 }
@@ -5026,14 +5053,15 @@ impl FilterProbe {
 /// cannot express exactly -- `price < 12.5` on an `int` field -- is left out
 /// of the range, which then only narrows, and the filter is evaluated.
 fn sorted_range(
-    ty: &DataType,
+    fd: &crate::schema::Field,
     field: &str,
     f: &Expr,
     params: &[Value],
 ) -> Option<(SortRange, bool)> {
+    let ty = &fd.ty;
     let mut ranges = Vec::new();
     f.conjunct_ranges(params, &mut ranges);
-    let mut range = SortRange::all();
+    let mut range = SortRange::all(fd.collate);
     let (mut any, mut exact) = (false, true);
     for (name, op, v) in ranges {
         if name != field {
@@ -5078,16 +5106,9 @@ fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
             )));
         }
     }
-    Ok((pos, s.asc, s.collate))
-}
-
-/// Text, or a list of it -- which compares element by element.
-fn collatable(t: &DataType) -> bool {
-    match t {
-        DataType::Text => true,
-        DataType::List(t) => **t == DataType::Text,
-        _ => false,
-    }
+    // A field in a collation orders in it unless the query names one.
+    let field = pos.and_then(|p| schema.fields[p].collate);
+    Ok((pos, s.asc, s.collate.or(field)))
 }
 
 /// The order `order` asks for between two rows' keys, before any tie-break.

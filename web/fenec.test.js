@@ -562,6 +562,45 @@ test('collate tr on wasm is Intl.Collator("tr")', { skip: wasm ? false : 'no web
   db.close();
 });
 
+test('a collate tr field pages by its last row on wasm, in Intl.Collator("tr") order', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  // A field in the collation compares in it too: `where name > $1` after
+  // the last row of a page is the next page, as keyset paging wants, over
+  // the scan and over a `@sorted` index alike.
+  const letters = [...'abcçdefgğhıijklmnoöprsştuüvyzABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZâîûÂÎÛ'];
+  // The high bits: an LCG's low ones cycle, the lowest six every 64 steps,
+  // and `% 64` over them never made 600 names.
+  let seed = 11;
+  const rnd = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return (seed >>> 12) % n;
+  };
+  const names = new Set();
+  while (names.size < 600) {
+    let w = '';
+    for (let i = rnd(5); i >= 0; i--) w += letters[rnd(letters.length)];
+    names.add(w);
+  }
+  const icu = new Intl.Collator('tr');
+  const bytes = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  const want = [...names].sort((a, b) => icu.compare(a, b) || bytes(a, b));
+  const { Fenec } = await import('./fenec.js');
+  for (const index of ['', ' @sorted']) {
+    const db = await Fenec.open(wasm);
+    db.run(`create collection people (name text collate tr${index})`);
+    await db.from('people').insert([...names].map((name) => ({ name })));
+    const paged = [];
+    for (;;) {
+      let page = db.from('people').select('name').order('name').limit(25);
+      if (paged.length) page = page.where('name', '>', paged[paged.length - 1]);
+      const rows = (await page.rows()).map((r) => r.name);
+      if (!rows.length) break;
+      paged.push(...rows);
+    }
+    assert.deepEqual(paged, want, index || 'scan');
+    db.close();
+  }
+});
+
 // ----------------------------------------------------------- HTTP endpoint
 //
 // Tests against a real server live on the Rust side (`crates/fenec-http/tests`).

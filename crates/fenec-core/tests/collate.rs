@@ -275,3 +275,190 @@ fn collate_is_refused_where_it_orders_nothing() {
         assert!(err.contains(says), "{sql}: {err}");
     }
 }
+
+fn query_with(db: &Database, sql: &str, params: &[Value]) -> ResultSet {
+    db.query(&fenec_ql::parse_one(sql).expect("parse"), params)
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .rows()
+        .expect("rows")
+        .clone()
+}
+
+fn text(s: &str) -> Value {
+    Value::Text(s.to_string())
+}
+
+/// A field in a collation -- `name text collate tr` -- orders in it
+/// wherever its text is compared: `order` that names none, `<` and `>` in a
+/// `where`, `min` and `max`. So a Turkish list pages by the last name it
+/// showed, the keyset way, which byte order made wrong. A `@sorted` index
+/// over the field holds the same order and answers as the scan does, row
+/// for row; equality stays the bytes'.
+#[test]
+fn a_collated_field_orders_and_compares_in_its_collation() {
+    let icu = icu();
+    for extra in [" collate tr", " collate tr @sorted", " @sorted collate tr"] {
+        let db = people(extra);
+        let names = |sql: &str, params: &[Value]| texts(&query_with(&db, sql, params).rows, 0);
+        assert_eq!(
+            names("get people select name order name", &[]),
+            icu,
+            "{extra}"
+        );
+        let mut reversed = icu.clone();
+        reversed.reverse();
+        assert_eq!(
+            names("get people select name order name desc", &[]),
+            reversed,
+            "{extra}"
+        );
+        assert_eq!(
+            names("get people select name order name limit 10 offset 40", &[]),
+            &icu[40..50],
+            "{extra}"
+        );
+
+        for (i, p) in icu.iter().enumerate() {
+            let cmp = |op: &str| {
+                names(
+                    &format!("get people select name where name {op} $1 order name"),
+                    &[text(p)],
+                )
+            };
+            assert_eq!(cmp(">"), &icu[i + 1..], "{extra}: > {p}");
+            assert_eq!(cmp(">="), &icu[i..], "{extra}: >= {p}");
+            assert_eq!(cmp("<"), &icu[..i], "{extra}: < {p}");
+            assert_eq!(cmp("<="), &icu[..=i], "{extra}: <= {p}");
+        }
+        let n = icu.len();
+        for (a, b) in [(3, 90), (40, 41), (70, n - 1), (0, n - 1)] {
+            assert_eq!(
+                names(
+                    "get people select name where name >= $1 and name < $2 order name",
+                    &[text(icu[a]), text(icu[b])]
+                ),
+                &icu[a..b],
+                "{extra}: [{a}, {b})"
+            );
+        }
+
+        let mut paged: Vec<String> = Vec::new();
+        loop {
+            let page = match paged.last() {
+                None => names("get people select name order name limit 7", &[]),
+                Some(last) => names(
+                    "get people select name where name > $1 order name limit 7",
+                    &[text(last)],
+                ),
+            };
+            if page.is_empty() {
+                break;
+            }
+            paged.extend(page);
+        }
+        assert_eq!(paged, icu, "{extra}");
+
+        let rs = query(&db, "get people select min(name), max(name)");
+        assert_eq!(
+            (texts(&rs.rows, 0), texts(&rs.rows, 1)),
+            (
+                vec![icu[0].to_string()],
+                vec![icu[icu.len() - 1].to_string()]
+            ),
+            "{extra}"
+        );
+        assert_eq!(
+            names("get people select name where name = \"Çağla\"", &[]),
+            ["Çağla"],
+            "{extra}"
+        );
+    }
+}
+
+/// A `@sorted` index over a collated field is walked for its order -- named
+/// or not -- and answers a range; byte order is its bytes' no longer.
+#[test]
+fn a_collated_sorted_field_is_walked_in_its_order() {
+    let db = people(" collate tr @sorted");
+    for sql in [
+        "explain get people select name order name limit 5",
+        "explain get people select name order name collate tr limit 5",
+    ] {
+        let steps = texts(&query(&db, sql).rows, 0);
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.starts_with("order: walked the ordered index on name")),
+            "{sql}: {steps:?}"
+        );
+    }
+    let steps = texts(
+        &query_with(
+            &db,
+            "explain get people select name where name > $1",
+            &[text("Kemal")],
+        )
+        .rows,
+        0,
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| s.contains("the ordered index on name")),
+        "{steps:?}"
+    );
+    let icu = icu();
+    let at = icu.iter().position(|n| *n == "Kemal").unwrap();
+    let rs = query_with(
+        &db,
+        "get people select name where name > $1",
+        &[text("Kemal")],
+    );
+    let mut got = texts(&rs.rows, 0);
+    got.sort_by(|a, b| Collation::Turkish.compare(a, b));
+    assert_eq!(got, &icu[at + 1..]);
+}
+
+/// The collation is the field's, so it travels with the schema: into the
+/// file, back out of it, and through `create index`.
+#[test]
+fn a_fields_collation_is_kept_in_the_file() {
+    let mut db = people(" collate tr");
+    let image = db.snapshot();
+    let mut back = Database::new();
+    back.load(&image).expect("load");
+    let rs = query(&back, "get people select name order name limit 5");
+    assert_eq!(texts(&rs.rows, 0), &icu()[..5]);
+
+    exec(&mut db, "create index on people (name) @sorted", &[]);
+    let rs = query(&db, "get people select name order name limit 5");
+    assert_eq!(texts(&rs.rows, 0), &icu()[..5]);
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("load");
+    let rs = query(&back, "get people select name order name desc limit 3");
+    let icu = icu();
+    let n = icu.len();
+    assert_eq!(texts(&rs.rows, 0), [icu[n - 1], icu[n - 2], icu[n - 3]]);
+}
+
+/// Only text orders in a collation, which the schema says before any
+/// statement runs.
+#[test]
+fn a_collation_on_anything_but_text_is_refused() {
+    let err = fenec_ql::parse_one("create collection t (n int collate tr)")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("`collate tr` orders text; `n` is int"),
+        "{err}"
+    );
+    let err = Schema::new(
+        "t",
+        vec![Field::new("at", DataType::Timestamp).collated(Collation::Turkish)],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("`at` is timestamp"), "{err}");
+    let mut db = Database::new();
+    exec(&mut db, "create collection u (tags [text] collate tr)", &[]);
+}

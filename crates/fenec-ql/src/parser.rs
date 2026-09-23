@@ -2,7 +2,7 @@
 //!
 //! Language summary
 //! ```text
-//! create collection [if not exists] <name> ( <field> <type> [@index], ... )
+//! create collection [if not exists] <name> ( <field> <type> [required] [collate tr] [@index], ... )
 //!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type]
 //!        index: @hash @sorted @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //! drop   collection [if exists] <name>
@@ -298,6 +298,12 @@ impl Parser {
         loop {
             if self.eat_kw("required") {
                 field = field.required();
+                continue;
+            }
+            // `name text collate tr`: the field's text orders in Turkish
+            // wherever it is compared, as SQL's column collation does.
+            if let Some(c) = self.collate()? {
+                field = field.collated(c);
                 continue;
             }
             if matches!(self.peek(), Tok::At) {

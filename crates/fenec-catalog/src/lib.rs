@@ -73,6 +73,9 @@ const INFORMATION_SCHEMA: i64 = 13_000;
 /// The role every session is, as PostgreSQL's bootstrap superuser is 10.
 const ROLE: i64 = 10;
 const DATABASE: i64 = 16_384;
+/// `tr-x-icu`, the name PostgreSQL gives ICU's Turkish collation: what a
+/// `collate tr` field's text orders in, and what `\d` shows for it.
+const COLL_TR: i64 = 12_800;
 
 const AM_HEAP: i64 = 2;
 const AM_BTREE: i64 = 403;
@@ -133,6 +136,7 @@ struct Field2 {
     ty: DataType,
     index: IndexKind,
     required: bool,
+    collate: Option<Collation>,
 }
 
 struct Table {
@@ -218,6 +222,7 @@ impl Snapshot {
                     ty: f.ty.clone(),
                     index: f.index.clone(),
                     required: f.required,
+                    collate: f.collate,
                 })
                 .collect();
             tables.push(Table {
@@ -637,6 +642,17 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
                     t("POSIX"),
                     t("POSIX"),
                 ],
+                vec![
+                    V::Int(COLL_TR),
+                    t("tr-x-icu"),
+                    V::Int(PG_CATALOG),
+                    V::Int(ROLE),
+                    t("i"),
+                    V::Bool(true),
+                    V::Int(-1),
+                    t("tr"),
+                    t("tr"),
+                ],
             ],
         ),
         "pg_settings" => rel(
@@ -877,9 +893,12 @@ fn pg_attribute(alias: &str, s: &Snapshot) -> Rel {
         ("attoptions", TEXT_ARRAY),
         ("attfdwoptions", TEXT_ARRAY),
     ];
-    let row = |rel: i64, name: &str, ty: &DataType, num: i64, notnull: bool| {
+    let row = |rel: i64, name: &str, ty: &DataType, num: i64, notnull: bool, coll: bool| {
         let (oid, typmod, ndims) = pg_type(ty);
-        let collation = TYPES.iter().find(|x| x.0 == oid).map_or(0, |x| x.6);
+        let collation = match coll {
+            true => COLL_TR,
+            false => TYPES.iter().find(|x| x.0 == oid).map_or(0, |x| x.6),
+        };
         let len = TYPES.iter().find(|x| x.0 == oid).map_or(-1, |x| x.2);
         vec![
             V::Int(rel),
@@ -910,12 +929,13 @@ fn pg_attribute(alias: &str, s: &Snapshot) -> Rel {
     };
     let mut rows = Vec::new();
     for tb in &s.tables {
-        rows.push(row(tb.oid, "id", &DataType::Int, 1, true));
+        rows.push(row(tb.oid, "id", &DataType::Int, 1, true, false));
         for f in &tb.fields {
-            rows.push(row(tb.oid, &f.name, &f.ty, f.attnum, f.required));
+            let coll = f.collate.is_some();
+            rows.push(row(tb.oid, &f.name, &f.ty, f.attnum, f.required, coll));
         }
         for i in tb.indexes() {
-            rows.push(row(i.oid, &i.column, &i.ty, 1, i.primary));
+            rows.push(row(i.oid, &i.column, &i.ty, 1, i.primary, false));
         }
     }
     rel(alias, &cols, rows)

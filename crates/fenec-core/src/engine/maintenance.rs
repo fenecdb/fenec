@@ -54,6 +54,8 @@ struct IndexCopy {
     pos: usize,
     kind: IndexKind,
     ty: DataType,
+    /// The field's collation, which a `@sorted` index orders its text in.
+    collate: Option<Collation>,
     values: Vec<(DocId, Option<Value>)>,
 }
 
@@ -228,6 +230,7 @@ impl Database {
             pos,
             kind: kind.resolved(),
             ty: c.schema.fields[pos].ty.clone(),
+            collate: c.schema.fields[pos].collate,
             values,
         }))
     }
@@ -447,6 +450,7 @@ impl Database {
                     pos,
                     kind: c.schema.fields[pos].index.clone(),
                     ty: c.schema.fields[pos].ty.clone(),
+                    collate: None,
                     values,
                 });
             }
@@ -537,6 +541,7 @@ impl IndexCopy {
             }
             IndexKind::Sorted => Built::Sorted(SortedIndex::build(
                 &self.ty,
+                self.collate,
                 &mut self.values.iter().map(|(id, v)| (*id, v.clone())),
             )),
             IndexKind::Inverted => {

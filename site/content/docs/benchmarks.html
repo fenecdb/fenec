@@ -277,7 +277,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1316 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1008 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>878 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>472 KB</b></td><td class="n"><b>136 KB</b></td><td class="n">165 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>474 KB</b></td><td class="n"><b>137 KB</b></td><td class="n">166 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">72 KB</td><td class="n">20 KB</td><td class="n">23 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.19 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -286,7 +286,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>156 KB brotli</b> for both together. A binary you execute and an image
+<b>157 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -295,9 +295,9 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  164 KB at <code>-q 5</code>, nginx's dynamic default, and 174 KB at
+  176 KB at <code>-q 5</code>, nginx's dynamic default, and 187 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
-  number by 12–18%.</p>
+  number by 12–19%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is
   what gets decompressed, compiled and held: <code>WebAssembly.compile</code>
   and the module's memory footprint track that figure, not the compressed one,

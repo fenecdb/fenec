@@ -25,14 +25,21 @@ struct Node {
 }
 
 fn start() -> Node {
-    let access = Arc::new(Access::new(SECRET, POLICY).unwrap());
+    start_with(
+        POLICY,
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection board (msg text)",
+            "create collection secrets (x int)",
+            "put secrets {x: 42}",
+        ],
+    )
+}
+
+fn start_with(policy: &str, setup: &[&str]) -> Node {
+    let access = Arc::new(Access::new(SECRET, policy).unwrap());
     let mut db = Database::new();
-    for sql in [
-        "create collection notes (owner text @hash, title text)",
-        "create collection board (msg text)",
-        "create collection secrets (x int)",
-        "put secrets {x: 42}",
-    ] {
+    for sql in setup {
         db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
     }
     let cfg = Config {
@@ -314,4 +321,22 @@ fn a_subscription_hears_nothing_of_other_users_rows() {
             assert!(dels.is_empty(), "a deletion of someone else's row: {e}");
         }
     }
+}
+
+/// A rule over a field in a collation checks a write in that order, as it
+/// filters a read: `çay` is before `d` in Turkish and after it in bytes, so
+/// a token held to `name < "d"` may write `çay`, which it is shown, and not
+/// `zeytin`, which it is not.
+#[test]
+fn a_rule_over_a_collated_field_checks_writes_in_its_order() {
+    let n = start_with(
+        "people  read,write  where name < \"d\"\n",
+        &["create collection people (name text collate tr)"],
+    );
+    let t = n.token(r#"{"sub":"a"}"#);
+    let (status, body) = n.query(&t, r#"put people {name: "çay"}"#);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(n.query(&t, r#"put people {name: "zeytin"}"#).0, 403);
+    let (_, rows) = n.query(&t, "get people select name");
+    assert!(rows.contains("çay"), "{rows}");
 }
