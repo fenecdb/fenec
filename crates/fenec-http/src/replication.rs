@@ -402,16 +402,36 @@ pub fn open_with(
     buffer: usize,
     mapped: bool,
 ) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
+    open_as(path, buffer, mapped, false)
+}
+
+/// [`open_with`] as a server opens its file: the vectors the open would
+/// link into a graph are left for [`crate::link::beside`] to link
+/// (`fenec_core::fs::open_serving`).
+pub fn open_serving(
+    path: &str,
+    buffer: usize,
+    mapped: bool,
+) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
+    open_as(path, buffer, mapped, true)
+}
+
+fn open_as(
+    path: &str,
+    buffer: usize,
+    mapped: bool,
+    serving: bool,
+) -> fenec_core::error::Result<(Database, Arc<Feed>)> {
     let feed = Feed::new(buffer);
     let made = Arc::clone(&feed);
-    let db = fenec_core::fs::open_with(
-        path,
-        mapped,
-        Box::new(move |mut file| {
-            file.sync_existing()?;
-            Ok(Box::new(Tee { file, feed: made }) as Box<dyn Sink>)
-        }),
-    )?;
+    let wrap: Box<fenec_core::fs::Wrap<'_>> = Box::new(move |mut file| {
+        file.sync_existing()?;
+        Ok(Box::new(Tee { file, feed: made }) as Box<dyn Sink>)
+    });
+    let db = match serving {
+        true => fenec_core::fs::open_serving(path, mapped, wrap)?,
+        false => fenec_core::fs::open_with(path, mapped, wrap)?,
+    };
     feed.start(db.change_seq());
     Ok((db, feed))
 }

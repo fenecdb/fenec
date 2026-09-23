@@ -7,7 +7,7 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench quant-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -195,6 +195,19 @@ open-bench:
 	test -f $(OPEN_FILE) || ./target/release/examples/open write $(OPEN_FILE) $(OPEN_ROWS) 400 hs
 	./target/release/examples/open open $(OPEN_FILE) read
 	./target/release/examples/open open $(OPEN_FILE) mapped
+
+## What a crash costs the next open: 100 000 x 768 written and never
+## checkpointed, so every vector is in the tail, then opened as a server did
+## (linked first) and does (linked beside the queries), alone and with two
+## clients sending a near every 20 ms. Each open is a process of its own.
+REOPEN_ROWS ?= 100000
+REOPEN_FILE ?= target/reopen-$(REOPEN_ROWS).fenec
+reopen-bench:
+	$(CARGO) build --release -p fenec-core --example reopen
+	test -f $(REOPEN_FILE) || ./target/release/examples/reopen write $(REOPEN_FILE) $(REOPEN_ROWS) 768
+	./target/release/examples/reopen open $(REOPEN_FILE) linked
+	./target/release/examples/reopen open $(REOPEN_FILE) deferred
+	./target/release/examples/reopen open $(REOPEN_FILE) deferred 2 20
 
 ## Quantized vector indexes against full vectors: the arena, the heap,
 ## recall@10, latency and the documents' vectors read at beams of 100, 200

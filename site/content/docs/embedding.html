@@ -51,7 +51,12 @@ never on the write path. Without a graph in the file it is rebuilt on open:
 10.2 s at 100 000 × 128, against 110 ms with it. A crash does not cost the
 graph: the next open restores the one the last checkpoint wrote and applies
 the writes since — 0.19 s for 1 000 of them at 100 000 × 128, where the
-rebuild took 8.8 s.</p>
+rebuild took 8.8 s. A process that has to answer before those are linked
+opens with <code>fs::open_serving</code>: the vectors written since go in
+unlinked, <code>near</code> measures each of them until
+<code>Database::link_pending(n)</code> has linked them, and the process
+calls it under its write lock a few at a time, as <code>fenec-pg</code>
+does. <code>Database::unlinked()</code> says how many are left.</p>
 
 <h2>Measuring the footprint</h2>
 

@@ -1018,6 +1018,9 @@ pub struct Database {
     /// Images adopted: each replaces the contents wholesale, possibly at
     /// the change the database already stood at.
     adoptions: u64,
+    /// Whether the next load leaves the vectors it would link into a graph
+    /// for [`Database::link_pending`] (see [`Database::defer_linking`]).
+    defer_links: bool,
 }
 
 impl Default for Database {
@@ -1044,6 +1047,7 @@ impl Database {
             tails: Mutex::default(),
             watched: std::sync::atomic::AtomicBool::new(false),
             adoptions: 0,
+            defer_links: false,
         }
     }
 
@@ -1488,6 +1492,60 @@ impl Database {
         })
     }
 
+    /// Has the next load leave out of the graphs the vectors it would link
+    /// into them -- the writes after the checkpoint, and every vector of a
+    /// graph it could not restore -- for [`Self::link_pending`] to link.
+    /// Until then `near` measures each of them against the query, so an
+    /// answer is what the graph finds and the nearest of them together. A
+    /// server opens its file this way (`fs::open_serving`) and links them
+    /// beside its queries: linked first, they kept its port closed for as
+    /// long as they took, 56.6 s at 100 000 x 768 never checkpointed,
+    /// which opens in 0.96 s this way.
+    pub fn defer_linking(&mut self) {
+        self.defer_links = true;
+    }
+
+    /// Links up to `max` of the vectors a load left out of the graphs
+    /// ([`Self::defer_linking`]) and returns how many are left. The caller
+    /// holds the write lock for as long as `max` of them take.
+    pub fn link_pending(&mut self, max: usize) -> usize {
+        let mut budget = max;
+        let mut left = 0;
+        for name in &self.order {
+            let Some(c) = self.collections.get_mut(name) else {
+                continue;
+            };
+            let Collection {
+                schema,
+                store,
+                vectors,
+                ..
+            } = c;
+            for (field, ix) in vectors.iter_mut() {
+                let before = ix.unlinked();
+                if before > 0 && budget > 0 {
+                    let pos = schema.field_pos(field);
+                    let now = ix.link_pending(budget, &mut |doc, out| {
+                        pos.is_some_and(|p| store.read_vector_into(doc, p, out).unwrap_or(false))
+                    });
+                    budget -= (before - now).min(budget);
+                }
+                left += ix.unlinked();
+            }
+        }
+        left
+    }
+
+    /// The vectors a load left out of the graphs and [`Self::link_pending`]
+    /// has still to link.
+    pub fn unlinked(&self) -> usize {
+        self.collections
+            .values()
+            .flat_map(|c| c.vectors.values())
+            .map(|ix| ix.unlinked())
+            .sum()
+    }
+
     /// The pass over a file's records; `replay` takes a data record's frames
     /// into a collection's store.
     fn load_records(&mut self, bytes: &[u8], replay: &mut Replay<'_>) -> Result<usize> {
@@ -1697,6 +1755,7 @@ impl Database {
             None => self.restore_graphs(&graphs)?,
         };
         self.rebuild_indexes_with(&restored, &reset, &touched)?;
+        self.defer_links = false;
         Ok(whole)
     }
 
@@ -1765,6 +1824,7 @@ impl Database {
         reset: &[String],
         touched: &[(String, Vec<DocId>)],
     ) -> Result<()> {
+        let later = crate::vector::UNLINKED && self.defer_links;
         for name in self.order.clone() {
             let c = self.collections.get_mut(&name).unwrap();
             // `ids()` comes back ascending; no extra sorting needed.
@@ -1807,7 +1867,19 @@ impl Database {
                 for id in gone {
                     ix.remove(id);
                 }
+                if later {
+                    ix.defer_batch(&items);
+                    continue;
+                }
                 ix.insert_batch(&items);
+                // A graph a server wrote before it had linked everything
+                // holds nodes still waiting: linked here, as the tail is.
+                if ix.unlinked() > 0 {
+                    let store = &c.store;
+                    ix.link_pending(usize::MAX, &mut |doc, out| {
+                        store.read_vector_into(doc, pos, out).unwrap_or(false)
+                    });
+                }
             }
 
             // 2) Rebuild whatever could not be restored, at the field's own
@@ -1946,7 +2018,10 @@ impl Database {
                 );
             }
             for (_, ix, rows) in vector_ix.iter_mut() {
-                ix.insert_batch(rows);
+                match later {
+                    true => ix.defer_batch(rows),
+                    false => ix.insert_batch(rows),
+                }
             }
         }
         Ok(())
@@ -3115,6 +3190,15 @@ impl Database {
         }
 
         let sp = Space::new(c, ix, &near.field);
+        if ix.unlinked() > 0 && !near.exact {
+            plan(|| {
+                format!(
+                    "near: {} vectors of {} not linked into the graph yet, each measured",
+                    ix.unlinked(),
+                    near.field
+                )
+            });
+        }
         let hits = match &sel.filter {
             // No filter: ANN directly, or a full scan when asked for -- or
             // when tombstones cut the ANN's answer short. One call each to

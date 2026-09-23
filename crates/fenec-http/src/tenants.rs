@@ -404,17 +404,13 @@ impl Tenants {
         };
         let (mut db, feed) = match &self.repl {
             None => {
-                let db = if self.mapped {
-                    fenec_core::fs::open(path)
-                } else {
-                    fenec_core::fs::open_in_memory(path)
-                };
+                let db = fenec_core::fs::open_serving(path, self.mapped, Box::new(Ok));
                 (db.map_err(failed)?, None)
             }
             Some(r) => {
                 let file = path.to_string_lossy().into_owned();
-                let (db, feed) =
-                    crate::replication::open_with(&file, r.buffer, self.mapped).map_err(failed)?;
+                let (db, feed) = crate::replication::open_serving(&file, r.buffer, self.mapped)
+                    .map_err(failed)?;
                 (db, Some(feed))
             }
         };
@@ -457,6 +453,7 @@ impl Tenants {
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
         let db = Arc::new(RwLock::new(db));
+        crate::link::beside(&format!("tenant `{name}`"), &db);
         // The follower applies the primary node's writes for this tenant, and
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.
@@ -741,6 +738,11 @@ impl Tenants {
             .map(|t| (t.name.clone(), t.read().memory_bytes(), t.is_frozen()))
             .collect();
         open.sort();
+        let unlinked = self
+            .open_tenants()
+            .iter()
+            .map(|t| t.read().unlinked())
+            .sum();
         let names = self.names();
         let disk = names
             .iter()
@@ -751,6 +753,7 @@ impl Tenants {
             tenants: names.len(),
             disk,
             open,
+            unlinked,
         }
     }
 
@@ -793,6 +796,9 @@ pub struct Stats {
     pub disk: u64,
     /// `(name, memory_bytes, frozen)`
     pub open: Vec<(String, usize, bool)>,
+    /// The open tenants' vectors still to be linked into their graphs
+    /// (`link::beside`).
+    pub unlinked: usize,
 }
 
 /// `[a-z0-9_-]{1,64}`: safe as a file name everywhere, no traversal, and

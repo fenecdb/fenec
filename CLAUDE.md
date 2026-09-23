@@ -31,6 +31,7 @@ make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
+make reopen-bench        # a crashed 100k x 768 file: linked at the open, or beside the queries
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 ```
 
@@ -274,6 +275,27 @@ bit, since `==` says -0.0 is 0.0 and a hash key is the value's encoding. An unfi
 again with the beam wider by their number -- no more than all of them can be
 in it -- or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
+
+**A server answers before its graph is linked.** A server checkpoints only
+on its way down, so a crash after a long run leaves every vector written
+since in the tail, and linking them at the open kept the port closed for as
+long as they took: at 100 000 x 768 never checkpointed, `fenec-pg` answered
+its first `near` 67.7 s after it started. `fenec-pg`, a tenant and a replica
+open with `fs::open_serving` instead, and it answers after 1.23 s: those
+vectors go into the arena unlinked (`VectorIndex::defer_batch`, every vector
+of a graph the open cannot restore too), a search measures each of them
+beside what its walk finds -- so an answer is never missing one -- and
+`fenec_http::link::beside` links them on a thread of its own, slices of
+about 10 ms under the write lock, each at most twice the last (a pace taken
+over a small graph had a slice hold the lock for 112 ms). `near` takes the
+exact scan's 16 ms until the 61.8 s of linking are done and 0.46 ms after,
+recall 0.976 against 0.978 (`make reopen-bench`). A checkpoint meanwhile
+writes the waiting nodes flagged, in graph record version 5 and only then,
+and an open that does not defer links them there. The linking needs the
+lock to let a waiting writer in: Linux's std lock does, while on macOS
+readers slip past it, and four clients asking back to back kept it from
+finishing in eleven minutes -- as they would keep any write waiting. The
+browser has none of it (`vector::UNLINKED`: 1.1 KB brotli).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;

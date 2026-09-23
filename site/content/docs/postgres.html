@@ -126,7 +126,8 @@ that succeeds would prove nothing.</p>
 
 <p>After the sync, if a vector index exists, a checkpoint is written: the HNSW
 graph lands in the file and the next open does not rebuild it — 110 ms instead
-of 10.2 s at 100 000 × 128.</p>
+of 10.2 s at 100 000 × 128. Vectors still waiting to be linked after a crash
+(below) are written as waiting, and linked after the next open.</p>
 
 <p>The cost is that shutdown takes longer on a large database: the image is
 written into the new file as it is produced, so it is a copy on disk rather
@@ -299,11 +300,17 @@ FENECPG_PASSWORD=secret docker compose up -d
   <li><b>The restart cost depends on how it stopped.</b>
     <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
     written, so the next open takes 110 ms. After <code>kill -9</code> or a
-    cgroup OOM the graph of the last checkpoint is restored and the writes
-    since it are applied to it: with 1 000 of them, 0.19 s at
-    100 000 × 128, where rebuilding the graph took 8.8 s. The cost grows with
-    the writes since that checkpoint, and the only one the server writes on
-    its own is the one at shutdown.</li>
+    cgroup OOM the graph of the last checkpoint is restored, and the vectors
+    written since it go in unlinked: the server answers once the documents
+    are read, and links them on a thread beside its queries,
+    <code>near</code> measuring each of them until then. The only checkpoint
+    the server writes on its own is the one at shutdown, so after a long run
+    that can be every vector: at 100 000 × 768 never checkpointed the first
+    <code>near</code> was answered 1.23 s after the start, against 67.7 s
+    when the open linked them first. Linking took 62 s, 157 s with two
+    clients each sending a <code>near</code> every 20 ms, which took 17 ms
+    p50 and 45 ms p99 meanwhile; <code>fenec_vectors_unlinked</code> counts
+    down to 0.</li>
 </ul>
 
 <div class="note trap">

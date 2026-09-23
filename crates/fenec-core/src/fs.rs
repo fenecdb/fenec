@@ -418,12 +418,32 @@ pub fn open(path: impl AsRef<Path>) -> Result<Database> {
 /// every server path (`fenec-pg --no-mmap`), replicated files and tenant
 /// directories included.
 pub fn open_with(path: impl AsRef<Path>, mapped: bool, wrap: Box<Wrap<'_>>) -> Result<Database> {
+    open_into(Database::new(), path, mapped, wrap)
+}
+
+/// [`open_with`] as a server opens its file: the vectors the open would
+/// link into a graph -- the writes after the last checkpoint, every vector
+/// of a graph it cannot restore -- are left for a thread beside the queries
+/// to link ([`Database::defer_linking`]), and the file opens in the time
+/// its documents take to read.
+pub fn open_serving(path: impl AsRef<Path>, mapped: bool, wrap: Box<Wrap<'_>>) -> Result<Database> {
+    let mut db = Database::new();
+    db.defer_linking();
+    open_into(db, path, mapped, wrap)
+}
+
+fn open_into(
+    db: Database,
+    path: impl AsRef<Path>,
+    mapped: bool,
+    wrap: Box<Wrap<'_>>,
+) -> Result<Database> {
     #[cfg(all(unix, target_pointer_width = "64"))]
     if mapped {
-        return open_mapped_with(path, wrap);
+        return open_mapped_into(db, path, wrap);
     }
     let _ = mapped;
-    open_in_memory_with(path, wrap)
+    open_in_memory_into(db, path, wrap)
 }
 
 /// Opens a fenecdb file (creating it when missing) and reads it into memory,
@@ -431,12 +451,15 @@ pub fn open_with(path: impl AsRef<Path>, mapped: bool, wrap: Box<Wrap<'_>>) -> R
 /// What a network file system wants, whose read errors a mapping would turn
 /// into the process's death, and what has `--max-memory` count the data.
 pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Database> {
-    open_in_memory_with(path, Box::new(Ok))
+    open_in_memory_into(Database::new(), path, Box::new(Ok))
 }
 
-fn open_in_memory_with(path: impl AsRef<Path>, wrap: Box<Wrap<'_>>) -> Result<Database> {
+fn open_in_memory_into(
+    mut db: Database,
+    path: impl AsRef<Path>,
+    wrap: Box<Wrap<'_>>,
+) -> Result<Database> {
     let (mut sink, existing) = FileSink::open(path)?;
-    let mut db = Database::new();
     if existing.len() > MAGIC.len() {
         let whole = db.load(&existing)?;
         if whole < existing.len() {
@@ -458,16 +481,19 @@ fn open_in_memory_with(path: impl AsRef<Path>, wrap: Box<Wrap<'_>>) -> Result<Da
 /// one fenecdb serves from.
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub fn open_mapped(path: impl AsRef<Path>) -> Result<Database> {
-    open_mapped_with(path, Box::new(Ok))
+    open_mapped_into(Database::new(), path, Box::new(Ok))
 }
 
 #[cfg(all(unix, target_pointer_width = "64"))]
-fn open_mapped_with(path: impl AsRef<Path>, wrap: Box<Wrap<'_>>) -> Result<Database> {
+fn open_mapped_into(
+    mut db: Database,
+    path: impl AsRef<Path>,
+    wrap: Box<Wrap<'_>>,
+) -> Result<Database> {
     let (mut file, path) = FileSink::create(path)?;
     let len = file.seek(SeekFrom::End(0))? as usize;
     let mapping = Mapping::of(&file, len)?;
     let mut sink = FileSink::over(file, path);
-    let mut db = Database::new();
     // A new file is loaded this way too -- it holds the magic by now -- so
     // the database is a mapped one from the start, and its first rewrite
     // points the stores at the file it wrote. Left out, a new file, a new

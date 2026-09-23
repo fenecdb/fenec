@@ -365,6 +365,7 @@ fn render(source: Source) -> String {
                 "1 once the disk refused a write: writes stop until the file is reopened.",
             );
             out.sample("fenec_storage_failed", &[], g.failure().is_some() as u8);
+            unlinked(&mut out, g.unlinked());
             drop(g);
             if let Some(repl) = repl {
                 repl.metrics(&mut out, seq);
@@ -391,9 +392,21 @@ fn render(source: Source) -> String {
                 &[],
                 s.open.iter().map(|(_, m, _)| m).sum::<usize>(),
             );
+            unlinked(&mut out, s.unlinked);
         }
     }
     out.0
+}
+
+/// How far linking the vectors an open left out of the graph has to go
+/// (`link::beside`); 0 once it is done.
+fn unlinked(out: &mut Text, n: usize) {
+    out.family(
+        "fenec_vectors_unlinked",
+        "gauge",
+        "Vectors the open left out of the graph: near measures each until they are linked.",
+    );
+    out.sample("fenec_vectors_unlinked", &[], n);
 }
 
 fn each(mut f: impl FnMut(usize, usize)) {

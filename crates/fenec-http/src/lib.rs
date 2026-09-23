@@ -43,6 +43,7 @@ pub mod api;
 pub mod archive;
 pub mod crypto;
 pub mod http;
+pub mod link;
 pub mod metrics;
 pub mod replication;
 pub mod sse;

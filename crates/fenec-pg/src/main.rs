@@ -443,14 +443,12 @@ fn main() {
     let mut db = match &file {
         Some(path) => {
             let opened = if replicating {
-                replication::open_with(path, replication_buffer, mmap).map(|(db, f)| {
+                replication::open_serving(path, replication_buffer, mmap).map(|(db, f)| {
                     feed = Some(f);
                     db
                 })
-            } else if mmap {
-                fenec_core::fs::open(path)
             } else {
-                fenec_core::fs::open_in_memory(path)
+                fenec_core::fs::open_serving(path, mmap, Box::new(Ok))
             };
             match opened {
                 Ok(db) => {
@@ -495,6 +493,11 @@ fn main() {
     }
 
     let shared = Arc::new(RwLock::new(db));
+    // What the open left out of the graphs is linked beside the queries: the
+    // port opens in the time the documents take to read.
+    if let Some(path) = &file {
+        fenec_http::link::beside(path, &shared);
+    }
 
     // The follower applies the primary's writes; this server's own feed
     // passes them on to replicas of its own.
