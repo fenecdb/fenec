@@ -42,15 +42,16 @@ model, and the other would be a different database.</p>
 
 <h2>Fixed limits</h2>
 
-<p>Ceilings baked into the code. Exceeding the first two makes the query
-<b>error</b>, because a silently cut result is a wrong answer believed
+<p>Ceilings baked into the code. Exceeding any of the first four makes the
+query <b>error</b>, because a silently cut result is a wrong answer believed
 right.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>Limit</th><th class="n">Value</th><th>Note</th></tr></thead>
 <tbody>
-<tr><td><code>near</code> result (<code>limit + offset</code>)</td><td class="n"><b>10 000 rows</b></td><td>a query error when exceeded; without <code>limit</code>, the default top-k applies</td></tr>
+<tr><td><code>near</code>, <code>match</code>, <code>fuse</code> result (<code>limit + offset</code>)</td><td class="n"><b>10 000 rows</b></td><td>a query error when exceeded; without <code>limit</code>, the default top-k applies</td></tr>
+<tr><td><code>rerank</code> candidates, <code>fuse</code> candidates a side</td><td class="n"><b>10 000</b></td><td>a query error when exceeded; never fewer than <code>limit + offset</code></td></tr>
 <tr><td>expression depth</td><td class="n"><b>512 levels</b></td><td>parentheses <i>and</i> <code>and</code>/<code>or</code> chains count</td></tr>
 <tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
 <tr><td>session stack (<code>fenec-pg</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
@@ -119,8 +120,9 @@ container memory is a sensible start: it covers both this 60–75% ratio and
 file of its own, nodes hold many, and a router forwards each request to the
 right one (<a href="/docs/sharding">Tenants and sharding</a>). The bound moves
 from "the database fits one machine" to "each tenant does" — a single tenant
-larger than a node is still out of reach, and there is no replication, so a node
-that is down takes its tenants with it.</p>
+larger than a node is still out of reach. A single file has
+<a href="/docs/replication">read replicas</a>, but a tenant node does not yet,
+so a node that is down takes its tenants with it.</p>
 
 <h2 id="index-build-open-and-maintenance">Index build, open and maintenance</h2>
 
@@ -140,9 +142,22 @@ that is down takes its tenants with it.</p>
     graph took 8.8 s and 48 s. The time grows with the writes since the
     checkpoint.</li>
   <li><b><code>compact</code> is a full rebuild, not a garbage collection.</b>
-    Even with zero dead bytes every index is built from scratch and writes
-    block throughout: 20 000 × 32 takes 0.94 s, against 0.05 s on a
-    vector-free text collection of the same size.</li>
+    Even with zero dead bytes every index is built from scratch: 20 000 × 32
+    takes 0.94 s, against 0.05 s on a vector-free text collection of the same
+    size.</li>
+  <li><b>A server builds an index or compacts beside the database.</b> A
+    <code>create index</code> or <code>compact</code> sent on its own to
+    <code>fenec-pg</code> or <code>POST /query</code> copies what it reads
+    under the read lock, builds with no lock held, and takes the write lock
+    only to apply the writes made meanwhile and put the result in place. At
+    100 000 × 128, where either takes about 20 s, reads waited at most 21 ms
+    through an HNSW build and 69 ms through a compact — the compact's includes
+    rewriting the file — against the full 20 s under the write lock, and
+    writes went on at the same pace. One in a batch, or run by the shell or
+    an embedding program, still holds the write lock throughout. A schema
+    change to the same collection while it builds — another index, a drop —
+    fails it with a request to run it again, since what was built no longer
+    fits. It cannot be cancelled once begun.</li>
   <li>A delete is a tombstone and the graph node stays in memory until
     <code>compact</code>. Updating a document also marks the old node deleted
     and adds a new one, so in collections whose vectors change, the graph grows
@@ -211,6 +226,17 @@ that is down takes its tenants with it.</p>
     has no place in an order, takes the sorting path. Without
     <code>order</code>, a scan stops at <code>offset + limit</code>
     matches.</li>
+  <li><b>One collation, Turkish, and only for <code>order</code>.</b>
+    <code>collate tr</code> orders a text key as ICU's <code>tr</code> does;
+    a comparison in <code>where</code> stays a comparison of bytes, and a
+    <code>@sorted</code> field keeps the bytes' order, so a collated key is
+    always sorted — 837 ms for a million names, against 362 ms by their bytes
+    — and a Turkish listing pages by <code>offset</code>. The order is ICU's
+    exactly over the Latin script, decomposed letters included. Two marks on
+    one letter written out of their canonical order can sort apart from ICU,
+    which normalises them, and past the Latin script the order is an
+    approximation: another script's letters after the Latin ones, other
+    symbols before the digits, each by code point.</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's
@@ -268,6 +294,15 @@ that is down takes its tenants with it.</p>
     always runs to the end and no <code>PortalSuspended</code> is sent. Clients
     using <code>fetch_size</code> or a named cursor get the whole result at
     once.</li>
+  <li><b>The catalog reads a part of <code>SELECT</code></b>: inner, left,
+    cross and <code>USING</code> joins, <code>CASE</code>, casts,
+    subqueries, <code>UNION</code>, aggregates, <code>row_number</code>,
+    <code>rank</code> and set-returning functions in the select list. A
+    <code>WITH</code>, a right or full join, or a catalog table it does not
+    build is answered empty rather than with an error, and a catalog function
+    it does not know is null (<a href="postgres.html#catalog">The
+    catalog</a>). It is only a catalog: a collection is still queried in
+    FenecQL.</li>
 </ul>
 
 <h2>fenec-http</h2>
@@ -333,4 +368,11 @@ that is down takes its tenants with it.</p>
     accepted it, the result would be meaningless.</li>
   <li>An import that stops halfway cannot be rolled back — there are no
     transactions.</li>
+  <li><b><code>--follow</code> needs <code>wal_level = logical</code> and an
+    integer key</b> in the replica identity: a changed row has to be found
+    again by id. It holds its file as its only writer, and its slot holds the
+    server's log until confirmed — drop the slot when you stop following for
+    good (<a href="import.html#following">Following changes</a>).</li>
+  <li>A column added to the followed table after the copy is left out; one
+    the collection needs that is dropped from it stops the follower.</li>
 </ul>

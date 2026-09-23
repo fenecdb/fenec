@@ -7,8 +7,9 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench small bench sweep \
-	compare import-test \
+.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench small bench sweep collate-bench \
+	python-test react-test \
+	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
 
@@ -80,6 +81,13 @@ shard:
 shard-bench:
 	$(CARGO) run --release -p fenec-shard --example overhead -- 100000 128
 
+## Replication: a replica's lag under each sync policy, how fast it
+## catches up and starts from an image, and what a failover loses.
+replica-bench:
+	$(CARGO) build --release -p fenec-pg
+	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
+	$(CARGO) run --release -p fenec-pg --example failover -- 10
+
 ## When size comes first: no import, abort instead of panic unwinding.
 small:
 	@$(CARGO) build --profile cli -p fenec-cli --no-default-features
@@ -95,18 +103,52 @@ bench:
 compare:
 	$(CARGO) run --release -p fenec-bench -- 100000 128
 
+## Retrieval quality on BEIR, nDCG@10 for every way of ranking ten documents:
+##   make beir BEIR=path/to/scifact
+## The directory is one of BEIR's zips unpacked, with the vectors
+## crates/fenec-bench/beir/embed.mjs writes beside it (npm install there once).
+beir:
+	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs)"; exit 1)
+	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
+
+## The LangChain and LlamaIndex vector stores against their frameworks' own
+## tests: fenec-pg built and started here, the tests from a python:3.13
+## container (Docker). The integrations may use outside packages; the
+## crates may not.
+python-test:
+	integrations/python/run-tests.sh
+
+## useLiveQuery for React, against a stand-in and a real fenec-pg + replica
+## (needs `make wasm`)
+react-test:
+	@$(CARGO) build -q -p fenec-pg
+	cd integrations/react && npm ci --no-audit --no-fund --loglevel=error && npm test
+
+## What `order ... collate tr` costs over a million Turkish names, in fenecdb
+## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu
+collate-bench:
+	$(CARGO) run --release -p fenec-bench --bin collate
+
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
-	@$(CARGO) test -p fenec-import --test pg -- --ignored; \
+	@$(CARGO) test -p fenec-import --test pg --test follow -- --ignored; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
-## Starts PostgreSQL with pgvector for the comparison
+## `fenec import --follow` against a live server: commit-to-visible latency,
+## how fast a burst drains, how long a cut stream takes to come back.
+## Needs `make pgvector-up` first.
+follow-bench:
+	$(CARGO) run --release -p fenec-import --example follow -- 10000 384
+
+## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
+## is for `fenec import --follow` and its tests; it changes what is logged
+## for updates and deletes, not how the compared reads run.
 pgvector-up:
 	docker run -d --name fenecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
 	  -p 55432:5432 --shm-size=1g pgvector/pgvector:pg17 \
 	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
-	  -c max_parallel_workers_per_gather=0
+	  -c max_parallel_workers_per_gather=0 -c wal_level=logical
 	@echo "waiting for it to become ready..."
 	@until docker exec fenecbench-pg pg_isready -U postgres -d fenecbench >/dev/null 2>&1; do sleep 1; done
 	@echo "postgres://postgres:fenec@127.0.0.1:55432/fenecbench"
@@ -136,6 +178,11 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fenecdb
+
+## What `create index` and `compact` cost the readers and writers of a
+## running database: under the write lock, then beside it.
+maintenance-bench:
+	$(CARGO) run --release -p fenec-core --example maintenance -- 100000 128
 
 ## Memory footprint (for calibrating --max-memory)
 memory:

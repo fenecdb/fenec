@@ -153,8 +153,16 @@ name = "fenec-bench"
 version = "0.1.4"
 dependencies = [
  "fenec-core",
+ "fenec-ql",
  "postgres",
  "rusqlite",
+]
+
+[[package]]
+name = "fenec-catalog"
+version = "0.1.4"
+dependencies = [
+ "fenec-core",
 ]
 
 [[package]]
@@ -162,6 +170,7 @@ name = "fenec-cli"
 version = "0.1.4"
 dependencies = [
  "fenec-core",
+ "fenec-http",
  "fenec-import",
  "fenec-ql",
 ]
@@ -194,6 +203,7 @@ dependencies = [
 name = "fenec-pg"
 version = "0.1.4"
 dependencies = [
+ "fenec-catalog",
  "fenec-core",
  "fenec-http",
  "fenec-ql",

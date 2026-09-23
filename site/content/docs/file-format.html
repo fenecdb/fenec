@@ -16,6 +16,7 @@ exception are worth knowing before you touch the reader.</p>
   [2][collection-id][length]               drop collection (empty body)
   [3][collection-id][length][records]      data
   [4][collection-id][length][field][graph] HNSW graph (optional)
+  [8][0][length][history]                  replication history (optional)
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>.
@@ -83,6 +84,18 @@ forward. Old files without the record load fine — the counter is then counted
 from the records. The reverse does not hold: an old binary cannot open a new
 file and reports <code>unknown record kind 6</code>.</p>
 
+<h2>The history record is not a write</h2>
+
+<p>Record kind 8 says which history the writes belong to, for
+<a href="/docs/replication">replication</a>: a list of
+<code>(id, from change)</code> pairs, one per fork, and whether the file is a
+replica's. A replica is fed a primary's writes by their number on the change
+counter, so this is the one record that must not move the counter — a
+replica would be numbered one change off its primary. It is appended when a
+history forks or a replica follows one, and written into every image while
+it is set; a file that never had a replica holds none. An old binary cannot
+open a file with one and reports <code>unknown record kind 8</code>.</p>
+
 <h2>The id counter exists because of compact</h2>
 
 <p>A document id is normally derived from the records: a replay takes one more
@@ -104,6 +117,7 @@ Old files without the counter still load correctly.</p>
   fenec-ql/     FenecQL lexer and parser                    (core only)
   fenec-wasm/   the browser ABI                             (no wasm-bindgen)
   fenec-pg/     PostgreSQL v3 wire protocol, server and client
+  fenec-catalog/ the pg_catalog psql, JDBC and DBeaver read (core only)
   fenec-http/   HTTP/JSON endpoint: REST, raw FenecQL, SSE  (core + ql only)
   fenec-import/ SQLite file reader, PostgreSQL COPY source
   fenec-cli/    the `fenec` shell, `fenec import`, `fenec types`

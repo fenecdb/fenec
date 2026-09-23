@@ -107,6 +107,18 @@ test('order adds a key on each successive call', () => {
   assert.equal(sql, 'get articles order year desc, title asc');
 });
 
+test('order takes a collation, checked against the ones there are', () => {
+  const [sql] = q().order('title', 'desc', { collate: 'tr' }).order('year').toFenecQL();
+  assert.equal(sql, 'get articles order title collate tr desc, year asc');
+  const [child] = q()
+    .lookup('remarks', { on: 'article_id', order: [['body', 'asc', { collate: 'tr' }], 'id'] })
+    .toFenecQL();
+  assert.equal(child, 'get articles lookup remarks on article_id order body collate tr asc, id asc');
+  // Spliced into the text, so only a name on the list gets through.
+  assert.throws(() => q().order('title', 'asc', { collate: 'tr desc; del articles' }), FenecError);
+  assert.throws(() => q().order('title', 'asc', { collate: 'de' }), FenecError);
+});
+
 test('count is generated as a clause', async () => {
   const seen = [];
   const exec = (sql, p) => (seen.push([sql, p]), { columns: ['count'], rows: [{ count: 7 }] });
@@ -126,6 +138,47 @@ test('count does not combine with the other clauses', async () => {
   ]) {
     await assert.rejects(() => base.bind(exec).count(), FenecError);
   }
+});
+
+test('fuse ranks by match and near together', () => {
+  const [sql, p] = q()
+    .match('body', 'rust wasm')
+    .near('embed', [1, 0, 0])
+    .fuse({ k: 20, candidates: 50 })
+    .limit(10)
+    .toFenecQL();
+  assert.equal(sql, 'get articles near embed $1 match body $2 fuse k 20 candidates 50 limit 10');
+  assert.deepEqual(p, [[1, 0, 0], 'rust wasm']);
+  assert.throws(() => q().match('body', 'x').near('embed', [1]).toFenecQL(), FenecError);
+  assert.throws(() => q().match('body', 'x').fuse().toFenecQL(), FenecError);
+});
+
+test('aggregates go in the select list, grouped or whole', () => {
+  const [sql] = from('orders')
+    .select('status', 'count(*)', 'SUM(total)', 'avg(total)')
+    .where('year', 2024)
+    .group('status')
+    .order('sum(total)', 'desc')
+    .limit(3)
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get orders select status, count(*), sum(total), avg(total) where year = $1 ' +
+      'group status order sum(total) desc limit 3',
+  );
+  assert.equal(
+    from('orders').select('min(at)', 'max(at)').toFenecQL()[0],
+    'get orders select min(at), max(at)',
+  );
+});
+
+test('aggregates refuse what the engine would', () => {
+  const agg = () => from('orders').select('count(*)');
+  assert.throws(() => from('orders').select('status').group('status').toFenecQL(), FenecError);
+  assert.throws(() => agg().limit(3).toFenecQL(), FenecError);
+  assert.throws(() => agg().near('v', [1, 0]).toFenecQL(), FenecError);
+  assert.throws(() => from('orders').select('median(total)'), FenecError);
+  assert.throws(() => from('orders').select('sum(a b)'), FenecError);
 });
 
 test('match, on its own and with a filter', () => {
@@ -425,6 +478,90 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)
   db.close();
 });
 
+test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection notes (body text @text, embed vector<2> @hnsw(cosine))');
+  await db.from('notes').insert([
+    { body: 'rust in the browser', embed: [0, 1] },
+    { body: 'garbage collection', embed: [1, 0] },
+    { body: 'rust and wasm', embed: [0.9, 0.1] },
+  ]);
+  // By text: 3 then 1. By vector: 2, 3, 1. The one on top of neither list
+  // but high on both comes first; the one only the vector found, last.
+  const rows = await db
+    .from('notes')
+    .select('body')
+    .match('body', 'rust')
+    .near('embed', [1, 0])
+    .fuse()
+    .rows();
+  assert.deepEqual(
+    rows.map((r) => r.body),
+    ['rust and wasm', 'rust in the browser', 'garbage collection'],
+  );
+  assert.ok(Math.abs(rows[0]._score - (1 / 61 + 1 / 62)) < 1e-6, String(rows[0]._score));
+  db.close();
+});
+
+test('collate tr on wasm is Intl.Collator("tr")', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  // Words over what the table covers -- Latin-1, Latin Extended-A to -C,
+  // the IPA letters, combining marks, punctuation, currency -- each written
+  // a second time with its case, its composition or an ignorable soft
+  // hyphen changed, so the comparison reaches the accents and the case and
+  // not only the letters. What the table leaves to ICU's normalisation stays
+  // out: a second mark on one letter, and a case partner outside the table.
+  const ranges = [[0x0, 0x370], [0x2000, 0x2070], [0x20a0, 0x20c1], [0x2c60, 0x2c80]];
+  const range = (a, b) => Array.from({ length: b - a }, (_, i) => String.fromCodePoint(a + i));
+  const covered = (s) => [...s].every((c) => ranges.some(([lo, hi]) => c.codePointAt(0) >= lo && c.codePointAt(0) < hi));
+  const pools = [
+    [...'abcçdefgğhıijklmnoöprsştuüvyzABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZâîûÂÎÛ'],
+    range(0x20, 0x7f),
+    [...range(0xa0, 0x300), ...range(0x2c60, 0x2c80)],
+    [...range(0x2000, 0x2070), ...range(0x20a0, 0x20c1), '\t', '­'],
+  ];
+  const marks = range(0x300, 0x370);
+  // `Math.imul`: a plain `*` loses the low bits past 2^53, and the
+  // generator falls into a cycle too short to make 3000 words.
+  let seed = 7;
+  const rnd = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const pick = (a) => a[rnd(a.length)];
+  const words = new Set();
+  while (words.size < 3000) {
+    const pool = pools[rnd(pools.length)];
+    let w = '';
+    for (let i = rnd(6); i >= 0; i--) {
+      const c = pick(rnd(4) ? pools[0] : pool);
+      w += c;
+      if (rnd(10) === 0 && c.normalize('NFD').length === 1) w += pick(marks);
+    }
+    words.add(w);
+    const twin = [...w]
+      .map((c) => {
+        const t = [c.toUpperCase(), c.toLowerCase(), c.normalize('NFD'), c + '­', c][rnd(5)];
+        return covered(t) ? t : c;
+      })
+      .join('');
+    words.add(twin);
+  }
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection words (w text)');
+  await db.from('words').insert([...words].map((w) => ({ w })));
+  const got = (await db.from('words').select('w').order('w', 'asc', { collate: 'tr' }).rows()).map(
+    (r) => r.w,
+  );
+  // What ICU calls equal goes by its bytes, as a deterministic PostgreSQL
+  // collation has it.
+  const icu = new Intl.Collator('tr');
+  const bytes = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  assert.deepEqual(got, [...words].sort((a, b) => icu.compare(a, b) || bytes(a, b)));
+  db.close();
+});
+
 // ----------------------------------------------------------- HTTP endpoint
 //
 // Tests against a real server live on the Rust side (`crates/fenec-http/tests`).
@@ -673,6 +810,30 @@ test('a chain refuses a repeated collection and a chain too deep', () => {
   let q = from('shops');
   for (let i = 0; i < 9; i++) q = q.lookup(`c${i}`, { on: 'k' });
   assert.throws(() => q.toFenecQL(), /chained too deep/);
+});
+
+test('aggregates end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection orders (status text @hash, total int)');
+  await db.from('orders').insert([
+    { status: 'paid', total: 30 },
+    { status: 'paid', total: 12 },
+    { status: 'open', total: 7 },
+    { status: 'open' },
+  ]);
+  const rows = await db
+    .from('orders')
+    .select('status', 'count(*)', 'sum(total)', 'avg(total)')
+    .group('status')
+    .order('sum(total)', 'desc')
+    .rows();
+  assert.deepEqual(rows, [
+    { status: 'paid', count: 2, 'sum(total)': 42, 'avg(total)': 21 },
+    { status: 'open', count: 2, 'sum(total)': 7, 'avg(total)': 7 },
+  ]);
+  const [whole] = await db.from('orders').select('min(total)', 'max(total)').rows();
+  assert.deepEqual(whole, { 'min(total)': 7, 'max(total)': 30 });
 });
 
 test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

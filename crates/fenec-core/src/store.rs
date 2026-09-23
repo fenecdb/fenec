@@ -426,6 +426,35 @@ impl Store {
         Ok(Some(decode_value(buf, &mut pos)?))
     }
 
+    /// Decodes the fields at `positions` -- ascending -- into `out`, in one
+    /// pass over the document that skips the others: an aggregate reads two
+    /// or three fields of every row, and a `read_field` each would skip the
+    /// fields before them once per field. `false` when there is no such
+    /// document.
+    pub fn read_fields(
+        &self,
+        id: DocId,
+        positions: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<bool> {
+        let Some(loc) = self.index.get(id) else {
+            return Ok(false);
+        };
+        let buf = self.payload(loc)?;
+        out.clear();
+        let mut pos = 0usize;
+        let mut at = 0usize;
+        for &want in positions {
+            while at < want {
+                skip_value(buf, &mut pos)?;
+                at += 1;
+            }
+            out.push(decode_value(buf, &mut pos)?);
+            at += 1;
+        }
+        Ok(true)
+    }
+
     /// Decodes a vector field into the given buffer -- with no intermediate
     /// allocation.
     ///
@@ -538,6 +567,21 @@ impl Store {
         }
         *self = fresh;
         Ok(image)
+    }
+
+    /// The live records in a fresh store, the dead ones left behind -- and
+    /// `self` untouched, so the database goes on using it while a
+    /// maintenance builds beside it.
+    pub fn compacted(&self) -> Result<Store> {
+        let mut fresh = Store::new();
+        fresh.next_id = self.next_id;
+        let ids = self.index.ids();
+        fresh.reserve(ids.len());
+        for id in ids {
+            let loc = self.index.get(id).unwrap();
+            fresh.append(OP_PUT, id, self.payload(loc)?);
+        }
+        Ok(fresh)
     }
 
     /// Byte image of the whole store (to persist or to move it).

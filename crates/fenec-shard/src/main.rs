@@ -31,7 +31,7 @@ The token is also read from the FENEC_SHARD_TOKEN environment variable.
 ";
 
 fn fail(msg: &str) -> ! {
-    eprintln!("{msg}");
+    fenec_http::log!("{msg}");
     std::process::exit(2);
 }
 
@@ -74,7 +74,7 @@ fn main() {
                 cfg.upstream_timeout = Duration::from_secs(secs);
             }
             "--help" | "-h" => {
-                eprintln!("fenec-shard {}\n\n{USAGE}", fenec_core::VERSION);
+                fenec_http::log!("fenec-shard {}\n\n{USAGE}", fenec_core::VERSION);
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
@@ -92,7 +92,7 @@ fn main() {
         Err(e) => fail(&format!("could not listen: {e}")),
     };
     if let Err(e) = router.serve_on(listener) {
-        eprintln!("router error: {e}");
+        fenec_http::log!("router error: {e}");
         std::process::exit(1);
     }
 }

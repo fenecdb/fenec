@@ -336,21 +336,43 @@ const OPS = {
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
 
 /**
- * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`.
- * A bare string is one ascending key; anything else is a list of pairs, so
- * there is no reading under which `['a','desc']` could mean two fields.
+ * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`,
+ * a pair taking `{ collate }` third as `order()` does. A bare string is one
+ * ascending key; anything else is a list of pairs, so there is no reading
+ * under which `['a','desc']` could mean two fields.
  */
 function orderKeys(spec) {
   if (spec === undefined || spec === null) return [];
-  if (typeof spec === 'string') return [{ field: ident(spec), asc: true }];
+  if (typeof spec === 'string') return [{ field: ident(spec), asc: true, collate: null }];
   return spec.map((k) => {
-    const [field, dir = 'asc'] = [k].flat();
-    const d = String(dir).toLowerCase();
-    if (d !== 'asc' && d !== 'desc') {
-      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
-    }
-    return { field: ident(field), asc: d === 'asc' };
+    const [field, dir = 'asc', opts = {}] = [k].flat();
+    return { field: ident(field), asc: direction(dir), collate: collation(opts.collate) };
   });
+}
+
+function direction(dir) {
+  const d = String(dir).toLowerCase();
+  if (d !== 'asc' && d !== 'desc') {
+    throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
+  }
+  return d === 'asc';
+}
+
+// The collations the engine knows. The name is spliced into the query text,
+// so it is checked against the list rather than against the name pattern.
+const COLLATIONS = ['tr'];
+
+function collation(name) {
+  if (name === undefined || name === null) return null;
+  if (!COLLATIONS.includes(name)) {
+    throw new FenecError(`unknown collation: ${JSON.stringify(name)}; there is 'tr'`);
+  }
+  return name;
+}
+
+// `name collate tr desc`: one key of an `order`.
+function sortKey(o) {
+  return `${o.field}${o.collate ? ` collate ${o.collate}` : ''} ${o.asc ? 'asc' : 'desc'}`;
 }
 
 function ident(name, what = 'field') {
@@ -358,6 +380,20 @@ function ident(name, what = 'field') {
     throw new FenecError(`invalid ${what} name: ${JSON.stringify(name)}`);
   }
   return name;
+}
+
+/**
+ * A select-list item: a field, or an aggregate spelled as FenecQL spells it
+ * -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- which answers
+ * under that same name.
+ */
+const AGGREGATE = /^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)\)$/i;
+
+function column(name) {
+  const m = typeof name === 'string' ? AGGREGATE.exec(name.trim()) : null;
+  if (!m) return { text: ident(name), aggregate: false };
+  const text = m[1] ? 'count(*)' : `${m[2].toLowerCase()}(${m[3]})`;
+  return { text, aggregate: true };
 }
 
 /** `limit`, `offset`, `ef` cannot be parameterised: FenecQL wants a literal. */
@@ -591,11 +627,28 @@ export class Query {
     return this.#with({ exec: fn });
   }
 
-  /** `select a, b` -- no arguments, or `'*'`, means every field. */
+  /**
+   * `select a, b` -- no arguments, or `'*'`, means every field. Aggregates
+   * go in the same list, spelled as FenecQL spells them, and answer under
+   * that name:
+   *
+   *   db.from('orders').select('status', 'count(*)', 'sum(total)').group('status')
+   */
   select(...cols) {
     const flat = cols.flat();
-    if (flat.length === 0 || flat.includes('*')) return this.#with({ project: null });
-    return this.#with({ project: flat.map((c) => ident(c)) });
+    if (flat.length === 0 || flat.includes('*')) {
+      return this.#with({ project: null, aggregate: false });
+    }
+    const list = flat.map((c) => column(c));
+    return this.#with({
+      project: list.map((c) => c.text),
+      aggregate: list.some((c) => c.aggregate),
+    });
+  }
+
+  /** `group field` -- one row per value, for a select list that aggregates. */
+  group(field) {
+    return this.#with({ group: ident(field) });
   }
 
   /**
@@ -631,6 +684,23 @@ export class Query {
   /** `match field $n` -- BM25 over a `@text` index. */
   match(field, query) {
     return this.#with({ match: { field: ident(field), query } });
+  }
+
+  /**
+   * `fuse [k N] [candidates N]` -- with both `match` and `near`, ranks by
+   * both: each side takes its own candidates and a document scores
+   * `1 / (k + rank)` from each list it is on.
+   *
+   *   db.from('docs').match('body', text).near('embed', vector).fuse().limit(10)
+   */
+  fuse(opts = {}) {
+    return this.#with({
+      fuse: {
+        k: opts.k === undefined ? null : whole(opts.k, 'k'),
+        candidates:
+          opts.candidates === undefined ? null : whole(opts.candidates, 'candidates'),
+      },
+    });
   }
 
   /**
@@ -709,15 +779,17 @@ export class Query {
 
   /**
    * `order field asc|desc`. Successive calls add keys: when the first key
-   * ties, the second decides.
+   * ties, the second decides. `{ collate: 'tr' }` puts text in Turkish order
+   * rather than its bytes' -- `ç` after `c`, `ı` before `i`, `Çağla` before
+   * `Zeynep` -- which is `collate tr`.
    */
-  order(field, dir = 'asc') {
-    const d = String(dir).toLowerCase();
-    if (d !== 'asc' && d !== 'desc') {
-      throw new FenecError(`order direction must be 'asc' or 'desc': ${dir}`);
-    }
+  order(field, dir = 'asc', { collate } = {}) {
+    // Over groups a key may be an aggregate of the list, by its name.
     return this.#with({
-      order: [...this.#s.order, { field: ident(field), asc: d === 'asc' }],
+      order: [
+        ...this.#s.order,
+        { field: column(field).text, asc: direction(dir), collate: collation(collate) },
+      ],
     });
   }
 
@@ -736,15 +808,32 @@ export class Query {
    */
   toFenecQL() {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank, lookups } = this.#s;
+    const { match, rerank, lookups, aggregate, group, fuse } = this.#s;
+    // The engine refuses these too; failing here never sends a query.
+    if (group && !aggregate) {
+      throw new FenecError(`group ${group} needs an aggregate in select: 'count(*)'`);
+    }
+    if (aggregate) {
+      const clash = near ? 'near' : match ? 'match' : lookups.length ? 'lookup' : count ? 'count' : null;
+      if (clash) throw new FenecError(`aggregates cannot be combined with ${clash}`);
+      if (!group && (order.length || limit !== undefined || offset)) {
+        throw new FenecError('aggregates answer one row; group makes a row per value');
+      }
+    }
     // The engine refuses both of these too; failing here never sends a query.
     if (rerank && !match) {
       throw new FenecError('rerank needs match: it reorders what match found');
     }
-    if (match && near) {
+    if (match && near && !fuse) {
       throw new FenecError(
-        'match and near cannot be combined: both order the result',
+        'match and near cannot be combined: both order the result; fuse() ranks by both',
       );
+    }
+    if (fuse && !(match && near)) {
+      throw new FenecError('fuse combines match and near: the query needs both');
+    }
+    if (fuse && rerank) {
+      throw new FenecError('fuse and rerank are two ways to use a vector with match: pick one');
     }
     // Refused in the engine too: a score spanning a parent and its children
     // has no meaning, and `count` collapses the rows they would hang from.
@@ -787,6 +876,7 @@ export class Query {
     if (project) sql += ` select ${project.join(', ')}`;
     const where = this.#where(bind);
     if (where) sql += ` where ${where}`;
+    if (group) sql += ` group ${group}`;
     if (near) {
       sql += ` near ${near.field} ${bind(near.vector, near.field)}`;
       if (near.ef !== null) sql += ` ef ${near.ef}`;
@@ -799,8 +889,13 @@ export class Query {
       sql += ` rerank ${rerank.field} ${bind(rerank.vector, rerank.field)}`;
       if (rerank.candidates !== null) sql += ` candidates ${rerank.candidates}`;
     }
+    if (fuse) {
+      sql += ' fuse';
+      if (fuse.k !== null) sql += ` k ${fuse.k}`;
+      if (fuse.candidates !== null) sql += ` candidates ${fuse.candidates}`;
+    }
     for (const [i, o] of order.entries()) {
-      sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+      sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
     }
     if (limit !== undefined) sql += ` limit ${limit}`;
     if (offset) sql += ` offset ${offset}`;
@@ -819,7 +914,7 @@ export class Query {
       const root = prune({ t: 'and', items: lookup.cond });
       if (root) sql += ` where ${render(root, bind, null)}`;
       for (const [i, o] of lookup.order.entries()) {
-        sql += `${i === 0 ? ' order ' : ', '}${o.field} ${o.asc ? 'asc' : 'desc'}`;
+        sql += `${i === 0 ? ' order ' : ', '}${sortKey(o)}`;
       }
       if (lookup.limit !== undefined) sql += ` limit ${lookup.limit}`;
       if (lookup.offset) sql += ` offset ${lookup.offset}`;

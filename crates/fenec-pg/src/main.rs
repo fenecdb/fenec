@@ -6,6 +6,7 @@
 //! ```
 
 use fenec_core::prelude::*;
+use fenec_http::replication::{self, fresh_id, Follower, Replication};
 use fenec_http::tenants::Tenants;
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::{self, Auth, SyncPolicy};
@@ -57,6 +58,16 @@ usage: fenec-pg [options]
                             writes one file, and the sync and checkpoint
                             policies are shared
       --http-token <value>  require `Authorization: Bearer <value>` for HTTP
+      --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
+                            each held to --policy: which collections, which
+                            rows (`where owner = $jwt.sub`). Also read from
+                            FENEC_JWT_SECRET; at least 32 bytes
+      --jwt-secret-file <path>  the secret from a file
+      --policy <path>       the rules a token is held to, one per line:
+                            <collection|*> <read|write|read,write>
+                            [where <filter>] [for <role>]
+      --mint-token <claims> print a token for this JSON object of claims,
+                            signed with the secret, and exit
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes over HTTP (the pg path is unaffected)
@@ -72,6 +83,28 @@ usage: fenec-pg [options]
                             writes per second, 4096 is a ~40 second window.
                             24 bytes per entry
 
+      --slow-ms <ms>        log every statement that takes this long or longer,
+                            with its text: pg and HTTP alike, from its arrival
+                            to its answer. Off by default
+      --metrics <address>   serve /_metrics, and nothing else, here -- for a
+                            server with no --http. With --http, the HTTP
+                            listener serves it too. Readable with
+                            --http-token or --admin-token; a non-loopback
+                            address wants one of them (or --insecure)
+
+      --replication-token <value>  turn replication on: /_replication on the
+                            HTTP listener feeds replicas the writes on this
+                            file's disk, reports status, and promotes a
+                            replica. Needs --file; refuses --sync off. Also
+                            read from FENEC_REPLICATION_TOKEN
+      --replica-of <url>    follow the primary at http://host:port into
+                            --file, and take no write of its own (25006)
+      --promote             open a replica's file to take writes: its history
+                            forks here. A replica's file opens only with
+                            --replica-of or this
+      --replication-buffer <MiB>  writes kept for replicas that fall behind
+                            default: 64. One further behind is sent an image
+
       --ping                connect to the server and exit: 0 = up, 1 = not.
                             For health checks; `--listen`, `--user` and the
                             password options pick the target
@@ -82,7 +115,7 @@ stunnel/nginx-stream before using it on an open network.
 ";
 
 fn fail(msg: &str) -> ! {
-    eprintln!("{msg}");
+    fenec_http::log!("{msg}");
     std::process::exit(2);
 }
 
@@ -97,12 +130,12 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
         Some((h, p)) => match p.parse::<u16>() {
             Ok(p) => (h.trim_matches(['[', ']']), p),
             Err(_) => {
-                eprintln!("could not parse the port in the address: {addr}");
+                fenec_http::log!("could not parse the port in the address: {addr}");
                 return 1;
             }
         },
         None => {
-            eprintln!("the address must be in `host:port` form: {addr}");
+            fenec_http::log!("the address must be in `host:port` form: {addr}");
             return 1;
         }
     };
@@ -123,7 +156,7 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
     match Client::connect(&url) {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("ping failed: {e}");
+            fenec_http::log!("ping failed: {e}");
             1
         }
     }
@@ -137,9 +170,17 @@ fn main() {
     let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
     let mut method = "scram".to_string();
     let mut ping = false;
+    let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
+    let mut replica_of: Option<String> = None;
+    let mut promote = false;
+    let mut replication_buffer = replication::DEFAULT_BUFFER;
+    let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
+    let mut policy: Option<String> = None;
+    let mut mint: Option<String> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut http: Option<String> = None;
+    let mut metrics: Option<String> = None;
     let mut http_cfg = fenec_http::Config::default();
 
     let mut i = 0;
@@ -209,7 +250,31 @@ fn main() {
                 cfg.max_message = mib << 20;
             }
             "--http" => http = Some(next(&mut i, "--http")),
+            "--metrics" => metrics = Some(next(&mut i, "--metrics")),
+            "--slow-ms" => {
+                let v = next(&mut i, "--slow-ms");
+                let ms: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--slow-ms expects milliseconds, got `{v}`"))
+                });
+                fenec_http::metrics::set_slow(ms);
+            }
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
+            "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
+            "--jwt-secret-file" => {
+                let path = next(&mut i, "--jwt-secret-file");
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => jwt_secret = Some(s.trim_end_matches(['\n', '\r']).to_string()),
+                    Err(e) => fail(&format!("could not read {path}: {e}")),
+                }
+            }
+            "--policy" => {
+                let path = next(&mut i, "--policy");
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => policy = Some(s),
+                    Err(e) => fail(&format!("could not read {path}: {e}")),
+                }
+            }
+            "--mint-token" => mint = Some(next(&mut i, "--mint-token")),
             "--http-cors" => http_cfg.cors = Some(next(&mut i, "--http-cors")),
             "--http-read-only" => http_cfg.read_only = true,
             "--http-max-streams" => {
@@ -234,15 +299,43 @@ fn main() {
                     .parse()
                     .unwrap_or_else(|_| fail(&format!("--changes expects a number, got `{v}`")))
             }
+            "--replication-token" => replication_token = Some(next(&mut i, "--replication-token")),
+            "--replica-of" => replica_of = Some(next(&mut i, "--replica-of")),
+            "--promote" => promote = true,
+            "--replication-buffer" => {
+                let v = next(&mut i, "--replication-buffer");
+                let mib: usize = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--replication-buffer expects MiB, got `{v}`"))
+                });
+                replication_buffer = mib << 20;
+            }
             "--ping" => ping = true,
             "--insecure" => cfg.insecure = true,
             "--help" | "-h" => {
-                eprintln!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
+                fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
         }
         i += 1;
+    }
+
+    if let Some(claims) = mint {
+        let secret = jwt_secret.unwrap_or_else(|| fail("--mint-token signs with --jwt-secret"));
+        let access =
+            fenec_http::access::Access::new(secret.as_bytes(), "").unwrap_or_else(|e| fail(&e));
+        println!("{}", access.mint(&claims).unwrap_or_else(|e| fail(&e)));
+        return;
+    }
+    match (jwt_secret, policy) {
+        (Some(secret), Some(policy)) => {
+            let access = fenec_http::access::Access::new(secret.as_bytes(), &policy)
+                .unwrap_or_else(|e| fail(&e));
+            http_cfg.access = Some(Arc::new(access));
+        }
+        (Some(_), None) => fail("--jwt-secret needs --policy: without rules a token reads nothing"),
+        (None, Some(_)) => fail("--policy needs --jwt-secret: the rules are for tokens it signs"),
+        (None, None) => {}
     }
 
     if ping {
@@ -253,7 +346,30 @@ fn main() {
         ));
     }
 
+    let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
+    if replica_of.is_some() && !replicating {
+        fail("--replica-of needs --replication-token: the primary asks for it");
+    }
+    if replica_of.is_some() && promote {
+        fail("--replica-of follows a primary and --promote stops following: pick one");
+    }
+    if (replicating || promote) && file.is_none() {
+        fail("replication works on a file: give --file");
+    }
+    if replicating && cfg.sync == SyncPolicy::Off {
+        fail(
+            "--sync off puts nothing on disk before shutdown, and a replica is sent only \
+             what is on the primary's disk: use --sync always or --sync <ms>",
+        );
+    }
+    if replicating && replica_of.is_none() && http.is_none() {
+        fail("replicas are fed over HTTP: give --http <address>");
+    }
+
     if let Some(dir) = dir {
+        if replicating || promote {
+            fail("replication is per file: a --dir node cannot have replicas yet");
+        }
         if file.is_some() {
             fail(
                 "--dir and --file are exclusive: one serves a file, the other a directory of them",
@@ -262,6 +378,9 @@ fn main() {
         let Some(addr) = http else {
             fail("--dir serves tenants over HTTP: give --http <address>");
         };
+        if metrics.is_some() {
+            fail("with --dir the HTTP listener serves /_metrics: --metrics is for a --file server");
+        }
         http_cfg.addr = addr;
         http_cfg.insecure = cfg.insecure;
         http_cfg.max_connections = cfg.max_connections;
@@ -279,17 +398,28 @@ fn main() {
         None => Auth::Trust,
     };
 
+    let mut feed = None;
     let mut db = match &file {
-        Some(path) => match fenec_core::fs::open(path) {
-            Ok(db) => {
-                eprintln!("opened: {path}");
-                db
+        Some(path) => {
+            let opened = if replicating {
+                replication::open(path, replication_buffer).map(|(db, f)| {
+                    feed = Some(f);
+                    db
+                })
+            } else {
+                fenec_core::fs::open(path)
+            };
+            match opened {
+                Ok(db) => {
+                    fenec_http::log!("opened: {path}");
+                    db
+                }
+                Err(e) => {
+                    fenec_http::log!("could not open {path}: {e}");
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("could not open {path}: {e}");
-                std::process::exit(1);
-            }
-        },
+        }
         None => {
             if cfg.sync != SyncPolicy::Off {
                 // Syncing makes no sense for an in-memory database.
@@ -303,11 +433,70 @@ fn main() {
     };
 
     if let Err(e) = db.install_plugin(&PgPlugin) {
-        eprintln!("could not load the plugin: {e}");
+        fenec_http::log!("could not load the plugin: {e}");
         std::process::exit(1);
     }
 
+    if let Some(path) = &file {
+        if let Err(e) = settle_history(&mut db, path, replicating, replica_of.is_some(), promote) {
+            fenec_http::log!("{e}");
+            std::process::exit(1);
+        }
+    }
+
     let shared = Arc::new(RwLock::new(db));
+
+    // The follower applies the primary's writes; this server's own feed
+    // passes them on to replicas of its own.
+    let follower = replica_of.as_ref().map(|url| {
+        let f = Follower::new(
+            url,
+            replication_token.clone().unwrap_or_default(),
+            Arc::clone(&shared),
+            feed.clone(),
+            cfg.sync == SyncPolicy::Always,
+        )
+        .unwrap_or_else(|e| fail(&e));
+        let run = Arc::clone(&f);
+        std::thread::Builder::new()
+            .name("fenec-replica".into())
+            .spawn(move || run.run())
+            .unwrap_or_else(|e| fail(&format!("could not start the replica thread: {e}")));
+        fenec_http::log!("following: {url}");
+        f
+    });
+    let repl = replication_token
+        .filter(|_| replicating)
+        .map(|token| Replication::new(token, feed.clone(), follower));
+
+    // Before the HTTP thread announces its listener, as `Server::serve_on`
+    // does before its own: the flag a signal sets waits for the syncer.
+    server::install_signal_handlers();
+
+    // `--metrics`: /_metrics alone on a listener of its own, readable with
+    // the tokens the HTTP endpoint takes.
+    if let Some(addr) = metrics {
+        let mcfg = fenec_http::Config {
+            addr,
+            token: http_cfg.token.clone(),
+            admin_token: http_cfg.admin_token.clone(),
+            insecure: cfg.insecure,
+            idle_timeout: cfg.idle_timeout,
+            ..fenec_http::Config::default()
+        };
+        let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
+        let listener = server
+            .bind()
+            .unwrap_or_else(|e| fail(&format!("could not open the metrics endpoint: {e}")));
+        std::thread::Builder::new()
+            .name("fenec-metrics".into())
+            .spawn(move || {
+                if let Err(e) = server.serve_on(listener) {
+                    fenec_http::log!("metrics server error: {e}");
+                }
+            })
+            .unwrap_or_else(|e| fail(&format!("could not start the metrics thread: {e}")));
+    }
 
     // The HTTP endpoint shares the same database: as a separate binary it
     // would open the same file from two processes and corrupt it (fenecdb is
@@ -319,11 +508,14 @@ fn main() {
         http_cfg.idle_timeout = cfg.idle_timeout;
         // `--sync always` must hold for HTTP writes too.
         http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
-        let http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
+        let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
+        if let Some(repl) = repl {
+            http_server = http_server.with_replication(repl);
+        }
         let listener = match http_server.bind() {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("could not open the HTTP endpoint: {e}");
+                fenec_http::log!("could not open the HTTP endpoint: {e}");
                 std::process::exit(1);
             }
         };
@@ -331,7 +523,7 @@ fn main() {
             .name("fenec-http".into())
             .spawn(move || {
                 if let Err(e) = http_server.serve_on(listener) {
-                    eprintln!("HTTP server error: {e}");
+                    fenec_http::log!("HTTP server error: {e}");
                 }
             })
             .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
@@ -339,9 +531,54 @@ fn main() {
 
     let server = Server::new(shared, cfg);
     if let Err(e) = server.serve() {
-        eprintln!("server error: {e}");
+        fenec_http::log!("server error: {e}");
         std::process::exit(1);
     }
+}
+
+/// Puts the file's history where the flags say it has to be before anyone
+/// is served. A replica's file opens as a primary only when `--promote` says
+/// so -- its history forks there, so no replica of the old primary is
+/// streamed the new one's writes as if they were its own. A replica marks
+/// its file as one before it has heard from its primary, and a primary gets
+/// a history of its own the first time it has replicas: the root history is
+/// every database's.
+fn settle_history(
+    db: &mut Database,
+    path: &str,
+    replicating: bool,
+    follows: bool,
+    promote: bool,
+) -> std::result::Result<(), String> {
+    let following = db.history().following;
+    let result = if follows {
+        let lineage = db.history().lineage.clone();
+        db.follow(lineage)
+    } else if promote {
+        if !following {
+            fenec_http::log!("--promote: {path} is not a replica's file; it opens as it is");
+            return Ok(());
+        }
+        let id = fresh_id();
+        let r = db.fork(id).and_then(|_| db.sync());
+        if r.is_ok() {
+            fenec_http::log!(
+                "promoted: {path} takes writes from change {} on, history {id:016x}",
+                db.change_seq()
+            );
+        }
+        r
+    } else if following {
+        return Err(format!(
+            "{path} is a replica's file. Start it with --replica-of <primary> to go on \
+             following, or with --promote to take writes -- its history forks there"
+        ));
+    } else if replicating && db.history().lineage.is_empty() {
+        db.fork(fresh_id()).and_then(|_| db.sync())
+    } else {
+        Ok(())
+    };
+    result.map_err(|e| format!("could not settle {path}'s history: {e}"))
 }
 
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
@@ -360,7 +597,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             .with_max_memory(cfg.max_memory)
             .with_checkpoint(cfg.checkpoint_on_exit),
     );
-    eprintln!(
+    fenec_http::log!(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
@@ -370,17 +607,19 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
         Ok(l) => l,
         Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
     };
+    // Before the thread that announces the listener, for the reason
+    // `Server::serve_on` gives: once the line is out, SIGTERM must sync.
+    server::install_signal_handlers();
     std::thread::Builder::new()
         .name("fenec-http".into())
         .spawn(move || {
             if let Err(e) = http_server.serve_on(listener) {
-                eprintln!("HTTP server error: {e}");
+                fenec_http::log!("HTTP server error: {e}");
                 std::process::exit(1);
             }
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    server::install_signal_handlers();
     let tick = match cfg.sync {
         SyncPolicy::Interval(d) if !d.is_zero() => d,
         _ => Duration::from_millis(200),
@@ -391,7 +630,7 @@ fn serve_dir(dir: &str, http_cfg: fenec_http::Config, cfg: &Config, idle_close: 
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             let open = tenants.shutdown();
-            eprintln!("\nshutting down: {open} open tenant(s) synced");
+            fenec_http::log!("\nshutting down: {open} open tenant(s) synced");
             std::process::exit(0);
         }
         if matches!(cfg.sync, SyncPolicy::Interval(_)) {

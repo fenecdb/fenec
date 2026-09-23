@@ -18,7 +18,13 @@ make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
-make import-test   # the PostgreSQL arm of import (needs Docker)
+make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
+make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
+make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir)
+make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
+make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
+make replica-bench # replica lag per sync policy, catch-up, what a failover loses
+make maintenance-bench # reads and writes during create index / compact
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 ```
@@ -50,12 +56,12 @@ Dependency direction (nothing points back up):
 fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
+     |                                fenec-catalog (pg_catalog SQL, core only)
+fenec-http  (REST/JSON + SSE, replication, /_metrics)
      |
-fenec-http  (REST/JSON + SSE)
+fenec-pg    (wire protocol: server AND client, catalog from fenec-catalog)
      |
-fenec-pg    (wire protocol: server AND client)
-     |
-fenec-import (SQLite file reader + PG COPY source)
+fenec-import (SQLite file reader + PG COPY source + --follow)
      |
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
 ```
@@ -66,7 +72,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 `fenec-core` modules: `store` (segments, offset index), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
-execution), `schema`, `value`, `codec`,
+execution), `schema`, `value`, `codec`, `collate` (ICU's Turkish order, a
+generated table),
 `json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
@@ -83,7 +90,7 @@ image.
 ## Invariants worth knowing before you change things
 
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
-`fenec-http`, `fenec-pg`, `fenec-import`. The WASM output has to stay small and
+`fenec-http`, `fenec-pg`, `fenec-import`, `fenec-catalog`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 (`str::parse` drags in a 12 KB table -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
@@ -114,11 +121,58 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 1 156 durable writes/s over eight clients. A failed one is reported back with
 `Database::fail` so the engine stops taking writes.
 
+**Replication ships only what is on disk, numbered by the change counter.**
+A primary (`--replication-token`) writes through a `Tee`
+(`fenec-http/src/replication.rs`): a write's record enters a bounded feed in
+memory as it is appended, and is sent once an fsync has covered it -- so a
+primary back from a crash holds every write any replica was sent. A replica
+applies them with `Database::apply`, which does the write path's index upkeep
+and hands each record on to its own sink with `Sink::record(seq, ..)`: its
+change counter matches the primary's write for write, and its file reopens
+where it stopped. So every write goes through `wal`, one record and one tick;
+a record that moved no counter would leave every replica one change off. The
+history (record kind 8, `History`) is the one record that moves none, and it is
+never sent: a promotion forks it, a replica is continued only from a position
+the primary's history passed through and sent an image otherwise, and a
+following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
+p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
+under `always` lost no acknowledged write. An archive (`fenec archive`,
+`fenec-http/src/archive.rs`) is the same stream written to files, each write
+with the time the primary appended it; `fenec restore` is an image plus the
+archived writes up to a time or a change, forked -- a fenecdb file is exactly
+that, so a restore is a concatenation checked by opening it.
+
+**A scoped token is held to its rules at every level, twice for writes**
+(`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement
+-- the `where`, each `lookup` level, a subscription's shape -- so a new path
+that runs a statement must go through `scoped()` or it reads everything. Writes
+also get `WITH CHECK`: the `Check` write hook tests every document a put or a
+set writes against the filter, found through a thread-local set by `within()`
+around the execution -- a scoped write executed outside `within` goes
+unchecked. A scoped subscription keeps the ids it sent and reports deletions
+only for those; the unscoped shape's "a changed id that does not match is a
+deletion" would hand every user everyone's ids. The algorithm is the server's
+(HS256 only), never the token's.
+
+**A server's `create index` and `compact` run beside the database**
+(`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
+under the read lock, the build holds no lock, and the write lock is taken only
+to apply the writes made meanwhile and put the result in place. Those writes
+are known exactly, not from the change ring a long build would overflow: every
+write passes through `Database::note`, which hands the id to the `Tail` of each
+maintenance on that collection -- so a write path that skipped `note` would
+leave a built index missing it. A schema change there (another index, a drop)
+fails the maintenance rather than installing what no longer fits. At 100 000 x
+128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
+(file rewrite included), against the full ~20 s under the write lock. Only a
+lone statement takes this path; a batch, the shell and `execute` hold the lock.
+
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
 record kind. The change counter record (kind 6) is at the front and fixed width;
-the id counter (kind 7) exists so `compact` cannot hand out a deleted id again.
+the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
+the history (kind 8) is the one appended record that is not a write.
 
 **The HNSW graph is derived data, not a cache.** It is written only by
 `snapshot`, `compact` and `checkpoint` — never on the write path. On open the
@@ -193,6 +247,21 @@ The structure is a sorted `Vec` of chunks of at most 512 entries, not a
 every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built on open, never in the file.
 
+**`collate tr` is ICU's order, and `order`'s alone.** Its weights are ICU's
+own -- `tools/collate/gen.py` reads them out of macOS's libicucore into
+`collate/table.rs`, one `u32` per code point over the Latin script, the
+combining marks and general punctuation -- and a comparison walks ICU's three
+levels, letters then accents then case, over the whole string before it falls
+back to the bytes, so the order is total. `web/fenec.test.js` holds it to
+`Intl.Collator("tr")` on every run; what it does not do is ICU's
+normalisation, so two marks on one letter out of canonical order can sort
+apart. A comparison starts at the first byte the two strings do not share, a
+character earlier when that is a mark, since `c` and U+0327 are one letter:
+68 -> 30 ns a comparison over a million names. A `@sorted` field keeps byte
+order and is never walked for a collated key, and `where` compares bytes --
+collating a comparison would need an index that orders the same way. It
+costs the browser module 8.5 KB, 3.2 KB brotli.
+
 **`lookup` is one bucket probe per parent, not a join.** It attaches another
 collection's matching documents to the row they belong to, and a `limit` after
 it counts children *per parent* -- the shape a join cannot express. It is
@@ -252,6 +321,76 @@ straight out of the store — so a collection can do vector retrieval with no
 HNSW graph to build, hold, validate or rebuild. Measured on BEIR it matches or
 beats a full dense scan while scoring under 2% of the corpus. It requires
 `match`: without candidates there is nothing to reorder.
+
+**`fuse` adds ranks, not scores.** `match ... near ... fuse` runs both searches
+to their own depth -- `candidates`, 20 unless given, never under the page --
+with the filter applied to each, and a document scores `1 / (k + rank)` from
+each list it is on (`k` 60). A BM25 score and a cosine distance share no
+scale, and a weight between them would need retuning per corpus. Measured
+with `make beir` (nDCG@10): SciFact 0.699 against 0.662 for `match` and 0.645
+for `near`; FiQA 0.366 against 0.232 and 0.365 -- the one path near the top
+of both. The depth is the knob that matters: up to 61 a side a document both
+searches found outranks every document only one found, and at 100 a side
+both scores fall (0.687, 0.358). It is built from what the engine already
+had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
+index's `best_first` sort -- because in types of its own it was 11 KB of the
+browser module; this way it is 2.
+
+**`--follow` confirms nothing that is not on disk.** `fenec import --follow`
+reads a logical replication slot through `pgoutput` and applies every change
+through the copy's own mapping (`fenec-import/src/follow.rs`). The slot's
+confirmed position only moves past a transaction an fsync has covered, and
+every write is a put or a delete by id, so a broken stream or a killed
+follower resumes from the slot and replays what it had applied without
+changing it. The slot is made before the copy is read, so the stream starts
+with changes the copy may already hold; the same idempotence converges them.
+A `_follow` collection in the file records whether a collection's copy
+finished: a copy cut short is made again rather than streamed on top of,
+which would lose the rows it never reached. An update arrives without its
+TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
+follower takes them from its pending writes or the collection; flushing
+before each such read cost the batching, 5 900 rows/s against 17 100. Commit
+to visible: p50 0.32 ms (`make follow-bench`).
+
+**The catalog is run, not matched.** psql's `\d`, JDBC's `DatabaseMetaData`
+and DBeaver send SQL over `pg_catalog` -- joins, `CASE`, `regclass` casts,
+correlated subqueries, `UNION`, window and set-returning functions -- and the
+texts change with every client version, so `fenec-catalog` evaluates that SQL
+over tables made from the schemas each time rather than pattern matching it.
+A collection is a table in `public` with `id` its primary key; fenecdb's
+indexes are indexes with their own access methods (`hash`, `btree` for
+`@sorted`, `hnsw`, `bm25`). Joins find rows by key where the query names an
+equality: over a thousand collections nested loops took JDBC's column lookup
+18.1 s, keyed 122 ms. What the subset cannot read, and catalog tables it does
+not build, answer empty -- the old behaviour -- so a tool never stalls. It is
+a crate of its own so that it can be built for size (`opt-level = "z"`): at
+opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
+queries 1.2-1.5x slower. The CLI and the browser module link none of it.
+
+**`/_metrics` counts at the edge, a shard per thread.** A statement is timed
+in `execute_into` (pg) and around `handle` (HTTP), from arrival to answer, so
+the lock wait and the `--sync always` fsync are in it; whether it wrote is a
+thread-local set where the write lock is taken (`metrics::wrote`), since a
+connection is a thread running one statement at a time. The counters are
+sixteen 128-byte-aligned shards handed to threads in turn: eight threads
+counting into one set cost 720 ns a statement, 6.7 ns with the shards. The
+path has an underscore because a collection may be called `metrics`.
+`--metrics <addr>` is a listener for it alone that never attaches a watcher
+-- a second one would take the HTTP endpoint's subscription wake-ups -- and a
+tenant node publishes counts of its tenants, never a tenant's collection
+names.
+
+**`integrations/` may use outside packages; the crates may not.** The
+LangChain and LlamaIndex vector stores (`integrations/python`, one package,
+the standard library for its client) and `useLiveQuery`
+(`integrations/react`) are held to their frameworks' own tests --
+`make python-test` runs LangChain's standard suite and the tests LlamaIndex's
+integrations run from a `python:3.13` container against a fenec-pg started
+here, `make react-test` runs the hook against a real replica. A store names
+its collection and metadata columns in the statement's text, so both are
+checked against FenecQL's name pattern; values always go in as parameters,
+and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
+value and not a list.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a

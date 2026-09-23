@@ -18,6 +18,7 @@
 //! - `CancelRequest` is a real cancellation: the pending lock is released and
 //!   the remaining statements are dropped with `57014`.
 
+use crate::catalog;
 use crate::compat;
 use crate::proto::*;
 use crate::scram;
@@ -25,13 +26,14 @@ use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_core::query::projection_columns;
 use fenec_core::value::DataType;
+use fenec_http::metrics::Transport;
 use fenec_ql::parse;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(1);
 
@@ -253,27 +255,29 @@ impl Server {
 
     /// Serves on an already-prepared listener.
     pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
-        eprintln!(
+        // The signal handlers come before the line saying it listens: a
+        // supervisor that sends SIGTERM as soon as it reads that line would
+        // otherwise stop it by the default action, with no final sync.
+        install_signal_handlers();
+        spawn_syncer(
+            Arc::clone(&self.db),
+            self.cfg.sync,
+            self.cfg.checkpoint_on_exit,
+        );
+        fenec_http::log!(
             "fenec-pg {} listening on: postgres://localhost:{}/fenec  [{}, sync={}]",
             fenec_core::VERSION,
             listener.local_addr()?.port(),
             match &self.cfg.auth {
                 Auth::Trust => "no auth",
                 Auth::Cleartext(_) => "password: plain text",
-                Auth::Scram(_) => "parola: SCRAM-SHA-256",
+                Auth::Scram(_) => "password: SCRAM-SHA-256",
             },
             match self.cfg.sync {
                 SyncPolicy::Off => "on shutdown".to_string(),
                 SyncPolicy::Always => "every write".to_string(),
                 SyncPolicy::Interval(d) => format!("{} ms", d.as_millis()),
             }
-        );
-
-        install_signal_handlers();
-        spawn_syncer(
-            Arc::clone(&self.db),
-            self.cfg.sync,
-            self.cfg.checkpoint_on_exit,
         );
 
         let mut failures = 0u32;
@@ -289,7 +293,7 @@ impl Server {
                 }
                 Err(e) => {
                     failures += 1;
-                    eprintln!("accept error ({failures}): {e}");
+                    fenec_http::log!("accept error ({failures}): {e}");
                     if failures >= ACCEPT_GIVE_UP {
                         return Err(e);
                     }
@@ -326,6 +330,7 @@ impl Server {
                 .stack_size(SESSION_STACK)
                 .spawn(move || {
                     let _guard = guard;
+                    let _open = fenec_http::metrics::Connection::open(Transport::Pg);
                     let peer = stream
                         .peer_addr()
                         .map(|a| a.to_string())
@@ -341,7 +346,7 @@ impl Server {
                                 | io::ErrorKind::TimedOut
                         );
                         if !quiet {
-                            eprintln!("session error ({peer}): {e}");
+                            fenec_http::log!("session error ({peer}): {e}");
                         }
                     }
                 });
@@ -351,7 +356,7 @@ impl Server {
             // server itself. Now only that connection drops; the client gets
             // PostgreSQL's "too many clients" code.
             if let Err(e) = spawned {
-                eprintln!("could not create a thread: {e}");
+                fenec_http::log!("could not create a thread: {e}");
                 if let Some(mut s) = refused {
                     refuse(&mut s, "53300", "could not create a thread");
                 }
@@ -428,12 +433,12 @@ fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool)
             match flushed {
                 Ok(Some(durability)) => {
                     if let Err(e) = durability() {
-                        eprintln!("sync error: {e}");
+                        fenec_http::log!("sync error: {e}");
                         write_lock(&db).fail(&e);
                     }
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("sync error: {e}"),
+                Err(e) => fenec_http::log!("sync error: {e}"),
             }
         }
     });
@@ -451,10 +456,10 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     let dirty = g.is_dirty();
     if dirty {
         if let Err(e) = g.sync() {
-            eprintln!("sync error: {e}");
+            fenec_http::log!("sync error: {e}");
         }
     }
-    eprintln!(
+    fenec_http::log!(
         "\nshutting down: {}",
         if dirty {
             "writes were pushed to disk"
@@ -472,8 +477,8 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
     // a half-written checkpoint cannot corrupt the file.
     if checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
         match g.checkpoint() {
-            Ok(()) => eprintln!("checkpoint written: the HNSW graph is persisted"),
-            Err(e) => eprintln!("could not write the checkpoint: {e}"),
+            Ok(()) => fenec_http::log!("checkpoint written: the HNSW graph is persisted"),
+            Err(e) => fenec_http::log!("could not write the checkpoint: {e}"),
         }
     }
     std::process::exit(0);
@@ -528,12 +533,52 @@ impl Guard<'_> {
         policy: SyncPolicy,
     ) -> fenec_core::error::Result<Option<Durability>> {
         match self {
-            Guard::Write(g) if policy == SyncPolicy::Always => {
-                g.flush().inspect_err(|e| eprintln!("sync error: {e}"))
-            }
+            Guard::Write(g) if policy == SyncPolicy::Always => g
+                .flush()
+                .inspect_err(|e| fenec_http::log!("sync error: {e}")),
             _ => Ok(None),
         }
     }
+}
+
+/// A `create index` or `compact` run beside the database. Not cancellable:
+/// the build holds no lock a `CancelRequest` could release.
+fn maintain(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    tx: &mut TxState,
+    stmt: &Statement,
+    out: &mut Writer,
+) -> Option<(Durability, Option<usize>)> {
+    if let Some(msg) = over_memory_cap(cfg, &read_lock(db), stmt) {
+        out.error("53200", &msg);
+        return None;
+    }
+    if let Err(e) = Database::maintain(db, stmt).expect("a maintenance statement") {
+        out.error(sqlstate(&e), &e.to_string());
+        return None;
+    }
+    if matches!(stmt, Statement::CreateIndex { .. }) {
+        tx.note_write();
+    }
+    // The index's record waits for the disk under `always`, as any write
+    // does; a compact's image was synced when it replaced the file.
+    let durability = match cfg.sync {
+        SyncPolicy::Always => match write_lock(db).flush() {
+            Ok(d) => d,
+            Err(e) => {
+                out.error(sqlstate(&e), &e.to_string());
+                return None;
+            }
+        },
+        _ => None,
+    };
+    let answer = out.mark();
+    out.command_complete(match stmt {
+        Statement::Compact(_) => "VACUUM",
+        _ => "OK",
+    });
+    durability.map(|d| (d, Some(answer)))
 }
 
 /// The SQLSTATE an engine error is reported under.
@@ -546,6 +591,10 @@ fn sqlstate(e: &Error) -> &'static str {
         // PostgreSQL's io_error: the disk refused, and the engine now refuses
         // writes until the file is reopened.
         Error::Io(_) => "58030",
+        // read_only_sql_transaction: what a PostgreSQL standby answers, and
+        // what pools and drivers look for to tell a replica from a primary.
+        Error::ReadOnly(_) => "25006",
+        Error::Denied(_) => "42501",
         _ => "XX000",
     }
 }
@@ -1206,6 +1255,25 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
             OID_INT8,
         )]);
     }
+    if !sel.aggregate.is_empty() {
+        let ty = |f: &str| coll.schema.field(f).map(|f| f.ty.clone());
+        return sel
+            .aggregate
+            .iter()
+            .map(|a| {
+                let oid = match a {
+                    Agg::Count => OID_INT8,
+                    Agg::Avg(_) => OID_FLOAT8,
+                    Agg::Sum(f) => match ty(f)? {
+                        DataType::Int => OID_INT8,
+                        _ => OID_FLOAT8,
+                    },
+                    Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => pg_oid(&ty(f)?),
+                };
+                Some((a.label(), oid))
+            })
+            .collect();
+    }
     let mut cols: Vec<(String, i32)> = projection_columns(&coll.schema, &sel.project)
         .into_iter()
         .map(|c| {
@@ -1258,6 +1326,23 @@ struct Shape {
     columns: Option<Vec<(String, i32)>>,
 }
 
+/// A catalog query run over the schemas as they stand: its columns with
+/// their types, and its rows. One the catalog cannot read answers empty.
+fn catalog_answer(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    sql: &str,
+    params: &[Value],
+) -> catalog::Answer {
+    // The schemas are copied under the read lock and the query runs without
+    // it: a catalog join is cheap, but a writer need not wait for one.
+    let snap = catalog::Snapshot::of(&read_lock(db), "fenec", &cfg.server_version);
+    catalog::answer(sql, params, &snap).unwrap_or_else(|_| catalog::Answer {
+        columns: vec![("result".to_string(), OID_TEXT)],
+        rows: Vec::new(),
+    })
+}
+
 /// Works out the shape *without running* the query.
 ///
 /// The previous version answered every Describe with `NoData` + an empty
@@ -1275,15 +1360,26 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
         });
     }
     // Compatibility-layer queries are pure and fixed; the shape is read from there.
-    if let Some(shim) = compat::handle(trimmed, cfg) {
-        return Some(Shape {
-            params: Vec::new(),
-            columns: match shim {
-                compat::Shim::Rows { columns, .. } => {
-                    Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect())
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
+        return Some(match shim {
+            compat::Shim::Rows { columns, .. } => Shape {
+                params: Vec::new(),
+                columns: Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect()),
+            },
+            // A catalog query's columns do not depend on its parameters: it
+            // is run with every one null to learn them.
+            compat::Shim::Catalog => {
+                let n = catalog::params(trimmed).unwrap_or(0);
+                let answer = catalog_answer(db, cfg, trimmed, &vec![Value::Null; n]);
+                Shape {
+                    params: vec![OID_UNSPECIFIED; n],
+                    columns: Some(answer.columns),
                 }
-                // A refusal is reported by Execute, the way a syntax error is.
-                compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => None,
+            }
+            // A refusal is reported by Execute, the way a syntax error is.
+            compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => Shape {
+                params: Vec::new(),
+                columns: None,
             },
         });
     }
@@ -1418,12 +1514,33 @@ fn execute_into(
     out: &mut Writer,
     row_desc_sent: bool,
 ) {
-    let Some((durability, answer)) = run_locked(db, cfg, be, tx, sql, params, out, row_desc_sent)
-    else {
-        return;
-    };
+    let started = Instant::now();
+    let errors = out.errors();
+    let wait = run_locked(db, cfg, be, tx, sql, params, out, row_desc_sent);
+    if let Some((durability, answer)) = wait {
+        durable_or_refused(db, durability, answer, out);
+    }
+    fenec_http::metrics::record(
+        Transport::Pg,
+        started.elapsed(),
+        out.errors() > errors,
+        || match params.len() {
+            0 => sql.to_string(),
+            n => format!("{sql} ({n} parameters)"),
+        },
+    );
+}
+
+/// Waits for the disk under `--sync always`, the lock already let go; a
+/// write the disk refused has its answer replaced by the error.
+fn durable_or_refused(
+    db: &Arc<RwLock<Database>>,
+    durability: Durability,
+    answer: Option<usize>,
+    out: &mut Writer,
+) {
     if let Err(e) = durability() {
-        eprintln!("sync error: {e}");
+        fenec_http::log!("sync error: {e}");
         // The engine did not see this one fail: it is told, and refuses
         // every later write as after a failure of its own.
         write_lock(db).fail(&e);
@@ -1458,8 +1575,18 @@ fn run_locked(
     }
 
     // The standard queries PostgreSQL clients send at startup
-    if let Some(shim) = compat::handle(trimmed, cfg) {
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
         match shim {
+            compat::Shim::Catalog => {
+                let answer = catalog_answer(db, cfg, trimmed, params);
+                if !row_desc_sent {
+                    out.row_description(&answer.columns);
+                }
+                for row in &answer.rows {
+                    out.data_row(row);
+                }
+                out.command_complete(&format!("SELECT {}", answer.rows.len()));
+            }
             compat::Shim::Rows { columns, rows, tag } => {
                 if !row_desc_sent {
                     let cols: Vec<(String, i32)> =
@@ -1487,8 +1614,19 @@ fn run_locked(
         }
     };
 
+    // `create index` and `compact` on their own are built beside the
+    // database: readers and writers go on, and the write lock is taken only
+    // to put the result in place (see `Database::maintain`).
+    if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
+        fenec_http::metrics::wrote();
+        return maintain(db, cfg, tx, stmt, out);
+    }
+
     // A shared lock suffices when everything is read-only: reads flow in parallel.
     let needs_write = stmts.iter().any(|s| !s.is_read_only());
+    if needs_write {
+        fenec_http::metrics::wrote();
+    }
     let mut guard = match acquire(db, needs_write, be) {
         Some(g) => g,
         // `acquire` returns `None` both on cancellation and on shutdown; the

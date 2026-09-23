@@ -236,6 +236,99 @@ fn select_filter_order_limit() {
 }
 
 #[test]
+fn near_with_match_is_fused() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection notes (body text @text, e vector<3> @hnsw(cosine))",
+        r#"put notes [{body: "rust and wasm", e: [0.0, 1.0, 0.0]},
+                      {body: "gardening notes", e: [1.0, 0.0, 0.0]},
+                      {body: "rust in the garden", e: [0.9, 0.1, 0.0]}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    // "rust" ranks 1 then 3; the vector ranks 2, 3, 1. With k = 60, note 1
+    // scores 1/61 + 1/63 and note 3 twice 1/62 -- the first and the third
+    // place together just beat the second place twice -- and note 2 only
+    // 1/61.
+    let body = r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "limit": 3}"#;
+    let r = call(h.port, "POST", "/notes/near", Some(body));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let order: Vec<&str> = r
+        .body
+        .match_indices("{\"id\":")
+        .map(|(i, _)| &r.body[i + 6..i + 7])
+        .collect();
+    assert_eq!(order, ["1", "3", "2"], "{}", r.body);
+    let q = r#"{"query": "get notes match body \"rust\" near e [1.0, 0.0, 0.0] fuse limit 3"}"#;
+    let same = call(h.port, "POST", "/query", Some(q));
+    assert_eq!(rows(&same.body), 3);
+    let bad = r#"{"vector": [1.0, 0.0, 0.0], "match": "rust", "match_field": "nope"}"#;
+    assert_eq!(call(h.port, "POST", "/notes/near", Some(bad)).status, 400);
+}
+
+#[test]
+fn order_takes_a_collation() {
+    let mut db = Database::new();
+    for sql in [
+        "create collection people (name text, n int)",
+        r#"put people [{name: "Zeynep", n: 1}, {name: "Çağla", n: 2}, {name: "ılgaz", n: 3},
+                       {name: "İlker", n: 4}, {name: "Irmak", n: 5}, {name: "cem", n: 6}]"#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    let h = start_with(Config::default(), db);
+    let names = |target: &str| -> Vec<String> {
+        let r = get(h.port, target);
+        assert_eq!(r.status, 200, "{target}: {}", r.body);
+        r.body
+            .split("\"name\":\"")
+            .skip(1)
+            .map(|s| s[..s.find('"').unwrap()].to_string())
+            .collect()
+    };
+    let turkish = ["cem", "Çağla", "ılgaz", "Irmak", "İlker", "Zeynep"];
+    assert_eq!(names("/people?select=name&order=name.tr"), turkish);
+    let mut reversed = turkish;
+    reversed.reverse();
+    assert_eq!(names("/people?select=name&order=name.tr.desc"), reversed);
+    assert_eq!(names("/people?select=name&order=name.desc.tr"), reversed);
+    // Without one, the bytes' order.
+    assert_eq!(
+        names("/people?select=name&order=name"),
+        ["Irmak", "Zeynep", "cem", "Çağla", "İlker", "ılgaz"]
+    );
+    assert_eq!(get(h.port, "/people?order=name.de").status, 400);
+    assert_eq!(get(h.port, "/people?order=n.tr").status, 400);
+}
+
+#[test]
+fn aggregates_over_the_query_string() {
+    let h = start(Config::default());
+    let r = get(
+        h.port,
+        "/remarks?select=article_id,count(*),sum(stars),avg(stars)&group=article_id&order=count(*).desc",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body.trim(),
+        "[{\"article_id\":1,\"count\":2,\"sum(stars)\":8,\"avg(stars)\":4},\
+         {\"article_id\":3,\"count\":1,\"sum(stars)\":2,\"avg(stars)\":2}]"
+    );
+    // Whole, filtered; and what the engine refuses comes back as a 400.
+    let r = get(
+        h.port,
+        "/remarks?select=max(stars),min(body)&article_id=eq.1",
+    );
+    assert_eq!(
+        r.body.trim(),
+        "[{\"max(stars)\":5,\"min(body)\":\"dense\"}]"
+    );
+    assert_eq!(get(h.port, "/remarks?select=sum(body)").status, 400);
+    assert_eq!(get(h.port, "/remarks?select=count(*)&limit=1").status, 400);
+}
+
+#[test]
 fn count_and_free_where() {
     let h = start(Config::default());
 

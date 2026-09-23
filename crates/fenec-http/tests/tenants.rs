@@ -168,6 +168,27 @@ fn tenants_do_not_see_each_other() {
 }
 
 #[test]
+fn the_metrics_are_the_nodes() {
+    let n = start("metrics", admin_cfg());
+    create(n.port, "acme");
+    create(n.port, "beta");
+    let r = query(n.port, "acme", "create collection notes (title text)");
+    assert_eq!(r.status, 200, "{}", r.text());
+    // The node has an admin token, so a scrape needs it.
+    assert_eq!(call(n.port, "GET", "/_metrics", b"", None).status, 401);
+    let r = call(n.port, "GET", "/_metrics", b"", Some(ADMIN));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.head.contains("text/plain; version=0.0.4"), "{}", r.head);
+    let text = r.text();
+    assert!(text.contains("\nfenec_tenants 2\n"), "{text}");
+    // Creating a tenant opens it.
+    assert!(text.contains("\nfenec_tenants_open 2\n"), "{text}");
+    // Per tenant it counts, not what a tenant holds: its collections are
+    // not the node's to publish.
+    assert!(!text.contains("notes"), "{text}");
+}
+
+#[test]
 fn unknown_and_invalid_tenants_are_refused() {
     let n = start("refusals", admin_cfg());
     assert_eq!(call(n.port, "GET", "/t/nope/x", b"", None).status, 404);

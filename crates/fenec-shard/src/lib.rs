@@ -116,7 +116,7 @@ impl Router {
     }
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
-        eprintln!(
+        fenec_http::log!(
             "fenec-shard {} listening on: http://{}  [{} node(s), {} tenant(s)]",
             fenec_core::VERSION,
             listener.local_addr()?,
@@ -125,7 +125,7 @@ impl Router {
         );
         for (t, p) in self.read_dir().tenants() {
             if p.state == State::Moving {
-                eprintln!(
+                fenec_http::log!(
                     "tenant `{t}` was being moved when the router stopped; it is served \
                      from `{}`, and moving it again clears the state",
                     p.node
@@ -605,7 +605,7 @@ impl Router {
         let cleanup = self.pool.call(&src.addr, "DELETE", &base, &src.token, b"");
         let left = !matches!(cleanup, Ok((204, _)) | Ok((404, _)));
         if left {
-            eprintln!(
+            fenec_http::log!(
                 "tenant `{tenant}` moved to `{to}`, but its copy on `{from}` could not be \
                  removed; it is frozen there and no longer routed to"
             );
@@ -699,7 +699,9 @@ fn message(e: &Error) -> String {
         | Error::Query(m)
         | Error::Corrupt(m)
         | Error::Io(m)
-        | Error::Plugin(m) => m.clone(),
+        | Error::Plugin(m)
+        | Error::ReadOnly(m)
+        | Error::Denied(m) => m.clone(),
     }
 }
 

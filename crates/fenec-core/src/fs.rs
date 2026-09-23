@@ -132,6 +132,16 @@ impl FileSink {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Pushes the whole file to disk, the bytes an earlier process wrote
+    /// and never synced included. After a crash of the process alone they
+    /// are in the file but may be only in the kernel's cache: a primary
+    /// calls this before it tells a replica they exist.
+    pub fn sync_existing(&mut self) -> Result<()> {
+        let disk = lock(&self.disk);
+        disk.file.sync_data()?;
+        Ok(())
+    }
 }
 
 impl Sink for FileSink {

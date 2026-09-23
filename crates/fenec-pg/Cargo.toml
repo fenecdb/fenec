@@ -13,6 +13,7 @@ categories.workspace = true
 fenec-core.workspace = true
 fenec-ql.workspace = true
 fenec-http.workspace = true
+fenec-catalog.workspace = true
 
 [[bin]]
 name = "fenec-pg"

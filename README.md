@@ -37,6 +37,18 @@ get articles select title
   limit 10
 ```
 
+Or both rankings at once: BM25 and the vectors each find their own
+candidates, and reciprocal rank fuses the two lists, so a document either one
+missed still counts:
+
+```
+get articles select title
+  match body $1
+  near embed $2
+  fuse
+  limit 10
+```
+
 The same query from JS — no ORM, no npm, no build step:
 
 ```js
@@ -99,10 +111,12 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-418 KB of WebAssembly — 137 KB brotli (`-q 11`) over the wire, client included — no
+444 KB of WebAssembly — 147 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
-**PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx:
+**PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx, and
+the catalog they look around in: `\d`, JDBC's `DatabaseMetaData` and
+DBeaver's navigator see the collections, their fields and their indexes.
 
 ```bash
 make pg PGPASS=secret HTTP=127.0.0.1:8080
@@ -110,11 +124,16 @@ psql -h 127.0.0.1 -p 5432 -U fenec
 ```
 
 The same process carries the HTTP/JSON endpoint — never a second binary, since
-two processes opening one file would corrupt it.
-[PostgreSQL server](https://fenecdb.com/docs/postgres) ·
-[HTTP endpoint](https://fenecdb.com/docs/http).
+two processes opening one file would corrupt it. A second `fenec-pg` follows
+it as a read replica with `--replica-of`: it is sent the writes on the
+primary's disk, serves reads, refuses writes with `25006`, and is promoted by
+hand; `fenec backup`, `fenec archive` and `fenec restore --to <time>` take a
+running database whole, keep its writes, and rebuild it as it stood at a
+moment. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
+[HTTP endpoint](https://fenecdb.com/docs/http) ·
+[Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 1.31 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 2.19 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -136,11 +155,16 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=..)`, `@text(k1=.., b=.., prefix=..)` |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
-| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed) |
+| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
+| **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
+| **Collation** | `order name collate tr` — Turkish as ICU orders it (`ç` after `c`, `ı` before `i`), PostgreSQL's `tr-x-icu`; bytes otherwise |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI |
-| **Runtime size** | 418 KB wasm + 69 KB client (137 KB brotli served) · 684–927 KB binary · 1.31 MB container image |
+| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
+| **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
+| **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
+| **Runtime size** | 444 KB wasm + 72 KB client (147 KB brotli served) · 829–1251 KB binary · 2.19 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
@@ -164,9 +188,12 @@ query; it is not a join and is not trying to be one.
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [PostgreSQL server](https://fenecdb.com/docs/postgres) | Sessions, SCRAM authentication, the type mapping, what the protocol does not carry |
+| [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
+| [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React |
+| [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, and the slow-statement log |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |
-| [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command |
+| [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
 | [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process |

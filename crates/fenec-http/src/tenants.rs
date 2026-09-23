@@ -88,7 +88,7 @@ impl Drop for Tenant {
         let mut g = self.write();
         if g.is_dirty() {
             if let Err(e) = g.sync() {
-                eprintln!("sync error ({}): {e}", self.name);
+                crate::log!("sync error ({}): {e}", self.name);
             }
         }
     }
@@ -308,7 +308,7 @@ impl Tenants {
             let mut g = t.write();
             if g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
                 if let Err(e) = g.checkpoint() {
-                    eprintln!("could not write the checkpoint ({}): {e}", t.name);
+                    crate::log!("could not write the checkpoint ({}): {e}", t.name);
                 }
             }
         }
@@ -374,7 +374,7 @@ impl Tenants {
         for t in self.open_tenants() {
             if t.read().is_dirty() {
                 if let Err(e) = t.write().sync() {
-                    eprintln!("sync error ({}): {e}", t.name);
+                    crate::log!("sync error ({}): {e}", t.name);
                 }
             }
         }
@@ -545,12 +545,12 @@ impl Tenants {
                 let mut g = t.write();
                 if g.is_dirty() {
                     if let Err(e) = g.sync() {
-                        eprintln!("sync error ({}): {e}", t.name);
+                        crate::log!("sync error ({}): {e}", t.name);
                     }
                 }
                 if self.checkpoint && g.stats().iter().any(|s| !s.vector_indexes.is_empty()) {
                     if let Err(e) = g.checkpoint() {
-                        eprintln!("could not write the checkpoint ({}): {e}", t.name);
+                        crate::log!("could not write the checkpoint ({}): {e}", t.name);
                     }
                 }
                 // Leaked on purpose: the process is about to exit, and a lock

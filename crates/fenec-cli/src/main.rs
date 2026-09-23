@@ -7,8 +7,12 @@
 //! echo "get docs" | fenec data.fenec
 //! ```
 
+#[cfg(feature = "backup")]
+mod backup;
 #[cfg(feature = "import")]
 mod import;
+#[cfg(any(feature = "backup", feature = "import"))]
+mod stop;
 mod types;
 
 use fenec_core::prelude::*;
@@ -22,7 +26,7 @@ FenecQL summary
   drop collection [if exists] <name>
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
-           [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+           [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
   explain get <name> ...                  -- the path the query took, one row a step
   select a, b from <name> ...             -- the classic SQL order works too
@@ -36,17 +40,29 @@ Operators = != < <= > >=   ~ (text contains)   has (list contains)   in [..]
 "#;
 
 /// The import arm is only compiled with the `import` feature: the SQLite
-/// reader and the PostgreSQL client add ~190 KB to the binary and are
-/// unnecessary for embedded use.
+/// reader, the PostgreSQL client and the `--follow` follower add 242 KB to
+/// the binary and are unnecessary for embedded use.
 #[cfg(feature = "import")]
 const IMPORT_HELP: &str = r#"
 Import
   fenec import <file.sqlite|postgres://...> --table <name> [--into <name>]
-                                         load from SQLite or PostgreSQL
+                                         load from SQLite or PostgreSQL;
+                                         --follow keeps applying its changes
                                          for details: fenec import --help
 "#;
 #[cfg(not(feature = "import"))]
 const IMPORT_HELP: &str = "";
+
+#[cfg(feature = "backup")]
+const BACKUP_HELP: &str = r#"
+Backup
+  fenec backup <http://primary> <file|dir>   the database, taken while it runs
+  fenec archive <http://primary> <dir>       keep every write, until interrupted
+  fenec restore <dir> <out> [--to <time>]    the database as it stood then
+                                         for details: fenec backup --help
+"#;
+#[cfg(not(feature = "backup"))]
+const BACKUP_HELP: &str = "";
 
 const TYPES_HELP: &str = r#"
 TypeScript types
@@ -74,6 +90,17 @@ fn main() {
         std::process::exit(types::main(&args[1..]));
     }
 
+    if let Some(command @ ("backup" | "archive" | "restore")) = args.first().map(String::as_str) {
+        #[cfg(feature = "backup")]
+        std::process::exit(backup::main(command, &args[1..]));
+        #[cfg(not(feature = "backup"))]
+        {
+            eprintln!("this binary was built without `{command}`: its `backup` feature is off");
+            eprintln!("rebuild it: cargo build --release -p fenec-cli --features backup");
+            std::process::exit(2);
+        }
+    }
+
     if args.first().is_some_and(|a| a == "import") {
         #[cfg(feature = "import")]
         std::process::exit(import::main(&args[1..]));
@@ -95,7 +122,7 @@ fn main() {
                 command = args.get(i).cloned();
             }
             "-h" | "--help" => {
-                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{TYPES_HELP}{SHELL_HELP}");
+                println!("usage: fenec [file.fenec] [-c \"<query>\"]{HELP}{IMPORT_HELP}{BACKUP_HELP}{TYPES_HELP}{SHELL_HELP}");
                 return;
             }
             other if !other.starts_with('-') => path = Some(other.to_string()),

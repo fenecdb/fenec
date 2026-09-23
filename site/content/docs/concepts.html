@@ -161,8 +161,9 @@ reason is
 the WebAssembly output — it has to stay small and auditable.</p>
 
 <p>The rule covers <code>fenec-core</code>, <code>fenec-ql</code>,
-<code>fenec-wasm</code>, <code>fenec-http</code>, <code>fenec-pg</code> and
-<code>fenec-import</code>. <code>fenec-core</code> does dev-depend on
+<code>fenec-wasm</code>, <code>fenec-http</code>, <code>fenec-pg</code>,
+<code>fenec-catalog</code>, <code>fenec-import</code> and
+<code>fenec-shard</code>. <code>fenec-core</code> does dev-depend on
 <code>fenec-ql</code>, which Cargo permits through a dev dependency, so tests
 can be written as real queries.</p>
 

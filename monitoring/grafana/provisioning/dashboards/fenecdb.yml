@@ -1,0 +1,7 @@
+# Loads grafana/fenecdb.json, which docker-compose.yml mounts here.
+apiVersion: 1
+providers:
+  - name: fenecdb
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

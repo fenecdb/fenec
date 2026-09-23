@@ -1,9 +1,13 @@
 //! `fenec import` -- builds a collection from a SQLite file or a PostgreSQL
 //! server.
 
+use crate::stop;
 use fenec_core::prelude::*;
+use fenec_import::follow::{self, lsn_text, Event, Follow};
 use fenec_import::{load, map, pg, sqlite, IdSource, Options, Source};
 use std::io::{IsTerminal, Write};
+use std::sync::{PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 pub const USAGE: &str = r#"
 usage: fenec import <source> --table <name> [options]
@@ -33,11 +37,25 @@ options
   --count                 with --dry-run: also count how many rows will be
                           read. It means a full scan, hence optional.
 
+following (postgres)
+  --follow                after the copy, keep applying the table's inserts,
+                          updates and deletes as they commit, until
+                          interrupted. Run again, it resumes where it stopped.
+                          Needs wal_level = logical and an integer key
+  --slot <name>           the replication slot it reads through, made if
+                          missing (default: fenec_<into>). It holds the
+                          server's WAL until the follower confirms it: drop
+                          it when you stop following for good
+  --publication <name>    the publication carrying the table, made if missing
+                          (default: fenec_<into>)
+
 example
   fenec import data.sqlite --table docs --into articles \
       --vector embed:384 --index "embed@hnsw(cosine)"
   fenec import data.sqlite --table docs --into articles \
       --where 'category = "book" and score >= 10'
+  fenec import postgres://app@db/app --table docs --into articles \
+      --index "embed@hnsw(cosine)" --follow
 "#;
 
 fn fail(msg: &str) -> ! {
@@ -55,6 +73,9 @@ pub fn main(args: &[String]) -> i32 {
     let mut sample = sqlite::DEFAULT_SAMPLE;
     let mut dry_run = false;
     let mut count = false;
+    let mut following = false;
+    let mut slot: Option<String> = None;
+    let mut publication: Option<String> = None;
     let mut opts = Options::new("");
 
     let mut i = 0;
@@ -112,6 +133,9 @@ pub fn main(args: &[String]) -> i32 {
             "--sample" => sample = number(&next(&mut i, "--sample"), "--sample") as usize,
             "--dry-run" | "-n" => dry_run = true,
             "--count" => count = true,
+            "--follow" => following = true,
+            "--slot" => slot = Some(next(&mut i, "--slot")),
+            "--publication" => publication = Some(next(&mut i, "--publication")),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return 0;
@@ -143,6 +167,40 @@ pub fn main(args: &[String]) -> i32 {
     opts.into = into.unwrap_or_else(|| table.clone());
     let target = file.unwrap_or_else(|| format!("{}.fenec", opts.into));
 
+    let follow = if following {
+        let is_pg = source.starts_with("postgres://") || source.starts_with("postgresql://");
+        if !is_pg {
+            fail("--follow reads a PostgreSQL replication slot: the source must be postgres://...");
+        }
+        if source_where.is_some() {
+            fail(
+                "--source-where narrows the copy but not the stream; use --where, which both obey",
+            );
+        }
+        if opts.limit.is_some() {
+            fail("--limit and --follow do not go together: a follower keeps every row");
+        }
+        let named = Follow::named_after(&opts.into);
+        Some(Follow {
+            slot: slot.unwrap_or(named.slot),
+            publication: publication.unwrap_or(named.publication),
+        })
+    } else {
+        if slot.is_some() || publication.is_some() {
+            fail("--slot and --publication belong to --follow");
+        }
+        None
+    };
+    if let (Some(f), false) = (&follow, dry_run) {
+        return match run_follow(&source, &table, &target, &opts, f) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+
     match run(
         &source,
         &table,
@@ -153,7 +211,15 @@ pub fn main(args: &[String]) -> i32 {
         count,
         &opts,
     ) {
-        Ok(()) => 0,
+        Ok(()) => {
+            if let Some(f) = &follow {
+                println!(
+                    "--follow would then read slot {} of publication {}, making either if missing",
+                    f.slot, f.publication
+                );
+            }
+            0
+        }
         Err(e) => {
             eprintln!("error: {e}");
             1
@@ -275,6 +341,149 @@ fn run(
         println!("index    {field} {}", index_name(kind));
     }
     Ok(())
+}
+
+/// `--follow`: the copy when there is no whole one, then the changes, until
+/// SIGINT or SIGTERM. What it prints comes from the follower's events.
+fn run_follow(source: &str, table: &str, target: &str, opts: &Options, f: &Follow) -> Result<()> {
+    let url = pg::Url::parse(source)?;
+    println!(
+        "source   {}@{}:{}/{} -> {table}",
+        url.user, url.host, url.port, url.database
+    );
+    println!("target   {target} -> {}", opts.into);
+    // A file this run made and never wrote a copy into goes again on an
+    // error, as the one-shot import's does; one with a copy is never removed.
+    let existed = std::path::Path::new(target).exists();
+    let mut copied = false;
+    let db = RwLock::new(fenec_core::fs::open(target)?);
+    stop::on_signals();
+
+    let interactive = std::io::stdout().is_terminal();
+    // A line printed over by the next one is left open; anything else
+    // starts on a fresh line.
+    let mut open_line = false;
+    let mut last = (0u64, Instant::now() - Duration::from_secs(60));
+    let mut report = |e: Event| {
+        let open = &mut open_line;
+        match e {
+            Event::Prepared {
+                publication_created,
+                slot_created,
+            } => {
+                let made = |yes: bool| if yes { " (created)" } else { "" };
+                say(
+                    open,
+                    format!(
+                        "follow   slot {}{}, publication {}{}",
+                        f.slot,
+                        made(slot_created),
+                        f.publication,
+                        made(publication_created)
+                    ),
+                );
+                if slot_created {
+                    say(
+                        open,
+                        format!(
+                        "note     the slot keeps the server's WAL until this follower confirms it; \
+                         to stop following for good: select pg_drop_replication_slot('{}')",
+                        f.slot
+                    ),
+                    );
+                }
+            }
+            Event::Copying(why) => say(open, format!("copying  {why}")),
+            Event::CopyProgress(n) => {
+                if interactive {
+                    print!("\r{n} records...");
+                    let _ = std::io::stdout().flush();
+                    *open = true;
+                }
+            }
+            Event::Copied(s) => {
+                copied = true;
+                if interactive {
+                    print!("\r");
+                    *open = false;
+                }
+                say(
+                    open,
+                    format!("{} records, {target} ({:.2?})", s.rows, s.elapsed),
+                );
+                if s.skipped > 0 {
+                    say(open, format!("skipped  {} rows (--where)", s.skipped));
+                }
+                for w in &s.warnings {
+                    say(open, format!("warning  {w}"));
+                }
+            }
+            Event::Streaming => say(
+                open,
+                format!("following {table}: ctrl-c stops, and the same command resumes"),
+            ),
+            Event::Confirmed {
+                lsn,
+                transactions,
+                changes,
+            } => {
+                last.0 = lsn;
+                let text = format!(
+                    "{transactions} transactions, {changes} changes, at {}",
+                    lsn_text(lsn)
+                );
+                if interactive {
+                    print!("\r{text}");
+                    let _ = std::io::stdout().flush();
+                    *open = true;
+                } else if last.1.elapsed() >= Duration::from_secs(10) {
+                    println!("{text}");
+                    last.1 = Instant::now();
+                }
+            }
+            Event::Ignored(c) => say(
+                open,
+                format!(
+                    "warning  column `{c}` has no field in the collection; its values are not kept"
+                ),
+            ),
+            Event::Reconnecting { error, wait } => {
+                say(open, format!("stream   {error}; again in {wait:.1?}"))
+            }
+        }
+    };
+    let result = follow::run(&url, table, &db, opts, f, &stop::STOP, &mut report);
+    if open_line {
+        println!();
+    }
+    let mut db = db.into_inner().unwrap_or_else(PoisonError::into_inner);
+    if let Err(e) = result {
+        if !existed && !copied {
+            drop(db);
+            let _ = std::fs::remove_file(target);
+        } else {
+            let _ = db.checkpoint();
+        }
+        return Err(e);
+    }
+    // The graph goes into the file: the next start opens it instead of
+    // rebuilding it.
+    db.checkpoint()?;
+    match last.0 {
+        0 => println!("stopped; the same command resumes"),
+        lsn => println!("stopped at {}; the same command resumes", lsn_text(lsn)),
+    }
+    Ok(())
+}
+
+/// Prints a line, on a line of its own: after a progress line that the next
+/// one would have written over, it starts a new one.
+fn say(open: &mut bool, text: String) {
+    if *open {
+        println!();
+        *open = false;
+    }
+    println!("{text}");
 }
 
 fn print_plan(plan: &map::Plan, columns: &[fenec_import::Column], target: &str, rows: Option<u64>) {

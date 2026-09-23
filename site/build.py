@@ -63,9 +63,12 @@ NAV = [
         ("docs/javascript", "JavaScript"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
+        ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
         ("docs/postgres", "PostgreSQL server"),
+        ("docs/replication", "Replication"),
+        ("docs/monitoring", "Monitoring"),
         ("docs/sharding", "Tenants and sharding"),
         ("docs/import", "Import"),
         ("docs/embedding", "Embedded Rust"),
@@ -449,9 +452,9 @@ LLMS_BRIEF = """\
 
 Writing FenecQL -- the reference below spells it out in full:
 
-- It is not SQL. There is no JOIN, subquery, GROUP BY, sum/avg or
-  transaction; `count` is the one aggregate, and related rows come from
-  `lookup`.
+- It is not SQL. There is no JOIN, subquery or transaction; related rows
+  come from `lookup`. The aggregates -- `count(*)`, `sum`, `avg`, `min`,
+  `max` -- go in the select list, over every match or per `group <field>`.
 - Square brackets are list literals and nothing else: `tags: ["a", "b"]`,
   `tags [text]`. Nothing here marks an optional part with them; a clause you
   do not need is simply left out.
@@ -466,9 +469,12 @@ Writing FenecQL -- the reference below spells it out in full:
   Only an `and` chain uses an index: `=` and `in [...]` on a `@hash` field or
   on `id`, `<`, `<=`, `>`, `>=` and `=` on a `@sorted` field; everything else
   scans. `explain get ...` runs a query and returns the path it took.
-- `near` and `match` decide the order: neither combines with `order` or with
-  the other, and each returns at most 10 000 rows (`limit + offset`). Both add
-  a `_score` column.
+- Text is ordered by its bytes; `order title collate tr` orders it as
+  Turkish does (ICU's `tr`: `ç` after `c`, `ı` before `i`). The collation
+  is for `order` alone -- `where` compares bytes.
+- `near` and `match` decide the order: neither combines with `order`, and
+  the two together need `fuse`, which ranks by both. Each returns at most
+  10 000 rows (`limit + offset`) and adds a `_score` column.
 - After `lookup`, every clause belongs to the child collection and `limit`
   counts children per parent. `required` goes right after `on <field>` and
   keeps only the parents with a matching child; `count` goes before `lookup`.
@@ -480,9 +486,12 @@ create collection articles (title text @hash, views int, tags [text], published 
 put articles {title: "Rust", views: 10, tags: ["lang"], published: "2026-09-01T10:00:00Z", embed: [0.1, 0.2, 0.3, 0.4], body: "Ownership and borrowing"}
 put articles [{title: "Zig", views: 3}, {title: "Go", views: 7}]
 get articles select title, views where views < 100 and tags has "lang" order views desc limit 5 offset 5
+get articles select title order title collate tr, views desc limit 20
 get articles where title in ["Rust", "Go"] count
 get articles select title where published >= "2026-01-01" near embed $1 limit 3
 get articles match body "borrowing" rerank embed $1 candidates 200 limit 10
+get articles match body "borrowing" near embed $1 fuse limit 10
+get articles select title, sum(views), max(published) where tags has "lang" group title order sum(views) desc limit 5
 get articles order published desc limit 20 lookup comments on article_id where score >= 4 order published desc limit 3
 get articles count lookup comments on article_id required where score = 5
 explain get articles where views < 100 order published desc limit 5

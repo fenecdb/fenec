@@ -1,6 +1,6 @@
 <!--
 title: PostgreSQL server — fenecdb
-description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation and running it in a container.
+description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation, the catalog tools read, and running it in a container.
 -->
 
 <h1>PostgreSQL server</h1>
@@ -18,7 +18,7 @@ psql -h 127.0.0.1 -p 5433 -U fenec
 PostgreSQL ecosystem: vectors use the same text representation as pgvector
 (<code>[1,2,3]</code>) and errors map to SQLSTATE codes
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
-<code>57014</code>).</p>
+<code>57014</code>, and <code>25006</code> for a write sent to a replica).</p>
 
 <p><code>explain get ...</code> answers the way PostgreSQL's
 <code>EXPLAIN ANALYZE</code> does on the wire: rows of text in one column,
@@ -26,6 +26,14 @@ here <code>plan</code>, tagged <code>EXPLAIN</code>, so psql prints the plan
 and a driver reads it as rows. The steps are fenecdb's own — which index,
 how many rows each stage read — and are described under <a
 href="fenecql.html#explain">Explain</a>.</p>
+
+<p>With <code>--replica-of</code> the process follows another
+<code>fenec-pg</code> as a read replica: it serves every read, refuses every
+write with <code>25006</code> as a PostgreSQL standby does, and answers
+<code>SHOW transaction_read_only</code> and <code>pg_is_in_recovery()</code>
+accordingly, which is what libpq's <code>target_session_attrs</code> and
+JDBC's <code>targetServerType</code> go by. The flags, promotion and what a
+failover loses are on <a href="/docs/replication">Replication</a>.</p>
 
 <p>With <code>--dir &lt;path&gt;</code> instead of <code>--file</code> the
 process serves a directory of tenant files over HTTP, one file per tenant under
@@ -137,6 +145,13 @@ wait too and a healthy server would look dead. Measured at roughly 100 ms.</p>
 means "the index is ready" — a start period has to be long enough to cover the
 graph build.</p>
 
+<p>What the server is doing is at <code>/_metrics</code>, in Prometheus's
+text format: <code>--metrics &lt;address&gt;</code> opens a listener for it
+alone, for a server whose data goes over PostgreSQL only, and
+<code>--slow-ms &lt;ms&gt;</code> logs every statement at least that slow
+with its text. The metrics, a Grafana dashboard and the log are in
+<a href="/docs/monitoring">Monitoring</a>.</p>
+
 <h2>Query cancellation</h2>
 
 <p><code>CancelRequest</code> is a real cancellation: the pending lock is
@@ -173,11 +188,60 @@ reported too. Parameter types are left unspecified; the client sends text and
 the server infers. <code>RowDescription</code> goes exactly once, on
 <code>Execute</code> when <code>Describe</code> is skipped.</p>
 
+<h2 id="catalog">The catalog</h2>
+
+<p>psql's <code>\d</code>, JDBC's <code>DatabaseMetaData</code> and
+DBeaver's navigator do not ask which collections exist: they send SQL over
+<code>pg_catalog</code> and <code>information_schema</code>, with joins,
+<code>CASE</code>, casts to <code>regclass</code>, correlated subqueries,
+<code>UNION</code> and window functions. <code>fenec-pg</code> runs that SQL
+over a catalog it makes from the schemas each time, so the tools see the
+database as it is:</p>
+
+<pre data-lang="text">fenec=# \d docs
+                        Table "public.docs"
+ Column |           Type           | Collation | Nullable | Default
+--------+--------------------------+-----------+----------+---------
+ id     | bigint                   |           | not null |
+ title  | text                     |           |          |
+ n      | bigint                   |           |          |
+ embed  | vector(3)                |           |          |
+ body   | text                     |           |          |
+Indexes:
+    "docs_pkey" PRIMARY KEY, btree (id)
+    "docs_body_text" bm25 (body)
+    "docs_embed_hnsw" hnsw (embed)
+    "docs_n_sorted" btree (n)
+    "docs_title_hash" hash (title)
+</pre>
+
+<p>A collection is a table in <code>public</code>, its <code>id</code> the
+first column and the primary key, each field a column of the type the wire
+already reports for it — a vector as <code>vector(N)</code>, a list as an
+array. Each fenecdb index is an index with its own access method:
+<code>hash</code>, <code>btree</code> for <code>@sorted</code>,
+<code>hnsw</code>, and <code>bm25</code> for <code>@text</code>. It is checked
+against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
+<code>\dt</code>, <code>\di</code>, <code>\dn</code>, <code>\l</code>),
+PgJDBC 42.7's <code>getTables</code>, <code>getColumns</code>,
+<code>getPrimaryKeys</code> and <code>getIndexInfo</code>, and the SQL
+DBeaver's PostgreSQL navigator runs for databases, schemas, tables, columns,
+constraints and indexes.</p>
+
+<p>Over a thousand collections of ten fields, psql's <code>\d</code> answers
+in 11 ms and JDBC's column lookup for every table in 122 ms. Joins find their
+rows by key where the query names an equality; trying every pair took the
+same column lookup 18.1 s. A query outside what the catalog reads — a
+<code>WITH</code>, a right or full join — is answered empty, as every catalog
+query was before, so a client never stalls on one.</p>
+
 <h2>Both directions</h2>
 
 <p>The same protocol code runs the other way round. <code>fenec import</code>
 connects to a real PostgreSQL server and streams
-<code>COPY ... TO STDOUT</code>. The server half of SCRAM lives in
+<code>COPY ... TO STDOUT</code>, and with <code>--follow</code> reads a
+logical replication slot through <code>pgoutput</code>. The server half of
+SCRAM lives in
 <code>scram.rs</code> and the client half in <code>client.rs</code>; both are
 hand-written, so they test each other. See <a href="import.html">Import</a>.</p>
 
@@ -194,7 +258,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>1.31 MB</b> on amd64 and 1.18 MB on arm64 — since no target
+package manager, no libc. The image is <b>2.19 MB</b> on amd64 and 1.90 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image

@@ -15,7 +15,7 @@
 //!
 //! **What it is not: semantic.** On BEIR FiQA, where questions share little
 //! vocabulary with the answers that resolve them, this index scores 0.232
-//! against the same transformer's 0.369 -- a gap that *is* significant. No
+//! against the same transformer's 0.368 -- a gap that *is* significant. No
 //! amount of tuning closes it, because no amount of counting words recovers a
 //! meaning the words do not carry. That is what `rerank` is for: this index
 //! chooses the candidates, stored vectors order them.
@@ -542,9 +542,17 @@ impl TextIndex {
         }
 
         let mut out: Vec<(DocId, f32)> = heap.into_iter().map(|s| (s.1, s.0)).collect();
-        out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.sort_by(best_first);
         out
     }
+}
+
+/// Highest score first, ties to the lower id. A function rather than a
+/// closure so that every ranking sorted this way -- `fuse`'s too -- shares
+/// one copy of the sort: a closure inside the generic `search` is a type of
+/// its own for every `accept` it is given.
+pub(crate) fn best_first(a: &(DocId, f32), b: &(DocId, f32)) -> Ordering {
+    b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
 /// One query term's walk through its postings.
@@ -663,7 +671,7 @@ impl TextIndex {
             }
         }
         let mut out: Vec<(DocId, f32)> = heap.into_iter().map(|s| (s.1, s.0)).collect();
-        out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.sort_by(best_first);
         out
     }
 }

@@ -107,7 +107,7 @@ pub fn run_with_progress(
 }
 
 /// Turns a row into a `put` body.
-fn document(
+pub(crate) fn document(
     plan: &Plan,
     types: &[Option<DataType>],
     values: Vec<Value>,
@@ -143,7 +143,12 @@ fn document(
 }
 
 /// Applies the filter to one row.
-fn keep(filter: &Expr, doc: &[(String, Expr)], ctx: &EvalCtx, row_no: u64) -> Result<bool> {
+pub(crate) fn keep(
+    filter: &Expr,
+    doc: &[(String, Expr)],
+    ctx: &EvalCtx,
+    row_no: u64,
+) -> Result<bool> {
     let mut row = ImportedRow { doc };
     let v = eval(filter, &mut row, ctx).map_err(|e| match e {
         Error::NotFound(m) => Error::NotFound(format!(

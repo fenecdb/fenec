@@ -32,8 +32,8 @@ use fenec_core::prelude::*;
 /// Query keys that are read as clauses rather than as filters. A field with
 /// the same name cannot be filtered over HTTP (the FenecQL and `fenec-pg` paths
 /// are unaffected).
-const RESERVED: [&str; 7] = [
-    "select", "order", "limit", "offset", "count", "where", "lookup",
+const RESERVED: [&str; 8] = [
+    "select", "order", "limit", "offset", "count", "where", "lookup", "group",
 ];
 
 /// On the subscription endpoint `since` is a clause as well. It is a
@@ -167,7 +167,11 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
     };
     for (k, v) in &req.query {
         match k.as_str() {
+            // `select=status,sum(total),count(*)`: a list with an aggregate
+            // in it aggregates, as FenecQL's does.
+            "select" if v.contains('(') => sel.aggregate = aggregates(schema, v)?,
             "select" => sel.project = Some(projection(schema, v)?),
+            "group" => sel.group = Some(field_of(schema, v)?),
             "order" => sel.order = order(schema, v)?,
             "limit" => sel.limit = Some(number(v, "limit")?),
             "offset" => sel.offset = number(v, "offset")?,
@@ -285,21 +289,62 @@ fn projection(schema: &Schema, raw: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `order=year.desc,title` -> `[(year, false), (title, true)]`
-fn order(schema: &Schema, raw: &str) -> Result<Vec<(String, bool)>> {
+/// `select=status,sum(total),count(*)` -> the fields and aggregates, in
+/// order. The list is FenecQL's, parsed by FenecQL's parser.
+fn aggregates(schema: &Schema, raw: &str) -> Result<Vec<Agg>> {
+    let (_, list) =
+        fenec_ql::parse_select_list(raw).map_err(|e| Error::Query(format!("`select`: {e}")))?;
+    for f in list.iter().filter_map(Agg::field) {
+        field(schema, f)?;
+    }
+    Ok(list)
+}
+
+/// `order=year.desc,title` -> `order year desc, title`. A collation's name
+/// among the modifiers puts a text field in its language's order:
+/// `order=name.tr.desc` is `order name collate tr desc`. Over groups a key
+/// may name an aggregate of the list, `order=sum(total).desc`; the engine
+/// checks it against the list.
+fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
     let mut out = Vec::new();
     for part in raw.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        let (name, asc) = match part.rsplit_once('.') {
-            Some((n, "desc")) => (n, false),
-            Some((n, "asc")) => (n, true),
-            _ => (part, true),
+        // No name holds a dot -- an aggregate's parentheses neither -- so
+        // everything after the first one is a modifier.
+        let mut words = part.split('.');
+        let name = words.next().unwrap_or_default();
+        let (mut asc, mut collate) = (true, None);
+        for w in words {
+            match w {
+                "asc" => asc = true,
+                "desc" => asc = false,
+                w => {
+                    collate = Some(Collation::named(w).ok_or_else(|| {
+                        Error::Query(format!(
+                            "`order`: `{w}` in `{part}` is not asc, desc or a collation (tr)"
+                        ))
+                    })?)
+                }
+            }
+        }
+        let name = if let Some((f, rest)) = name.split_once('(') {
+            // The function's name folds as FenecQL folds it; the field's does not.
+            match (f.to_ascii_lowercase().as_str(), rest) {
+                ("count", "*)" | ")") => "count".to_string(),
+                (f, rest) => format!("{f}({rest}"),
+            }
+        } else {
+            field(schema, name)?;
+            name.to_string()
         };
-        field(schema, name)?;
-        out.push((name.to_string(), asc));
+        out.push(Sort {
+            field: name,
+            asc,
+            collate,
+        });
     }
     Ok(out)
 }
@@ -595,6 +640,29 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
         ..Default::default()
     };
 
+    // `"match": "words"` makes it hybrid: BM25 over the text field ranks
+    // too, and the two rankings are fused. Flat keys, since a JSON body
+    // here holds no nested objects.
+    match get("match") {
+        None | Some(Value::Null) => {}
+        Some(Value::Text(q)) => {
+            let text_field = match get("match_field") {
+                Some(Value::Text(f)) => f.clone(),
+                Some(_) => return Err(Error::Query("`match_field` must be text".into())),
+                None => default_text_field(schema)?,
+            };
+            sel.matcher = Some(Match {
+                field: text_field,
+                query: Expr::Lit(Value::Text(q.clone())),
+            });
+            sel.fuse = Some(Fuse {
+                k: as_usize("fuse_k")?.map(|k| k.min(u32::MAX as usize) as u32),
+                candidates: as_usize("candidates")?,
+            });
+        }
+        Some(_) => return Err(Error::Query("`match` must be text".into())),
+    }
+
     if let Some(v) = get("select") {
         let cols = match v {
             Value::List(items) => items
@@ -626,6 +694,25 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     }
     sel.filter = filter;
     Ok(sel)
+}
+
+/// When the collection has a single `@text` field there is no need to write
+/// `match_field`.
+fn default_text_field(schema: &Schema) -> Result<String> {
+    let mut texts = schema
+        .fields
+        .iter()
+        .filter(|f| matches!(f.index, IndexKind::Text(_)));
+    match (texts.next(), texts.next()) {
+        (Some(f), None) => Ok(f.name.clone()),
+        (None, _) => Err(Error::Query(format!(
+            "`{}` has no @text field to match",
+            schema.name
+        ))),
+        (Some(_), Some(_)) => Err(Error::Query(
+            "the collection has several @text fields: name one with `match_field`".into(),
+        )),
+    }
 }
 
 /// When the collection has a single vector field there is no need to write `field`.
@@ -937,5 +1024,7 @@ pub fn status_of(e: &Error) -> u16 {
         Error::Exists(_) => 409,
         Error::Type(_) | Error::Query(_) => 400,
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
+        // As `--http-read-only` answers: the write is not this server's to take.
+        Error::ReadOnly(_) | Error::Denied(_) => 403,
     }
 }

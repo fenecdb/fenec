@@ -2,18 +2,22 @@
 
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
+use crate::collate::Collation;
 use crate::error::{Error, Result};
+use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
 use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::store::{Store, OP_DEL, OP_PUT};
-use crate::text::TextIndex;
+use crate::text::{best_first, TextIndex};
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
 use crate::vector::{distance, dot, norm, normalized, score_from_distance, VectorIndex};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+mod maintenance;
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 
@@ -34,11 +38,30 @@ pub const MAX_MATCH_ROWS: usize = 10_000;
 
 /// How many `match` candidates `rerank` rescores when the query does not say.
 ///
-/// Measured on BEIR: on FiQA (57 638 documents) 1 000 candidates reproduce a
-/// full dense scan exactly and 250 reach 97% of it; on SciFact 50 already
-/// beat the full scan. 200 sits where the curve has flattened on both, and
-/// costs 200 vector reads -- under 0.4% of that corpus.
+/// Measured on BEIR (`make beir`): on FiQA (57 638 documents) 1 000
+/// candidates come within 0.0003 of a full dense scan and 200 reach 98% of
+/// it; on SciFact 50 already beat the full scan. 200 sits where the curve
+/// has flattened on both, and costs 200 vector reads -- under 0.4% of that
+/// corpus.
 pub const DEFAULT_RERANK_CANDIDATES: usize = 200;
+
+/// How many candidates each side of `fuse` ranks when the query does not
+/// say (and never fewer than the page).
+///
+/// Measured on BEIR (`make beir`), nDCG@10 at 10 / 20 / 100 a side: SciFact
+/// 0.701 / 0.699 / 0.687, FiQA 0.364 / 0.366 / 0.358. Up to 61 a side at
+/// `k = 60`, a document both searches found outranks every document only
+/// one found -- `2 / (60 + 61)` still beats `1 / 61` -- and deeper, agreement
+/// in the middle of both lists starts to outvote the top of one. 20 is at or
+/// within 0.003 of the best on both, and on FiQA answers in 0.78 ms against
+/// 0.98 ms at 100.
+pub const DEFAULT_FUSE_CANDIDATES: usize = 20;
+
+/// The rank offset of `fuse`: 60, the value reciprocal rank fusion was
+/// published with and the one most implementations keep. Measured on BEIR at
+/// 20 a side, anything from 10 to 120 moved nDCG@10 by at most 0.005 on
+/// either dataset, which is noise, so the published value stands.
+pub const DEFAULT_FUSE_K: u32 = 60;
 
 const REC_CREATE: u8 = 1;
 const REC_DROP: u8 = 2;
@@ -83,10 +106,23 @@ const REC_SEQ_LEN: usize = 1 + 8 + 8;
 /// tombstones are still present and carry the counter themselves.
 const REC_NEXTID: u8 = 7;
 
+/// Which history a database's writes belong to: `[8][0][length][following]
+/// [count]{[id: u64 LE][from]}`. Not a write -- it moves no counter -- so a
+/// replica never receives it as one; see [`History`].
+const REC_HISTORY: u8 = crate::history::RECORD;
+
 /// The persistence layer. The engine only says "append these bytes"; where
 /// they are written (file, IndexedDB, OPFS, S3) is this layer's problem.
 pub trait Sink: Send {
     fn append(&mut self, bytes: &[u8]) -> Result<()>;
+    /// Appends a write, the `seq`th of the change counter. A sink that
+    /// passes writes on -- a primary's feed to its replicas -- numbers them
+    /// by it; everything else only appends. Records that are not writes
+    /// (the history) come through [`Self::append`] and carry no number.
+    fn record(&mut self, seq: u64, bytes: &[u8]) -> Result<()> {
+        let _ = seq;
+        self.append(bytes)
+    }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
     fn sync(&mut self) -> Result<()> {
         Ok(())
@@ -186,6 +222,12 @@ impl Collection {
 
     /// Rebuilds the index structures from the schema's index definitions
     /// (contents empty; filling them is `rebuild_indexes_with`'s job).
+    ///
+    /// Inlined, as the other two functions [`Database::apply`] shares with the
+    /// write path are: the browser module links no `apply`, and with a
+    /// second caller they were no longer inlined into their first -- 1.1 KB
+    /// of the module for nothing it runs.
+    #[inline(always)]
     fn reset_index_structures(&mut self) {
         self.vectors.clear();
         self.hashes.clear();
@@ -220,6 +262,9 @@ impl Collection {
             .map(|(_, ix)| ix)
     }
 
+    /// Inlined for the reason [`Self::reset_index_structures`] is: a
+    /// compact beside the database calls it too.
+    #[inline(always)]
     fn index_doc(&mut self, doc: &Document) {
         for (name, ix) in self.vectors.iter_mut() {
             if let Some(Value::Vector(v)) = doc.get(name) {
@@ -251,6 +296,7 @@ impl Collection {
     ///
     /// Calling `insert` one at a time missed the chance to parallelise the
     /// read-only part of the HNSW build; the batch path takes it.
+    #[inline(always)]
     fn index_vectors_batch(&mut self, docs: &[Document]) {
         for (name, ix) in self.vectors.iter_mut() {
             let items: Vec<(DocId, Vec<f32>)> = docs
@@ -733,6 +779,16 @@ pub struct Database {
     changes: ChangeLog,
     /// The party to wake after a write (if any).
     watcher: Option<Arc<dyn Watcher>>,
+    /// Which history the writes belong to, and whether they come from a
+    /// primary; see [`History`].
+    history: History,
+    /// The writes a `create index` or `compact` running beside the database
+    /// has to catch up with once it is built (see `maintenance`). A `Mutex`
+    /// for the reason `sink` is one: it is registered under the read lock,
+    /// and the write path reaches it through `get_mut`.
+    tails: Mutex<maintenance::Tails>,
+    /// Whether `tails` holds any: the one thing every write looks at.
+    watched: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Database {
@@ -753,6 +809,9 @@ impl Database {
             failed: None,
             changes: ChangeLog::default(),
             watcher: None,
+            history: History::default(),
+            tails: Mutex::default(),
+            watched: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -797,9 +856,24 @@ impl Database {
         self.watcher = Some(w);
     }
 
-    /// Marks a write on the feed.
+    /// Marks a write on the feed, and for any maintenance running beside
+    /// the database on that collection.
     fn note(&mut self, cid: u32, id: DocId) {
         self.changes.record(cid, id);
+        if *self.watched.get_mut() {
+            self.note_watched(cid, id);
+        }
+    }
+
+    /// Out of line: a browser never runs a maintenance, and inlined into
+    /// every write this was half a kilobyte of its module.
+    #[cold]
+    #[inline(never)]
+    fn note_watched(&mut self, cid: u32, id: DocId) {
+        self.tails
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .note(cid, id);
     }
 
     /// Names of the collections that changed since `since`.
@@ -979,6 +1053,10 @@ impl Database {
         out.extend_from_slice(&self.changes.seq().to_le_bytes());
         out.extend_from_slice(&0u64.to_le_bytes());
         let body_at = out.len();
+
+        if self.history.following || !self.history.lineage.is_empty() {
+            out.extend_from_slice(&self.history.record());
+        }
 
         for name in &self.order {
             let c = &self.collections[name];
@@ -1192,6 +1270,16 @@ impl Database {
                         graphs.insert((name.clone(), field), chunk[cp..].to_vec());
                     }
                 }
+                REC_HISTORY => {
+                    let _ = get_uvarint(bytes, &mut pos)?;
+                    let len = get_uvarint(bytes, &mut pos)? as usize;
+                    if pos + len > bytes.len() {
+                        break;
+                    }
+                    // Not a write: it does not move `seq`.
+                    self.history = History::decode(&bytes[pos..pos + len])?;
+                    pos += len;
+                }
                 REC_SEQ => {
                     if pos + REC_SEQ_LEN - 1 > bytes.len() {
                         return Err(Error::Corrupt("truncated counter header".into()));
@@ -1404,13 +1492,17 @@ impl Database {
         Ok(())
     }
 
+    /// Appends a write's record. Every caller notes the write on the change
+    /// counter right after, so the record is numbered as the one after the
+    /// counter's current value.
     fn wal(&mut self, rec: u8, cid: u32, payload: &[u8]) -> Result<()> {
         let mut frame = Vec::with_capacity(payload.len() + 12);
         frame.push(rec);
         put_uvarint(&mut frame, cid as u64);
         put_uvarint(&mut frame, payload.len() as u64);
         frame.extend_from_slice(payload);
-        let r = self.sink_mut().append(&frame);
+        let seq = self.changes.seq() + 1;
+        let r = self.sink_mut().record(seq, &frame);
         self.storage(r)?;
         self.dirty = true;
         Ok(())
@@ -1478,6 +1570,233 @@ impl Database {
         }
     }
 
+    // ---------------------------------------------------------- replication
+
+    /// Which history the writes belong to; see [`History`].
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+
+    /// Starts a new history at the current change, under `id`, and takes
+    /// writes from here on: a replica being promoted, or a primary about to
+    /// have its first replica -- the root history is every database's and
+    /// names none. `id` must be one no other database holds; the caller
+    /// draws it at random.
+    pub fn fork(&mut self, id: u64) -> Result<()> {
+        self.set_history(self.history.forked(id, self.changes.seq()))
+    }
+
+    /// Takes a primary's history, and from then on no write of its own:
+    /// the writes arrive through [`Self::apply`].
+    pub fn follow(&mut self, lineage: Vec<(u64, u64)>) -> Result<()> {
+        self.set_history(History {
+            lineage,
+            following: true,
+        })
+    }
+
+    fn set_history(&mut self, h: History) -> Result<()> {
+        self.refuse_if_failed()?;
+        if h == self.history {
+            return Ok(());
+        }
+        // Not a write: it has no number, and no replica is sent it.
+        let r = self.sink_mut().append(&h.record());
+        self.storage(r)?;
+        self.dirty = true;
+        self.history = h;
+        Ok(())
+    }
+
+    /// Applies writes a primary made. `records` are what its write path
+    /// appended to its file, whole and in order, and each is numbered as
+    /// the change after this database's counter -- the number the primary
+    /// gave it, when the two agree on where they stand
+    /// ([`History::continues`]).
+    ///
+    /// Each record goes through the index upkeep the write path does and on
+    /// to this database's own sink, so a replica's file holds the primary's
+    /// records and reopens at the same change. The one thing that may come
+    /// out different is the HNSW graph: the same vectors go in, in the same
+    /// order, but not in the same batches, and the search is approximate
+    /// either way.
+    pub fn apply(&mut self, records: &[u8]) -> Result<usize> {
+        self.refuse_if_failed()?;
+        let before = self.changes.seq();
+        let mut batch = VectorBatch::default();
+        let applied = self.apply_records(records, &mut batch);
+        // A record that failed leaves the ones before it applied, and their
+        // vectors are indexed all the same.
+        self.index_batch(&mut batch);
+        let after = self.changes.seq();
+        if after != before {
+            if let Some(w) = &self.watcher {
+                w.notify(after);
+            }
+        }
+        applied
+    }
+
+    fn apply_records(&mut self, bytes: &[u8], batch: &mut VectorBatch) -> Result<usize> {
+        let cut = || Error::Corrupt("a write record cut short".into());
+        let mut n = 0;
+        let mut pos = 0;
+        while pos < bytes.len() {
+            let start = pos;
+            let rec = bytes[pos];
+            pos += 1;
+            let cid = get_uvarint(bytes, &mut pos)? as u32;
+            let len = get_uvarint(bytes, &mut pos)? as usize;
+            let body = bytes.get(pos..pos + len).ok_or_else(cut)?;
+            pos += len;
+
+            let mut marked = SCHEMA_MARK;
+            if rec == REC_DATA {
+                let mut p = 1;
+                marked = get_uvarint(body, &mut p)?;
+            }
+            // The graph takes a batch as the graph stands before it: a
+            // record that needs it as it stands after -- a document the
+            // batch holds, another collection, a schema change -- ends it.
+            if !batch.docs.is_empty()
+                && (rec != REC_DATA || cid != batch.cid || batch.ids.contains(&marked))
+            {
+                self.index_batch(batch);
+            }
+            match rec {
+                REC_CREATE => {
+                    let mut sp = 0;
+                    let schema = Schema::decode(body, &mut sp)?;
+                    if self.collections.contains_key(&schema.name) || self.named(cid).is_some() {
+                        return Err(Error::Corrupt(format!(
+                            "collection `{}` is already here",
+                            schema.name
+                        )));
+                    }
+                    self.next_coll_id = self.next_coll_id.max(cid + 1);
+                    self.order.push(schema.name.clone());
+                    self.collections
+                        .insert(schema.name.clone(), Collection::new(cid, schema));
+                }
+                REC_DROP => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    self.collections.remove(&name);
+                    self.order.retain(|n| *n != name);
+                }
+                REC_ALTER => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    let mut sp = 0;
+                    let schema = Schema::decode(body, &mut sp)?;
+                    let c = self.collections.get_mut(&name).unwrap();
+                    let same_layout = c.schema.fields.len() == schema.fields.len()
+                        && c.schema
+                            .fields
+                            .iter()
+                            .zip(&schema.fields)
+                            .all(|(a, b)| a.name == b.name && a.ty == b.ty);
+                    if !same_layout {
+                        return Err(Error::Corrupt(format!(
+                            "a schema change moved the fields of `{name}`"
+                        )));
+                    }
+                    // `create index` adds one; anything else rebuilds them all.
+                    let changed: Vec<usize> = (0..schema.fields.len())
+                        .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
+                        .collect();
+                    let added = changed
+                        .iter()
+                        .all(|&i| c.schema.fields[i].index == IndexKind::None);
+                    c.schema = schema;
+                    if added {
+                        for i in changed {
+                            build_index(c, i)?;
+                        }
+                    } else {
+                        c.reset_index_structures();
+                        for i in 0..c.schema.fields.len() {
+                            build_index(c, i)?;
+                        }
+                    }
+                }
+                REC_DATA => {
+                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
+                    let c = self.collections.get_mut(&name).unwrap();
+                    let op = body[0];
+                    let mut p = 1;
+                    let id = get_uvarint(body, &mut p)?;
+                    let plen = get_uvarint(body, &mut p)? as usize;
+                    let payload = body.get(p..p + plen).ok_or_else(cut)?;
+                    if let Some(old) = c.store.read(&c.schema, id)? {
+                        c.unindex_doc(&old);
+                    }
+                    c.store.append(op, id, payload);
+                    if op == OP_PUT {
+                        let doc = c.store.read(&c.schema, id)?.ok_or_else(cut)?;
+                        c.index_scalar(&doc);
+                        if !c.vectors.is_empty() {
+                            batch.cid = cid;
+                            batch.ids.insert(id);
+                            batch.docs.push(doc);
+                        }
+                    }
+                }
+                other => {
+                    return Err(Error::Corrupt(format!(
+                        "record kind {other} is not a write"
+                    )))
+                }
+            }
+            let seq = self.changes.seq() + 1;
+            let r = self.sink_mut().record(seq, &bytes[start..pos]);
+            self.storage(r)?;
+            self.dirty = true;
+            self.note(cid, marked);
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// The name of the collection with id `cid`.
+    fn named(&self, cid: u32) -> Option<String> {
+        self.order
+            .iter()
+            .find(|n| self.collections[*n].id == cid)
+            .cloned()
+    }
+
+    fn index_batch(&mut self, batch: &mut VectorBatch) {
+        if let Some(name) = self.named(batch.cid) {
+            if let Some(c) = self.collections.get_mut(&name) {
+                c.index_vectors_batch(&batch.docs);
+            }
+        }
+        batch.docs.clear();
+        batch.ids.clear();
+    }
+
+    /// Replaces everything with `fresh` -- a database loaded from `image` --
+    /// and rewrites the sink with the image: what a replica does when its
+    /// primary no longer holds the writes it missed. The sink, the watcher,
+    /// the plugins and the change ring's size stay. The ring's marks do not,
+    /// so every subscriber reseeds.
+    pub fn adopt(&mut self, fresh: Database, image: &[u8]) -> Result<()> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().rewrite(image);
+        self.storage(r)?;
+        let cap = self.changes.capacity();
+        self.collections = fresh.collections;
+        self.order = fresh.order;
+        self.next_coll_id = fresh.next_coll_id;
+        self.history = fresh.history;
+        self.changes = fresh.changes;
+        self.changes.set_capacity(cap);
+        self.dirty = false;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------ execution
 
     pub fn execute(&mut self, stmt: &Statement) -> Result<Response> {
@@ -1511,6 +1830,12 @@ impl Database {
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         if !stmt.is_read_only() {
             self.refuse_if_failed()?;
+            // `compact` changes no document, only how the file holds them.
+            if self.history.following && !matches!(stmt, Statement::Compact(_)) {
+                return Err(Error::ReadOnly(
+                    "this database is a replica: its writes come from its primary".into(),
+                ));
+            }
         }
         let before = self.changes.seq();
         let out = self.execute_inner(stmt, params);
@@ -1593,7 +1918,9 @@ impl Database {
         }
     }
 
-    /// Builds an index on an existing field and fills it from the current documents.
+    /// Builds an index on an existing field and fills it from the current
+    /// documents, all under the write lock; a server runs it beside the
+    /// database instead ([`Database::maintain`]).
     fn create_index(
         &mut self,
         collection: &str,
@@ -1601,95 +1928,14 @@ impl Database {
         kind: &IndexKind,
         if_not_exists: bool,
     ) -> Result<Response> {
-        let c = self
-            .collections
-            .get(collection)
-            .ok_or_else(|| Error::NotFound(format!("collection `{collection}`")))?;
-        let f = c
-            .schema
-            .field(field)
-            .ok_or_else(|| Error::NotFound(format!("field `{field}` in `{collection}`")))?;
-        if f.index != IndexKind::None {
-            if if_not_exists {
-                return Ok(Response::Ok(format!("`{field}` is already indexed")));
-            }
-            return Err(Error::Exists(format!("an index on field `{field}`")));
+        if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
+            return Ok(done);
         }
-        if let IndexKind::Vector(_) = kind {
-            if !matches!(f.ty, DataType::Vector(..)) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not vector<N>, no vector index can be built"
-                )));
-            }
-        }
-        if let IndexKind::Text(_) = kind {
-            if !matches!(f.ty, DataType::Text) {
-                return Err(Error::Type(format!(
-                    "field `{field}` is not text, no full-text index can be built"
-                )));
-            }
-        }
-        if *kind == IndexKind::Sorted && !SortedIndex::supports(&f.ty) {
-            return Err(Error::Type(format!(
-                "field `{field}` is not int, float, timestamp or text, no ordered index can be built"
-            )));
-        }
-
-        let cid = c.id;
         let c = self.collections.get_mut(collection).unwrap();
+        let cid = c.id;
         let pos = c.schema.field_pos(field).unwrap();
         c.schema.fields[pos].index = kind.clone();
-
-        // Build the index structure and fill it from the current documents.
-        match kind {
-            IndexKind::Vector(spec) => {
-                let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
-                    unreachable!()
-                };
-                let mut ix = VectorIndex::with_precision(dim, *spec, prec);
-                let ids: Vec<DocId> = c.store.ids();
-                ix.reserve(ids.len());
-                let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
-                for id in &ids {
-                    if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
-                        items.push((*id, v));
-                    }
-                }
-                ix.insert_batch(&items);
-                c.vectors.insert(field.to_string(), ix);
-            }
-            IndexKind::Hash => {
-                let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
-                for id in c.store.ids() {
-                    if let Some(v) = c.store.read_field(id, pos)? {
-                        map.entry(hash_key(&v)).or_default().push(id);
-                    }
-                }
-                c.hashes.insert(field.to_string(), map);
-            }
-            IndexKind::Text(spec) => {
-                let mut ix = TextIndex::new(*spec);
-                for id in c.store.ids() {
-                    if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
-                        ix.insert(id, &t);
-                    }
-                }
-                ix.shrink_to_fit();
-                c.texts.insert(field.to_string(), ix);
-            }
-            IndexKind::Sorted => {
-                let ty = c.schema.fields[pos].ty.clone();
-                let mut rows = Vec::with_capacity(c.store.len());
-                for id in c.store.ids() {
-                    rows.push((id, c.store.read_field(id, pos)?));
-                }
-                c.sorted.push((
-                    field.to_string(),
-                    SortedIndex::build(&ty, &mut rows.into_iter()),
-                ));
-            }
-            IndexKind::None => {}
-        }
+        build_index(c, pos)?;
 
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;
@@ -2231,7 +2477,13 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Option<Vec<DocId>>> {
-        let [(field, asc)] = sel.order.as_slice() else {
+        // The index holds the bytes' order, so a collated key sorts.
+        let [Sort {
+            field,
+            asc,
+            collate: None,
+        }] = sel.order.as_slice()
+        else {
             return Ok(None);
         };
         let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
@@ -2340,7 +2592,110 @@ impl Database {
         Ok((!gave_up).then_some(out))
     }
 
-    /// `match`, and `rerank` on top of it when the query asks for one.
+    /// `near`'s first `want` candidates, nearest first -- the filter's rows
+    /// only, when there is one.
+    fn run_near(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let ix = c.vectors.get(&near.field).ok_or_else(|| {
+            Error::Query(format!(
+                "field `{}` has no vector index (declare it with @hnsw)",
+                near.field
+            ))
+        })?;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        if qv.len() != ix.dim {
+            return Err(Error::Type(format!(
+                "the query vector must have {} dimensions, got {}",
+                ix.dim,
+                qv.len()
+            )));
+        }
+
+        let hits = match &sel.filter {
+            // No filter: ANN directly, or a full scan when asked for.
+            None if near.exact => {
+                plan(|| format!("near: exact scan over every vector in {}", near.field));
+                ix.search_exact(&qv, want, |_| true)
+            }
+            None => {
+                plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                ix.search(&qv, want, near.ef, |_| true)
+            }
+            Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, ctx)?,
+        };
+        Ok(hits)
+    }
+
+    /// `match ... near ... fuse`: each side ranks its own candidates -- the
+    /// filter applied to both -- and a document's score is the sum of
+    /// `1 / (k + rank)` over the lists it is on. A document one side missed
+    /// still scores from the other; ties go to the lower id.
+    ///
+    /// Built from what the engine already has -- the two searches, the
+    /// vector index's id map, the text index's order: written with types of
+    /// its own it was 11 KB of the browser module, this way it is 2.
+    #[allow(clippy::too_many_arguments)]
+    fn run_fuse(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        m: &Match,
+        near: &Near,
+        f: &Fuse,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        // Each side ranks its own first `depth`, never fewer than the page:
+        // a document neither list reaches cannot be on it.
+        let page = ranked_rows(sel, "fuse", MAX_MATCH_ROWS)?;
+        let depth = f.candidates.unwrap_or(DEFAULT_FUSE_CANDIDATES).max(page);
+        if depth > MAX_MATCH_ROWS {
+            return Err(Error::Query(format!(
+                "`fuse` ranks at most {MAX_MATCH_ROWS} candidates a side, {depth} were requested"
+            )));
+        }
+        let k = f.k.unwrap_or(DEFAULT_FUSE_K) as f32;
+        let text = self.run_match(c, sel, m, depth, params, ctx)?;
+        let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
+        plan(|| {
+            format!(
+                "fuse: reciprocal rank, k = {k}, over {} + {} candidates",
+                text.len(),
+                vectors.len()
+            )
+        });
+        let mut fused: Vec<(DocId, f32)> = Vec::with_capacity(text.len() + vectors.len());
+        let mut at: HashMap<DocId, u32> = HashMap::new();
+        at.reserve(text.len() + vectors.len());
+        let ids = text.iter().map(|h| h.0).chain(vectors.iter().map(|h| h.0));
+        for (i, id) in ids.enumerate() {
+            // Rank within its own list, from 1.
+            let rank = if i < text.len() { i } else { i - text.len() };
+            let w = 1.0 / (k + rank as f32 + 1.0);
+            match at.get(&id) {
+                Some(&slot) => fused[slot as usize].1 += w,
+                None => {
+                    at.insert(id, fused.len() as u32);
+                    fused.push((id, w));
+                }
+            }
+        }
+        fused.sort_by(best_first);
+        // Two lists can hold twice the ceiling between them; the answer
+        // keeps to it, as `match` and `near` do.
+        fused.truncate(page);
+        Ok(fused)
+    }
+
+    /// `match`, and `rerank` on top of it when the query asks for one: the
+    /// first `want` rows, best first.
     ///
     /// The two stages answer different questions. `match` is recall: cheap,
     /// lexical, and wrong about meaning. `rerank` is precision: exact vector
@@ -2351,9 +2706,10 @@ impl Database {
         c: &Collection,
         sel: &Select,
         m: &Match,
+        want: usize,
         params: &[Value],
         ctx: &EvalCtx,
-    ) -> Result<Vec<(DocId, Option<f32>)>> {
+    ) -> Result<Vec<(DocId, f32)>> {
         let ix = c.texts.get(&m.field).ok_or_else(|| {
             Error::Query(format!(
                 "field `{}` has no full-text index (declare it with @text)",
@@ -2370,16 +2726,6 @@ impl Database {
             }
         };
 
-        // As with `near`: the ceiling is checked before any scanning, because
-        // erroring beats handing back a truncated relevance list.
-        let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
-        if bound.unwrap_or(sel.offset) > MAX_MATCH_ROWS {
-            return Err(Error::Query(format!(
-                "`match` returns at most {MAX_MATCH_ROWS} rows, {} were requested (limit + offset)",
-                bound.unwrap_or(sel.offset)
-            )));
-        }
-
         let allowed: Option<Vec<DocId>> = match &sel.filter {
             Some(_) => Some(self.matching_ids(&sel.collection, &sel.filter, params)?),
             None => None,
@@ -2389,7 +2735,6 @@ impl Database {
             None => true,
         };
 
-        let want = bound.unwrap_or(MAX_MATCH_ROWS).max(1);
         let Some(rr) = &sel.rerank else {
             let hits = ix.search(&query, want, accept);
             plan(|| {
@@ -2399,7 +2744,7 @@ impl Database {
                     hits.len()
                 )
             });
-            return Ok(hits.into_iter().map(|(id, s)| (id, Some(s))).collect());
+            return Ok(hits);
         };
 
         // The candidate set has to be at least as large as what the caller
@@ -2483,10 +2828,10 @@ impl Database {
         // Ascending distance, ties on the id so the answer is stable.
         out.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         out.truncate(want);
-        Ok(out
-            .into_iter()
-            .map(|(id, d)| (id, Some(score_from_distance(metric, d))))
-            .collect())
+        for h in &mut out {
+            h.1 = score_from_distance(metric, h.1);
+        }
+        Ok(out)
     }
 
     /// Collects the children of each parent row.
@@ -2807,16 +3152,9 @@ impl Database {
         }
 
         let mut keys = Vec::with_capacity(l.order.len());
-        for (field, asc) in &l.order {
-            let pos =
-                if field == "id" {
-                    None
-                } else {
-                    Some(child.schema.field_pos(field).ok_or_else(|| {
-                        Error::NotFound(format!("field `{}.{field}`", l.collection))
-                    })?)
-                };
-            keys.push((pos, *asc));
+        let owner = format!("{}.", l.collection);
+        for s in &l.order {
+            keys.push(order_key(&child.schema, s, &owner)?);
         }
 
         let limit = l.limit.unwrap_or(usize::MAX);
@@ -2852,7 +3190,7 @@ impl Database {
                 let mut keyed: Vec<(Vec<Value>, DocId)> = Vec::with_capacity(kept.len());
                 for id in &kept {
                     let mut vals = Vec::with_capacity(keys.len());
-                    for (pos, _) in &keys {
+                    for (pos, ..) in &keys {
                         vals.push(match pos {
                             None => Value::Int(*id as i64),
                             Some(p) => child.store.read_field(*id, *p)?.unwrap_or(Value::Null),
@@ -2866,13 +3204,7 @@ impl Database {
                 // makes the order total, which is what lets the selection
                 // below pick the same rows the full sort would.
                 let cmp = |a: &(Vec<Value>, DocId), b: &(Vec<Value>, DocId)| {
-                    for (i, (_, asc)) in keys.iter().enumerate() {
-                        let o = a.0[i].cmp_value(&b.0[i]);
-                        if o != Ordering::Equal {
-                            return if *asc { o } else { o.reverse() };
-                        }
-                    }
-                    a.1.cmp(&b.1)
+                    rank(&keys, &a.0, &b.0).then(a.1.cmp(&b.1))
                 };
                 // `lookup` is the one place a bounded `order` is known up
                 // front: the clause carries its own `limit`, so only
@@ -2972,6 +3304,9 @@ impl Database {
             registry: &self.registry,
         };
         sel.check()?;
+        if !sel.aggregate.is_empty() {
+            return self.aggregate(c, sel, params);
+        }
 
         // `count` sends the filter down the same path but never decodes the
         // rows: it returns a single row with a single column.
@@ -3005,8 +3340,11 @@ impl Database {
         let limit = sel.limit.unwrap_or(usize::MAX);
         let scored: Vec<(DocId, Option<f32>)>;
 
-        if let Some(m) = &sel.matcher {
-            scored = self.run_match(c, sel, m, params, &ctx)?;
+        if let (Some(m), Some(near), Some(f)) = (&sel.matcher, &sel.near, &sel.fuse) {
+            scored = with_scores(self.run_fuse(c, sel, m, near, f, params, &ctx)?);
+        } else if let Some(m) = &sel.matcher {
+            let want = ranked_rows(sel, "match", MAX_MATCH_ROWS)?;
+            scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
         } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
             // rejected explicitly rather than ignored silently.
@@ -3016,45 +3354,8 @@ impl Database {
                         .into(),
                 ));
             }
-            let ix = c.vectors.get(&near.field).ok_or_else(|| {
-                Error::Query(format!(
-                    "field `{}` has no vector index (declare it with @hnsw)",
-                    near.field
-                ))
-            })?;
-            let qv = near_vector(eval(&near.vector, &mut NoRow, &ctx)?)?;
-            if qv.len() != ix.dim {
-                return Err(Error::Type(format!(
-                    "the query vector must have {} dimensions, got {}",
-                    ix.dim,
-                    qv.len()
-                )));
-            }
-
-            // If the requested row count exceeds the ceiling we stop before
-            // scanning the filter: erroring beats returning a truncated result.
-            let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
-            if bound.unwrap_or(sel.offset) > MAX_NEAR_ROWS {
-                return Err(Error::Query(format!(
-                    "`near` returns at most {MAX_NEAR_ROWS} rows, {} were requested (limit + offset)",
-                    bound.unwrap_or(sel.offset)
-                )));
-            }
-
-            let want = bound.unwrap_or(MAX_NEAR_ROWS).max(1);
-            let hits = match &sel.filter {
-                // No filter: ANN directly, or a full scan when asked for.
-                None if near.exact => {
-                    plan(|| format!("near: exact scan over every vector in {}", near.field));
-                    ix.search_exact(&qv, want, |_| true)
-                }
-                None => {
-                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
-                    ix.search(&qv, want, near.ef, |_| true)
-                }
-                Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, &ctx)?,
-            };
-            scored = hits.into_iter().map(|(id, s)| (id, Some(s))).collect();
+            let want = ranked_rows(sel, "near", MAX_NEAR_ROWS)?;
+            scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
         } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
             scored = ids.into_iter().map(|id| (id, None)).collect();
         } else {
@@ -3082,17 +3383,8 @@ impl Database {
                 // field lookup used to happen first, so `order id` raised an
                 // error.
                 let mut keys = Vec::with_capacity(sel.order.len());
-                for (field, asc) in &sel.order {
-                    let pos = if field == "id" {
-                        None
-                    } else {
-                        Some(
-                            c.schema
-                                .field_pos(field)
-                                .ok_or_else(|| Error::NotFound(format!("field `{field}`")))?,
-                        )
-                    };
-                    keys.push((pos, *asc));
+                for s in &sel.order {
+                    keys.push(order_key(&c.schema, s, "")?);
                 }
                 let k = sel
                     .limit
@@ -3102,10 +3394,14 @@ impl Database {
                     // Built by hand: `join` brought a 1.2 KB copy of its own
                     // into the browser module for this one line.
                     let mut by = String::new();
-                    for (i, (f, asc)) in sel.order.iter().enumerate() {
+                    for (i, s) in sel.order.iter().enumerate() {
                         by.push_str(if i == 0 { "" } else { ", " });
-                        by.push_str(f);
-                        by.push_str(if *asc { "" } else { " desc" });
+                        by.push_str(&s.field);
+                        if let Some(c) = s.collate {
+                            by.push_str(" collate ");
+                            by.push_str(c.name());
+                        }
+                        by.push_str(if s.asc { "" } else { " desc" });
                     }
                     let kept = if k < ids.len() {
                         format!("the first {k} put in order")
@@ -3153,6 +3449,180 @@ impl Database {
             columns,
             rows,
             nested,
+        })
+    }
+
+    /// An aggregating select: the rows the filter finds -- through the same
+    /// indexes any select uses -- folded into one row, or one per value of
+    /// the `group` field, each row in the select list's order.
+    ///
+    /// Written as plain loops over types the engine already has -- the hash
+    /// index's map, `order`'s sort: the first version, in iterator chains
+    /// over types of its own, was 25 KB of the browser module.
+    fn aggregate(&self, c: &Collection, sel: &Select, params: &[Value]) -> Result<ResultSet> {
+        let pos_of = |name: &str| {
+            c.schema
+                .field_pos(name)
+                .ok_or_else(|| Error::NotFound(format!("field `{name}`")))
+        };
+        // Every field the list and the group read, each read once a row, in
+        // field order. Kept sorted as it is built: a handful of fields, and
+        // `sort` over them was a sort instantiation of its own in the
+        // browser module.
+        let mut positions: Vec<usize> = Vec::new();
+        let names = sel.aggregate.iter().filter_map(Agg::field);
+        for f in names.chain(sel.group.as_deref()) {
+            let p = pos_of(f)?;
+            if let Err(i) = positions.binary_search(&p) {
+                positions.insert(i, p);
+            }
+        }
+        let slot_of = |pos: usize| positions.iter().position(|p| *p == pos).unwrap_or(0);
+        // Each item's slot in a row read, and its fold as a group starts it.
+        let mut slots = Vec::with_capacity(sel.aggregate.len());
+        let mut start = Vec::with_capacity(sel.aggregate.len());
+        for a in &sel.aggregate {
+            match a.field() {
+                Some(f) => {
+                    let pos = pos_of(f)?;
+                    slots.push(Some(slot_of(pos)));
+                    start.push(Fold::new(a, &c.schema.fields[pos].ty)?);
+                }
+                None => {
+                    slots.push(None);
+                    start.push(Fold::new(a, &DataType::Int)?);
+                }
+            }
+        }
+        let group = match &sel.group {
+            Some(g) => Some(slot_of(pos_of(g)?)),
+            None => None,
+        };
+
+        let ids = self.matching_ids(&sel.collection, &sel.filter, params)?;
+        // A group's number under its key's encoding. The hash index's own map
+        // type, holding one number: a map of another type was 1 KB of the
+        // browser module.
+        let mut index: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+        let mut keys: Vec<Value> = Vec::new();
+        let mut folds: Vec<Vec<Fold>> = Vec::new();
+        if group.is_none() {
+            keys.push(Value::Null);
+            folds.push(start.clone());
+        }
+        let mut row = Vec::with_capacity(positions.len());
+        let mut key = Vec::new();
+        for &id in &ids {
+            if !c.store.read_fields(id, &positions, &mut row)? {
+                continue;
+            }
+            let at = match group {
+                None => 0,
+                Some(g) => {
+                    key.clear();
+                    crate::codec::encode_value(&mut key, &row[g]);
+                    // Looked up first and entered only when new: an entry a
+                    // row cloned the key every row, 81 -> 100 ms over a
+                    // million.
+                    match index.get(&key) {
+                        Some(n) => n[0] as usize,
+                        None => {
+                            index
+                                .entry(key.clone())
+                                .or_default()
+                                .push(keys.len() as DocId);
+                            keys.push(row[g].clone());
+                            folds.push(start.clone());
+                            keys.len() - 1
+                        }
+                    }
+                }
+            };
+            for (i, fold) in folds[at].iter_mut().enumerate() {
+                match slots[i] {
+                    Some(s) => fold.add(&row[s])?,
+                    None => fold.add(&Value::Bool(true))?,
+                }
+            }
+        }
+        let n = keys.len();
+        plan(|| {
+            format!(
+                "aggregate: {} rows into {n} {}",
+                ids.len(),
+                if n == 1 { "group" } else { "groups" }
+            )
+        });
+
+        let mut columns = Vec::with_capacity(sel.aggregate.len());
+        for a in &sel.aggregate {
+            columns.push(a.label());
+        }
+        let width = columns.len();
+        let mut values: Vec<Value> = Vec::with_capacity(n * width);
+        for (k, group_folds) in keys.iter().zip(folds) {
+            for (a, f) in sel.aggregate.iter().zip(group_folds) {
+                values.push(match a {
+                    Agg::Key(_) => k.clone(),
+                    _ => f.value(),
+                });
+            }
+        }
+        // Groups come out by their key unless `order` says otherwise, naming
+        // the list's columns; the key breaks what the order leaves tied.
+        let mut order: Vec<OrderKey> = Vec::with_capacity(sel.order.len() + 1);
+        let mut picked: Vec<usize> = Vec::with_capacity(sel.order.len());
+        for s in &sel.order {
+            let name = &s.field;
+            let Some(at) = columns.iter().position(|c| c == name) else {
+                return Err(Error::Query(format!(
+                    "`order {name}`: not a column of this select"
+                )));
+            };
+            if let Some(coll) = s.collate {
+                // Only the key and `min`/`max` carry a field's values;
+                // `count`, `sum` and `avg` are numbers whatever they read.
+                let text = match &sel.aggregate[at] {
+                    Agg::Key(f) | Agg::Min(f) | Agg::Max(f) => {
+                        c.schema.field(f).is_some_and(|f| collatable(&f.ty))
+                    }
+                    _ => false,
+                };
+                if !text {
+                    return Err(Error::Query(format!(
+                        "`collate {}` orders text; `{name}` is not",
+                        coll.name()
+                    )));
+                }
+            }
+            picked.push(at);
+            order.push((None, s.asc, s.collate));
+        }
+        order.push((None, true, None));
+        let w = order.len();
+        let mut flat: Vec<Value> = Vec::with_capacity(n * w);
+        for g in 0..n {
+            for &at in &picked {
+                flat.push(values[g * width + at].clone());
+            }
+            flat.push(keys[g].clone());
+        }
+        let k = sel.limit.map_or(n, |l| l.saturating_add(sel.offset)).min(n);
+        let mut rows = Vec::with_capacity(k.saturating_sub(sel.offset));
+        for g in order_rows(&flat, w, n, &order, k)
+            .into_iter()
+            .skip(sel.offset)
+        {
+            rows.push(Row {
+                id: 0,
+                values: values[g * width..g * width + width].to_vec(),
+                score: None,
+            });
+        }
+        Ok(ResultSet {
+            columns,
+            rows,
+            nested: None,
         })
     }
 
@@ -3260,6 +3730,182 @@ impl Database {
     }
 }
 
+/// The documents [`Database::apply`] has yet to put into the graph: one
+/// collection's, none of them twice.
+#[derive(Default)]
+struct VectorBatch {
+    cid: u32,
+    ids: std::collections::HashSet<DocId>,
+    docs: Vec<Document>,
+}
+
+fn missing(cid: u32) -> Error {
+    Error::Corrupt(format!("a write to collection {cid}, which is not here"))
+}
+
+/// Builds the index the schema declares on the field at `pos` and fills it
+/// from the collection's documents: what `create index` does, and what a
+/// replica does with the primary's. Inlined for the reason
+/// [`Collection::reset_index_structures`] is.
+#[inline(always)]
+fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    let field = c.schema.fields[pos].name.clone();
+    match c.schema.fields[pos].index.clone() {
+        IndexKind::Vector(spec) => {
+            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+                return Err(Error::Type(format!("field `{field}` is not vector<N>")));
+            };
+            let mut ix = VectorIndex::with_precision(dim, spec, prec);
+            let ids: Vec<DocId> = c.store.ids();
+            ix.reserve(ids.len());
+            let mut items: Vec<(DocId, Vec<f32>)> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(Value::Vector(v)) = c.store.read_field(*id, pos)? {
+                    items.push((*id, v));
+                }
+            }
+            ix.insert_batch(&items);
+            c.vectors.insert(field, ix);
+        }
+        IndexKind::Hash => {
+            let mut map: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+            for id in c.store.ids() {
+                if let Some(v) = c.store.read_field(id, pos)? {
+                    map.entry(hash_key(&v)).or_default().push(id);
+                }
+            }
+            c.hashes.insert(field, map);
+        }
+        IndexKind::Text(spec) => {
+            let mut ix = TextIndex::new(spec);
+            for id in c.store.ids() {
+                if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
+                    ix.insert(id, &t);
+                }
+            }
+            ix.shrink_to_fit();
+            c.texts.insert(field, ix);
+        }
+        IndexKind::Sorted => {
+            let ty = c.schema.fields[pos].ty.clone();
+            let mut rows = Vec::with_capacity(c.store.len());
+            for id in c.store.ids() {
+                rows.push((id, c.store.read_field(id, pos)?));
+            }
+            let ix = SortedIndex::build(&ty, &mut rows.into_iter());
+            match c.sorted.iter_mut().find(|(n, _)| *n == field) {
+                Some(slot) => slot.1 = ix,
+                None => c.sorted.push((field, ix)),
+            }
+        }
+        IndexKind::None => {}
+    }
+    Ok(())
+}
+
+/// One aggregate's running value over a group's rows. Nulls are skipped
+/// by every one but the row count, as SQL's are.
+#[derive(Clone)]
+enum Fold {
+    Count(i64),
+    /// An int field's sum, and how many values went in.
+    SumInt(i64, u64),
+    SumFloat(f64, u64),
+    Avg(f64, u64),
+    /// `true` for `max`.
+    Extreme(Option<Value>, bool),
+}
+
+impl Fold {
+    fn new(a: &Agg, ty: &DataType) -> Result<Fold> {
+        let numeric = |what: &str, f: &str| {
+            Error::Type(format!(
+                "`{what}({f})` needs an int or float field; `{f}` is {}",
+                ty.name()
+            ))
+        };
+        Ok(match a {
+            Agg::Count | Agg::Key(_) => Fold::Count(0),
+            Agg::Sum(f) => match ty {
+                DataType::Int => Fold::SumInt(0, 0),
+                DataType::Float => Fold::SumFloat(0.0, 0),
+                _ => return Err(numeric("sum", f)),
+            },
+            Agg::Avg(f) => match ty {
+                DataType::Int | DataType::Float => Fold::Avg(0.0, 0),
+                _ => return Err(numeric("avg", f)),
+            },
+            Agg::Min(f) | Agg::Max(f) => match ty {
+                DataType::Int
+                | DataType::Float
+                | DataType::Timestamp
+                | DataType::Text
+                | DataType::Bool => Fold::Extreme(None, matches!(a, Agg::Max(_))),
+                _ => {
+                    return Err(Error::Type(format!(
+                        "`{}` needs a field with an order; `{f}` is {}",
+                        a.label(),
+                        ty.name()
+                    )))
+                }
+            },
+        })
+    }
+
+    fn add(&mut self, v: &Value) -> Result<()> {
+        if matches!(v, Value::Null) && !matches!(self, Fold::Count(_)) {
+            return Ok(());
+        }
+        match self {
+            Fold::Count(n) => *n += 1,
+            Fold::SumInt(sum, n) => {
+                let Value::Int(i) = v else { return Ok(()) };
+                *sum = sum
+                    .checked_add(*i)
+                    .ok_or_else(|| Error::Query("the sum does not fit a 64-bit int".into()))?;
+                *n += 1;
+            }
+            Fold::SumFloat(sum, n) | Fold::Avg(sum, n) => {
+                let x = match v {
+                    Value::Int(i) => *i as f64,
+                    Value::Float(f) => *f,
+                    _ => return Ok(()),
+                };
+                *sum += x;
+                *n += 1;
+            }
+            Fold::Extreme(best, max) => {
+                let better = match best {
+                    None => true,
+                    Some(b) => {
+                        let o = v.cmp_value(b);
+                        if *max {
+                            o == Ordering::Greater
+                        } else {
+                            o == Ordering::Less
+                        }
+                    }
+                };
+                if better {
+                    *best = Some(v.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn value(self) -> Value {
+        match self {
+            Fold::Count(n) => Value::Int(n),
+            Fold::SumInt(_, 0) | Fold::SumFloat(_, 0) | Fold::Avg(_, 0) => Value::Null,
+            Fold::SumInt(s, _) => Value::Int(s),
+            Fold::SumFloat(s, _) => Value::Float(s),
+            Fold::Avg(s, n) => Value::Float(s / n as f64),
+            Fold::Extreme(v, _) => v.unwrap_or(Value::Null),
+        }
+    }
+}
+
 thread_local! {
     /// The steps an `explain` is recording on this thread, `None` outside
     /// one. A thread-local rather than a parameter: the steps are taken deep
@@ -3295,6 +3941,27 @@ fn push_step(line: String) {
             steps.push(line);
         }
     });
+}
+
+/// How many rows a ranked clause has to produce: `limit + offset`, or the
+/// ceiling when there is no limit. A request past the ceiling is refused
+/// before anything is scanned -- erroring beats handing back a truncated
+/// ranking.
+fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
+    let bound = sel.limit.map(|l| l.saturating_add(sel.offset));
+    if bound.unwrap_or(sel.offset) > ceiling {
+        return Err(Error::Query(format!(
+            "`{clause}` returns at most {ceiling} rows, {} were requested (limit + offset)",
+            bound.unwrap_or(sel.offset)
+        )));
+    }
+    Ok(bound.unwrap_or(ceiling).max(1))
+}
+
+/// A ranking as the rows carry it. One conversion for `match`, `near` and
+/// `fuse`: a closure each was a copy each in the browser module.
+fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
+    hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
 }
 
 /// The ANN's beam as `explain` states it: the `ef` in force, and the page
@@ -3426,13 +4093,53 @@ fn sorted_range(
     any.then_some((range, exact))
 }
 
-/// Sort keys: a field position (`None` for `id`) and whether it ascends.
-type OrderKey = (Option<usize>, bool);
+/// Sort keys: a field position (`None` for `id`), whether it ascends, and
+/// the collation its text is compared in.
+type OrderKey = (Option<usize>, bool, Option<Collation>);
+
+/// The key `s` names in `schema`. `collate` is refused on anything but text:
+/// on a number it would claim an order it does not change. `owner` goes in
+/// front of the field's name in an error -- `reviews.` for a `lookup`'s.
+fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
+    let f = &s.field;
+    let pos = if f == "id" {
+        None
+    } else {
+        Some(
+            schema
+                .field_pos(f)
+                .ok_or_else(|| Error::NotFound(format!("field `{owner}{f}`")))?,
+        )
+    };
+    if let Some(c) = s.collate {
+        let ty = pos.map_or(&DataType::Int, |p| &schema.fields[p].ty);
+        if !collatable(ty) {
+            return Err(Error::Query(format!(
+                "`collate {}` orders text; `{owner}{f}` is {}",
+                c.name(),
+                ty.name()
+            )));
+        }
+    }
+    Ok((pos, s.asc, s.collate))
+}
+
+/// Text, or a list of it -- which compares element by element.
+fn collatable(t: &DataType) -> bool {
+    match t {
+        DataType::Text => true,
+        DataType::List(t) => **t == DataType::Text,
+        _ => false,
+    }
+}
 
 /// The order `order` asks for between two rows' keys, before any tie-break.
 fn rank(keys: &[OrderKey], a: &[Value], b: &[Value]) -> Ordering {
-    for (i, (_, asc)) in keys.iter().enumerate() {
-        let o = a[i].cmp_value(&b[i]);
+    for (i, (_, asc, collate)) in keys.iter().enumerate() {
+        let o = match collate {
+            Some(c) => c.compare_values(&a[i], &b[i]),
+            None => a[i].cmp_value(&b[i]),
+        };
         if o != Ordering::Equal {
             return if *asc { o } else { o.reverse() };
         }
@@ -3463,25 +4170,36 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
     // The read stays inline: behind a closure returning `Result<Value>` the
     // same query measured 39 ms.
     for &id in ids {
-        for (pos, _) in keys {
+        for (pos, ..) in keys {
             flat.push(match pos {
                 None => Value::Int(id as i64),
                 Some(p) => store.read_field(id, *p)?.unwrap_or(Value::Null),
             });
         }
     }
+    let idx = order_rows(&flat, n, ids.len(), keys, k);
+    Ok(idx.into_iter().map(|i| ids[i]).collect())
+}
+
+/// The first `k` of `count` rows, each `n` keys wide in `flat`, in the
+/// order `keys` ask for: `order` over documents, and over the groups of an
+/// aggregate -- one function, so the browser module holds one sort for both.
+fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usize) -> Vec<usize> {
     let row = |i: usize| &flat[i * n..i * n + n];
     // Ties fall back to the position the row came in, which is what the
     // stable sort this replaced gave them: a selection is not stable, and a
     // page must not change with the plan.
     let cmp = |a: &usize, b: &usize| rank(keys, row(*a), row(*b)).then(a.cmp(b));
-    let mut idx: Vec<usize> = (0..ids.len()).collect();
+    let mut idx: Vec<usize> = (0..count).collect();
+    if k == 0 {
+        return Vec::new();
+    }
     if k < idx.len() {
         idx.select_nth_unstable_by(k - 1, cmp);
         idx.truncate(k);
     }
     idx.sort_unstable_by(cmp);
-    Ok(idx.into_iter().map(|i| ids[i]).collect())
+    idx
 }
 
 /// The query vector of `near`. Three forms are accepted, none of them

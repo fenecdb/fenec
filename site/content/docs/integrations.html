@@ -1,0 +1,124 @@
+<!--
+title: Integrations — fenecdb
+description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, and useLiveQuery for React over a synced replica.
+-->
+
+<h1>Integrations</h1>
+<p class="kicker">A vector store for LangChain and one for LlamaIndex, over
+fenec-pg's HTTP endpoint, and <code>useLiveQuery</code> for React, over a
+replica the sync layer keeps. Each passes the tests its framework holds its
+own integrations to.</p>
+
+<h2>LangChain</h2>
+
+<pre data-lang="bash">pip install "fenecdb[langchain] @ git+https://github.com/fenecdb/fenec#subdirectory=integrations/python"
+</pre>
+
+<pre data-lang="python">from fenecdb.langchain import FenecVectorStore
+
+store = FenecVectorStore(
+    embeddings, "handbook",
+    url="http://127.0.0.1:8080", token="...",
+    metadata_fields={"source": "text", "year": "int"},
+)
+store.add_documents(documents)
+store.similarity_search("how do I compact", k=4, filter={"source": "ops"})
+retriever = store.as_retriever(search_kwargs={"k": 8})
+</pre>
+
+<p>A document is a row: its id, its text, its metadata as JSON and its vector
+under <code>@hnsw</code>, in a collection created on the first write, once the
+embedding's size is known. Adding an id that is already there replaces it —
+the old row out and the new one in, sent as one <code>/batch</code> and run
+under one write lock, so no reader sees the id twice or not at all.</p>
+
+<p>A metadata field named in <code>metadata_fields</code> gets a column of its
+own under <code>@hash</code>, and <code>filter</code> takes equality and
+<code>$in</code> over those: <code>{"source": "ops"}</code> becomes
+<code>where source = $2</code>, answered by the index before
+<code>near</code> looks for neighbours among the rows that passed. A filter on
+a field not declared is refused rather than applied to the JSON after the
+search, which would return fewer than <code>k</code> rows and not say
+so.</p>
+
+<p>The score is fenecdb's own, the one the HTTP endpoint and the PostgreSQL
+wire return: the cosine similarity under <code>cosine</code> (the default),
+the distance under <code>l2</code>, the product under <code>dot</code>.
+<code>similarity_search_with_relevance_scores</code> maps them the way
+LangChain's own functions do.</p>
+
+<h2>LlamaIndex</h2>
+
+<pre data-lang="bash">pip install "fenecdb[llama-index] @ git+https://github.com/fenecdb/fenec#subdirectory=integrations/python"
+</pre>
+
+<pre data-lang="python">from fenecdb.llama_index import FenecVectorStore
+from llama_index.core import StorageContext, VectorStoreIndex
+
+store = FenecVectorStore("handbook", url="http://127.0.0.1:8080", token="...",
+                         metadata_fields={"author": "text", "year": "int"})
+index = VectorStoreIndex.from_documents(
+    documents, storage_context=StorageContext.from_defaults(vector_store=store)
+)
+index.as_retriever(similarity_top_k=4).retrieve("how do I compact")
+</pre>
+
+<p>A node is a row with its document's id beside it, so
+<code>index.delete_ref_doc(...)</code> is one <code>del</code> over a hashed
+field. Filters take <code>==</code>, <code>!=</code>, <code>&lt;</code>,
+<code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>in</code> and
+<code>nin</code> over the declared fields, joined by <code>and</code> or
+<code>or</code> and nested; <code>node_ids</code> and <code>doc_ids</code>
+narrow the same way. <code>get_nodes</code>, <code>delete_nodes</code> and
+<code>clear</code> are there; <code>delete_nodes()</code> with neither ids nor
+filters deletes nothing — everything is <code>clear</code>, asked for by name.
+The query mode is the default one: LlamaIndex's hybrid mode is not answered
+yet, though fenecdb's own <a href="fenecql.html#hybrid"><code>fuse</code></a>
+is.</p>
+
+<h2>React</h2>
+
+<pre data-lang="js">import { sync } from './fenec.js';
+import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
+
+const db = await sync({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'tasks' }] });
+
+function Open() {
+  const rows = useLiveQuery(useFenec().from('tasks').where('done', false).order('title'));
+  if (rows === undefined) return &lt;Spinner /&gt;;
+  return rows.map((t) =&gt; &lt;Task key={t.id} {...t} /&gt;);
+}
+
+&lt;FenecProvider db={db}&gt;&lt;Open /&gt;&lt;/FenecProvider&gt;
+</pre>
+
+<p>The rows come from the local replica, so no render waits on the network:
+the sync layer runs the query again after every local change — a write of
+this tab's, or one the server streamed in from another client — and the
+component renders what it answers. <code>useLiveQuery</code> is
+<code>undefined</code> until the first answer, and subscribes by the query's
+text and parameters, so the query built again on every render, which is the
+natural way to write one, does not subscribe again unless it asks something
+else; the rows of the query it asked before are not handed out as this one's.
+A query that fails throws while rendering, to the nearest error boundary. It
+lives in <code>integrations/react</code>, with React as its one peer
+dependency.</p>
+
+<h2>Their tests</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Integration</th><th>Held to</th><th>Run with</th></tr></thead>
+<tbody>
+<tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance and <code>from_texts</code> besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
+<tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top</td></tr>
+<tr><td>React</td><td>a stand-in database for the contract, and a real fenec-pg and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>LangChain's suite writes the same documents twice under the same ids, and
+that is how it found a bug in the graph: a node whose every candidate
+neighbour had been deleted was linked to nothing, so a collection deleted and
+written again answered <code>near</code> with nothing. It is fixed in the
+engine, with the test that shows it.</p>

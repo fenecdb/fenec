@@ -7,8 +7,11 @@
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
-//!            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
+//!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
+//!            [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+//! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
+//!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
 //! select a, b from <name> ...            -- the classic SQL order works too
 //! set    <name> { k: v, ... } [where <expr>]
 //! del    <name> [where <expr>]
@@ -16,6 +19,7 @@
 //! ```
 
 use crate::lexer::{tokenize, Tok, Token};
+use fenec_core::collate::Collation;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
 use fenec_core::schema::{Field, IndexKind, Metric, Schema, TextIndexSpec, VectorIndexSpec};
@@ -77,6 +81,22 @@ pub fn parse_one(src: &str) -> Result<Statement> {
         )));
     }
     Ok(s.remove(0))
+}
+
+/// A select list on its own -- `status, sum(total), count(*)` -- as `get
+/// ... select` reads one: the fields, or the aggregates when it has any.
+/// For a caller that assembles a select from parts, such as a query string.
+pub fn parse_select_list(src: &str) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        depth: 0,
+    };
+    let list = p.select_list()?;
+    if !p.at_eof() {
+        return p.err("a select list ends where the text does");
+    }
+    Ok(list)
 }
 
 impl Parser {
@@ -506,10 +526,11 @@ impl Parser {
                      // is followed by `from` it is a projection, otherwise the first name
                      // is the collection.
         let mut project = None;
+        let mut aggregate = Vec::new();
         if !self.peek_kw("from") {
             let save = self.i;
-            match self.projection_before_from()? {
-                Some(cols) => project = cols,
+            match self.projection_before_from() {
+                Some((cols, aggs)) => (project, aggregate) = (cols, aggs),
                 None => self.i = save,
             }
         }
@@ -518,12 +539,18 @@ impl Parser {
         let mut sel = Select {
             collection,
             project,
+            aggregate,
             ..Default::default()
         };
 
         loop {
             if self.eat_kw("select") {
-                sel.project = self.projection_list()?;
+                (sel.project, sel.aggregate) = self.select_list()?;
+                continue;
+            }
+            if self.eat_kw("group") {
+                self.eat_kw("by");
+                sel.group = Some(self.ident()?);
                 continue;
             }
             if self.eat_kw("where") {
@@ -558,6 +585,25 @@ impl Parser {
                 let field = self.ident()?;
                 let query = self.expr()?;
                 sel.matcher = Some(Match { field, query });
+                continue;
+            }
+            if self.eat_kw("fuse") {
+                let mut f = Fuse {
+                    k: None,
+                    candidates: None,
+                };
+                loop {
+                    if self.eat_kw("k") {
+                        f.k = Some(self.int()?.clamp(0, u32::MAX as i64) as u32);
+                        continue;
+                    }
+                    if self.eat_kw("candidates") {
+                        f.candidates = Some(self.int()?.max(0) as usize);
+                        continue;
+                    }
+                    break;
+                }
+                sel.fuse = Some(f);
                 continue;
             }
             if self.eat_kw("rerank") {
@@ -633,24 +679,59 @@ impl Parser {
         Ok(Some(cols))
     }
 
-    /// `order year desc, title asc` -- keys in priority order.
-    fn order_list(&mut self, out: &mut Vec<(String, bool)>) -> Result<()> {
+    /// `order year desc, title asc` -- keys in priority order. Over groups a
+    /// key may be an aggregate, `order sum(total) desc`, named by its column.
+    fn order_list(&mut self, out: &mut Vec<Sort>) -> Result<()> {
         self.eat_kw("by");
         loop {
-            let field = self.ident()?;
+            let mut field = self.ident()?;
+            if matches!(self.peek(), Tok::LParen) {
+                self.next();
+                if matches!(self.peek(), Tok::Star) {
+                    self.next();
+                    field = COUNT_COLUMN.to_string();
+                } else {
+                    field = format!("{}({})", field.to_ascii_lowercase(), self.ident()?);
+                }
+                self.expect(Tok::RParen)?;
+            }
+            // `collate` comes before the direction, as in SQL; written
+            // after it, it reads just as well and is taken there too.
+            let mut collate = self.collate()?;
             let asc = if self.eat_kw("desc") {
                 false
             } else {
                 self.eat_kw("asc");
                 true
             };
-            out.push((field, asc));
+            if collate.is_none() {
+                collate = self.collate()?;
+            }
+            out.push(Sort {
+                field,
+                asc,
+                collate,
+            });
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
             self.next();
         }
         Ok(())
+    }
+
+    /// `collate <name>`, if it comes next.
+    fn collate(&mut self) -> Result<Option<Collation>> {
+        if !self.eat_kw("collate") {
+            return Ok(None);
+        }
+        let name = self.ident()?;
+        match Collation::named(&name) {
+            Some(c) => Ok(Some(c)),
+            None => self.err(format!(
+                "unknown collation `{name}`: the one there is is `tr`"
+            )),
+        }
     }
 
     /// `lookup <name> on <child> [= <parent>]` and the clauses that follow,
@@ -731,31 +812,67 @@ impl Parser {
         Ok(l)
     }
 
-    fn projection_before_from(&mut self) -> Result<Option<Option<Vec<String>>>> {
+    fn projection_before_from(&mut self) -> Option<(Option<Vec<String>>, Vec<Agg>)> {
+        let list = self.select_list().ok()?;
+        self.eat_kw("from").then_some(list)
+    }
+
+    /// A select list: `*`, fields, or -- once any item is an aggregate
+    /// call -- an aggregating list, whose plain fields are the group's key.
+    /// `count` needs its parentheses there: bare, it is a field of that
+    /// name.
+    fn select_list(&mut self) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
         if matches!(self.peek(), Tok::Star) {
             self.next();
-            return Ok(if self.eat_kw("from") {
-                Some(None)
-            } else {
-                None
-            });
+            return Ok((None, Vec::new()));
         }
-        let mut cols = Vec::new();
+        let mut items = Vec::new();
+        let mut aggregates = false;
         loop {
-            match self.peek() {
-                Tok::Ident(_) => cols.push(self.ident()?),
-                _ => return Ok(None),
+            let name = self.ident()?;
+            if matches!(self.peek(), Tok::LParen) {
+                self.next();
+                let arg = if matches!(self.peek(), Tok::Star | Tok::RParen) {
+                    if matches!(self.peek(), Tok::Star) {
+                        self.next();
+                    }
+                    None
+                } else {
+                    Some(self.ident()?)
+                };
+                self.expect(Tok::RParen)?;
+                items.push(match (name.to_ascii_lowercase().as_str(), arg) {
+                    ("count", None) => Agg::Count,
+                    ("sum", Some(f)) => Agg::Sum(f),
+                    ("avg", Some(f)) => Agg::Avg(f),
+                    ("min", Some(f)) => Agg::Min(f),
+                    ("max", Some(f)) => Agg::Max(f),
+                    ("count", Some(_)) => {
+                        return self.err("`count` counts rows: `count(*)`, not a field")
+                    }
+                    (f @ ("sum" | "avg" | "min" | "max"), None) => {
+                        return self.err(format!("`{f}` needs a field: `{f}(<field>)`"))
+                    }
+                    (other, _) => {
+                        return self.err(format!(
+                            "`{other}` is not an aggregate: count, sum, avg, min or max"
+                        ))
+                    }
+                });
+                aggregates = true;
+            } else {
+                items.push(Agg::Key(name));
             }
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
             self.next();
         }
-        Ok(if self.eat_kw("from") {
-            Some(Some(cols))
-        } else {
-            None
-        })
+        if aggregates {
+            return Ok((None, items));
+        }
+        let fields = items.into_iter().map(|a| a.label()).collect();
+        Ok((Some(fields), Vec::new()))
     }
 
     fn set(&mut self) -> Result<Statement> {

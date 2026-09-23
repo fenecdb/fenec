@@ -3,6 +3,7 @@
 //! This module is independent of FenecQL: plan structures can also be built
 //! straight from Rust (embedded use); FenecQL is just a front end producing them.
 
+use crate::collate::Collation;
 use crate::error::{Error, Result};
 use crate::schema::Schema;
 use crate::value::{DocId, Value};
@@ -438,10 +439,11 @@ pub struct Match {
 /// This is the no-graph retrieval path. `match` is cheap and recall-oriented,
 /// the vectors are read straight out of the store, and the reordering is
 /// exact over the candidate set -- so no HNSW graph has to be built, held,
-/// validated on open or rebuilt when it fails to validate. Measured on BEIR:
-/// on SciFact taking 50 candidates scores nDCG@10 0.676 against 0.645 for a
-/// full dense scan of the same vectors, and on FiQA 1 000 candidates match
-/// the full scan exactly (0.3687), each while scoring under 2% of the corpus.
+/// validated on open or rebuilt when it fails to validate. Measured on BEIR
+/// (`make beir`): on SciFact taking 50 candidates scores nDCG@10 0.654
+/// against 0.645 for a full dense scan of the same vectors, and on FiQA 1 000
+/// candidates come within 0.0003 of the full scan (0.368), each while scoring
+/// under 2% of the corpus.
 /// The lexical stage does not only save work -- it removes documents that are
 /// semantically close but lexically wrong.
 #[derive(Debug, Clone, PartialEq)]
@@ -450,6 +452,26 @@ pub struct Rerank {
     /// The query vector, given directly or through a parameter.
     pub vector: Expr,
     /// How many `match` candidates to rescore. None means the default.
+    pub candidates: Option<usize>,
+}
+
+/// `fuse`: `match` and `near` each rank their own candidates, and the two
+/// rankings are combined by reciprocal rank -- a document scores
+/// `1 / (k + rank)` from each list it is on. Ranks, not scores: a BM25 score
+/// and a cosine distance have no common scale to add them on.
+///
+/// Measured on BEIR (`make beir`, nDCG@10): on SciFact, where a claim shares
+/// its words with the evidence, 0.699 against 0.662 for `match` and 0.645 for
+/// `near` alone; on FiQA, where a question shares few words with its answer,
+/// 0.366 against 0.232 and 0.365 -- the weak side does not drag the strong
+/// one down. `rerank` at its default scores 0.643 and 0.360: it can only
+/// reorder what the words found, and `fuse` also takes what they missed. What
+/// that costs is the graph `near` walks, which `rerank` does without.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fuse {
+    /// The rank offset; 60 unless given, the value the method was published with.
+    pub k: Option<u32>,
+    /// How many candidates each side ranks. None means the default.
     pub candidates: Option<usize>,
 }
 
@@ -481,7 +503,7 @@ pub struct Lookup {
     /// None = all fields of the child.
     pub project: Option<Vec<String>>,
     pub filter: Option<Expr>,
-    pub order: Vec<(String, bool)>,
+    pub order: Vec<Sort>,
     pub limit: Option<usize>,
     pub offset: usize,
     /// `required`: drop a parent that no child matches.
@@ -549,6 +571,62 @@ pub const COUNT_COLUMN: &str = "count";
 /// The one column `explain` answers with.
 pub const PLAN_COLUMN: &str = "plan";
 
+/// An item of an aggregating select list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Agg {
+    /// The group's own value: the `group` field, listed.
+    Key(String),
+    /// `count(*)`: the rows.
+    Count,
+    Sum(String),
+    Avg(String),
+    Min(String),
+    Max(String),
+}
+
+impl Agg {
+    /// The column it answers under: the field, `count`, `sum(total)`.
+    pub fn label(&self) -> String {
+        match self {
+            Agg::Key(f) => f.clone(),
+            Agg::Count => COUNT_COLUMN.to_string(),
+            Agg::Sum(f) => format!("sum({f})"),
+            Agg::Avg(f) => format!("avg({f})"),
+            Agg::Min(f) => format!("min({f})"),
+            Agg::Max(f) => format!("max({f})"),
+        }
+    }
+
+    /// The field it reads, if any.
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Agg::Count => None,
+            Agg::Key(f) | Agg::Sum(f) | Agg::Avg(f) | Agg::Min(f) | Agg::Max(f) => Some(f),
+        }
+    }
+}
+
+/// One key of `order`: `order year desc`, `order name collate tr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sort {
+    pub field: String,
+    pub asc: bool,
+    /// `collate tr`: the field's text in a language's order rather than
+    /// its bytes'. None: byte order, which is what `@sorted` holds.
+    pub collate: Option<Collation>,
+}
+
+impl Sort {
+    /// `field` ascending, or descending, in byte order.
+    pub fn new(field: impl Into<String>, asc: bool) -> Sort {
+        Sort {
+            field: field.into(),
+            asc,
+            collate: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -561,16 +639,22 @@ pub struct Select {
     pub matcher: Option<Match>,
     /// `rerank`: exact vector ordering over the `match` candidates.
     pub rerank: Option<Rerank>,
-    /// Sort keys in priority order: (field, ascending?).
-    /// Empty = no ordering. Additional keys break ties:
-    /// `order year desc, title asc`.
-    pub order: Vec<(String, bool)>,
+    /// Sort keys in priority order. Empty = no ordering. Additional keys
+    /// break ties: `order year desc, title asc`.
+    pub order: Vec<Sort>,
     pub limit: Option<usize>,
     pub offset: usize,
     /// `count`: returns the number of matching rows instead of the rows.
     pub count: bool,
     /// `lookup`: children of another collection, attached per row.
     pub lookup: Option<Lookup>,
+    /// A select list that aggregates -- `select status, sum(total), count(*)`
+    /// -- in the order written. Empty: no aggregation.
+    pub aggregate: Vec<Agg>,
+    /// `group <field>`: one row per value of the field rather than one in all.
+    pub group: Option<String>,
+    /// `fuse`: `match` and `near` both, their rankings combined.
+    pub fuse: Option<Fuse>,
 }
 
 impl Select {
@@ -581,10 +665,35 @@ impl Select {
     pub fn check(&self) -> Result<()> {
         // `match` and `near` both decide the ordering. A query asking for
         // both is asking two questions, and silently picking one of them
-        // would answer the other one wrongly.
-        if self.matcher.is_some() && self.near.is_some() {
+        // would answer the other one wrongly -- unless `fuse` says how the
+        // two answers make one.
+        if let Some(f) = &self.fuse {
+            if self.matcher.is_none() || self.near.is_none() {
+                return Err(Error::Query(
+                    "`fuse` combines `match` and `near`: the query needs both".into(),
+                ));
+            }
+            if self.rerank.is_some() {
+                return Err(Error::Query(
+                    "`fuse` and `rerank` are two ways to use a vector with `match`: pick one"
+                        .into(),
+                ));
+            }
+            if f.candidates == Some(0) {
+                return Err(Error::Query(
+                    "`fuse` needs at least one candidate a side".into(),
+                ));
+            }
+            if !self.order.is_empty() {
+                return Err(Error::Query(
+                    "`fuse` cannot be combined with `order`: it orders by both rankings".into(),
+                ));
+            }
+        } else if self.matcher.is_some() && self.near.is_some() {
             return Err(Error::Query(
-                "`match` and `near` cannot be combined: both order the result".into(),
+                "`match` and `near` cannot be combined: both order the result; \
+                 `fuse` ranks by both"
+                    .into(),
             ));
         }
         if self.matcher.is_some() && !self.order.is_empty() {
@@ -657,6 +766,9 @@ impl Select {
                 seen.push(step.collection.as_str());
             }
         }
+        if !self.aggregate.is_empty() || self.group.is_some() {
+            self.check_aggregate()?;
+        }
         if !self.count {
             return Ok(());
         }
@@ -677,6 +789,70 @@ impl Select {
         };
         Err(Error::Query(format!(
             "`count` cannot be used together with `{clash}`"
+        )))
+    }
+
+    /// Aggregates follow `count`'s rules: they collapse rows, so nothing that
+    /// ranks the rows or hangs children from them combines with them, and a
+    /// single row has nothing to order or page. Grouped, the rows are the
+    /// groups, and those do.
+    fn check_aggregate(&self) -> Result<()> {
+        let Some(group) = &self.group else {
+            let clash = if !self.order.is_empty() {
+                "order"
+            } else if self.limit.is_some() {
+                "limit"
+            } else if self.offset != 0 {
+                "offset"
+            } else {
+                ""
+            };
+            if !clash.is_empty() {
+                return Err(Error::Query(format!(
+                    "aggregates answer one row, which `{clash}` has nothing to do with; \
+                     `group` makes a row per value"
+                )));
+            }
+            if let Some(Agg::Key(f)) = self.aggregate.iter().find(|a| matches!(a, Agg::Key(_))) {
+                return Err(Error::Query(format!(
+                    "`{f}` is neither aggregated nor grouped by"
+                )));
+            }
+            return self.check_aggregate_company();
+        };
+        if self.aggregate.is_empty() {
+            return Err(Error::Query(format!(
+                "`group {group}` needs an aggregate to answer with: `select {group}, count(*)`"
+            )));
+        }
+        for a in &self.aggregate {
+            if let Agg::Key(f) = a {
+                if f != group {
+                    return Err(Error::Query(format!(
+                        "`{f}` is neither aggregated nor grouped by"
+                    )));
+                }
+            }
+        }
+        self.check_aggregate_company()
+    }
+
+    fn check_aggregate_company(&self) -> Result<()> {
+        let clash = if self.near.is_some() {
+            "near"
+        } else if self.matcher.is_some() {
+            "match"
+        } else if self.lookup.is_some() {
+            "lookup"
+        } else if self.count {
+            "count"
+        } else if self.project.is_some() {
+            "select"
+        } else {
+            return Ok(());
+        };
+        Err(Error::Query(format!(
+            "aggregates cannot be used together with `{clash}`"
         )))
     }
 }
@@ -1056,7 +1232,7 @@ mod tests {
             Box::new(Expr::Field("price".into())),
             Box::new(Expr::Lit(Value::Int(10))),
         ));
-        sel.order = vec![("price".into(), false)];
+        sel.order = vec![Sort::new("price", false)];
         sel.limit = Some(20);
         sel.offset = 40;
         sel.project = Some(vec!["name".into()]);

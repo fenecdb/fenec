@@ -1,0 +1,70 @@
+# fenecdb with Prometheus and Grafana, the dashboard (grafana/fenecdb.json)
+# already loaded:
+#
+#   FENECPG_PASSWORD=secret FENEC_METRICS_TOKEN=scrape \
+#     docker compose -f monitoring/docker-compose.yml up -d
+#   open http://127.0.0.1:3000/d/fenecdb
+#
+# fenec-pg serves /_metrics on a listener of its own (--metrics), so the
+# pg port is the only data port. That listener is on the compose network
+# alone and still takes a token: a non-loopback address wants one.
+
+services:
+  fenecdb:
+    build: ..
+    image: fenecdb
+    command:
+      - --listen
+      - 0.0.0.0:5433
+      - --file
+      - /data/data.fenec
+      - --sync
+      - "250"
+      - --metrics
+      - 0.0.0.0:9464
+      - --admin-token
+      - "${FENEC_METRICS_TOKEN:?set a scrape token, e.g. FENEC_METRICS_TOKEN=scrape}"
+      # Statements that take 100 ms or longer go to the log with their text.
+      - --slow-ms
+      - "100"
+    environment:
+      FENECPG_PASSWORD: "${FENECPG_PASSWORD:?set a password first, e.g. FENECPG_PASSWORD=secret}"
+    ports:
+      - "127.0.0.1:5433:5433"
+    volumes:
+      - fenecdata:/data
+    mem_limit: 1g
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    # Prometheus reads a token from a file, not from the environment.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        printf %s "$$FENEC_METRICS_TOKEN" > /prometheus/token &&
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus
+    environment:
+      FENEC_METRICS_TOKEN: "${FENEC_METRICS_TOKEN:?set a scrape token}"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fenecdb.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/fenecdb.json:/var/lib/grafana/dashboards/fenecdb.json:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  fenecdata:

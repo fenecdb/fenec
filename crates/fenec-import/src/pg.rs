@@ -51,7 +51,7 @@ pub struct VectorOids {
 
 /// How a column is decoded from COPY text.
 #[derive(Debug, Clone, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Bool,
     Int,
     Float,
@@ -67,7 +67,7 @@ enum Kind {
 }
 
 /// The fenecdb type and decoder for an OID.
-fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
+pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
     let name = f.name.as_str();
     let col = |ty: DataType, src: &str| Column::new(name, ty, src);
 
@@ -242,7 +242,7 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value> {
+pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value> {
     let bad = |want: &str| {
         Error::Type(format!(
             "`{column}` expected {want}, could not parse `{}`",
@@ -512,7 +512,7 @@ pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
 }
 
 /// Quotes an identifier. `schema.table` is handled as two parts.
-fn quote_ident(name: &str) -> Result<String> {
+pub(crate) fn quote_ident(name: &str) -> Result<String> {
     if name.trim().is_empty() {
         return Err(Error::Query("the table name is empty".into()));
     }
