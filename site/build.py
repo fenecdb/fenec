@@ -395,6 +395,9 @@ def check_claims():
         "version": workspace_version(),
     }
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
+    # Every size fact is in KB; without a default the report of a drifted
+    # size died on a KeyError instead of saying which file drifted.
+    unit = {**{k: " KB" for k in truth}, **unit}
 
     problems = []
     for rel, pattern, fact, tol in CLAIMS:
@@ -458,9 +461,11 @@ Writing FenecQL -- the reference below spells it out in full:
 - Types: `bool int float text bytes timestamp vector<N> vector<N, f16>` and
   lists such as `[text]`. There is no decimal -- money is an `int` of cents --
   no UUID type (use `text @hash`) and no nested objects.
-- Indexes: `@hash` for equality, `@hnsw(cosine)` (or `l2`, `dot`) for
-  `near`, `@text` for `match`. Only `=` and `in [...]` inside an `and` chain
-  use an index, on a `@hash` field or on `id`; everything else scans.
+- Indexes: `@hash` for equality, `@sorted` for ranges and for `order` with a
+  `limit`, `@hnsw(cosine)` (or `l2`, `dot`) for `near`, `@text` for `match`.
+  Only an `and` chain uses an index: `=` and `in [...]` on a `@hash` field or
+  on `id`, `<`, `<=`, `>`, `>=` and `=` on a `@sorted` field; everything else
+  scans. `explain get ...` runs a query and returns the path it took.
 - `near` and `match` decide the order: neither combines with `order` or with
   the other, and each returns at most 10 000 rows (`limit + offset`). Both add
   a `_score` column.
@@ -471,7 +476,7 @@ Writing FenecQL -- the reference below spells it out in full:
 Every statement, by example:
 
 ```fenecql
-create collection articles (title text @hash, views int, tags [text], published timestamp, embed vector<4> @hnsw(cosine), body text @text)
+create collection articles (title text @hash, views int, tags [text], published timestamp @sorted, embed vector<4> @hnsw(cosine), body text @text)
 put articles {title: "Rust", views: 10, tags: ["lang"], published: "2026-09-01T10:00:00Z", embed: [0.1, 0.2, 0.3, 0.4], body: "Ownership and borrowing"}
 put articles [{title: "Zig", views: 3}, {title: "Go", views: 7}]
 get articles select title, views where views < 100 and tags has "lang" order views desc limit 5 offset 5
@@ -480,6 +485,7 @@ get articles select title where published >= "2026-01-01" near embed $1 limit 3
 get articles match body "borrowing" rerank embed $1 candidates 200 limit 10
 get articles order published desc limit 20 lookup comments on article_id where score >= 4 order published desc limit 3
 get articles count lookup comments on article_id required where score = 5
+explain get articles where views < 100 order published desc limit 5
 set articles {views: 11} where id = 7
 del articles where views > 100000
 create index on articles (views) @hash

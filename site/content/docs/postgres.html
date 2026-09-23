@@ -20,6 +20,13 @@ PostgreSQL ecosystem: vectors use the same text representation as pgvector
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>).</p>
 
+<p><code>explain get ...</code> answers the way PostgreSQL's
+<code>EXPLAIN ANALYZE</code> does on the wire: rows of text in one column,
+here <code>plan</code>, tagged <code>EXPLAIN</code>, so psql prints the plan
+and a driver reads it as rows. The steps are fenecdb's own — which index,
+how many rows each stage read — and are described under <a
+href="fenecql.html#explain">Explain</a>.</p>
+
 <p>With <code>--dir &lt;path&gt;</code> instead of <code>--file</code> the
 process serves a directory of tenant files over HTTP, one file per tenant under
 <code>/t/&lt;tenant&gt;/</code>, and the PostgreSQL listener is off. That mode,
@@ -69,12 +76,22 @@ reach the disk.</p>
 <table>
 <thead><tr><th><code>--sync</code></th><th>Meaning</th><th>Cost</th></tr></thead>
 <tbody>
-<tr><td><code>always</code></td><td><code>fsync</code> after every write statement</td><td class="n">~3 ms/write</td></tr>
+<tr><td><code>always</code></td><td>every write statement waits for an <code>fsync</code>; writes arriving together share one</td><td class="n">~3.7 ms a write alone</td></tr>
 <tr><td><code>250</code> (default)</td><td>periodic; at most one interval is at risk</td><td class="n">negligible</td></tr>
 <tr><td><code>off</code></td><td>on shutdown only</td><td class="n">none</td></tr>
 </tbody>
 </table>
 </div>
+
+<p>Under <code>always</code> the <code>fsync</code> runs after the write has
+let go of the exclusive lock, and the bytes reach the file there too. Readers
+therefore do not wait on the disk, and writes that arrive while one
+<code>fsync</code> runs are made durable together by the next. Over eight
+clients on macOS, where an <code>fsync</code> is a full cache flush of about
+3.7 ms, that took durable writes from 268 to 1 156 a second, and a read's p99
+under that load from 320 ms to 0.44 ms, against 0.15 ms idle. One client
+still gets one write per <code>fsync</code>. The HTTP listener's writes take
+the same path.</p>
 
 <p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
 and a final sync runs before exit. The exclusive lock is <b>held</b> until
@@ -202,7 +219,11 @@ FENECPG_PASSWORD=secret docker compose up -d
   <li><b>The restart cost depends on how it stopped.</b>
     <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
     written, so the next open takes 110 ms. After <code>kill -9</code> or a
-    cgroup OOM the graph is rebuilt instead: 10.2 s at 100 000 × 128.</li>
+    cgroup OOM the graph of the last checkpoint is restored and the writes
+    since it are applied to it: with 1 000 of them, 0.19 s at
+    100 000 × 128, where rebuilding the graph took 8.8 s. The cost grows with
+    the writes since that checkpoint, and the only one the server writes on
+    its own is the one at shutdown.</li>
 </ul>
 
 <div class="note trap">

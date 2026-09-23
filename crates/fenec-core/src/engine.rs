@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
+use crate::sorted::{Range as SortRange, SortedIndex};
 use crate::store::{Store, OP_DEL, OP_PUT};
 use crate::text::TextIndex;
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
@@ -90,7 +91,19 @@ pub trait Sink: Send {
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
+    /// `sync` in two halves: hands the buffered writes to the operating
+    /// system now, and returns what makes them durable, for the caller to
+    /// run once it has let go of the database -- a server's readers then do
+    /// not wait on the disk. `None` when this already made them durable.
+    fn flush(&mut self) -> Result<Option<Durability>> {
+        self.sync()?;
+        Ok(None)
+    }
 }
+
+/// What makes the writes a [`Sink::flush`] handed over durable: an fsync on
+/// the file they went to.
+pub type Durability = Box<dyn FnOnce() -> Result<()> + Send>;
 
 /// The party that wants to hear that a write happened.
 ///
@@ -127,6 +140,11 @@ pub struct Collection {
     pub hashes: HashMap<String, HashMap<Vec<u8>, Vec<DocId>>>,
     /// field name -> inverted index
     pub texts: HashMap<String, TextIndex>,
+    /// field name -> ordered index, in schema order. A `Vec` rather than a
+    /// map: a collection has a handful of ordered fields, the map's code was
+    /// 2.6 KB of the browser module, and a fixed order keeps the choice
+    /// between two ranges the same from one run to the next.
+    pub sorted: Vec<(String, SortedIndex)>,
 }
 
 impl Collection {
@@ -134,6 +152,7 @@ impl Collection {
         let mut vectors = HashMap::new();
         let mut hashes = HashMap::new();
         let mut texts = HashMap::new();
+        let mut sorted = Vec::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -148,6 +167,9 @@ impl Collection {
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                    sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                }
                 _ => {}
             }
         }
@@ -158,6 +180,7 @@ impl Collection {
             vectors,
             hashes,
             texts,
+            sorted,
         }
     }
 
@@ -167,6 +190,7 @@ impl Collection {
         self.vectors.clear();
         self.hashes.clear();
         self.texts.clear();
+        self.sorted.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -181,9 +205,19 @@ impl Collection {
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                    self.sorted.push((f.name.clone(), SortedIndex::new(ty)));
+                }
                 _ => {}
             }
         }
+    }
+
+    pub fn sorted_index(&self, field: &str) -> Option<&SortedIndex> {
+        self.sorted
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, ix)| ix)
     }
 
     fn index_doc(&mut self, doc: &Document) {
@@ -207,6 +241,9 @@ impl Collection {
             if let Some(Value::Text(t)) = doc.get(name) {
                 ix.insert(doc.id, t);
             }
+        }
+        for (name, ix) in self.sorted.iter_mut() {
+            ix.insert(doc.id, doc.get(name));
         }
     }
 
@@ -248,6 +285,9 @@ impl Collection {
             if let Some(Value::Text(t)) = doc.get(name) {
                 ix.remove(doc.id, t);
             }
+        }
+        for (name, ix) in self.sorted.iter_mut() {
+            ix.remove(doc.id, doc.get(name));
         }
     }
 
@@ -722,6 +762,12 @@ impl Database {
         db
     }
 
+    /// Sends every later write to `sink`. What was written before is not
+    /// in it: the caller starts it from a [`Self::snapshot`].
+    pub fn set_sink(&mut self, sink: Box<dyn Sink>) {
+        *self.sink_mut() = sink;
+    }
+
     /// Exclusive access to the sink. No lock is taken, since it is `&mut self`.
     fn sink_mut(&mut self) -> &mut Box<dyn Sink> {
         self.sink.get_mut().unwrap_or_else(|e| e.into_inner())
@@ -913,6 +959,10 @@ impl Database {
                         .map(|ix| ix.arena_bytes() + ix.graph_bytes())
                         .sum::<usize>()
                     + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
+                    + c.sorted
+                        .iter()
+                        .map(|(_, ix)| ix.memory_bytes())
+                        .sum::<usize>()
             })
             .sum()
     }
@@ -993,8 +1043,26 @@ impl Database {
         let mut seq_base = 0u64;
         let mut seq_seen = 0u64;
         let mut body_end = MAGIC.len();
+        // The graphs are restored where the image ends, against the
+        // documents they were written with, and the tail -- the writes since
+        // the checkpoint -- is applied to them afterwards, one touched
+        // document at a time. Restored after the whole file instead, a single
+        // write in the tail left the node count off and threw the graph away:
+        // a crash cost a full rebuild. Without the header (an old file) there
+        // is no boundary to restore at, and that is still what happens.
+        let mut has_header = false;
+        let mut restored: Option<Vec<(String, String)>> = None;
+        // Per collection, the documents the tail wrote. A `Vec`, not a map:
+        // a file has a handful of collections, and the map's code was 1.5 KB
+        // of the browser module.
+        let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
+        // Collections whose indexes the tail reset or replaced.
+        let mut reset: Vec<String> = Vec::new();
         while pos < bytes.len() {
             let tail = pos >= body_end;
+            if tail && has_header && restored.is_none() {
+                restored = Some(self.restore_graphs(&graphs)?);
+            }
             let rec = bytes[pos];
             pos += 1;
             match rec {
@@ -1008,6 +1076,9 @@ impl Database {
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
                     seq_seen += tail as u64;
+                    if tail {
+                        reset.push(schema.name.clone());
+                    }
                     by_id.insert(cid, schema.name.clone());
                     self.order.retain(|n| n != &schema.name);
                     self.order.push(schema.name.clone());
@@ -1030,6 +1101,7 @@ impl Database {
                     if let Some(name) = by_id.remove(&cid) {
                         self.collections.remove(&name);
                         self.order.retain(|n| n != &name);
+                        reset.push(name);
                     }
                 }
                 REC_DATA => {
@@ -1045,7 +1117,19 @@ impl Database {
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let c = self.collections.get_mut(&name).unwrap();
-                    let frames = c.store.replay(chunk)? as u64;
+                    let frames = if tail && has_header {
+                        let at = match touched.iter().position(|(n, _)| *n == name) {
+                            Some(at) => at,
+                            None => {
+                                touched.push((name, Vec::new()));
+                                touched.len() - 1
+                            }
+                        };
+                        let ids = &mut touched[at].1;
+                        c.store.replay_noting(chunk, &mut |id| ids.push(id))?
+                    } else {
+                        c.store.replay(chunk)?
+                    } as u64;
                     if tail {
                         seq_seen += frames;
                     }
@@ -1073,6 +1157,7 @@ impl Database {
                             if same_layout {
                                 c.schema = schema;
                                 c.reset_index_structures();
+                                reset.push(name.clone());
                             }
                         }
                     }
@@ -1117,6 +1202,7 @@ impl Database {
                     w.copy_from_slice(&bytes[pos + 8..pos + 16]);
                     pos += 16;
                     body_end = pos + u64::from_le_bytes(w) as usize;
+                    has_header = true;
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
             }
@@ -1126,53 +1212,121 @@ impl Database {
         // A cursor sitting exactly here (a quiet restart) gets an empty
         // answer; everything else is reseeded.
         self.changes.reset(seq_base + seq_seen);
-        // Indexes are derived data: restored from the persisted graph when
-        // there is one, rebuilt otherwise (or when validation fails).
-        self.rebuild_indexes_with(&graphs)?;
+        // Indexes are derived data: a graph restored from the file takes the
+        // tail's writes; everything else is rebuilt from the documents.
+        let restored = match restored {
+            Some(r) => r,
+            None => self.restore_graphs(&graphs)?,
+        };
+        self.rebuild_indexes_with(&restored, &reset, &touched)?;
         Ok(())
     }
 
-    pub fn rebuild_indexes(&mut self) -> Result<()> {
-        self.rebuild_indexes_with(&HashMap::new())
+    /// Restores each persisted graph against the documents as they stand,
+    /// keeping it only if it describes them exactly: every live node's
+    /// document holds a vector -- `restore_graph` checks that -- and every
+    /// document holding one has a node. The second used to be a comparison
+    /// with the number of documents, so a single document without a vector
+    /// threw the graph away on every open.
+    fn restore_graphs(
+        &mut self,
+        graphs: &HashMap<(String, String), Vec<u8>>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut restored = Vec::new();
+        for ((name, field), bytes) in graphs {
+            let Some(c) = self.collections.get_mut(name) else {
+                continue;
+            };
+            let Some(pos) = c.schema.field_pos(field) else {
+                continue;
+            };
+            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+                continue;
+            };
+            if !c.vectors.contains_key(field) {
+                continue;
+            }
+            let store = &c.store;
+            let Some(ix) = VectorIndex::restore_graph(bytes, dim, prec, |doc, out| {
+                store.read_vector_into(doc, pos, out).unwrap_or(false)
+            }) else {
+                continue;
+            };
+            let mut with_vector = 0;
+            for id in store.iter_ids() {
+                with_vector += store.has_vector(id, pos)? as usize;
+            }
+            if ix.len() == with_vector {
+                c.vectors.insert(field.clone(), ix);
+                restored.push((name.clone(), field.clone()));
+            }
+        }
+        Ok(restored)
     }
 
-    fn rebuild_indexes_with(&mut self, graphs: &HashMap<(String, String), Vec<u8>>) -> Result<()> {
+    pub fn rebuild_indexes(&mut self) -> Result<()> {
+        self.rebuild_indexes_with(&[], &[], &[])
+    }
+
+    /// Fills the derived indexes from the documents. A vector index named in
+    /// `restored` came back from the file as of the checkpoint, and takes
+    /// only the documents the tail after it touched -- unless the tail
+    /// `reset` its collection's indexes, which a restored graph cannot
+    /// survive.
+    fn rebuild_indexes_with(
+        &mut self,
+        restored: &[(String, String)],
+        reset: &[String],
+        touched: &[(String, Vec<DocId>)],
+    ) -> Result<()> {
         for name in self.order.clone() {
             let c = self.collections.get_mut(&name).unwrap();
             // `ids()` comes back ascending; no extra sorting needed.
             let ids: Vec<DocId> = c.store.ids();
-
-            // 1) Try to restore from the persisted graph.
             let fields: Vec<String> = c.vectors.keys().cloned().collect();
-            let mut restored: Vec<String> = Vec::new();
-            for field in &fields {
-                let Some(bytes) = graphs.get(&(name.clone(), field.clone())) else {
+            let fresh = reset.contains(&name);
+            let kept =
+                |field: &str| !fresh && restored.iter().any(|(n, f)| *n == name && f == field);
+
+            // 1) The restored graphs take the tail's writes the way the write
+            // path took them: the node a touched document had is retired,
+            // and the vector it holds now, if any, goes in anew.
+            let mut tail = touched
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, ids)| ids.clone())
+                .unwrap_or_default();
+            tail.sort_unstable();
+            tail.dedup();
+            for field in fields.iter().filter(|f| kept(f)) {
+                let Some(pos) = c.schema.field_pos(field) else {
                     continue;
                 };
-                let (dim, pos) = {
-                    let ix = &c.vectors[field];
-                    (ix.dim, c.schema.field_pos(field))
-                };
-                let Some(pos) = pos else { continue };
-                let store = &c.store;
-                let candidate = VectorIndex::restore_graph(bytes, dim, |doc, out| {
-                    store.read_vector_into(doc, pos, out).unwrap_or(false)
-                });
-                if let Some(ix) = candidate {
-                    // If the live document count does not match, the graph is stale.
-                    if ix.len() == ids.len() {
-                        c.vectors.insert(field.clone(), ix);
-                        restored.push(field.clone());
+                let mut items: Vec<(DocId, Vec<f32>)> = Vec::new();
+                let mut buf = Vec::new();
+                for &id in &tail {
+                    if c.store.read_vector_into(id, pos, &mut buf)? {
+                        items.push((id, buf.clone()));
                     }
                 }
+                let ix = c
+                    .vectors
+                    .get_mut(field)
+                    .expect("a restored field has its index");
+                for &id in &tail {
+                    ix.remove(id);
+                }
+                ix.insert_batch(&items);
             }
 
-            // 2) Rebuild whatever could not be restored.
+            // 2) Rebuild whatever could not be restored, at the field's own
+            // precision -- `VectorIndex::new` would have made every rebuilt
+            // `vector<N, f16>` index an f32 one.
             for (field, ix) in c.vectors.iter_mut() {
-                if restored.contains(field) {
+                if kept(field) {
                     continue;
                 }
-                *ix = VectorIndex::new(ix.dim, ix.spec);
+                *ix = VectorIndex::with_precision(ix.dim, ix.spec, ix.precision());
                 // The document count is known, so the arena is sized in one go.
                 ix.reserve(ids.len());
             }
@@ -1182,7 +1336,11 @@ impl Database {
             for t in c.texts.values_mut() {
                 t.clear();
             }
-            if restored.len() == fields.len() && c.hashes.is_empty() && c.texts.is_empty() {
+            if fields.iter().all(|f| kept(f))
+                && c.hashes.is_empty()
+                && c.texts.is_empty()
+                && c.sorted.is_empty()
+            {
                 continue; // everything restored, no need to read the documents
             }
             // The rebuild goes through the batch path as well.
@@ -1205,8 +1363,19 @@ impl Database {
             for ix in c.texts.values_mut() {
                 ix.shrink_to_fit();
             }
+            // Built from the documents in one pass each, sorted once rather
+            // than inserted row by row.
+            for (field, ix) in c.sorted.iter_mut() {
+                let Some(fd) = c.schema.field(field) else {
+                    continue;
+                };
+                *ix = SortedIndex::build(
+                    &fd.ty,
+                    &mut docs.iter().map(|d| (d.id, d.get(field).cloned())),
+                );
+            }
             for (field, ix) in c.vectors.iter_mut() {
-                if restored.contains(field) {
+                if kept(field) {
                     continue;
                 }
                 let items: Vec<(DocId, Vec<f32>)> = docs
@@ -1257,6 +1426,28 @@ impl Database {
         Ok(())
     }
 
+    /// The first half of [`Self::sync`], for a caller that will not hold the
+    /// database while the disk works: the writes go to the operating
+    /// system, and what comes back makes them durable. Run it, and if it
+    /// fails, report the failure back with [`Self::fail`] -- the second half
+    /// runs where the engine cannot see it.
+    pub fn flush(&mut self) -> Result<Option<Durability>> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().flush();
+        let durable = self.storage(r)?;
+        self.dirty = false;
+        Ok(durable)
+    }
+
+    /// Records a storage failure found outside the engine, a
+    /// [`Durability`] that failed: every later write and sync is refused, as
+    /// after one the engine saw itself.
+    pub fn fail(&mut self, e: &Error) {
+        if self.failed.is_none() {
+            self.failed = Some(e.to_string());
+        }
+    }
+
     /// Whether a write is still waiting to be pushed to disk.
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -1299,6 +1490,7 @@ impl Database {
     pub fn query(&self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         match stmt {
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
+            Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
                     .iter()
@@ -1346,6 +1538,7 @@ impl Database {
             } => self.create_index(collection, field, kind, *if_not_exists),
             Statement::Put { collection, docs } => self.put(collection, docs, params),
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
+            Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::Update {
                 collection,
                 set,
@@ -1436,6 +1629,11 @@ impl Database {
                 )));
             }
         }
+        if *kind == IndexKind::Sorted && !SortedIndex::supports(&f.ty) {
+            return Err(Error::Type(format!(
+                "field `{field}` is not int, float, timestamp or text, no ordered index can be built"
+            )));
+        }
 
         let cid = c.id;
         let c = self.collections.get_mut(collection).unwrap();
@@ -1478,6 +1676,17 @@ impl Database {
                 }
                 ix.shrink_to_fit();
                 c.texts.insert(field.to_string(), ix);
+            }
+            IndexKind::Sorted => {
+                let ty = c.schema.fields[pos].ty.clone();
+                let mut rows = Vec::with_capacity(c.store.len());
+                for id in c.store.ids() {
+                    rows.push((id, c.store.read_field(id, pos)?));
+                }
+                c.sorted.push((
+                    field.to_string(),
+                    SortedIndex::build(&ty, &mut rows.into_iter()),
+                ));
             }
             IndexKind::None => {}
         }
@@ -1612,17 +1821,82 @@ impl Database {
         let want = cap.unwrap_or(usize::MAX);
 
         let Some(f) = filter else {
+            plan(|| "filter: none, rows in id order".into());
             return Ok(match cap {
                 Some(k) => c.store.iter_ids().take(k).collect(),
                 None => c.store.ids(),
             });
         };
 
+        let mut out = Vec::new();
+        let mut tested = 0usize;
+        let scanned = match self.filter_candidates(c, f, params, want)? {
+            // The filter is exactly what the index answered: no row needs a
+            // second look.
+            Some((mut b, true)) => {
+                b.truncate(want);
+                return Ok(b);
+            }
+            Some((b, false)) => {
+                for id in b {
+                    if out.len() >= want {
+                        break;
+                    }
+                    tested += 1;
+                    if row_matches(c, f, id, &ctx)? {
+                        out.push(id);
+                    }
+                }
+                false
+            }
+            // No index: the full scan, read lazily so a cap stops it early.
+            None => {
+                for id in c.store.iter_ids() {
+                    if out.len() >= want {
+                        break;
+                    }
+                    tested += 1;
+                    if row_matches(c, f, id, &ctx)? {
+                        out.push(id);
+                    }
+                }
+                true
+            }
+        };
+        plan(|| {
+            let what = if scanned {
+                format!("a full scan, {tested} of {} rows tested", c.store.len())
+            } else {
+                format!("{tested} candidates tested")
+            };
+            let stop = if out.len() == want {
+                ", stopped at the page"
+            } else {
+                ""
+            };
+            format!("filter: {what}, {} matched{stop}", out.len())
+        });
+        Ok(out)
+    }
+
+    /// The rows an index narrows a filter to, ascending and live, and
+    /// whether they are the answer itself -- `None` when no index narrows
+    /// it and every row has to be tested. `want` is how many matches the
+    /// caller will take, which bounds how wide a range is worth reading.
+    fn filter_candidates(
+        &self,
+        c: &Collection,
+        f: &Expr,
+        params: &[Value],
+        want: usize,
+    ) -> Result<Option<(Vec<DocId>, bool)>> {
         // Hash index pushdown. The candidate set is picked from the smallest
         // of the indexable equalities in the `and` chain.
         let mut eqs = Vec::new();
         f.conjunct_equalities(params, &mut eqs);
         let mut candidates: Option<Vec<DocId>> = None;
+        // Which index the candidates came from, for `explain`.
+        let mut source: (&str, &str) = ("", "");
         for (field, val) in eqs {
             if field == "id" {
                 let Some(hit) = id_candidates(&c.store, &[val]) else {
@@ -1634,6 +1908,7 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
+                    source = ("the id index", "id");
                 }
                 continue;
             }
@@ -1660,6 +1935,7 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(bucket);
+                source = ("the hash index on", field);
             }
         }
 
@@ -1685,6 +1961,7 @@ impl Database {
                     .unwrap_or(true)
                 {
                     candidates = Some(hit);
+                    source = ("the id index, `in`", "id");
                     bare_in = matches!(f, Expr::In(..));
                 }
                 continue;
@@ -1731,6 +2008,7 @@ impl Database {
                 .unwrap_or(true)
             {
                 candidates = Some(union);
+                source = ("the hash index, `in`, on", field);
                 // Exact only when the list is the whole filter. With anything
                 // `and`ed on, every candidate still has to be tested -- and a
                 // filter holding an equality as well cannot be a bare `in`,
@@ -1739,49 +2017,327 @@ impl Database {
             }
         }
 
-        let matches = |id: DocId| -> Result<bool> {
-            let mut row = StoreRow {
-                store: &c.store,
-                schema: &c.schema,
-                id,
-                memo: Vec::new(),
-            };
-            Ok(truthy(&eval(f, &mut row, &ctx)?))
-        };
-
-        let mut out = Vec::new();
-        match candidates {
-            Some(mut b) => {
-                b.sort_unstable();
-                b.retain(|id| c.store.contains(*id));
-                // If the filter is exactly that equality, or exactly a list
-                // that was pushed down whole, no re-evaluation is needed.
-                if f.is_bare_equality(params) || bare_in {
-                    b.truncate(want);
-                    return Ok(b);
+        // Comparisons over an ordered index narrow to a range. It is collected
+        // only while it stays smaller than the candidates already in hand and
+        // than the scan it would replace: past half the collection the scan
+        // is cheaper than gathering and sorting the ids, and a page of twenty
+        // over a wide range is found sooner by the scan in id order.
+        let mut bare_range = false;
+        if !c.sorted.is_empty() {
+            let mut ranges = Vec::new();
+            f.conjunct_ranges(params, &mut ranges);
+            let n = c.store.len();
+            for (field, ix) in &c.sorted {
+                if !ranges.iter().any(|r| r.0 == field) {
+                    continue;
                 }
-                for id in b {
-                    if out.len() >= want {
-                        break;
-                    }
-                    if matches(id)? {
-                        out.push(id);
-                    }
+                let Some(fd) = c.schema.field(field) else {
+                    continue;
+                };
+                let Some((range, exact)) = sorted_range(&fd.ty, field, f, params) else {
+                    continue;
+                };
+                let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
+                if want != usize::MAX {
+                    cap = cap.min(want.saturating_mul(64).max(4096));
                 }
-            }
-            // No index: the full scan, read lazily so a cap stops it early.
-            None => {
-                for id in c.store.iter_ids() {
-                    if out.len() >= want {
-                        break;
-                    }
-                    if matches(id)? {
-                        out.push(id);
-                    }
+                if let Some(ids) = ix.range_ids(&range, cap) {
+                    candidates = Some(ids);
+                    source = ("the ordered index on", field);
+                    bare_range = exact && f.only_ranges_on(field, params);
+                    bare_in = false;
+                } else {
+                    plan(|| {
+                        format!(
+                            "filter: the ordered index on {field} not used, \
+                             its range holds more than {cap} rows"
+                        )
+                    });
                 }
             }
         }
-        Ok(out)
+
+        Ok(candidates.map(|mut b| {
+            b.sort_unstable();
+            b.retain(|id| c.store.contains(*id));
+            // If the filter is exactly that equality, or exactly a list that
+            // was pushed down whole, or exactly the range an ordered index
+            // expressed, no re-evaluation is needed.
+            let exact = f.is_bare_equality(params) || bare_in || bare_range;
+            plan(|| {
+                let (index, field) = source;
+                let named = if field == "id" {
+                    index.to_string()
+                } else {
+                    format!("{index} {field}")
+                };
+                let then = if exact { ", which is the answer" } else { "" };
+                format!("filter: {named}, {} rows{then}", b.len())
+            });
+            (b, exact)
+        }))
+    }
+
+    /// A filtered `near`, finding the filter's rows only as far as the plan
+    /// needs them.
+    ///
+    /// The plan follows the size of that set. At most `probe_budget` rows --
+    /// about the number of distances the ANN would measure anyway -- are
+    /// searched exactly; more go through the ANN, whose candidates are tested
+    /// against the filter; and an ANN that comes up short, because the filter
+    /// correlates with the vector, falls back to searching the whole set.
+    ///
+    /// Finding the whole set first was nearly all of the query when no index
+    /// narrows the filter: `year >= 2020` over 200 000 x 128 took 16.4 ms,
+    /// of which the ANN was 0.14. But the plan only needs to know whether
+    /// the set is larger than the budget, so the rows are probed until it is
+    /// (1.1 ms), and the rest is read only where the whole set would have
+    /// been used -- so the answer is the same one, row for row, and a filter
+    /// under the budget costs what it did (17.9 ms against 17.6).
+    #[allow(clippy::too_many_arguments)]
+    fn filtered_near(
+        &self,
+        c: &Collection,
+        ix: &VectorIndex,
+        f: &Expr,
+        qv: &[f32],
+        want: usize,
+        near: &Near,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let budget = ix.probe_budget(near.ef);
+        let mut probe = match self.filter_candidates(c, f, params, usize::MAX)? {
+            Some((rows, true)) => FilterProbe::done(rows),
+            Some((rows, false)) => FilterProbe::new(rows),
+            None => FilterProbe::new(c.store.ids()),
+        };
+        let matches = |id: DocId| row_matches(c, f, id, ctx);
+        // `exact` is the verification path: it always scans everything.
+        let cap = if near.exact { usize::MAX } else { budget + 1 };
+        let total = probe.rows.len();
+        let whole = probe.run(cap, matches)?;
+        // Rows an index answered exactly were not probed; that step said so.
+        if total > 0 {
+            plan(|| {
+                let found = if whole {
+                    "the whole set".to_string()
+                } else {
+                    format!("more than the ANN budget of {budget}")
+                };
+                format!(
+                    "filter: probed {} of {total} rows, {} matched, {found}",
+                    probe.tested,
+                    probe.matched.len()
+                )
+            });
+        }
+        let field = &near.field;
+        if whole {
+            let ids = probe.into_sorted();
+            let accept = |id: DocId| ids.binary_search(&id).is_ok();
+            return Ok(if near.exact {
+                plan(|| {
+                    format!("near: exact scan over every vector in {field}, the set as a test")
+                });
+                ix.search_exact(qv, want, accept)
+            } else if ids.len() <= budget {
+                // The set is smaller than the number of candidates the ANN
+                // walk would measure anyway: the walk buys nothing, and
+                // searching the set directly is both cheaper and exact.
+                plan(|| {
+                    format!(
+                        "near: the {} rows searched exactly, under the ANN budget of {budget}",
+                        ids.len()
+                    )
+                });
+                ix.search_ids(qv, want, &ids)
+            } else {
+                let hits = ix.search(qv, want, near.ef, accept);
+                plan(|| {
+                    format!(
+                        "near: ANN over {field}, the set as a test, {} kept",
+                        hits.len()
+                    )
+                });
+                if hits.len() < want.min(ids.len()) {
+                    plan(|| {
+                        format!(
+                            "near: the ANN came up short, the {} rows searched exactly",
+                            ids.len()
+                        )
+                    });
+                    ix.search_ids(qv, want, &ids)
+                } else {
+                    hits
+                }
+            });
+        }
+        // More rows match than the budget: the ANN, testing each candidate in
+        // distance order as `search` would test membership. The beam is the
+        // one `search` would use for `want`, so the candidates are the same.
+        let ef = near.ef.unwrap_or(ix.spec.ef_search);
+        let mut hits = Vec::with_capacity(want);
+        let mut tested = 0;
+        for (id, score) in ix.search(qv, want.max(ef), near.ef, |_| true) {
+            if hits.len() == want {
+                break;
+            }
+            tested += 1;
+            if c.store.contains(id) && matches(id)? {
+                hits.push((id, score));
+            }
+        }
+        plan(|| {
+            format!(
+                "near: ANN over {field}, {}, {tested} candidates tested, {} kept",
+                beam(ix, near, want),
+                hits.len()
+            )
+        });
+        // The filter is applied after the candidates are gathered, so a
+        // filter correlated with the vector can eliminate all of them. If the
+        // result comes up short the rest of the set is found and searched
+        // exactly, as it always was.
+        if hits.len() < want {
+            probe.run(usize::MAX, matches)?;
+            let ids = probe.into_sorted();
+            if hits.len() < want.min(ids.len()) {
+                plan(|| {
+                    format!(
+                        "near: the ANN came up short, the probe finished, {} rows searched exactly",
+                        ids.len()
+                    )
+                });
+                return Ok(ix.search_ids(qv, want, &ids));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// `order <field> limit N` answered by walking an ordered index and
+    /// stopping at the page -- `None` when that is not the better plan.
+    ///
+    /// The walk visits rows in order and tests the filter on each, so it wins
+    /// when the page fills early; an equality over a hash index, an `in`, or
+    /// a narrow range on another ordered field names a small set that is
+    /// cheaper to sort, and those keep the sorting path. Without a `limit`
+    /// every row is emitted anyway, and `required` needs every candidate, so
+    /// both keep it too. A range on the ordered field itself bounds the walk.
+    fn walk_order(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Option<Vec<DocId>>> {
+        let [(field, asc)] = sel.order.as_slice() else {
+            return Ok(None);
+        };
+        let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
+            return Ok(None);
+        };
+        if ix.has_nan() {
+            plan(|| format!("order: the ordered index on {field} not walked, it holds a NaN"));
+            return Ok(None);
+        }
+        if sel.lookup.as_ref().is_some_and(|l| l.required) {
+            return Ok(None);
+        }
+        let want = limit.saturating_add(sel.offset);
+        let mut range = None;
+        let mut bare = true;
+        if let Some(f) = &sel.filter {
+            let indexed = |name: &str| name == "id" || c.hashes.contains_key(name);
+            let mut eqs = Vec::new();
+            f.conjunct_equalities(params, &mut eqs);
+            let mut ins = Vec::new();
+            f.conjunct_in_sets(params, &mut ins);
+            if eqs.iter().any(|(n, _)| indexed(n)) || ins.iter().any(|(n, _)| indexed(n)) {
+                plan(|| {
+                    format!("order: the ordered index on {field} not walked, an equality names fewer rows")
+                });
+                return Ok(None);
+            }
+            let mut ranges = Vec::new();
+            f.conjunct_ranges(params, &mut ranges);
+            for (name, _, _) in &ranges {
+                if name == field {
+                    continue;
+                }
+                let (Some(other), Some(fd)) = (c.sorted_index(name), c.schema.field(name)) else {
+                    continue;
+                };
+                if let Some((r, _)) = sorted_range(&fd.ty, name, f, params) {
+                    if other.range_ids(&r, 4096).is_some() {
+                        plan(|| {
+                            format!(
+                                "order: the ordered index on {field} not walked, \
+                                 the range on {name} names fewer rows"
+                            )
+                        });
+                        return Ok(None);
+                    }
+                }
+            }
+            let fd = c
+                .schema
+                .field(field)
+                .expect("an ordered index has its field");
+            let own = sorted_range(&fd.ty, field, f, params);
+            bare = matches!(&own, Some((_, true))) && f.only_ranges_on(field, params);
+            range = own.map(|(r, _)| r);
+        }
+        let mut out = Vec::with_capacity(want.min(4096));
+        if want == 0 {
+            return Ok(Some(out));
+        }
+        // A filter the index cannot narrow is tested as the walk passes each
+        // row, and one that matches almost nothing would have the walk read
+        // every row in key order: random reads, which over a million rows
+        // took 237 ms against the scan's 121. Past an eighth of the
+        // collection the scan is the better bet, and the rows walked so far
+        // are what the wrong guess cost -- 1.25x the scan at worst, while a
+        // filter matching 1% still fills the page in 0.29 ms against 125.
+        let budget = (c.store.len() / 8).max(want);
+        let (mut walked, mut gave_up) = (0usize, false);
+        ix.walk(!asc, range.as_ref(), |id| {
+            if !bare {
+                if let Some(f) = &sel.filter {
+                    walked += 1;
+                    if walked > budget {
+                        gave_up = true;
+                        return Ok(false);
+                    }
+                    if !row_matches(c, f, id, ctx)? {
+                        return Ok(true);
+                    }
+                }
+            }
+            out.push(id);
+            Ok(out.len() < want)
+        })?;
+        plan(|| {
+            let dir = if *asc { "" } else { " desc" };
+            if gave_up {
+                format!(
+                    "order: walked the ordered index on {field}{dir}, gave up after {budget} rows \
+                     with {} kept, back to the scan",
+                    out.len()
+                )
+            } else if bare {
+                format!(
+                    "order: walked the ordered index on {field}{dir}, {} rows",
+                    out.len()
+                )
+            } else {
+                format!(
+                    "order: walked the ordered index on {field}{dir}, {walked} rows tested, {} kept",
+                    out.len()
+                )
+            }
+        });
+        Ok((!gave_up).then_some(out))
     }
 
     /// `match`, and `rerank` on top of it when the query asks for one.
@@ -1836,6 +2392,13 @@ impl Database {
         let want = bound.unwrap_or(MAX_MATCH_ROWS).max(1);
         let Some(rr) = &sel.rerank else {
             let hits = ix.search(&query, want, accept);
+            plan(|| {
+                format!(
+                    "match: the text index on {}, {} ranked",
+                    m.field,
+                    hits.len()
+                )
+            });
             return Ok(hits.into_iter().map(|(id, s)| (id, Some(s))).collect());
         };
 
@@ -1880,6 +2443,14 @@ impl Database {
         };
 
         let hits = ix.search(&query, candidates, accept);
+        plan(|| {
+            format!(
+                "match: the text index on {}, {} candidates",
+                m.field,
+                hits.len()
+            )
+        });
+        plan(|| format!("rerank: {}, exact distance read from the store", rr.field));
         let mut out: Vec<(DocId, f32)> = Vec::with_capacity(hits.len());
         let mut buf: Vec<f32> = Vec::with_capacity(dim);
         for (id, _) in hits {
@@ -2152,13 +2723,24 @@ impl Database {
                     let n = child.store.len() as u64;
                     let b = cands.len() as u64;
                     if (ids.len() as u64).saturating_mul(n) > b.saturating_mul(b) {
-                        return self.retain_via_children(&steps, ids, cands, ctx);
+                        let parents = ids.len();
+                        let kept = self.retain_via_children(&steps, ids, cands, ctx)?;
+                        plan(|| {
+                            format!(
+                                "required: from the child side, {} children in a hash bucket, \
+                                 {} of {parents} parents kept",
+                                cands.len(),
+                                kept.len()
+                            )
+                        });
+                        return Ok(kept);
                     }
                 }
             }
         }
 
         let mut out = Vec::new();
+        let parents = ids.len();
         for id in ids {
             let key = match parent_pos {
                 None => Value::Int(id as i64),
@@ -2171,6 +2753,14 @@ impl Database {
                 out.push(id);
             }
         }
+        plan(|| {
+            format!(
+                "required: from the parent side, {} parents probed in {}, {} kept",
+                parents,
+                l.collection,
+                out.len()
+            )
+        });
         Ok(out)
     }
 
@@ -2319,6 +2909,19 @@ impl Database {
             groups.push(group);
         }
 
+        plan(|| {
+            let by = match probe {
+                Probe::Id => "the id",
+                Probe::Hash(..) => "the hash index",
+            };
+            format!(
+                "lookup: {} on {}, {by} probed for {} parents, {} children",
+                l.collection,
+                l.child_field,
+                ids.len(),
+                groups.iter().map(Vec::len).sum::<usize>()
+            )
+        });
         // The level below is aligned to these rows read left to right, so it
         // is handed exactly that: one flat list of ids, in group order.
         let nested = match steps.get(depth + 1) {
@@ -2334,6 +2937,31 @@ impl Database {
             columns,
             groups,
             nested,
+        })
+    }
+
+    /// Runs the query and answers with the path it took instead of its
+    /// rows: one row a step, in the order the steps ran.
+    fn explain(&self, sel: &Select, params: &[Value]) -> Result<ResultSet> {
+        PLAN.with(|p| *p.borrow_mut() = Some(Vec::new()));
+        let result = self.select(sel, params);
+        let mut steps = PLAN.with(|p| p.borrow_mut().take()).unwrap_or_default();
+        let rs = result?;
+        steps.push(match rs.rows.first().map(|r| &r.values[..]) {
+            Some([Value::Int(n)]) if sel.count => format!("count: {n}"),
+            _ => format!("rows: {}", rs.rows.len()),
+        });
+        Ok(ResultSet {
+            columns: vec![PLAN_COLUMN.to_string()],
+            rows: steps
+                .into_iter()
+                .map(|s| Row {
+                    id: 0,
+                    values: vec![Value::Text(s)],
+                    score: None,
+                })
+                .collect(),
+            nested: None,
         })
     }
 
@@ -2413,46 +3041,22 @@ impl Database {
                 )));
             }
 
-            // When there is a filter, work out the matching id set first and
-            // then use it as a membership test during the ANN walk.
-            let allowed: Option<Vec<DocId>> = match &sel.filter {
-                Some(_) => Some(self.matching_ids(&sel.collection, &sel.filter, params)?),
-                None => None,
-            };
-            let accept = |id: DocId| match &allowed {
-                Some(list) => list.binary_search(&id).is_ok(),
-                None => true,
-            };
-
             let want = bound.unwrap_or(MAX_NEAR_ROWS).max(1);
-            let hits = match &allowed {
+            let hits = match &sel.filter {
                 // No filter: ANN directly, or a full scan when asked for.
-                None if near.exact => ix.search_exact(&qv, want, accept),
-                None => ix.search(&qv, want, near.ef, accept),
-                // `exact` is the verification path: it always scans everything.
-                Some(_) if near.exact => ix.search_exact(&qv, want, accept),
-                Some(ids) if ids.len() <= ix.probe_budget(near.ef) => {
-                    // The filter set is smaller than the number of candidates
-                    // the ANN walk would measure anyway: the walk buys nothing,
-                    // and scanning directly is both cheaper and exact.
-                    ix.search_ids(&qv, want, ids)
+                None if near.exact => {
+                    plan(|| format!("near: exact scan over every vector in {}", near.field));
+                    ix.search_exact(&qv, want, |_| true)
                 }
-                Some(ids) => {
-                    let hits = ix.search(&qv, want, near.ef, &accept);
-                    // `search` applies the filter *after* the candidates are
-                    // gathered. A selective filter may leave fewer results than
-                    // the limit, or none at all when the filter field
-                    // correlates with the vector (all `ef` nearest neighbours
-                    // are eliminated). If it comes up short we scan the whole
-                    // filter set and give the right answer.
-                    if hits.len() < want.min(ids.len()) {
-                        ix.search_ids(&qv, want, ids)
-                    } else {
-                        hits
-                    }
+                None => {
+                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                    ix.search(&qv, want, near.ef, |_| true)
                 }
+                Some(f) => self.filtered_near(c, ix, f, &qv, want, near, params, &ctx)?,
             };
             scored = hits.into_iter().map(|(id, s)| (id, Some(s))).collect();
+        } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
+            scored = ids.into_iter().map(|id| (id, None)).collect();
         } else {
             // With no ordering the page is the first `offset + limit` matches
             // in id order, so the scan can stop there. `required` drops
@@ -2494,6 +3098,22 @@ impl Database {
                     .limit
                     .map(|l| l.saturating_add(sel.offset))
                     .unwrap_or(usize::MAX);
+                plan(|| {
+                    // Built by hand: `join` brought a 1.2 KB copy of its own
+                    // into the browser module for this one line.
+                    let mut by = String::new();
+                    for (i, (f, asc)) in sel.order.iter().enumerate() {
+                        by.push_str(if i == 0 { "" } else { ", " });
+                        by.push_str(f);
+                        by.push_str(if *asc { "" } else { " desc" });
+                    }
+                    let kept = if k < ids.len() {
+                        format!("the first {k} put in order")
+                    } else {
+                        "all put in order".to_string()
+                    };
+                    format!("order: {by}, every key read, {} matches, {kept}", ids.len())
+                });
                 ids = order_ids(&c.store, &ids, &keys, k)?;
             }
             scored = ids.into_iter().map(|id| (id, None)).collect();
@@ -2638,6 +3258,172 @@ impl Database {
             "compaction done, {reclaimed} bytes reclaimed"
         )))
     }
+}
+
+thread_local! {
+    /// The steps an `explain` is recording on this thread, `None` outside
+    /// one. A thread-local rather than a parameter: the steps are taken deep
+    /// in paths every query shares, and threading a recorder through them
+    /// would touch every signature on the way for a statement most queries
+    /// never are. Outside an `explain` a step costs one check of this cell.
+    static PLAN: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records a step of the plan while an `explain` runs; `step` is called only
+/// then.
+///
+/// Only the test is inlined into the caller. With the whole of it generic
+/// over the closure, each of the two dozen steps carried its own copy of the
+/// thread-local access and the push, and `explain` cost the browser module
+/// 16 KB.
+#[inline(always)]
+fn plan(step: impl FnOnce() -> String) {
+    if planning() {
+        push_step(step());
+    }
+}
+
+#[inline(never)]
+fn planning() -> bool {
+    PLAN.with(|p| p.borrow().is_some())
+}
+
+#[inline(never)]
+fn push_step(line: String) {
+    PLAN.with(|p| {
+        if let Some(steps) = p.borrow_mut().as_mut() {
+            steps.push(line);
+        }
+    });
+}
+
+/// The ANN's beam as `explain` states it: the `ef` in force, and the page
+/// when that is wider, since the walk keeps at least as many candidates as
+/// it has to return.
+fn beam(ix: &VectorIndex, near: &Near, want: usize) -> String {
+    let ef = near.ef.unwrap_or(ix.spec.ef_search);
+    if want > ef {
+        format!("ef {ef}, widened to the {want} rows asked for")
+    } else {
+        format!("ef {ef}")
+    }
+}
+
+/// Whether the stored row `id` passes the filter.
+fn row_matches(c: &Collection, f: &Expr, id: DocId, ctx: &EvalCtx) -> Result<bool> {
+    let mut row = StoreRow {
+        store: &c.store,
+        schema: &c.schema,
+        id,
+        memo: Vec::new(),
+    };
+    Ok(truthy(&eval(f, &mut row, ctx)?))
+}
+
+/// A filter evaluated over `rows` in blocks taken a stride apart, so that
+/// the first matches it finds come from across the whole collection rather
+/// than its oldest rows: a filter for the newest rows, which sit at the end
+/// of the id order, is known to be large as soon as one for rows everywhere
+/// -- `recent >= 20` over 200 000 rows, the newest 23%, took 1.67 ms against
+/// 1.12 for the same share spread out, and 16.7 before the probe. It can
+/// stop at a number of matches and later carry on from where it stopped.
+struct FilterProbe {
+    rows: Vec<DocId>,
+    matched: Vec<DocId>,
+    tested: usize,
+    /// The next row to test, and the pass it belongs to: pass `p` reads
+    /// blocks `p`, `p + PROBE_STRIDE`, `p + 2 * PROBE_STRIDE`, ...
+    next: usize,
+    pass: usize,
+}
+
+/// Rows read in sequence. Blocks rather than single rows a stride apart:
+/// reading every 64th row took a scan of the whole set from 17.6 ms to 32.1,
+/// because a row read alone is a row the prefetcher did not see coming.
+const PROBE_BLOCK: usize = 256;
+/// Blocks between two read in the same pass.
+const PROBE_STRIDE: usize = 16;
+
+impl FilterProbe {
+    fn new(rows: Vec<DocId>) -> FilterProbe {
+        FilterProbe {
+            rows,
+            matched: Vec::new(),
+            tested: 0,
+            next: 0,
+            pass: 0,
+        }
+    }
+
+    /// Rows that are the answer already, with nothing left to test.
+    fn done(rows: Vec<DocId>) -> FilterProbe {
+        FilterProbe {
+            rows: Vec::new(),
+            matched: rows,
+            tested: 0,
+            next: 0,
+            pass: 0,
+        }
+    }
+
+    /// Tests rows until `cap` have matched or none is left; true when none
+    /// is left, which makes `matched` the whole set.
+    fn run(&mut self, cap: usize, matches: impl Fn(DocId) -> Result<bool>) -> Result<bool> {
+        while self.pass < PROBE_STRIDE {
+            while self.next < self.rows.len() {
+                if self.matched.len() >= cap {
+                    return Ok(false);
+                }
+                let id = self.rows[self.next];
+                self.next += 1;
+                if self.next.is_multiple_of(PROBE_BLOCK) {
+                    self.next += (PROBE_STRIDE - 1) * PROBE_BLOCK;
+                }
+                self.tested += 1;
+                if matches(id)? {
+                    self.matched.push(id);
+                }
+            }
+            self.pass += 1;
+            self.next = self.pass * PROBE_BLOCK;
+        }
+        Ok(true)
+    }
+
+    fn into_sorted(self) -> Vec<DocId> {
+        let mut ids = self.matched;
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// The range a filter's comparisons put on an ordered field, and whether
+/// every one of them could be said as a key. A comparison the key space
+/// cannot express exactly -- `price < 12.5` on an `int` field -- is left out
+/// of the range, which then only narrows, and the filter is evaluated.
+fn sorted_range(
+    ty: &DataType,
+    field: &str,
+    f: &Expr,
+    params: &[Value],
+) -> Option<(SortRange, bool)> {
+    let mut ranges = Vec::new();
+    f.conjunct_ranges(params, &mut ranges);
+    let mut range = SortRange::all();
+    let (mut any, mut exact) = (false, true);
+    for (name, op, v) in ranges {
+        if name != field {
+            continue;
+        }
+        match SortedIndex::bound(ty, v) {
+            Some(key) => {
+                range.narrow(op, key);
+                any = true;
+            }
+            None => exact = false,
+        }
+    }
+    any.then_some((range, exact))
 }
 
 /// Sort keys: a field position (`None` for `id`) and whether it ascends.

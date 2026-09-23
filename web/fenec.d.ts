@@ -299,6 +299,11 @@ export declare class Query<
   first(): Promise<P | null>;
   /** Number of matching rows (`get ... count`); rows are not decoded. */
   count(): Promise<number>;
+  /**
+   * The path the query took (`explain get ...`): which index answered and
+   * how many rows each stage read, one line a step. The query runs.
+   */
+  explain(): Promise<string[]>;
 
   insert(docs: Insert<F> | Insert<F>[]): Promise<number>;
   update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;
@@ -386,6 +391,13 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   schemas(): SchemaInfo[];
   stats(): unknown;
   snapshot(): Uint8Array;
+  /** Starts keeping the writes for `drain()`; `persist` does it itself. */
+  journal(): void;
+  /**
+   * The writes since the last drain: frames to append to a stored image, or
+   * with `replace` an image to store instead (after a `compact`).
+   */
+  drain(): { replace: boolean; bytes: Uint8Array };
   load(bytes: Uint8Array): void;
   close(): void;
 
@@ -400,9 +412,12 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   setChangeCapacity(n: number): void;
 }
 
-/** Writes a snapshot into IndexedDB; returns the byte count. */
+/**
+ * Writes the database into IndexedDB under `key`: the image the first time,
+ * then only the writes since the last call. Returns the bytes written.
+ */
 export function persist(fenec: Fenec<any>, key?: string): Promise<number>;
-/** Restores from IndexedDB; `false` when there is no record. */
+/** Restores from IndexedDB, image and chunks; `false` when there is no record. */
 export function restore(fenec: Fenec<any>, key?: string): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;

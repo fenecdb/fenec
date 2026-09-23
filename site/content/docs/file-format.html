@@ -32,14 +32,36 @@ recovery step after a crash.</p>
 <h2>The graph record</h2>
 
 <p>It is derived data, not a cache. On open, the version, the dimension, the
-node count and the link bounds are validated; if any of them does not hold, the
-record is ignored and the index is rebuilt from scratch. A corrupt or stale
-graph therefore cannot cause data loss.</p>
+precision and the link bounds are validated, and the live nodes against the
+documents: every one's document has to hold a vector, and every document
+holding one has to have a node. If any of it does not hold, the record is
+ignored and the index is rebuilt from scratch. A corrupt or stale graph
+therefore cannot cause data loss.</p>
 
 <p>It is written only during <code>snapshot</code>, <code>compact</code> and
 <code>checkpoint</code> — never on the normal write path. What it stores is the
 links, not the vectors: the vectors are already in the document records, and
-the expensive part is the build.</p>
+the expensive part is the build. The exception is a tombstone, the node a
+deleted or rewritten document leaves behind until <code>compact</code>: it
+still routes searches, but its document is gone or holds another vector, so
+the record carries the vector the node was linked with.</p>
+
+<p>The graph is restored where the image ends, against the documents it was
+written with. Everything after that point was written since the checkpoint,
+and is applied to it the way the write path applied it: the node of each
+document the tail touched is retired, and the vector the document holds now
+goes in. A crash therefore costs the tail, not the graph.</p>
+
+<h2>Indexes in the schema</h2>
+
+<p>A schema names each field's index by a kind byte: 0 none, 1
+<code>@hash</code>, 2 <code>@hnsw</code> with its parameters, 3
+<code>@text</code> with its parameters, 4 <code>@sorted</code>. For every
+kind but the graph that byte is all the file holds: the hash, text and
+ordered indexes are rebuilt from the documents on open, so there is nothing
+of theirs to validate or to go stale. An old binary cannot open a file whose
+schema uses a newer kind and reports <code>unknown index kind 4</code>, the
+same refusal as for a record kind it does not know.</p>
 
 <h2>The change counter, and why it is at the front</h2>
 

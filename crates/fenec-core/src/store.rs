@@ -431,39 +431,78 @@ impl Store {
     ///
     /// Allocating a `Vec<f32>` per node while restoring the graph was a
     /// noticeable part of the startup time; here a single buffer is reused.
-    pub fn read_vector_into(
-        &self,
-        id: DocId,
-        field_pos: usize,
-        out: &mut Vec<f32>,
-    ) -> Result<bool> {
+    /// The stored document's bytes from the value at `field_pos` on, or
+    /// `None` when there is no such document.
+    fn field_at(&self, id: DocId, field_pos: usize) -> Result<Option<&[u8]>> {
         let Some(loc) = self.index.get(id) else {
-            return Ok(false);
+            return Ok(None);
         };
         let buf = self.payload(loc)?;
         let mut pos = 0usize;
         for _ in 0..field_pos {
             crate::codec::skip_value(buf, &mut pos)?;
         }
-        if buf.get(pos) != Some(&crate::codec::TAG_VECTOR) {
+        Ok(Some(&buf[pos.min(buf.len())..]))
+    }
+
+    /// Whether the stored document holds a vector at `field_pos`, read off
+    /// the value's tag without decoding it.
+    pub fn has_vector(&self, id: DocId, field_pos: usize) -> Result<bool> {
+        Ok(matches!(
+            self.field_at(id, field_pos)?.and_then(|b| b.first()),
+            Some(&(crate::codec::TAG_VECTOR | crate::codec::TAG_VECTOR_F16))
+        ))
+    }
+
+    pub fn read_vector_into(
+        &self,
+        id: DocId,
+        field_pos: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<bool> {
+        let Some(buf) = self.field_at(id, field_pos)? else {
             return Ok(false);
-        }
+        };
+        let mut pos = 0usize;
+        // A `vector<N, f16>` field is stored halved, under its own tag.
+        // Reading only the f32 one, every such field looked empty: `rerank`
+        // over it returned no rows, and a restore found no vector for any
+        // node and rebuilt the graph on every open.
+        let half = match buf.get(pos) {
+            Some(&crate::codec::TAG_VECTOR) => false,
+            Some(&crate::codec::TAG_VECTOR_F16) => true,
+            _ => return Ok(false),
+        };
         pos += 1;
         let n = crate::codec::get_uvarint(buf, &mut pos)? as usize;
-        let end = pos + n * 4;
+        let end = pos + n * if half { 2 } else { 4 };
         if end > buf.len() {
             return Err(Error::Corrupt("vector outside the segment".into()));
         }
         out.clear();
         out.reserve(n);
-        for chunk in buf[pos..end].chunks_exact(4) {
-            out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+        if half {
+            let (words, _) = buf[pos..end].as_chunks::<2>();
+            out.extend(
+                words
+                    .iter()
+                    .map(|w| crate::codec::f32_from_f16(u16::from_le_bytes(*w))),
+            );
+        } else {
+            let (words, _) = buf[pos..end].as_chunks::<4>();
+            out.extend(words.iter().map(|w| f32::from_le_bytes(*w)));
         }
         Ok(true)
     }
 
     /// Replays every record from a file/byte image.
     pub fn replay(&mut self, bytes: &[u8]) -> Result<usize> {
+        self.replay_noting(bytes, &mut |_| {})
+    }
+
+    /// [`Self::replay`], handing each record's id to `note` -- how an open
+    /// learns which documents the writes after a checkpoint touched.
+    pub fn replay_noting(&mut self, bytes: &[u8], note: &mut dyn FnMut(DocId)) -> Result<usize> {
         let mut pos = 0usize;
         let mut count = 0usize;
         while pos < bytes.len() {
@@ -478,6 +517,7 @@ impl Store {
             let payload = bytes[pos..pos + len].to_vec();
             pos += len;
             self.append(op, id, &payload);
+            note(id);
             count += 1;
         }
         Ok(count)

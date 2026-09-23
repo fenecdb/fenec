@@ -440,6 +440,48 @@ impl Arena {
         }
     }
 
+    /// Appends the node's vector as the arena holds it, little-endian.
+    fn write_stored(&self, node: u32, dim: usize, out: &mut Vec<u8>) {
+        let s = node as usize * dim;
+        match self {
+            Arena::F32(d) => d[s..s + dim]
+                .iter()
+                .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            Arena::F16(d) => d[s..s + dim]
+                .iter()
+                .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+        }
+    }
+
+    /// Appends a vector written by `write_stored`, as it was: it was already
+    /// normalised, and normalising again would move its last bits.
+    fn push_stored(&mut self, bytes: &[u8]) {
+        match self {
+            Arena::F32(d) => d.extend(
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b)),
+            ),
+            Arena::F16(d) => d.extend(
+                bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| u16::from_le_bytes(*b)),
+            ),
+        }
+    }
+
+    /// Bytes a vector of `dim` takes in `write_stored`'s form.
+    fn stored_len(&self, dim: usize) -> usize {
+        match self {
+            Arena::F32(_) => dim * 4,
+            Arena::F16(_) => dim * 2,
+        }
+    }
+
     /// Bytes the arena occupies in memory (for statistics).
     pub(crate) fn bytes(&self) -> usize {
         match self {
@@ -501,8 +543,10 @@ impl Rng {
     }
 }
 
-/// Version of the serialised graph format.
-const GRAPH_VERSION: u8 = 2;
+/// Version of the serialised graph format. 3 added the arena's precision
+/// and a tombstone's own vector; a record of an older version is rejected
+/// and the graph rebuilt once.
+const GRAPH_VERSION: u8 = 3;
 
 /// Upper bound on a single batch during parallel construction. Nodes inside a
 /// batch cannot see each other, so large batches lower recall; this limit is
@@ -1050,8 +1094,18 @@ impl VectorIndex {
     /// With cosine the normalisation is done in place on the arena -- there
     /// is no intermediate `Vec` allocation.
     fn alloc_node(&mut self, doc: DocId, raw: &[f32], level: usize) -> u32 {
-        let node = self.doc_ids.len() as u32;
         self.data.push(raw, self.spec.metric == Metric::Cosine);
+        self.alloc_links(doc, level)
+    }
+
+    /// `alloc_node` for a vector in the arena's stored form.
+    fn alloc_node_stored(&mut self, doc: DocId, stored: &[u8], level: usize) -> u32 {
+        self.data.push_stored(stored);
+        self.alloc_links(doc, level)
+    }
+
+    fn alloc_links(&mut self, doc: DocId, level: usize) -> u32 {
+        let node = self.doc_ids.len() as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
         self.l0.resize(self.l0.len() + self.m0, 0);
@@ -1386,6 +1440,10 @@ impl VectorIndex {
         put_uvarint(&mut out, self.spec.m as u64);
         put_uvarint(&mut out, self.spec.ef_construction as u64);
         put_uvarint(&mut out, self.spec.ef_search as u64);
+        out.push(match self.data.prec() {
+            VecPrec::F32 => 0,
+            VecPrec::F16 => 1,
+        });
         put_uvarint(&mut out, self.doc_ids.len() as u64);
         put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
         put_uvarint(&mut out, self.max_level as u64);
@@ -1395,6 +1453,15 @@ impl VectorIndex {
             out.push(self.is_deleted(node) as u8);
             let levels = self.node_levels(node) + 1; // level 0 included
             put_uvarint(&mut out, levels as u64);
+            // A tombstone still routes searches, but its document may be
+            // gone or hold another vector by now: the vector it was linked
+            // with travels with it. Before, a restore that could not find a
+            // deleted document's vector threw the graph away, so a single
+            // `del` rebuilt it on every open until `compact` -- 852 ms
+            // against 6.6 at 20 000 x 32.
+            if self.is_deleted(node) {
+                self.data.write_stored(node, self.dim, &mut out);
+            }
             let mut sorted: Vec<u32> = Vec::with_capacity(self.m0);
             for l in 0..levels {
                 let nbs = self.neighbors(node, l);
@@ -1424,6 +1491,7 @@ impl VectorIndex {
     pub fn restore_graph(
         bytes: &[u8],
         expect_dim: usize,
+        expect_prec: VecPrec,
         mut lookup: impl FnMut(DocId, &mut Vec<f32>) -> bool,
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
@@ -1448,11 +1516,22 @@ impl VectorIndex {
             ef_construction: get_uvarint(bytes, &mut pos).ok()? as usize,
             ef_search: get_uvarint(bytes, &mut pos).ok()? as usize,
         };
+        // The field's own precision: restored as f32, a `vector<N, f16>`
+        // field held twice the memory after every reopen.
+        let prec = match *bytes.get(pos)? {
+            0 => VecPrec::F32,
+            1 => VecPrec::F16,
+            _ => return None,
+        };
+        pos += 1;
+        if prec != expect_prec {
+            return None;
+        }
         let count = get_uvarint(bytes, &mut pos).ok()? as usize;
         let entry_raw = get_uvarint(bytes, &mut pos).ok()?;
         let max_level = get_uvarint(bytes, &mut pos).ok()? as usize;
 
-        let mut ix = VectorIndex::new(dim, spec);
+        let mut ix = VectorIndex::with_precision(dim, spec, prec);
         ix.reserve(count);
         ix.max_level = max_level;
         ix.entry = if entry_raw == 0 {
@@ -1462,19 +1541,25 @@ impl VectorIndex {
         };
 
         let mut raw: Vec<f32> = Vec::with_capacity(dim);
+        let stored = ix.data.stored_len(dim);
         for node in 0..count {
             let doc = get_uvarint(bytes, &mut pos).ok()?;
             let is_deleted = *bytes.get(pos)? != 0;
             pos += 1;
-
-            if !lookup(doc, &mut raw) || raw.len() != dim {
-                return None;
-            }
             let levels = get_uvarint(bytes, &mut pos).ok()? as usize;
             if levels == 0 {
                 return None;
             }
-            let n = ix.alloc_node(doc, &raw, levels - 1);
+            let n = if is_deleted {
+                let v = bytes.get(pos..pos + stored)?;
+                pos += stored;
+                ix.alloc_node_stored(doc, v, levels - 1)
+            } else {
+                if !lookup(doc, &mut raw) || raw.len() != dim {
+                    return None;
+                }
+                ix.alloc_node(doc, &raw, levels - 1)
+            };
             debug_assert_eq!(n as usize, node);
             if is_deleted {
                 ix.deleted[node] = true;
@@ -1794,7 +1879,8 @@ mod tests {
             }
             None => false,
         };
-        let restored = VectorIndex::restore_graph(&bytes, 8, fetch).expect("restore failed");
+        let restored =
+            VectorIndex::restore_graph(&bytes, 8, VecPrec::F32, fetch).expect("restore failed");
         assert_eq!(restored.len(), 300);
         let after: Vec<u64> = restored
             .search(&vecs[42], 10, None, |_| true)
@@ -1807,18 +1893,75 @@ mod tests {
         );
 
         // A wrong dimension must be rejected
-        assert!(VectorIndex::restore_graph(&bytes, 16, fetch).is_none());
+        assert!(VectorIndex::restore_graph(&bytes, 16, VecPrec::F32, fetch).is_none());
         // A missing document must be rejected
-        assert!(
-            VectorIndex::restore_graph(&bytes, 8, |d: u64, out: &mut Vec<f32>| {
+        assert!(VectorIndex::restore_graph(
+            &bytes,
+            8,
+            VecPrec::F32,
+            |d: u64, out: &mut Vec<f32>| {
                 if d == 7 {
                     false
                 } else {
                     fetch(d, out)
                 }
-            })
-            .is_none()
-        );
+            }
+        )
+        .is_none());
+    }
+
+    /// A tombstone's vector travels in the record: its document may be gone
+    /// (a `del`) or hold a new vector (an update), and the restored graph has
+    /// to route exactly as the one written did. The arena keeps its
+    /// precision too.
+    #[test]
+    fn tombstones_and_precision_survive_serialization() {
+        for prec in [VecPrec::F32, VecPrec::F16] {
+            let mut ix = VectorIndex::with_precision(8, VectorIndexSpec::default(), prec);
+            let mut rng = Rng(7);
+            let mut vecs: Vec<Option<Vec<f32>>> = Vec::new();
+            for i in 0..300u64 {
+                let v: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
+                ix.insert(i, &v);
+                vecs.push(Some(v));
+            }
+            // Deleted: the document is gone.
+            for i in [3u64, 50, 51, 299] {
+                ix.remove(i);
+                vecs[i as usize] = None;
+            }
+            // Updated: a new vector under the same id, the old node a tombstone.
+            for i in [10u64, 11] {
+                let v: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
+                ix.insert(i, &v);
+                vecs[i as usize] = Some(v);
+            }
+            let q: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
+            let before = ix.search(&q, 20, None, |_| true);
+
+            let bytes = ix.serialize_graph();
+            let fetch =
+                |d: u64, out: &mut Vec<f32>| match vecs.get(d as usize).and_then(|v| v.as_ref()) {
+                    Some(v) => {
+                        out.clear();
+                        out.extend_from_slice(v);
+                        true
+                    }
+                    None => false,
+                };
+            let restored =
+                VectorIndex::restore_graph(&bytes, 8, prec, fetch).expect("restore failed");
+            assert_eq!(restored.len(), ix.len());
+            assert_eq!(restored.data.prec(), prec);
+            assert_eq!(restored.search(&q, 20, None, |_| true), before, "{prec:?}");
+
+            let other = if prec == VecPrec::F32 {
+                VecPrec::F16
+            } else {
+                VecPrec::F32
+            };
+            assert!(VectorIndex::restore_graph(&bytes, 8, other, fetch).is_none());
+        }
     }
 
     #[test]

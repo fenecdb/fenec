@@ -145,6 +145,9 @@ pub enum IndexKind {
     Vector(VectorIndexSpec),
     /// Inverted index with BM25 scoring, behind `match`.
     Text(TextIndexSpec),
+    /// Ordered index: ranges, equality, and `order ... limit` walked in
+    /// order (see [`crate::sorted`]).
+    Sorted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +212,12 @@ impl Schema {
                     )));
                 }
             }
+            if f.index == IndexKind::Sorted && !crate::sorted::SortedIndex::supports(&f.ty) {
+                return Err(Error::Type(format!(
+                    "field `{}` is not int, float, timestamp or text, no ordered index can be built",
+                    f.name
+                )));
+            }
             seen.push(f.name.clone());
         }
         Ok(Schema { name, fields })
@@ -271,6 +280,7 @@ impl Schema {
                     put_uvarint(&mut out, spec.prefix_max as u64);
                     put_uvarint(&mut out, spec.prefix_min as u64);
                 }
+                IndexKind::Sorted => out.push(4),
             }
         }
         out
@@ -306,6 +316,7 @@ impl Schema {
                     prefix_max: get_uvarint(buf, pos)? as u8,
                     prefix_min: get_uvarint(buf, pos)? as u8,
                 }),
+                4 => IndexKind::Sorted,
                 o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
             };
             fields.push(Field {

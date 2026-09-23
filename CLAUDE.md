@@ -74,9 +74,14 @@ execution), `schema`, `value`, `codec`,
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
 
-The browser client is `web/fenec.js` — WASM glue (~175 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~190 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
+`persist`/`restore` keep a database in IndexedDB as a file would hold it: an
+image, then the writes since as chunks, from the journal `fenec_journal` starts
+and `fenec_drain` empties (off until asked for -- a page that never drains would
+hold every write). One row persists in 0.6 ms over 32 MB, against 136 ms for the
+image.
 
 ## Invariants worth knowing before you change things
 
@@ -104,7 +109,13 @@ rewrite, every later write and sync returns `Error::Io` until the file is
 reopened (`Database::failure`); reads go on from memory. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
 `fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
-had not yet sent.
+had not yet sent. That fsync runs *outside* the exclusive lock: under it a
+write only calls `Database::flush`, which hands back a `Durability` to run once
+the lock is released, and `FileSink` writes the bytes there as well (a `write`
+under the lock waited out concurrent fsyncs on macOS). A durability whose bytes
+an earlier fsync already covered runs none, which is the group commit: 268 ->
+1 156 durable writes/s over eight clients. A failed one is reported back with
+`Database::fail` so the engine stops taking writes.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`;
 `site/content/docs/sharding.html`). The tenant comes from the path
@@ -128,8 +139,15 @@ the id counter (kind 7) exists so `compact` cannot hand out a deleted id again.
 
 **The HNSW graph is derived data, not a cache.** It is written only by
 `snapshot`, `compact` and `checkpoint` — never on the write path. On open the
-version, dimension, node count and link bounds are validated; anything off means
-a silent full rebuild. A corrupt graph can therefore never lose data.
+version, dimension, precision and link bounds are validated, and the live nodes
+against the documents holding a vector; anything off means a silent full
+rebuild. A corrupt graph can therefore never lose data. It is restored where the
+checkpoint's image ends, against the documents it was written with, and the tail
+after it is applied as the write path would (a touched document's node retired,
+its current vector inserted) -- restored after the whole file, one write in the
+tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
+tombstone carries its own vector in the record, since its document may be gone:
+without that, one `del` rebuilt the graph on every open until `compact`.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
@@ -149,25 +167,48 @@ eight accumulators and reduction order, so a graph built in the browser is the
 graph built natively; `web/fenec.test.js` checks that order against a
 `Math.fround` reference.
 
-**Filtered `near` needs its fallback.** The filter set is extracted first; either
-it is scanned directly (when smaller than `ef × m0`) or the ANN runs and
-candidates are membership-tested. The second path *must* fall back to scanning
-the filter set in full when the result lands under the limit — otherwise a filter
-correlated with the vector eliminates every candidate and returns empty.
+**Filtered `near` needs its fallback.** The filter's rows are probed first -- in
+blocks spread over the collection, and only until more than `ef × m0` match,
+which is all the plan needs to know. A set that stays under that is searched
+exactly; a larger one goes through the ANN with each candidate tested against the
+filter. That second path *must* fall back to searching the whole set (the probe
+carries on from where it stopped) when the result lands under the limit —
+otherwise a filter correlated with the vector eliminates every candidate and
+returns empty. The probe decides when rows are read, never the answer:
+`tests/filtered.rs` checks it against the plan with the whole set found first.
 
-**Only equality inside an `and` chain reaches an index** -- `=` or `in [..]`,
-over a `@hash` field or over `id`. `in` is a set of equalities written short, so
-it is answered as the union of one bucket per element, and only when *every*
-element resolves to something the field's type can express: one it cannot sends
-the whole list back to the scan, because a union missing an element's rows is a
-wrong answer rather than a slow one. `id` has no `@hash` and cannot have one --
-`Schema::new` reserves the name -- so the store's id index answers it directly;
-before that it was a full scan, 383 us against 0.50 us over 20 000 documents.
-Everything else -- `>=`, `~`, `has`, anything under `or` -- is a full scan. `~`
-is unranked substring matching; ranked text retrieval is `match` over an `@text`
-field, which does reach one. `order` reads every match's key but puts only
-`offset + limit` rows in order; with no `order`, the scan stops at
-`offset + limit` matches.
+**Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
+`@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set
+of equalities written short, so it is answered as the union of one bucket per
+element, and only when *every* element resolves to something the field's type
+can express: one it cannot sends the whole list back to the scan, because a
+union missing an element's rows is a wrong answer rather than a slow one. `id`
+has no `@hash` and cannot have one -- `Schema::new` reserves the name -- so the
+store's id index answers it directly; before that it was a full scan, 383 us
+against 0.50 us over 20 000 documents. Everything else -- `!=`, `~`, `has`, a
+comparison on a field without `@sorted`, anything under `or` -- is a full scan.
+`~` is unranked substring matching; ranked text retrieval is `match` over an
+`@text` field, which does reach one. `order` reads every match's key but puts
+only `offset + limit` rows in order -- unless it is one key over a `@sorted`
+field with a `limit`, which walks the index and stops at the page; with no
+`order`, the scan stops at `offset + limit` matches.
+
+**`@sorted` must give the scan's answer, row for row.** Its keys order exactly
+as `Value::cmp_value` orders the field's values (ints and timestamps through a
+sign-bit flip, floats through order-preserving bits with `-0.0` folded onto
+`0.0`), `null` is held apart below every key, and `NaN` apart from both: it
+compares equal to everything, so it matches every inclusive comparison and no
+strict one, and an index holding one is never walked for `order`. A literal the
+key space cannot express exactly (`12.5` against an `int`, an int past 2^53
+against a `timestamp`) is left out of the range and evaluated per row. Ties come
+out in ascending id both ways, since that is the order the scan leaves them in
+-- a descending walk reverses each run of equal keys. A walk tests the rest of
+the filter row by row and gives up past an eighth of the collection, so a filter
+that matches almost nothing costs 1.25x the scan rather than 2x in random reads.
+The structure is a sorted `Vec` of chunks of at most 512 entries, not a
+`BTreeSet`, which made the browser module 75 KB larger; `tests/sorted.rs` checks
+every filter, order and page against a twin collection without the index. It is
+derived data like the hash and text indexes: built on open, never in the file.
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

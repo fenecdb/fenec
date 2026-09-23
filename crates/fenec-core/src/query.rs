@@ -194,6 +194,70 @@ impl Expr {
     pub fn is_bare_equality(&self, params: &[Value]) -> bool {
         self.equality_key(params).is_some()
     }
+
+    /// `field <op> value` for one comparison, with `value <op> field` turned
+    /// round so the field is always on the left. `!=` is left out: it bounds
+    /// nothing.
+    pub fn range_key<'a>(&'a self, params: &'a [Value]) -> Option<(&'a str, CmpOp, &'a Value)> {
+        fn value<'a>(e: &'a Expr, params: &'a [Value]) -> Option<&'a Value> {
+            match e {
+                Expr::Lit(v) => Some(v),
+                Expr::Param(i) => params.get(*i),
+                _ => None,
+            }
+        }
+        let Expr::Cmp(op, a, b) = self else {
+            return None;
+        };
+        if *op == CmpOp::Ne {
+            return None;
+        }
+        if let (Expr::Field(f), Some(v)) = (a.as_ref(), value(b, params)) {
+            return Some((f, *op, v));
+        }
+        if let (Some(v), Expr::Field(f)) = (value(a, params), b.as_ref()) {
+            let flipped = match op {
+                CmpOp::Lt => CmpOp::Gt,
+                CmpOp::Le => CmpOp::Ge,
+                CmpOp::Gt => CmpOp::Lt,
+                CmpOp::Ge => CmpOp::Le,
+                other => *other,
+            };
+            return Some((f, flipped, v));
+        }
+        None
+    }
+
+    /// The comparisons inside an `and` chain an ordered index can narrow by.
+    /// Like `conjunct_equalities` it does not descend under `or` or `not`.
+    pub fn conjunct_ranges<'a>(
+        &'a self,
+        params: &'a [Value],
+        out: &mut Vec<(&'a str, CmpOp, &'a Value)>,
+    ) {
+        match self {
+            Expr::And(a, b) => {
+                a.conjunct_ranges(params, out);
+                b.conjunct_ranges(params, out);
+            }
+            other => {
+                if let Some(r) = other.range_key(params) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+
+    /// Whether the whole filter is comparisons of `field` against values --
+    /// an `and` chain of them and nothing else. Answered from an ordered
+    /// index whose range expressed every one of them, such a filter needs no
+    /// second look at the rows.
+    pub fn only_ranges_on(&self, field: &str, params: &[Value]) -> bool {
+        match self {
+            Expr::And(a, b) => a.only_ranges_on(field, params) && b.only_ranges_on(field, params),
+            other => matches!(other.range_key(params), Some((f, _, _)) if f == field),
+        }
+    }
 }
 
 /// Lazy access to a row's fields. The engine provides this over the store,
@@ -482,6 +546,9 @@ impl Lookup {
 /// replaces the projection entirely.
 pub const COUNT_COLUMN: &str = "count";
 
+/// The one column `explain` answers with.
+pub const PLAN_COLUMN: &str = "plan";
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Select {
     pub collection: String,
@@ -641,6 +708,10 @@ pub enum Statement {
         docs: Vec<Vec<(String, Expr)>>,
     },
     Select(Select),
+    /// `explain get ...`: the query runs, and what comes back is the path it
+    /// took -- which index answered, how many rows each stage read -- one
+    /// row a step, in a single `plan` column.
+    Explain(Select),
     Update {
         collection: String,
         set: Vec<(String, Expr)>,
@@ -661,7 +732,10 @@ impl Statement {
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
-            Statement::Select(_) | Statement::ListCollections | Statement::Describe(_)
+            Statement::Select(_)
+                | Statement::Explain(_)
+                | Statement::ListCollections
+                | Statement::Describe(_)
         )
     }
 
@@ -672,7 +746,7 @@ impl Statement {
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
             Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
-            Statement::Select(sel) => {
+            Statement::Select(sel) | Statement::Explain(sel) => {
                 let near = sel.near.as_ref().map(|n| n.vector.max_param()).unwrap_or(0);
                 let m = sel
                     .matcher

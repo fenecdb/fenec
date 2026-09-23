@@ -203,6 +203,20 @@ export class Fenec {
     return this.#readBytes(this.#wasm.fenec_snapshot(this.#handle));
   }
 
+  /** Starts keeping the writes for `drain()`; `persist` does it itself. */
+  journal() {
+    this.#wasm.fenec_journal(this.#handle);
+  }
+
+  /**
+   * The writes since the last drain, `{replace, bytes}`: frames to append
+   * to a stored image, or with `replace` an image to store instead.
+   */
+  drain() {
+    const b = this.#readBytes(this.#wasm.fenec_drain(this.#handle));
+    return { replace: b[0] === 1, bytes: b.subarray(1) };
+  }
+
   /** Restores from a byte image. */
   load(bytes) {
     const ptr = this.#wasm.fenec_alloc(bytes.length);
@@ -839,6 +853,16 @@ export class Query {
     return r.rows?.[0]?.count ?? 0;
   }
 
+  /**
+   * The path the query took -- which index answered, how many rows each
+   * stage read -- one line a step. The query runs to find out.
+   */
+  async explain() {
+    const [sql, params] = this.toFenecQL();
+    const r = await this.#exec(`explain ${sql}`, params);
+    return (r.rows ?? []).map((row) => row.plan);
+  }
+
   // The text of the write statements, **without running them**. The write
   // side counterpart of `toFenecQL()`: inspectable, loggable, handable to
   // another transport -- and synchronous. The optimistic layer depends on
@@ -991,10 +1015,21 @@ export function from(name) {
 }
 
 // ------------------------------------------------------------- persistence
-// fenecdb's byte image is a single blob; it goes into IndexedDB under one key.
+// What is stored is what a file would hold: an image under the key, and the
+// writes since, as chunks under `key#000000001`, `key#000000002`, ... A
+// persist after the first stores only what was written since the last, so
+// its cost follows the write rather than the database: before, every one
+// wrote the whole image.
 
 const DB_NAME = 'fenecdb';
 const STORE = 'images';
+/** Once the chunks outgrow this share of the image, a new image replaces them. */
+const FOLD = 0.5;
+/** Per database, where its chunks stand: `{key, next, image, chunks}`. */
+const stored = new WeakMap();
+
+const chunkKey = (key, n) => `${key}#${String(n).padStart(9, '0')}`;
+const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
 function idb() {
   return new Promise((res, rej) => {
@@ -1005,17 +1040,50 @@ function idb() {
   });
 }
 
-/** Writes a snapshot into IndexedDB. */
+/**
+ * Writes the database into IndexedDB under `key`: the image the first time,
+ * then only the writes since the last call, as a chunk. Returns the bytes
+ * written.
+ */
 export async function persist(fenec, key = 'default') {
   const db = await idb();
-  const bytes = fenec.snapshot();
-  await new Promise((res, rej) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(bytes, key);
-    tx.oncomplete = res;
-    tx.onerror = () => rej(tx.error);
-  });
-  return bytes.length;
+  let s = stored.get(fenec);
+  let image = null;
+  let chunk = null;
+  if (s?.key !== key) {
+    fenec.journal();
+    image = fenec.snapshot();
+    s = { key, next: 1, image: 0, chunks: 0 };
+    stored.set(fenec, s);
+  } else {
+    const { replace, bytes } = fenec.drain();
+    if (replace) image = bytes;
+    else if (bytes.length === 0) return 0;
+    else if (s.chunks + bytes.length > s.image * FOLD) image = fenec.snapshot();
+    else chunk = bytes;
+  }
+  try {
+    await new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const os = tx.objectStore(STORE);
+      if (image) {
+        os.put(image, key);
+        os.delete(chunkRange(key));
+      } else {
+        os.put(chunk, chunkKey(key, s.next));
+      }
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
+      tx.onabort = () => rej(tx.error);
+    });
+  } catch (e) {
+    // The drained writes are nowhere now; the next call stores an image.
+    stored.delete(fenec);
+    throw e;
+  }
+  if (image) Object.assign(s, { next: 1, image: image.length, chunks: 0 });
+  else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
+  return (image ?? chunk).length;
 }
 
 /** Free-form state (cursors): next to the image, under a separate key. */
@@ -1040,17 +1108,34 @@ export async function getState(key) {
   });
 }
 
-/** Restores from IndexedDB; returns false when there is no record. */
+/**
+ * Restores from IndexedDB, the image and its chunks read as one file; later
+ * `persist` calls go on adding chunks. Returns false when there is no record.
+ */
 export async function restore(fenec, key = 'default') {
   const db = await idb();
-  const bytes = await new Promise((res, rej) => {
+  const [image, chunks] = await new Promise((res, rej) => {
     const tx = db.transaction(STORE, 'readonly');
-    const req = tx.objectStore(STORE).get(key);
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
+    const os = tx.objectStore(STORE);
+    const img = os.get(key);
+    const ch = os.getAll(chunkRange(key));
+    tx.oncomplete = () => res([img.result, ch.result]);
+    tx.onerror = () => rej(tx.error);
   });
-  if (!bytes) return false;
+  if (!image) return false;
+  let bytes = image;
+  if (chunks.length) {
+    bytes = new Uint8Array(chunks.reduce((n, c) => n + c.length, image.length));
+    bytes.set(image, 0);
+    let at = image.length;
+    for (const c of chunks) {
+      bytes.set(c, at);
+      at += c.length;
+    }
+  }
   fenec.load(bytes);
+  fenec.journal();
+  stored.set(fenec, { key, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
   return true;
 }
 

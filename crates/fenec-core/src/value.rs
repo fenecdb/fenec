@@ -208,6 +208,10 @@ impl Value {
             (Value::Null, _) => Ordering::Less,
             (_, Value::Null) => Ordering::Greater,
             (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            // Exact: through the f64 arm below two ints past 2^53 that differ
+            // compared equal, and an ordered index, which keys ints exactly,
+            // would then disagree with the scan about their order.
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Text(a), Value::Text(b)) => a.cmp(b),
             (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),

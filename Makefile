@@ -24,9 +24,10 @@ test:
 ##   fenec.test.js       query builder (end-to-end too when wasm is present)
 ##   fenec.sync.test.js  sync layer -- against a real `fenec-pg --http` server;
 ##                     skipped when `web/fenec.wasm` or the binary is missing
+##   fenec.persist.test.js  incremental persistence, over an in-memory IndexedDB
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi

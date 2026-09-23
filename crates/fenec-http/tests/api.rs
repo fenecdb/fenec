@@ -617,6 +617,28 @@ fn raw_fenecql_endpoint() {
     assert_eq!(q(r#"{"query":"get articles get articles"}"#).status, 400);
 }
 
+/// `explain` through `POST /query`: the plan is rows like any read's, one
+/// object a step, and it is a read, so a read-only server answers it.
+#[test]
+fn explain_through_the_query_endpoint() {
+    let h = start(Config {
+        read_only: true,
+        ..Config::default()
+    });
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"explain get articles where year = $1","params":[2024]}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(
+        r.body.trim(),
+        "[{\"plan\":\"filter: the hash index on year, 1 rows, which is the answer\"},\
+         {\"plan\":\"rows: 1\"}]"
+    );
+}
+
 #[test]
 fn raw_query_respects_read_only() {
     let h = start(Config {

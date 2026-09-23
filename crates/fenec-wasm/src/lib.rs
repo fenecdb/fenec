@@ -16,9 +16,46 @@ use fenec_core::prelude::*;
 use fenec_ql::parse;
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 thread_local! {
-    static HANDLES: RefCell<Vec<Option<Database>>> = const { RefCell::new(Vec::new()) };
+    static HANDLES: RefCell<Vec<Option<Slot>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A handle's database, and the journal `fenec_journal` started for it. In
+/// one slot rather than a second table: that table's code was 1.5 KB of the
+/// module.
+struct Slot {
+    db: Database,
+    journal: Option<Arc<Mutex<Journal>>>,
+}
+
+/// What a page's database wrote since the page last took it: the frames
+/// appended, or a whole image when a `compact` rewrote it, followed by the
+/// frames after that. Either is what a file holds, so the page appends the
+/// first to what it stored and replaces what it stored with the second.
+#[derive(Default)]
+struct Journal {
+    image: Option<Vec<u8>>,
+    tail: Vec<u8>,
+}
+
+/// The sink a journaling database writes through. `Arc<Mutex>` rather than
+/// `Rc<RefCell>` only because a sink has to be `Send`; there is one thread.
+struct JournalSink(Arc<Mutex<Journal>>);
+
+impl Sink for JournalSink {
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        let mut j = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        j.tail.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
+        let mut j = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        j.image = Some(bytes.to_vec());
+        j.tail.clear();
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------- memory
@@ -67,7 +104,10 @@ unsafe fn str_from(ptr: *const u8, len: usize) -> String {
 pub extern "C" fn fenec_open() -> u32 {
     HANDLES.with(|h| {
         let mut h = h.borrow_mut();
-        h.push(Some(Database::new()));
+        h.push(Some(Slot {
+            db: Database::new(),
+            journal: None,
+        }));
         (h.len() - 1) as u32
     })
 }
@@ -79,7 +119,7 @@ pub extern "C" fn fenec_close(handle: u32) {
         if let Some(slot) = h.borrow_mut().get_mut(handle as usize) {
             *slot = None;
         }
-    })
+    });
 }
 
 #[no_mangle]
@@ -87,14 +127,15 @@ pub extern "C" fn fenec_version() -> *mut u8 {
     boxed(fenec_core::VERSION.as_bytes())
 }
 
-fn with_db<T>(handle: u32, f: impl FnOnce(&mut Database) -> T) -> Option<T> {
+fn with_slot<T>(handle: u32, f: impl FnOnce(&mut Slot) -> T) -> Option<T> {
     HANDLES.with(|h| {
         let mut h = h.borrow_mut();
-        match h.get_mut(handle as usize).and_then(|s| s.as_mut()) {
-            Some(db) => Some(f(db)),
-            None => None,
-        }
+        h.get_mut(handle as usize).and_then(|s| s.as_mut()).map(f)
     })
+}
+
+fn with_db<T>(handle: u32, f: impl FnOnce(&mut Database) -> T) -> Option<T> {
+    with_slot(handle, |s| f(&mut s.db))
 }
 
 // ------------------------------------------------------------- query
@@ -208,6 +249,49 @@ pub extern "C" fn fenec_snapshot(handle: u32) -> *mut u8 {
         Some(bytes) => boxed(&bytes),
         None => boxed(&[]),
     }
+}
+
+/// Starts keeping the database's writes for `fenec_drain`. Off until asked
+/// for: a page that never drains would hold every write it made. What was
+/// written before is not kept; the page stores a snapshot first.
+#[no_mangle]
+pub extern "C" fn fenec_journal(handle: u32) {
+    with_slot(handle, |s| {
+        let journal = Arc::new(Mutex::new(Journal::default()));
+        s.db.set_sink(Box::new(JournalSink(Arc::clone(&journal))));
+        s.journal = Some(journal);
+    });
+}
+
+/// What the database wrote since the last drain, and forgets it: `[0]` and
+/// the frames to append to what the page stored, or `[1]` and an image to
+/// replace it with. Empty frames when nothing was written or no journal
+/// was started.
+#[no_mangle]
+pub extern "C" fn fenec_drain(handle: u32) -> *mut u8 {
+    let taken = with_slot(handle, |s| {
+        let mut j = s
+            .journal
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Some((j.image.take(), std::mem::take(&mut j.tail)))
+    })
+    .flatten();
+    let mut out = Vec::new();
+    match taken {
+        Some((Some(image), tail)) => {
+            out.push(1);
+            out.extend_from_slice(&image);
+            out.extend_from_slice(&tail);
+        }
+        Some((None, tail)) => {
+            out.push(0);
+            out.extend_from_slice(&tail);
+        }
+        None => out.push(0),
+    }
+    boxed(&out)
 }
 
 /// Loads from a byte image. 0 = success, 1 = error.

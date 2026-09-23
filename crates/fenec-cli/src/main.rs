@@ -17,12 +17,14 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 const HELP: &str = r#"
 FenecQL summary
-  create collection <name> ( <field> <type> [@hash|@hnsw(metric, m=.., ef_search=..)], ... )
+  create collection <name> ( <field> <type> [@hash|@sorted|@text|@hnsw(metric, m=.., ef_search=..)], ... )
+  create index [if not exists] on <name> (<field>) @hash|@sorted|@text|@hnsw(..)
   drop collection [if exists] <name>
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
            [order <field> [asc|desc], ...] [limit N] [offset N] [count]
            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+  explain get <name> ...                  -- the path the query took, one row a step
   select a, b from <name> ...             -- the classic SQL order works too
   set <name> { field: value } [where <expr>]
   del <name> [where <expr>]
@@ -345,6 +347,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                     let ix = match &f.index {
                         IndexKind::None => String::new(),
                         IndexKind::Hash => "  @hash".into(),
+                        IndexKind::Sorted => "  @sorted".into(),
                         IndexKind::Vector(sp) => format!(
                             "  @hnsw({}, m={}, ef_search={})",
                             sp.metric.name(),
@@ -377,6 +380,10 @@ fn print_response(r: &Response, took: std::time::Duration) {
                 }
                 table.push(cells);
             }
+            // Wide cells are cut so the columns beside them stay in view. A
+            // single column has none, and an `explain` line cut at 48
+            // characters loses the numbers it exists for.
+            let cap = if cols.len() == 1 { usize::MAX } else { 48 };
             let widths: Vec<usize> = (0..cols.len())
                 .map(|i| {
                     table
@@ -384,7 +391,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         .map(|r| r.get(i).map(|s| s.chars().count()).unwrap_or(0))
                         .max()
                         .unwrap_or(0)
-                        .min(48)
+                        .min(cap)
                 })
                 .collect();
             for (ri, row) in table.iter().enumerate() {

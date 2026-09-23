@@ -19,7 +19,7 @@ db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
 
 const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
 
-await persist(db);     // snapshot into IndexedDB
+await persist(db);     // into IndexedDB: the image once, then only the writes since
 await restore(db);     // read it back
 </pre>
 
@@ -78,7 +78,7 @@ call site.</p>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
 <tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
-<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code></td></tr>
+<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>
 </tbody>
 </table>
