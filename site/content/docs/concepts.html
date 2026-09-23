@@ -232,6 +232,60 @@ order of the vector kernels: natively LLVM vectorises them, and in the
 browser they add in the same order, so a graph over codes is the same graph
 in both.</p>
 
+<h3 id="sparse-vectors">Sparse vectors</h3>
+
+<p>A learned sparse model weighs a text's vocabulary: SPLADE gives each of
+BERT's 30 522 word pieces a weight, and all but a couple of hundred come out
+zero. It learns which words a text is about, including ones it never uses —
+an abstract on damage to cerebral white matter is weighted for
+<code>disability</code> as well as the <code>disabilities</code> it says.
+<code>sparse&lt;N&gt;</code> holds such a vector by its non-zero entries, and
+<code>@inverted</code> indexes it the way <code>@text</code> indexes words: a
+list per dimension of the documents with a weight there.</p>
+
+<pre data-lang="fenecql">create collection passages (body text @text, splade sparse&lt;30522&gt; @inverted)
+get passages near splade $1 limit 10
+</pre>
+
+<p><code>near</code> over it scores by dot product and walks the lists with
+MaxScore, the pruning <code>match</code> uses, so what comes back is the exact
+top ten rather than an estimate of it; only documents sharing a dimension with
+the query are ranked. Encoded with SPLADE++ and scored on BEIR (<code>make
+beir</code>, <a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>nDCG@10</th><th class="n">SciFact</th><th class="n">FiQA</th></tr></thead>
+<tbody>
+<tr><td><code>match</code>, BM25</td><td class="n">0.662</td><td class="n">0.232</td></tr>
+<tr><td><code>near</code>, dense (all-MiniLM-L6-v2)</td><td class="n">0.645</td><td class="n">0.365</td></tr>
+<tr><td><code>match … near … fuse</code>, dense</td><td class="n">0.699</td><td class="n">0.366</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>On SciFact, where a claim shares its words with the evidence, SPLADE alone
+scores what BM25 and the dense vectors do fused, with one index. On FiQA,
+where a question shares few words with its answer, it lifts BM25 from 0.232
+to 0.331 but stays under the dense vectors, and fusing it with BM25 there
+costs it: the two are both lexical, and the weaker one drags. The index holds
+968 928 postings for SciFact's 5 183 documents — 186.9 a document — in
+13.1 MB, built in 0.07 s; FiQA's 57 638 hold 8.8 million in 107 MB, built
+in 1.2 s. Like the text index it is derived from the documents and rebuilt
+on open, never written to the file.</p>
+
+<div class="note trap">
+  <p><b>A SPLADE query reaches most of the corpus.</b> Its 37 to 65
+  expanded terms touch 38 262 of FiQA's 57 638 documents, and MaxScore gives
+  up on 99.7% of them only after reading their share of those lists: 2.6 ms
+  at the median, against 0.38 ms for a dense <code>near</code>, which walks
+  a graph instead, and 0.25 ms for <code>match</code>. On SciFact it is
+  0.60 ms. The pruning is exact; bounds per block of a list, which would let
+  it skip blocks rather than documents, are not built.</p>
+</div>
+
 <h2 id="bulk-load-first-index-after">Bulk load first, index after</h2>
 
 <p>Writing the index during the load makes every insert a graph mutation.

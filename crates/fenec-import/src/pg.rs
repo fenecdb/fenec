@@ -47,6 +47,7 @@ const FLOAT8_ARRAY: i32 = 1022;
 pub struct VectorOids {
     pub vector: Option<i32>,
     pub halfvec: Option<i32>,
+    pub sparsevec: Option<i32>,
 }
 
 /// How a column is decoded from COPY text.
@@ -100,6 +101,29 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
                     "the dimension is not declared; supply it with `--cast <field>=vector<N>`",
                 ),
                 Kind::Vector,
+            )
+        };
+    }
+
+    // A `sparsevec` arrives in the text form `sparse<N>` reads,
+    // `{1:0.5,3:0.25}/N`, so it is taken as text and read by the schema.
+    if Some(f.oid) == oids.sparsevec {
+        return if f.typmod > 0 {
+            (
+                col(
+                    DataType::Sparse(f.typmod as usize),
+                    &format!("sparsevec({})", f.typmod),
+                ),
+                Kind::Text,
+            )
+        } else {
+            (
+                Column::unsupported(
+                    name,
+                    "sparsevec",
+                    "the dimension is not declared; supply it with `--cast <field>=sparse<N>`",
+                ),
+                Kind::Text,
             )
         };
     }
@@ -492,8 +516,9 @@ pub fn count_rows(url: &Url, query: &Query) -> Result<u64> {
 
 /// Learns the OIDs of the pgvector types when the extension is installed.
 pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
-    let r =
-        client.query("select typname, oid from pg_type where typname in ('vector', 'halfvec')")?;
+    let r = client.query(
+        "select typname, oid from pg_type where typname in ('vector', 'halfvec', 'sparsevec')",
+    )?;
     let mut out = VectorOids::default();
     for row in &r.rows {
         let (Some(name), Some(oid)) = (row.first(), row.get(1)) else {
@@ -505,6 +530,7 @@ pub fn vector_oids(client: &mut Client) -> Result<VectorOids> {
         match name.as_deref() {
             Some("vector") => out.vector = Some(oid),
             Some("halfvec") => out.halfvec = Some(oid),
+            Some("sparsevec") => out.sparsevec = Some(oid),
             _ => {}
         }
     }
@@ -580,6 +606,7 @@ mod tests {
         let o = VectorOids {
             vector: Some(16385),
             halfvec: Some(16390),
+            sparsevec: Some(16395),
         };
         let (c, k) = map_oid(&f("embed", 16385, 384), &o);
         assert_eq!(c.ty, Some(DataType::Vector(384, VecPrec::F32)));
@@ -590,6 +617,18 @@ mod tests {
         let (c, _) = map_oid(&f("embed", 16385, -1), &o);
         assert_eq!(c.ty, None);
         assert!(c.note.unwrap().contains("vector<N>"));
+        // A `sparsevec` is read in its text form by the schema.
+        let (c, k) = map_oid(&f("splade", 16395, 30522), &o);
+        assert_eq!(c.ty, Some(DataType::Sparse(30522)));
+        assert_eq!(k, Kind::Text);
+        let v = parse_cell(b"{1:0.5,3:0.25}/30522", &k, "splade").unwrap();
+        assert_eq!(
+            v.coerce(&DataType::Sparse(30522)).unwrap(),
+            Value::Sparse(30522, vec![(0, 0.5), (2, 0.25)])
+        );
+        let (c, _) = map_oid(&f("splade", 16395, -1), &o);
+        assert_eq!(c.ty, None);
+        assert!(c.note.unwrap().contains("sparse<N>"));
     }
 
     #[test]

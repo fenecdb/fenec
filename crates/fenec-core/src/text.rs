@@ -583,9 +583,10 @@ impl Cursor<'_> {
 
 /// Ordered so that the *worst* candidate sits at the top of the max-heap --
 /// that is the one a better score evicts. Ties break on the document id so
-/// the same query always returns the same rows in the same order.
+/// the same query always returns the same rows in the same order. The
+/// sparse index keeps its best the same way, through this one type.
 #[derive(PartialEq)]
-struct ByScore(f32, DocId);
+pub(crate) struct ByScore(pub(crate) f32, pub(crate) DocId);
 
 impl Eq for ByScore {}
 

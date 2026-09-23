@@ -40,8 +40,8 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <div class="tbl">
 <table>
 <tbody>
-<tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code></td></tr>
+<tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code></td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=400</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
@@ -67,7 +67,10 @@ get articles near embed $1 exact limit 10
 <p><code>ef</code> raises the search beam for this query only, trading latency
 for recall. <code>exact</code> replaces the ANN walk with a full scan, which is
 how you verify recall against ground truth. A query that uses
-<code>near</code> gains a <code>_score</code> column.</p>
+<code>near</code> gains a <code>_score</code> column. Over a
+<code>sparse&lt;N&gt;</code> field <code>near</code> ranks by dot product and
+is exact already, so it takes no <code>ef</code> — see <a
+href="#sparse">Sparse vectors</a>.</p>
 
 <p>A filter next to <code>near</code> is planned, not stacked: the filter's
 rows are read only until it is clear whether there are more of them than the
@@ -355,6 +358,28 @@ rather than the codes. Bit codes estimate coarsely and take a wider beam:
 <code>ef_search</code> is 400 there unless it is named. What they save and
 what they cost is in <a href="concepts.html#quantized-indexes">How it
 works</a>.</p>
+
+<h3 id="sparse">Sparse vectors</h3>
+
+<pre data-lang="fenecql">create collection passages (body text @text, splade sparse&lt;30522&gt; @inverted)
+put passages {body: "...", splade: "{1037:0.84,2003:1.27,7592:2.1}/30522"}
+get passages near splade $1 limit 10
+get passages match body $1 near splade $2 fuse limit 10
+</pre>
+
+<p><code>sparse&lt;N&gt;</code> holds a vector of <code>N</code> dimensions by
+its non-zero entries alone: what a learned sparse model such as SPLADE gives a
+text, a weight for a few dozen or hundred of its vocabulary's 30 522 words. It
+is written and read in pgvector's <code>sparsevec</code> text form,
+<code>{index:value,...}/N</code> with the indices counted from 1, as a string
+in JSON and as text on the pg wire; entries come back in index order and
+zeros are dropped. <code>@inverted</code> indexes it as a word index is
+indexed, dimension by dimension, and <code>near</code> over it returns the
+documents with the largest dot product — the exact ones, walked with the
+pruning <code>match</code> uses — and ranks only documents sharing at least one
+dimension with the query. A filter is tested as the lists are merged;
+<code>exact</code> scores every document instead, and <code>fuse</code> takes a
+sparse <code>near</code> as it takes a dense one.</p>
 
 <h3>Ordered indexes</h3>
 

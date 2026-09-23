@@ -16,7 +16,9 @@ psql -h 127.0.0.1 -p 5433 -U fenec
 
 <p>fenecdb does not speak SQL. It does work with the connection tooling of the
 PostgreSQL ecosystem: vectors use the same text representation as pgvector
-(<code>[1,2,3]</code>) and errors map to SQLSTATE codes
+(<code>[1,2,3]</code>), sparse vectors that of its <code>sparsevec</code>
+(<code>{1:0.5,3:0.25}/30522</code>, indices from 1), and errors map to
+SQLSTATE codes
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>, and <code>25006</code> for a write sent to a replica).</p>
 
@@ -220,10 +222,11 @@ Indexes:
 
 <p>A collection is a table in <code>public</code>, its <code>id</code> the
 first column and the primary key, each field a column of the type the wire
-already reports for it — a vector as <code>vector(N)</code>, a list as an
-array. Each fenecdb index is an index with its own access method:
-<code>hash</code>, <code>btree</code> for <code>@sorted</code>,
-<code>hnsw</code>, and <code>bm25</code> for <code>@text</code>. It is checked
+already reports for it — a vector as <code>vector(N)</code>, a sparse one as
+<code>sparsevec(N)</code>, a list as an array. Each fenecdb index is an index
+with its own access method: <code>hash</code>, <code>btree</code> for
+<code>@sorted</code>, <code>hnsw</code>, <code>bm25</code> for
+<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. It is checked
 against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
 <code>\dt</code>, <code>\di</code>, <code>\dn</code>, <code>\l</code>),
 PgJDBC 42.7's <code>getTables</code>, <code>getColumns</code>,

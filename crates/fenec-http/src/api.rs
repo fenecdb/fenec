@@ -525,7 +525,7 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
             Err(_) => Value::Text(raw.to_string()).coerce(&DataType::Timestamp)?,
         },
         DataType::List(inner) => lit(raw, inner, name)?,
-        DataType::Vector(..) => {
+        DataType::Vector(..) | DataType::Sparse(_) => {
             return Err(Error::Query(format!(
                 "`{name}` is a vector: it cannot be filtered in the query string, use `POST /<collection>/near`"
             )))
@@ -598,20 +598,28 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
         Some(_) => return Err(Error::Query("`field` must be text".into())),
         None => default_vector_field(schema)?,
     };
-    match field(schema, &field_name)? {
-        DataType::Vector(..) => {}
+    let sparse = match field(schema, &field_name)? {
+        DataType::Vector(..) => false,
+        DataType::Sparse(_) => true,
         other => {
             return Err(Error::Query(format!(
                 "`{field_name}` is not a vector ({})",
                 other.name()
             )))
         }
-    }
+    };
 
     let vector = match get("vector") {
-        Some(Value::Vector(v)) => Value::Vector(v.clone()),
+        Some(Value::Vector(v)) if !sparse => Value::Vector(v.clone()),
+        // A sparse field's is pgvector's text form: `{1:0.5,3:0.25}/30522`.
+        Some(Value::Text(t)) if sparse => Value::Text(t.clone()),
         Some(Value::List(items)) if items.is_empty() => {
             return Err(Error::Query("`vector` is empty".into()))
+        }
+        Some(_) if sparse => {
+            return Err(Error::Query(
+                "`vector` must be a sparse vector as text: {index:value,...}/dimension".into(),
+            ))
         }
         Some(_) => return Err(Error::Query("`vector` must be an array of numbers".into())),
         None => return Err(Error::Query("`vector` is required".into())),
@@ -1007,6 +1015,7 @@ fn schemas_json(list: &[Schema]) -> String {
                 IndexKind::Text(spec) => {
                     json::escape_into(&mut out, &format!("text(k1={}, b={})", spec.k1(), spec.b()))
                 }
+                IndexKind::Inverted => json::escape_into(&mut out, "inverted"),
             }
             out.push_str(",\"required\":");
             out.push_str(if f.required { "true" } else { "false" });

@@ -74,6 +74,7 @@ impl ScalarFn for PgTypeof {
                 Value::Text(_) => "text",
                 Value::Bytes(_) => "bytea",
                 Value::Vector(_) => "vector",
+                Value::Sparse(..) => "sparsevec",
                 Value::List(_) => "array",
             }
             .to_string(),

@@ -385,6 +385,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         IndexKind::Text(sp) => {
                             format!("  @text(k1={}, b={})", sp.k1(), sp.b())
                         }
+                        IndexKind::Inverted => "  @inverted".into(),
                     };
                     println!("  {:<14} {:<14}{ix}", f.name, f.ty.name());
                 }
@@ -476,5 +477,6 @@ fn cell(v: &Value) -> String {
             "[{}]",
             items.iter().map(cell).collect::<Vec<_>>().join(", ")
         ),
+        Value::Sparse(dim, e) => format!("<{} of {dim} non-zero>", e.len()),
     }
 }

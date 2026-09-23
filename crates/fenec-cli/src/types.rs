@@ -112,6 +112,12 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
              export type Timestamp = string & { readonly __fenec: 'timestamp' };\n",
         );
     }
+    if used(|t| matches!(t, DataType::Sparse(_))) {
+        out.push_str(
+            "/** `sparse<N>`: pgvector's text form, `{1:0.5,3:0.25}/N`, indices from 1. */\n\
+             export type Sparse = string & { readonly __fenec: 'sparse' };\n",
+        );
+    }
     if used(|t| matches!(t, DataType::Vector(..))) {
         out.push_str(
             "/** `vector<N>`: an array of numbers in JSON. */\n\
@@ -177,6 +183,9 @@ fn ts_type(t: &DataType) -> String {
         DataType::Bytes => "Bytes".into(),
         DataType::Timestamp => "Timestamp".into(),
         DataType::Vector(..) => "Vector".into(),
+        // pgvector's text form, `{1:0.5}/30522`: the string every transport
+        // carries a sparse vector as.
+        DataType::Sparse(_) => "Sparse".into(),
         DataType::List(inner) => format!("{}[]", ts_type(inner)),
     }
 }
@@ -194,6 +203,7 @@ fn index_note(k: &IndexKind) -> Option<String> {
             spec.quant_arg()
         )),
         IndexKind::Text(spec) => Some(format!(" @text(k1={}, b={})", spec.k1(), spec.b())),
+        IndexKind::Inverted => Some(" @inverted".into()),
     }
 }
 

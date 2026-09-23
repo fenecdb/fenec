@@ -3,6 +3,8 @@
 //! Language summary
 //! ```text
 //! create collection [if not exists] <name> ( <field> <type> [@index], ... )
+//!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type]
+//!        index: @hash @sorted @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //! drop   collection [if exists] <name>
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
@@ -280,6 +282,7 @@ impl Parser {
             "sorted" => IndexKind::Sorted,
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
+            "inverted" => IndexKind::Inverted,
             other => return self.err(format!("unknown index `{other}`")),
         };
         Ok(Statement::CreateIndex {
@@ -313,6 +316,7 @@ impl Parser {
                         let spec = self.text_args()?;
                         field = field.indexed(IndexKind::Text(spec));
                     }
+                    "inverted" => field = field.indexed(IndexKind::Inverted),
                     other => return self.err(format!("unknown index `{other}`")),
                 }
                 continue;
@@ -463,6 +467,20 @@ impl Parser {
                 };
                 self.expect(Tok::Gt)?;
                 DataType::Vector(dim as usize, prec)
+            }
+            // `sparse<30522>`: a vector of that many dimensions of which only
+            // the non-zero entries are kept -- a SPLADE vocabulary's size.
+            "sparse" | "sparsevec" => {
+                self.expect(Tok::Lt)?;
+                let dim = self.int()?;
+                if dim <= 0 || dim as u64 > fenec_core::sparse::MAX_DIM as u64 {
+                    return self.err(format!(
+                        "a sparse vector's dimension is 1 to {}",
+                        fenec_core::sparse::MAX_DIM
+                    ));
+                }
+                self.expect(Tok::Gt)?;
+                DataType::Sparse(dim as usize)
             }
             other => return self.err(format!("unknown type `{other}`")),
         })

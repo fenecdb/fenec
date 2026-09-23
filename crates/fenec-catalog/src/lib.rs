@@ -65,6 +65,7 @@ const REGNAMESPACE: i32 = 4089;
 /// Types of fenecdb's own, where pgvector would have put its.
 const VECTOR: i32 = 16_400;
 const HALFVEC: i32 = 16_401;
+const SPARSEVEC: i32 = 16_402;
 
 const PG_CATALOG: i64 = 11;
 const PUBLIC: i64 = 2200;
@@ -78,6 +79,8 @@ const AM_BTREE: i64 = 403;
 const AM_HASH: i64 = 405;
 const AM_HNSW: i64 = 16_410;
 const AM_BM25: i64 = 16_411;
+/// A sparse vector's index: a word index's shape, scored by dot product.
+const AM_INVERTED: i64 = 16_413;
 const AM_FENEC: i64 = 16_412;
 
 /// A collection's oid, and room after it for its indexes and its key:
@@ -159,6 +162,7 @@ impl Table {
                 IndexKind::Sorted => (AM_BTREE, "sorted"),
                 IndexKind::Text(_) => (AM_BM25, "text"),
                 IndexKind::Vector(_) => (AM_HNSW, "hnsw"),
+                IndexKind::Inverted => (AM_INVERTED, "inverted"),
             };
             out.push(Index {
                 oid: self.oid + 1 + f.attnum,
@@ -282,6 +286,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
         DataType::Timestamp => (TIMESTAMPTZ, -1, 0),
         DataType::Vector(n, VecPrec::F32) => (VECTOR, *n as i64, 0),
         DataType::Vector(n, VecPrec::F16) => (HALFVEC, *n as i64, 0),
+        DataType::Sparse(n) => (SPARSEVEC, *n as i64, 0),
         DataType::List(inner) => {
             let oid = match **inner {
                 DataType::Bool => BOOL_ARRAY,
@@ -297,7 +302,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
 }
 
 /// `pg_type`'s rows: (oid, name, length, category, element, array, collation).
-const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 30] = [
+const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 31] = [
     (BOOL, "bool", 1, "B", 0, BOOL_ARRAY, 0),
     (BYTEA, "bytea", -1, "U", 0, BYTEA_ARRAY, 0),
     (CHAR, "char", 1, "Z", 0, 1002, 0),
@@ -336,6 +341,7 @@ const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 30] = [
     (REGCLASS, "regclass", 4, "N", 0, 2210, 0),
     (VECTOR, "vector", -1, "U", 0, 0, 0),
     (HALFVEC, "halfvec", -1, "U", 0, 0, 0),
+    (SPARSEVEC, "sparsevec", -1, "U", 0, 0, 0),
 ];
 
 /// `format_type`: the name `\d` prints.
@@ -363,11 +369,11 @@ fn format_type(oid: i64, typmod: i64) -> Option<String> {
         })
     };
     match oid as i32 {
-        VECTOR | HALFVEC => {
-            let name = if oid as i32 == VECTOR {
-                "vector"
-            } else {
-                "halfvec"
+        VECTOR | HALFVEC | SPARSEVEC => {
+            let name = match oid as i32 {
+                VECTOR => "vector",
+                HALFVEC => "halfvec",
+                _ => "sparsevec",
             };
             Some(if typmod > 0 {
                 format!("{name}({typmod})")
@@ -462,6 +468,7 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
                 (AM_HASH, "hash", "i"),
                 (AM_HNSW, "hnsw", "i"),
                 (AM_BM25, "bm25", "i"),
+                (AM_INVERTED, "inverted", "i"),
                 (AM_FENEC, "fenec", "t"),
             ]
             .iter()
@@ -1163,7 +1170,7 @@ fn information_schema(name: &str, alias: &str, s: &Snapshot) -> Rel {
                 for (name, ty, num, required) in std::iter::once(id).chain(fields) {
                     let (oid, typmod, _) = pg_type(&ty);
                     let data_type = match oid {
-                        VECTOR | HALFVEC => "USER-DEFINED".to_string(),
+                        VECTOR | HALFVEC | SPARSEVEC => "USER-DEFINED".to_string(),
                         _ if matches!(ty, DataType::List(_)) => "ARRAY".to_string(),
                         _ => format_type(oid as i64, typmod).unwrap_or_default(),
                     };
@@ -1266,6 +1273,7 @@ fn index_def(tb: &Table, i: &Index) -> String {
         AM_HASH => "hash",
         AM_HNSW => "hnsw",
         AM_BM25 => "bm25",
+        AM_INVERTED => "inverted",
         _ => "btree",
     };
     let unique = if i.primary { "UNIQUE " } else { "" };

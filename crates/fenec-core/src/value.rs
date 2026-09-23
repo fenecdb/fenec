@@ -34,6 +34,10 @@ pub enum DataType {
     /// Fixed-size vector. The dimension is known at schema time, which lets
     /// storage keep it inline without a length prefix (arena).
     Vector(usize, VecPrec),
+    /// Sparse vector of dimension N: only the non-zero entries are kept,
+    /// what a learned sparse model (SPLADE) gives a text. See
+    /// [`crate::sparse`].
+    Sparse(usize),
     /// Homogeneous list (of scalar types).
     List(Box<DataType>),
 }
@@ -49,6 +53,7 @@ impl DataType {
             DataType::Timestamp => "timestamp".into(),
             DataType::Vector(d, VecPrec::F32) => format!("vector<{d}>"),
             DataType::Vector(d, VecPrec::F16) => format!("vector<{d}, f16>"),
+            DataType::Sparse(d) => format!("sparse<{d}>"),
             DataType::List(inner) => format!("[{}]", inner.name()),
         }
     }
@@ -73,6 +78,10 @@ pub enum Value {
     Timestamp(i64),
     Vector(Vec<f32>),
     List(Vec<Value>),
+    /// A sparse vector: its dimension, and its non-zero entries ascending by
+    /// index, the indices counted from 0. One `Vec` of pairs rather than two,
+    /// so a `Value` stays the size it was.
+    Sparse(u32, Vec<(u32, f32)>),
 }
 
 impl Value {
@@ -87,6 +96,7 @@ impl Value {
             Value::Timestamp(_) => "timestamp",
             Value::Vector(_) => "vector",
             Value::List(_) => "list",
+            Value::Sparse(..) => "sparse",
         }
     }
 
@@ -141,6 +151,17 @@ impl Value {
             (DataType::Int, Value::Timestamp(ms)) => Ok(Value::Int(ms)),
             (DataType::Text, Value::Timestamp(ms)) => Ok(Value::Text(crate::time::format_iso(ms))),
             (DataType::Vector(dim, _), Value::Vector(v)) => check_dim(v, *dim),
+            // pgvector's text form is how a sparse vector arrives from JSON, a
+            // FenecQL literal or the pg wire; either way it is put in index
+            // order, and its zeros dropped, before anything holds it.
+            (DataType::Sparse(dim), Value::Sparse(d, e)) => {
+                let (d, e) = crate::sparse::normalise(d, e).map_err(Error::Type)?;
+                check_sparse_dim(d, e, *dim)
+            }
+            (DataType::Sparse(dim), Value::Text(s)) => {
+                let (d, e) = crate::sparse::parse(&s)?;
+                check_sparse_dim(d, e, *dim)
+            }
             (DataType::Vector(dim, _), Value::List(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for it in items {
@@ -197,6 +218,7 @@ impl Value {
             Value::Text(_) | Value::Bytes(_) => 3,
             Value::Vector(_) => 4,
             Value::List(_) => 5,
+            Value::Sparse(..) => 6,
         }
     }
 
@@ -242,6 +264,17 @@ impl Value {
                 }
                 a.len().cmp(&b.len())
             }
+            (Value::Sparse(da, a), Value::Sparse(db, b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    let o =
+                        x.0.cmp(&y.0)
+                            .then(x.1.partial_cmp(&y.1).unwrap_or(Ordering::Equal));
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                a.len().cmp(&b.len()).then(da.cmp(db))
+            }
             (Value::Vector(a), Value::Vector(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
                     let o = x.partial_cmp(y).unwrap_or(Ordering::Equal);
@@ -259,6 +292,15 @@ impl Value {
             },
         }
     }
+}
+
+fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
+    if d as usize != dim {
+        return Err(Error::Type(format!(
+            "sparse vector dimension must be {dim}, got {d}"
+        )));
+    }
+    Ok(Value::Sparse(d, e))
 }
 
 fn check_dim(v: Vec<f32>, dim: usize) -> Result<Value> {

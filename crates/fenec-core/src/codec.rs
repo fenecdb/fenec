@@ -22,6 +22,10 @@ pub const TAG_LIST: u8 = 7;
 pub const TAG_VECTOR_F16: u8 = 8;
 /// UTC epoch milliseconds; carries a zigzag varint just like `TAG_INT`.
 pub const TAG_TIMESTAMP: u8 = 9;
+/// Sparse vector: `[dimension][count]` then the indices, each the distance
+/// from the one before -- a SPLADE vector's are close together, and small
+/// gaps take a byte each -- then the weights as `f32`.
+pub const TAG_SPARSE: u8 = 10;
 
 // ------------------------------------------------------- half precision
 //
@@ -188,6 +192,21 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
                 encode_value(out, it);
             }
         }
+        Value::Sparse(dim, entries) => {
+            out.push(TAG_SPARSE);
+            put_uvarint(out, *dim as u64);
+            put_uvarint(out, entries.len() as u64);
+            // Wrapping, as the reader adds: entries out of order -- a value
+            // built by hand, never one a write coerced -- still round-trip.
+            let mut last = 0u32;
+            for (i, _) in entries {
+                put_uvarint(out, i.wrapping_sub(last) as u64);
+                last = *i;
+            }
+            for (_, w) in entries {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
     }
 }
 
@@ -250,6 +269,21 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
             }
             Ok(Value::List(items))
         }
+        TAG_SPARSE => {
+            let dim = get_uvarint(buf, pos)? as u32;
+            let n = get_uvarint(buf, pos)? as usize;
+            let mut entries = Vec::with_capacity(n.min(1 << 16));
+            let mut at = 0u32;
+            for _ in 0..n {
+                at = at.wrapping_add(get_uvarint(buf, pos)? as u32);
+                entries.push((at, 0.0));
+            }
+            let raw = take(buf, pos, n * 4)?;
+            for (e, w) in entries.iter_mut().zip(raw.chunks_exact(4)) {
+                e.1 = f32::from_le_bytes(w.try_into().unwrap());
+            }
+            Ok(Value::Sparse(dim, entries))
+        }
         other => Err(Error::Corrupt(format!("unknown value tag {other}"))),
     }
 }
@@ -297,6 +331,15 @@ pub fn skip_value(buf: &[u8], pos: &mut usize) -> Result<()> {
             }
             Ok(())
         }
+        TAG_SPARSE => {
+            get_uvarint(buf, pos)?;
+            let n = get_uvarint(buf, pos)? as usize;
+            for _ in 0..n {
+                get_uvarint(buf, pos)?;
+            }
+            take(buf, pos, n * 4)?;
+            Ok(())
+        }
         other => Err(Error::Corrupt(format!("unknown value tag {other}"))),
     }
 }
@@ -338,6 +381,10 @@ pub fn encode_type(out: &mut Vec<u8>, ty: &DataType) {
             out.push(TAG_LIST);
             encode_type(out, inner);
         }
+        DataType::Sparse(d) => {
+            out.push(TAG_SPARSE);
+            put_uvarint(out, *d as u64);
+        }
     }
 }
 
@@ -356,6 +403,7 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
         TAG_VECTOR => DataType::Vector(get_uvarint(buf, pos)? as usize, VecPrec::F32),
         TAG_VECTOR_F16 => DataType::Vector(get_uvarint(buf, pos)? as usize, VecPrec::F16),
         TAG_LIST => DataType::List(Box::new(decode_type(buf, pos)?)),
+        TAG_SPARSE => DataType::Sparse(get_uvarint(buf, pos)? as usize),
         other => return Err(Error::Corrupt(format!("unknown type tag {other}"))),
     })
 }
@@ -388,6 +436,8 @@ mod tests {
             Value::Bytes(vec![1, 2, 3]),
             Value::Vector(vec![0.1, -0.2, 0.3]),
             Value::List(vec![Value::Int(1), Value::Text("a".into())]),
+            Value::Sparse(30_522, vec![(0, 0.5), (7, -1.25), (30_521, 3.0)]),
+            Value::Sparse(4, vec![]),
         ];
         let mut buf = Vec::new();
         for v in &vals {

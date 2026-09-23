@@ -179,14 +179,18 @@ deliberately.</p>
 
 <h2 id="retrieval-quality">Retrieval quality</h2>
 
-<pre data-lang="bash">cd crates/fenec-bench/beir &amp;&amp; npm install &amp;&amp; node embed.mjs path/to/scifact
+<pre data-lang="bash">cd crates/fenec-bench/beir &amp;&amp; npm install
+node embed.mjs path/to/scifact     # dense: all-MiniLM-L6-v2, 90 MB
+node splade.mjs path/to/scifact    # sparse: SPLADE++, 532 MB, optional
 make beir BEIR=path/to/scifact
 </pre>
 
 <p>Two BEIR datasets as BEIR ships them — SciFact, 5 183 documents and 300
 test queries, and FiQA, 57 638 and 648 — with every document and query
-embedded by all-MiniLM-L6-v2 the way sentence-transformers does it. Each of
-the engine's ways of ranking ten documents is then scored by nDCG@10, through
+embedded by all-MiniLM-L6-v2 the way sentence-transformers does it, and
+encoded by SPLADE++ (<code>prithivida/Splade_PP_en_v1</code>) into a
+<code>sparse&lt;30522&gt;</code> field, both cut at 256 tokens. Each of the
+engine's ways of ranking ten documents is then scored by nDCG@10, through
 FenecQL: the answers are the engine's own.</p>
 
 <div class="tbl">
@@ -203,6 +207,8 @@ FenecQL: the answers are the engine's own.</p>
 <tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.699</td><td class="n">0.366</td><td class="n">0.78 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.687</td><td class="n">0.358</td><td class="n">0.98 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.689</td><td class="n">0.363</td><td class="n">4.09 ms</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">2.62 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">3.22 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -213,6 +219,13 @@ shares few words with its answer and BM25 is far behind. <code>fuse</code>
 is the one path near the top of both. The rank offset matters less than the
 depth: at 20 a side, <code>k</code> from 10 to 120 moves either score by at
 most 0.005.</p>
+
+<p>SPLADE sits between the two. On SciFact it comes within 0.006 of the dense
+fusion with one index; on FiQA it lifts BM25 by 0.099 but stays under the
+dense vectors, and fused with BM25 there it loses 0.016 — both sides are
+lexical. Its queries' 37 to 65 terms reach most of the corpus, which is
+where its 2.6 ms go (<a href="concepts.html#sparse-vectors">How it
+works</a>).</p>
 
 <h2>Half precision</h2>
 
@@ -258,10 +271,10 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1251 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">942 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>829 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>456 KB</b></td><td class="n"><b>130 KB</b></td><td class="n">158 KB</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1316 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1008 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>878 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>473 KB</b></td><td class="n"><b>135 KB</b></td><td class="n">164 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">72 KB</td><td class="n">20 KB</td><td class="n">23 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.19 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -270,7 +283,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>150 KB brotli</b> for both together. A binary you execute and an image
+<b>155 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 

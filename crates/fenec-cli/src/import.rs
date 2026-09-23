@@ -551,6 +551,7 @@ fn index_name(kind: &IndexKind) -> String {
             s.quant_arg()
         ),
         IndexKind::Text(s) => format!("@text(k1={}, b={})", s.k1(), s.b()),
+        IndexKind::Inverted => "@inverted".into(),
         IndexKind::None => String::new(),
     }
 }

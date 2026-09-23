@@ -1370,6 +1370,7 @@ mod tests {
         let oids = VectorOids {
             vector: Some(90_000),
             halfvec: None,
+            sparsevec: None,
         };
         let desc = |name: &str, oid: i32, typmod: i32| FieldDesc {
             name: name.into(),

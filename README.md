@@ -111,7 +111,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-456 KB of WebAssembly — 150 KB brotli (`-q 11`) over the wire, client included — no
+473 KB of WebAssembly — 155 KB brotli (`-q 11`) over the wire, client included — no
 wasm-bindgen, no build step. [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, JDBC and pgx, and
@@ -151,11 +151,11 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 
 | | |
 |---|---|
-| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `[type]` |
-| **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)` |
+| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` |
+| **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted` |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
-| **Retrieval** | `near` (HNSW), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
+| **Retrieval** | `near` (HNSW; exact by dot product over a `sparse<N>` such as SPLADE's), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
 | **Collation** | `order name collate tr` — Turkish as ICU orders it (`ç` after `c`, `ı` before `i`), PostgreSQL's `tr-x-icu`; bytes otherwise |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
@@ -164,7 +164,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 456 KB wasm + 72 KB client (150 KB brotli served) · 829–1251 KB binary · 2.19 MB container image |
+| **Runtime size** | 473 KB wasm + 72 KB client (155 KB brotli served) · 878–1316 KB binary · 2.19 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

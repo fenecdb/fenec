@@ -62,6 +62,7 @@ enum Built {
     Hash(HashMap<Vec<u8>, Vec<DocId>>),
     Text(TextIndex),
     Sorted(SortedIndex),
+    Sparse(SparseIndex),
 }
 
 /// The index built from the copy, and the copy: taking a write back out of
@@ -301,6 +302,17 @@ impl Database {
                 }
                 c.sorted.push((copy.field.clone(), ix));
             }
+            Built::Sparse(mut ix) => {
+                for id in ids {
+                    if let Some(Value::Sparse(_, e)) = old(id) {
+                        ix.remove(id, e);
+                    }
+                    if let Some(Value::Sparse(_, e)) = c.store.read_field(id, pos)? {
+                        ix.insert(id, &e);
+                    }
+                }
+                c.sparse.push((copy.field.clone(), ix));
+            }
         }
         c.schema.fields[pos].index = copy.kind;
         let (cid, encoded) = (c.id, c.schema.encode());
@@ -525,6 +537,16 @@ impl IndexCopy {
                 &self.ty,
                 &mut self.values.iter().map(|(id, v)| (*id, v.clone())),
             )),
+            IndexKind::Inverted => {
+                let mut ix = SparseIndex::new();
+                for (id, v) in &self.values {
+                    if let Some(Value::Sparse(_, e)) = v {
+                        ix.insert(*id, e);
+                    }
+                }
+                ix.shrink_to_fit();
+                Built::Sparse(ix)
+            }
             IndexKind::None => unreachable!("a create index names its kind"),
         };
         BuiltIndex { copy: self, index }
