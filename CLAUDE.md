@@ -303,8 +303,8 @@ is off by its rounding, a step a component, and `VectorIndex::floor` is the
 nearest its vector can plausibly lie (six standard deviations of that
 rounding, wrong less than 1.5e-8 of the time); a candidate whose floor is past
 the k-th exact distance held is neither tested nor read. At 100 000 x 768 that
-is 16.8 of a beam of 100, and of 400, with recall unchanged; a bit code bounds
-nothing and reads the whole beam. A filtered set under the ANN budget is
+is 16.8 of a beam of 100, and of 400, and 20 over a million, with recall
+unchanged; a bit code bounds nothing and reads the whole beam. A filtered set under the ANN budget is
 ranked by its codes and its beam's worth ordered the same way -- read whole it
 was up to 12 800 vectors a query under bit codes -- and `exact` reads every
 vector. Bit codes need the wider beam `BIT_EF_SEARCH` -- 400: over a million
