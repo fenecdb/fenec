@@ -80,6 +80,13 @@ pub fn value_into(out: &mut String, v: &Value) {
             }
             out.push(']');
         }
+        // pgvector's text form, as a string: the one form every transport
+        // takes back, and JSON has no object a value can be.
+        Value::Sparse(dim, entries) => {
+            out.push('"');
+            crate::sparse::format_into(out, *dim, entries);
+            out.push('"');
+        }
     }
 }
 
@@ -230,6 +237,7 @@ pub fn response_to_string(r: &Response) -> String {
                             crate::schema::IndexKind::None => "none".to_string(),
                             crate::schema::IndexKind::Hash => "hash".to_string(),
                             crate::schema::IndexKind::Sorted => "sorted".to_string(),
+                            crate::schema::IndexKind::Inverted => "inverted".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {
                                 format!(
                                     "hnsw({}, m={}{})",

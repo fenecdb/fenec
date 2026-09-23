@@ -972,3 +972,47 @@ fn lookup_from_the_query_string_is_checked() {
     );
     assert_eq!(r.status, 200, "{}", r.body);
 }
+
+/// A `sparse<N>` field over JSON: written and read back as pgvector's text
+/// form, the one form every transport takes, and searched by `near` --
+/// through `/query` with the vector a parameter, and through `/<name>/near`.
+#[test]
+fn sparse_vectors_over_json() {
+    let mut db = Database::new();
+    db.execute(
+        &fenec_ql::parse_one("create collection docs (title text, s sparse<30522> @inverted)")
+            .unwrap(),
+    )
+    .unwrap();
+    let h = start_with(Config::default(), db);
+    let body = r#"{"query":"put docs [{title: \"one\", s: $1}, {title: \"two\", s: $2}]","params":["{1:0.5,3:0.25}/30522","{3:2}/30522"]}"#;
+    let r = call(h.port, "POST", "/query", Some(body));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = get(h.port, "/docs?select=title,s&order=id");
+    assert!(
+        r.body.contains(r#""s":"{1:0.5,3:0.25}/30522""#),
+        "{}",
+        r.body
+    );
+
+    let body = r#"{"query":"get docs select title near s $1 limit 1","params":["{3:1}/30522"]}"#;
+    let r = call(h.port, "POST", "/query", Some(body));
+    assert!(r.body.contains(r#""title":"two""#), "{}", r.body);
+    assert!(r.body.contains(r#""_score":2"#), "{}", r.body);
+
+    let r = call(
+        h.port,
+        "POST",
+        "/docs/near",
+        Some(r#"{"field":"s","vector":"{1:1}/30522","limit":5}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(rows(&r.body), 1, "{}", r.body);
+    let r = call(
+        h.port,
+        "POST",
+        "/docs/near",
+        Some(r#"{"field":"s","vector":[1,2,3],"limit":5}"#),
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+}

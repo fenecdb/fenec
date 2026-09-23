@@ -9,6 +9,7 @@ use crate::plugin::{Plugin, Registry, WriteOp};
 use crate::query::*;
 use crate::schema::{IndexKind, Metric, Schema};
 use crate::sorted::{Range as SortRange, SortedIndex};
+use crate::sparse::SparseIndex;
 use crate::store::{Store, OP_DEL, OP_PUT};
 use crate::text::{best_first, TextIndex};
 use crate::value::{DataType, DocId, Document, Value, VecPrec};
@@ -270,6 +271,9 @@ pub struct Collection {
     /// 2.6 KB of the browser module, and a fixed order keeps the choice
     /// between two ranges the same from one run to the next.
     pub sorted: Vec<(String, SortedIndex)>,
+    /// field name -> inverted index over a sparse vector, in schema order,
+    /// a `Vec` for the reason `sorted` is one.
+    pub sparse: Vec<(String, SparseIndex)>,
 }
 
 impl Collection {
@@ -278,6 +282,7 @@ impl Collection {
         let mut hashes = HashMap::new();
         let mut texts = HashMap::new();
         let mut sorted = Vec::new();
+        let mut sparse = Vec::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -295,6 +300,9 @@ impl Collection {
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     sorted.push((f.name.clone(), SortedIndex::new(ty)));
                 }
+                (IndexKind::Inverted, DataType::Sparse(_)) => {
+                    sparse.push((f.name.clone(), SparseIndex::new()));
+                }
                 _ => {}
             }
         }
@@ -306,6 +314,7 @@ impl Collection {
             hashes,
             texts,
             sorted,
+            sparse,
         }
     }
 
@@ -322,6 +331,7 @@ impl Collection {
         self.hashes.clear();
         self.texts.clear();
         self.sorted.clear();
+        self.sparse.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -339,9 +349,19 @@ impl Collection {
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     self.sorted.push((f.name.clone(), SortedIndex::new(ty)));
                 }
+                (IndexKind::Inverted, DataType::Sparse(_)) => {
+                    self.sparse.push((f.name.clone(), SparseIndex::new()));
+                }
                 _ => {}
             }
         }
+    }
+
+    pub fn sparse_index(&self, field: &str) -> Option<&SparseIndex> {
+        self.sparse
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, ix)| ix)
     }
 
     pub fn sorted_index(&self, field: &str) -> Option<&SortedIndex> {
@@ -378,6 +398,11 @@ impl Collection {
         }
         for (name, ix) in self.sorted.iter_mut() {
             ix.insert(doc.id, doc.get(name));
+        }
+        for (name, ix) in self.sparse.iter_mut() {
+            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+                ix.insert(doc.id, e);
+            }
         }
     }
 
@@ -423,6 +448,11 @@ impl Collection {
         }
         for (name, ix) in self.sorted.iter_mut() {
             ix.remove(doc.id, doc.get(name));
+        }
+        for (name, ix) in self.sparse.iter_mut() {
+            if let Some(Value::Sparse(_, e)) = doc.get(name) {
+                ix.remove(doc.id, e);
+            }
         }
     }
 
@@ -1138,6 +1168,10 @@ impl Database {
                         .iter()
                         .map(|(_, ix)| ix.memory_bytes())
                         .sum::<usize>()
+                    + c.sparse
+                        .iter()
+                        .map(|(_, ix)| ix.memory_bytes())
+                        .sum::<usize>()
             })
             .sum()
     }
@@ -1657,10 +1691,14 @@ impl Database {
             for t in c.texts.values_mut() {
                 t.clear();
             }
+            for (_, ix) in c.sparse.iter_mut() {
+                ix.clear();
+            }
             if fields.iter().all(|f| kept(f))
                 && c.hashes.is_empty()
                 && c.texts.is_empty()
                 && c.sorted.is_empty()
+                && c.sparse.is_empty()
             {
                 continue; // everything restored, no need to read the documents
             }
@@ -1677,6 +1715,7 @@ impl Database {
                 hashes,
                 texts,
                 sorted,
+                sparse,
                 ..
             } = c;
             // Each index beside its field's position, the ordered and vector
@@ -1707,6 +1746,12 @@ impl Database {
                     vector_ix.push((p, ix, Vec::new()));
                 }
             }
+            let mut sparse_ix = Vec::new();
+            for (f, ix) in sparse.iter_mut() {
+                if let Some(p) = schema.field_pos(f) {
+                    sparse_ix.push((p, ix));
+                }
+            }
             // In field order, as `read_fields` wants them; walked rather than
             // sorted, since a sort was 2 KB of the browser module.
             let mut positions = Vec::new();
@@ -1715,6 +1760,7 @@ impl Database {
                     || text_ix.iter().any(|(q, _)| *q == p)
                     || sorted_ix.iter().any(|(q, ..)| *q == p)
                     || vector_ix.iter().any(|(q, ..)| *q == p)
+                    || sparse_ix.iter().any(|(q, _)| *q == p)
                 {
                     positions.push(p);
                 }
@@ -1743,8 +1789,16 @@ impl Database {
                         rows.push((id, v));
                     }
                 }
+                for (p, ix) in sparse_ix.iter_mut() {
+                    if let Value::Sparse(_, e) = &vals[slot(*p)] {
+                        ix.insert(id, e);
+                    }
+                }
             }
             for (_, ix) in text_ix.iter_mut() {
+                ix.shrink_to_fit();
+            }
+            for (_, ix) in sparse_ix.iter_mut() {
                 ix.shrink_to_fit();
             }
             // Each ordered index is sorted once from its keys rather than
@@ -2905,6 +2959,9 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
+        if let Some(DataType::Sparse(dim)) = c.schema.field(&near.field).map(|f| &f.ty) {
+            return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
+        }
         let ix = c.vectors.get(&near.field).ok_or_else(|| {
             Error::Query(format!(
                 "field `{}` has no vector index (declare it with @hnsw)",
@@ -2933,6 +2990,91 @@ impl Database {
             }
             Some(f) => self.filtered_near(c, &sp, f, &qv, want, near, params, ctx)?,
         };
+        Ok(hits)
+    }
+
+    /// `near` over a `sparse<N>` field: the documents with the largest dot
+    /// product with the query, through the field's inverted index -- the
+    /// exact top `want`, not an estimate, so there is no beam to widen -- or
+    /// with `exact` every document scored, which is what the index is held
+    /// to. Only a document sharing a dimension with the query is ranked, on
+    /// either path. The filter is tested as the lists are merged, as
+    /// `match` tests it.
+    #[allow(clippy::too_many_arguments)]
+    fn run_sparse_near(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        dim: usize,
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        let field = &near.field;
+        let ix = c.sparse_index(field).ok_or_else(|| {
+            Error::Query(format!(
+                "field `{field}` has no inverted index (declare it with @inverted)"
+            ))
+        })?;
+        if near.ef.is_some() {
+            return Err(Error::Query(format!(
+                "`ef` is the HNSW beam; `{field}` is searched exactly, through its inverted index"
+            )));
+        }
+        let (d, q) = match eval(&near.vector, &mut NoRow, ctx)? {
+            Value::Sparse(d, e) => crate::sparse::normalise(d, e).map_err(Error::Type)?,
+            Value::Text(t) => crate::sparse::parse(&t)?,
+            other => {
+                return Err(Error::Type(format!(
+                    "`near` on `{field}` expects a sparse vector, found {}",
+                    other.type_name()
+                )))
+            }
+        };
+        if d as usize != dim {
+            return Err(Error::Type(format!(
+                "the query vector must have dimension {dim}, got {d}"
+            )));
+        }
+        let allowed: Option<Vec<DocId>> = match &sel.filter {
+            Some(_) => Some(self.matching_ids(&sel.collection, &sel.filter, params)?),
+            None => None,
+        };
+        let accept = |id: DocId| {
+            allowed
+                .as_ref()
+                .is_none_or(|l| l.binary_search(&id).is_ok())
+        };
+        if !near.exact {
+            let hits = ix.search(&q, want, &accept);
+            plan(|| {
+                format!(
+                    "near: the inverted index on {field}, {} dimensions, {} ranked",
+                    q.len(),
+                    hits.len()
+                )
+            });
+            return Ok(hits);
+        }
+        plan(|| format!("near: exact scan over every sparse vector in {field}"));
+        let pos = c
+            .schema
+            .field_pos(field)
+            .expect("an indexed field is in the schema");
+        let mut hits = Vec::new();
+        for id in c.store.iter_ids() {
+            if !accept(id) {
+                continue;
+            }
+            if let Some(Value::Sparse(_, e)) = c.store.read_field(id, pos)? {
+                if let Some(score) = crate::sparse::dot(&e, &q) {
+                    hits.push((id, score as f32));
+                }
+            }
+        }
+        hits.sort_by(best_first);
+        hits.truncate(want);
         Ok(hits)
     }
 
@@ -4117,6 +4259,19 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             match c.sorted.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
                 None => c.sorted.push((field, ix)),
+            }
+        }
+        IndexKind::Inverted => {
+            let mut ix = SparseIndex::new();
+            for id in c.store.ids() {
+                if let Some(Value::Sparse(_, e)) = c.store.read_field(id, pos)? {
+                    ix.insert(id, &e);
+                }
+            }
+            ix.shrink_to_fit();
+            match c.sparse.iter_mut().find(|(n, _)| *n == field) {
+                Some(slot) => slot.1 = ix,
+                None => c.sparse.push((field, ix)),
             }
         }
         IndexKind::None => {}

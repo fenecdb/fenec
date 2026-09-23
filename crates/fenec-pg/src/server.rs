@@ -1328,6 +1328,12 @@ pub fn to_pg_text(v: &Value) -> Option<String> {
             s.push(']');
             s
         }
+        // pgvector's sparsevec notation: {1:0.5,3:0.25}/30522
+        Value::Sparse(dim, entries) => {
+            let mut s = String::new();
+            fenec_core::sparse::format_into(&mut s, *dim, entries);
+            s
+        }
         Value::List(items) => {
             // PostgreSQL array notation: {a,b,c}
             let mut s = String::from("{");
@@ -1890,6 +1896,7 @@ fn run_locked(
                                         IndexKind::Text(sp) => {
                                             format!("text(k1={}, b={})", sp.k1(), sp.b())
                                         }
+                                        IndexKind::Inverted => "inverted".to_string(),
                                     }),
                                 ]);
                                 n += 1;

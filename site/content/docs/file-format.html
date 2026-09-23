@@ -19,7 +19,11 @@ exception are worth knowing before you touch the reader.</p>
   [8][0][length][history]                  replication history (optional)
 </pre>
 
-<p>Records inside a data block are <code>[op][doc-id][length][fields]</code>.
+<p>Records inside a data block are <code>[op][doc-id][length][fields]</code>,
+each field a tagged value. A <code>sparse&lt;N&gt;</code> one is
+<code>[10][N][count]</code>, then the indices, each as its distance from the
+one before — a SPLADE vector's sit close together, and a small gap takes a
+byte — then the weights as <code>f32</code>.
 A crash in the middle of an append leaves the last record cut short, in its
 header or its body: the open loads everything before it and cuts it off the
 file, so there is no separate recovery step after a crash.</p>
@@ -64,10 +68,11 @@ goes in. A crash therefore costs the tail, not the graph.</p>
 
 <p>A schema names each field's index by a kind byte: 0 none, 1
 <code>@hash</code>, 2 <code>@hnsw</code> with its parameters, 3
-<code>@text</code> with its parameters, 4 <code>@sorted</code>. For every
-kind but the graph that byte is all the file holds: the hash, text and
-ordered indexes are rebuilt from the documents on open, so there is nothing
-of theirs to validate or to go stale. An old binary cannot open a file whose
+<code>@text</code> with its parameters, 4 <code>@sorted</code>, 5
+<code>@hnsw</code> over codes (<code>quant=</code>), 6 <code>@inverted</code>.
+For every kind but the graph that byte is all the file holds: the hash, text,
+ordered and inverted indexes are rebuilt from the documents on open, so there
+is nothing of theirs to validate or to go stale. An old binary cannot open a file whose
 schema uses a newer kind and reports <code>unknown index kind 4</code>, the
 same refusal as for a record kind it does not know.</p>
 

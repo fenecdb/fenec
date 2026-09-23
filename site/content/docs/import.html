@@ -56,8 +56,8 @@ first 1000 rows.</p>
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, using
 <code>fenec-pg</code>'s own crypto in the client direction. pgvector's
-<code>vector</code> and <code>halfvec</code> columns are recognised along with
-their dimensions.</p>
+<code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns
+are recognised along with their dimensions.</p>
 
 <h2>Type mapping</h2>
 
@@ -73,6 +73,7 @@ their dimensions.</p>
 <tr><td><code>date</code> <code>datetime</code> <code>timestamp(tz)</code></td><td><code>timestamp</code></td></tr>
 <tr><td><code>int[]</code> <code>float[]</code> <code>text[]</code></td><td><code>[int]</code> <code>[float]</code> <code>[text]</code></td></tr>
 <tr><td><code>vector(N)</code> <code>halfvec(N)</code></td><td><code>vector&lt;N&gt;</code> <code>vector&lt;N, f16&gt;</code></td></tr>
+<tr><td><code>sparsevec(N)</code></td><td><code>sparse&lt;N&gt;</code>, read in the same text form</td></tr>
 <tr><td><code>uuid</code></td><td><code>text</code></td></tr>
 <tr><td><b><code>numeric</code> <code>decimal</code></b></td><td>no equivalent — <code>--cast</code> required</td></tr>
 <tr><td><b><code>json</code> <code>jsonb</code></b></td><td>no equivalent — <code>--cast</code> required</td></tr>
@@ -202,6 +203,6 @@ cargo test -p fenec-import --test pg --test follow -- --ignored
 
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
 for 242 KB of it. <code>--no-default-features</code> removes it, and
-<code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (65 KB);
-with the <code>cli</code> profile as well, the binary drops from 1251 KB to 829 KB
+<code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (66 KB);
+with the <code>cli</code> profile as well, the binary drops from 1316 KB to 878 KB
 (<code>make small</code>).</p>

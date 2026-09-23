@@ -411,6 +411,7 @@ pub fn truthy(v: &Value) -> bool {
         Value::Bytes(b) => !b.is_empty(),
         Value::List(l) => !l.is_empty(),
         Value::Vector(v) => !v.is_empty(),
+        Value::Sparse(_, e) => !e.is_empty(),
     }
 }
 

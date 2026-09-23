@@ -219,6 +219,9 @@ pub enum IndexKind {
     /// Ordered index: ranges, equality, and `order ... limit` walked in
     /// order (see [`crate::sorted`]).
     Sorted,
+    /// Inverted index over a sparse vector's dimensions, behind `near` on a
+    /// `sparse<N>` field (see [`crate::sparse`]).
+    Inverted,
 }
 
 impl IndexKind {
@@ -254,7 +257,21 @@ impl IndexKind {
                      can be built"
                 )));
             }
+            IndexKind::Inverted if !matches!(ty, DataType::Sparse(_)) => {
+                return Err(Error::Type(format!(
+                    "field `{field}` is not sparse<N>, no inverted index can be built \
+                     (a text field's is @text)"
+                )));
+            }
             _ => {}
+        }
+        if let DataType::Sparse(d) = ty {
+            if *d == 0 || *d > crate::sparse::MAX_DIM {
+                return Err(Error::Type(format!(
+                    "`{field}`: a sparse vector's dimension is 1 to {}",
+                    crate::sparse::MAX_DIM
+                )));
+            }
         }
         Ok(())
     }
@@ -377,6 +394,7 @@ impl Schema {
                     put_uvarint(&mut out, spec.prefix_min as u64);
                 }
                 IndexKind::Sorted => out.push(4),
+                IndexKind::Inverted => out.push(6),
             }
         }
         out
@@ -423,6 +441,7 @@ impl Schema {
                     prefix_min: get_uvarint(buf, pos)? as u8,
                 }),
                 4 => IndexKind::Sorted,
+                6 => IndexKind::Inverted,
                 o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
             };
             fields.push(Field {

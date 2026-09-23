@@ -64,6 +64,7 @@ right.</p>
 <tr><td>gap in an externally given <code>id</code></td><td class="n">4096</td><td>a larger jump falls into a sparse map rather than a dense array</td></tr>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
 <tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
+<tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
 <tr><td><code>fenec-pg</code> message size</td><td class="n">64 MiB</td><td><code>--max-message</code>; the protocol ceiling is 1 GiB</td></tr>
 <tr><td><code>fenec-pg</code> startup packet</td><td class="n">10 000 B</td><td>same as PostgreSQL; the only allocation before authentication</td></tr>
 <tr><td><code>fenec-pg</code> column / parameter count</td><td class="n">32 767</td><td>the protocol's <code>i16</code> counters</td></tr>
@@ -197,6 +198,14 @@ so a node that is down takes its tenants with it.</p>
 <h2>Query behaviour</h2>
 
 <ul>
+  <li><b><code>near</code> over a <code>sparse&lt;N&gt;</code> field ranks
+    only the documents sharing a dimension with the query</b>, by dot product
+    and exactly — it takes no <code>ef</code>. A document with no dimension in
+    common scores nothing and is not returned, as a document holding no word
+    of a <code>match</code> query is not; with weights of both signs, one that
+    shares dimensions can score below zero and still be on the page. The cost
+    grows with the query's non-zero entries: SPLADE expands a query to 40 to 65
+    of them, which reach most of the corpus.</li>
   <li><b>Only an <code>and</code> chain reaches an index</b> — equality
     (<code>=</code> or <code>in [..]</code>) over a <code>@hash</code> field
     or over <code>id</code>, and comparisons (<code>&lt;</code>,

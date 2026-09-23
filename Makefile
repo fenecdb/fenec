@@ -109,7 +109,7 @@ compare:
 ## The directory is one of BEIR's zips unpacked, with the vectors
 ## crates/fenec-bench/beir/embed.mjs writes beside it (npm install there once).
 beir:
-	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs)"; exit 1)
+	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs; SPLADE, optional: splade.mjs)"; exit 1)
 	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
 
 ## The LangChain and LlamaIndex vector stores against their frameworks' own

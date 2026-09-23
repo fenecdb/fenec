@@ -2,8 +2,9 @@
   "name": "fenec-beir-embed",
   "private": true,
   "type": "module",
-  "description": "Embeds a BEIR dataset for the evaluation in ../src/bin/beir.rs",
+  "description": "Encodes a BEIR dataset -- dense vectors (embed.mjs) and SPLADE (splade.mjs) -- for the evaluation in ../src/bin/beir.rs",
   "dependencies": {
-    "@huggingface/transformers": "3.8.1"
+    "@huggingface/transformers": "3.8.1",
+    "onnxruntime-node": "1.21.0"
   }
 }

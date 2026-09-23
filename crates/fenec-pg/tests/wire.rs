@@ -1649,3 +1649,66 @@ fn the_catalog_describes_the_collections() {
     assert!(find(&r, b'E').is_none(), "{r:?}");
     assert!(rows(&r).is_empty());
 }
+
+/// A `sparse<N>` field travels as pgvector's `sparsevec` does -- the text
+/// form `{1:0.5,3:0.25}/N`, indices from 1 -- both ways, as a parameter to
+/// `near` too, and the catalog calls the type and its index by name.
+#[test]
+fn sparse_vectors_travel_in_pgvectors_text_form() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection docs (title text, s sparse<30522> @inverted)");
+    let r = c.extended(
+        "put docs {title: $1, s: $2}",
+        &["one", "{1:0.5,3:0.25}/30522"],
+        false,
+    );
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.cells())
+    );
+    c.simple(r#"put docs {title: "two", s: "{3:2}/30522"}"#);
+
+    let r = c.simple("get docs select title, s");
+    let cells: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(cells[0][1].as_deref(), Some("{1:0.5,3:0.25}/30522"));
+
+    let r = c.extended(
+        "get docs select title near s $1 limit 2",
+        &["{3:1}/30522"],
+        false,
+    );
+    let hits: Vec<Vec<Option<String>>> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0][0].as_deref(), Some("two"));
+    assert_eq!(hits[0][1].as_deref(), Some("2"));
+    assert_eq!(hits[1][1].as_deref(), Some("0.25"));
+
+    let r = c.simple(
+        "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
+         FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+         WHERE c.relname = 'docs' AND a.attname = 's'",
+    );
+    assert_eq!(
+        find(&r, b'D').unwrap().cells()[0].as_deref(),
+        Some("sparsevec(30522)")
+    );
+    let r = c.simple(
+        "SELECT am.amname FROM pg_catalog.pg_index i
+         JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
+         JOIN pg_catalog.pg_am am ON am.oid = c.relam WHERE c.relname = 'docs_s_inverted'",
+    );
+    assert_eq!(
+        find(&r, b'D').unwrap().cells()[0].as_deref(),
+        Some("inverted")
+    );
+}

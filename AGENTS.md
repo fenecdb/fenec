@@ -20,7 +20,7 @@ make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
 make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
-make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir)
+make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
@@ -76,7 +76,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
 execution), `schema`, `value`, `codec`, `collate` (ICU's Turkish order, a
 generated table),
-`json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `changes`
+`json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `sparse`
+(sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
 
@@ -368,6 +369,28 @@ both scores fall (0.687, 0.358). It is built from what the engine already
 had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
+
+**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.**
+A sparse vector is held as its non-zero entries, `(index, weight)` ascending
+with indices from 0, and travels everywhere in pgvector's text form,
+`{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, pg text, a FenecQL
+literal -- so a pgvector client and `fenec import` carry the same vector.
+Every way in goes through `sparse::normalise` (order, an index given twice
+refused, zeros dropped), and the index relies on it. `@inverted` is the text
+index's shape with weights where the counts were; `near` by dot product
+walks it with MaxScore, rank-safe -- the bounds are compared once rounded to
+`f32`, after a 1e-9 slack, so a tie-break never depends on the pruning --
+and `tests/sparse.rs` holds it to `near ... exact` row for row. Only a
+document sharing a dimension with the query is ranked. Like the text index
+it is derived and never persisted. It sorts through the engine's one
+`(DocId, f32)` sort and maps dimensions through the vector index's
+`HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
+feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
+nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
+0.232 (the dense vectors 0.365), at 2.6 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. The script cuts texts
+itself: transformers.js drops the closing [SEP] when it truncates, and
+SPLADE without it took SciFact to 0.23.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change

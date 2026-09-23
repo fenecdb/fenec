@@ -206,6 +206,13 @@ pub fn parse_type(s: &str) -> Option<DataType> {
         }
         return Some(DataType::Vector(dim, prec));
     }
+    if let Some(dim) = s.strip_prefix("sparse<").and_then(|r| r.strip_suffix('>')) {
+        let dim: usize = dim.trim().parse().ok()?;
+        if dim == 0 || dim > fenec_core::sparse::MAX_DIM {
+            return None;
+        }
+        return Some(DataType::Sparse(dim));
+    }
     Some(match s.to_ascii_lowercase().as_str() {
         "bool" => DataType::Bool,
         "int" => DataType::Int,

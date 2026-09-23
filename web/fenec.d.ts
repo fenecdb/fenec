@@ -16,6 +16,8 @@
 export type Timestamp = string & { readonly __fenec: 'timestamp' };
 /** A `vector<N>` field. */
 export type Vector = number[] & { readonly __fenec: 'vector' };
+/** A `sparse<N>` field: pgvector's text form, `{1:0.5,3:0.25}/N`, indices from 1. */
+export type Sparse = string & { readonly __fenec: 'sparse' };
 /** A `bytes` field: an array of bytes in JSON. */
 export type Bytes = number[] & { readonly __fenec: 'bytes' };
 
@@ -92,6 +94,8 @@ export type Writable<T> = T extends Timestamp
   ? Timestamp | string | number | Date
   : T extends Vector
     ? number[] | Float32Array
+    : T extends Sparse
+      ? string
     : T extends Bytes
       ? number[] | Uint8Array | string
       : T;
@@ -99,11 +103,12 @@ export type Writable<T> = T extends Timestamp
 type Elem<T> = T extends readonly (infer U)[] ? U : never;
 
 /**
- * Fields of type `vector<N>` -- the only ones `near` accepts. An optional
- * field is generated as `Vector | null`, so `null` is peeled off first.
+ * Fields of type `vector<N>` or `sparse<N>` -- the only ones `near` accepts.
+ * An optional field is generated as `Vector | null`, so `null` is peeled off
+ * first.
  */
 export type VectorKey<F extends Fields> = {
-  [K in keyof F]: NonNullable<F[K]> extends Vector ? K : never;
+  [K in keyof F]: NonNullable<F[K]> extends Vector | Sparse ? K : never;
 }[keyof F] &
   string;
 
@@ -248,10 +253,13 @@ export declare class Query<
     value: unknown,
   ): Query<F, P, L>;
 
-  /** Vector search; `_score` is added to the result. */
+  /**
+   * Vector search; `_score` is added to the result. Over a `sparse<N>` field
+   * the vector is its text form and the score its dot product.
+   */
   near(
     field: VectorKey<F>,
-    vector: number[] | Float32Array,
+    vector: number[] | Float32Array | string,
     opts?: { ef?: number; exact?: boolean },
   ): Query<F, P & { _score: number }, L>;
 

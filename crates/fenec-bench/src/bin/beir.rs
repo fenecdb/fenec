@@ -7,6 +7,11 @@
 //! is scored by nDCG@10 over the test queries: BM25 alone, the vectors alone
 //! (the graph, and an exact scan), `match` then `rerank`, and `match` with
 //! `near` fused by reciprocal rank.
+//!
+//! With the SPLADE vectors `beir/splade.mjs` writes there as well, each
+//! document's goes into a `sparse<30522>` field, its `@inverted` index built
+//! afterwards and timed, and `near` over it -- alone, and fused with
+//! `match` -- is scored the same way.
 
 use fenec_core::prelude::*;
 use std::collections::HashMap;
@@ -21,6 +26,30 @@ fn read(dir: &Path, file: &str) -> String {
         )
     })
 }
+
+/// What `splade.mjs` writes: per text a count, the vocabulary ids, then the
+/// weights, little-endian.
+fn sparse_vectors(dir: &Path, file: &str) -> Option<Vec<Vec<(u32, f32)>>> {
+    let bytes = std::fs::read(dir.join(file)).ok()?;
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let n = word(at) as usize;
+        let ids = at + 4;
+        let weights = ids + 4 * n;
+        out.push(
+            (0..n)
+                .map(|k| (word(ids + 4 * k), f32::from_bits(word(weights + 4 * k))))
+                .collect(),
+        );
+        at = weights + 4 * n;
+    }
+    Some(out)
+}
+
+/// SPLADE's vocabulary: BERT's WordPiece.
+const VOCAB: u32 = 30_522;
 
 fn vectors(dir: &Path, file: &str) -> Vec<f32> {
     let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
@@ -110,28 +139,43 @@ fn main() {
     let dim = flat.len() / ids.len();
     let texts = documents(&read(dir, "corpus.jsonl"));
 
+    let splade = sparse_vectors(dir, "corpus.sparse");
+    if let Some(s) = &splade {
+        assert_eq!(
+            s.len(),
+            ids.len(),
+            "corpus.sparse is not corpus.ids' length"
+        );
+    }
     let mut db = Database::new();
     let t = Instant::now();
     db.execute(
         &fenec_ql::parse_one(&format!(
-            "create collection d (doc text, body text @text, v vector<{dim}> @hnsw(cosine))"
+            "create collection d (doc text, body text @text, v vector<{dim}> @hnsw(cosine), \
+             s sparse<{VOCAB}>)"
         ))
         .unwrap(),
     )
     .unwrap();
-    for (chunk, vs) in ids.chunks(1_000).zip(flat.chunks(1_000 * dim)) {
+    for (n, (chunk, vs)) in ids.chunks(1_000).zip(flat.chunks(1_000 * dim)).enumerate() {
         let docs = chunk
             .iter()
             .zip(vs.chunks(dim))
-            .map(|(id, v)| {
-                vec![
+            .enumerate()
+            .map(|(k, (id, v))| {
+                let mut doc = vec![
                     ("doc".to_string(), Expr::Lit(Value::Text(id.clone()))),
                     (
                         "body".to_string(),
                         Expr::Lit(Value::Text(texts[id].clone())),
                     ),
                     ("v".to_string(), Expr::Lit(Value::Vector(v.to_vec()))),
-                ]
+                ];
+                if let Some(s) = &splade {
+                    let e = s[n * 1_000 + k].clone();
+                    doc.push(("s".to_string(), Expr::Lit(Value::Sparse(VOCAB, e))));
+                }
+                doc
             })
             .collect();
         db.execute(&Statement::Put {
@@ -146,6 +190,19 @@ fn main() {
         ids.len(),
         t.elapsed().as_secs_f64()
     );
+    if splade.is_some() {
+        let t = Instant::now();
+        db.execute(&fenec_ql::parse_one("create index on d (s) @inverted").unwrap())
+            .unwrap();
+        let ix = db.collection("d").unwrap().sparse_index("s").unwrap();
+        eprintln!(
+            "SPLADE: the inverted index in {:.2} s, {} postings over {} dimensions, {:.1} MB",
+            t.elapsed().as_secs_f64(),
+            ix.postings_count(),
+            ix.dimensions(),
+            ix.memory_bytes() as f64 / 1e6
+        );
+    }
 
     let mut qrels: HashMap<String, HashMap<String, u32>> = HashMap::new();
     for line in read(dir, "qrels/test.tsv").lines().skip(1) {
@@ -162,6 +219,7 @@ fn main() {
     }
     let qids: Vec<String> = read(dir, "queries.ids").lines().map(String::from).collect();
     let qflat = vectors(dir, "queries.f32");
+    let qsparse = sparse_vectors(dir, "queries.sparse");
     let qtext: HashMap<String, String> = read(dir, "queries.jsonl")
         .lines()
         .filter(|l| !l.is_empty())
@@ -201,6 +259,16 @@ fn main() {
             format!("get d select doc match body $1 near v $2 fuse k {k} candidates 20 limit 10"),
         ));
     }
+    if qsparse.is_some() {
+        methods.push((
+            "near, sparse (SPLADE)".into(),
+            "get d select doc near s $3 limit 10".into(),
+        ));
+        methods.push((
+            "match + sparse near, fuse".into(),
+            "get d select doc match body $1 near s $3 fuse limit 10".into(),
+        ));
+    }
 
     println!("{:<36} {:>8} {:>10}", "", "nDCG@10", "p50 ms");
     for (name, sql) in &methods {
@@ -212,6 +280,10 @@ fn main() {
             let params = [
                 Value::Text(qtext[qid].clone()),
                 Value::Vector(qflat[i * dim..(i + 1) * dim].to_vec()),
+                match &qsparse {
+                    Some(q) => Value::Sparse(VOCAB, q[i].clone()),
+                    None => Value::Null,
+                },
             ];
             let t = Instant::now();
             let r = db.query(&stmt, &params).unwrap();
