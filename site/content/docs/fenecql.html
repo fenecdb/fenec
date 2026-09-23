@@ -199,14 +199,13 @@ meaning. <code>count</code> is refused as well unless the clause is
 <code>required</code>, since otherwise it collapses the very rows the children
 would hang from.</p>
 
-<p><code>order</code> inside a <code>lookup</code> is the one ordering in the
-engine that is bounded in advance: the clause carries its own
-<code>limit</code>, so only <code>offset + limit</code> children can ever be
-emitted and the rest are never put in order. On a parent with 56 374 children,
-<code>order created desc limit 3</code> costs 3.71 ms rather than 7.52 ms. What
-remains is reading one key per child, which no ordering can avoid — you cannot
-know the first three without having seen all of them. Elsewhere
-<code>order</code> has no such guarantee and still sorts in full.</p>
+<p><code>order</code> inside a <code>lookup</code> is bounded in advance: the
+clause carries its own <code>limit</code>, so only <code>offset + limit</code>
+children can ever be emitted and the rest are never put in order. On a parent
+with 56 374 children, <code>order created desc limit 3</code> costs 3.71 ms
+rather than 7.52 ms. What remains is reading one key per child, which no
+ordering can avoid — you cannot know the first three without having seen all
+of them. The query's own <code>order</code> works the same way.</p>
 
 <p>Over JSON the children are nested under the collection's name, and a chain
 nests all the way down. On the PostgreSQL wire, which has no nested row, they
@@ -281,8 +280,9 @@ create index on articles (body) @text(prefix=6)   -- for an inflected language
   and anything under an <code>or</code> — is a full scan: each matching row is
   decoded and evaluated. <code>~</code> in particular is substring matching
   without ranking and reaches no index; ranked retrieval is <code>match</code>
-  over a <code>@text</code> field. <code>order</code> has no top-k either:
-  every match is sorted and then <code>limit</code> applies.</p>
+  over a <code>@text</code> field. <code>order</code> reaches no index either:
+  every match's key is read, and only <code>offset + limit</code> of them are
+  put in order.</p>
 </div>
 
 <h2>Time</h2>

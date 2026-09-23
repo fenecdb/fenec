@@ -408,8 +408,14 @@ fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool)
             continue;
         }
         // No need to take the lock when nothing is dirty: idle passes must
-        // not block the readers.
-        if read_lock(&db).is_dirty() {
+        // not block the readers. After a storage error nothing is ever clean
+        // again, and every pass would log the same error; the writes that
+        // follow are refused by the engine and say it themselves.
+        let pending = {
+            let g = read_lock(&db);
+            g.is_dirty() && g.failure().is_none()
+        };
+        if pending {
             if let Err(e) = write_lock(&db).sync() {
                 eprintln!("sync error: {e}");
             }
@@ -497,14 +503,33 @@ impl Guard<'_> {
         }
     }
 
-    fn sync_if_needed(&mut self, policy: SyncPolicy) {
+    /// Under `always`, pushes the writes to disk before the answer goes out.
+    /// The error is returned rather than logged: a client told "done" for a
+    /// write the disk refused would be believing a wrong answer.
+    fn sync_if_needed(&mut self, policy: SyncPolicy) -> fenec_core::error::Result<()> {
         if policy == SyncPolicy::Always {
             if let Guard::Write(g) = self {
                 if let Err(e) = g.sync() {
                     eprintln!("sync error: {e}");
+                    return Err(e);
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// The SQLSTATE an engine error is reported under.
+fn sqlstate(e: &Error) -> &'static str {
+    match e {
+        Error::NotFound(_) => "42P01",
+        Error::Type(_) => "42804",
+        Error::Query(_) => "42601",
+        Error::Exists(_) => "42P07",
+        // PostgreSQL's io_error: the disk refused, and the engine now refuses
+        // writes until the file is reopened.
+        Error::Io(_) => "58030",
+        _ => "XX000",
     }
 }
 
@@ -702,6 +727,7 @@ fn session(
     let mut portals: HashMap<String, Portal> = HashMap::new();
     let mut described_stmts: HashSet<String> = HashSet::new();
     let mut described_portals: HashSet<String> = HashSet::new();
+    let mut tx = TxState::default();
 
     loop {
         let m = match read_message_max(&mut r, cfg.max_message) {
@@ -731,10 +757,10 @@ fn session(
                 let sql = take_cstr(&m.body, &mut pos);
                 be.busy.store(true, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
-                execute_into(&db, &cfg, &be, &sql, &[], &mut out, false);
+                execute_into(&db, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
                 be.busy.store(false, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
-                out.ready(b'I');
+                out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
 
@@ -807,7 +833,7 @@ fn session(
                     Some(s) => s,
                     None => {
                         out.error("57014", "the query was cancelled");
-                        out.ready(b'I');
+                        out.ready(tx.status());
                         out.flush_to(&mut w)?;
                         continue;
                     }
@@ -839,7 +865,9 @@ fn session(
                     described_portals.contains(&portal) || described_stmts.contains(&p.stmt_name);
                 be.busy.store(true, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
-                execute_into(&db, &cfg, &be, &p.sql, &p.params, &mut out, already);
+                execute_into(
+                    &db, &cfg, &be, &mut tx, &p.sql, &p.params, &mut out, already,
+                );
                 be.busy.store(false, Ordering::SeqCst);
                 be.canceled.store(false, Ordering::SeqCst);
             }
@@ -858,7 +886,7 @@ fn session(
                 out.close_complete();
             }
             b'S' => {
-                out.ready(b'I');
+                out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
             b'H' => {
@@ -867,7 +895,7 @@ fn session(
             b'X' => return Ok(()),
             other => {
                 out.error("0A000", &format!("unsupported message `{}`", other as char));
-                out.ready(b'I');
+                out.ready(tx.status());
                 out.flush_to(&mut w)?;
             }
         }
@@ -1231,7 +1259,8 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
                 compat::Shim::Rows { columns, .. } => {
                     Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect())
                 }
-                compat::Shim::Tag(_) => None,
+                // A refusal is reported by Execute, the way a syntax error is.
+                compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => None,
             },
         });
     }
@@ -1268,14 +1297,88 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
 
 // ---------------------------------------------------------------- execution
 
+/// What a session did since `BEGIN`. There are no transactions -- every
+/// statement is applied as it runs -- but drivers still bracket their work
+/// with `BEGIN` and `COMMIT`/`ROLLBACK`, and a `ROLLBACK` that answers
+/// "done" after a write is a wrong answer believed right: the caller thinks
+/// the writes were undone. So the session counts the writes it lets through
+/// and `ROLLBACK` succeeds only when there is nothing it would have had to
+/// undo, which keeps it harmless for the pools that send it on every
+/// check-in.
+#[derive(Default)]
+struct TxState {
+    open: bool,
+    writes: usize,
+}
+
+impl TxState {
+    /// The ReadyForQuery status. It has to say `T` inside a block: libpq-based
+    /// drivers such as psycopg 3 read their transaction state from it, and
+    /// with a permanent `I` they never send the `ROLLBACK` at all.
+    fn status(&self) -> u8 {
+        if self.open {
+            b'T'
+        } else {
+            b'I'
+        }
+    }
+
+    /// Called for a statement that left something behind, which the caller
+    /// reads off the change counter rather than the statement's result: a
+    /// `put` can fail after writing part of its documents, and one that
+    /// failed validation wrote nothing a `ROLLBACK` would have had to undo.
+    fn note_write(&mut self) {
+        if self.open {
+            self.writes += 1;
+        }
+    }
+
+    fn apply(&mut self, tx: compat::Tx, out: &mut Writer) {
+        match tx {
+            // A second `BEGIN` keeps the block, and the count, it is in.
+            compat::Tx::Begin => {
+                if !self.open {
+                    *self = TxState {
+                        open: true,
+                        writes: 0,
+                    };
+                }
+                out.command_complete("BEGIN");
+            }
+            compat::Tx::Commit => {
+                *self = TxState::default();
+                out.command_complete("COMMIT");
+            }
+            compat::Tx::Rollback => {
+                let n = self.writes;
+                *self = TxState::default();
+                if n == 0 {
+                    out.command_complete("ROLLBACK");
+                } else {
+                    let (s, are) = if n == 1 { ("", "is") } else { ("s", "are") };
+                    out.error(
+                        "0A000",
+                        &format!(
+                            "ROLLBACK undid nothing: fenecdb has no transactions, and the \
+                             {n} write statement{s} since BEGIN {are} already applied"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Runs the query and writes the PG messages into `out`.
 ///
 /// `row_desc_sent`: when the column description was already sent with
 /// Describe it is not repeated.
+#[allow(clippy::too_many_arguments)]
 fn execute_into(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
     be: &Backend,
+    tx: &mut TxState,
     sql: &str,
     params: &[Value],
     out: &mut Writer,
@@ -1303,6 +1406,8 @@ fn execute_into(
                 out.command_complete(&format!("{tag} {}", rows.len()));
             }
             compat::Shim::Tag(tag) => out.command_complete(&tag),
+            compat::Shim::Tx(t) => tx.apply(t, out),
+            compat::Shim::Refuse { code, message } => out.error(code, &message),
         }
         return;
     }
@@ -1333,37 +1438,49 @@ fn execute_into(
     };
 
     for (i, stmt) in stmts.iter().enumerate() {
-        // A cancellation arriving mid-batch drops the rest.
+        // A cancellation arriving mid-batch drops the rest. What ran before
+        // it stays applied, so under `always` it still goes to disk.
         if be.take_cancel() {
+            let _ = guard.sync_if_needed(cfg.sync);
             out.error("57014", "the query was cancelled");
             return;
         }
         // The memory ceiling is checked *before* the statement: the overshoot
         // is at most one statement, whose body is capped by `--max-message`.
         if let Some(msg) = over_memory_cap(cfg, guard.db(), stmt) {
+            let _ = guard.sync_if_needed(cfg.sync);
             out.error("53200", &msg);
             return;
         }
         let last = i == stmts.len() - 1;
-        match guard.run(stmt, params) {
+        // The change counter moves for every document and schema change, and
+        // for nothing else.
+        let before = guard.db().change_seq();
+        let result = guard.run(stmt, params);
+        if guard.db().change_seq() != before {
+            tx.note_write();
+        }
+        match result {
             Err(e) => {
-                let code = match e {
-                    Error::NotFound(_) => "42P01",
-                    Error::Type(_) => "42804",
-                    Error::Query(_) => "42601",
-                    Error::Exists(_) => "42P07",
-                    _ => "XX000",
-                };
+                let code = sqlstate(&e);
                 // An error does not undo the statements written before it
                 // (there are no transactions): the `always` policy must push
-                // those to disk as well.
-                guard.sync_if_needed(cfg.sync);
+                // those to disk as well. The statement's own error is the one
+                // reported; a failed sync has already refused every later
+                // write in the engine.
+                let _ = guard.sync_if_needed(cfg.sync);
                 out.error(code, &e.to_string());
                 return;
             }
             Ok(resp) => {
                 if !last {
                     continue;
+                }
+                // Under `always` the answer waits for the disk: a write the
+                // disk refused must not be reported as done.
+                if let Err(e) = guard.sync_if_needed(cfg.sync) {
+                    out.error(sqlstate(&e), &e.to_string());
+                    return;
                 }
                 match resp {
                     Response::Rows(rs) => {
@@ -1444,7 +1561,6 @@ fn execute_into(
             }
         }
     }
-    guard.sync_if_needed(cfg.sync);
 }
 
 #[cfg(test)]

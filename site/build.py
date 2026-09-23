@@ -427,6 +427,120 @@ def check_claims():
     return problems
 
 
+# ------------------------------------------------------------------ llms.txt
+#
+# Most new databases are now created by coding agents, and no model has seen
+# FenecQL: left alone, an agent writes SQL at it. /llms.txt is the short brief
+# an agent reads first (https://llmstxt.org), /llms-full.txt the whole
+# reference as one text file. Both are rendered from the pages on every build,
+# so they cannot drift from the docs the way a hand-kept copy would.
+
+SITE = "https://fenecdb.com"
+
+LLMS_BRIEF = """\
+# fenecdb
+
+> Minimal, vector-native embedded database: one file, HNSW, BM25 and hash
+> indexes, runs in the browser as WebAssembly and speaks the PostgreSQL wire
+> protocol. Its query language is FenecQL, which is not SQL.
+
+Writing FenecQL -- the reference below spells it out in full:
+
+- It is not SQL. There is no JOIN, subquery, GROUP BY, sum/avg or
+  transaction; `count` is the one aggregate, and related rows come from
+  `lookup`.
+- Square brackets are list literals and nothing else: `tags: ["a", "b"]`,
+  `tags [text]`. Nothing here marks an optional part with them; a clause you
+  do not need is simply left out.
+- Strings take double quotes. Parameters are `$1`, `$2`, ...; a vector
+  parameter is a list of numbers. A timestamp is written as text,
+  `"2026-09-01T10:00:00Z"`, or `"2026-01-01"` in a comparison.
+- Types: `bool int float text bytes timestamp vector<N> vector<N, f16>` and
+  lists such as `[text]`. There is no decimal -- money is an `int` of cents --
+  no UUID type (use `text @hash`) and no nested objects.
+- Indexes: `@hash` for equality, `@hnsw(cosine)` (or `l2`, `dot`) for
+  `near`, `@text` for `match`. Only `=` and `in [...]` inside an `and` chain
+  use an index, on a `@hash` field or on `id`; everything else scans.
+- `near` and `match` decide the order: neither combines with `order` or with
+  the other, and each returns at most 10 000 rows (`limit + offset`). Both add
+  a `_score` column.
+- After `lookup`, every clause belongs to the child collection and `limit`
+  counts children per parent. `required` goes right after `on <field>` and
+  keeps only the parents with a matching child; `count` goes before `lookup`.
+
+Every statement, by example:
+
+```fenecql
+create collection articles (title text @hash, views int, tags [text], published timestamp, embed vector<4> @hnsw(cosine), body text @text)
+put articles {title: "Rust", views: 10, tags: ["lang"], published: "2026-09-01T10:00:00Z", embed: [0.1, 0.2, 0.3, 0.4], body: "Ownership and borrowing"}
+put articles [{title: "Zig", views: 3}, {title: "Go", views: 7}]
+get articles select title, views where views < 100 and tags has "lang" order views desc limit 5 offset 5
+get articles where title in ["Rust", "Go"] count
+get articles select title where published >= "2026-01-01" near embed $1 limit 3
+get articles match body "borrowing" rerank embed $1 candidates 200 limit 10
+get articles order published desc limit 20 lookup comments on article_id where score >= 4 order published desc limit 3
+get articles count lookup comments on article_id required where score = 5
+set articles {views: 11} where id = 7
+del articles where views > 100000
+create index on articles (views) @hash
+drop collection articles
+```
+
+From JavaScript, `db.from('articles').where('views', '<', 100).near('embed', v)
+.limit(10).rows()` builds the same FenecQL with every value a parameter.
+"""
+
+
+def page_text(body):
+    """A docs page as plain Markdown-ish text: headings, code, tables, lists."""
+    # A code block may be written with entities or with a raw `<`; both are
+    # escaped here and unescaped only by the last pass, or `<name>` and
+    # `vector<384>` would read as tags to the pass that strips them.
+    def code(m):
+        lang = m.group(1) or ""
+        src = html.escape(html.unescape(m.group(2)), quote=False)
+        return f"\n```{lang}\n{src.strip()}\n```\n"
+
+    def row(m):
+        cells = re.findall(r"<t[hd][^>]*>([\s\S]*?)</t[hd]>", m.group(1))
+        return "| " + " | ".join(re.sub(r"\s+", " ", c).strip() for c in cells) + " |\n"
+
+    def link(m):
+        href, text = m.group(1), m.group(2)
+        if not re.match(r"https?:|mailto:|#", href):
+            href = f"{SITE}/docs/" + re.sub(r"\.html(?=#|$)", "", href)
+        return f"[{text}]({href})"
+
+    t = re.sub(r"<!--[\s\S]*?-->", "", body)
+    t = re.sub(r'<pre(?: data-lang="([^"]*)")?>([\s\S]*?)</pre>', code, t)
+    t = re.sub(r"<tr[^>]*>([\s\S]*?)</tr>", row, t)
+    t = re.sub(r"<h1[^>]*>([\s\S]*?)</h1>", r"\n# \1\n", t)
+    t = re.sub(r"<h2[^>]*>([\s\S]*?)</h2>", r"\n## \1\n", t)
+    t = re.sub(r"<h3[^>]*>([\s\S]*?)</h3>", r"\n### \1\n", t)
+    t = re.sub(r"<li[^>]*>", "\n- ", t)
+    t = re.sub(r"<code>([\s\S]*?)</code>", r"`\1`", t)
+    t = re.sub(r"<b>([\s\S]*?)</b>", r"**\1**", t)
+    t = re.sub(r'<a [^>]*?href="([^"]*)"[^>]*>([\s\S]*?)</a>', link, t)
+    t = re.sub(r"</?(p|div|ul|ol|table|thead|tbody|br)[^>]*>", "\n", t)
+    t = html.unescape(re.sub(r"<[^>]+>", "", t))
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip() + "\n"
+
+
+def llms_texts():
+    """(`llms.txt`, `llms-full.txt`) from the docs pages, in navigation order."""
+    index = [LLMS_BRIEF, "\n## Docs\n\n"]
+    full = [LLMS_BRIEF]
+    for _, items in NAV:
+        for key, label in items:
+            meta, body = read_page(os.path.join(ROOT, "content", key + ".html"))
+            url = f"{SITE}/{key}".replace("/docs/index", "/docs/")
+            index.append(f"- [{label}]({url}): {meta.get('description', '')}\n")
+            full.append(f"\n\n---\n\nSource: {url}\n\n{page_text(body)}")
+    index.append(f"\n## Optional\n\n- [Every page above as one text file]({SITE}/llms-full.txt)\n")
+    return "".join(index), "".join(full)
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -554,6 +668,10 @@ def build():
     for stable in ("fenec.js", "fenec.wasm"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
+
+    brief, full = llms_texts()
+    open(os.path.join(OUT, "llms.txt"), "w", encoding="utf-8").write(brief)
+    open(os.path.join(OUT, "llms-full.txt"), "w", encoding="utf-8").write(full)
 
     print(f"built {len(pages)} pages -> {os.path.relpath(OUT, REPO)}")
 

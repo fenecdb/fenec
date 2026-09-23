@@ -1,0 +1,11 @@
+# The browser module is built with WebAssembly SIMD. The distance kernels in
+# crates/fenec-core/src/vector.rs are written against it (`vector::simd`),
+# because the module is optimised for size and at `opt-level = "z"` LLVM does
+# not vectorise them on its own: a 20 000 x 384 HNSW build took 28.0 s without
+# it and 9.95 s with it, for 0.9 KB of the module.
+#
+# Every engine the client targets has SIMD: Chrome 91, Firefox 89, Safari 16.4
+# (March 2023). Without this flag the scalar kernels are compiled instead, so
+# a build that drops it still works -- it is only slower.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

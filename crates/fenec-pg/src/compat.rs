@@ -14,6 +14,22 @@ pub enum Shim {
         tag: String,
     },
     Tag(String),
+    /// Transaction control. The answer depends on what the session did since
+    /// `BEGIN`, which this layer cannot see, so the session decides.
+    Tx(Tx),
+    /// A command whose honest answer is "no": accepting it would tell the
+    /// client something happened that did not.
+    Refuse {
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tx {
+    Begin,
+    Commit,
+    Rollback,
 }
 
 fn one(col: &str, val: &str) -> Shim {
@@ -59,14 +75,29 @@ pub fn handle(sql: &str, cfg: &Config) -> Option<Shim> {
     let first = lower.split_whitespace().next().unwrap_or("");
 
     match first {
-        // Transaction control: fenecdb runs on a single-writer model, so these
-        // commands are accepted and have no effect.
-        "begin" | "start" => return Some(Shim::Tag("BEGIN".into())),
-        "commit" | "end" => return Some(Shim::Tag("COMMIT".into())),
-        "rollback" | "abort" => return Some(Shim::Tag("ROLLBACK".into())),
+        // Transaction control: there are no transactions, every statement is
+        // applied as it runs. `BEGIN` and `COMMIT` are still accepted so
+        // drivers can open, but `ROLLBACK` is answered by the session: it
+        // succeeds only when there is nothing it would have had to undo.
+        "begin" | "start" => return Some(Shim::Tx(Tx::Begin)),
+        "commit" | "end" => return Some(Shim::Tx(Tx::Commit)),
+        "rollback" | "abort" => return Some(Shim::Tx(Tx::Rollback)),
         "set" => return Some(Shim::Tag("SET".into())),
         "discard" => return Some(Shim::Tag("DISCARD ALL".into())),
-        "listen" | "unlisten" | "notify" => return Some(Shim::Tag(first.to_uppercase())),
+        // `UNLISTEN` stays a no-op because it is true: nothing is listening.
+        // `LISTEN` would leave a client waiting for notifications that never
+        // come, and `NOTIFY` would tell the sender it reached someone.
+        "unlisten" => return Some(Shim::Tag("UNLISTEN".into())),
+        "listen" | "notify" => {
+            return Some(Shim::Refuse {
+                code: "0A000",
+                message: format!(
+                    "{} is not supported: fenec-pg sends no notifications; \
+                     subscribe to changes over HTTP with GET /<collection>/changes",
+                    first.to_uppercase()
+                ),
+            })
+        }
         "show" => {
             let name = lower.strip_prefix("show").unwrap_or("").trim();
             let val = match name {
@@ -132,6 +163,31 @@ mod tests {
         assert!(handle("SHOW server_version", &cfg).is_some());
         assert!(handle("select version()", &cfg).is_some());
         assert!(handle("SELECT c.oid FROM pg_catalog.pg_class c", &cfg).is_some());
+    }
+
+    /// Transaction control is handed to the session; a notification command
+    /// that could not do what it says is refused rather than acknowledged.
+    #[test]
+    fn transaction_control_and_notifications() {
+        let cfg = Config::default();
+        let tx = |q: &str| match handle(q, &cfg) {
+            Some(Shim::Tx(t)) => Some(t),
+            _ => None,
+        };
+        assert_eq!(tx("BEGIN"), Some(Tx::Begin));
+        assert_eq!(tx("start transaction"), Some(Tx::Begin));
+        assert_eq!(tx("COMMIT;"), Some(Tx::Commit));
+        assert_eq!(tx("end"), Some(Tx::Commit));
+        assert_eq!(tx("ROLLBACK"), Some(Tx::Rollback));
+        assert_eq!(tx("abort"), Some(Tx::Rollback));
+
+        for q in ["LISTEN jobs", "notify jobs, 'x'"] {
+            assert!(
+                matches!(handle(q, &cfg), Some(Shim::Refuse { code: "0A000", .. })),
+                "`{q}` must be refused"
+            );
+        }
+        assert!(matches!(handle("UNLISTEN *", &cfg), Some(Shim::Tag(_))));
     }
 
     #[test]
