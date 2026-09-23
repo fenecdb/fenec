@@ -312,25 +312,130 @@ fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
 
 // ------------------------------------------------------ quantized kernels
 //
-// Scalar on every target, in `strip8!`'s order: LLVM vectorises the strips
-// natively, and the browser's scalar loop adds in the same order, so a graph
-// over codes is the same graph in both, as over vectors.
+// In `strip8!`'s order on every target: LLVM vectorises the strips natively,
+// and the browser's scalar loop adds in the same order, so a graph over
+// codes is the same graph in both, as over vectors. On aarch64 the int8
+// strips are written out (`neon`).
 
+#[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline]
 fn widen_i8(x: i8) -> f32 {
     x as f32
 }
 
 /// Σ code·q, the int8 arena's dot product with a query before its scale.
+#[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline]
 fn dot_i8(code: &[i8], q: &[f32]) -> f32 {
     strip8!(code, q, widen_i8, ident, mul, 0)
 }
 
 /// Σ (scale·code − q)², the int8 arena's squared distance.
+#[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline]
 fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
     strip8!(code, q, |x: i8| x as f32 * scale, ident, diff_sq, 0)
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn dot_i8(code: &[i8], q: &[f32]) -> f32 {
+    // SAFETY: the build has NEON, which is all `neon::dot` requires.
+    unsafe { neon::dot(code, q) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
+    // SAFETY: as for `dot_i8`.
+    unsafe { neon::l2(code, q, scale) }
+}
+
+/// The int8 strips on aarch64, with NEON's own sign extension. Left to the
+/// vectoriser, eight codes were widened as two halves, each zipped with a
+/// register it took for spare -- and where that register was an
+/// accumulator, every strip waited on the one before: 505 ns a 768-code
+/// distance, against 78 written out, and whether a build got that register
+/// depended on the code around the loop. A walk over int8 codes ran 2.5x
+/// slower than one over bit codes that way, and a build 1.5x slower than
+/// now. Each lane does the scalar loop's multiply and add, and the lanes
+/// are summed as `strip8!` sums its accumulators, so the result is the
+/// scalar one, bit for bit.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+mod neon {
+    use core::arch::aarch64::*;
+
+    /// Σ code·q.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dot(code: &[i8], q: &[f32]) -> f32 {
+        strips(code, q, |c, x| vmulq_f32(c, x), |c, x| c * x)
+    }
+
+    /// Σ (scale·code − q)².
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2(code: &[i8], q: &[f32], scale: f32) -> f32 {
+        strips(
+            code,
+            q,
+            |c, x| {
+                let d = vsubq_f32(vmulq_n_f32(c, scale), x);
+                vmulq_f32(d, d)
+            },
+            |c, x| super::diff_sq(c * scale, x),
+        )
+    }
+
+    /// `strip8!` over codes and a query: `step` four lanes at a time, the
+    /// eight accumulators as two registers, `tail` past the last strip.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn strips(
+        code: &[i8],
+        q: &[f32],
+        step: impl Fn(float32x4_t, float32x4_t) -> float32x4_t,
+        tail: impl Fn(f32, f32) -> f32,
+    ) -> f32 {
+        debug_assert_eq!(code.len(), q.len());
+        let (cc, rc) = code.as_chunks::<8>();
+        let (cq, rq) = q.as_chunks::<8>();
+        let (mut lo, mut hi) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+        for (c, x) in cc.iter().zip(cq) {
+            // Eight codes, sign-extended to sixteen bits and then to 32.
+            let w = vmovl_s8(vcreate_s8(u64::from_le_bytes(c.map(|b| b as u8))));
+            let c0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(w)));
+            let c1 = vcvtq_f32_s32(vmovl_high_s16(w));
+            lo = vaddq_f32(lo, step(c0, four(&x[..4])));
+            hi = vaddq_f32(hi, step(c1, four(&x[4..])));
+        }
+        let (l, h) = (lanes(lo), lanes(hi));
+        let mut s = (l[0] + l[1]) + (l[2] + l[3]) + ((h[0] + h[1]) + (h[2] + h[3]));
+        for (c, x) in rc.iter().zip(rq) {
+            s += tail(*c as f32, *x);
+        }
+        s
+    }
+
+    /// Four f32 as a register, built from the elements: LLVM folds the
+    /// reads into one load.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn four(x: &[f32]) -> float32x4_t {
+        let v = vdupq_n_f32(x[0]);
+        let v = vsetq_lane_f32::<1>(x[1], v);
+        let v = vsetq_lane_f32::<2>(x[2], v);
+        vsetq_lane_f32::<3>(x[3], v)
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn lanes(v: float32x4_t) -> [f32; 4] {
+        [
+            vgetq_lane_f32::<0>(v),
+            vgetq_lane_f32::<1>(v),
+            vgetq_lane_f32::<2>(v),
+            vgetq_lane_f32::<3>(v),
+        ]
+    }
 }
 
 /// Σ ±q, the sign each bit gives: the bit arena's dot product with a query
@@ -1158,6 +1263,38 @@ impl VectorIndex {
         self.data.quantized()
     }
 
+    /// The nearest `doc`'s own vector can lie, as a distance, given the
+    /// `score` its code estimated against a query `reach` long; minus
+    /// infinity where the code bounds nothing, and the vector has to be read
+    /// to be known.
+    ///
+    /// An int8 code rounds each component to a step of its scale, so the
+    /// estimate is off by the rounding left in every component, weighed by
+    /// the query: a sum of terms each within half a step, which spreads as
+    /// the step times the query over √12 -- 0.0003 of a cosine distance at
+    /// 768 dimensions. A rounding error spread evenly is sub-Gaussian with
+    /// its own variance, so the sum passes six of those less often than
+    /// 1.5e-8 of the time. In the worst case, every rounding leaning the
+    /// query's way, the step times the query's L1 norm is off by 0.0105:
+    /// as wide as the tenth nearest's lead over the hundredth, and 98 of a
+    /// beam of 100 still had to be read. A bit code keeps no step.
+    pub fn floor(&self, doc: DocId, score: f32, reach: f32) -> f32 {
+        let Arena::I8(_, scales) = &self.data else {
+            return f32::NEG_INFINITY;
+        };
+        let Some(&node) = self.by_doc.get(&doc) else {
+            return f32::NEG_INFINITY;
+        };
+        // How far a unit of rounding moves the distance: the query, or
+        // under L2 twice the difference, as long as the estimate's root.
+        let (d, reach) = match self.spec.metric {
+            Metric::Cosine => (1.0 - score, reach),
+            Metric::Dot => (-score, reach),
+            Metric::L2 => (score * score, 2.0 * score),
+        };
+        d - 6.0 * scales[node as usize] * reach / 12f32.sqrt()
+    }
+
     /// The vector a node written with `raw` searches the graph for its
     /// neighbours with: `raw` itself, prepared, over an arena of codes --
     /// what the node's code widens back to is the signs alone under `bit` --
@@ -1955,6 +2092,40 @@ mod tests {
         let r = ix.search(&[10.2, 0.0], 3, None, |_| true);
         assert_eq!(r[0].0, 10);
         assert_eq!(ix.len(), 200);
+    }
+
+    /// The int8 kernels -- NEON's own on aarch64 -- give the scalar strips'
+    /// result bit for bit, at every length and through the tail, so a graph
+    /// over codes built natively is the graph the browser builds.
+    #[test]
+    fn int8_kernels_match_the_scalar_strips() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for len in (0..70).chain([767, 768, 1536]) {
+            for _ in 0..50 {
+                let code: Vec<i8> = (0..len).map(|_| next() as i8).collect();
+                let q: Vec<f32> = (0..len)
+                    .map(|_| (next() % 20_001) as f32 / 10_000.0 - 1.0)
+                    .collect();
+                let scale = (next() % 1000 + 1) as f32 / 97_000.0;
+                let dot = strip8!(&code[..], &q[..], |c: i8| c as f32, ident, mul, 0);
+                let l2 = strip8!(
+                    &code[..],
+                    &q[..],
+                    |c: i8| c as f32 * scale,
+                    ident,
+                    diff_sq,
+                    0
+                );
+                assert_eq!(dot_i8(&code, &q).to_bits(), dot.to_bits(), "dot, {len}");
+                assert_eq!(l2_i8(&code, &q, scale).to_bits(), l2.to_bits(), "l2, {len}");
+            }
+        }
     }
 
     /// If a vector carrying NaN enters the index the distance becomes NaN too.

@@ -197,12 +197,13 @@ open-bench:
 	./target/release/examples/open open $(OPEN_FILE) mapped
 
 ## Quantized vector indexes against full vectors: the arena, the heap,
-## recall@10 and latency at beams of 100, 200 and 400. QUANT_ROWS=1000000 is
-## the million the docs quote; each mode runs in a process of its own.
+## recall@10, latency and the documents' vectors read at beams of 100, 200
+## and 400, and over a filtered set of 3 000 rows. QUANT_ROWS=1000000 is the
+## million the docs quote; each mode runs in a process of its own.
 QUANT_ROWS ?= 100000
 quant-bench:
 	$(CARGO) build --release -p fenec-core --example quant
-	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32; done
+	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32 --filter 3000; done
 
 ## Memory footprint (for calibrating --max-memory)
 memory:
