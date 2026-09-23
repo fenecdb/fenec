@@ -5,6 +5,6 @@
   "description": "Encodes a BEIR dataset -- dense vectors (embed.mjs) and SPLADE (splade.mjs) -- for the evaluation in ../src/bin/beir.rs",
   "dependencies": {
     "@huggingface/transformers": "4.3.0",
-    "onnxruntime-node": "1.21.0"
+    "onnxruntime-node": "1.30.0"
   }
 }
