@@ -228,6 +228,10 @@ so a node that is down takes its tenants with it.</p>
     decoded and evaluated. <code>~</code> is unranked substring matching;
     ranked retrieval is <code>match</code> over a <code>@text</code> field,
     which does reach an index.</li>
+  <li>A <code>@hash</code> equality answers as the scan does, a float's
+    <code>-0.0</code> and <code>0.0</code> as one value. Inside a list or a
+    vector a <code>-0.0</code> keeps its own key, so an equality over a
+    hashed list or vector holding one can miss what the scan finds.</li>
   <li>A comparison reaches an ordered index only when its literal compares
     exactly as the scan would: <code>price &lt; 12.5</code> on an
     <code>int</code> field, or an integer past 2<sup>53</sup> against a

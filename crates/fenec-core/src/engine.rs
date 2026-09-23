@@ -658,15 +658,26 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
     Some(out)
 }
 
+/// A value's bucket key: its encoding, a float's -0.0 filed as 0.0. The scan
+/// finds the two equal -- PostgreSQL's float hash hashes -0 as 0 for the
+/// same reason -- and under a key of its own a stored -0.0 was missed by
+/// `price = 0.0` through the index alone. The document keeps the value as
+/// it was written. A -0.0 inside a list or a vector keeps its sign: folding
+/// those too was 570 bytes of the browser module, for a hash index on such
+/// a field meeting a -0.0.
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
-    crate::codec::encode_value(&mut out, v);
+    match v {
+        // Adding +0.0 turns -0.0 into 0.0 and leaves every other float alone.
+        Value::Float(f) => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
+        _ => crate::codec::encode_value(&mut out, v),
+    }
     out
 }
 
-/// Whether an index files `a` and `b` as one entry: the same encoding, which
-/// is equal to the bit -- `==` says -0.0 is 0.0, and a hash key is the
-/// encoding. `==` itself was 570 bytes of the browser module besides.
+/// Whether an index files `a` and `b` as one entry: the same hash key, which
+/// every index's own key follows. `==` would call a NaN changed that files
+/// where it did, and was 570 bytes of the browser module besides.
 fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
     match (a, b) {
         (None, None) => true,

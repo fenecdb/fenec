@@ -131,9 +131,9 @@ fn the_tail_after_a_checkpoint_keeps_the_nodes_too() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A float that changes only its sign bit -- `0.0` to `-0.0`, equal by
-/// `==` -- is a rewrite of a hash index's entry, whose key is the value's
-/// encoding: judged by `==`, the bucket kept the old key.
+/// A float that changes only its sign bit -- `0.0` to `-0.0`, which the
+/// scan and the hash key take for one value -- leaves the index answering
+/// as a build from the documents does, both ways round.
 #[test]
 fn a_sign_bit_is_a_change() {
     let mut db = Database::new();

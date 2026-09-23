@@ -566,7 +566,9 @@ fn create_index_after_bulk_load() {
 /// schema must give the same answer to the same filter. Because the bucket
 /// key is produced on the write path from the value coerced to the field
 /// type, `price = 10` missed the stored `10.0` and silently returned 0 rows
-/// unless the lookup went through the same conversion.
+/// unless the lookup went through the same conversion. The key is the
+/// value's encoding, bits and all, so `-0.0`, which the scan finds equal to
+/// `0.0`, went under a key of its own.
 #[test]
 fn hash_index_agrees_with_scan() {
     let mut db = Database::new();
@@ -583,6 +585,10 @@ fn hash_index_agrees_with_scan() {
             &mut db,
             &format!(r#"put {c} {{price: 10.0, year: 2024, label: "x"}}"#),
         );
+        run(
+            &mut db,
+            &format!(r#"put {c} {{price: -0.0, year: 2023, label: "y"}}"#),
+        );
     }
 
     for filter in [
@@ -595,6 +601,10 @@ fn hash_index_agrees_with_scan() {
         r#"where label = "x""#,  // text literal  -> bytes field
         r#"where year = "abc""#, // literal that does not fit the type
         r#"where year = 2024 and label = "x""#,
+        "where price = 0.0", // the stored -0.0
+        "where price = -0.0",
+        "where price = 0",
+        "where price in [0.0, 10.0]",
     ] {
         let a = run(&mut db, &format!("get ix {filter}"))
             .rows()
