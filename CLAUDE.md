@@ -173,7 +173,9 @@ archived writes up to a time or a change, forked -- a fenecdb file is exactly
 that, so a restore is a concatenation checked by opening it.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
-whose directory replicates to a standby router like any other file;
+whose directory replicates to a standby router like any other file, the
+standby's maps catching up from the change ring -- 4 us a change at 100 000
+tenants against 38 ms reading them all again under the router's write lock;
 `site/content/docs/sharding.html`). The tenant comes from the path
 (`/t/<tenant>/`), or over the pg wire from the startup packet's database
 (`--listen` in `--dir` mode; looked up again per statement, so a move, an idle
