@@ -70,7 +70,10 @@ make wasm FEATURES=none            # none of the four: 117 KB
 </pre>
 
 <p>The module carries four indexes, and a page that uses fewer can load one
-built without the rest. What each set weighs is in <a
+built without the rest. The release's <code>fenec-web</code> bundle carries
+<code>fenec-lite.wasm</code>, built without any, beside
+<code>fenec.wasm</code>; another set is a <code>make wasm</code> away. What
+each set weighs is in <a
 href="benchmarks.html#module-features">Benchmarks</a>.</p>
 
 <div class="tbl">

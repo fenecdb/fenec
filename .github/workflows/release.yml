@@ -107,11 +107,14 @@ jobs:
             tag="$GITHUB_REF_NAME"
           fi
           version="${tag#v}"
-          make wasm
+          make wasm wasm-lite
           mkdir -p dist "fenec-web-v${version}"
-          # What a page actually needs: the module, the bundle and the types,
-          # and the collation data the module fetches beside it.
-          cp web/fenec.js web/fenec.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
+          # What a page actually needs: the module -- with every index, and
+          # without them for a page that uses none -- the bundle and the
+          # types, the collation data the module fetches beside it, and a
+          # note on which module to take.
+          cp web/fenec.js web/fenec.wasm web/fenec-lite.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
+          cp web/BUNDLE.md "fenec-web-v${version}/README.md"
           cp -r web/collate "fenec-web-v${version}/"
           tar -czf "dist/fenec-web-v${version}.tar.gz" "fenec-web-v${version}"
 
