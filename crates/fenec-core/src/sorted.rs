@@ -16,7 +16,9 @@
 //! the key space cannot express exactly sends the query back to the scan, and
 //! ties keep the order the scan keeps them in, ascending id.
 
+use crate::collate::Collation;
 use crate::value::{DataType, DocId, Value};
+use std::cmp::Ordering;
 use std::ops::Bound;
 
 /// A field's index: `int` and `timestamp` keys and `float` keys map onto
@@ -44,12 +46,15 @@ pub struct Ordered<K> {
     heap: usize,
 }
 
-impl<K: Ord + Clone + Default> Ordered<K> {
-    fn new() -> Self {
+impl<K: Ord + Clone + Default> Ordered<K>
+where
+    (K, DocId): Entry,
+{
+    fn new(coll: Option<Collation>) -> Self {
         Ordered {
-            keys: Chunked::new(),
-            nulls: Chunked::new(),
-            nans: Chunked::new(),
+            keys: Chunked::new(coll),
+            nulls: Chunked::new(None),
+            nans: Chunked::new(None),
             heap: 0,
         }
     }
@@ -73,18 +78,50 @@ const CHUNK: usize = 512;
 struct Chunked<T> {
     chunks: Vec<Vec<T>>,
     len: usize,
+    /// The order of a text field's collation (`collate tr`), where the
+    /// entries' own is their bytes'.
+    coll: Option<Collation>,
 }
 
-impl<T: Ord> Chunked<T> {
-    fn new() -> Self {
+/// An entry of an index: a key and the id it belongs to, ordered by the key
+/// and then the id. A text key orders in its field's collation when it has
+/// one -- passed in rather than made a key type of its own, which would have
+/// been a third copy of this module's code in the browser module. Public
+/// only because [`Ordered`] is.
+pub trait Entry: Ord {
+    fn order(&self, other: &Self, coll: Option<Collation>) -> Ordering;
+}
+
+impl Entry for (u64, DocId) {
+    fn order(&self, other: &Self, _: Option<Collation>) -> Ordering {
+        self.cmp(other)
+    }
+}
+
+impl Entry for (Box<str>, DocId) {
+    fn order(&self, other: &Self, coll: Option<Collation>) -> Ordering {
+        match coll {
+            Some(c) => c.compare(&self.0, &other.0).then(self.1.cmp(&other.1)),
+            None => self.cmp(other),
+        }
+    }
+}
+
+impl<T: Entry> Chunked<T> {
+    fn new(coll: Option<Collation>) -> Self {
         Chunked {
             chunks: Vec::new(),
             len: 0,
+            coll,
         }
     }
 
+    fn cmp(&self, a: &T, b: &T) -> Ordering {
+        a.order(b, self.coll)
+    }
+
     /// From entries already sorted and unique.
-    fn from_sorted(v: Vec<T>) -> Self {
+    fn from_sorted(v: Vec<T>, coll: Option<Collation>) -> Self {
         let len = v.len();
         let mut chunks = Vec::with_capacity(len / CHUNK + 1);
         let mut it = v.into_iter();
@@ -95,14 +132,14 @@ impl<T: Ord> Chunked<T> {
             }
             chunks.push(chunk);
         }
-        Chunked { chunks, len }
+        Chunked { chunks, len, coll }
     }
 
     /// The chunk an entry belongs in: the last whose first entry is not
     /// above it.
     fn chunk_for(&self, x: &T) -> usize {
         self.chunks
-            .partition_point(|c| c[0] <= *x)
+            .partition_point(|c| self.cmp(&c[0], x) != Ordering::Greater)
             .saturating_sub(1)
     }
 
@@ -111,11 +148,9 @@ impl<T: Ord> Chunked<T> {
         // and the full chunk it passes stays full instead of being split in
         // half and never written again. A million creation times went in
         // in 7 ms instead of 90, in half the memory.
-        if self
-            .chunks
-            .last()
-            .is_none_or(|c| *c.last().expect("chunks are never empty") < x)
-        {
+        if self.chunks.last().is_none_or(|c| {
+            self.cmp(c.last().expect("chunks are never empty"), &x) == Ordering::Less
+        }) {
             match self.chunks.last_mut() {
                 Some(c) if c.len() < CHUNK => c.push(x),
                 _ => self.chunks.push(vec![x]),
@@ -124,7 +159,7 @@ impl<T: Ord> Chunked<T> {
             return true;
         }
         let ci = self.chunk_for(&x);
-        let Err(pos) = self.chunks[ci].binary_search(&x) else {
+        let Err(pos) = self.chunks[ci].binary_search_by(|e| self.cmp(e, &x)) else {
             return false;
         };
         // A full chunk splits before the insert, not after: past `CHUNK`
@@ -151,8 +186,9 @@ impl<T: Ord> Chunked<T> {
             return false;
         }
         let ci = self.chunk_for(x);
+        let coll = self.coll;
         let chunk = &mut self.chunks[ci];
-        let Ok(pos) = chunk.binary_search(x) else {
+        let Ok(pos) = chunk.binary_search_by(|e| e.order(x, coll)) else {
             return false;
         };
         chunk.remove(pos);
@@ -171,7 +207,11 @@ impl<T: Ord> Chunked<T> {
     /// the first not below it otherwise. A flag rather than a closure: each
     /// closure was a search of its own in the browser module.
     fn seek(&self, x: &T, past: bool) -> (usize, usize) {
-        let below = |e: &T| if past { e <= x } else { e < x };
+        let below = |e: &T| match self.cmp(e, x) {
+            Ordering::Less => true,
+            Ordering::Equal => past,
+            Ordering::Greater => false,
+        };
         let ci = self
             .chunks
             .partition_point(|c| below(c.last().expect("chunks are never empty")));
@@ -230,6 +270,8 @@ pub struct Range {
     pub lo: Bound<Key>,
     pub hi: Bound<Key>,
     pub strict: bool,
+    /// The collation text bounds compare in: the field's.
+    pub coll: Option<Collation>,
 }
 
 /// `int`/`timestamp` onto `u64`, order kept: flipping the sign bit puts the
@@ -260,17 +302,23 @@ impl SortedIndex {
         )
     }
 
-    pub fn new(ty: &DataType) -> SortedIndex {
+    /// An empty index over a field of type `ty`, its text in `coll` when
+    /// the field names one.
+    pub fn new(ty: &DataType, coll: Option<Collation>) -> SortedIndex {
         match ty {
-            DataType::Text => SortedIndex::Text(Ordered::new()),
-            _ => SortedIndex::Num(Ordered::new()),
+            DataType::Text => SortedIndex::Text(Ordered::new(coll)),
+            _ => SortedIndex::Num(Ordered::new(None)),
         }
     }
 
     /// Built in one pass from `(id, value)` pairs: sorted once and cut into
     /// chunks, rather than inserted one at a time. The rows come through
     /// `dyn` so that the two callers share one copy of this.
-    pub fn build(ty: &DataType, rows: &mut dyn Iterator<Item = (DocId, Option<Value>)>) -> Self {
+    pub fn build(
+        ty: &DataType,
+        coll: Option<Collation>,
+        rows: &mut dyn Iterator<Item = (DocId, Option<Value>)>,
+    ) -> Self {
         match ty {
             DataType::Text => {
                 let (mut keys, mut nulls) = (Vec::new(), Vec::new());
@@ -284,9 +332,12 @@ impl SortedIndex {
                         _ => nulls.push((Box::default(), id)),
                     }
                 }
-                keys.sort_unstable();
-                nulls.sort_unstable();
-                SortedIndex::Text(Ordered::from_sorted(keys, nulls, Vec::new(), heap))
+                // One closure for both: each closure is a sort of its own,
+                // and a sort of these pairs is 4.5 KB of the browser module.
+                let by = |a: &(Box<str>, DocId), b: &(Box<str>, DocId)| a.order(b, coll);
+                keys.sort_unstable_by(by);
+                nulls.sort_unstable_by(by);
+                SortedIndex::Text(Ordered::from_sorted(keys, nulls, Vec::new(), heap, coll))
             }
             _ => {
                 let (mut keys, mut nulls, mut nans) = (Vec::new(), Vec::new(), Vec::new());
@@ -300,7 +351,7 @@ impl SortedIndex {
                 for v in [&mut keys, &mut nulls, &mut nans] {
                     radix_sort(v);
                 }
-                SortedIndex::Num(Ordered::from_sorted(keys, nulls, nans, 0))
+                SortedIndex::Num(Ordered::from_sorted(keys, nulls, nans, 0, None))
             }
         }
     }
@@ -462,17 +513,21 @@ impl SortedIndex {
     }
 }
 
-impl<K: Ord + Clone + Default> Ordered<K> {
+impl<K: Ord + Clone + Default> Ordered<K>
+where
+    (K, DocId): Entry,
+{
     fn from_sorted(
         keys: Vec<(K, DocId)>,
         nulls: Vec<(K, DocId)>,
         nans: Vec<(K, DocId)>,
         heap: usize,
+        coll: Option<Collation>,
     ) -> Self {
         Ordered {
-            keys: Chunked::from_sorted(keys),
-            nulls: Chunked::from_sorted(nulls),
-            nans: Chunked::from_sorted(nans),
+            keys: Chunked::from_sorted(keys, coll),
+            nulls: Chunked::from_sorted(nulls, None),
+            nans: Chunked::from_sorted(nans, None),
             heap,
         }
     }
@@ -490,7 +545,10 @@ fn walk_ordered<K: Ord + Clone + Default>(
     bounds: Option<Ends<K>>,
     desc: bool,
     emit: &mut impl FnMut(DocId) -> crate::error::Result<bool>,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<()>
+where
+    (K, DocId): Entry,
+{
     // A range never matches `null`, so only a whole walk visits those rows.
     let with_nulls = bounds.is_none();
     let (lo, hi) = bounds.unwrap_or((Bound::Unbounded, Bound::Unbounded));
@@ -624,12 +682,14 @@ fn text_bound(b: &Bound<Key>, lower: bool) -> Bound<(Box<str>, DocId)> {
 }
 
 impl Range {
-    /// No bounds yet: every value, and no `NaN` excluded.
-    pub fn all() -> Range {
+    /// No bounds yet: every value, and no `NaN` excluded, over a field
+    /// whose text compares in `coll`.
+    pub fn all(coll: Option<Collation>) -> Range {
         Range {
             lo: Bound::Unbounded,
             hi: Bound::Unbounded,
             strict: false,
+            coll,
         }
     }
 
@@ -656,13 +716,13 @@ impl Range {
     }
 
     fn tighten_lo(&mut self, b: Bound<Key>) {
-        if bound_cmp(&b, &self.lo, true) == std::cmp::Ordering::Greater {
+        if bound_cmp(&b, &self.lo, true, self.coll) == Ordering::Greater {
             self.lo = b;
         }
     }
 
     fn tighten_hi(&mut self, b: Bound<Key>) {
-        if bound_cmp(&b, &self.hi, false) == std::cmp::Ordering::Less {
+        if bound_cmp(&b, &self.hi, false, self.coll) == Ordering::Less {
             self.hi = b;
         }
     }
@@ -671,11 +731,11 @@ impl Range {
 /// Orders two bounds of the same side by how much they admit: for a lower
 /// bound the greater one admits less, and at an equal key an exclusive one
 /// is the greater; for an upper bound the other way round.
-fn bound_cmp(a: &Bound<Key>, b: &Bound<Key>, lower: bool) -> std::cmp::Ordering {
+fn bound_cmp(a: &Bound<Key>, b: &Bound<Key>, lower: bool, coll: Option<Collation>) -> Ordering {
     use std::cmp::Ordering::*;
     let key = |k: &Key, k2: &Key| match (k, k2) {
         (Key::Num(x), Key::Num(y)) => x.cmp(y),
-        (Key::Text(x), Key::Text(y)) => x.cmp(y),
+        (Key::Text(x), Key::Text(y)) => coll.map_or_else(|| x.cmp(y), |c| c.compare(x, y)),
         // One field has one key type; mixed bounds never meet.
         _ => Equal,
     };
@@ -745,7 +805,7 @@ mod tests {
                 Bound::Unbounded => true,
             })
         };
-        let mut c: Chunked<(u64, u64)> = Chunked::new();
+        let mut c: Chunked<(u64, u64)> = Chunked::new(None);
         let mut r: BTreeSet<(u64, u64)> = BTreeSet::new();
         for step in 0..60_000 {
             let e = (next() % 500, next() % 30_000);
@@ -781,7 +841,7 @@ mod tests {
             .all(|ch| !ch.is_empty() && ch.capacity() <= CHUNK));
 
         // Built in one go, and then written to, it agrees as well.
-        let mut built = Chunked::from_sorted(r.iter().copied().collect());
+        let mut built = Chunked::from_sorted(r.iter().copied().collect(), None);
         for _ in 0..5_000 {
             let e = (next() % 500, next() % 30_000);
             assert_eq!(built.insert(e), c.insert(e));
@@ -847,7 +907,7 @@ mod tests {
             (4, None),
             (5, Some(Value::Int(7))),
         ];
-        let ix = SortedIndex::build(&DataType::Int, &mut rows.into_iter());
+        let ix = SortedIndex::build(&DataType::Int, None, &mut rows.into_iter());
         let walk = |desc| {
             let mut out = Vec::new();
             ix.walk(desc, None, |id| {

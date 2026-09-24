@@ -64,6 +64,16 @@ and is applied to it the way the write path applied it: the node of each
 document the tail touched is retired, and the vector the document holds now
 goes in. A crash therefore costs the tail, not the graph.</p>
 
+<p>A server does not wait for the tail. It opens with the tail's vectors in
+the arena but in no neighbour list, measures each of them in every
+<code>near</code>, and links them on a thread beside its queries. A
+checkpoint written before that is done marks those nodes as waiting: a
+node's flag byte, 0 for a live node and 1 for a tombstone, is 2 for one,
+in a graph record of version 5, which is written only then. The next open
+leaves them waiting again, or links them there when it is not a server's.
+An older binary does not know version 5 and rebuilds the graph, as it does
+from any record it cannot read.</p>
+
 <h2>Indexes in the schema</h2>
 
 <p>A schema names each field's index by a kind byte: 0 none, 1
@@ -75,6 +85,11 @@ ordered and inverted indexes are rebuilt from the documents on open, so there
 is nothing of theirs to validate or to go stale. An old binary cannot open a file whose
 schema uses a newer kind and reports <code>unknown index kind 4</code>, the
 same refusal as for a record kind it does not know.</p>
+
+<p>A field whose text orders in a collation (<code>name text collate
+tr</code>) is written with type tag 11 and the collation's code in front of
+its type. An older binary meets a type tag it does not know and refuses the
+file, rather than read the field and order it by its bytes.</p>
 
 <h2>The change counter, and why it is at the front</h2>
 

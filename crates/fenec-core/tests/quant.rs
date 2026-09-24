@@ -398,3 +398,85 @@ fn the_quantization_is_part_of_the_index() {
         assert!(found(&got, &exact) >= 9);
     }
 }
+
+/// A bit index built through the Rust API takes the beam FenecQL gives it.
+/// Only the parser knew the bit beam, and the Rust API's searched 100:
+/// 82.5% of the true ten over a million vectors, where 400 held 98.4%. The
+/// core settles `ef_search` now, wherever a spec comes in, and a beam named
+/// is kept.
+#[test]
+fn the_rust_api_gives_a_bit_index_the_beam_fenecql_does() {
+    use fenec_core::schema::{BIT_EF_SEARCH, DEFAULT_EF_SEARCH};
+    let spec = |quant| VectorIndexSpec {
+        metric: Metric::Cosine,
+        quant,
+        ..VectorIndexSpec::default()
+    };
+    let field = |name: &str, spec| {
+        Field::new(name, DataType::Vector(8, VecPrec::F32)).indexed(IndexKind::Vector(spec))
+    };
+    let schema = Schema::new(
+        "d",
+        vec![
+            field("b", spec(Quant::Bit)),
+            field("i", spec(Quant::Int8)),
+            field(
+                "n",
+                VectorIndexSpec {
+                    ef_search: 64,
+                    ..spec(Quant::Bit)
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    let beams = |s: &Schema| -> Vec<usize> {
+        s.fields
+            .iter()
+            .map(|f| match f.index {
+                IndexKind::Vector(v) => v.ef_search,
+                _ => 0,
+            })
+            .collect()
+    };
+    assert_eq!(beams(&schema), [BIT_EF_SEARCH, DEFAULT_EF_SEARCH, 64]);
+    let Statement::CreateCollection { schema: parsed, .. } = fenec_ql::parse_one(
+        "create collection d (b vector<8> @hnsw(cosine, quant=bit), \
+         i vector<8> @hnsw(cosine, quant=int8), n vector<8> @hnsw(cosine, quant=bit, ef=64))",
+    )
+    .unwrap() else {
+        panic!("not a create collection")
+    };
+    assert_eq!(parsed, schema);
+
+    // A `create index` settles it too, under the lock and beside the
+    // database, and so does an index made on its own.
+    let mut db = Database::new();
+    run(&mut db, "create collection e (v vector<8>, w vector<8>)");
+    for field in ["v", "w"] {
+        let stmt = Statement::CreateIndex {
+            collection: "e".into(),
+            field: field.into(),
+            kind: IndexKind::Vector(spec(Quant::Bit)),
+            if_not_exists: false,
+        };
+        match field {
+            "v" => {
+                db.execute(&stmt).unwrap();
+            }
+            _ => {
+                let lock = std::sync::RwLock::new(db);
+                Database::maintain(&lock, &stmt)
+                    .expect("a maintenance")
+                    .unwrap();
+                db = lock.into_inner().unwrap();
+            }
+        }
+    }
+    let Response::Schemas(schemas) = db.execute(&Statement::ListCollections).unwrap() else {
+        panic!("no schemas")
+    };
+    assert_eq!(beams(&schemas[0]), [BIT_EF_SEARCH, BIT_EF_SEARCH]);
+    let ix = fenec_core::vector::VectorIndex::new(8, spec(Quant::Bit));
+    assert_eq!(ix.spec.ef_search, BIT_EF_SEARCH);
+}

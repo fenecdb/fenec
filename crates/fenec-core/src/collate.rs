@@ -53,6 +53,17 @@ impl Collation {
         }
     }
 
+    /// The byte a schema writes for a field in this collation.
+    pub fn code(self) -> u8 {
+        match self {
+            Collation::Turkish => 1,
+        }
+    }
+
+    pub fn from_code(c: u8) -> Option<Collation> {
+        (c == 1).then_some(Collation::Turkish)
+    }
+
     /// `a` against `b` in this order.
     pub fn compare(self, a: &str, b: &str) -> Ordering {
         // What the two share weighs the same in both, at every level, so the

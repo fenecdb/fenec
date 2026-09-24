@@ -154,9 +154,14 @@ so a node that is down takes its tenants with it.</p>
     does <code>kill -9</code> or a cgroup OOM. The next open then restores the
     graph the last checkpoint wrote and applies the writes since it, so what
     is lost is time, not data: with 1 000 writes after the checkpoint,
-    0.19 s at 100 000 × 128 and 0.99 s at 100 000 × 768, where rebuilding the
-    graph took 8.8 s and 48 s. The time grows with the writes since the
-    checkpoint.</li>
+    0.19 s at 100 000 × 128 and 0.99 s at 100 000 × 768. The time grows with
+    the writes since the checkpoint, and a server does not wait for it:
+    their vectors go in unlinked, <code>near</code> measures each of them,
+    and a thread beside the queries links them. At 100 000 × 768 never
+    checkpointed, <code>fenec-pg</code> answered its first <code>near</code>
+    1.23 s after it started, against 67.7 s when the open linked them first;
+    <code>near</code> took the exact scan's 16 ms until the 62 s of linking
+    were done, and 0.46 ms after.</li>
   <li><b><code>compact</code> rebuilds a graph only when it holds
     tombstones.</b> The dead records go and the other indexes stand; a vector
     graph with a deleted or rewritten document's node in it is built again

@@ -266,6 +266,13 @@ impl Expr {
 pub trait RowAccess {
     fn id(&self) -> DocId;
     fn field(&mut self, name: &str) -> Result<Value>;
+    /// The collation a field's text compares in, when its schema names one
+    /// (`name text collate tr`); `<` and `>` against it then compare in
+    /// that order rather than the bytes'.
+    fn collation(&self, name: &str) -> Option<Collation> {
+        let _ = name;
+        None
+    }
 }
 
 pub struct EvalCtx<'a> {
@@ -347,7 +354,22 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
                     _ => Value::Bool(false),
                 });
             }
-            let ord = l.cmp_value(&r);
+            // Text against a field in a collation orders as the field does,
+            // so the scan and the field's `@sorted` index agree. Equality
+            // is the bytes' either way: the collation ties no two strings.
+            let field = |e: &Expr| match e {
+                Expr::Field(name) => row.collation(name),
+                _ => None,
+            };
+            let coll = match (op, &l, &r) {
+                (CmpOp::Eq | CmpOp::Ne, ..) => None,
+                (_, Value::Text(_), Value::Text(_)) => field(a).or_else(|| field(b)),
+                _ => None,
+            };
+            let ord = match (coll, &l, &r) {
+                (Some(c), Value::Text(x), Value::Text(y)) => c.compare(x, y),
+                _ => l.cmp_value(&r),
+            };
             Value::Bool(match op {
                 CmpOp::Eq => ord == Ordering::Equal,
                 CmpOp::Ne => ord != Ordering::Equal,

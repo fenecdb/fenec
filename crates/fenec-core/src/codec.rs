@@ -26,6 +26,11 @@ pub const TAG_TIMESTAMP: u8 = 9;
 /// from the one before -- a SPLADE vector's are close together, and small
 /// gaps take a byte each -- then the weights as `f32`.
 pub const TAG_SPARSE: u8 = 10;
+/// Never a value's: a schema writes it, and the collation's code, before the
+/// type of a field whose text orders in that collation (`name text collate
+/// tr`). A version that knows no collation meets an unknown type tag and
+/// refuses the file, rather than read the field in byte order.
+pub const TAG_COLLATED: u8 = 11;
 
 // ------------------------------------------------------- half precision
 //

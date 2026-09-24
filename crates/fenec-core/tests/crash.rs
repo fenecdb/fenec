@@ -88,11 +88,18 @@ struct Crash {
 /// Writes before the checkpoint that leave tombstones and documents without
 /// a vector in the image, then a tail of every kind of write.
 fn crashed(ty: &str) -> Crash {
+    crashed_over(ty, "none")
+}
+
+/// [`crashed`], the index over `quant` codes.
+fn crashed_over(ty: &str, quant: &str) -> Crash {
     let file = File::default();
     let mut db = Database::with_sink(Box::new(file.clone()));
     exec(
         &mut db,
-        &format!("create collection d (tag text, e {ty} @hnsw(cosine, m=8, ef_construction=64))"),
+        &format!(
+            "create collection d (tag text, e {ty} @hnsw(cosine, m=8, ef_construction=64, quant={quant}))"
+        ),
         &[],
     );
     let mut r = Rng(0x2545_F491_4F6C_DD1D);
@@ -230,6 +237,158 @@ fn a_crash_after_a_checkpoint_keeps_the_graph() {
         }
         assert!(found >= 190, "{ty}: recall {found}/200");
     }
+}
+
+/// What a server opens its file with (`fs::open_serving`): the graph the
+/// checkpoint holds, and the tail's vectors left out of it.
+fn reopen_serving(file: &File) -> Database {
+    let bytes = file.0.lock().unwrap().clone();
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    db.defer_linking();
+    db.load(&bytes).expect("load");
+    db
+}
+
+fn explain(db: &Database, sql: &str, params: &[Value]) -> Vec<String> {
+    let r = db
+        .query(
+            &fenec_ql::parse_one(&format!("explain {sql}")).expect("parse"),
+            params,
+        )
+        .unwrap_or_else(|e| panic!("explain {sql}: {e}"));
+    let rs = r.rows().expect("rows");
+    rs.rows
+        .iter()
+        .map(|r| match &r.values[..] {
+            [Value::Text(s)] => s.clone(),
+            other => panic!("a plan row holds {other:?}"),
+        })
+        .collect()
+}
+
+/// The answers a crashed file has to give: a document the tail rewrote at
+/// its new vector, one it deleted nowhere, and the walk what the exact scan
+/// finds.
+fn answers_the_tail(db: &Database, crash: &Crash, what: &str) {
+    for (id, _, new) in &crash.updated {
+        let hit = ids(
+            db,
+            "get d select id near e $1 limit 1",
+            &[Value::Vector(new.clone())],
+        );
+        assert_eq!(hit[0].0, *id, "{what}: document {id} at its new vector");
+    }
+    for (id, v) in &crash.deleted {
+        let hit = ids(
+            db,
+            "get d select id near e $1 limit 10",
+            &[Value::Vector(v.clone())],
+        );
+        assert!(
+            hit.iter().all(|(d, _)| d != id),
+            "{what}: deleted {id} came back"
+        );
+    }
+    let mut r = Rng(0x9E37_79B9_7F4A_7C15);
+    let mut found = 0;
+    for _ in 0..20 {
+        let q = Value::Vector(r.vector(DIM));
+        let ann = ids(
+            db,
+            "get d select id near e $1 limit 10",
+            std::slice::from_ref(&q),
+        );
+        let exact = ids(
+            db,
+            "get d select id near e $1 exact limit 10",
+            std::slice::from_ref(&q),
+        );
+        found += ann
+            .iter()
+            .filter(|a| exact.iter().any(|e| e.0 == a.0))
+            .count();
+    }
+    assert!(found >= 190, "{what}: recall {found}/200");
+}
+
+/// A server opens a crashed file without linking the tail's vectors, and
+/// links them beside the queries: at 100 000 x 768 linking them first kept
+/// the port closed for as long as they took. Until they are linked `near`
+/// measures each, so the answers are the ones a linked graph gives; a
+/// checkpoint in the meantime keeps them waiting, and an open that does not
+/// defer links them there.
+#[test]
+fn a_server_links_the_tail_after_the_open() {
+    for quant in ["none", "int8"] {
+        let what = format!("quant={quant}");
+        let crash = crashed_over(&format!("vector<{DIM}>"), quant);
+        let mut back = reopen_serving(&crash.file);
+        // Every vector the tail wrote waits: 100 new, the rewritten ones.
+        let waiting = back.unlinked();
+        assert_eq!(waiting, 100 + crash.updated.len(), "{what}");
+        assert_eq!(arena(&back, "d"), arena(&crash.live, "d"), "{what}");
+        answers_the_tail(&back, &crash, &what);
+        let q = [Value::Vector(vec![0.5; DIM])];
+        let steps = explain(&back, "get d select id near e $1 limit 10", &q);
+        let note =
+            format!("near: {waiting} vectors of e not linked into the graph yet, each measured");
+        assert!(steps.contains(&note), "{what}: {steps:?}");
+
+        back.checkpoint().expect("checkpoint");
+        assert_eq!(reopen_serving(&crash.file).unlinked(), waiting, "{what}");
+        let plain = reopen(&crash.file);
+        assert_eq!(plain.unlinked(), 0, "{what}");
+        answers_the_tail(&plain, &crash, &what);
+
+        let mut slices = 0;
+        while back.link_pending(7) > 0 {
+            slices += 1;
+        }
+        assert_eq!(slices, waiting.div_ceil(7) - 1, "{what}");
+        answers_the_tail(&back, &crash, &what);
+        assert!(!explain(&back, "get d select id near e $1 limit 10", &q)
+            .iter()
+            .any(|s| s.contains("not linked")));
+    }
+}
+
+/// A file with no graph in it -- never checkpointed -- opens with every
+/// vector waiting, and `near` is the exact scan until they are linked.
+#[test]
+fn a_file_never_checkpointed_opens_with_every_vector_waiting() {
+    // What `fs::open` writes into a new file, and nothing written over it.
+    let file = File(Arc::new(Mutex::new(fenec_core::engine::MAGIC.to_vec())));
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    exec(
+        &mut db,
+        "create collection d (e vector<8> @hnsw(cosine, m=8, ef_construction=64))",
+        &[],
+    );
+    let mut r = Rng(21);
+    for _ in 0..1500 {
+        exec(&mut db, "put d {e: $1}", &[Value::Vector(r.vector(8))]);
+    }
+    let mut back = reopen_serving(&file);
+    assert_eq!(back.unlinked(), 1500);
+    for _ in 0..10 {
+        let q = [Value::Vector(r.vector(8))];
+        assert_eq!(
+            ids(&back, "get d select id near e $1 limit 10", &q),
+            ids(&back, "get d select id near e $1 exact limit 10", &q)
+        );
+    }
+    while back.link_pending(100) > 0 {}
+    let mut found = 0;
+    for _ in 0..20 {
+        let q = [Value::Vector(r.vector(8))];
+        let ann = ids(&back, "get d select id near e $1 limit 10", &q);
+        let exact = ids(&back, "get d select id near e $1 exact limit 10", &q);
+        found += ann
+            .iter()
+            .filter(|a| exact.iter().any(|e| e.0 == a.0))
+            .count();
+    }
+    assert!(found >= 190, "recall {found}/200");
 }
 
 /// A checkpoint with nothing after it restores as well, tombstones and

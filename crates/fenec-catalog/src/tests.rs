@@ -397,3 +397,39 @@ fn queries_outside_the_subset_are_refused() {
     assert!(!is_catalog("select title from docs where n > 1"));
     assert!(!is_catalog("get docs"));
 }
+
+/// A `collate tr` field is a column in `tr-x-icu`, the name PostgreSQL gives
+/// ICU's Turkish collation, and `\d` says so where a text column in the
+/// default collation says nothing.
+#[test]
+fn a_collated_column_shows_its_collation() {
+    let mut db = Database::new();
+    let schema = Schema::new(
+        "people",
+        vec![
+            Field::new("name", DataType::Text).collated(Collation::Turkish),
+            Field::new("city", DataType::Text),
+        ],
+    )
+    .unwrap();
+    db.execute(&Statement::CreateCollection {
+        schema,
+        if_not_exists: false,
+    })
+    .unwrap();
+    let s = Snapshot::of(&db, "fenec", "16.0");
+    let columns = run_sql(
+        &s,
+        "SELECT a.attname,
+  (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+   WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation
+FROM pg_catalog.pg_attribute a, pg_catalog.pg_class r
+WHERE a.attrelid = r.oid AND r.relname = 'people' AND a.attnum > 0
+ORDER BY a.attnum;",
+        &[],
+    );
+    assert_eq!(
+        text(&columns),
+        [["id", "-"], ["name", "tr-x-icu"], ["city", "-"]]
+    );
+}

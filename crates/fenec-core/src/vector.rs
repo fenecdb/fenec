@@ -791,9 +791,20 @@ impl Rng {
 /// and a tombstone's own vector; a record of an older version is rejected
 /// and the graph rebuilt once. 4 adds the quantization, and only a quantized
 /// index writes it: every other graph stays 3, so a file written before
-/// quantization existed is not rebuilt for it.
+/// quantization existed is not rebuilt for it. 5 marks the nodes not linked
+/// yet ([`VectorIndex::defer_batch`]), and is written only while there are
+/// some: a server that shut down before linking them keeps them waiting
+/// rather than rebuilding, and a build before it rebuilds once.
 const GRAPH_VERSION: u8 = 3;
 const GRAPH_VERSION_QUANT: u8 = 4;
+const GRAPH_VERSION_UNLINKED: u8 = 5;
+
+/// Whether a graph can hold nodes not linked yet: a server's open leaves
+/// them for a thread beside its queries (`fs::open_serving`). The browser
+/// has no such thread, and the paths were 1.1 KB brotli of its module: a
+/// graph written with nodes waiting is rebuilt there, as any it cannot
+/// read is.
+pub(crate) const UNLINKED: bool = cfg!(not(target_arch = "wasm32"));
 
 /// Upper bound on a single batch during parallel construction. Nodes inside a
 /// batch cannot see each other, so large batches lower recall; this limit is
@@ -1147,6 +1158,11 @@ pub struct VectorIndex {
     level_mult: f32,
     /// Buffer reused while pruning (breaks the allocation cycle).
     prune_buf: Vec<Cand>,
+    /// Nodes in the arena that no link reaches yet, in the order they came:
+    /// a search measures each of them against the query, and
+    /// [`VectorIndex::link_pending`] takes them into the graph. A tombstone
+    /// among them is dropped when its turn comes.
+    pending: Vec<u32>,
 }
 
 thread_local! {
@@ -1168,6 +1184,7 @@ impl VectorIndex {
     }
 
     pub fn with_precision(dim: usize, spec: VectorIndexSpec, prec: VecPrec) -> VectorIndex {
+        let spec = spec.resolved();
         VectorIndex {
             dim,
             spec,
@@ -1186,6 +1203,7 @@ impl VectorIndex {
             rng: Rng(0x9E37_79B9_7F4A_7C15),
             level_mult: 1.0 / (spec.m.max(2) as f32).ln(),
             prune_buf: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -1251,6 +1269,16 @@ impl VectorIndex {
             + self.l0_len.capacity() * 2
             + self.deleted.capacity()
             + self.upper.capacity() * size_of::<Vec<Vec<u32>>>()
+            + self.pending.capacity() * 4
+    }
+
+    /// Nodes that no link reaches yet ([`Self::defer_batch`]), tombstones
+    /// among them included until their turn to be linked comes.
+    pub fn unlinked(&self) -> usize {
+        match UNLINKED {
+            true => self.pending.len(),
+            false => 0,
+        }
     }
 
     pub fn precision(&self) -> VecPrec {
@@ -1627,6 +1655,88 @@ impl VectorIndex {
         }
     }
 
+    /// Puts `items` in the arena as [`Self::insert_batch`] would, and links
+    /// none of them: until [`Self::link_pending`] does, a search measures
+    /// each against the query, so an answer is what the graph finds and
+    /// the nearest of these together. What a server opens a file with --
+    /// the writes after its last checkpoint -- when linking them first
+    /// kept its port closed: 56.6 s at 100 000 x 768 never checkpointed.
+    pub fn defer_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
+        if !UNLINKED {
+            return self.insert_batch(items);
+        }
+        for (doc, v) in items {
+            if v.len() != self.dim {
+                continue;
+            }
+            if let Some(&old) = self.by_doc.get(doc) {
+                if self.retire(old, v) {
+                    continue;
+                }
+            }
+            let level = self.random_level();
+            let node = self.alloc_node(*doc, v, level);
+            self.by_doc.insert(*doc, node);
+            self.pending.push(node);
+        }
+    }
+
+    /// Links up to `max` of the nodes [`Self::defer_batch`] left out of the
+    /// graph, the newest first, and returns how many are left. They go in
+    /// as a batch does -- one at a time while the graph is small, their
+    /// candidates computed in parallel after -- so a caller holding a lock
+    /// for it holds it as long as `max` nodes take. Over codes a node looks
+    /// for its neighbours with its document's own vector, which `lookup`
+    /// reads, as the write path does.
+    pub fn link_pending(
+        &mut self,
+        max: usize,
+        lookup: &mut dyn FnMut(DocId, &mut Vec<f32>) -> bool,
+    ) -> usize {
+        let threads = Self::threads();
+        let at = self.pending.len().saturating_sub(max.max(1));
+        let taken = self.pending.split_off(at);
+        let mut raw = Vec::new();
+        let mut todo: Vec<(u32, usize, Option<Vec<f32>>)> = Vec::with_capacity(taken.len());
+        for node in taken {
+            if self.is_deleted(node) {
+                continue;
+            }
+            let query = match self.quantized() {
+                true => {
+                    let doc = self.doc_ids[node as usize];
+                    (lookup(doc, &mut raw) && raw.len() == self.dim)
+                        .then(|| self.prepare_query(&raw))
+                }
+                false => None,
+            };
+            todo.push((node, self.node_levels(node), query));
+        }
+        // The nodes the graph holds, as `insert_batch` counts them.
+        let mut linked = self.doc_ids.len() - self.pending.len() - todo.len();
+        let mut rest = &todo[..];
+        while !rest.is_empty() {
+            if threads < 2 || linked < 1024 || self.entry.is_none() {
+                let take = rest.len().min(1024_usize.saturating_sub(linked).max(1));
+                for (node, level, query) in &rest[..take] {
+                    self.link_node(*node, *level, None, query.as_deref());
+                }
+                rest = &rest[take..];
+                linked += take;
+                continue;
+            }
+            let (chunk, tail) = rest.split_at((linked / 16).clamp(64, MAX_BATCH).min(rest.len()));
+            rest = tail;
+            linked += chunk.len();
+            let mut computed = self.compute_candidates(chunk, threads);
+            computed.sort_by_key(|(node, _, _)| *node);
+            for (node, level, per_level) in computed {
+                self.link_node(node, level, Some(per_level), None);
+            }
+        }
+        self.pending.len()
+    }
+
     /// Links the computed candidates into the graph (computing them itself
     /// when none are supplied, searching for `query` or the node's own
     /// vector).
@@ -1760,17 +1870,32 @@ impl VectorIndex {
     where
         F: Fn(DocId) -> bool,
     {
-        let Some(entry) = self.entry else {
-            return Vec::new();
-        };
-        if k == 0 {
+        if k == 0 || (self.entry.is_none() && self.unlinked() == 0) {
             return Vec::new();
         }
         let q = self.prepare_query(query);
         let ef = ef.unwrap_or(self.spec.ef_search).max(k);
 
-        let cur = self.descend(&q, entry, self.max_level, 0);
-        let found = self.search_layer(&q, &[cur], ef, 0);
+        let mut found = match self.entry {
+            Some(entry) => {
+                let cur = self.descend(&q, entry, self.max_level, 0);
+                self.search_layer(&q, &[cur], ef, 0)
+            }
+            None => Vec::new(),
+        };
+        // No link reaches a node not linked yet, so the walk cannot find
+        // one: each is measured, and ranked with what the walk found.
+        if self.unlinked() > 0 {
+            for &node in &self.pending {
+                if !self.is_deleted(node) {
+                    found.push(Cand {
+                        dist: self.dist_to(&q, node),
+                        node,
+                    });
+                }
+            }
+            found.sort();
+        }
 
         let mut out = Vec::with_capacity(k);
         for c in found {
@@ -1800,7 +1925,20 @@ impl VectorIndex {
     pub fn serialize_graph(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.doc_ids.len() * 96);
         let quant = self.spec.quant;
-        out.push(if quant == Quant::None {
+        // The nodes still to be linked, flagged as such: written as nodes
+        // with no links they would come back unreachable.
+        let mut unlinked = Vec::new();
+        if UNLINKED {
+            for &node in &self.pending {
+                if !self.is_deleted(node) {
+                    unlinked.resize(self.doc_ids.len(), false);
+                    unlinked[node as usize] = true;
+                }
+            }
+        }
+        out.push(if !unlinked.is_empty() {
+            GRAPH_VERSION_UNLINKED
+        } else if quant == Quant::None {
             GRAPH_VERSION
         } else {
             GRAPH_VERSION_QUANT
@@ -1818,7 +1956,7 @@ impl VectorIndex {
             VecPrec::F32 => 0,
             VecPrec::F16 => 1,
         });
-        if quant != Quant::None {
+        if quant != Quant::None || !unlinked.is_empty() {
             out.push(quant.code());
         }
         put_uvarint(&mut out, self.doc_ids.len() as u64);
@@ -1827,7 +1965,10 @@ impl VectorIndex {
         for (node, &doc) in self.doc_ids.iter().enumerate() {
             let node = node as u32;
             put_uvarint(&mut out, doc);
-            out.push(self.is_deleted(node) as u8);
+            out.push(match self.is_deleted(node) {
+                true => 1,
+                false => 2 * unlinked.get(node as usize).copied().unwrap_or(false) as u8,
+            });
             let levels = self.node_levels(node) + 1; // level 0 included
             put_uvarint(&mut out, levels as u64);
             // A tombstone still routes searches, but its document may be
@@ -1873,7 +2014,8 @@ impl VectorIndex {
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
         let version = *bytes.first()?;
-        if version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
+        let waits = UNLINKED && version == GRAPH_VERSION_UNLINKED;
+        if !waits && version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
             return None;
         }
         pos += 1;
@@ -1906,7 +2048,7 @@ impl VectorIndex {
         if prec != expect_prec {
             return None;
         }
-        if version == GRAPH_VERSION_QUANT {
+        if version != GRAPH_VERSION {
             spec.quant = Quant::from_code(*bytes.get(pos)?)?;
             pos += 1;
         }
@@ -1927,7 +2069,12 @@ impl VectorIndex {
         let stored = ix.data.stored_len(dim);
         for node in 0..count {
             let doc = get_uvarint(bytes, &mut pos).ok()?;
-            let is_deleted = *bytes.get(pos)? != 0;
+            let (is_deleted, unlinked) = match (*bytes.get(pos)?, waits) {
+                (0, _) => (false, false),
+                (2, true) => (false, true),
+                (1, true) | (_, false) => (true, false),
+                _ => return None,
+            };
             pos += 1;
             let levels = get_uvarint(bytes, &mut pos).ok()? as usize;
             if levels == 0 {
@@ -1949,6 +2096,9 @@ impl VectorIndex {
                 ix.deleted_count += 1;
             } else {
                 ix.by_doc.insert(doc, node as u32);
+            }
+            if unlinked {
+                ix.pending.push(node as u32);
             }
 
             for l in 0..levels {
@@ -2533,5 +2683,195 @@ mod tests {
                 assert_eq!(ranked(&back, q), ranked(&ix, q), "{quant:?}");
             }
         }
+    }
+
+    /// `n` random `(doc, vector)` items from a seed, docs counted from 0.
+    fn items(seed: u64, n: u64, dim: usize) -> Vec<(u64, Vec<f32>)> {
+        let mut rng = Rng(seed);
+        (0..n)
+            .map(|i| (i, (0..dim).map(|_| rng.next_f32() - 0.5).collect()))
+            .collect()
+    }
+
+    /// Recall@10 of the index's walk against its own exact scan.
+    fn recall(ix: &VectorIndex, queries: &[(u64, Vec<f32>)]) -> f64 {
+        let (mut hit, mut all) = (0, 0);
+        for (_, q) in queries {
+            let exact: Vec<u64> = ix
+                .search_exact(q, 10, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            let got: Vec<u64> = ix
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            hit += got.iter().filter(|d| exact.contains(d)).count();
+            all += exact.len();
+        }
+        hit as f64 / all as f64
+    }
+
+    /// A node left out of the graph is measured by every search until it is
+    /// linked: one of the true ten that waits is always found, and an index
+    /// of nothing but waiting nodes answers as its exact scan does.
+    #[test]
+    fn unlinked_nodes_are_measured_until_linked() {
+        let dim = 16;
+        let all = items(5, 3000, dim);
+        let mut ix = VectorIndex::new(dim, VectorIndexSpec::default());
+        ix.insert_batch(&all[..2000]);
+        ix.defer_batch(&all[2000..]);
+        assert_eq!((ix.unlinked(), ix.len()), (1000, 3000));
+        for (_, q) in all.iter().step_by(97) {
+            let got: Vec<u64> = ix
+                .search(q, 10, None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            for (doc, _) in ix.search_exact(q, 10, |_| true) {
+                assert!(
+                    doc < 2000 || got.contains(&doc),
+                    "waiting {doc} missed: {got:?}"
+                );
+            }
+        }
+        let mut only = VectorIndex::new(dim, VectorIndexSpec::default());
+        only.defer_batch(&all[..500]);
+        for (_, q) in all.iter().step_by(61) {
+            assert_eq!(
+                only.search(q, 10, None, |_| true),
+                only.search_exact(q, 10, |_| true)
+            );
+        }
+    }
+
+    /// Linked a slice at a time, the waiting nodes make a graph as good as
+    /// the batch build's, over a graph linked before them and over none.
+    #[test]
+    fn linking_in_slices_keeps_the_recall_of_a_batch() {
+        let dim = 16;
+        let all = items(7, 2400, dim);
+        let queries: Vec<_> = all.iter().step_by(120).cloned().collect();
+        let mut batch = VectorIndex::new(dim, spec());
+        batch.insert_batch(&all);
+        let want = recall(&batch, &queries);
+        for linked in [0, 1600] {
+            let mut ix = VectorIndex::new(dim, spec());
+            ix.insert_batch(&all[..linked]);
+            ix.defer_batch(&all[linked..]);
+            let mut slices = 1;
+            while ix.link_pending(37, &mut |_, _| false) > 0 {
+                slices += 1;
+            }
+            assert_eq!(
+                (ix.unlinked(), ix.len(), slices),
+                (0, 2400, (2400 - linked).div_ceil(37))
+            );
+            let got = recall(&ix, &queries);
+            assert!(
+                got >= want - 0.05,
+                "{linked} linked first: recall {got:.3} against the batch's {want:.3}"
+            );
+        }
+    }
+
+    /// Written while nodes wait, a graph says which (version 5) and they come
+    /// back waiting; linked, it is written as it always was.
+    #[test]
+    fn unlinked_nodes_survive_serialization() {
+        let dim = 8;
+        let all = items(9, 800, dim);
+        let fetch = |doc: DocId, out: &mut Vec<f32>| {
+            out.clear();
+            out.extend_from_slice(&all[doc as usize].1);
+            true
+        };
+        let ranked = |ix: &VectorIndex, q: &[f32]| {
+            let mut r = ix.search(q, 10, None, |_| true);
+            r.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            r
+        };
+        for quant in [Quant::None, Quant::Int8] {
+            let spec = VectorIndexSpec {
+                metric: Metric::Cosine,
+                quant,
+                ..spec()
+            };
+            let mut ix = VectorIndex::new(dim, spec);
+            ix.insert_batch(&all[..500]);
+            ix.defer_batch(&all[500..]);
+            // Deleted while waiting: a tombstone, no longer waiting.
+            ix.remove(600);
+            let bytes = ix.serialize_graph();
+            assert_eq!(bytes[0], 5, "{quant:?}");
+            let back = VectorIndex::restore_graph(&bytes, dim, VecPrec::F32, fetch)
+                .expect("restore failed");
+            assert_eq!(back.spec, spec);
+            assert_eq!((back.unlinked(), back.dead(), back.len()), (299, 1, 799));
+            for (_, q) in all.iter().step_by(41) {
+                assert_eq!(ranked(&back, q), ranked(&ix, q), "{quant:?}");
+            }
+            ix.link_pending(usize::MAX, &mut { fetch });
+            let linked = ix.serialize_graph();
+            assert_eq!(linked[0], if quant == Quant::None { 3 } else { 4 });
+        }
+    }
+
+    /// A waiting node whose document is written again or deleted is not
+    /// linked: the write leaves it a tombstone, as it leaves a linked one --
+    /// unless the vector is the one it holds, and it goes on waiting.
+    #[test]
+    fn a_rewritten_or_deleted_waiting_node_is_not_linked() {
+        let dim = 8;
+        let all = items(13, 1500, dim);
+        let mut ix = VectorIndex::new(dim, VectorIndexSpec::default());
+        ix.insert_batch(&all[..1200]);
+        ix.defer_batch(&all[1200..]);
+        ix.remove(1300);
+        let moved: Vec<f32> = all[5].1.iter().map(|x| x + 0.001).collect();
+        ix.insert(1400, &moved);
+        ix.insert(1450, &all[1450].1.clone());
+        assert_eq!((ix.dead(), ix.unlinked()), (2, 300));
+        while ix.link_pending(64, &mut |_, _| false) > 0 {}
+        assert_eq!(ix.len(), 1499);
+        assert_eq!(ix.search(&moved, 1, None, |_| true)[0].0, 1400);
+        assert_eq!(ix.search(&all[1450].1, 1, None, |_| true)[0].0, 1450);
+        let at_1300 = ix.search(&all[1300].1, 10, None, |_| true);
+        assert!(at_1300.iter().all(|h| h.0 != 1300), "{at_1300:?}");
+    }
+
+    /// Over codes a waiting node looks for its neighbours with its own
+    /// vector, read through `lookup`, as the write path does.
+    #[test]
+    fn a_waiting_node_over_codes_links_with_its_own_vector() {
+        let dim = 16;
+        let all = items(17, 3000, dim);
+        let spec = VectorIndexSpec {
+            metric: Metric::Cosine,
+            quant: Quant::Int8,
+            ..VectorIndexSpec::default()
+        };
+        let mut ix = VectorIndex::new(dim, spec);
+        ix.insert_batch(&all[..1500]);
+        ix.defer_batch(&all[1500..]);
+        let mut read = 0;
+        while ix.link_pending(100, &mut |doc, out| {
+            read += 1;
+            out.clear();
+            out.extend_from_slice(&all[doc as usize].1);
+            true
+        }) > 0
+        {}
+        assert_eq!(read, 1500);
+        let mut batch = VectorIndex::new(dim, spec);
+        batch.insert_batch(&all);
+        let queries: Vec<_> = all.iter().step_by(150).cloned().collect();
+        let (got, want) = (recall(&ix, &queries), recall(&batch, &queries));
+        assert!(
+            got >= want - 0.05,
+            "recall {got:.3} against the batch's {want:.3}"
+        );
     }
 }
