@@ -47,6 +47,24 @@ the distance under <code>l2</code>, the product under <code>dot</code>.
 <code>similarity_search_with_relevance_scores</code> maps them the way
 LangChain's own functions do.</p>
 
+<pre data-lang="python">store = FenecVectorStore(embeddings, "handbook", url=..., token=...,
+                         full_text=True, quant="int8")
+store.similarity_search("compact dead records", k=4, mode="text")     # BM25 alone
+store.similarity_search("how do I compact", k=4, mode="hybrid")       # both, fused
+retriever = store.as_retriever(search_kwargs={"k": 8, "mode": "hybrid"})
+</pre>
+
+<p>With <code>full_text=True</code> the text is indexed for BM25 as well
+(<code>@text</code>, added to a collection made before without it), and a
+search takes <code>mode</code>: <code>"text"</code> ranks by the words alone
+with <code>match</code> and embeds nothing, and <code>"hybrid"</code> runs
+<code>match</code> and <code>near</code> each to their own depth and fuses
+the two rankings (<a href="fenecql.html#hybrid"><code>fuse</code></a>). Their
+scores are BM25's and the fusion's, not similarities. <code>quant</code>,
+<code>"int8"</code> or <code>"bit"</code> (<code>cosine</code> only), keeps the
+graph over codes, and <code>near</code> still orders by the vectors
+themselves.</p>
+
 <h2>LlamaIndex</h2>
 
 <pre data-lang="bash">pip install "fenecdb[llama-index] @ git+https://github.com/fenecdb/fenec#subdirectory=integrations/python"
@@ -72,9 +90,18 @@ field. Filters take <code>==</code>, <code>!=</code>, <code>&lt;</code>,
 narrow the same way. <code>get_nodes</code>, <code>delete_nodes</code> and
 <code>clear</code> are there; <code>delete_nodes()</code> with neither ids nor
 filters deletes nothing — everything is <code>clear</code>, asked for by name.
-The query mode is the default one: LlamaIndex's hybrid mode is not answered
-yet, though fenecdb's own <a href="fenecql.html#hybrid"><code>fuse</code></a>
-is.</p>
+With <code>full_text=True</code> the text is indexed for BM25 as well, and
+a query takes the modes that need it: <code>TEXT_SEARCH</code> ranks by the
+words alone (<code>match</code>), and <code>HYBRID</code> runs
+<code>match</code> and <code>near</code> each to their own depth —
+<code>hybrid_top_k</code>, or <code>sparse_top_k</code>, deep — and fuses the
+two rankings (<a href="fenecql.html#hybrid"><code>fuse</code></a>). The fusion
+adds ranks rather than scores, so <code>alpha</code> has nothing to weigh and
+is not read. <code>quant</code> is taken as the LangChain store takes it.</p>
+
+<pre data-lang="python">store = FenecVectorStore("handbook", url=..., token=..., full_text=True)
+retriever = index.as_retriever(similarity_top_k=4, vector_store_query_mode="hybrid")
+</pre>
 
 <h2>React</h2>
 
@@ -110,8 +137,8 @@ dependency.</p>
 <table>
 <thead><tr><th>Integration</th><th>Held to</th><th>Run with</th></tr></thead>
 <tbody>
-<tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance and <code>from_texts</code> besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
-<tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top</td></tr>
+<tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance, <code>from_texts</code>, the text and hybrid modes and int8 codes besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
+<tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top — and the text search and hybrid modes</td></tr>
 <tr><td>React</td><td>a stand-in database for the contract, and a real fenec-pg and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
 </tbody>
 </table>

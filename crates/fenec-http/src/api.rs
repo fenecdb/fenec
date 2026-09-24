@@ -825,6 +825,8 @@ pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
         Some(_) => return Err(Error::Query("`query` must be text".into())),
         None => return Err(Error::Query("`query` is required".into())),
     };
+    // What the request is counted as, rather than its JSON (`statements`).
+    crate::statements::text(&sql);
     let params = match get("params") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::List(items)) => items.clone(),

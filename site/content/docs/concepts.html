@@ -273,10 +273,11 @@ list per dimension of the documents with a weight there.</p>
 get passages near splade $1 limit 10
 </pre>
 
-<p><code>near</code> over it scores by dot product and walks the lists with
-MaxScore, the pruning <code>match</code> uses, so what comes back is the exact
-top ten rather than an estimate of it; only documents sharing a dimension with
-the query are ranked. Encoded with SPLADE++ and scored on BEIR (<code>make
+<p><code>near</code> over it scores by dot product and sums the query's lists
+a list at a time — or walks them with MaxScore, the pruning <code>match</code>
+uses, where they hold few documents in a wide span of ids — so what comes back
+is the exact top ten rather than an estimate of it; only documents sharing a
+dimension with the query are ranked. Encoded with SPLADE++ and scored on BEIR (<code>make
 beir</code>, <a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
 
 <div class="tbl">
@@ -304,12 +305,15 @@ on open, never written to the file.</p>
 
 <div class="note trap">
   <p><b>A SPLADE query reaches most of the corpus.</b> Its 37 to 65
-  expanded terms touch 38 262 of FiQA's 57 638 documents, and MaxScore gives
-  up on 99.7% of them only after reading their share of those lists: 2.6 ms
-  at the median, against 0.38 ms for a dense <code>near</code>, which walks
-  a graph instead, and 0.25 ms for <code>match</code>. On SciFact it is
-  0.60 ms. The pruning is exact; bounds per block of a list, which would let
-  it skip blocks rather than documents, are not built.</p>
+  expanded terms touch 38 262 of FiQA's 57 638 documents. MaxScore, walking
+  the lists a document at a time, gave up on 99.7% of them only after reading
+  their share of the lists: 2.58 ms at the median. Summed a list at a time
+  into a slot a document, with nothing chosen among the lists' heads, the same
+  exact top ten comes in 0.68 ms, against 0.38 ms for a dense
+  <code>near</code>, which walks a graph instead, and 0.25 ms for
+  <code>match</code>; on SciFact 0.10 ms, where the walk took 0.60. Bounds
+  per block of a list, to let the walk skip blocks, did not pay: the stretch
+  every list could skip together was short.</p>
 </div>
 
 <h2 id="bulk-load-first-index-after">Bulk load first, index after</h2>

@@ -60,6 +60,9 @@ struct IndexCopy {
     values: Vec<(DocId, Option<Value>)>,
 }
 
+/// One of these is made a maintenance and moved into place once, so the
+/// graph's size beside the other variants' costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 enum Built {
     Vector(VectorIndex),
     Hash(HashIndex),
@@ -411,11 +414,17 @@ impl Database {
         }
         // After compaction the persisted image is rewritten from scratch,
         // streamed into the new file rather than built beside the data.
+        let mut len = 0;
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut Vec::new()))
+            sink.rewrite_with(&mut |out| {
+                self.image_into(out, &[], &mut Vec::new())?;
+                len = out.at();
+                Ok(())
+            })
         };
         self.storage(r)?;
+        self.rewrote(len);
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))

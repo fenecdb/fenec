@@ -202,19 +202,7 @@ pub(crate) enum Source<'a> {
 /// and no JSON Web Tokens, the server is open and so are they. A JWT is not
 /// taken: a scoped user must not learn the other collections' names.
 pub(crate) fn handle(cfg: &Config, req: &Request, source: Source) -> Response {
-    let tokens = [cfg.token.as_deref(), cfg.admin_token.as_deref()];
-    let open = tokens.iter().all(Option::is_none) && cfg.access.is_none();
-    let given = req
-        .header("authorization")
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let allowed = open
-        || given.is_some_and(|g| {
-            tokens
-                .iter()
-                .flatten()
-                .any(|t| constant_eq(g.as_bytes(), t.as_bytes()))
-        });
-    if !allowed {
+    if !allowed(cfg, req, false) {
         return Response::error(401, "invalid or missing token")
             .header("WWW-Authenticate", "Bearer");
     }
@@ -224,6 +212,32 @@ pub(crate) fn handle(cfg: &Config, req: &Request, source: Source) -> Response {
         content_type: "text/plain; version=0.0.4; charset=utf-8",
         extra: Vec::new(),
     }
+}
+
+/// Whether `req` may read what the node counts: its server token or the
+/// admin token, or anyone on a server with neither and no JSON Web Tokens.
+/// `admin` asks for the admin token alone, as a tenant node's statements
+/// do: they name the tenants' collections. A JWT is never taken: a scoped
+/// user must not learn the other collections' names.
+pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
+    let tokens = match admin {
+        true => [None, cfg.admin_token.as_deref()],
+        false => [cfg.token.as_deref(), cfg.admin_token.as_deref()],
+    };
+    let open = !admin
+        && [cfg.token.as_deref(), cfg.admin_token.as_deref()]
+            .iter()
+            .all(Option::is_none)
+        && cfg.access.is_none();
+    let given = req
+        .header("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "));
+    open || given.is_some_and(|g| {
+        tokens
+            .iter()
+            .flatten()
+            .any(|t| constant_eq(g.as_bytes(), t.as_bytes()))
+    })
 }
 
 /// The exposition: counters, then what the source holds.

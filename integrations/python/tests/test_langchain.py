@@ -88,3 +88,57 @@ def test_names_that_would_reach_the_query_text_are_refused():
         FenecVectorStore(embeddings, "ok", metadata_fields={"a b": "text"})
     with pytest.raises(ValueError):
         FenecVectorStore(embeddings, "ok", metadata_fields={"lc_id": "text"})
+
+
+@pytest.fixture()
+def worded():
+    s = FenecVectorStore(
+        VectorStoreIntegrationTests.get_embeddings(),
+        fresh("lc"),
+        url=URL,
+        token=TOKEN,
+        metadata_fields={"source": "text"},
+        full_text=True,
+        quant="int8",
+    )
+    try:
+        yield s
+    finally:
+        s.drop_collection()
+
+
+def test_text_and_hybrid_search(worded):
+    worded.add_texts(
+        [
+            "compact rewrites the file without its dead records",
+            "a checkpoint lands the graph in the file",
+            "a replica follows its primary",
+        ],
+        metadatas=[{"source": "a"}, {"source": "b"}, {"source": "a"}],
+        ids=["c", "k", "r"],
+    )
+    found = worded.similarity_search("dead records", k=3, mode="text")
+    assert [d.id for d in found] == ["c"]
+    # The words find "k" alone, so it leads whatever the vector ranks.
+    found = worded.similarity_search("checkpoint graph", k=3, mode="hybrid")
+    assert found[0].id == "k"
+    found = worded.similarity_search("checkpoint graph", k=3, mode="hybrid", filter={"source": "a"})
+    assert "k" not in [d.id for d in found]
+    # Over int8 codes, a text's own vector is still its nearest.
+    best = worded.similarity_search("a replica follows its primary", k=1)
+    assert best[0].id == "r"
+    retriever = worded.as_retriever(search_kwargs={"k": 1, "mode": "text"})
+    assert [d.id for d in retriever.invoke("primary")] == ["r"]
+
+
+def test_modes_and_codes_are_checked(store):
+    store.add_texts(["alpha"], ids=["a"])
+    with pytest.raises(ValueError):
+        store.similarity_search("alpha", mode="text")
+    with pytest.raises(ValueError):
+        store.similarity_search("alpha", mode="bm25")
+    embeddings = VectorStoreIntegrationTests.get_embeddings()
+    with pytest.raises(ValueError):
+        FenecVectorStore(embeddings, "ok", metric="l2", quant="bit")
+    with pytest.raises(ValueError):
+        FenecVectorStore(embeddings, "ok", quant="pq")

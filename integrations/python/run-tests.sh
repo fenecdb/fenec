@@ -28,7 +28,9 @@ until grep -q "listening on: http://" "$dir/server.log"; do
 done
 
 # The source is copied inside, so the build and pytest's caches stay there.
-docker run --rm -v "$here:/src:ro" \
+# host.docker.internal is Docker Desktop's name for the machine; a Linux
+# daemon, a CI runner's, only knows it when told.
+docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway \
     -e FENEC_URL="http://host.docker.internal:$port" -e FENEC_TOKEN="$token" \
     python:3.13-slim sh -c \
     "cp -r /src /work && cd /work &&

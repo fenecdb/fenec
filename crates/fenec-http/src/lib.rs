@@ -47,6 +47,7 @@ pub mod link;
 pub mod metrics;
 pub mod replication;
 pub mod sse;
+pub mod statements;
 pub mod tenants;
 
 use access::Who;
@@ -350,6 +351,13 @@ fn authenticate(cfg: &Config, req: &Request) -> std::result::Result<Who, Respons
     Err(refuse("invalid or missing token"))
 }
 
+/// Whether `req` may read what every statement cost where it is sent: what
+/// reads the data there without a scope, or the admin token. A JWT's user
+/// is held to its rows, and the statements name every collection.
+fn full(cfg: &Config, req: &Request) -> bool {
+    matches!(authenticate(cfg, req), Ok(Who::Full)) || metrics::allowed(cfg, req, true)
+}
+
 /// The statement as `who` may run it.
 fn scoped(who: &Who, stmt: Statement) -> fenec_core::error::Result<Statement> {
     match who.scope() {
@@ -435,6 +443,22 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             continue;
         }
 
+        // The node's own statements -- on a tenant node every tenant's, its
+        // admin's alone. A tenant's own are under its prefix, routed below.
+        if req.segments() == ["_stats", "statements"] {
+            let (view, allowed) = match backend {
+                Backend::Tenants(_) => {
+                    (statements::View::Tenants, metrics::allowed(cfg, &req, true))
+                }
+                _ => (statements::View::Node, full(cfg, &req)),
+            };
+            let resp = cors(statements::handle(&req, view, allowed), cfg);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
         // The database is only ever borrowed from the tenant, never cloned
         // out of it: the tenant's `Arc` count is what says "in use", and a
         // clone of the inner `Arc` would keep the database alive past a
@@ -452,6 +476,14 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 }
             },
         };
+        if let (Some(t), ["_stats", "statements"]) = (&tenant, req.segments().as_slice()) {
+            let view = statements::View::Tenant(t.name());
+            let resp = cors(statements::handle(&req, view, full(cfg, &req)), cfg);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
         let (db, hub) = match (&tenant, backend) {
             (Some(t), _) => (&t.db, &t.hub),
             (None, Backend::Single { db, hub, .. }) => (db, hub),
@@ -510,12 +542,10 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         };
         // A preflight is the browser's, not a statement.
         if req.method != Method::Options {
-            metrics::record(
-                metrics::Transport::Http,
-                started.elapsed(),
-                resp.status >= 400,
-                || describe(&req),
-            );
+            let (took, failed) = (started.elapsed(), resp.status >= 400);
+            let what = describe(&req);
+            metrics::record(metrics::Transport::Http, took, failed, || what.clone());
+            statements::record(tenant.as_ref().map(|t| t.name()), &what, took, failed);
         }
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.
@@ -683,7 +713,10 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             return error_response(&e);
         }
         match result {
-            Ok(resp) => api::render(&resp, &routed.shape, fenec_core::VERSION),
+            Ok(resp) => {
+                statements::rows(counted(&resp));
+                api::render(&resp, &routed.shape, fenec_core::VERSION)
+            }
             Err(e) => error_response(&e),
         }
     } else {
@@ -697,7 +730,11 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Err(e) => return error_response(&e),
         };
         match guard.query(&stmt, &[]) {
-            Ok(resp) => api::render(&visible(&who, resp), &routed.shape, fenec_core::VERSION),
+            Ok(resp) => {
+                let resp = visible(&who, resp);
+                statements::rows(counted(&resp));
+                api::render(&resp, &routed.shape, fenec_core::VERSION)
+            }
             Err(e) => error_response(&e),
         }
     }
@@ -767,8 +804,21 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         r
     };
     match result {
-        Ok(resp) => api::render_any(&visible(who, resp), fenec_core::VERSION),
+        Ok(resp) => {
+            let resp = visible(who, resp);
+            statements::rows(counted(&resp));
+            api::render_any(&resp, fenec_core::VERSION)
+        }
         Err(e) => error_response(&e),
+    }
+}
+
+/// The rows a response returned or changed, for the statements' counts.
+fn counted(resp: &fenec_core::prelude::Response) -> u64 {
+    match resp {
+        fenec_core::prelude::Response::Rows(rs) => rs.rows.len() as u64,
+        fenec_core::prelude::Response::Affected(n) => *n as u64,
+        _ => 0,
     }
 }
 
@@ -812,7 +862,11 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 .map_err(|e| (api::status_of(&e), e.to_string())),
         };
         match r {
-            Ok(r) => results.push(visible(who, r)),
+            Ok(r) => {
+                let r = visible(who, r);
+                statements::rows(counted(&r));
+                results.push(r)
+            }
             Err((status, why)) => {
                 // Sync on the error path too: whatever was applied is durable.
                 // The statement's error is the one reported.

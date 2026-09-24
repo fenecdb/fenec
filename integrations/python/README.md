@@ -37,7 +37,17 @@ index = VectorStoreIndex.from_documents(
 A document or node is a row -- its id, text, metadata as JSON and vector
 under `@hnsw` -- in a collection created on the first write. Fields named in
 `metadata_fields` get columns of their own under `@hash`, and filters over
-them are answered by the index before `near` runs.
+them are answered by the index before the search runs.
+
+With `full_text=True` the text is indexed for BM25 too, and both stores search
+by the words alone or by the words and the vector fused -- LangChain's
+`mode="text"` and `mode="hybrid"`, LlamaIndex's `TEXT_SEARCH` and `HYBRID`.
+`quant="int8"` or `"bit"` keeps the graph over codes.
+
+```python
+store = FenecVectorStore(embeddings, "docs", url=..., token=..., full_text=True)
+store.similarity_search("how do I compact", k=4, mode="hybrid")
+```
 
 `./run-tests.sh` runs LangChain's standard vector store suite and the tests
 LlamaIndex's own integrations run against a fenec-pg it builds and starts.

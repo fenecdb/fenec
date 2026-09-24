@@ -200,6 +200,9 @@ pub struct Snapshot {
     database: String,
     version: String,
     tables: Vec<Table>,
+    /// What `pg_stat_statements` answers: the server's counts, handed over
+    /// with [`Snapshot::with_statements`].
+    statements: Vec<StatementRow>,
     /// Every relation's name by oid and oid by name: a `regclass` is
     /// printed or resolved once per row, over hundreds of relations.
     names: HashMap<i64, String>,
@@ -253,7 +256,14 @@ impl Snapshot {
             tables,
             names,
             oids,
+            statements: Vec::new(),
         }
+    }
+
+    /// The snapshot with what `pg_stat_statements` is to answer.
+    pub fn with_statements(mut self, statements: Vec<StatementRow>) -> Snapshot {
+        self.statements = statements;
+        self
     }
 
     fn relation_name(&self, oid: i64) -> Option<String> {
@@ -414,6 +424,60 @@ fn type_by_name(name: &str) -> Option<i64> {
 
 // ------------------------------------------------------------------ tables
 
+/// A row of `pg_stat_statements`: a statement's shape and what it cost, as
+/// the server counted them. The view is PostgreSQL's extension's, so the
+/// tools that read it -- a monitoring agent, `psql` -- find the columns they
+/// ask for.
+pub struct StatementRow {
+    pub queryid: i64,
+    pub query: String,
+    pub calls: i64,
+    pub total_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub rows: i64,
+}
+
+fn pg_stat_statements(alias: &str, s: &Snapshot) -> Rel {
+    let rows = s
+        .statements
+        .iter()
+        .map(|st| {
+            let mean = st.total_ms / st.calls.max(1) as f64;
+            vec![
+                V::Int(ROLE),
+                V::Int(DATABASE),
+                V::Bool(true),
+                V::Int(st.queryid),
+                t(&st.query),
+                V::Int(st.calls),
+                V::Float(st.total_ms),
+                V::Float(st.min_ms),
+                V::Float(st.max_ms),
+                V::Float(mean),
+                V::Int(st.rows),
+            ]
+        })
+        .collect();
+    rel(
+        alias,
+        &[
+            ("userid", OID),
+            ("dbid", OID),
+            ("toplevel", BOOL),
+            ("queryid", INT8),
+            ("query", TEXT),
+            ("calls", INT8),
+            ("total_exec_time", FLOAT8),
+            ("min_exec_time", FLOAT8),
+            ("max_exec_time", FLOAT8),
+            ("mean_exec_time", FLOAT8),
+            ("rows", INT8),
+        ],
+        rows,
+    )
+}
+
 /// A relation a query reads: the catalog table, a subquery's result or a
 /// function's rows.
 struct Rel {
@@ -457,6 +521,7 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
             ],
         ),
         "pg_class" => pg_class(alias, s),
+        "pg_stat_statements" => pg_stat_statements(alias, s),
         "pg_attribute" => pg_attribute(alias, s),
         "pg_type" => pg_type_table(alias),
         "pg_index" => pg_index(alias, s),

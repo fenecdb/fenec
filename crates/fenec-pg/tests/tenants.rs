@@ -299,3 +299,64 @@ fn a_refused_describe_answers_one_ready_for_query_per_sync() {
         .unwrap();
     assert!(read_message(&mut s).is_err(), "a second ReadyForQuery");
 }
+
+impl Node {
+    /// Status and body of a GET, with `token` if any.
+    fn get(&self, path: &str, token: Option<&str>) -> (u16, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let body = out
+            .split_once("\r\n\r\n")
+            .map_or("", |(_, b)| b)
+            .to_string();
+        (out[9..12].parse().unwrap(), body)
+    }
+}
+
+/// A tenant's statements are its own: its connection's `pg_stat_statements`
+/// and `/t/<tenant>/_stats/statements` hold them alone -- their text names
+/// the tenant's collections -- and the node's `/_stats/statements`, every
+/// tenant's with its name, is the admin's alone.
+#[test]
+fn a_tenant_sees_its_own_statements() {
+    let n = start("stats");
+    assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
+    assert_eq!(n.admin("PUT", "/_admin/tenants/beta"), 201);
+    let mut acme = n.connect("acme").expect("acme");
+    let mut beta = n.connect("beta").expect("beta");
+    rows(&mut acme, "create collection acme_notes (title text)");
+    rows(&mut beta, "create collection beta_notes (title text)");
+    rows(&mut beta, "put beta_notes {title: \"x\"}");
+
+    let seen = rows(&mut acme, "select query from pg_stat_statements");
+    assert!(seen
+        .iter()
+        .any(|r| r[0].as_deref().is_some_and(|q| q.contains("acme_notes"))));
+    assert!(!seen
+        .iter()
+        .any(|r| r[0].as_deref().is_some_and(|q| q.contains("beta_notes"))));
+
+    let (status, json) = n.get("/t/beta/_stats/statements", None);
+    assert_eq!(status, 200, "{json}");
+    assert!(
+        json.contains("beta_notes") && !json.contains("acme_notes"),
+        "{json}"
+    );
+
+    // The node's own lists every tenant's, named, to its admin alone.
+    assert_eq!(n.get("/_stats/statements", None).0, 401);
+    let (status, json) = n.get("/_stats/statements", Some(ADMIN));
+    assert_eq!(status, 200, "{json}");
+    assert!(
+        json.contains("\"tenant\":\"acme\"") && json.contains("\"tenant\":\"beta\""),
+        "{json}"
+    );
+}

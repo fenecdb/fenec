@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -67,6 +67,11 @@ wasm-lite:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
 	@cp $(WASM_OUT) web/fenec-lite.wasm
 	@echo "web/fenec-lite.wasm  $$(wc -c < web/fenec-lite.wasm) bytes"
+
+## What counting a statement by its shape costs (/_stats/statements,
+## pg_stat_statements): a million each, by one thread and by eight.
+statements-bench:
+	$(CARGO) run --release -p fenec-http --example statements
 
 ## The browser module's size built with each set of the four indexes
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
@@ -220,15 +225,20 @@ open-bench:
 ## What a crash costs the next open: 100 000 x 768 written and never
 ## checkpointed, so every vector is in the tail, then opened as a server did
 ## (linked first) and does (linked beside the queries), alone and with two
-## clients sending a near every 20 ms. Each open is a process of its own.
+## clients sending a near every 20 ms. Then written as a server keeps its
+## graphs in the file, and crashed a row before the next one was due: the
+## most a crash can leave to link. Each open is a process of its own.
 REOPEN_ROWS ?= 100000
 REOPEN_FILE ?= target/reopen-$(REOPEN_ROWS).fenec
+REOPEN_KEPT ?= target/reopen-$(REOPEN_ROWS)-kept.fenec
 reopen-bench:
 	$(CARGO) build --release -p fenec-core --example reopen
 	test -f $(REOPEN_FILE) || ./target/release/examples/reopen write $(REOPEN_FILE) $(REOPEN_ROWS) 768
 	./target/release/examples/reopen open $(REOPEN_FILE) linked
 	./target/release/examples/reopen open $(REOPEN_FILE) deferred
 	./target/release/examples/reopen open $(REOPEN_FILE) deferred 2 20
+	test -f $(REOPEN_KEPT) || ./target/release/examples/reopen write $(REOPEN_KEPT) $(REOPEN_ROWS) 768 worst
+	./target/release/examples/reopen open $(REOPEN_KEPT) deferred
 
 ## Quantized vector indexes against full vectors: the arena, the heap,
 ## recall@10, latency and the documents' vectors read at beams of 100, 200

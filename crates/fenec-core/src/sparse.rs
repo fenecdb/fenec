@@ -13,12 +13,14 @@
 //!
 //! The index is the text index's shape with weights where the term counts
 //! were: dimension -> the documents with a weight there, ascending by id.
-//! `near` scores by dot product and walks the lists with MaxScore, the
-//! pruning `match` uses, so what it returns is the exact top k, not an
-//! estimate of it; `pruning_never_changes_the_answer` holds it to an
-//! exhaustive walk. A document sharing no dimension with the query is on
-//! none of the lists and is not ranked -- as `match` ranks only documents
-//! holding a word of its query.
+//! `near` scores by dot product, summing the query's lists a list at a
+//! time, or walking them with MaxScore, the pruning `match` uses, where
+//! they hold few documents in a wide span of ids ([`SparseIndex::search`]).
+//! Either way what it returns is the exact top k, not an estimate of it;
+//! `pruning_never_changes_the_answer` holds both to an exhaustive walk. A
+//! document sharing no dimension with the query is on none of the lists
+//! and is not ranked -- as `match` ranks only documents holding a word of
+//! its query.
 
 // Without the `sparse` feature the index's code is here but unused (`off.rs`);
 // the values it indexes stay.
@@ -359,31 +361,42 @@ impl SparseIndex {
     }
 
     /// The `k` documents with the largest dot product with `query`, best
-    /// first, ties to the lower id. `accept` is the filter, tested as the
-    /// lists are merged, as `match` tests it.
+    /// first, ties to the lower id. `accept` is the filter, tested on the
+    /// documents that can still be kept.
     ///
-    /// MaxScore as the text index walks it: each query dimension's ceiling
-    /// is the most it can add to any document, and once the kept `k` are
-    /// all better than what the dimensions with the smallest ceilings could
-    /// add up to together, those stop proposing documents and are only read
-    /// for the documents the rest propose. A dimension whose weights have a
-    /// sign against the query's adds at most nothing, so its ceiling is 0.
-    ///
-    /// The bounds are compared once rounded to `f32`, the precision scores
-    /// are kept in: a document skipped for falling short of the worst kept
-    /// score cannot tie it, so the tie-break on the id never depends on
-    /// what was pruned. They carry a relative slack of 1e-9 against the
-    /// rounding of summing them in `f64`, far past what a sum of fewer than
-    /// a million terms can drift.
+    /// Two ways, both exact: `pruning_never_changes_the_answer` holds each
+    /// to an exhaustive walk. Where the query's lists are dense in the ids
+    /// they span they are summed a list at a time ([`summed`]): a SPLADE
+    /// query's dozens of lists reach most of a collection, and MaxScore,
+    /// walking them a document at a time ([`walk`]), took 2.54 ms p50 on
+    /// BEIR FiQA against 0.68 summed, and 0.60 ms against 0.11 on SciFact,
+    /// the same rows. Where few postings spread over a wide span of ids, a
+    /// window summed is mostly marks to read for nothing, and the walk
+    /// reads less. Bounding the walk by blocks did not pay: a block of each
+    /// list's postings at a time, 2.69 ms, since the stretch every list
+    /// could skip together was short; ranges of ids bounded across the
+    /// lists, as block-max pruning does, left 443 of FiQA's 451 ranges of
+    /// 128 ids to read, and held 35 MB more.
     pub fn search(
         &self,
         query: &[(u32, f32)],
         k: usize,
         accept: &dyn Fn(DocId) -> bool,
     ) -> Vec<(DocId, f32)> {
-        if k == 0 {
+        let mut lists = self.cursors(query);
+        if k == 0 || lists.is_empty() {
             return Vec::new();
         }
+        // The browser sums whatever the density: its collections span few
+        // ids, and the walk was 1.6 KB of its module.
+        match cfg!(target_arch = "wasm32") || dense(&lists) {
+            true => summed(&mut lists, k, accept),
+            false => walk(lists, k, accept),
+        }
+    }
+
+    /// A cursor at the head of each list the query has a dimension in.
+    fn cursors(&self, query: &[(u32, f32)]) -> Vec<Cursor<'_>> {
         let mut found: Vec<Cursor> = Vec::with_capacity(query.len());
         for &(i, q) in query {
             if let Some(list) = self.list(i) {
@@ -397,83 +410,188 @@ impl SparseIndex {
                 });
             }
         }
-        if found.is_empty() {
-            return Vec::new();
-        }
-        // Smallest ceiling first, through the engine's one sort of scored
-        // ids: the negated ceiling is the score, the cursor's place the id.
-        // The order is the pruning's efficiency, never its answer -- `reach`
-        // sums the ceilings in whatever order they stand -- so their
-        // rounding to `f32` here costs nothing.
-        let mut keyed: Vec<(DocId, f32)> = Vec::with_capacity(found.len());
-        for (at, c) in found.iter().enumerate() {
-            keyed.push((at as DocId, -(c.ceiling as f32)));
-        }
-        keyed.sort_by(crate::text::best_first);
-        let mut cursors: Vec<Cursor> = Vec::with_capacity(found.len());
-        for (at, _) in &keyed {
-            cursors.push(found[*at as usize]);
-        }
-        let mut reach: Vec<f64> = Vec::with_capacity(cursors.len() + 1);
-        reach.push(0.0);
-        for c in &cursors {
-            reach.push(reach[reach.len() - 1] + c.ceiling);
-        }
-
-        let mut heap: BinaryHeap<ByScore> = BinaryHeap::with_capacity(k + 1);
-        let mut worst_kept = f32::NEG_INFINITY;
-        let mut pivot = 0usize;
-        loop {
-            while pivot < cursors.len() && (reach[pivot + 1] as f32) < worst_kept {
-                pivot += 1;
-            }
-            if pivot == cursors.len() {
-                break;
-            }
-            let mut doc = DocId::MAX;
-            for c in &cursors[pivot..] {
-                if let Some(d) = c.list.docs.get(c.at) {
-                    if *d < doc {
-                        doc = *d;
-                    }
-                }
-            }
-            if doc == DocId::MAX {
-                break;
-            }
-            let mut score = 0.0f64;
-            for c in cursors[pivot..].iter_mut() {
-                if c.list.docs.get(c.at) == Some(&doc) {
-                    score += c.weight * c.list.weights[c.at] as f64;
-                    c.at += 1;
-                }
-            }
-            let mut gave_up = false;
-            for j in (0..pivot).rev() {
-                if ((score + reach[j + 1]) as f32) < worst_kept {
-                    gave_up = true;
-                    break;
-                }
-                let c = &mut cursors[j];
-                c.at += c.list.docs[c.at..].partition_point(|d| *d < doc);
-                if c.list.docs.get(c.at) == Some(&doc) {
-                    score += c.weight * c.list.weights[c.at] as f64;
-                }
-            }
-            if !gave_up && accept(doc) {
-                heap.push(ByScore(score as f32, doc));
-                if heap.len() > k {
-                    heap.pop();
-                }
-                if heap.len() == k {
-                    worst_kept = heap.peek().map(|s| s.0).unwrap_or(f32::NEG_INFINITY);
-                }
-            }
-        }
-        let mut out: Vec<(DocId, f32)> = heap.into_iter().map(|s| (s.1, s.0)).collect();
-        out.sort_by(crate::text::best_first);
-        out
+        found
     }
+}
+
+/// Whether `lists` hold postings densely enough in the ids they span to be
+/// summed: a window of [`WINDOW`] ids costs the summing its 1 024 words of
+/// marks whether anything landed there or not, which is the walk's cost of
+/// some 256 postings.
+fn dense(lists: &[Cursor]) -> bool {
+    let postings: usize = lists.iter().map(|c| c.list.docs.len()).sum();
+    span(lists) / 256 < postings
+}
+
+/// How many ids `lists` span, their first document to their last.
+fn span(lists: &[Cursor]) -> usize {
+    let (mut first, mut last) = (DocId::MAX, 0);
+    for c in lists {
+        if let (Some(a), Some(z)) = (c.list.docs.first(), c.list.docs.last()) {
+            (first, last) = (first.min(*a), last.max(*z));
+        }
+    }
+    last.saturating_sub(first) as usize + 1
+}
+
+/// Keeps `doc` among the best `k` in `heap`, and says what a document now
+/// has to score to get in: the worst kept, once `k` are.
+fn keep(heap: &mut BinaryHeap<ByScore>, k: usize, score: f32, doc: DocId) -> f32 {
+    heap.push(ByScore(score, doc));
+    if heap.len() > k {
+        heap.pop();
+    }
+    match heap.len() == k {
+        true => heap.peek().map_or(f32::NEG_INFINITY, |s| s.0),
+        false => f32::NEG_INFINITY,
+    }
+}
+
+/// What `heap` kept, best first.
+fn best(heap: BinaryHeap<ByScore>) -> Vec<(DocId, f32)> {
+    let mut out: Vec<(DocId, f32)> = heap.into_iter().map(|s| (s.1, s.0)).collect();
+    out.sort_by(crate::text::best_first);
+    out
+}
+
+/// MaxScore as the text index walks it: each query dimension's ceiling is
+/// the most it can add to any document, and once the kept `k` are all
+/// better than what the dimensions with the smallest ceilings could add up
+/// to together, those stop proposing documents and are only read for the
+/// documents the rest propose. A dimension whose weights have a sign
+/// against the query's adds at most nothing, so its ceiling is 0.
+///
+/// The bounds are compared once rounded to `f32`, the precision scores are
+/// kept in: a document skipped for falling short of the worst kept score
+/// cannot tie it, so the tie-break on the id never depends on what was
+/// pruned. They carry a relative slack of 1e-9 against the rounding of
+/// summing them in `f64`, far past what a sum of fewer than a million terms
+/// can drift.
+fn walk(found: Vec<Cursor>, k: usize, accept: &dyn Fn(DocId) -> bool) -> Vec<(DocId, f32)> {
+    // Smallest ceiling first, through the engine's one sort of scored
+    // ids: the negated ceiling is the score, the cursor's place the id.
+    // The order is the pruning's efficiency, never its answer -- `reach`
+    // sums the ceilings in whatever order they stand -- so their
+    // rounding to `f32` here costs nothing.
+    let mut keyed: Vec<(DocId, f32)> = Vec::with_capacity(found.len());
+    for (at, c) in found.iter().enumerate() {
+        keyed.push((at as DocId, -(c.ceiling as f32)));
+    }
+    keyed.sort_by(crate::text::best_first);
+    let mut cursors: Vec<Cursor> = Vec::with_capacity(found.len());
+    for (at, _) in &keyed {
+        cursors.push(found[*at as usize]);
+    }
+    let mut reach: Vec<f64> = Vec::with_capacity(cursors.len() + 1);
+    reach.push(0.0);
+    for c in &cursors {
+        reach.push(reach[reach.len() - 1] + c.ceiling);
+    }
+
+    let mut heap: BinaryHeap<ByScore> = BinaryHeap::with_capacity(k + 1);
+    let mut worst_kept = f32::NEG_INFINITY;
+    let mut pivot = 0usize;
+    loop {
+        while pivot < cursors.len() && (reach[pivot + 1] as f32) < worst_kept {
+            pivot += 1;
+        }
+        if pivot == cursors.len() {
+            break;
+        }
+        let mut doc = DocId::MAX;
+        for c in &cursors[pivot..] {
+            if let Some(d) = c.list.docs.get(c.at) {
+                if *d < doc {
+                    doc = *d;
+                }
+            }
+        }
+        if doc == DocId::MAX {
+            break;
+        }
+        let mut score = 0.0f64;
+        for c in cursors[pivot..].iter_mut() {
+            if c.list.docs.get(c.at) == Some(&doc) {
+                score += c.weight * c.list.weights[c.at] as f64;
+                c.at += 1;
+            }
+        }
+        let mut gave_up = false;
+        for j in (0..pivot).rev() {
+            if ((score + reach[j + 1]) as f32) < worst_kept {
+                gave_up = true;
+                break;
+            }
+            let c = &mut cursors[j];
+            c.at += c.list.docs[c.at..].partition_point(|d| *d < doc);
+            if c.list.docs.get(c.at) == Some(&doc) {
+                score += c.weight * c.list.weights[c.at] as f64;
+            }
+        }
+        if !gave_up && accept(doc) {
+            worst_kept = keep(&mut heap, k, score as f32, doc);
+        }
+    }
+    best(heap)
+}
+
+/// Ids summed at a time by [`summed`]: their sums are 512 KB, the most a
+/// query holds whatever the collection's size, and a collection that spans
+/// fewer ids sums them in a window its own size. The tests take 256, so
+/// that their queries cross many.
+const WINDOW: usize = if cfg!(test) { 1 << 8 } else { 1 << 16 };
+
+/// The `k` best of what `lists` score, summed a list at a time into a slot
+/// a document, a window of ids at a time: no document is chosen among the
+/// lists' heads, and one is weighed against the worst kept once, when its
+/// window is done. The sums are `f64` as the walk's are, so the two agree
+/// once rounded to `f32` however their additions were ordered.
+fn summed(lists: &mut [Cursor], k: usize, accept: &dyn Fn(DocId) -> bool) -> Vec<(DocId, f32)> {
+    let window = WINDOW.min(span(lists).next_power_of_two()).max(64);
+    // Resized, and the marks in words of `usize`, rather than `vec!` of
+    // `f64` and of `u64`: each type's copy of it was 0.3 KB of the
+    // browser module, and `usize`'s was there already.
+    let mut sums: Vec<f64> = Vec::new();
+    sums.resize(window, 0.0);
+    let word = usize::BITS as usize;
+    let mut held = vec![0usize; window / word];
+    let mut heap: BinaryHeap<ByScore> = BinaryHeap::with_capacity(k + 1);
+    let mut worst_kept = f32::NEG_INFINITY;
+    loop {
+        let next = lists
+            .iter()
+            .filter_map(|c| c.list.docs.get(c.at))
+            .min()
+            .copied();
+        let Some(next) = next else {
+            break;
+        };
+        let lo = next & !(window as DocId - 1);
+        let hi = lo + window as DocId;
+        for c in lists.iter_mut() {
+            let (docs, weights) = (&c.list.docs, &c.list.weights);
+            while let Some(&d) = docs.get(c.at).filter(|d| **d < hi) {
+                let i = (d - lo) as usize;
+                sums[i] += c.weight * weights[c.at] as f64;
+                held[i / word] |= 1 << (i % word);
+                c.at += 1;
+            }
+        }
+        for (w, bits) in held.iter_mut().enumerate() {
+            while *bits != 0 {
+                let i = w * word + bits.trailing_zeros() as usize;
+                *bits &= *bits - 1;
+                let (doc, score) = (lo + i as DocId, sums[i] as f32);
+                sums[i] = 0.0;
+                // Asked this way round, a NaN is kept, as the walk keeps it.
+                if score < worst_kept || !accept(doc) {
+                    continue;
+                }
+                worst_kept = keep(&mut heap, k, score, doc);
+            }
+        }
+    }
+    best(heap)
 }
 
 /// One query dimension's walk through its list.
@@ -627,8 +745,11 @@ mod tests {
             seed
         };
         for round in 0..400 {
-            let dims = 8 + (next() % 200) as u32;
-            let n = 20 + (next() % 300) as usize;
+            // Every third round a few long lists, as a SPLADE query meets.
+            let (dims, n) = match round % 3 {
+                0 => (2 + (next() % 10) as u32, 300 + (next() % 1500) as usize),
+                _ => (8 + (next() % 200) as u32, 20 + (next() % 300) as usize),
+            };
             let signed = round % 4 == 0;
             let entries = |len: u64, next: &mut dyn FnMut() -> u64| {
                 let mut e: Vec<(u32, f32)> = Vec::new();
@@ -648,7 +769,13 @@ mod tests {
             };
             let mut ix = SparseIndex::new();
             let mut docs = Vec::new();
-            for id in 1..=n as DocId {
+            // Every third round the ids far apart, over several of the
+            // windows the summing takes at a time.
+            let stride = match round % 3 {
+                1 => 1 + next() % 400,
+                _ => 1,
+            };
+            for id in (1..=n as DocId).map(|i| i * stride) {
                 let e = entries(24, &mut next);
                 ix.insert(id, &e);
                 docs.push((id, e));
@@ -677,11 +804,20 @@ mod tests {
                 let k = [1, 3, 10, 50][(next() % 4) as usize];
                 let odd = next() % 2 == 0;
                 let accept = |id: DocId| !odd || id % 2 == 1;
+                let want = exhaustive(&docs, &q, k, &accept);
                 assert_eq!(
                     ix.search(&q, k, &accept),
-                    exhaustive(&docs, &q, k, &accept),
-                    "round {round}, k {k}, query {q:?}"
+                    want,
+                    "round {round}, k {k}, {q:?}"
                 );
+                // Each way on its own, whichever the lists' density picks.
+                assert_eq!(
+                    walk(ix.cursors(&q), k, &accept),
+                    want,
+                    "round {round}, walked"
+                );
+                let summed_ = summed(&mut ix.cursors(&q), k, &accept);
+                assert_eq!(summed_, want, "round {round}, summed");
             }
         }
     }

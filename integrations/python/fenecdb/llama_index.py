@@ -9,12 +9,19 @@
     )
 
 A node is a row: its id, its document's id, its text, its metadata as
-LlamaIndex serialises it, and its vector under `@hnsw`. The collection is
-created on the first write, when the embedding's size is known. A metadata
-field named in `metadata_fields` also gets a column of its own, under `@hash`,
-and a query's filters are answered over those -- `==`, `!=`, `<`, `<=`, `>`,
-`>=`, `in` and `nin`, joined by `and` or `or` -- before `near` looks for
-neighbours among what passed.
+LlamaIndex serialises it, and its vector under `@hnsw` -- over int8 or bit
+codes with `quant="int8"` or `"bit"`. The collection is created on the first
+write, when the embedding's size is known. A metadata field named in
+`metadata_fields` also gets a column of its own, under `@hash`, and a query's
+filters are answered over those -- `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` and
+`nin`, joined by `and` or `or` -- before the search ranks what passed.
+
+With `full_text=True` the text is indexed for BM25 as well (`@text`), and a
+query takes the modes that need it: `TEXT_SEARCH` ranks by the words alone
+(`match`), and `HYBRID` ranks the words and the vector each to their own depth
+and fuses the two rankings (`match ... near ... fuse`). The fusion adds ranks,
+not scores, so `alpha` has nothing to weigh and is not read; `hybrid_top_k`,
+or `sparse_top_k`, is how deep each side goes.
 """
 
 from __future__ import annotations
@@ -48,6 +55,8 @@ _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TYPES = {"text", "int", "float", "bool", "timestamp"}
 _RESERVED = {"id", "node_id", "ref_doc_id", "content", "metadata", "embedding"}
 _METRICS = {"cosine", "l2", "dot"}
+_QUANT = {None, "int8", "bit"}
+_WORDS = {VectorStoreQueryMode.TEXT_SEARCH, VectorStoreQueryMode.HYBRID}
 _COMPARE = {
     FilterOperator.EQ: "=",
     FilterOperator.NE: "!=",
@@ -69,6 +78,8 @@ class FenecVectorStore(BasePydanticVectorStore):
     token: Optional[str] = None
     metric: str = "cosine"
     metadata_fields: dict = {}
+    quant: Optional[str] = None
+    full_text: bool = False
 
     _client: Client = PrivateAttr()
     _dimension: Optional[int] = PrivateAttr(default=None)
@@ -81,12 +92,18 @@ class FenecVectorStore(BasePydanticVectorStore):
         metric: str = "cosine",
         metadata_fields: Optional[dict] = None,
         client: Optional[Client] = None,
+        quant: Optional[str] = None,
+        full_text: bool = False,
         **kwargs: Any,
     ):
         if not _NAME.match(collection):
             raise ValueError(f"not a collection name: {collection!r}")
         if metric not in _METRICS:
             raise ValueError(f"metric is one of {sorted(_METRICS)}, not {metric!r}")
+        if quant not in _QUANT:
+            raise ValueError(f"quant is None, 'int8' or 'bit', not {quant!r}")
+        if quant == "bit" and metric != "cosine":
+            raise ValueError("quant='bit' keeps signs, which only cosine can order by")
         fields = dict(metadata_fields or {})
         for name, ty in fields.items():
             if not _NAME.match(name) or name in _RESERVED:
@@ -99,6 +116,8 @@ class FenecVectorStore(BasePydanticVectorStore):
             token=token,
             metric=metric,
             metadata_fields=fields,
+            quant=quant,
+            full_text=full_text,
             **kwargs,
         )
         self._client = client or Client(url, token)
@@ -190,19 +209,26 @@ class FenecVectorStore(BasePydanticVectorStore):
         return [self._node(r) for r in rows]
 
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
-        if query.mode != VectorStoreQueryMode.DEFAULT:
-            raise NotImplementedError(f"query mode {query.mode} is not supported")
-        if query.query_embedding is None:
+        mode = query.mode
+        if mode not in (VectorStoreQueryMode.DEFAULT, *_WORDS):
+            raise NotImplementedError(f"query mode {mode} is not supported")
+        if mode in _WORDS and not self.full_text:
+            raise ValueError(f"query mode {mode} needs the store made with full_text=True")
+        if mode in _WORDS and not query.query_str:
+            raise ValueError(f"query mode {mode} needs the query's text")
+        if mode != VectorStoreQueryMode.TEXT_SEARCH and query.query_embedding is None:
             raise ValueError("a query embedding is needed")
+        # What the query ranks by, and its parameters ahead of the filter's.
+        rank, ahead = self._rank(query)
         # An empty list is no restriction here, as LlamaIndex means it: its
         # retriever sends `node_ids=[]` for a store that keeps its own text.
         where, params = self._where(
-            query.node_ids or None, query.doc_ids or None, query.filters, first=2
+            query.node_ids or None, query.doc_ids or None, query.filters, first=len(ahead) + 1
         )
         rows = self._run(
             f"get {self.collection} select node_id, content, metadata{where} "
-            f"near embedding $1 limit {int(query.similarity_top_k)}",
-            [[float(x) for x in query.query_embedding], *params],
+            f"{rank} limit {int(query.similarity_top_k)}",
+            [*ahead, *params],
         )
         return VectorStoreQueryResult(
             nodes=[self._node(r) for r in rows],
@@ -212,15 +238,33 @@ class FenecVectorStore(BasePydanticVectorStore):
 
     # ------------------------------------------------------------ inside
 
+    def _rank(self, query: VectorStoreQuery) -> tuple[str, list]:
+        """`near`, `match`, or both fused, and their parameters, $1 on."""
+        vector = [float(x) for x in query.query_embedding or []]
+        if query.mode == VectorStoreQueryMode.TEXT_SEARCH:
+            return "match content $1", [query.query_str]
+        if query.mode == VectorStoreQueryMode.HYBRID:
+            depth = query.hybrid_top_k or query.sparse_top_k
+            deep = f" candidates {int(depth)}" if depth else ""
+            return f"match content $1 near embedding $2 fuse{deep}", [query.query_str, vector]
+        return "near embedding $1", [vector]
+
     def _ensure(self, dimension: int) -> None:
         if self._dimension == dimension:
             return
         extra = "".join(f", {f} {t} @hash" for f, t in self.metadata_fields.items())
+        quant = f", quant={self.quant}" if self.quant else ""
+        content = "content text @text" if self.full_text else "content text"
         self._client.query(
             f"create collection if not exists {self.collection} ("
-            f"node_id text @hash, ref_doc_id text @hash, content text, metadata text, "
-            f"embedding vector<{dimension}> @hnsw({self.metric}){extra})"
+            f"node_id text @hash, ref_doc_id text @hash, {content}, metadata text, "
+            f"embedding vector<{dimension}> @hnsw({self.metric}{quant}){extra})"
         )
+        if self.full_text:
+            # A collection made before without it takes the index now.
+            self._client.query(
+                f"create index if not exists on {self.collection} (content) @text"
+            )
         self._dimension = dimension
 
     def _run(self, statement: str, params: list) -> Any:

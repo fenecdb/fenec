@@ -21,7 +21,7 @@ use crate::error::Result;
 use crate::schema::{TextIndexSpec, VectorIndexSpec};
 use crate::sorted::{Key, Range};
 use crate::value::{DataType, DocId, Value, VecPrec};
-use crate::vector::GraphView;
+use crate::vector::{GraphView, Persisted};
 
 pub(crate) enum Never {}
 
@@ -63,6 +63,12 @@ impl VectorIndex {
         match self.never {}
     }
     pub fn unlinked(&self) -> usize {
+        match self.never {}
+    }
+    pub fn changes(&self) -> u64 {
+        match self.never {}
+    }
+    pub fn persisted(&self) -> &Persisted {
         match self.never {}
     }
     pub fn precision(&self) -> VecPrec {
@@ -112,6 +118,9 @@ impl VectorIndex {
         match self.never {}
     }
     pub fn serialize_graph(&self) -> Vec<u8> {
+        match self.never {}
+    }
+    pub fn serialize_graph_kept(&self) -> Vec<u8> {
         match self.never {}
     }
     /// A graph in the file is derived data: without the index to restore it

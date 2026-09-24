@@ -16,6 +16,7 @@ use crate::value::{DataType, DocId, Document, Value, VecPrec};
 use crate::vector::{distance, dot, norm, normalized, score_from_distance, VectorIndex};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
 mod maintenance;
@@ -135,6 +136,63 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
         };
     }
     Ok(len <= (bytes.len() - pos) as u64)
+}
+
+/// Where the last graph record of each index starts, by collection id and
+/// field: the one a load restores. The walk reads record heads alone and
+/// stops where the load would -- at a record cut short, or of a kind it
+/// refuses -- so the load says what is wrong.
+fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
+    let mut last: Vec<(u32, String, usize)> = Vec::new();
+    let mut pos = MAGIC.len();
+    while pos < bytes.len() && whole_record(bytes, pos)? {
+        let at = pos;
+        match bytes[pos] {
+            REC_SEQ => {
+                pos += REC_SEQ_LEN;
+                continue;
+            }
+            REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY => {
+            }
+            _ => break,
+        }
+        pos += 1;
+        let cid = get_uvarint(bytes, &mut pos)? as u32;
+        let len = get_uvarint(bytes, &mut pos)? as usize;
+        if bytes[at] == REC_GRAPH {
+            let mut cp = 0usize;
+            let field = crate::codec::decode_str(&bytes[pos..pos + len], &mut cp)?;
+            match last.iter_mut().find(|(c, f, _)| *c == cid && *f == field) {
+                Some(l) => l.2 = at,
+                None => last.push((cid, field, at)),
+            }
+        }
+        pos += len;
+    }
+    Ok(last)
+}
+
+/// Drops from a load's restored graphs those of collection `name` but the
+/// fields `keep` names. One function rather than a `retain` at each record
+/// kind: each closure was a copy of `retain`, 264 bytes of the browser
+/// module apiece.
+fn forget(restored: &mut Vec<(String, String, usize)>, name: &str, keep: &dyn Fn(&str) -> bool) {
+    restored.retain(|(n, f, _)| n != name || keep(f));
+}
+
+/// Whether `ix` is due a record of its own in a file `appended` bytes long,
+/// by `(changes, growth)` ([`Database::save_graphs`]).
+fn graph_due(ix: &VectorIndex, appended: u64, (changes, growth): (u64, u64)) -> bool {
+    if ix.unlinked() > 0 || ix.is_empty() {
+        return false;
+    }
+    let p = ix.persisted();
+    let node_bytes = match p.node_bytes.load(Relaxed) {
+        0 => GRAPH_NODE_BYTES,
+        b => b,
+    };
+    ix.changes().saturating_sub(p.changes.load(Relaxed)) >= changes
+        && appended.saturating_sub(p.at.load(Relaxed)) >= growth * node_bytes * ix.len() as u64
 }
 
 /// Takes a data record's frames into a collection's store: the record's
@@ -1099,7 +1157,30 @@ pub struct Database {
     /// Whether the next load leaves the vectors it would link into a graph
     /// for [`Database::link_pending`] (see [`Database::defer_linking`]).
     defer_links: bool,
+    /// The bytes of the file as this database has written it: what it
+    /// opened, and every record appended since. An atomic because a graph
+    /// record is appended under the read lock ([`Database::save_graphs`]).
+    appended: std::sync::atomic::AtomicU64,
+    /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
+    /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
+    graph_saves: (u64, u64),
 }
+
+/// A server appends a graph to its file's tail ([`Database::save_graphs`])
+/// once this many of its nodes changed since it last reached the file --
+/// added, retired or linked, and every one of them linked again at the open
+/// after a crash --
+pub const GRAPH_SAVE_CHANGES: u64 = 10_000;
+
+/// -- and the file has grown by this many times the record since: the
+/// graph a record holds is the whole of it, so a record every few thousand
+/// writes, which a bound on the linking alone would ask of a big graph,
+/// would write the graph over and over for a little of it.
+pub const GRAPH_SAVE_GROWTH: u64 = 3;
+
+/// What a node takes in a graph record, before one was written: measured
+/// at 100 000 x 768, m 16.
+const GRAPH_NODE_BYTES: u64 = 72;
 
 impl Default for Database {
     fn default() -> Self {
@@ -1126,6 +1207,8 @@ impl Database {
             watched: std::sync::atomic::AtomicBool::new(false),
             adoptions: 0,
             defer_links: false,
+            appended: std::sync::atomic::AtomicU64::new(0),
+            graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
         }
     }
 
@@ -1640,6 +1723,84 @@ impl Database {
         left
     }
 
+    /// Whether [`Self::save_graphs`] would append a graph.
+    pub fn graphs_due(&self) -> bool {
+        let appended = self.appended.load(Relaxed);
+        self.collections.values().any(|c| {
+            c.vectors
+                .values()
+                .any(|ix| graph_due(ix, appended, self.graph_saves))
+        })
+    }
+
+    /// When [`Self::save_graphs`] appends a graph: once `changes` of its
+    /// nodes changed since it last reached the file, and the file grew since
+    /// by `growth` times its record.
+    pub fn set_graph_saves(&mut self, changes: u64, growth: u64) {
+        self.graph_saves = (changes, growth);
+    }
+
+    /// Appends to the file, as a record of its own, each graph that changed
+    /// in [`GRAPH_SAVE_CHANGES`] nodes since it last reached it and has none
+    /// waiting to be linked, once the file has grown since by
+    /// [`GRAPH_SAVE_GROWTH`] times the record; returns how many. A load
+    /// restores a graph where its last record is and links only what was
+    /// written after it, where a server that crashed linked every vector
+    /// written since its last checkpoint -- which it writes on its way down
+    /// alone.
+    ///
+    /// It takes `&self`, for a caller holding the read lock: that keeps the
+    /// writes out while a graph is written -- a record of a graph that
+    /// writes changed meanwhile would not match the documents where it lands
+    /// -- and lets queries on. The record is not a write: the change counter
+    /// does not move and no replica is sent it. What comes back with the
+    /// count pushes the records to disk, to run once the lock is let go, as
+    /// a write's [`Durability`] is: left in the sink's buffer until the next
+    /// write, a record was lost to the crash of a server that had nothing
+    /// more to write -- the one that had just linked what the last crash
+    /// left. A sink that refuses either is reported back with
+    /// [`Self::fail`].
+    pub fn save_graphs(&self) -> Result<(usize, Option<Durability>)> {
+        if self.failed.is_some() {
+            return Ok((0, None));
+        }
+        let mut n = 0;
+        for name in &self.order {
+            let c = &self.collections[name];
+            for (field, ix) in &c.vectors {
+                if !graph_due(ix, self.appended.load(Relaxed), self.graph_saves) {
+                    continue;
+                }
+                let mut payload = Vec::new();
+                crate::codec::encode_str(&mut payload, field);
+                payload.extend_from_slice(&ix.serialize_graph_kept());
+                let mut record = record_head(REC_GRAPH, c.id, payload.len());
+                record.extend_from_slice(&payload);
+                self.sink
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .append(&record)?;
+                let end =
+                    self.appended.fetch_add(record.len() as u64, Relaxed) + record.len() as u64;
+                let p = ix.persisted();
+                p.changes.store(ix.changes(), Relaxed);
+                p.at.store(end, Relaxed);
+                p.node_bytes
+                    .store((payload.len() / ix.len().max(1)) as u64, Relaxed);
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return Ok((0, None));
+        }
+        let durable = self
+            .sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush()?;
+        Ok((n, durable))
+    }
+
     /// The vectors a load left out of the graphs and [`Self::link_pending`]
     /// has still to link.
     pub fn unlinked(&self) -> usize {
@@ -1658,7 +1819,21 @@ impl Database {
         }
         let mut pos = MAGIC.len();
         let mut by_id: HashMap<u32, String> = HashMap::new();
-        let mut graphs: HashMap<(String, String), Vec<u8>> = HashMap::new();
+        // Each graph is restored where its last record is, against the
+        // documents as they stood when it was written, and the writes after
+        // it are applied to it one touched document at a time: a
+        // checkpoint's image holds one after each collection's data, and a
+        // server appends one to the tail now and then (`save_graphs`).
+        // Restored after the whole file instead, a single write in the tail
+        // left the node count off and threw the graph away -- a crash cost a
+        // full rebuild -- and an earlier record of the same graph is not
+        // restored at all: it would read every vector again for nothing. A
+        // browser writes one record of a graph, in an image, and restores
+        // each it meets rather than carry the walk.
+        let last = match cfg!(target_arch = "wasm32") {
+            true => None,
+            false => Some(last_graphs(bytes)?),
+        };
         // The counter is built from two parts: the base written by the
         // checkpoint, and the records appended **after** the image body
         // ended. The boundary is a byte offset (`body_end`), not a record
@@ -1669,21 +1844,13 @@ impl Database {
         let mut seq_base = 0u64;
         let mut seq_seen = 0u64;
         let mut body_end = MAGIC.len();
-        // The graphs are restored where the image ends, against the
-        // documents they were written with, and the tail -- the writes since
-        // the checkpoint -- is applied to them afterwards, one touched
-        // document at a time. Restored after the whole file instead, a single
-        // write in the tail left the node count off and threw the graph away:
-        // a crash cost a full rebuild. Without the header (an old file) there
-        // is no boundary to restore at, and that is still what happens.
-        let mut has_header = false;
-        let mut restored: Option<Vec<(String, String)>> = None;
-        // Per collection, the documents the tail wrote. A `Vec`, not a map:
-        // a file has a handful of collections, and the map's code was 1.5 KB
-        // of the browser module.
+        // The graphs restored, each with how many of its collection's
+        // touched documents came before it: it takes the ones after.
+        let mut restored: Vec<(String, String, usize)> = Vec::new();
+        // Per collection with a restored graph, the documents written after
+        // one was. A `Vec`, not a map: a file has a handful of collections,
+        // and the map's code was 1.5 KB of the browser module.
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
-        // Collections whose indexes the tail reset or replaced.
-        let mut reset: Vec<String> = Vec::new();
         let mut whole = bytes.len();
         while pos < bytes.len() {
             if !whole_record(bytes, pos)? {
@@ -1702,9 +1869,7 @@ impl Database {
                 break;
             }
             let tail = pos >= body_end;
-            if tail && has_header && restored.is_none() {
-                restored = Some(self.restore_graphs(&graphs)?);
-            }
+            let at = pos;
             let rec = bytes[pos];
             pos += 1;
             match rec {
@@ -1715,9 +1880,9 @@ impl Database {
                     let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
                     pos += len;
                     seq_seen += tail as u64;
-                    if tail {
-                        reset.push(schema.name.clone());
-                    }
+                    // Made again under its name: no graph restored before
+                    // is this collection's.
+                    forget(&mut restored, &schema.name, &|_| false);
                     by_id.insert(cid, schema.name.clone());
                     self.order.retain(|n| n != &schema.name);
                     self.order.push(schema.name.clone());
@@ -1737,7 +1902,7 @@ impl Database {
                     if let Some(name) = by_id.remove(&cid) {
                         self.collections.remove(&name);
                         self.order.retain(|n| n != &name);
-                        reset.push(name);
+                        forget(&mut restored, &name, &|_| false);
                     }
                 }
                 REC_DATA => {
@@ -1751,7 +1916,7 @@ impl Database {
                     let chunk = &bytes[pos..pos + len];
                     pos += len;
                     let c = self.collections.get_mut(&name).unwrap();
-                    let frames = if tail && has_header {
+                    let frames = if restored.iter().any(|(n, _, _)| *n == name) {
                         let at = match touched.iter().position(|(n, _)| *n == name) {
                             Some(at) => at,
                             None => {
@@ -1786,9 +1951,32 @@ impl Database {
                                     .zip(&schema.fields)
                                     .all(|(a, b)| a.name == b.name && a.ty == b.ty);
                             if same_layout {
+                                // An index added leaves the graphs restored
+                                // before it, as a replica leaves them: the
+                                // documents are the same ones. Not in the
+                                // browser, whose schemas are declared with
+                                // their collections: 767 bytes of its module
+                                // for a rebuild it would rarely save.
+                                let mut kept = Vec::new();
+                                for (n, f, _) in
+                                    restored.iter().filter(|_| !cfg!(target_arch = "wasm32"))
+                                {
+                                    let same = schema.field_pos(f).is_some_and(|p| {
+                                        c.schema.fields.get(p).map(|x| &x.index)
+                                            == Some(&schema.fields[p].index)
+                                    });
+                                    if n == name && same {
+                                        if let Some(ix) = c.vectors.remove(f) {
+                                            kept.push((f.clone(), ix));
+                                        }
+                                    }
+                                }
                                 c.schema = schema;
                                 c.reset_index_structures();
-                                reset.push(name.clone());
+                                forget(&mut restored, name, &|f| kept.iter().any(|(k, _)| k == f));
+                                for (f, ix) in kept {
+                                    c.vectors.insert(f, ix);
+                                }
                             }
                         }
                     }
@@ -1813,8 +2001,32 @@ impl Database {
                     pos += len;
                     let mut cp = 0usize;
                     let field = crate::codec::decode_str(chunk, &mut cp)?;
-                    if let Some(name) = by_id.get(&cid) {
-                        graphs.insert((name.clone(), field), chunk[cp..].to_vec());
+                    let latest = last.as_ref().is_none_or(|last| {
+                        last.iter()
+                            .any(|(c, f, p)| *c == cid && *f == field && *p == at)
+                    });
+                    let name = by_id.get(&cid).cloned();
+                    if let (true, Some(name)) = (latest, name) {
+                        if self.restore_graph(&name, &field, &chunk[cp..])? {
+                            let from = match touched.iter().position(|(n, _)| *n == name) {
+                                Some(i) => touched[i].1.len(),
+                                None => {
+                                    touched.push((name.clone(), Vec::new()));
+                                    0
+                                }
+                            };
+                            // As saved as its record: the writes after it
+                            // are what a crash would take into it again.
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let ix = &self.collections[&name].vectors[&field];
+                                let p = ix.persisted();
+                                p.at.store(pos as u64, Relaxed);
+                                p.node_bytes.store((len / ix.len().max(1)) as u64, Relaxed);
+                            }
+                            forget(&mut restored, &name, &|f| f != field);
+                            restored.push((name, field, from));
+                        }
                     }
                 }
                 REC_HISTORY => {
@@ -1842,7 +2054,6 @@ impl Database {
                             "the checkpoint image is longer than the file".into(),
                         ));
                     }
-                    has_header = true;
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
             }
@@ -1853,79 +2064,69 @@ impl Database {
         // answer; everything else is reseeded.
         self.changes.reset(seq_base + seq_seen);
         // Indexes are derived data: a graph restored from the file takes the
-        // tail's writes; everything else is rebuilt from the documents.
-        let restored = match restored {
-            Some(r) => r,
-            None => self.restore_graphs(&graphs)?,
-        };
-        self.rebuild_indexes_with(&restored, &reset, &touched)?;
+        // writes after its record; everything else is rebuilt from the
+        // documents.
+        self.rebuild_indexes_with(&restored, &touched)?;
+        *self.appended.get_mut() = whole as u64;
         self.defer_links = false;
         Ok(whole)
     }
 
-    /// Restores each persisted graph against the documents as they stand,
-    /// keeping it only if it describes them exactly: every live node's
-    /// document holds a vector -- `restore_graph` checks that -- and every
-    /// document holding one has a node. The second used to be a comparison
-    /// with the number of documents, so a single document without a vector
-    /// threw the graph away on every open.
-    fn restore_graphs(
-        &mut self,
-        graphs: &HashMap<(String, String), Vec<u8>>,
-    ) -> Result<Vec<(String, String)>> {
-        let mut restored = Vec::new();
-        for ((name, field), bytes) in graphs {
-            let Some(c) = self.collections.get_mut(name) else {
-                continue;
-            };
-            let Some(pos) = c.schema.field_pos(field) else {
-                continue;
-            };
-            let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
-                continue;
-            };
-            let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
-                continue;
-            };
-            if !c.vectors.contains_key(field) {
-                continue;
-            }
-            let store = &c.store;
-            let Some(ix) = VectorIndex::restore_graph(bytes, dim, prec, |doc, out| {
-                store.read_vector_into(doc, pos, out).unwrap_or(false)
-            }) else {
-                continue;
-            };
-            // Built with other parameters -- another quantization, whose
-            // arena holds other codes -- it is not this index's graph.
-            if ix.spec != spec {
-                continue;
-            }
-            let mut with_vector = 0;
-            for id in store.iter_ids() {
-                with_vector += store.has_vector(id, pos)? as usize;
-            }
-            if ix.len() == with_vector {
-                c.vectors.insert(field.clone(), ix);
-                restored.push((name.clone(), field.clone()));
-            }
+    /// Restores a persisted graph against the documents as they stand where
+    /// its record is, keeping it only if it describes them exactly: every
+    /// live node's document holds a vector -- `restore_graph` checks that --
+    /// and every document holding one has a node. The second used to be a
+    /// comparison with the number of documents, so a single document
+    /// without a vector threw the graph away on every open.
+    fn restore_graph(&mut self, name: &str, field: &str, bytes: &[u8]) -> Result<bool> {
+        let Some(c) = self.collections.get_mut(name) else {
+            return Ok(false);
+        };
+        let Some(pos) = c.schema.field_pos(field) else {
+            return Ok(false);
+        };
+        let DataType::Vector(dim, prec) = c.schema.fields[pos].ty else {
+            return Ok(false);
+        };
+        let IndexKind::Vector(spec) = c.schema.fields[pos].index else {
+            return Ok(false);
+        };
+        if !c.vectors.contains_key(field) {
+            return Ok(false);
         }
-        Ok(restored)
+        let store = &c.store;
+        let Some(ix) = VectorIndex::restore_graph(bytes, dim, prec, |doc, out| {
+            store.read_vector_into(doc, pos, out).unwrap_or(false)
+        }) else {
+            return Ok(false);
+        };
+        // Built with other parameters -- another quantization, whose arena
+        // holds other codes -- it is not this index's graph.
+        if ix.spec != spec {
+            return Ok(false);
+        }
+        let mut with_vector = 0;
+        for id in store.iter_ids() {
+            with_vector += store.has_vector(id, pos)? as usize;
+        }
+        if ix.len() != with_vector {
+            return Ok(false);
+        }
+        c.vectors.insert(field.to_string(), ix);
+        Ok(true)
     }
 
     pub fn rebuild_indexes(&mut self) -> Result<()> {
-        self.rebuild_indexes_with(&[], &[], &[])
+        self.rebuild_indexes_with(&[], &[])
     }
 
     /// Fills the derived indexes from the documents. A vector index named in
-    /// `restored` came back from the file as of the checkpoint, and takes
-    /// only the documents the tail after it touched -- unless the tail
-    /// `reset` its collection's indexes, which a restored graph cannot
-    /// survive.
+    /// `restored` came back from the file as of its last graph record, and
+    /// takes only the documents written after it: those of its collection's
+    /// `touched` from the count beside it on.
     fn rebuild_indexes_with(
         &mut self,
-        restored: &[(String, String)],
-        reset: &[String],
+        restored: &[(String, String, usize)],
         touched: &[(String, Vec<DocId>)],
     ) -> Result<()> {
         let later = crate::vector::UNLINKED && self.defer_links;
@@ -1934,26 +2135,31 @@ impl Database {
             // `ids()` comes back ascending; no extra sorting needed.
             let ids: Vec<DocId> = c.store.ids();
             let fields: Vec<String> = c.vectors.keys().cloned().collect();
-            let fresh = reset.contains(&name);
-            let kept =
-                |field: &str| !fresh && restored.iter().any(|(n, f)| *n == name && f == field);
-
-            // 1) The restored graphs take the tail's writes the way the write
-            // path took them: a touched document keeps its node while it
-            // holds the vector the checkpoint had -- `insert` sees to it --
-            // has it retired for the one it holds now otherwise, and leaves
-            // the graph without one.
-            let mut tail = touched
+            let from = |field: &str| {
+                restored
+                    .iter()
+                    .find(|(n, f, _)| *n == name && f == field)
+                    .map(|(_, _, from)| *from)
+            };
+            let kept = |field: &str| from(field).is_some();
+            let written: &[DocId] = touched
                 .iter()
                 .find(|(n, _)| *n == name)
-                .map(|(_, ids)| ids.clone())
-                .unwrap_or_default();
-            tail.sort_unstable();
-            tail.dedup();
+                .map(|(_, ids)| &ids[..])
+                .unwrap_or(&[]);
+
+            // 1) The restored graphs take the writes after their records the
+            // way the write path took them: a touched document keeps its node
+            // while it holds the vector the record had -- `insert` sees to it
+            // -- has it retired for the one it holds now otherwise, and
+            // leaves the graph without one.
             for field in fields.iter().filter(|f| kept(f)) {
                 let Some(pos) = c.schema.field_pos(field) else {
                     continue;
                 };
+                let mut tail = written[from(field).unwrap_or(0).min(written.len())..].to_vec();
+                tail.sort_unstable();
+                tail.dedup();
                 let mut items: Vec<(DocId, Vec<f32>)> = Vec::new();
                 let mut gone = Vec::new();
                 let mut buf = Vec::new();
@@ -2140,17 +2346,40 @@ impl Database {
         // The sink is behind a lock, so the image can be written from `self`
         // while the sink takes it: both are shared borrows here.
         let mut placed = Vec::new();
+        let mut len = 0;
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.image_into(out, &[], &mut placed))
+            sink.rewrite_with(&mut |out| {
+                self.image_into(out, &[], &mut placed)?;
+                len = out.at();
+                Ok(())
+            })
         };
         self.storage(r)?;
+        self.rewrote(len);
         let r = self.sink_mut().sync();
         self.storage(r)?;
         #[cfg(not(target_arch = "wasm32"))]
         self.repoint(Some(&placed), &[])?;
         self.dirty = false;
         Ok(())
+    }
+
+    /// The file is an image of the database as it stands, `len` bytes long:
+    /// every graph in it is as saved as it can be.
+    fn rewrote(&mut self, len: u64) {
+        // A browser appends no graph, and its module carries none of this.
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        *self.appended.get_mut() = len;
+        for c in self.collections.values() {
+            for ix in c.vectors.values() {
+                let p = ix.persisted();
+                p.changes.store(ix.changes(), Relaxed);
+                p.at.store(len, Relaxed);
+            }
+        }
     }
 
     /// Appends a write's record. Every caller notes the write on the change
@@ -2165,6 +2394,10 @@ impl Database {
         let seq = self.changes.seq() + 1;
         let r = self.sink_mut().record(seq, &frame);
         self.storage(r)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.appended.get_mut() += frame.len() as u64;
+        }
         self.dirty = true;
         Ok(())
     }
@@ -2262,8 +2495,10 @@ impl Database {
             return Ok(());
         }
         // Not a write: it has no number, and no replica is sent it.
-        let r = self.sink_mut().append(&h.record());
+        let record = h.record();
+        let r = self.sink_mut().append(&record);
         self.storage(r)?;
+        *self.appended.get_mut() += record.len() as u64;
         self.dirty = true;
         self.history = h;
         Ok(())
@@ -2414,6 +2649,7 @@ impl Database {
             let seq = self.changes.seq() + 1;
             let r = self.sink_mut().record(seq, &bytes[start..pos]);
             self.storage(r)?;
+            *self.appended.get_mut() += (pos - start) as u64;
             self.dirty = true;
             self.note(cid, marked);
             n += 1;
@@ -2455,6 +2691,7 @@ impl Database {
         self.refuse_if_failed()?;
         let r = self.sink_mut().rewrite(image);
         self.storage(r)?;
+        *self.appended.get_mut() = image.len() as u64;
         let cap = self.changes.capacity();
         self.collections = fresh.collections;
         self.order = fresh.order;
@@ -4586,11 +4823,17 @@ impl Database {
         // After compaction the persisted image is rewritten from scratch.
         let compacting: &[String] = if mapped { &targets } else { &[] };
         let mut placed = Vec::new();
+        let mut len = 0;
         let r = {
             let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
-            sink.rewrite_with(&mut |out| self.image_into(out, compacting, &mut placed))
+            sink.rewrite_with(&mut |out| {
+                self.image_into(out, compacting, &mut placed)?;
+                len = out.at();
+                Ok(())
+            })
         };
         self.storage(r)?;
+        self.rewrote(len);
         #[cfg(not(target_arch = "wasm32"))]
         self.repoint(Some(&placed), compacting)?;
         Ok(Response::Ok(format!(

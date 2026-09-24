@@ -156,3 +156,54 @@ def test_an_index_on_top(store):
     index.delete_ref_doc("d1")
     found = index.as_retriever(similarity_top_k=2).retrieve("database")
     assert [n.node.ref_doc_id for n in found] == ["d2"]
+
+
+@pytest.fixture()
+def worded():
+    s = FenecVectorStore(
+        fresh("li"),
+        url=URL,
+        token=TOKEN,
+        metadata_fields={"author": "text", "theme": "text", "year": "int"},
+        full_text=True,
+        quant="int8",
+    )
+    try:
+        yield s
+    finally:
+        s.drop_collection()
+
+
+def test_text_search_ranks_by_the_words(worded, nodes):
+    worded.add(nodes)
+    q = VectorStoreQuery(query_str="dolor amet", similarity_top_k=2, mode="text_search")
+    assert ids(worded.query(q)) == ["c3d1e1dd"]
+    # A filter still narrows what is ranked.
+    q.filters = MetadataFilters(filters=[MetadataFilter(key="theme", value="Friendship")])
+    assert ids(worded.query(q)) == []
+
+
+def test_hybrid_fuses_the_words_and_the_vector(worded, nodes):
+    worded.add(nodes)
+    # The vector points at "lorem ipsum", the words at "sed do eiusmod":
+    # found by both, "sed do eiusmod" -- nearest after it -- ranks first.
+    q = VectorStoreQuery(
+        query_str="eiusmod",
+        query_embedding=[1.0, 0.1, 0.0],
+        similarity_top_k=2,
+        mode="hybrid",
+    )
+    assert ids(worded.query(q)) == ["0b31ae71", "c330d77f"]
+    q.hybrid_top_k = 1
+    # One a side: each search's best, the words' first on the tie-break.
+    assert sorted(ids(worded.query(q))) == ["0b31ae71", "c330d77f"]
+
+
+def test_modes_are_refused_without_their_index(store, nodes):
+    store.add(nodes)
+    with pytest.raises(ValueError):
+        store.query(VectorStoreQuery(query_str="lorem", similarity_top_k=1, mode="text_search"))
+    with pytest.raises(ValueError):
+        FenecVectorStore(fresh("li"), url=URL, token=TOKEN, metric="l2", quant="bit")
+    with pytest.raises(ValueError):
+        FenecVectorStore(fresh("li"), url=URL, token=TOKEN, quant="pq")

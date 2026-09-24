@@ -30,6 +30,7 @@ make replica-bench # replica lag per sync policy, catch-up, what a failover lose
 make maintenance-bench # reads and writes during create index / compact
 make open-bench # opening a 1 GB file, read into memory or mapped
 make quant-bench # quant=int8|bit against full vectors: memory, recall, latency
+make statements-bench # what counting a statement by its shape costs
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 ```
@@ -150,8 +151,8 @@ and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
 where it stopped. So every write goes through `wal`, one record and one tick;
 a record that moved no counter would leave every replica one change off. The
-history (record kind 8, `History`) is the one record that moves none, and it is
-never sent: a promotion forks it, a replica is continued only from a position
+history (record kind 8, `History`) moves none, as a graph a server keeps in
+the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
 following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
 p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
@@ -198,18 +199,25 @@ after. A record cut short inside the checkpoint image is refused as corrupt
 instead (an image is renamed in whole), and `fenec types` opens with
 `fs::open_read_only`, which writes nothing to a server's live file. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
-the history (kind 8) is the one appended record that is not a write.
+the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
+appended records that are not writes.
 
-**The HNSW graph is derived data, not a cache.** It is written only by
-`snapshot`, `compact` and `checkpoint` — never on the write path. On open the
+**The HNSW graph is derived data, not a cache.** It is written by
+`snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
+(below) — never on the write path. On open the
 version, dimension, precision and link bounds are validated, and the live nodes
 against the documents holding a vector; anything off means a silent full
-rebuild. A corrupt graph can therefore never lose data. It is restored where the
-checkpoint's image ends, against the documents it was written with, and the tail
-after it is applied as the write path would (a touched document keeps its node
-while it holds the same vector, and has it retired for the new one otherwise) --
-restored after the whole file, one write in the
-tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
+rebuild. A corrupt graph can therefore never lose data. It is restored where
+its last record is -- a checkpoint's image holds one after each collection's
+data; `last_graphs` walks the record heads for it first, since restoring each
+record read every vector again -- against the documents as they stood there,
+and the writes after it are applied as the write path would (a touched
+document keeps its node while it holds the same vector, and has it retired for
+the new one otherwise) -- restored after the whole file, one write in the
+tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99.
+An index added in the tail (`create index`) leaves the graphs restored
+before it, as a replica leaves them; reset with the rest, it had the next
+open build them all again. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`, which
 rebuilds a graph holding tombstones (nothing else takes one out). A rewrite
@@ -219,6 +227,27 @@ longer takes the vector out of the graph and back in (1.89 -> 0.006 ms at
 `near` the tombstones cut short walks again with the beam wider by their
 number, or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
+
+**A server keeps its graphs in its file.** It checkpoints only on its way
+down, so a crash after a long run left every vector written since the start
+to link again. `fenec_http::link::keep` looks at every database the process
+serves every 5 s, and appends to the tail each graph that changed in 10 000
+nodes since it last reached the file, has none waiting to be linked, and
+whose record the file has grown three times over since
+(`Database::save_graphs`, under the read lock, which keeps the writes out
+while the graph is written). The record holds the whole graph, so a bound
+on the linking alone would have a big graph written over and over for a
+little of it; waiting for the linking kept a crash from leaving the nodes
+waiting again. It is a graph record (kind 4) of version 6, which an older
+binary does not know and rebuilds from -- it restored a record in the tail
+against the documents the whole file left, and a vector rewritten after it
+kept the links of the one before -- and like the history it moves no
+counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
+leaves at most 10 000 vectors to link, 7.9 s with `near` at 2.06 ms p50
+meanwhile, where every vector waited 55.2 s in the same run with `near` at
+the exact scan's 14.89 ms; the ten records were 35.2 MB of a 370.3 MB file
+until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
+at most (`make reopen-bench`).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
@@ -241,8 +270,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.4 KB
-brotli with all four, 117.3 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.6 KB
+brotli with all four, 117.2 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -459,28 +488,36 @@ had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
 
-**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.**
-A sparse vector is held as its non-zero entries, `(index, weight)` ascending
+**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
+sparse vector is held as its non-zero entries, `(index, weight)` ascending
 with indices from 0, and travels everywhere in pgvector's text form,
 `{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, pg text, a FenecQL
 literal -- so a pgvector client and `fenec import` carry the same vector.
 Every way in goes through `sparse::normalise` (order, an index given twice
 refused, zeros dropped), and the index relies on it. `@inverted` is the text
-index's shape with weights where the counts were; `near` by dot product
-walks it with MaxScore, rank-safe -- the bounds are compared once rounded to
-`f32`, after a 1e-9 slack, so a tie-break never depends on the pruning --
-and `tests/sparse.rs` holds it to `near ... exact` row for row. Only a
-document sharing a dimension with the query is ranked. Like the text index
-it is derived and never persisted. It sorts through the engine's one
-`(DocId, f32)` sort and maps dimensions through the vector index's
-`HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
+index's shape with weights where the counts were; `near` by dot product sums
+the query's lists a list at a time into a slot a document, a window of 65 536
+ids at a time (`sparse::summed`), where they are dense in the ids they span,
+and walks them with MaxScore where they are not -- rank-safe, the bounds
+compared once rounded to `f32` after a 1e-9 slack, so a tie-break never
+depends on the pruning; the browser always sums, and has no walk. A SPLADE
+query's dozens of lists reach most of a collection, and the walk, choosing a
+document at a time among their heads, took 2.54 ms p50 on FiQA against 0.68
+summed, 0.60 against 0.10 on SciFact; bounds per block of a list's postings
+(2.69 ms) and per range of ids across the lists (443 of 451 ranges still read,
+35 MB more) did not pay. `pruning_never_changes_the_answer` holds both ways to
+an exhaustive walk, and `tests/sparse.rs` holds `near` to `near ... exact` row
+for row. Only a document sharing a dimension with the query is ranked. Like
+the text index it is derived and never persisted. It sorts through the
+engine's one `(DocId, f32)` sort and maps dimensions through the vector
+index's `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.366), at 2.6 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut
-texts themselves: transformers.js drops the closing [SEP] when it truncates,
-SPLADE without it took SciFact to 0.23, and the dense vectors (`embed.mjs`)
-moved by up to 0.003.
+0.232 (the dense vectors 0.366), at 0.68 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut texts
+themselves: transformers.js drops the closing [SEP] when it truncates, SPLADE
+without it took SciFact to 0.23, and the dense vectors (`embed.mjs`) moved by
+up to 0.003.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change
@@ -526,13 +563,35 @@ path has an underscore because a collection may be called `metrics`.
 tenant node publishes counts of its tenants, never a tenant's collection
 names.
 
+**`/_stats/statements` counts by shape, a tenant's apart.** Every
+statement is also counted by its text with each literal and parameter as
+`$n` and a list of literals alone as one (`fenec_http::statements::shape`)
+-- over HTTP by the FenecQL of `/query` and `/batch`, noted as
+`api::parse_query` reads it (`statements::text`), since the strings of the
+JSON would all have been one shape. The counts are shards a thread each
+behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
+the least called forgotten: 0.34 us for a statement of 87 bytes, against the
+2.2 us its parse takes (`make statements-bench`). Over the pg wire they are
+`pg_stat_statements` (a `fenec-catalog` table, filled only for a query that
+names it). They need what reads the data without a JWT's scope, or the admin
+token -- a shape names every collection -- and a tenant node keeps each
+tenant's apart (`statements::View`): its own under `/t/<tenant>/` and over
+its connection, every tenant's, named, to the admin alone.
+
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
 the standard library for its client) and `useLiveQuery`
 (`integrations/react`) are held to their frameworks' own tests --
 `make python-test` runs LangChain's standard suite and the tests LlamaIndex's
 integrations run from a `python:3.13` container against a fenec-pg started
-here, `make react-test` runs the hook against a real replica. A store names
+here, `make react-test` runs the hook against a real replica, and CI runs
+both (`integrations`), with the wheel and the npm tarball built as a publish
+would build them -- publishing itself is not decided there. With
+`full_text=True` a store indexes its text for BM25 as well and searches by
+the words (`match`) or by the words and the vector fused (`fuse`):
+LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
+`"hybrid"`. `alpha` is not read, since `fuse` adds ranks; `quant` passes
+`int8` or `bit` codes to `@hnsw`. A store names
 its collection and metadata columns in the statement's text, so both are
 checked against FenecQL's name pattern; values always go in as parameters,
 and `in` takes one per element (`in [$2, $3]`), since a parameter binds a

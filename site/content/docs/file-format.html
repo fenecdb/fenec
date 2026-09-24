@@ -50,19 +50,37 @@ holding one has to have a node. If any of it does not hold, the record is
 ignored and the index is rebuilt from scratch. A corrupt or stale graph
 therefore cannot cause data loss.</p>
 
-<p>It is written only during <code>snapshot</code>, <code>compact</code> and
-<code>checkpoint</code> — never on the normal write path. What it stores is the
+<p>It is written during <code>snapshot</code>, <code>compact</code> and
+<code>checkpoint</code>, and a server appends one to the file's tail now and
+then (below) — never on the normal write path. What it stores is the
 links, not the vectors: the vectors are already in the document records, and
 the expensive part is the build. The exception is a tombstone, the node a
 deleted or rewritten document leaves behind until <code>compact</code>: it
 still routes searches, but its document is gone or holds another vector, so
 the record carries the vector the node was linked with.</p>
 
-<p>The graph is restored where the image ends, against the documents it was
-written with. Everything after that point was written since the checkpoint,
-and is applied to it the way the write path applied it: the node of each
-document the tail touched is retired, and the vector the document holds now
-goes in. A crash therefore costs the tail, not the graph.</p>
+<p>The graph is restored where its last record is, against the documents as
+they stood there: a checkpoint's image holds one after each collection's
+data. Everything after that point is applied to it the way the write path
+applied it: the node of each document written since is retired, and the
+vector the document holds now goes in. A crash therefore costs the writes
+after the last graph, not the graph. An earlier record of the same graph is
+passed over — the open walks the record heads to find the last one first —
+since restoring it would read every vector again for nothing.</p>
+
+<p>A server keeps its graphs in the file as they change, since it writes a
+checkpoint only on its way down: once a graph has changed in 10 000 nodes
+since it last reached the file, has none waiting to be linked, and the file
+has grown by three times its record since, it is appended to the tail, the
+writes held off while it is written. The record holds the whole graph,
+which is why the growth counts too: a big graph written every few thousand
+writes would be written over and over for a little of it. It is written in
+version 6, whose layout is version 5's; a binary that does not know 6
+rebuilds the graph rather than restore it against the documents the whole
+file left, which a vector rewritten after the record would not match. It
+is not a write: the change counter does not move, no replica is sent it,
+and a record cut short is cut off the file like any other. The next
+checkpoint leaves the ones before it out.</p>
 
 <p>A server does not wait for the tail. It opens with the tail's vectors in
 the arena but in no neighbour list, measures each of them in every

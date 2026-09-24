@@ -105,6 +105,47 @@ jobs:
       - name: Test
         run: make test
 
+  integrations:
+    name: integrations (python, react)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-integrations-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-integrations-
+
+      # LangChain's standard vector store suite and the tests LlamaIndex's
+      # own integrations run, from a python:3.13 container, against a
+      # fenec-pg started on the runner.
+      - name: Python stores
+        run: make python-test
+
+      # useLiveQuery against a stand-in and a real fenec-pg and replica; the
+      # sync layer loads the browser module.
+      - name: React hook
+        run: make wasm react-test
+
+      # What PyPI and npm would take, built as they build it. Publishing is
+      # a decision of its own, and not made here.
+      - name: Packages
+        run: |
+          pip wheel -q --no-deps -w dist integrations/python
+          cd integrations/react && npm pack --dry-run
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest

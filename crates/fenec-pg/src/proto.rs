@@ -38,6 +38,10 @@ pub struct Writer {
     /// ErrorResponses written so far: how a statement's caller tells, for
     /// the metrics, that it ended in one.
     errors: u64,
+    /// Rows the CommandCompletes so far said were returned or changed: the
+    /// number that ends `SELECT n`, `INSERT 0 n`, `UPDATE n`, `DELETE n`, as
+    /// `pg_stat_statements` counts them.
+    rows: u64,
 }
 
 impl Default for Writer {
@@ -51,6 +55,7 @@ impl Writer {
         Writer {
             buf: Vec::new(),
             errors: 0,
+            rows: 0,
         }
     }
 
@@ -174,7 +179,16 @@ impl Writer {
     }
 
     pub fn command_complete(&mut self, tag: &str) {
+        self.rows += tag
+            .rsplit(' ')
+            .next()
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
         self.msg(b'C', |b| put_cstr(b, tag));
+    }
+
+    pub fn rows(&self) -> u64 {
+        self.rows
     }
 
     pub fn empty_query(&mut self) {

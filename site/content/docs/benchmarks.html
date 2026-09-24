@@ -210,8 +210,8 @@ FenecQL: the answers are the engine's own.</p>
 <tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.700</td><td class="n">0.366</td><td class="n">0.74 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.688</td><td class="n">0.359</td><td class="n">0.97 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.690</td><td class="n">0.364</td><td class="n">4.03 ms</td></tr>
-<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">2.58 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">3.20 ms</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">0.68 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">1.07 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -226,9 +226,10 @@ most 0.005.</p>
 <p>SPLADE sits between the two. On SciFact it comes within 0.006 of the dense
 fusion with one index; on FiQA it lifts BM25 by 0.099 but stays under the
 dense vectors, and fused with BM25 there it loses 0.016 — both sides are
-lexical. Its queries' 37 to 65 terms reach most of the corpus, which is
-where its 2.6 ms go (<a href="concepts.html#sparse-vectors">How it
-works</a>).</p>
+lexical. Its queries' 37 to 65 terms reach most of the corpus, and its
+lists are summed a list at a time rather than walked a document at a time:
+0.68 ms, where MaxScore's walk took 2.58 (<a
+href="concepts.html#sparse-vectors">How it works</a>).</p>
 
 <h2>Half precision</h2>
 
@@ -277,7 +278,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1477 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1039 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>490 KB</b></td><td class="n"><b>144 KB</b></td><td class="n">175 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>490 KB</b></td><td class="n"><b>145 KB</b></td><td class="n">175 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">78 KB</td><td class="n">21 KB</td><td class="n">25 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.51 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -322,28 +323,28 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">490.1</td><td class="n">144.4</td><td class="n">174.8</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">460.9</td><td class="n">137.4</td><td class="n">165.9</td><td class="n">7.0</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">485.4</td><td class="n">143.3</td><td class="n">173.0</td><td class="n">1.1</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">466.9</td><td class="n">139.5</td><td class="n">168.4</td><td class="n">4.9</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">446.4</td><td class="n">133.0</td><td class="n">160.5</td><td class="n">11.4</td></tr>
-<tr><td><code>vector text</code></td><td class="n">455.4</td><td class="n">135.7</td><td class="n">163.7</td><td class="n">8.7</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">437.0</td><td class="n">132.1</td><td class="n">158.9</td><td class="n">12.3</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">459.8</td><td class="n">137.5</td><td class="n">165.8</td><td class="n">6.9</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">416.4</td><td class="n">125.4</td><td class="n">150.8</td><td class="n">19.0</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">440.7</td><td class="n">131.4</td><td class="n">158.4</td><td class="n">13.0</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">420.6</td><td class="n">127.1</td><td class="n">152.8</td><td class="n">17.3</td></tr>
-<tr><td><code>vector</code></td><td class="n">429.6</td><td class="n">130.1</td><td class="n">156.1</td><td class="n">14.3</td></tr>
-<tr><td><code>text</code></td><td class="n">410.7</td><td class="n">123.8</td><td class="n">148.6</td><td class="n">20.6</td></tr>
-<tr><td><code>sparse</code></td><td class="n">390.6</td><td class="n">119.5</td><td class="n">143.4</td><td class="n">24.9</td></tr>
-<tr><td><code>sorted</code></td><td class="n">413.3</td><td class="n">124.9</td><td class="n">150.2</td><td class="n">19.5</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">383.0</td><td class="n">117.3</td><td class="n">140.6</td><td class="n">27.1</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">489.9</td><td class="n">144.6</td><td class="n">175.0</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">460.7</td><td class="n">137.7</td><td class="n">166.0</td><td class="n">6.9</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">485.4</td><td class="n">143.3</td><td class="n">173.1</td><td class="n">1.3</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">466.6</td><td class="n">139.7</td><td class="n">168.5</td><td class="n">5.0</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">445.6</td><td class="n">133.0</td><td class="n">160.4</td><td class="n">11.6</td></tr>
+<tr><td><code>vector text</code></td><td class="n">455.4</td><td class="n">136.0</td><td class="n">163.8</td><td class="n">8.7</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">436.7</td><td class="n">132.5</td><td class="n">159.0</td><td class="n">12.1</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">459.6</td><td class="n">137.6</td><td class="n">165.8</td><td class="n">7.0</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">415.6</td><td class="n">125.4</td><td class="n">150.7</td><td class="n">19.2</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">440.1</td><td class="n">131.3</td><td class="n">158.2</td><td class="n">13.3</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">419.6</td><td class="n">127.0</td><td class="n">152.7</td><td class="n">17.7</td></tr>
+<tr><td><code>vector</code></td><td class="n">429.5</td><td class="n">130.2</td><td class="n">156.2</td><td class="n">14.5</td></tr>
+<tr><td><code>text</code></td><td class="n">410.0</td><td class="n">123.8</td><td class="n">148.4</td><td class="n">20.8</td></tr>
+<tr><td><code>sparse</code></td><td class="n">389.5</td><td class="n">119.6</td><td class="n">143.3</td><td class="n">25.0</td></tr>
+<tr><td><code>sorted</code></td><td class="n">412.5</td><td class="n">124.8</td><td class="n">150.0</td><td class="n">19.8</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">382.3</td><td class="n">117.2</td><td class="n">140.4</td><td class="n">27.4</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>Left out alone, the graph saves 11.4 KB brotli, the ordered index 7.0,
-the text index 4.9 and the sparse index 1.1, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.2. All four
-save 27.1 KB, 19% of the module. The module with every index is the size it
+<p>Left out alone, the graph saves 11.6 KB brotli, the ordered index 6.9,
+the text index 5.0 and the sparse index 1.3, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.4. All four
+save 27.4 KB, 19% of the module. The module with every index is the size it
 was before any could be left out, to the byte.</p>
