@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -67,6 +67,11 @@ wasm-lite:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
 	@cp $(WASM_OUT) web/fenec-lite.wasm
 	@echo "web/fenec-lite.wasm  $$(wc -c < web/fenec-lite.wasm) bytes"
+
+## What counting a statement by its shape costs (/_stats/statements,
+## pg_stat_statements): a million each, by one thread and by eight.
+statements-bench:
+	$(CARGO) run --release -p fenec-http --example statements
 
 ## The browser module's size built with each set of the four indexes
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.

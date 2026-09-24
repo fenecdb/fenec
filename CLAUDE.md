@@ -36,6 +36,7 @@ make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
+make statements-bench    # what counting a statement by its shape costs
 ```
 
 Single tests:
@@ -677,6 +678,21 @@ path has an underscore because a collection may be called `metrics`.
 -- a second one would take the HTTP endpoint's subscription wake-ups -- and a
 tenant node publishes counts of its tenants, never a tenant's collection
 names.
+
+**`/_stats/statements` counts by shape, a tenant's apart.** Every
+statement is also counted by its text with each literal and parameter as
+`$n` and a list of literals alone as one (`fenec_http::statements::shape`)
+-- over HTTP by the FenecQL of `/query` and `/batch`, noted as
+`api::parse_query` reads it (`statements::text`), since the strings of the
+JSON would all have been one shape. The counts are shards a thread each
+behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
+the least called forgotten: 0.34 us for a statement of 87 bytes, against the
+2.2 us its parse takes (`make statements-bench`). Over the pg wire they are
+`pg_stat_statements` (a `fenec-catalog` table, filled only for a query that
+names it). They need what reads the data without a JWT's scope, or the admin
+token -- a shape names every collection -- and a tenant node keeps each
+tenant's apart (`statements::View`): its own under `/t/<tenant>/` and over
+its connection, every tenant's, named, to the admin alone.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

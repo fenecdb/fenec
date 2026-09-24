@@ -120,6 +120,32 @@ not. Over HTTP the line is the method and the target, and for
 statements. A line is cut at 1 000 bytes, so a bulk <code>put</code> of a
 megabyte shows what it was without being all of it.</p>
 
+<h2 id="statements">What each statement cost</h2>
+
+<pre data-lang="bash">curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/_stats/statements
+psql -c "select query, calls, mean_exec_time, rows from pg_stat_statements order by total_exec_time desc limit 10"
+curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/_stats/statements
+</pre>
+
+<p>Every statement is also counted by its shape — its text with each literal
+and parameter written <code>$1</code>, <code>$2</code>… and a list of literals
+alone, a vector's components, as one — so the same statement run with other
+values is one line: how often it ran, its total, mean, least and most time,
+the rows it returned or changed, and its failures. Over HTTP a
+<code>/query</code> or <code>/batch</code> is counted as its FenecQL, with
+the same statement over the pg wire; a call to a collection's path as its
+method and path. <code>GET /_stats/statements</code> answers JSON, most time
+first, and <code>DELETE</code> forgets it all; over the pg wire the counts are
+PostgreSQL's <code>pg_stat_statements</code> view, which psql and monitoring
+agents read as they read the extension's.</p>
+
+<p>The server keeps at most 5 000 shapes, as the extension does by default,
+and forgets the least called when it is full. The counts need what reads the
+data without a JWT's scope, or the admin token: a shape names every
+collection. A tenant node keeps each tenant's apart —
+<code>/t/&lt;tenant&gt;/_stats/statements</code> and its own connection's
+view — and lists every tenant's, named, to its admin alone.</p>
+
 <h2>What it costs</h2>
 
 <p>Counting a statement is a handful of relaxed atomic adds, into counters a
@@ -128,3 +154,10 @@ shared set of counters the same eight cost 720 ns each, the cache line moving
 from core to core, which is why they are spread. A scrape reads the gauges
 under the database's shared lock, beside the readers and ahead of a writer
 for as long as a <code>count</code> would be.</p>
+
+<p>Counting it by its shape is a pass over its text into a buffer the thread
+keeps, and an entry found in the thread's shard: 0.34 µs for a read of 87
+bytes, 0.56 µs with eight threads counting at once — a sixth of the 2.2 µs
+parsing it takes. It grows with the text: 5.6 µs for a <code>near</code> with
+768 components written into it, whose parse takes 85
+(<code>make statements-bench</code>).</p>

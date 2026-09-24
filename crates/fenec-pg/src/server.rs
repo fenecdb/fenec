@@ -812,6 +812,11 @@ fn session(
             return Ok(());
         }
     }
+    // Whose statements this session's are counted as, and sees in
+    // `pg_stat_statements`: a connection is a thread of its own.
+    SCOPE.with(|s| {
+        *s.borrow_mut() = matches!(source, Source::Tenants(_)).then(|| tenant.clone());
+    });
 
     // ---- session record (for cancellation)
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -1444,7 +1449,25 @@ fn catalog_answer(
 ) -> catalog::Answer {
     // The schemas are copied under the read lock and the query runs without
     // it: a catalog join is cheap, but a writer need not wait for one.
-    let snap = catalog::Snapshot::of(&read_lock(db), "fenec", &cfg.server_version);
+    let mut snap = catalog::Snapshot::of(&read_lock(db), "fenec", &cfg.server_version);
+    // What the server counted, only for a query that reads it.
+    if sql.contains("pg_stat_statements") {
+        let rows = SCOPE.with(|s| fenec_http::statements::snapshot(view_of(&s.borrow())));
+        let ms = |us: u64| us as f64 / 1000.0;
+        snap = snap.with_statements(
+            rows.into_iter()
+                .map(|e| catalog::StatementRow {
+                    queryid: e.id as i64,
+                    query: e.text,
+                    calls: e.calls as i64,
+                    total_ms: ms(e.micros),
+                    min_ms: ms(e.min_micros),
+                    max_ms: ms(e.max_micros),
+                    rows: e.rows as i64,
+                })
+                .collect(),
+        );
+    }
     catalog::answer(sql, params, &snap).unwrap_or_else(|_| catalog::Answer {
         columns: vec![("result".to_string(), OID_TEXT)],
         rows: Vec::new(),
@@ -1624,20 +1647,32 @@ fn execute_into(
     row_desc_sent: bool,
 ) {
     let started = Instant::now();
-    let errors = out.errors();
+    let (errors, rows) = (out.errors(), out.rows());
     let wait = run_locked(db, frozen, cfg, be, tx, sql, params, out, row_desc_sent);
     if let Some((durability, answer)) = wait {
         durable_or_refused(db, durability, answer, out);
     }
-    fenec_http::metrics::record(
-        Transport::Pg,
-        started.elapsed(),
-        out.errors() > errors,
-        || match params.len() {
-            0 => sql.to_string(),
-            n => format!("{sql} ({n} parameters)"),
-        },
-    );
+    let (took, failed) = (started.elapsed(), out.errors() > errors);
+    fenec_http::metrics::record(Transport::Pg, took, failed, || match params.len() {
+        0 => sql.to_string(),
+        n => format!("{sql} ({n} parameters)"),
+    });
+    fenec_http::statements::rows(out.rows() - rows);
+    SCOPE.with(|s| fenec_http::statements::record(s.borrow().as_deref(), sql, took, failed));
+}
+
+thread_local! {
+    /// The tenant this connection's statements belong to, `None` over a
+    /// single file.
+    static SCOPE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whose statements `pg_stat_statements` shows this connection.
+fn view_of(scope: &Option<String>) -> fenec_http::statements::View<'_> {
+    match scope {
+        Some(t) => fenec_http::statements::View::Tenant(t),
+        None => fenec_http::statements::View::Node,
+    }
 }
 
 /// Waits for the disk under `--sync always`, the lock already let go; a
