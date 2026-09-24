@@ -342,9 +342,19 @@ impl Parser {
                 break;
             }
             let key = self.ident()?;
+            let lowered = key.to_ascii_lowercase();
+            // `chars` is a flag: each character of a script written without
+            // spaces indexed as well as each pair.
+            if lowered == "chars" {
+                spec.chars = true;
+                if !matches!(self.peek(), Tok::Comma) {
+                    break;
+                }
+                self.next();
+                continue;
+            }
             self.expect(Tok::Eq)?;
             let v = self.number()?;
-            let lowered = key.to_ascii_lowercase();
             match lowered.as_str() {
                 "k1" | "b" => {
                     if !(0.0..=100.0).contains(&v) {

@@ -41,7 +41,7 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <table>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=..)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=400</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
@@ -298,6 +298,7 @@ transports carry.</p>
 create index on articles (embed) @hnsw(cosine)
 create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
+create index on products (title) @text(chars)     -- short Chinese or Japanese text
 create index on articles (title) @sorted
 </pre>
 
@@ -322,6 +323,43 @@ for <code>int</code>, <code>float</code>, <code>timestamp</code> and
   postings it indexes — 58 MB &rarr; 182 MB, and 82 &rarr; 485 µs per query.
   On English SciFact the same option is worth +0.0137.</p>
 </div>
+
+<div class="note">
+  <p><b>A script written without spaces is indexed in runs of
+  characters.</b> Chinese, Japanese and Thai run their words together, and
+  Korean hangs its particles on them, so a word is not a term there: a run of
+  Han, kana or Hangul is indexed as its overlapping pairs of characters —
+  <code>東京都に</code> is <code>東京</code>, <code>京都</code>,
+  <code>都に</code> — and one of Thai, Lao, Khmer or Myanmar, whose
+  characters are letters, as its triples. A query is split the same way, so
+  <code>match body "東京"</code> finds the run it is written in. There is no
+  dictionary and no language setting; a script that spaces its words keeps
+  its words.</p>
+  <p><code>chars</code> indexes each character of Han, kana and Hangul as
+  well, so a query of one character finds every run holding it, which pairs
+  alone do only for a run of one. It pays on short text and costs on long:
+  product titles gain a fifth, news and questions lose a little, and the
+  index holds 1.6 to 1.9&times; the postings for a query 3 to 8&times;
+  slower. Off unless asked for.</p>
+</div>
+
+<div class="tbl">
+<table>
+<thead><tr><th>nDCG@10, BM25</th><th class="n">documents</th><th class="n">words whole</th><th class="n">runs of characters</th><th class="n">with <code>chars</code></th></tr></thead>
+<tbody>
+<tr><td>C-MTEB EcomRetrieval, Chinese product titles</td><td class="n">100 902</td><td class="n">0.006</td><td class="n">0.439</td><td class="n"><b>0.528</b></td></tr>
+<tr><td>C-MTEB CovidRetrieval, Chinese news</td><td class="n">100 001</td><td class="n">0.162</td><td class="n">0.868</td><td class="n"><b>0.872</b></td></tr>
+<tr><td>WebFAQ, Chinese</td><td class="n">132 491</td><td class="n">0.146</td><td class="n"><b>0.686</b></td><td class="n">0.666</td></tr>
+<tr><td>JaGovFaqs-22k, Japanese</td><td class="n">22 135</td><td class="n">0.119</td><td class="n"><b>0.582</b></td><td class="n">0.576</td></tr>
+<tr><td>WebFAQ, Korean</td><td class="n">102 000</td><td class="n">0.537</td><td class="n"><b>0.682</b></td><td class="n">0.651</td></tr>
+<tr><td>WebFAQ, Thai (triples; pairs 0.495)</td><td class="n">47 429</td><td class="n">0.448</td><td class="n"><b>0.547</b></td><td class="n">—</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The same pipeline as BEIR (<code>make beir</code> over each set in its
+layout); English SciFact scores what it did, to the fourth decimal. A query
+over those sets takes 0.09 to 0.66 ms at the median.</p>
 
 <div class="note">
   <p><b>A filter reaches an index only inside an <code>and</code> chain.</b>

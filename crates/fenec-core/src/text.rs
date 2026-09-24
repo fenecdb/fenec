@@ -50,33 +50,137 @@ use std::collections::{BinaryHeap, HashMap};
 /// in that corpus query and document mostly break the same way and so still
 /// meet; the point is the second column, where after the fold the two are the
 /// same number. Case no longer decides.
+///
+/// **A script written without spaces is indexed in runs of characters.** Han,
+/// kana and Hangul, and Thai, Lao, Khmer and Myanmar, run their words
+/// together or hang particles on them, so a run of them is indexed as its
+/// overlapping pairs of characters -- `東京都に` is `東京`, `京都`, `都に` --
+/// or triples for the four whose characters are letters rather than
+/// syllables, and a query's find the documents that hold them anywhere.
+/// Whole, a run was one term no query repeated. nDCG@10 by BM25, before and
+/// after: C-MTEB's EcomRetrieval 0.006 -> 0.439 and CovidRetrieval 0.162 ->
+/// 0.868, WebFAQ's Chinese 0.146 -> 0.686, JaGovFaqs 0.119 -> 0.582, WebFAQ's
+/// Korean 0.537 -> 0.682 and its Thai 0.448 -> 0.547 -- pairs of Thai
+/// letters were 0.495 at a query three times as slow, too common to tell
+/// documents apart.
 pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
+    terms(text, false, &mut f);
+}
+
+/// [`for_each_term`], each character of a run of Han, kana or Hangul handed
+/// out as well as each pair when `chars` is set (`TextIndexSpec::chars`).
+///
+/// `f` is a trait object: generic over it, the tokenizer was compiled once
+/// for every caller -- insert, remove and search, with prefixes and without
+/// -- six copies and 8 KB of the browser module.
+fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
     let mut buf = String::new();
     // U+0307 is not alphanumeric, so a plain `is_alphanumeric` split would cut
     // `I\u{307}stanbul` -- the decomposed spelling of `İstanbul`, and what the
     // default mapping leaves behind -- into two terms. Keep it inside the
-    // word; it is dropped below.
-    for raw in text.split(|c: char| !c.is_alphanumeric() && c != '\u{0307}') {
+    // word; it is dropped below. So are a Thai or a Khmer word's marks, some
+    // of which are not letters: split at them, `ไม่` lost its tone mark.
+    for raw in text.split(|c: char| !c.is_alphanumeric() && c != '\u{0307}' && !marked(c)) {
         if raw.is_empty() || raw.chars().all(|c| c == '\u{0307}') {
             continue;
         }
         // Already-lowercase ASCII is its own answer -- `i` folds to `i`.
         if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_uppercase()) {
             f(raw);
-        } else {
+            continue;
+        }
+        // A run of a script written without spaces is its runs of characters
+        // (`grams`), what is between them a word as any other.
+        let mut rest = raw;
+        while let Some(first) = rest.chars().next() {
+            let n = gram(first);
+            let end = rest
+                .char_indices()
+                .find(|&(_, c)| gram(c) != n)
+                .map_or(rest.len(), |(i, _)| i);
+            let (run, after) = rest.split_at(end);
+            rest = after;
+            if n > 0 {
+                grams(run, n, chars && n == 2, f);
+                continue;
+            }
+            if run.chars().all(|c| c == '\u{0307}') {
+                continue;
+            }
             buf.clear();
-            for c in raw.chars() {
+            for c in run.chars() {
                 match c {
                     'I' | 'İ' | 'ı' => buf.push('i'),
                     // Carries nothing once the I forms are folded, and it is
                     // what the default mapping leaves behind for `İ`.
                     '\u{0307}' => {}
+                    // A full-width Latin letter or digit, as Japanese and
+                    // Chinese text writes them (`ＩＴ`, `２０２３`), is the
+                    // ASCII one.
+                    '\u{FF01}'..='\u{FF5E}' => {
+                        let a = char::from_u32(c as u32 - 0xFEE0).unwrap_or(c);
+                        buf.push(a.to_ascii_lowercase());
+                    }
                     _ => buf.extend(c.to_lowercase()),
                 }
             }
             f(&buf);
         }
     }
+}
+
+/// Every overlapping run of `n` characters in `run` -- the whole of it when it
+/// is shorter -- and each character as well with `chars`. The starts of the
+/// last `n` characters are held in a ring, so a run allocates nothing.
+fn grams(run: &str, n: usize, chars: bool, f: &mut dyn FnMut(&str)) {
+    let mut starts = [0usize; 3];
+    let mut seen = 0;
+    for (i, c) in run.char_indices() {
+        let end = i + c.len_utf8();
+        if chars {
+            f(&run[i..end]);
+        }
+        starts[seen % n] = i;
+        seen += 1;
+        if seen >= n {
+            // The oldest of the last `n` characters: the one `n` back.
+            f(&run[starts[seen % n]..end]);
+        }
+    }
+    if seen < n && !(chars && seen == 1) {
+        f(run);
+    }
+}
+
+/// How a run of `c`'s script is indexed: in overlapping runs of 2
+/// characters for Han, kana and Hangul, whose characters are syllables or
+/// words, and of 3 for Thai, Lao, Khmer and Myanmar, whose are letters; 0
+/// for a script that spaces its words, whose words are the terms.
+fn gram(c: char) -> usize {
+    match c as u32 {
+        0x0E00..=0x0EFF      // Thai, Lao
+        | 0x1000..=0x109F    // Myanmar
+        | 0x1780..=0x17FF => 3, // Khmer
+        0x1100..=0x11FF      // Hangul jamo
+        | 0x3005..=0x3007    // 々, 〆, 〇
+        | 0x3041..=0x30FF    // Hiragana, Katakana
+        | 0x3131..=0x318E    // Hangul compatibility jamo
+        | 0x31F0..=0x31FF    // Katakana phonetic extensions
+        | 0x3400..=0x4DBF    // Han, extension A
+        | 0x4E00..=0x9FFF    // Han
+        | 0xA960..=0xA97F    // Hangul jamo extended-A
+        | 0xAC00..=0xD7FF    // Hangul syllables, jamo extended-B
+        | 0xF900..=0xFAFF    // Han compatibility
+        | 0xFF66..=0xFFDC    // half-width katakana and Hangul
+        | 0x20000..=0x3FFFF => 2, // Han of the other planes
+        _ => 0,
+    }
+}
+
+/// A mark of a script whose words hold marks that are not letters -- a Thai
+/// tone mark, a Khmer or Myanmar sign -- kept inside the word.
+fn marked(c: char) -> bool {
+    matches!(c as u32, 0x0E31..=0x0E4E | 0x0EB1..=0x0ECD | 0x102B..=0x103E | 0x17B4..=0x17D3)
 }
 
 /// `for_each_term` collected. For queries and tests, where the allocation is
@@ -97,11 +201,11 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// roughly the same factor, so `dl / avgdl` is where it was.
 pub fn for_each_indexed_term(text: &str, spec: &TextIndexSpec, mut f: impl FnMut(&str)) {
     let Some(prefixes) = spec.prefixes() else {
-        for_each_term(text, f);
+        terms(text, spec.chars, &mut f);
         return;
     };
     let mut buf = String::new();
-    for_each_term(text, |w| {
+    terms(text, spec.chars, &mut |w| {
         f(w);
         // `chars`, not bytes: a Turkish word is not one byte per letter, and
         // slicing it as if it were would panic on a boundary.
@@ -764,6 +868,62 @@ mod tests {
         let mut short = Vec::new();
         for_each_indexed_term("ev kar", &on, |t| short.push(t.to_string()));
         assert_eq!(short, ["ev", "kar"]);
+    }
+
+    /// A script written without spaces is indexed in overlapping runs of
+    /// characters: pairs of Han, kana and Hangul, across the kana a Japanese
+    /// word ends in, and triples of Thai letters, a tone mark among them.
+    #[test]
+    fn unspaced_scripts_are_indexed_in_runs_of_characters() {
+        assert_eq!(tokenize("北京天安门"), ["北京", "京天", "天安", "安门"]);
+        assert_eq!(
+            tokenize("東京都に住む"),
+            ["東京", "京都", "都に", "に住", "住む"]
+        );
+        assert_eq!(tokenize("학교에 간다"), ["학교", "교에", "간다"]);
+        assert_eq!(
+            tokenize("ไม่มีปัญหา"),
+            ["ไม่", "ม่ม", "่มี", "มีป", "ีปั", "ปัญ", "ัญห", "ญหา"]
+        );
+        // A run shorter than its gram is one term; a script that spaces its
+        // words keeps them whole beside one that does not.
+        assert_eq!(tokenize("京 ไม่"), ["京", "ไม่"]);
+        assert_eq!(
+            tokenize("iPhone手机 2023年"),
+            ["iphone", "手机", "2023", "年"]
+        );
+        // Full-width Latin and digits are the ASCII ones.
+        assert_eq!(tokenize("ＩＴ企業 ２０２３"), ["it", "企業", "2023"]);
+    }
+
+    /// `chars` adds each character of Han, kana and Hangul, once for a run
+    /// of one, and nothing to Thai, whose characters are letters.
+    #[test]
+    fn chars_add_each_character_to_the_pairs() {
+        let on = TextIndexSpec {
+            chars: true,
+            ..TextIndexSpec::default()
+        };
+        let terms = |text: &str| {
+            let mut got = Vec::new();
+            for_each_indexed_term(text, &on, |t| got.push(t.to_string()));
+            got.sort();
+            got
+        };
+        assert_eq!(terms("北京市"), ["京", "京市", "北", "北京", "市"]);
+        assert_eq!(terms("京"), ["京"]);
+        assert_eq!(terms("ไม่มี"), ["ม่ม", "ไม่", "่มี"]);
+        let mut ix = TextIndex::new(on);
+        ix.insert(1, "北京市");
+        ix.insert(2, "上海市");
+        let ids = |q: &str| {
+            ix.search(q, 10, |_| true)
+                .iter()
+                .map(|h| h.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("京"), [1], "one character finds the runs holding it");
+        assert_eq!(ids("市").len(), 2);
     }
 
     /// The whole point of the option: an inflected form and its stem have to

@@ -1019,7 +1019,7 @@ fn schemas_json(list: &[Schema]) -> String {
                     ),
                 ),
                 IndexKind::Text(spec) => {
-                    json::escape_into(&mut out, &format!("text(k1={}, b={})", spec.k1(), spec.b()))
+                    json::escape_into(&mut out, &format!("text({})", spec.args()))
                 }
                 IndexKind::Inverted => json::escape_into(&mut out, "inverted"),
             }

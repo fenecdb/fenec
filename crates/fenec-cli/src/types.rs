@@ -202,7 +202,7 @@ fn index_note(k: &IndexKind) -> Option<String> {
             spec.ef_search,
             spec.quant_arg()
         )),
-        IndexKind::Text(spec) => Some(format!(" @text(k1={}, b={})", spec.k1(), spec.b())),
+        IndexKind::Text(spec) => Some(format!(" @text({})", spec.args())),
         IndexKind::Inverted => Some(" @inverted".into()),
     }
 }

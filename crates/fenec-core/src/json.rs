@@ -247,7 +247,7 @@ pub fn response_to_string(r: &Response) -> String {
                                 )
                             }
                             crate::schema::IndexKind::Text(spec) => {
-                                format!("text(k1={}, b={})", spec.k1(), spec.b())
+                                format!("text({})", spec.args())
                             }
                         }
                         .as_str(),

@@ -79,10 +79,13 @@ from any record it cannot read.</p>
 <p>A schema names each field's index by a kind byte: 0 none, 1
 <code>@hash</code>, 2 <code>@hnsw</code> with its parameters, 3
 <code>@text</code> with its parameters, 4 <code>@sorted</code>, 5
-<code>@hnsw</code> over codes (<code>quant=</code>), 6 <code>@inverted</code>.
-For every kind but the graph that byte is all the file holds: the hash, text,
-ordered and inverted indexes are rebuilt from the documents on open, so there
-is nothing of theirs to validate or to go stale. An old binary cannot open a file whose
+<code>@hnsw</code> over codes (<code>quant=</code>), 6 <code>@inverted</code>,
+7 <code>@text</code> indexing characters as well (<code>chars</code>) with the
+parameters kind 3 has. For every kind but the graph that byte is all the file
+holds: the hash, text, ordered and inverted indexes are rebuilt from the
+documents on open, so there is nothing of theirs to validate or to go stale --
+and a binary that splits text another way, as one before runs of characters
+did, builds its own text index from the same documents. An old binary cannot open a file whose
 schema uses a newer kind and reports <code>unknown index kind 4</code>, the
 same refusal as for a record kind it does not know.</p>
 

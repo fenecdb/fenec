@@ -108,7 +108,9 @@ compare:
 ## Retrieval quality on BEIR, nDCG@10 for every way of ranking ten documents:
 ##   make beir BEIR=path/to/scifact
 ## The directory is one of BEIR's zips unpacked, with the vectors
-## crates/fenec-bench/beir/embed.mjs writes beside it (npm install there once).
+## crates/fenec-bench/beir/embed.mjs writes beside it (npm install there once);
+## without them BM25 alone is scored. FENECBENCH_TEXT=chars (or prefix=6)
+## gives the text index its options.
 beir:
 	@test -n "$(BEIR)" || (echo "usage: make beir BEIR=<dataset dir> (vectors: crates/fenec-bench/beir/embed.mjs; SPLADE, optional: splade.mjs)"; exit 1)
 	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)

@@ -306,6 +306,90 @@ fn the_prefix_option_finds_a_stem_inside_an_inflected_word() {
     assert_eq!(ids(&run(&mut fresh, r#"get d match t "kitap""#)), [1]);
 }
 
+/// A word of a script written without spaces is found inside the run it is
+/// written in -- Chinese, Japanese, Korean with its particle, Thai -- where
+/// the run used to be one term only the whole of it matched.
+#[test]
+fn a_word_is_found_inside_an_unspaced_run() {
+    let mut db = Database::new();
+    run(&mut db, "create collection d (t text @text)");
+    for (id, t) in [
+        (1, "北京天安门广场人很多"),
+        (2, "上海外滩的夜景"),
+        (3, "東京都に住んでいます"),
+        (4, "학교에서 공부합니다"),
+        (5, "กรุงเทพมหานครเป็นเมืองหลวง"),
+    ] {
+        run(&mut db, &format!(r#"put d {{id: {id}, t: "{t}"}}"#));
+    }
+    for (q, want) in [
+        ("天安门", 1),
+        ("外滩", 2),
+        ("東京", 3),
+        ("학교", 4),
+        ("เมืองหลวง", 5),
+    ] {
+        let got = ids(&run(&mut db, &format!(r#"get d match t "{q}""#)));
+        assert_eq!(got.first(), Some(&want), "{q}: {got:?}");
+    }
+    // One character finds a run of more only with `chars`.
+    assert!(ids(&run(&mut db, r#"get d match t "滩""#)).is_empty());
+    run(&mut db, "create collection c (t text @text(chars))");
+    run(&mut db, r#"put c {id: 2, t: "上海外滩的夜景"}"#);
+    assert_eq!(ids(&run(&mut db, r#"get c match t "滩""#)), [2]);
+}
+
+/// `chars` is written with the schema as an index kind of its own, and
+/// every listing of the schema spells the options out.
+#[test]
+fn the_chars_option_is_carried_through_the_schema() {
+    let mut db = Database::new();
+    run(
+        &mut db,
+        "create collection d (t text @text(prefix=6, chars), u text @text)",
+    );
+    let Response::Schemas(s) = run(&mut db, "describe d") else {
+        panic!("expected a schema");
+    };
+    let IndexKind::Text(spec) = &s[0].fields[0].index else {
+        panic!("expected a text index, got {:?}", s[0].fields[0].index);
+    };
+    assert!(spec.chars);
+    assert_eq!(spec.args(), "k1=0.9, b=0.4, prefix=6, chars");
+    let IndexKind::Text(plain) = &s[0].fields[1].index else {
+        panic!("expected a text index");
+    };
+    assert!(!plain.chars);
+    let fresh = reload(&db);
+    let c = fresh.collection("d").expect("collection");
+    assert_eq!(c.schema.fields[0].index, IndexKind::Text(*spec));
+    assert_eq!(c.schema.fields[1].index, IndexKind::Text(*plain));
+    // Written as an index kind of its own, 7 where the plain index is 3, so
+    // an older binary refuses the file rather than index pairs alone.
+    let encoded = |spec: TextIndexSpec| {
+        Schema::new(
+            "x",
+            vec![Field::new("t", DataType::Text).indexed(IndexKind::Text(spec))],
+        )
+        .unwrap()
+        .encode()
+    };
+    let (with, without) = (
+        encoded(*spec),
+        encoded(TextIndexSpec {
+            chars: false,
+            ..*spec
+        }),
+    );
+    let differ: Vec<(u8, u8)> = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (*a, *b))
+        .collect();
+    assert_eq!((with.len(), differ), (without.len(), vec![(7, 3)]));
+}
+
 #[test]
 fn bm25_parameters_are_carried_through_the_schema() {
     let mut db = Database::new();

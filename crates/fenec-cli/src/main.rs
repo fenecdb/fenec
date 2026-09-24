@@ -383,7 +383,7 @@ fn print_response(r: &Response, took: std::time::Duration) {
                             sp.quant_arg()
                         ),
                         IndexKind::Text(sp) => {
-                            format!("  @text(k1={}, b={})", sp.k1(), sp.b())
+                            format!("  @text({})", sp.args())
                         }
                         IndexKind::Inverted => "  @inverted".into(),
                     };
