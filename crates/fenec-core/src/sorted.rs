@@ -16,13 +16,27 @@
 //! the key space cannot express exactly sends the query back to the scan, and
 //! ties keep the order the scan keeps them in, ascending id.
 
+// Without the `sorted` feature the index's code is here but unused (`off.rs`);
+// the keys and ranges the planner builds stay.
+#![cfg_attr(not(feature = "sorted"), allow(dead_code, unused_imports))]
 use crate::collate::Collation;
 use crate::value::{DataType, DocId, Value};
 use std::cmp::Ordering;
 use std::ops::Bound;
 
+/// Whether a field of type `ty` can be `@sorted`: a property of the type,
+/// which a build without the index answers the same, so that the schema a
+/// file declares is the schema either build accepts.
+pub fn orderable(ty: &DataType) -> bool {
+    matches!(
+        ty,
+        DataType::Int | DataType::Float | DataType::Timestamp | DataType::Text
+    )
+}
+
 /// A field's index: `int` and `timestamp` keys and `float` keys map onto
 /// one ordered `u64` space; `text` keeps its string.
+#[cfg(feature = "sorted")]
 pub enum SortedIndex {
     Num(Ordered<u64>),
     Text(Ordered<Box<str>>),
@@ -293,13 +307,11 @@ fn float_key(f: f64) -> u64 {
     }
 }
 
+#[cfg(feature = "sorted")]
 impl SortedIndex {
     /// The types an ordered index is built for.
     pub fn supports(ty: &DataType) -> bool {
-        matches!(
-            ty,
-            DataType::Int | DataType::Float | DataType::Timestamp | DataType::Text
-        )
+        orderable(ty)
     }
 
     /// An empty index over a field of type `ty`, its text in `coll` when
@@ -756,7 +768,10 @@ fn bound_cmp(a: &Bound<Key>, b: &Bound<Key>, lower: bool, coll: Option<Collation
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "sorted"))]
+pub use crate::off::SortedIndex;
+
+#[cfg(all(test, feature = "sorted"))]
 mod tests {
     use super::*;
 

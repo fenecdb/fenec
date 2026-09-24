@@ -478,6 +478,85 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)
   db.close();
 });
 
+// A module made without the indexes (`make wasm-lite`, which is
+// `make wasm FEATURES=none`) opens what the full one wrote, and the full
+// one what it wrote: a page can load the smaller module over a store the
+// other filled, and hand it back.
+const lite = await readFile(new URL('./fenec-lite.wasm', import.meta.url)).catch(() => null);
+
+test('the module made without indexes and the full one open each other\'s files', {
+  skip: wasm && lite ? false : 'no web/fenec.wasm and web/fenec-lite.wasm (make wasm wasm-lite)',
+}, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const cat = (...parts) => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    parts.reduce((at, p) => (out.set(p, at), at + p.length), 0);
+    return out;
+  };
+  const full = await Fenec.open(wasm);
+  full.run(`create collection d (year int @sorted, title text @text, tag text,
+            embed vector<3> @hnsw(cosine), s sparse<10> @inverted)`);
+  full.run(`put d [
+    {year: 2021, title: "rust", tag: "b", embed: [1.0, 0.0, 0.0], s: "{1:0.5}/10"},
+    {year: 1999, title: "wasm", tag: "a", embed: [0.0, 1.0, 0.0], s: "{2:0.5}/10"},
+    {year: 2010, title: "search", tag: "c", embed: [0.0, 0.0, 1.0], s: "{3:0.5}/10"}]`);
+  // The image holds the graph; the writes after it are what `persist`
+  // stores as chunks, an index made over the documents among them.
+  const image = full.snapshot();
+  full.journal();
+  full.run('create index on d (tag) @sorted');
+  full.run('put d {year: 2024, title: "zig", tag: "d", embed: [0.6, 0.8, 0.0]}');
+  const written = full.drain();
+  assert.equal(written.replace, false);
+
+  const small = await Fenec.open(lite);
+  small.load(cat(image, written.bytes));
+  const years = (db) => db.rows('get d select year order year').map((r) => r.year);
+  assert.deepEqual(years(small), [1999, 2010, 2021, 2024]);
+  assert.deepEqual(small.rows('get d select tag where tag > "b" order tag desc').map((r) => r.tag), ['d', 'c']);
+  for (const [sql, feature] of [
+    ['get d near embed [1.0, 0.0, 0.0] limit 1', 'vector'],
+    ['get d match title "rust"', 'text'],
+    ['get d near s "{1:0.5}/10" limit 1', 'sparse'],
+    ['create index on d (title) @sorted', 'sorted'],
+  ]) {
+    assert.throws(() => small.run(sql), new RegExp(`\`${feature}\` feature, which this build was made without`), sql);
+  }
+
+  // It writes all the same, a vector and a text among what it changes ...
+  small.journal();
+  small.run('put d {year: 2030, title: "lite", tag: "e", embed: [0.0, 0.0, 1.0], s: "{4:0.5}/10"}');
+  small.run('set d {embed: [0.0, 0.6, 0.8], title: "moved"} where year = 1999');
+  small.run('del d where year = 2010');
+  const tail = small.drain();
+  assert.equal(tail.replace, false);
+
+  // ... and the full module builds every index over it, from the small
+  // one's image and from the full one's image with the small one's writes
+  // after it, whose graph the writes are applied to.
+  const answers = (db) => ({
+    years: years(db),
+    tags: db.rows('get d select tag where tag >= "d" order tag').map((r) => r.tag),
+    near: db.rows('get d near embed [0.0, 0.0, 1.0] limit 2').map((r) => r.title),
+    match: db.rows('get d match title "moved"').map((r) => r.year),
+    sparse: db.rows('get d near s "{4:0.5}/10" limit 1').map((r) => r.title),
+  });
+  const want = {
+    years: [1999, 2021, 2024, 2030],
+    tags: ['d', 'e'],
+    near: ['lite', 'moved'],
+    match: [1999],
+    sparse: ['lite'],
+  };
+  const fromImage = await Fenec.open(wasm);
+  fromImage.load(small.snapshot());
+  assert.deepEqual(answers(fromImage), want);
+  const fromTail = await Fenec.open(wasm);
+  fromTail.load(cat(image, written.bytes, tail.bytes));
+  assert.deepEqual(answers(fromTail), want);
+  for (const db of [full, small, fromImage, fromTail]) db.close();
+});
+
 test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

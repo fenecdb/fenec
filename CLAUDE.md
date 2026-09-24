@@ -11,8 +11,11 @@ front door and links into them, and this file is the working summary.
 ## Commands
 
 ```bash
-make test          # cargo test, then the JS tests (node --test)
+make test          # cargo test, fenec-core without its indexes, then the JS tests (node --test)
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
+make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
+make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
+make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make serve         # wasm + python3 http.server -> http://localhost:8787
 make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
@@ -41,6 +44,7 @@ Single tests:
 cargo test -p fenec-core --test persist          # one integration test file
 cargo test -p fenec-ql near                      # by name substring (integration: fn name only)
 cargo test -p fenec-core codec::tests            # inline unit tests in a module
+cargo test -p fenec-core --no-default-features --features std-fs --lib --test features   # without the indexes
 cargo test -p fenec-import --test pg -- --ignored   # needs a live PostgreSQL
 node --test web/fenec.test.js                    # JS: builder
 node --test --test-name-pattern 'shape' web/fenec.sync.test.js
@@ -84,7 +88,8 @@ tailoring, generated tables in chunks),
 `json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `sparse`
 (sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
-`std-fs` feature).
+`std-fs` feature), `off` (what stands in for an index a build is made
+without).
 
 The browser client is `web/fenec.js` — WASM glue (~305 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
@@ -314,6 +319,37 @@ built at `opt-level = "z"`, where LLVM does not vectorise the scalar strips
 eight accumulators and reduction order, so a graph built in the browser is the
 graph built natively; `web/fenec.test.js` checks that order against a
 `Math.fround` reference.
+
+**The indexes are features, and a build without one opens a file that
+declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
+four are `indexes`, on by default) are what a browser module may leave out:
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.4 KB
+brotli with all four, 117.3 with none, and `make wasm-sizes` measures the
+sixteen sets. What stands in for a missing one is a type of no value with
+the real one's methods (`off.rs`: a field of an empty enum), so the engine
+compiles unchanged and the compiler drops every path through it; only the
+places that make one are `cfg`'d (`Collection::new`,
+`reset_index_structures`, `build_index`, the maintenance build). The file
+does not change with the build: a collection declaring the index is made
+and opened and its documents read and written, `near`, `match` and a sparse
+`near` over it are refused naming the feature (`not_built`), and so is a
+`create index` of its kind -- while one replayed from the log is taken and
+not built, since refusing it would refuse the file. A `@sorted` field's
+comparisons and orders are the scan's, the same rows, so which types it
+takes is the type's answer in both builds (`sorted::orderable`). A graph in
+the file is passed over, and a checkpoint without one holds none, which a
+full build rebuilds on open like a graph that does not validate. `rerank`
+reads vectors out of the store and needs only `text`. The checks for a
+missing index ask `EVERY_INDEX` first: the lookup of a field is a loop the
+compiler cannot prove ends, and one left in cost the full module 197 bytes
+brotli; it is the size it was before the features, to the byte. A crate
+that depends on `fenec-core` names `indexes` itself (the workspace takes it
+without default features), and `fenec-ql` only as a dev dependency -- in its
+normal ones it would put them back into every browser module.
+`tests/features.rs` and the unit tests run without them in `make test`,
+`web/fenec.test.js` hands files between the full module and the one
+`make wasm-lite` makes, both ways, and CI runs clippy over none and each
+alone.
 
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a

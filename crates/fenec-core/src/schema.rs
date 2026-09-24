@@ -312,7 +312,7 @@ impl IndexKind {
                     "field `{field}` is not text, no full-text index can be built"
                 )));
             }
-            IndexKind::Sorted if !crate::sorted::SortedIndex::supports(ty) => {
+            IndexKind::Sorted if !crate::sorted::orderable(ty) => {
                 return Err(Error::Type(format!(
                     "field `{field}` is not int, float, timestamp or text, no ordered index \
                      can be built"

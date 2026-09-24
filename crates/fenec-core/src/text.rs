@@ -20,6 +20,11 @@
 //! meaning the words do not carry. That is what `rerank` is for: this index
 //! chooses the candidates, stored vectors order them.
 
+// Without the `text` feature the index's code is here but unused: the index
+// is a type of no value (`off.rs`), and the compiler drops the rest. The
+// tokenizer stays, for what else splits text.
+#![cfg_attr(not(feature = "text"), allow(dead_code, unused_imports))]
+
 use crate::schema::TextIndexSpec;
 use crate::value::DocId;
 use std::cmp::Ordering;
@@ -381,6 +386,7 @@ impl DocLengths {
 /// graph's ~102 us, and the rebuild pass already reads every document to
 /// fill the hash indexes. A second record kind, and the validation path that
 /// would have to come with it, was not worth ~3 s per 100 000 documents.
+#[cfg(feature = "text")]
 pub struct TextIndex {
     pub spec: TextIndexSpec,
     /// term -> postings, kept ascending by document id so `search` can merge
@@ -395,6 +401,7 @@ pub struct TextIndex {
     heap: usize,
 }
 
+#[cfg(feature = "text")]
 impl TextIndex {
     pub fn new(spec: TextIndexSpec) -> TextIndex {
         TextIndex {
@@ -734,7 +741,10 @@ impl PartialOrd for ByScore {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "text"))]
+pub use crate::off::TextIndex;
+
+#[cfg(all(test, feature = "text"))]
 impl TextIndex {
     /// The same walk with the pruning switched off: every term drives the
     /// frontier, every matching document is scored. Only `search`'s
@@ -806,7 +816,7 @@ impl TextIndex {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "text"))]
 mod tests {
     use super::*;
 

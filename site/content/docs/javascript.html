@@ -62,6 +62,41 @@ changes it is sent and its optimistic writes need
 (<code>sync({ collation })</code> says where from). A chunk of another
 version's tables is refused: its ranks would mean something else.</p>
 
+<h2 id="features">A smaller module</h2>
+
+<pre data-lang="bash">make wasm                          # every index: 144 KB brotli
+make wasm FEATURES="text sorted"   # no vector or sparse search: 131 KB
+make wasm FEATURES=none            # none of the four: 117 KB
+</pre>
+
+<p>The module carries four indexes, and a page that uses fewer can load one
+built without the rest. What each set weighs is in <a
+href="benchmarks.html#module-features">Benchmarks</a>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Feature</th><th>What needs it</th></tr></thead>
+<tbody>
+<tr><td><code>vector</code></td><td><code>near</code> over a vector field, and <code>fuse</code></td></tr>
+<tr><td><code>text</code></td><td><code>match</code>, and the <code>rerank</code> after it, which reads the vectors themselves</td></tr>
+<tr><td><code>sparse</code></td><td><code>near</code> over a <code>sparse&lt;N&gt;</code> field</td></tr>
+<tr><td><code>sorted</code></td><td>nothing but speed: without it the scan answers a <code>@sorted</code> field's comparisons and orders, with the same rows</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Everything else is in every build: documents, filters,
+<code>order</code>, aggregates, <code>lookup</code>, collations, the change
+feed, persistence and the sync layer.</p>
+
+<p>The file does not change with the build. A collection that declares an
+index the module lacks is made and loaded all the same, and its documents
+are read and written. A statement that needs the index, or a <code>create
+index</code> of its kind, throws a <code>FenecError</code> naming the
+feature. A module that has the index builds it when it loads what the
+other wrote, so a page can hand a store to the other module and take it
+back.</p>
+
 <h2>The query builder</h2>
 
 <p>FenecQL reads well, but on the application side the job is still building a

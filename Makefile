@@ -6,8 +6,12 @@ CARGO ?= $(shell test -x $(HOME)/.cargo/bin/cargo && echo $(HOME)/.cargo/bin/car
 PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
+# The indexes the browser module is built with: every one unless named --
+# `make wasm FEATURES="text sorted"`, or FEATURES=none for none of them.
+FEATURES ?=
+WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -17,8 +21,10 @@ all: test wasm
 
 ## Rust first: `cargo test` also builds the `fenec-pg` binary, and the sync
 ## tests on the JS side run against it (they skip themselves without it).
+## Then fenec-core made without its indexes, as a small browser module is.
 test:
 	$(CARGO) test
+	$(CARGO) test -p fenec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 
 ## JS tests. node's own runner; no dependencies.
@@ -49,11 +55,23 @@ types:
 # 0.8 ms, cold, in Chrome, measured before the text index went in). Any
 # network at all makes that a losing trade.
 wasm:
-	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm 2>&1 | tail -2 || \
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm $(WASM_FEATURES) 2>&1 | tail -2 || \
 		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)
 	@cp $(WASM_OUT) web/fenec.wasm
 	@mkdir -p web/collate && rm -f web/collate/*.bin && cp crates/fenec-core/src/collate/*.bin web/collate/
 	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
+
+## The module made without an index (FEATURES=none), for web/fenec.test.js
+## to hand files between it and the full one.
+wasm-lite:
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
+	@cp $(WASM_OUT) web/fenec-lite.wasm
+	@echo "web/fenec-lite.wasm  $$(wc -c < web/fenec-lite.wasm) bytes"
+
+## The browser module's size built with each set of the four indexes
+## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
+wasm-sizes:
+	@python3 crates/fenec-wasm/sizes.py
 
 ## Serves the browser demo locally
 serve: wasm
@@ -245,5 +263,5 @@ site-deploy: site
 
 clean:
 	$(CARGO) clean
-	rm -f web/fenec.wasm
+	rm -f web/fenec.wasm web/fenec-lite.wasm
 	rm -rf web/collate site/dist

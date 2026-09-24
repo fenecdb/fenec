@@ -53,6 +53,16 @@ jobs:
       # std-fs.
       - run: cargo clippy -p fenec-wasm -p fenec-core -p fenec-ql --target wasm32-unknown-unknown -- -D warnings
 
+      # A module made without some of the indexes (`make wasm FEATURES=...`)
+      # compiles what the full one does not: the stand-ins in off.rs, and
+      # the engine with its paths through them dead. None of the four, each
+      # alone, and fenec-core's tests and examples without them.
+      - run: |
+          for f in "" vector text sparse sorted; do
+            cargo clippy -p fenec-wasm -p fenec-core --target wasm32-unknown-unknown --no-default-features ${f:+--features=$f} -- -D warnings
+          done
+      - run: cargo clippy -p fenec-core --no-default-features --features std-fs --all-targets -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -85,8 +95,10 @@ jobs:
       # The browser bundle comes first: web/fenec.sync.test.js and the
       # end-to-end half of web/fenec.test.js skip themselves when
       # web/fenec.wasm is missing, so without this the JS side is a no-op.
+      # The module without the indexes is what web/fenec.test.js hands the
+      # full one's files to, and back.
       - name: Build WASM
-        run: make wasm
+        run: make wasm wasm-lite
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
       # fenec-pg binary that the sync tests run against.

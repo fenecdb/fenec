@@ -343,6 +343,15 @@ pub struct Collection {
 }
 
 impl Collection {
+    #[cfg_attr(
+        not(all(
+            feature = "vector",
+            feature = "text",
+            feature = "sparse",
+            feature = "sorted"
+        )),
+        allow(unused_mut)
+    )]
     fn new(id: u32, schema: Schema) -> Collection {
         let mut vectors = HashMap::new();
         let mut hashes = HashMap::new();
@@ -351,6 +360,7 @@ impl Collection {
         let mut sparse = Vec::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
+                #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
                     vectors.insert(
                         f.name.clone(),
@@ -360,12 +370,15 @@ impl Collection {
                 (IndexKind::Hash, _) => {
                     hashes.insert(f.name.clone(), HashIndex::default());
                 }
+                #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     sorted.push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
+                #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     sparse.push((f.name.clone(), SparseIndex::new()));
                 }
@@ -400,6 +413,7 @@ impl Collection {
         self.sparse.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
+                #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
                     self.vectors.insert(
                         f.name.clone(),
@@ -409,13 +423,16 @@ impl Collection {
                 (IndexKind::Hash, _) => {
                     self.hashes.insert(f.name.clone(), HashIndex::default());
                 }
+                #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     self.sorted
                         .push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
+                #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     self.sparse.push((f.name.clone(), SparseIndex::new()));
                 }
@@ -674,6 +691,48 @@ fn hash_key(v: &Value) -> Vec<u8> {
         _ => crate::codec::encode_value(&mut out, v),
     }
     out
+}
+
+/// The feature `kind` needs when this build was made without it
+/// (`Cargo.toml`): a file declaring such an index opens all the same, the
+/// index unbuilt, and what needs it is refused.
+fn missing_feature(kind: &IndexKind) -> Option<&'static str> {
+    match kind {
+        IndexKind::Vector(_) if !cfg!(feature = "vector") => Some("vector"),
+        IndexKind::Text(_) if !cfg!(feature = "text") => Some("text"),
+        IndexKind::Inverted if !cfg!(feature = "sparse") => Some("sparse"),
+        IndexKind::Sorted if !cfg!(feature = "sorted") => Some("sorted"),
+        _ => None,
+    }
+}
+
+fn not_built(what: &str, feature: &str) -> Error {
+    Error::Query(format!(
+        "{what} needs the `{feature}` feature, which this build was made without"
+    ))
+}
+
+/// Whether this build has every index, which is where the checks for one
+/// it lacks fold away.
+const EVERY_INDEX: bool = cfg!(all(
+    feature = "vector",
+    feature = "text",
+    feature = "sparse",
+    feature = "sorted"
+));
+
+/// The refusal of a `near` or a `match` over `field` when it declares an
+/// index this build was made without, ahead of the one for a field that
+/// declares none -- whose message stays whole at each call site: put
+/// together here from parts passed in, it cost the module with every index
+/// 197 bytes brotli. That module asks nothing, since the lookup of the field
+/// is a loop the compiler cannot prove ends, and it would stay in.
+fn not_built_on(c: &Collection, field: &str, what: &str) -> Option<Error> {
+    if EVERY_INDEX {
+        return None;
+    }
+    let feature = missing_feature(&c.schema.field(field)?.index)?;
+    Some(not_built(&format!("field `{field}`'s {what}"), feature))
 }
 
 /// Whether an index files `a` and `b` as one entry: the same hash key, which
@@ -2056,6 +2115,7 @@ impl Database {
             }
             // Each ordered index is sorted once from its keys rather than
             // inserted row by row.
+            #[cfg(feature = "sorted")]
             for (p, ix, rows) in sorted_ix.iter_mut() {
                 **ix = SortedIndex::build(
                     &schema.fields[*p].ty,
@@ -2558,6 +2618,9 @@ impl Database {
         kind: &IndexKind,
         if_not_exists: bool,
     ) -> Result<Response> {
+        if let Some(feature) = missing_feature(kind) {
+            return Err(not_built("the index", feature));
+        }
         if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
             return Ok(done);
         }
@@ -3245,10 +3308,12 @@ impl Database {
             return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
         }
         let ix = c.vectors.get(&near.field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{}` has no vector index (declare it with @hnsw)",
-                near.field
-            ))
+            not_built_on(c, &near.field, "vector index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{}` has no vector index (declare it with @hnsw)",
+                    near.field
+                ))
+            })
         })?;
         let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
         if qv.len() != ix.dim {
@@ -3318,9 +3383,11 @@ impl Database {
     ) -> Result<Vec<(DocId, f32)>> {
         let field = &near.field;
         let ix = c.sparse_index(field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{field}` has no inverted index (declare it with @inverted)"
-            ))
+            not_built_on(c, field, "inverted index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{field}` has no inverted index (declare it with @inverted)"
+                ))
+            })
         })?;
         if near.ef.is_some() {
             return Err(Error::Query(format!(
@@ -3461,10 +3528,12 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         let ix = c.texts.get(&m.field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{}` has no full-text index (declare it with @text)",
-                m.field
-            ))
+            not_built_on(c, &m.field, "full-text index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{}` has no full-text index (declare it with @text)",
+                    m.field
+                ))
+            })
         })?;
         let query = match eval(&m.query, &mut NoRow, ctx)? {
             Value::Text(t) => t,
@@ -4573,6 +4642,13 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
 /// [`Collection::reset_index_structures`] is.
 #[inline(always)]
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    // An index this build lacks is not built: a file's log replays the
+    // `create index` that made it, and the file opens all the same. Asked
+    // after `EVERY_INDEX`, or the bounds check of the lookup stays in the
+    // module that has every index.
+    if !EVERY_INDEX && missing_feature(&c.schema.fields[pos].index).is_some() {
+        return Ok(());
+    }
     let field = c.schema.fields[pos].name.clone();
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
@@ -4595,6 +4671,9 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             ix.shrink_to_fit();
             c.texts.insert(field, ix);
         }
+        #[cfg(not(feature = "sorted"))]
+        IndexKind::Sorted => return Err(not_built("the index", "sorted")),
+        #[cfg(feature = "sorted")]
         IndexKind::Sorted => {
             let ty = c.schema.fields[pos].ty.clone();
             let mut rows = Vec::with_capacity(c.store.len());

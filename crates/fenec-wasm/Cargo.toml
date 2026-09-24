@@ -15,3 +15,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 fenec-core = { workspace = true, default-features = false }
 fenec-ql.workspace = true
+
+# A page that needs no vector, text or sparse search, or no ordered index,
+# loads a module built without it: `make wasm FEATURES=...`.
+[features]
+default = ["indexes"]
+indexes = ["vector", "text", "sparse", "sorted"]
+vector = ["fenec-core/vector"]
+text = ["fenec-core/text"]
+sparse = ["fenec-core/sparse"]
+sorted = ["fenec-core/sorted"]
