@@ -603,28 +603,36 @@ had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
 index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
 
-**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.**
-A sparse vector is held as its non-zero entries, `(index, weight)` ascending
+**`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
+sparse vector is held as its non-zero entries, `(index, weight)` ascending
 with indices from 0, and travels everywhere in pgvector's text form,
 `{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, pg text, a FenecQL
 literal -- so a pgvector client and `fenec import` carry the same vector.
 Every way in goes through `sparse::normalise` (order, an index given twice
 refused, zeros dropped), and the index relies on it. `@inverted` is the text
-index's shape with weights where the counts were; `near` by dot product
-walks it with MaxScore, rank-safe -- the bounds are compared once rounded to
-`f32`, after a 1e-9 slack, so a tie-break never depends on the pruning --
-and `tests/sparse.rs` holds it to `near ... exact` row for row. Only a
-document sharing a dimension with the query is ranked. Like the text index
-it is derived and never persisted. It sorts through the engine's one
-`(DocId, f32)` sort and maps dimensions through the vector index's
-`HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
+index's shape with weights where the counts were; `near` by dot product sums
+the query's lists a list at a time into a slot a document, a window of 65 536
+ids at a time (`sparse::summed`), where they are dense in the ids they span,
+and walks them with MaxScore where they are not -- rank-safe, the bounds
+compared once rounded to `f32` after a 1e-9 slack, so a tie-break never
+depends on the pruning; the browser always sums, and has no walk. A SPLADE
+query's dozens of lists reach most of a collection, and the walk, choosing a
+document at a time among their heads, took 2.54 ms p50 on FiQA against 0.68
+summed, 0.60 against 0.10 on SciFact; bounds per block of a list's postings
+(2.69 ms) and per range of ids across the lists (443 of 451 ranges still read,
+35 MB more) did not pay. `pruning_never_changes_the_answer` holds both ways to
+an exhaustive walk, and `tests/sparse.rs` holds `near` to `near ... exact` row
+for row. Only a document sharing a dimension with the query is ranked. Like
+the text index it is derived and never persisted. It sorts through the
+engine's one `(DocId, f32)` sort and maps dimensions through the vector
+index's `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
-0.232 (the dense vectors 0.366), at 2.6 ms p50 over 57 638 documents: its
-queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut
-texts themselves: transformers.js drops the closing [SEP] when it truncates,
-SPLADE without it took SciFact to 0.23, and the dense vectors (`embed.mjs`)
-moved by up to 0.003.
+0.232 (the dense vectors 0.366), at 0.68 ms p50 over 57 638 documents: its
+queries' 37 to 65 terms reach most of the corpus. Both BEIR scripts cut texts
+themselves: transformers.js drops the closing [SEP] when it truncates, SPLADE
+without it took SciFact to 0.23, and the dense vectors (`embed.mjs`) moved by
+up to 0.003.
 
 **`--follow` confirms nothing that is not on disk.** `fenec import --follow`
 reads a logical replication slot through `pgoutput` and applies every change

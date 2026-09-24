@@ -210,8 +210,8 @@ FenecQL: the answers are the engine's own.</p>
 <tr><td><code>match … near … fuse</code>, 20 (default)</td><td class="n">0.700</td><td class="n">0.366</td><td class="n">0.74 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 100</td><td class="n">0.688</td><td class="n">0.359</td><td class="n">0.97 ms</td></tr>
 <tr><td><code>match … near … fuse</code>, 1 000</td><td class="n">0.690</td><td class="n">0.364</td><td class="n">4.03 ms</td></tr>
-<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">2.58 ms</td></tr>
-<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">3.20 ms</td></tr>
+<tr><td><code>near</code>, sparse (SPLADE++)</td><td class="n">0.693</td><td class="n">0.331</td><td class="n">0.68 ms</td></tr>
+<tr><td><code>match … near … fuse</code>, sparse</td><td class="n">0.698</td><td class="n">0.314</td><td class="n">1.07 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -226,9 +226,10 @@ most 0.005.</p>
 <p>SPLADE sits between the two. On SciFact it comes within 0.006 of the dense
 fusion with one index; on FiQA it lifts BM25 by 0.099 but stays under the
 dense vectors, and fused with BM25 there it loses 0.016 — both sides are
-lexical. Its queries' 37 to 65 terms reach most of the corpus, which is
-where its 2.6 ms go (<a href="concepts.html#sparse-vectors">How it
-works</a>).</p>
+lexical. Its queries' 37 to 65 terms reach most of the corpus, and its
+lists are summed a list at a time rather than walked a document at a time:
+0.68 ms, where MaxScore's walk took 2.58 (<a
+href="concepts.html#sparse-vectors">How it works</a>).</p>
 
 <h2>Half precision</h2>
 
