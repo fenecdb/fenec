@@ -161,6 +161,7 @@ does not return them.</p>
 <tr><td><code>PUT /_shard/tenants/&lt;t&gt;</code></td><td>place and create; <code>{node}</code> to choose, otherwise the node with the fewest bytes on disk</td></tr>
 <tr><td><code>DELETE /_shard/tenants/&lt;t&gt;</code></td><td>delete on the node, then forget</td></tr>
 <tr><td><code>POST /_shard/tenants/&lt;t&gt;/move</code></td><td><code>{to}</code>; see below</td></tr>
+<tr><td><code>GET /_metrics</code></td><td>what the router answered and forwarded, the nodes' time and the ones it could not reach, and its moves, in Prometheus's text format (<a href="monitoring.html#router">Monitoring</a>)</td></tr>
 </tbody>
 </table>
 </div>

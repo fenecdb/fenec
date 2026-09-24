@@ -605,8 +605,9 @@ pub fn handle(
 
 impl Replication {
     /// A scrape's part of it: how many replicas a primary feeds, and how far
-    /// a replica trails -- the same figures `/_replication/status` gives.
-    pub(crate) fn metrics(&self, out: &mut crate::metrics::Text, seq: u64) {
+    /// a replica trails -- the same figures `/_replication/status` gives. A
+    /// router's scrape takes its directory's.
+    pub fn metrics(&self, out: &mut crate::metrics::Text, seq: u64) {
         if self.feed.is_some() {
             out.family("fenec_replicas", "gauge", "Replicas being fed now.");
             out.sample("fenec_replicas", &[], lock(&self.streams).len());

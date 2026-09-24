@@ -291,6 +291,19 @@ impl Directory {
         self.tenants.get(tenant)
     }
 
+    /// The tenants on each node, every node named, and how many are in a
+    /// move: what a scrape reports, counted without the copy
+    /// [`Directory::tenants`] makes of 100 000 names.
+    pub fn load_by_node(&self) -> (BTreeMap<&str, usize>, usize) {
+        let mut by: BTreeMap<&str, usize> = self.nodes.keys().map(|n| (n.as_str(), 0)).collect();
+        let mut moving = 0;
+        for p in self.tenants.values() {
+            *by.entry(p.node.as_str()).or_default() += 1;
+            moving += (p.state == State::Moving) as usize;
+        }
+        (by, moving)
+    }
+
     /// `(tenant, placement)`, sorted by name.
     pub fn tenants(&self) -> Vec<(String, Placement)> {
         let mut out: Vec<_> = self

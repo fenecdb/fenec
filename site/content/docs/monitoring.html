@@ -91,8 +91,9 @@ version and uptime, whether the disk has refused a write, statements and
 errors per second, the memory footprint — then statements by transport and
 kind with their p50 and p99, errors, and slow statements a minute; documents,
 writes a second and each collection's dead share, the one that says when to
-<code>compact</code>; replication; and tenants. The instance variable picks
-one server or all of them. Imported on its own, the dashboard asks for a
+<code>compact</code>; replication; tenants; and a router's requests, its
+latency beside its nodes', the nodes it could not reach, the tenants on each
+node and its moves. The instance variable picks one server or all of them. Imported on its own, the dashboard asks for a
 Prometheus data source.</p>
 
 <pre data-lang="text"># the p99 of reads over PostgreSQL, over five minutes
@@ -146,12 +147,58 @@ collection. A tenant node keeps each tenant's apart —
 <code>/t/&lt;tenant&gt;/_stats/statements</code> and its own connection's
 view — and lists every tenant's, named, to its admin alone.</p>
 
+<h2 id="router">The router</h2>
+
+<pre data-lang="bash">curl -H "Authorization: Bearer $SHARD_TOKEN" http://127.0.0.1:8090/_metrics
+# fenec_router_requests_total{route="tenant",code="2xx"} 48120
+# fenec_router_upstream_duration_seconds_bucket{le="0.001"} 47655
+# fenec_router_upstream_errors_total{node="n2"} 3
+# ...
+</pre>
+
+<p><code>fenec-shard</code> serves <code>/_metrics</code> on its own listener,
+behind its <code>--token</code> as <code>/_shard/</code> is: a scrape names the
+nodes. It counts what it answered and what the nodes took over it; what a
+tenant's statements did is its node's to count, and no label names a tenant.
+A request is timed from its arrival to its answer, the node's time included —
+a subscription to its head, since the stream lasts as long as its client
+stays; a standby router's replication stream is counted and not timed.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Metric</th><th>Type</th><th>What it says</th></tr></thead>
+<tbody>
+<tr><td><code>fenec_router_requests_total{route, code}</code></td><td>counter</td><td>requests answered; <code>route</code> is <code>tenant</code> (<code>/t/…</code>, forwarded), <code>shard</code>, <code>replication</code>, <code>metrics</code> or <code>other</code>, <code>code</code> the status class, <code>2xx</code> to <code>5xx</code></td></tr>
+<tr><td><code>fenec_router_request_duration_seconds{route}</code></td><td>histogram</td><td>arrival to answer, in buckets from 100 µs to 10 s</td></tr>
+<tr><td><code>fenec_router_upstream_duration_seconds</code></td><td>histogram</td><td>a forwarded request's time at its node: from its sending to the whole answer. Taken from the request's duration, it leaves the router's own</td></tr>
+<tr><td><code>fenec_router_upstream_errors_total{node}</code></td><td>counter</td><td>forwarded requests a node did not answer or broke off, each answered 502: the one to alert on</td></tr>
+<tr><td><code>fenec_router_moves_total{outcome}</code></td><td>counter</td><td>tenant moves that began, <code>done</code> or <code>failed</code> and thawed; one refused before it began is not one</td></tr>
+<tr><td><code>fenec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
+<tr><td><code>fenec_router_connections</code></td><td>gauge</td><td>client connections open now, the scrape's own among them</td></tr>
+<tr><td><code>fenec_router_nodes</code>, <code>fenec_router_tenants{node}</code></td><td>gauge</td><td>the nodes in the directory, and the tenants placed on each</td></tr>
+<tr><td><code>fenec_router_tenants_moving</code></td><td>gauge</td><td>tenants a move began on and did not record done — served from where they were, and cleared by moving them again</td></tr>
+<tr><td><code>fenec_router_following</code></td><td>gauge</td><td>1 on a standby router; its directory's <code>fenec_replica_*</code> gauges follow, and a primary's <code>fenec_replicas</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<pre data-lang="text"># what the router adds, at the median, over five minutes
+histogram_quantile(0.5, sum by (le) (rate(fenec_router_request_duration_seconds_bucket{route="tenant"}[5m])))
+  - histogram_quantile(0.5, sum by (le) (rate(fenec_router_upstream_duration_seconds_bucket[5m])))
+
+# worth an alert
+rate(fenec_router_upstream_errors_total[5m]) > 0
+fenec_router_tenants_moving > 0
+</pre>
+
 <h2>What it costs</h2>
 
 <p>Counting a statement is a handful of relaxed atomic adds, into counters a
 thread each: 6.7 ns a statement with eight threads counting at once. Into one
 shared set of counters the same eight cost 720 ns each, the cache line moving
-from core to core, which is why they are spread. A scrape reads the gauges
+from core to core, which is why they are spread. The router counts a request
+the same way, 13.3 ns with eight threads counting, beside the 17 µs it adds
+to the request (<code>make shard-bench</code>). A scrape reads the gauges
 under the database's shared lock, beside the readers and ahead of a writer
 for as long as a <code>count</code> would be.</p>
 

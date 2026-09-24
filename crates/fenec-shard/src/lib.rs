@@ -28,12 +28,14 @@
 //! and the `/_shard/` endpoints in [`Router::admin`].
 
 pub mod directory;
+pub mod metrics;
 pub mod upstream;
 
 use directory::{Directory, Node, State};
 use fenec_core::prelude::*;
 use fenec_http::http::{self, Method, Request, Response};
 use fenec_http::replication::{self, Replication};
+use metrics::Route;
 use std::collections::HashSet;
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -131,6 +133,7 @@ impl Router {
     }
 
     pub fn serve_on(self: &Arc<Router>, listener: TcpListener) -> std::io::Result<()> {
+        fenec_http::metrics::started();
         fenec_http::log!(
             "fenec-shard {} listening on: http://{}  [{} node(s), {} tenant(s)]",
             fenec_core::VERSION,
@@ -184,6 +187,7 @@ impl Router {
         let Ok(mut out) = stream.try_clone() else {
             return;
         };
+        let _open = metrics::Connection::open();
         let mut reader = BufReader::new(stream);
         loop {
             let req = match http::read_request(&mut reader, self.cfg.max_body) {
@@ -194,6 +198,16 @@ impl Router {
                     return;
                 }
             };
+            let arrived = Instant::now();
+            // Everything but a forwarded request is counted here, as it is
+            // answered; `forward` counts its own, a stream at its head.
+            let answer = |out: &mut TcpStream, route: Route, resp: Response| {
+                let sent = resp
+                    .write(out, req.keep_alive, req.method == Method::Head)
+                    .is_ok();
+                metrics::request(route, resp.status, arrived.elapsed());
+                sent && req.keep_alive
+            };
             // A standby's directory moves as the primary's writes arrive:
             // the maps are read again before the request is answered from
             // them, and only then.
@@ -203,38 +217,37 @@ impl Router {
                 }
             }
             let keep = match req.segments().first() {
-                Some(&"t") => self.forward(&req, &mut out),
+                Some(&"t") => self.forward(&req, &mut out, arrived),
                 Some(&"_replication") => {
                     let Some(repl) = self.repl.clone() else {
                         let _ = Response::error(404, "this router has no --replication-token")
                             .write(&mut out, false, false);
+                        metrics::request(Route::Replication, 404, arrived.elapsed());
                         return;
                     };
                     // The directory's database, not the router's lock: a
                     // stream lasts as long as the replica stays connected.
                     let db = self.read_dir().db().clone();
                     match replication::handle(&mut out, &db, &repl, &req) {
-                        // The stream took the connection over and has ended.
-                        None => return,
-                        Some(resp) => {
-                            resp.write(&mut out, req.keep_alive, req.method == Method::Head)
-                                .is_ok()
-                                && req.keep_alive
+                        // The stream took the connection over and has ended:
+                        // counted, not timed.
+                        None => {
+                            metrics::counted(Route::Replication, 200);
+                            return;
                         }
+                        Some(resp) => answer(&mut out, Route::Replication, resp),
                     }
                 }
-                Some(&"_shard") => {
-                    let resp = self.admin(&req);
-                    resp.write(&mut out, req.keep_alive, req.method == Method::Head)
-                        .is_ok()
-                        && req.keep_alive
-                }
-                _ => {
-                    Response::error(404, "the router serves /t/<tenant>/... and /_shard/")
-                        .write(&mut out, req.keep_alive, false)
-                        .is_ok()
-                        && req.keep_alive
-                }
+                Some(&"_shard") => answer(&mut out, Route::Shard, self.admin(&req)),
+                Some(&"_metrics") => answer(&mut out, Route::Metrics, self.metrics(&req)),
+                _ => answer(
+                    &mut out,
+                    Route::Other,
+                    Response::error(
+                        404,
+                        "the router serves /t/<tenant>/..., /_shard/ and /_metrics",
+                    ),
+                ),
             };
             if !keep {
                 return;
@@ -244,12 +257,14 @@ impl Router {
 
     // ------------------------------------------------------------ forwarding
 
-    /// Forwards one request and copies the answer back. Returns whether the
-    /// client connection can carry another request.
-    fn forward(&self, req: &Request, out: &mut TcpStream) -> bool {
+    /// Forwards one request and copies the answer back, and counts it.
+    /// Returns whether the client connection can carry another request.
+    fn forward(&self, req: &Request, out: &mut TcpStream, arrived: Instant) -> bool {
         let head_only = req.method == Method::Head;
         let reply = |out: &mut TcpStream, resp: Response| {
-            resp.write(out, req.keep_alive, head_only).is_ok() && req.keep_alive
+            let sent = resp.write(out, req.keep_alive, head_only).is_ok();
+            metrics::request(Route::Tenant, resp.status, arrived.elapsed());
+            sent && req.keep_alive
         };
         let segs = req.segments();
         let tenant = segs.get(1).copied().unwrap_or("");
@@ -286,6 +301,7 @@ impl Router {
             .filter(|(k, _)| !hop_by_hop(k) && !k.eq_ignore_ascii_case("host"))
             .cloned()
             .collect();
+        let sent = Instant::now();
         let answer =
             match self
                 .pool
@@ -293,13 +309,14 @@ impl Router {
             {
                 Ok(a) => a,
                 Err(e) => {
+                    metrics::unreachable(&node);
                     return reply(
                         out,
                         Response::error(
                             502,
                             &format!("node `{node}` ({addr}) did not answer: {e}"),
                         ),
-                    )
+                    );
                 }
             };
 
@@ -315,12 +332,14 @@ impl Router {
             let body = match answer.read_body(&self.pool, head_only) {
                 Ok(b) => b,
                 Err(e) => {
+                    metrics::unreachable(&node);
                     return reply(
                         out,
                         Response::error(502, &format!("node `{node}` broke off: {e}")),
-                    )
+                    );
                 }
             };
+            metrics::upstream(sent.elapsed());
             // A HEAD answer states the length of the body it leaves out.
             head.push_str(&format!(
                 "Content-Length: {}\r\nConnection: {}\r\n\r\n",
@@ -331,17 +350,22 @@ impl Router {
                     "close"
                 }
             ));
-            let sent = out
+            let written = out
                 .write_all(head.as_bytes())
                 .and_then(|_| out.write_all(&body))
                 .and_then(|_| out.flush());
-            return sent.is_ok() && req.keep_alive;
+            metrics::request(Route::Tenant, status, arrived.elapsed());
+            return written.is_ok() && req.keep_alive;
         }
 
         // No length: a stream. It is copied as it arrives until either side
-        // closes, and the client connection ends with it.
+        // closes, and the client connection ends with it; it is counted,
+        // and timed to its head.
+        metrics::upstream(sent.elapsed());
         head.push_str("Connection: close\r\n\r\n");
-        if out.write_all(head.as_bytes()).is_err() {
+        let written = out.write_all(head.as_bytes());
+        metrics::request(Route::Tenant, status, arrived.elapsed());
+        if written.is_err() {
             return false;
         }
         let _ = out.set_read_timeout(None);
@@ -368,15 +392,8 @@ impl Router {
     ///                                       its standby and route them there
     /// ```
     pub fn admin(&self, req: &Request) -> Response {
-        if let Some(token) = &self.cfg.token {
-            let given = req
-                .header("authorization")
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .unwrap_or("");
-            if !constant_eq(given.as_bytes(), token.as_bytes()) {
-                return Response::error(401, "invalid or missing token")
-                    .header("WWW-Authenticate", "Bearer");
-            }
+        if let Some(refused) = self.refused(req) {
+            return refused;
         }
         let body = match body_fields(req) {
             Ok(b) => b,
@@ -412,6 +429,70 @@ impl Router {
             _ => Err(Fail(404, "no such endpoint under /_shard/".into())),
         };
         result.unwrap_or_else(|Fail(status, msg)| Response::error(status, &msg))
+    }
+
+    /// The 401 a request without the router's `--token` gets, where it has
+    /// one: `/_shard/`, and `/_metrics`, which names the nodes.
+    fn refused(&self, req: &Request) -> Option<Response> {
+        let token = self.cfg.token.as_ref()?;
+        let given = req
+            .header("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        (!constant_eq(given.as_bytes(), token.as_bytes())).then(|| {
+            Response::error(401, "invalid or missing token").header("WWW-Authenticate", "Bearer")
+        })
+    }
+
+    /// `GET /_metrics`: the counters ([`metrics`]), what the directory
+    /// holds, and on a router replicated or following, its replication.
+    fn metrics(&self, req: &Request) -> Response {
+        if let Some(refused) = self.refused(req) {
+            return refused;
+        }
+        if req.method != Method::Get && req.method != Method::Head {
+            return Response::error(405, "/_metrics is read with GET");
+        }
+        let mut out = fenec_http::metrics::Text::new();
+        fenec_http::metrics::head(&mut out);
+        metrics::counters(&mut out);
+        let seq = {
+            let dir = self.read_dir();
+            let (by_node, moving) = dir.load_by_node();
+            out.family("fenec_router_nodes", "gauge", "Nodes in the directory.");
+            out.sample("fenec_router_nodes", &[], dir.nodes().len());
+            out.family(
+                "fenec_router_tenants",
+                "gauge",
+                "Tenants placed on each node.",
+            );
+            for (node, n) in &by_node {
+                out.sample("fenec_router_tenants", &[("node", node)], n);
+            }
+            out.family(
+                "fenec_router_tenants_moving",
+                "gauge",
+                "Tenants a move began on and has not recorded done: served from where they were.",
+            );
+            out.sample("fenec_router_tenants_moving", &[], moving);
+            out.family(
+                "fenec_router_following",
+                "gauge",
+                "1 on a standby router, whose directory follows the primary's.",
+            );
+            out.sample("fenec_router_following", &[], dir.following() as u8);
+            let db = dir.db().read().unwrap_or_else(|e| e.into_inner());
+            db.change_seq()
+        };
+        if let Some(repl) = &self.repl {
+            repl.metrics(&mut out, seq);
+        }
+        Response {
+            status: 200,
+            body: out.finish().into_bytes(),
+            content_type: "text/plain; version=0.0.4; charset=utf-8",
+            extra: Vec::new(),
+        }
     }
 
     fn list_nodes(&self) -> Response {
@@ -854,6 +935,7 @@ impl Router {
                 .pool
                 .call(&src.addr, "POST", &format!("{base}/thaw"), &src.token, b"");
             let _ = self.write_dir().place(tenant, &from, State::Active);
+            metrics::moved(false, started.elapsed());
             why
         };
 
@@ -905,6 +987,7 @@ impl Router {
         // as it goes, and the clients reconnect through the router.
         let cleanup = self.pool.call(&src.addr, "DELETE", &base, &src.token, b"");
         let left = !matches!(cleanup, Ok((204, _)) | Ok((404, _)));
+        metrics::moved(true, started.elapsed());
         if left {
             fenec_http::log!(
                 "tenant `{tenant}` moved to `{to}`, but its copy on `{from}` could not be \

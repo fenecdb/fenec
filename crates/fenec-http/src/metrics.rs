@@ -50,29 +50,84 @@ impl Transport {
 
 /// Upper bounds of the latency buckets, in microseconds: 100 µs, where a
 /// point read over HTTP lands, to 10 s, where a full rebuild does.
-const BUCKETS: [u64; 16] = [
+pub const BUCKETS: [u64; 16] = [
     100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000,
     1_000_000, 2_500_000, 5_000_000, 10_000_000,
 ];
 
-/// One transport's statements of one kind. A bucket counts only its own
-/// range; the exposition adds them up, as Prometheus's buckets are
-/// cumulative.
-struct Series {
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO: AtomicU64 = AtomicU64::new(0);
+
+/// Durations, as a Prometheus histogram counts them: how many, their sum,
+/// and a count a bucket of `bounds` (microseconds). A bucket counts only its
+/// own range; the exposition adds them up, as Prometheus's buckets are
+/// cumulative. The router counts its requests with these as a node counts
+/// its statements.
+pub struct Timings {
+    bounds: &'static [u64; 16],
     count: AtomicU64,
-    errors: AtomicU64,
     micros: AtomicU64,
-    buckets: [AtomicU64; BUCKETS.len()],
+    buckets: [AtomicU64; 16],
+}
+
+impl Timings {
+    pub const fn new(bounds: &'static [u64; 16]) -> Timings {
+        Timings {
+            bounds,
+            count: ZERO,
+            micros: ZERO,
+            buckets: [ZERO; 16],
+        }
+    }
+
+    pub fn add(&self, took: Duration) {
+        let micros = took.as_micros().min(u64::MAX as u128) as u64;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.micros.fetch_add(micros, Ordering::Relaxed);
+        if let Some(b) = self.bounds.iter().position(|&le| micros <= le) {
+            self.buckets[b].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The histogram `name` with `labels`, over the same series of each shard.
+/// Shards are read one after another while counting goes on, so a total can
+/// be one short of a bucket read a moment later -- as any scrape of a
+/// running server can be.
+pub fn histogram(out: &mut Text, name: &str, labels: &[(&str, &str)], shards: &[&Timings]) {
+    let Some(first) = shards.first() else {
+        return;
+    };
+    let total =
+        |f: &dyn Fn(&Timings) -> &AtomicU64| -> u64 { shards.iter().map(|t| load(f(t))).sum() };
+    let bucket = format!("{name}_bucket");
+    let with = |le: &str, n: u64, out: &mut Text| {
+        let mut all = labels.to_vec();
+        all.push(("le", le));
+        out.sample(&bucket, &all, n);
+    };
+    let mut below = 0;
+    for (i, le) in first.bounds.iter().enumerate() {
+        below += total(&|t| &t.buckets[i]);
+        with(&format!("{}", *le as f64 / 1e6), below, out);
+    }
+    let count = total(&|t| &t.count);
+    with("+Inf", count, out);
+    let micros = total(&|t| &t.micros);
+    out.sample(&format!("{name}_sum"), labels, micros as f64 / 1e6);
+    out.sample(&format!("{name}_count"), labels, count);
+}
+
+/// One transport's statements of one kind.
+struct Series {
+    timings: Timings,
+    errors: AtomicU64,
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
-const ZERO: AtomicU64 = AtomicU64::new(0);
-#[allow(clippy::declare_interior_mutable_const)]
 const SERIES: Series = Series {
-    count: ZERO,
+    timings: Timings::new(&BUCKETS),
     errors: ZERO,
-    micros: ZERO,
-    buckets: [ZERO; BUCKETS.len()],
 };
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -94,7 +149,7 @@ const SHARD: Shard = Shard {
     slow: [ZERO; 2],
 };
 
-static SHARDS: [Shard; 16] = [SHARD; 16];
+static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 static CONNECTIONS: [AtomicI64; 2] = [AtomicI64::new(0), AtomicI64::new(0)];
 /// `--slow-ms` in microseconds; 0 is off.
@@ -109,6 +164,16 @@ thread_local! {
     static WROTE: Cell<bool> = const { Cell::new(false) };
     /// This thread's shard, handed out in turn.
     static MINE: usize = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS.len();
+}
+
+/// Counters are kept in this many shards, a thread each and a few threads'
+/// past it.
+pub const SHARD_COUNT: usize = 16;
+
+/// This thread's shard, below [`SHARD_COUNT`]: for counters of a process's
+/// own kept as these are, the router's.
+pub fn shard() -> usize {
+    MINE.with(|m| *m)
 }
 
 /// Notes that the statement this thread is running writes.
@@ -137,16 +202,12 @@ fn now_secs() -> u64 {
 /// is asked for only then.
 pub fn record(t: Transport, took: Duration, failed: bool, text: impl FnOnce() -> String) {
     let wrote = WROTE.with(|w| w.replace(false));
-    let shard = &SHARDS[MINE.with(|m| *m)];
+    let shard = &SHARDS[shard()];
     let s = &shard.statements[t as usize][wrote as usize];
     let micros = took.as_micros().min(u64::MAX as u128) as u64;
-    s.count.fetch_add(1, Ordering::Relaxed);
-    s.micros.fetch_add(micros, Ordering::Relaxed);
+    s.timings.add(took);
     if failed {
         s.errors.fetch_add(1, Ordering::Relaxed);
-    }
-    if let Some(b) = BUCKETS.iter().position(|&le| micros <= le) {
-        s.buckets[b].fetch_add(1, Ordering::Relaxed);
     }
     let slow = SLOW_MICROS.load(Ordering::Relaxed);
     if slow > 0 && micros >= slow {
@@ -240,9 +301,9 @@ pub(crate) fn allowed(cfg: &Config, req: &Request, admin: bool) -> bool {
     })
 }
 
-/// The exposition: counters, then what the source holds.
-fn render(source: Source) -> String {
-    let mut out = Text(String::with_capacity(8 << 10));
+/// The version running and when the process started, which every
+/// exposition begins with, the router's too.
+pub fn head(out: &mut Text) {
     out.family(
         "fenec_build_info",
         "gauge",
@@ -259,6 +320,12 @@ fn render(source: Source) -> String {
         &[],
         *STARTED.get_or_init(now_secs),
     );
+}
+
+/// The exposition: counters, then what the source holds.
+fn render(source: Source) -> String {
+    let mut out = Text::new();
+    head(&mut out);
 
     let kinds = |t: usize, w: usize| {
         [
@@ -272,7 +339,7 @@ fn render(source: Source) -> String {
         "Statements answered, by transport and by whether they wrote.",
     );
     each(|t, w| {
-        let n = sum(t, w, |s| &s.count);
+        let n = sum(t, w, |s| &s.timings.count);
         out.sample("fenec_statements_total", &kinds(t, w), n)
     });
     out.family(
@@ -290,29 +357,13 @@ fn render(source: Source) -> String {
         "From a statement's arrival to its answer: lock waits and, under --sync always, the disk included.",
     );
     each(|t, w| {
-        let [a, b] = kinds(t, w);
-        let mut below = 0;
-        for (i, le) in BUCKETS.iter().enumerate() {
-            below += sum(t, w, |s| &s.buckets[i]);
-            let le = format!("{}", *le as f64 / 1e6);
-            out.sample(
-                "fenec_statement_duration_seconds_bucket",
-                &[a, b, ("le", &le)],
-                below,
-            );
-        }
-        let count = sum(t, w, |s| &s.count);
-        out.sample(
-            "fenec_statement_duration_seconds_bucket",
-            &[a, b, ("le", "+Inf")],
-            count,
+        let shards: Vec<&Timings> = SHARDS.iter().map(|s| &s.statements[t][w].timings).collect();
+        histogram(
+            &mut out,
+            "fenec_statement_duration_seconds",
+            &kinds(t, w),
+            &shards,
         );
-        out.sample(
-            "fenec_statement_duration_seconds_sum",
-            &[a, b],
-            sum(t, w, |s| &s.micros) as f64 / 1e6,
-        );
-        out.sample("fenec_statement_duration_seconds_count", &[a, b], count);
     });
     out.family(
         "fenec_slow_statements_total",
@@ -448,14 +499,28 @@ fn load(n: &AtomicU64) -> u64 {
 
 /// Prometheus's text format, written by hand: one `# HELP` and `# TYPE`
 /// per family, then its samples.
-pub(crate) struct Text(String);
+pub struct Text(String);
+
+impl Default for Text {
+    fn default() -> Text {
+        Text::new()
+    }
+}
 
 impl Text {
-    pub(crate) fn family(&mut self, name: &str, kind: &str, help: &str) {
+    pub fn new() -> Text {
+        Text(String::with_capacity(8 << 10))
+    }
+
+    pub fn finish(self) -> String {
+        self.0
+    }
+
+    pub fn family(&mut self, name: &str, kind: &str, help: &str) {
         let _ = writeln!(self.0, "# HELP {name} {help}\n# TYPE {name} {kind}");
     }
 
-    pub(crate) fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: impl Display) {
+    pub fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: impl Display) {
         self.0.push_str(name);
         for (i, (k, v)) in labels.iter().enumerate() {
             self.0.push(if i == 0 { '{' } else { ',' });

@@ -704,7 +704,13 @@ path has an underscore because a collection may be called `metrics`.
 `--metrics <addr>` is a listener for it alone that never attaches a watcher
 -- a second one would take the HTTP endpoint's subscription wake-ups -- and a
 tenant node publishes counts of its tenants, never a tenant's collection
-names.
+names. The router counts its own the same way (`fenec-shard/src/metrics.rs`,
+over `fenec_http::metrics::Timings`): requests by route and status class, a
+forwarded one's time at its node, the nodes it could not reach and its moves,
+never a tenant in a label -- 13.3 ns a request with eight threads counting,
+beside the 17 µs the router adds. A subscription is timed to its head, and a
+standby's replication stream only counted: both last as long as their
+client.
 
 **`/_stats/statements` counts by shape, a tenant's apart.** Every
 statement is also counted by its text with each literal and parameter as
