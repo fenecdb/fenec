@@ -7,11 +7,19 @@
     store.similarity_search("how do I compact", k=4)
 
 A document is a row: its id, its text, its metadata as JSON, and its vector
-under `@hnsw`. The collection is created on the first write, when the
-embedding's size is known. A metadata field named in `metadata_fields` also
-gets a column of its own, under `@hash`, and `filter` takes equality over
-those -- `filter={"source": "handbook"}` is `where source = $2`, answered by
-the index, before `near` looks for neighbours among what passed.
+under `@hnsw` -- over int8 or bit codes with `quant="int8"` or `"bit"`. The
+collection is created on the first write, when the embedding's size is known.
+A metadata field named in `metadata_fields` also gets a column of its own,
+under `@hash`, and `filter` takes equality over those -- `filter={"source":
+"handbook"}` is `where source = $2`, answered by the index, before the search
+ranks what passed.
+
+With `full_text=True` the text is indexed for BM25 as well (`@text`), and a
+search takes `mode`: `"text"` ranks by the words alone (`match`), with no
+embedding of the query, and `"hybrid"` ranks the words and the vector each to
+their own depth and fuses the two rankings (`match ... near ... fuse`). A
+retriever passes it through `search_kwargs={"mode": "hybrid"}`. The scores
+are then BM25's, or the fusion's, not similarities.
 
 Writing an id that is already there replaces it: the old row out and the new
 one in, sent as one batch and run under one write lock.
@@ -37,6 +45,8 @@ _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TYPES = {"text", "int", "float", "bool", "timestamp"}
 _RESERVED = {"id", "lc_id", "content", "metadata", "embedding"}
 _METRICS = {"cosine", "l2", "dot"}
+_QUANT = {None, "int8", "bit"}
+_MODES = {"similarity", "text", "hybrid"}
 
 
 class FenecVectorStore(VectorStore):
@@ -52,11 +62,17 @@ class FenecVectorStore(VectorStore):
         client: Client | None = None,
         metric: str = "cosine",
         metadata_fields: dict[str, str] | None = None,
+        quant: str | None = None,
+        full_text: bool = False,
     ):
         if not _NAME.match(collection):
             raise ValueError(f"not a collection name: {collection!r}")
         if metric not in _METRICS:
             raise ValueError(f"metric is one of {sorted(_METRICS)}, not {metric!r}")
+        if quant not in _QUANT:
+            raise ValueError(f"quant is None, 'int8' or 'bit', not {quant!r}")
+        if quant == "bit" and metric != "cosine":
+            raise ValueError("quant='bit' keeps signs, which only cosine can order by")
         fields = dict(metadata_fields or {})
         for name, ty in fields.items():
             if not _NAME.match(name) or name in _RESERVED:
@@ -68,6 +84,8 @@ class FenecVectorStore(VectorStore):
         self._client = client or Client(url, token)
         self._metric = metric
         self._fields = fields
+        self._quant = quant
+        self._full_text = full_text
         self._dimension: int | None = None
 
     @property
@@ -148,16 +166,41 @@ class FenecVectorStore(VectorStore):
     def similarity_search(
         self, query: str, k: int = 4, filter: dict | None = None, **kwargs: Any
     ) -> list[Document]:
+        """`mode` as `similarity_search_with_score` takes it."""
         return [d for d, _ in self.similarity_search_with_score(query, k, filter, **kwargs)]
 
     def similarity_search_with_score(
-        self, query: str, k: int = 4, filter: dict | None = None, **kwargs: Any
+        self,
+        query: str,
+        k: int = 4,
+        filter: dict | None = None,
+        *,
+        mode: str = "similarity",
+        **kwargs: Any,
     ) -> list[tuple[Document, float]]:
         """Documents with fenecdb's score: the cosine similarity under
         `cosine`, higher is nearer; the distance under `l2`; the product
-        under `dot`."""
-        vector = self._embedding.embed_query(query)
-        return self.similarity_search_with_score_by_vector(vector, k, filter, **kwargs)
+        under `dot`. With `mode="text"` or `"hybrid"` (`full_text=True`)
+        BM25's score, or the fusion's."""
+        if mode not in _MODES:
+            raise ValueError(f"mode is one of {sorted(_MODES)}, not {mode!r}")
+        if mode == "similarity":
+            vector = self._embedding.embed_query(query)
+            return self.similarity_search_with_score_by_vector(vector, k, filter, **kwargs)
+        if not self._full_text:
+            raise ValueError(f"mode {mode!r} needs the store made with full_text=True")
+        if mode == "text":
+            rank, ahead = "match content $1", [query]
+        else:
+            vector = [float(x) for x in self._embedding.embed_query(query)]
+            rank, ahead = "match content $1 near embedding $2 fuse", [query, vector]
+        where, params = self._where(filter, first=len(ahead) + 1)
+        rows = self._run(
+            f"get {self.collection} select lc_id, content, metadata{where} "
+            f"{rank} limit {int(k)}",
+            [*ahead, *params],
+        )
+        return [(self._document(r), r["_score"]) for r in rows]
 
     def similarity_search_by_vector(
         self, embedding: list[float], k: int = 4, filter: dict | None = None, **kwargs: Any
@@ -203,11 +246,18 @@ class FenecVectorStore(VectorStore):
         if self._dimension == dimension:
             return
         extra = "".join(f", {f} {t} @hash" for f, t in self._fields.items())
+        quant = f", quant={self._quant}" if self._quant else ""
+        content = "content text @text" if self._full_text else "content text"
         self._client.query(
             f"create collection if not exists {self.collection} ("
-            f"lc_id text @hash, content text, metadata text, "
-            f"embedding vector<{dimension}> @hnsw({self._metric}){extra})"
+            f"lc_id text @hash, {content}, metadata text, "
+            f"embedding vector<{dimension}> @hnsw({self._metric}{quant}){extra})"
         )
+        if self._full_text:
+            # A collection made before without it takes the index now.
+            self._client.query(
+                f"create index if not exists on {self.collection} (content) @text"
+            )
         self._dimension = dimension
 
     def _run(self, statement: str, params: list) -> Any:

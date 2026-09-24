@@ -568,7 +568,14 @@ the standard library for its client) and `useLiveQuery`
 (`integrations/react`) are held to their frameworks' own tests --
 `make python-test` runs LangChain's standard suite and the tests LlamaIndex's
 integrations run from a `python:3.13` container against a fenec-pg started
-here, `make react-test` runs the hook against a real replica. A store names
+here, `make react-test` runs the hook against a real replica, and CI runs
+both (`integrations`), with the wheel and the npm tarball built as a publish
+would build them -- publishing itself is not decided there. With
+`full_text=True` a store indexes its text for BM25 as well and searches by
+the words (`match`) or by the words and the vector fused (`fuse`):
+LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
+`"hybrid"`. `alpha` is not read, since `fuse` adds ranks; `quant` passes
+`int8` or `bit` codes to `@hnsw`. A store names
 its collection and metadata columns in the statement's text, so both are
 checked against FenecQL's name pattern; values always go in as parameters,
 and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
