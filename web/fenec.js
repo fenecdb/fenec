@@ -44,11 +44,12 @@ function whyNoModule(err) {
 }
 
 export class Fenec {
-  #wasm; #handle;
+  #wasm; #handle; #collation;
 
-  constructor(wasm, handle) {
+  constructor(wasm, handle, collation = null) {
     this.#wasm = wasm;
     this.#handle = handle;
+    this.#collation = collation;
   }
 
   /**
@@ -56,8 +57,13 @@ export class Fenec {
    * @param {string|BufferSource} src  A URL, or the module bytes themselves.
    *   The bytes are for Node: `fetch` cannot resolve a relative path there,
    *   so the file is read with `readFile` and handed over directly.
+   * @param {{collation?: string|URL|Function}} opts  Where the collation
+   *   data the module does not carry comes from (`collation()`): the URL of
+   *   the directory holding `<name>.bin`, or a function handed the name and
+   *   returning its bytes or a `Response`. By default `collate/` beside the
+   *   module, when `src` is a URL.
    */
-  static async open(src = './fenec.wasm') {
+  static async open(src = './fenec.wasm', opts = {}) {
     let mod;
     try {
       if (typeof src !== 'string') {
@@ -74,7 +80,7 @@ export class Fenec {
       throw whyNoModule(e);
     }
     const wasm = mod.instance.exports;
-    return new Fenec(wasm, wasm.fenec_open());
+    return new Fenec(wasm, wasm.fenec_open(), opts.collation ?? beside(src));
   }
 
   /** Connects to a remote HTTP endpoint: `Fenec.connect('http://host:8080')`. */
@@ -137,8 +143,94 @@ export class Fenec {
       this.#wasm.fenec_free(pp, pl || 1);
     }
     const res = JSON.parse(out);
-    if (res.kind === 'error') throw new FenecError(res.message);
+    if (res.kind === 'error') {
+      const e = new FenecError(res.message);
+      // Refused for collation data the module has not been handed: which,
+      // and how many statements before this one ran (`query` runs it again
+      // only when none did).
+      if (res.chunks) Object.assign(e, { collation: res.chunks, ran: res.ran ?? 0 });
+      throw e;
+    }
     return res.kind === 'rows' ? res.result : res;
+  }
+
+  /**
+   * `run`, fetching the collation data a statement is refused for and
+   * running it again: the module carries `latin`, and a statement that
+   * compares text of another script in a collation needs that script's
+   * data first. Only a statement nothing ran before is run again -- the
+   * refusal comes before it changes anything, but a statement ahead of it
+   * in the same text may have.
+   */
+  async query(sql, params = []) {
+    for (;;) {
+      try {
+        return this.run(sql, params);
+      } catch (e) {
+        if (!e.collation || e.ran || !(await this.#fetched(e.collation))) throw e;
+      }
+    }
+  }
+
+  /**
+   * Hands the module the collation data `names` names -- `'all'` for every
+   * script's. It carries `latin`; `collate und` and `collate tr` over other
+   * scripts need theirs: greek, cyrillic, middle-east, indic,
+   * southeast-asia, east-asia, han, han-ext, symbols, other, smp. `query`
+   * and the builder fetch what a statement needs by themselves; this is
+   * for having it before the first one does. True when it fetched any.
+   */
+  async collation(...names) {
+    return this.#fetched(names.includes('all') ? this.#collationState().chunks : names);
+  }
+
+  /** `{chunks, loaded}`: every chunk's name, and a bit each for those here. */
+  #collationState() {
+    return JSON.parse(this.#readString(this.#wasm.fenec_collation()));
+  }
+
+  /**
+   * Fetches and hands over those of `names` the module has not got. False
+   * when it had them all: what refused a statement was not their absence.
+   */
+  async #fetched(names) {
+    const { chunks, loaded } = this.#collationState();
+    const want = names.filter((name) => {
+      const i = chunks.indexOf(name);
+      if (i < 0) throw new FenecError(`no collation data named ${JSON.stringify(name)}; there are ${chunks.join(', ')}`);
+      return !(loaded & (1 << i));
+    });
+    const got = await Promise.all(want.map((name) => this.#chunk(name)));
+    got.forEach((bytes, k) => {
+      const ptr = this.#wasm.fenec_alloc(bytes.length || 1);
+      new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+      let at;
+      try {
+        at = this.#wasm.fenec_add_chunk(ptr, bytes.length);
+      } finally {
+        this.#wasm.fenec_free(ptr, bytes.length || 1);
+      }
+      if (chunks[at] !== want[k]) {
+        throw new FenecError(`${want[k]}.bin is not this module's collation data (another version's?)`);
+      }
+    });
+    return want.length > 0;
+  }
+
+  async #chunk(name) {
+    const from = this.#collation;
+    if (!from) {
+      throw new FenecError(
+        `the collation data ${name} is needed: open the module with { collation } -- ` +
+          `the URL of the directory holding ${name}.bin, or a function returning its bytes`,
+      );
+    }
+    let got = typeof from === 'function' ? await from(name) : await fetch(new URL(`${name}.bin`, from));
+    if (typeof got?.arrayBuffer === 'function') {
+      if (got.ok === false) throw new FenecError(`${name}.bin: HTTP ${got.status}`);
+      got = await got.arrayBuffer();
+    }
+    return got instanceof Uint8Array ? got : new Uint8Array(got.buffer ?? got);
   }
 
   /** Returns the query result as a plain array of objects. */
@@ -156,7 +248,7 @@ export class Fenec {
   from(name) {
     return new Query({
       collection: ident(name, 'collection'),
-      exec: (sql, params) => this.run(sql, params),
+      exec: (sql, params) => this.query(sql, params),
     });
   }
 
@@ -217,21 +309,52 @@ export class Fenec {
     return { replace: b[0] === 1, bytes: b.subarray(1) };
   }
 
-  /** Restores from a byte image. */
+  /**
+   * Restores from a byte image. An image whose collated text needs
+   * collation data the module has not been handed is refused, as `run`
+   * refuses a statement (`e.collation`): `restore` fetches it and loads the
+   * image again.
+   */
   load(bytes) {
     const ptr = this.#wasm.fenec_alloc(bytes.length);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+    let r;
     try {
-      if (this.#wasm.fenec_load(this.#handle, ptr, bytes.length) !== 0) {
-        throw new FenecError('could not load image (corrupt or incompatible version)');
-      }
+      r = this.#wasm.fenec_load(this.#handle, ptr, bytes.length);
     } finally {
       this.#wasm.fenec_free(ptr, bytes.length);
+    }
+    if (r & 2) {
+      const { chunks } = this.#collationState();
+      const e = new FenecError('the image needs collation data the module has not been handed');
+      throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
+    }
+    if (r !== 0) throw new FenecError('could not load image (corrupt or incompatible version)');
+  }
+
+  /** `load`, fetching the collation data the image needs and loading it again. */
+  async loadAsync(bytes) {
+    for (;;) {
+      try {
+        return this.load(bytes);
+      } catch (e) {
+        if (!e.collation || !(await this.#fetched(e.collation))) throw e;
+      }
     }
   }
 
   close() {
     this.#wasm.fenec_close(this.#handle);
+  }
+}
+
+/** `collate/` beside the module, where `make wasm` puts the collation data. */
+function beside(src) {
+  if (typeof src !== 'string' && !(src instanceof URL)) return null;
+  try {
+    return new URL('collate/', new URL(src, globalThis.location?.href));
+  } catch {
+    return null;
   }
 }
 
@@ -360,12 +483,12 @@ function direction(dir) {
 
 // The collations the engine knows. The name is spliced into the query text,
 // so it is checked against the list rather than against the name pattern.
-const COLLATIONS = ['tr'];
+const COLLATIONS = ['und', 'tr'];
 
 function collation(name) {
   if (name === undefined || name === null) return null;
   if (!COLLATIONS.includes(name)) {
-    throw new FenecError(`unknown collation: ${JSON.stringify(name)}; there is 'tr'`);
+    throw new FenecError(`unknown collation: ${JSON.stringify(name)}; there are 'und' and 'tr'`);
   }
   return name;
 }
@@ -1228,7 +1351,7 @@ export async function restore(fenec, key = 'default') {
       at += c.length;
     }
   }
-  fenec.load(bytes);
+  await fenec.loadAsync(bytes);
   fenec.journal();
   stored.set(fenec, { key, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
   return true;
@@ -1379,11 +1502,16 @@ async function* sseEvents(res) {
   }
 }
 
-/** `create collection` text from a schema: field name, type and index as is. */
+/**
+ * `create collection` text from a schema: field name, type, collation and
+ * index as is. The collation too: without it the replica's field compared
+ * its text by the bytes, and paged and ordered differently from the server.
+ */
 function schemaDDL(schema) {
   const fields = schema.fields.map(
     (f) =>
       `${ident(f.name)} ${f.type}` +
+      (f.collate ? ` collate ${collation(f.collate)}` : '') +
       (f.required ? ' required' : '') +
       (f.index ? ` @${f.index}` : ''),
   );
@@ -1551,7 +1679,7 @@ export class FenecSync {
     return new SyncQuery({
       collection,
       context: this,
-      exec: (sql, params) => this.#local.run(sql, params),
+      exec: (sql, params) => this.#local.query(sql, params),
     });
   }
 
@@ -1568,7 +1696,7 @@ export class FenecSync {
   live(query, cb, opts = {}) {
     const entry = {
       collection: query.collection,
-      query: query.plain().bind((sql, params) => this.#local.run(sql, params)),
+      query: query.plain().bind((sql, params) => this.#local.query(sql, params)),
       cb,
       onError: opts.onError ?? this.#onError,
     };
@@ -1674,7 +1802,9 @@ export class FenecSync {
         // insert into a keyless shape is *not* applied optimistically (see
         // below), or the server's row would leave two copies locally.
         const temps = docs.map(() => this.#nextTemp++);
-        this.#local.run(...base.toInsert(docs.map((d, i) => ({ ...d, id: temps[i] }))));
+        // `await undefined` would itself put a microtask in between.
+        const wait = this.#optimistic(() => this.#local.run(...base.toInsert(docs.map((d, i) => ({ ...d, id: temps[i] })))));
+        if (wait) await wait;
         const pend = this.#pending.get(collection);
         docs.forEach((d, i) => pend.set(String(d[shape.key]), temps[i]));
         undo = () => {
@@ -1691,9 +1821,13 @@ export class FenecSync {
       // enough -- `update` creates no rows and `delete` deletes none it
       // created, so this id set is the whole of the change.
       // `select()` drops the projection: writing back needs every field.
-      const before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
+      let before;
       stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
-      count = this.#local.run(...stmt).count ?? 0;
+      const wait = this.#optimistic(() => {
+        before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
+        count = this.#local.run(...stmt).count ?? 0;
+      });
+      if (wait) await wait;
       undo = () => {
         // An unconditional builder: `before` already carries *which* rows
         // changed, by id. Re-applying the filter (and running into
@@ -1719,6 +1853,26 @@ export class FenecSync {
     }
   }
 
+  /**
+   * Runs `fn`, the optimistic half of a write, at once, and again once the
+   * collation data it was refused for is here -- refused before it changed
+   * anything. Not `async`: when `fn` runs at once, as it does unless the
+   * module lacks that data, nothing is awaited, and the change is visible
+   * the moment `write` is called.
+   */
+  #optimistic(fn) {
+    try {
+      fn();
+      return undefined;
+    } catch (e) {
+      if (!e.collation || e.ran) throw e;
+      return this.#local.collation(...e.collation).then((fetched) => {
+        if (!fetched) throw e;
+        return this.#optimistic(fn);
+      });
+    }
+  }
+
   #rollback(undos) {
     for (const u of undos.reverse()) {
       try {
@@ -1731,7 +1885,7 @@ export class FenecSync {
   }
 
   get #localExec() {
-    return (sql, params) => this.#local.run(sql, params);
+    return (sql, params) => this.#local.query(sql, params);
   }
 
   #deleteLocal(collection, ids) {
@@ -2151,7 +2305,8 @@ function normalizeShape(raw) {
  *
  * - `url`      server root (`fenec-pg --http`)
  * - `shapes`   `[{ collection, where?, select?, key? }]`
- * - `local`    an existing `Fenec`; otherwise opened from the `wasm` path
+ * - `local`    an existing `Fenec`; otherwise opened from the `wasm` path,
+ *              its collation data from `collation` (`Fenec.open`)
  * - `token`    `Authorization: Bearer`
  * - `persist`  IndexedDB key: the image **and the cursors** are stored
  * - `leader`   `false` turns off multi-tab leader election
@@ -2159,7 +2314,7 @@ function normalizeShape(raw) {
  */
 export async function sync(opts = {}) {
   if (!opts.url) throw new FenecError('sync(): `url` is required');
-  const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec.wasm'));
+  const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec.wasm', { collation: opts.collation }));
   return new FenecSync(local, opts).start();
 }
 

@@ -20,6 +20,9 @@
 //! none of the lists and is not ranked -- as `match` ranks only documents
 //! holding a word of its query.
 
+// Without the `sparse` feature the index's code is here but unused (`off.rs`);
+// the values it indexes stay.
+#![cfg_attr(not(feature = "sparse"), allow(dead_code, unused_imports))]
 use crate::error::{Error, Result};
 use crate::text::ByScore;
 use crate::value::DocId;
@@ -247,6 +250,7 @@ impl List {
 /// to the file: it is rebuilt from the documents on open, in the pass that
 /// already reads every one of them for the other indexes.
 #[derive(Default)]
+#[cfg(feature = "sparse")]
 pub struct SparseIndex {
     /// Dimension -> where its list is in `lists`: the map the vector index
     /// keeps from a document to its node, reused. A map of its own for this
@@ -261,6 +265,7 @@ pub struct SparseIndex {
     heap: usize,
 }
 
+#[cfg(feature = "sparse")]
 impl SparseIndex {
     pub fn new() -> SparseIndex {
         SparseIndex::default()
@@ -482,7 +487,10 @@ struct Cursor<'a> {
     ceiling: f64,
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "sparse"))]
+pub use crate::off::SparseIndex;
+
+#[cfg(all(test, feature = "sparse"))]
 mod tests {
     use super::*;
 

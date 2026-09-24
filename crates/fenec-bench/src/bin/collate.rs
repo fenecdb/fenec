@@ -1,4 +1,4 @@
-//! What `order ... collate tr` costs: `make collate-bench`
+//! What `order ... collate tr` and `collate und` cost: `make collate-bench`
 //!
 //! A million Turkish names -- a first name, a second one for a third of
 //! them, a surname, and one in twenty in capitals as a registry writes them
@@ -89,16 +89,19 @@ fn main() {
     });
     println!("sorting {n} strings in memory (the copy, {copy:.1} ms, taken off)");
     let calls = Cell::new(0u64);
-    for (label, turkish) in [("bytes", false), ("tr", true)] {
+    for (label, coll) in [
+        ("bytes", None),
+        ("tr", Some(Collation::Turkish)),
+        ("und", Some(Collation::Root)),
+    ] {
         let ms = time(|| {
             let mut v = names.clone();
             calls.set(0);
             v.sort_unstable_by(|a, b| {
                 calls.set(calls.get() + 1);
-                if turkish {
-                    Collation::Turkish.compare(a, b)
-                } else {
-                    a.cmp(b)
+                match coll {
+                    Some(c) => c.compare(a, b),
+                    None => a.cmp(b),
                 }
             });
         }) - copy;
@@ -130,10 +133,15 @@ fn main() {
     let queries = [
         ("a page, bytes", "order name limit 20".to_string()),
         ("a page, tr", "order name collate tr limit 20".to_string()),
+        ("a page, und", "order name collate und limit 20".to_string()),
         ("all, bytes", format!("order name offset {all} limit 20")),
         (
             "all, tr",
             format!("order name collate tr offset {all} limit 20"),
+        ),
+        (
+            "all, und",
+            format!("order name collate und offset {all} limit 20"),
         ),
     ];
     println!("fenecdb, in process");

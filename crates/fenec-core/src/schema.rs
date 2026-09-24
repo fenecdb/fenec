@@ -202,6 +202,16 @@ pub struct TextIndexSpec {
     pub prefix_max: u8,
     /// Shortest prefix indexed. Below 3 the terms stop discriminating.
     pub prefix_min: u8,
+    /// Whether each character of a script written without spaces -- Han,
+    /// kana, Hangul, Thai -- is indexed as well as each pair of them (`text`).
+    ///
+    /// Pairs find a word written in a longer run, and a query of one
+    /// character finds only a run of one. On C-MTEB's EcomRetrieval, whose
+    /// documents are product titles, characters as well move nDCG@10 0.439
+    /// -> 0.528; on its CovidRetrieval, news, 0.868 -> 0.872, and on the
+    /// Japanese JaGovFaqs 0.582 -> 0.576. For 1.6 to 1.9x the postings and a
+    /// query 3 to 8x slower, so it is off unless asked for.
+    pub chars: bool,
 }
 
 impl Default for TextIndexSpec {
@@ -211,6 +221,7 @@ impl Default for TextIndexSpec {
             b_pct: 40,
             prefix_max: 0,
             prefix_min: 3,
+            chars: false,
         }
     }
 }
@@ -222,6 +233,23 @@ impl TextIndexSpec {
     pub fn b(&self) -> f32 {
         self.b_pct as f32 / 100.0
     }
+    /// The options as `@text(...)` spells them: what every listing of a
+    /// schema and every statement generated from one prints, so that an
+    /// index made again from it is the same index.
+    pub fn args(&self) -> String {
+        let mut out = format!("k1={}, b={}", self.k1(), self.b());
+        if self.prefix_max != 0 {
+            out.push_str(&format!(", prefix={}", self.prefix_max));
+            if self.prefix_min != 3 {
+                out.push_str(&format!(", prefix_min={}", self.prefix_min));
+            }
+        }
+        if self.chars {
+            out.push_str(", chars");
+        }
+        out
+    }
+
     /// The prefix lengths to index, `None` when the option is off.
     pub fn prefixes(&self) -> Option<std::ops::RangeInclusive<usize>> {
         if self.prefix_max == 0 || self.prefix_max < self.prefix_min {
@@ -284,7 +312,7 @@ impl IndexKind {
                     "field `{field}` is not text, no full-text index can be built"
                 )));
             }
-            IndexKind::Sorted if !crate::sorted::SortedIndex::supports(ty) => {
+            IndexKind::Sorted if !crate::sorted::orderable(ty) => {
                 return Err(Error::Type(format!(
                     "field `{field}` is not int, float, timestamp or text, no ordered index \
                      can be built"
@@ -453,7 +481,11 @@ impl Schema {
                     }
                 }
                 IndexKind::Text(spec) => {
-                    out.push(3);
+                    // One that indexes characters is a kind of its own, as a
+                    // quantized index is: a version that knows no `chars`
+                    // refuses the file rather than index pairs alone and
+                    // answer a query of one character with nothing.
+                    out.push(if spec.chars { 7 } else { 3 });
                     put_uvarint(&mut out, spec.k1_pct as u64);
                     put_uvarint(&mut out, spec.b_pct as u64);
                     put_uvarint(&mut out, spec.prefix_max as u64);
@@ -513,11 +545,12 @@ impl Schema {
                     }
                     IndexKind::Vector(spec.resolved())
                 }
-                3 => IndexKind::Text(TextIndexSpec {
+                3 | 7 => IndexKind::Text(TextIndexSpec {
                     k1_pct: get_uvarint(buf, pos)? as u16,
                     b_pct: get_uvarint(buf, pos)? as u16,
                     prefix_max: get_uvarint(buf, pos)? as u8,
                     prefix_min: get_uvarint(buf, pos)? as u8,
+                    chars: kind == 7,
                 }),
                 4 => IndexKind::Sorted,
                 6 => IndexKind::Inverted,

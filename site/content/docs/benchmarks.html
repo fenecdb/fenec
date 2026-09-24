@@ -274,19 +274,19 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1316 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1008 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>878 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>474 KB</b></td><td class="n"><b>137 KB</b></td><td class="n">166 KB</td></tr>
-<tr><td><code>web/fenec.js</code>, the client</td><td class="n">72 KB</td><td class="n">20 KB</td><td class="n">23 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">2.19 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1477 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1039 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>490 KB</b></td><td class="n"><b>144 KB</b></td><td class="n">175 KB</td></tr>
+<tr><td><code>web/fenec.js</code>, the client</td><td class="n">78 KB</td><td class="n">21 KB</td><td class="n">25 KB</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">2.51 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>157 KB brotli</b> for both together. A binary you execute and an image
+<b>166 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -295,7 +295,7 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  176 KB at <code>-q 5</code>, nginx's dynamic default, and 187 KB at
+  186 KB at <code>-q 5</code>, nginx's dynamic default, and 198 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
   number by 12–19%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is
@@ -308,3 +308,42 @@ dashes.</p>
 a connection thread that panics unwinds and takes down only its own session,
 and the server stays up. The <code>cli</code> profile turns panic unwinding
 into abort, which is right for a single process with nothing to recover.</p>
+
+<h3 id="module-features">The browser module, index by index</h3>
+
+<p>A page that does not search vectors, or text, loads a module built
+without the index it does not use (<a href="javascript.html#features">A
+smaller module</a>): <code>make wasm FEATURES="text sorted"</code>, and
+<code>make wasm-sizes</code> builds and measures every set of the four.
+What stands in for a missing index is a type no value can have, so the
+compiler drops the index whole, and the engine's paths through it with it.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
+<tbody>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">490.1</td><td class="n">144.4</td><td class="n">174.8</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">460.9</td><td class="n">137.4</td><td class="n">165.9</td><td class="n">7.0</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">485.4</td><td class="n">143.3</td><td class="n">173.0</td><td class="n">1.1</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">466.9</td><td class="n">139.5</td><td class="n">168.4</td><td class="n">4.9</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">446.4</td><td class="n">133.0</td><td class="n">160.5</td><td class="n">11.4</td></tr>
+<tr><td><code>vector text</code></td><td class="n">455.4</td><td class="n">135.7</td><td class="n">163.7</td><td class="n">8.7</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">437.0</td><td class="n">132.1</td><td class="n">158.9</td><td class="n">12.3</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">459.8</td><td class="n">137.5</td><td class="n">165.8</td><td class="n">6.9</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">416.4</td><td class="n">125.4</td><td class="n">150.8</td><td class="n">19.0</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">440.7</td><td class="n">131.4</td><td class="n">158.4</td><td class="n">13.0</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">420.6</td><td class="n">127.1</td><td class="n">152.8</td><td class="n">17.3</td></tr>
+<tr><td><code>vector</code></td><td class="n">429.6</td><td class="n">130.1</td><td class="n">156.1</td><td class="n">14.3</td></tr>
+<tr><td><code>text</code></td><td class="n">410.7</td><td class="n">123.8</td><td class="n">148.6</td><td class="n">20.6</td></tr>
+<tr><td><code>sparse</code></td><td class="n">390.6</td><td class="n">119.5</td><td class="n">143.4</td><td class="n">24.9</td></tr>
+<tr><td><code>sorted</code></td><td class="n">413.3</td><td class="n">124.9</td><td class="n">150.2</td><td class="n">19.5</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">383.0</td><td class="n">117.3</td><td class="n">140.6</td><td class="n">27.1</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Left out alone, the graph saves 11.4 KB brotli, the ordered index 7.0,
+the text index 4.9 and the sparse index 1.1, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.2. All four
+save 27.1 KB, 19% of the module. The module with every index is the size it
+was before any could be left out, to the byte.</p>

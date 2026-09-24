@@ -2,7 +2,7 @@
 //!
 //! Language summary
 //! ```text
-//! create collection [if not exists] <name> ( <field> <type> [required] [collate tr] [@index], ... )
+//! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [@index], ... )
 //!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type]
 //!        index: @hash @sorted @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //! drop   collection [if exists] <name>
@@ -10,7 +10,7 @@
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
-//!            [order <field> [collate tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            [order <field> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
 //!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
@@ -300,8 +300,9 @@ impl Parser {
                 field = field.required();
                 continue;
             }
-            // `name text collate tr`: the field's text orders in Turkish
-            // wherever it is compared, as SQL's column collation does.
+            // `name text collate tr`: the field's text orders in its
+            // collation wherever it is compared, as SQL's column collation
+            // does.
             if let Some(c) = self.collate()? {
                 field = field.collated(c);
                 continue;
@@ -341,9 +342,19 @@ impl Parser {
                 break;
             }
             let key = self.ident()?;
+            let lowered = key.to_ascii_lowercase();
+            // `chars` is a flag: each character of a script written without
+            // spaces indexed as well as each pair.
+            if lowered == "chars" {
+                spec.chars = true;
+                if !matches!(self.peek(), Tok::Comma) {
+                    break;
+                }
+                self.next();
+                continue;
+            }
             self.expect(Tok::Eq)?;
             let v = self.number()?;
-            let lowered = key.to_ascii_lowercase();
             match lowered.as_str() {
                 "k1" | "b" => {
                     if !(0.0..=100.0).contains(&v) {
@@ -764,7 +775,7 @@ impl Parser {
         match Collation::named(&name) {
             Some(c) => Ok(Some(c)),
             None => self.err(format!(
-                "unknown collation `{name}`: the one there is is `tr`"
+                "unknown collation `{name}`: there are `und`, Unicode's order for every language, and `tr`"
             )),
         }
     }

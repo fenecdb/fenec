@@ -24,7 +24,7 @@ self.onmessage = async (e) => {
   try {
     if (cmd === 'demo') return await demo();
     if (cmd === 'open') return await open(id);
-    if (cmd === 'exec') return exec(id, e.data.sql, e.data.params);
+    if (cmd === 'exec') return await exec(id, e.data.sql, e.data.params);
     if (cmd === 'seed') return await seed(id, e.data.n, e.data.dim);
     if (cmd === 'schema') return schema(id);
   } catch (err) {
@@ -42,10 +42,12 @@ async function open(id) {
   post('result', { id, ok: true, ms: performance.now() - t0 });
 }
 
-function exec(id, sql, params) {
+async function exec(id, sql, params) {
   if (!db) throw new Error('the database is not open yet');
   const t0 = performance.now();
-  const res = db.run(sql, params || []);
+  // `query` rather than `run`: a statement over text of a script whose
+  // collation data the module has not got fetches it and runs again.
+  const res = await db.query(sql, params || []);
   const ms = performance.now() - t0;
   // A read comes back as {columns, rows}; `collections` and `describe` as
   // {kind:'schemas', collections}; a write as {kind:'affected', count}.

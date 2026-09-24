@@ -12,5 +12,11 @@ categories.workspace = true
 [dependencies]
 fenec-core = { workspace = true, default-features = false }
 
+# The tests run their statements through the engine, every index among
+# them. The parser needs none, and asking for them here would put them back
+# into a browser module made without them.
+[dev-dependencies]
+fenec-core = { workspace = true, features = ["indexes"] }
+
 [features]
 default = []

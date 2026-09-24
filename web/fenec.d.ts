@@ -55,8 +55,11 @@ type Attach<T, Path extends readonly string[], N extends string, C extends Field
       }
     : T & { [K in N]: Row<C>[] };
 
-/** A collation `order` can put text in: `'tr'` is Turkish (`collate tr`). */
-export type Collation = 'tr';
+/**
+ * A collation `order` can put text in: `'und'` is Unicode's order, for every
+ * language (`collate und`); `'tr'` is Turkish (`collate tr`).
+ */
+export type Collation = 'und' | 'tr';
 
 /**
  * The child side of a `lookup`. `on` is the child's field; the parent's key
@@ -189,7 +192,25 @@ export function raw<F extends Fields = Fields>(sql: string, ...params: unknown[]
 /** Executor: `(sql, params)` -> response. A `Fenec` instance also works. */
 export type Exec = (sql: string, params: unknown[]) => unknown;
 
-export declare class FenecError extends Error {}
+export declare class FenecError extends Error {
+  /**
+   * Set when what refused the statement was collation data the module has
+   * not been handed: the names to hand it (`Fenec.collation`).
+   */
+  collation?: string[];
+  /** How many statements of the same text ran before this one. */
+  ran?: number;
+}
+
+/**
+ * Where the collation data the browser module does not carry comes from:
+ * the URL of the directory holding `<name>.bin`, or a function handed the
+ * name and returning its bytes or a `Response`.
+ */
+export type CollationSource =
+  | string
+  | URL
+  | ((name: string) => BufferSource | Response | Promise<BufferSource | Response>);
 
 /**
  * Immutable query builder. `F` is the collection's fields, `P` the result
@@ -314,7 +335,8 @@ export declare class Query<
 
   /**
    * Successive calls add a sort key (the second decides when the first ties).
-   * `{ collate: 'tr' }` orders text as Turkish does rather than by its bytes.
+   * `{ collate: 'und' }` orders text as Unicode does for every language,
+   * `{ collate: 'tr' }` as Turkish does, rather than by its bytes.
    */
   order(
     field: (keyof Row<F> & string) | Aggregate<F>,
@@ -418,10 +440,13 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
 
   /**
    * Loads the WASM module. On Node the file bytes are passed directly:
-   * `Fenec.open(await readFile('fenec.wasm'))`.
+   * `Fenec.open(await readFile('fenec.wasm'))`. `collation` says where the
+   * collation data it does not carry comes from: by default `collate/`
+   * beside the module, when `src` is a URL.
    */
   static open<S extends AnySchema<S> = Schema>(
     src?: string | BufferSource,
+    opts?: { collation?: CollationSource },
   ): Promise<Fenec<S>>;
 
   readonly version: string;
@@ -429,9 +454,21 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   /** Query builder. */
   from<K extends keyof S & string>(name: K): Query<S[K]>;
 
-  /** Raw FenecQL -- synchronous. */
+  /**
+   * Raw FenecQL -- synchronous. A statement that compares text in a
+   * collation whose data for its script the module has not been handed is
+   * refused (`FenecError.collation`); `query` fetches it and runs it again.
+   */
   run(sql: string, params?: unknown[]): any;
   rows(sql: string, params?: unknown[]): any[];
+  /** `run`, fetching the collation data a statement is refused for. */
+  query(sql: string, params?: unknown[]): Promise<any>;
+  /**
+   * Hands the module the collation data `names` names -- `'all'` for every
+   * script's -- before a statement needs it. The module carries `latin`.
+   * True when it fetched any.
+   */
+  collation(...names: string[]): Promise<boolean>;
 
   schemas(): SchemaInfo[];
   stats(): unknown;
@@ -443,7 +480,10 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
    * with `replace` an image to store instead (after a `compact`).
    */
   drain(): { replace: boolean; bytes: Uint8Array };
+  /** Restores from a byte image; refused like `run` for collation data. */
   load(bytes: Uint8Array): void;
+  /** `load`, fetching the collation data the image needs. */
+  loadAsync(bytes: Uint8Array): Promise<void>;
   close(): void;
 
   /**
@@ -500,6 +540,8 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** An existing local database; otherwise opened from the `wasm` path. */
   local?: Fenec<S>;
   wasm?: string | BufferSource;
+  /** Where the local module's collation data comes from (`Fenec.open`). */
+  collation?: CollationSource;
   token?: string;
   fetch?: typeof globalThis.fetch;
   /** IndexedDB key: the image **and the cursors** are stored. */

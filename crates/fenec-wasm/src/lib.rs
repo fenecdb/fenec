@@ -11,6 +11,7 @@
 //! Every returned buffer is `[u32 length (LE)][contents]`. Once the caller
 //! has read the contents it must call `fenec_free(ptr, 4 + length)`.
 
+use fenec_core::collate;
 use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_ql::parse;
@@ -174,20 +175,86 @@ fn run(handle: u32, sql: &str, params_src: &str) -> String {
         Ok(s) => s,
         Err(e) => return json::error_to_string(&e),
     };
+    // A note left by anything before is not these statements'.
+    collate::take_missing();
     let res = with_db(handle, |db| {
         let mut last = Response::Ok("empty".into());
-        for s in &stmts {
+        for (ran, s) in stmts.iter().enumerate() {
             match db.execute_with(s, &params) {
                 Ok(r) => last = r,
-                Err(e) => return Err(e),
+                Err(e) => return Err((e, ran)),
             }
         }
         Ok(last)
     });
     match res {
         None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
-        Some(Err(e)) => json::error_to_string(&e),
+        Some(Err((e, ran))) => refused(&e, ran),
         Some(Ok(r)) => json::response_to_string(&r),
+    }
+}
+
+/// An error as JSON, and when what refused the statement was collation data
+/// the module has not been handed, which (`"chunks"`) and how many of the
+/// statements before it ran (`"ran"`, left out when none did): the client
+/// runs one again by itself only when nothing before it had.
+fn refused(e: &Error, ran: usize) -> String {
+    let mut out = json::error_to_string(e);
+    let missing = collate::take_missing();
+    if missing != 0 {
+        out.pop();
+        out.push_str(",\"chunks\":[");
+        for (i, name) in collate::chunk_names(missing).enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            json::escape_into(&mut out, name);
+        }
+        out.push(']');
+        if ran > 0 {
+            out.push_str(&format!(",\"ran\":{ran}"));
+        }
+        out.push('}');
+    }
+    out
+}
+
+// ----------------------------------------------------------- collation
+
+/// The collation data: `{"chunks":[names],"loaded":mask}`, a chunk's bit its
+/// place in the list. The module carries `latin`; the others are handed to
+/// it (`fenec_add_chunk`) from `collate/<name>.bin` beside it.
+#[no_mangle]
+pub extern "C" fn fenec_collation() -> *mut u8 {
+    let mut s = String::from("{\"chunks\":[");
+    for (i, name) in collate::CHUNKS.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        json::escape_into(&mut s, name);
+    }
+    s.push_str(&format!("],\"loaded\":{}}}", collate::loaded()));
+    boxed(s.as_bytes())
+}
+
+/// Hands the module a chunk of collation data, the bytes of its `.bin`.
+/// Returns its place in `fenec_collation`'s list, or -1 for bytes that are
+/// not one of this module's chunks -- another version's among them.
+///
+/// # Safety
+/// `ptr` must be valid and `len` bytes long.
+#[no_mangle]
+pub unsafe extern "C" fn fenec_add_chunk(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() {
+        return -1;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    match collate::add_chunk(bytes) {
+        Some(name) => collate::CHUNKS
+            .iter()
+            .position(|n| *n == name)
+            .map_or(-1, |i| i as i32),
+        None => -1,
     }
 }
 
@@ -299,7 +366,12 @@ pub extern "C" fn fenec_drain(handle: u32) -> *mut u8 {
     boxed(&out)
 }
 
-/// Loads from a byte image. 0 = success, 1 = error.
+/// Loads from a byte image: 0 when it did, 1 when the bytes are not one,
+/// and bit 1 when its collated text needs collation data the module has not
+/// been handed -- a bit a chunk from bit 2, a chunk's bit its place in
+/// `fenec_collation`'s list. Its `@sorted` indexes were then built comparing
+/// without it, so the database is emptied, to be loaded again once the
+/// module has it.
 ///
 /// # Safety
 /// `ptr` must be valid and `len` bytes long.
@@ -309,9 +381,24 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
         return 1;
     }
     let bytes = std::slice::from_raw_parts(ptr, len);
-    match with_db(handle, |db| db.load(bytes)) {
-        Some(Ok(_)) => 0,
-        _ => 1,
+    collate::take_missing();
+    let out = with_slot(handle, |s| {
+        s.db.load(bytes).ok()?;
+        let missing = s.db.collation_missing() | collate::take_missing();
+        if missing != 0 {
+            let mut empty = Database::new();
+            empty.set_change_capacity(s.db.change_capacity());
+            if let Some(j) = &s.journal {
+                empty.set_sink(Box::new(JournalSink(Arc::clone(j))));
+            }
+            s.db = empty;
+        }
+        Some(missing)
+    });
+    match out.flatten() {
+        Some(0) => 0,
+        Some(missing) => (2 | missing << 2) as i32,
+        None => 1,
     }
 }
 

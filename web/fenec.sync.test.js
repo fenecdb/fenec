@@ -154,6 +154,40 @@ test('the seed fills the local replica with the shape', opts, async () => {
   }
 });
 
+test('a collated field syncs in its collation, the replica handed the data it needs', opts, async () => {
+  const s = await server();
+  await s.run('create collection people (key text @hash, name text collate und @sorted)');
+  await s.run('put people [{key: "1", name: "Ζωή"}, {key: "2", name: "anna"}, {key: "3", name: "Борис"}, {key: "4", name: "Bora"}]');
+  const fetched = [];
+  const db = await sync({
+    url: s.url,
+    local: await Fenec.open(wasm, {
+      collation: (name) => {
+        fetched.push(name);
+        return readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+      },
+    }),
+    leader: false,
+    shapes: [{ collection: 'people', key: 'key' }],
+  });
+  const names = async () => (await db.from('people').select('name').order('name').rows()).map((r) => r.name);
+  try {
+    // The seed needed Greek and Cyrillic, and the replica's field orders as
+    // the server's does: by the collation, not the bytes.
+    await db.ready();
+    assert.deepEqual(await names(), ['anna', 'Bora', 'Ζωή', 'Борис']);
+    // An optimistic write whose text needs data the replica has not got
+    // waits for it, then shows up.
+    await db.from('people').insert({ name: '山田' });
+    assert.deepEqual(await names(), ['anna', 'Bora', 'Ζωή', 'Борис', '山田']);
+    assert.deepEqual(fetched.sort(), ['cyrillic', 'greek', 'han']);
+    await until(async () => (await s.run('get people')).length === 5, 'the server has the write');
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
 test('a write on the server lands on the subscriber', opts, async () => {
   const s = await server();
   const db = await open(s.url);

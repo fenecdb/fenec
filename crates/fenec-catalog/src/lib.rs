@@ -73,9 +73,11 @@ const INFORMATION_SCHEMA: i64 = 13_000;
 /// The role every session is, as PostgreSQL's bootstrap superuser is 10.
 const ROLE: i64 = 10;
 const DATABASE: i64 = 16_384;
-/// `tr-x-icu`, the name PostgreSQL gives ICU's Turkish collation: what a
-/// `collate tr` field's text orders in, and what `\d` shows for it.
+/// `tr-x-icu` and `und-x-icu`, the names PostgreSQL gives ICU's Turkish
+/// collation and its root one: what a `collate tr` and a `collate und`
+/// field's text orders in, and what `\d` shows for it.
 const COLL_TR: i64 = 12_800;
+const COLL_UND: i64 = 12_801;
 
 const AM_HEAP: i64 = 2;
 const AM_BTREE: i64 = 403;
@@ -653,6 +655,17 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
                     t("tr"),
                     t("tr"),
                 ],
+                vec![
+                    V::Int(COLL_UND),
+                    t("und-x-icu"),
+                    V::Int(PG_CATALOG),
+                    V::Int(ROLE),
+                    t("i"),
+                    V::Bool(true),
+                    V::Int(-1),
+                    t("und"),
+                    t("und"),
+                ],
             ],
         ),
         "pg_settings" => rel(
@@ -893,49 +906,50 @@ fn pg_attribute(alias: &str, s: &Snapshot) -> Rel {
         ("attoptions", TEXT_ARRAY),
         ("attfdwoptions", TEXT_ARRAY),
     ];
-    let row = |rel: i64, name: &str, ty: &DataType, num: i64, notnull: bool, coll: bool| {
-        let (oid, typmod, ndims) = pg_type(ty);
-        let collation = match coll {
-            true => COLL_TR,
-            false => TYPES.iter().find(|x| x.0 == oid).map_or(0, |x| x.6),
+    let row =
+        |rel: i64, name: &str, ty: &DataType, num: i64, notnull: bool, coll: Option<Collation>| {
+            let (oid, typmod, ndims) = pg_type(ty);
+            let collation = match coll {
+                Some(Collation::Turkish) => COLL_TR,
+                Some(Collation::Root) => COLL_UND,
+                None => TYPES.iter().find(|x| x.0 == oid).map_or(0, |x| x.6),
+            };
+            let len = TYPES.iter().find(|x| x.0 == oid).map_or(-1, |x| x.2);
+            vec![
+                V::Int(rel),
+                t(name),
+                V::Int(oid as i64),
+                V::Int(len),
+                V::Int(num),
+                V::Int(typmod),
+                V::Int(ndims),
+                V::Bool(len > 0 && len <= 8),
+                t("d"),
+                t(if len > 0 { "p" } else { "x" }),
+                t(""),
+                V::Bool(notnull),
+                V::Bool(false),
+                V::Bool(false),
+                t(""),
+                t(""),
+                V::Bool(false),
+                V::Bool(true),
+                V::Int(0),
+                V::Int(collation),
+                V::Int(-1),
+                nul(),
+                nul(),
+                nul(),
+            ]
         };
-        let len = TYPES.iter().find(|x| x.0 == oid).map_or(-1, |x| x.2);
-        vec![
-            V::Int(rel),
-            t(name),
-            V::Int(oid as i64),
-            V::Int(len),
-            V::Int(num),
-            V::Int(typmod),
-            V::Int(ndims),
-            V::Bool(len > 0 && len <= 8),
-            t("d"),
-            t(if len > 0 { "p" } else { "x" }),
-            t(""),
-            V::Bool(notnull),
-            V::Bool(false),
-            V::Bool(false),
-            t(""),
-            t(""),
-            V::Bool(false),
-            V::Bool(true),
-            V::Int(0),
-            V::Int(collation),
-            V::Int(-1),
-            nul(),
-            nul(),
-            nul(),
-        ]
-    };
     let mut rows = Vec::new();
     for tb in &s.tables {
-        rows.push(row(tb.oid, "id", &DataType::Int, 1, true, false));
+        rows.push(row(tb.oid, "id", &DataType::Int, 1, true, None));
         for f in &tb.fields {
-            let coll = f.collate.is_some();
-            rows.push(row(tb.oid, &f.name, &f.ty, f.attnum, f.required, coll));
+            rows.push(row(tb.oid, &f.name, &f.ty, f.attnum, f.required, f.collate));
         }
         for i in tb.indexes() {
-            rows.push(row(i.oid, &i.column, &i.ty, 1, i.primary, false));
+            rows.push(row(i.oid, &i.column, &i.ty, 1, i.primary, None));
         }
     }
     rel(alias, &cols, rows)

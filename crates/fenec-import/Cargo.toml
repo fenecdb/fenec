@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 # No external dependencies. The SQLite file format is read by hand; the
 # PostgreSQL wire protocol is spoken through fenec-pg's client.
-fenec-core = { workspace = true, features = ["std-fs"] }
+fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-pg.workspace = true
 
 [dev-dependencies]

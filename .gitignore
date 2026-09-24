@@ -5,6 +5,8 @@ pkg/
 node_modules/
 web/fenec-schema.d.ts
 web/fenec.wasm
+web/fenec-lite.wasm
+web/collate/
 site/dist/
 .wrangler/
 __pycache__/

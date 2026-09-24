@@ -602,14 +602,34 @@ def build():
         open(os.path.join(OUT, hashed), "wb").write(blob)
         engine[name] = hashed
 
+    # The collation data the module is handed as a page needs it: beside the
+    # stable module under `collate/`, and for the site's own under a name
+    # that changes with the data -- a chunk of other tables is refused, and
+    # a cached one would be handed over until the cache let it go.
+    chunks = os.path.join(REPO, "web", "collate")
+    if os.path.isdir(chunks):
+        names = sorted(n for n in os.listdir(chunks) if n.endswith(".bin"))
+        digest = hashlib.sha256()
+        for n in names:
+            digest.update(n.encode("utf-8"))
+            digest.update(open(os.path.join(chunks, n), "rb").read())
+        engine["collate/"] = f"collate.{digest.hexdigest()[:10]}/"
+        for d in ("collate/", engine["collate/"]):
+            os.makedirs(os.path.join(OUT, d), exist_ok=True)
+            for n in names:
+                shutil.copy(os.path.join(chunks, n), os.path.join(OUT, d, n))
+
     worker = open(os.path.join(ROOT, "engine-worker.js"), encoding="utf-8").read()
     # Point the worker at the immutable copies. The exact quoted paths are
     # matched, so the `booting fenec.wasm` log line is left alone.
     if "fenec.js" in engine:
         worker = worker.replace("from './fenec.js'", f"from './{engine['fenec.js']}'")
     if "fenec.wasm" in engine:
+        collation = ""
+        if "collate/" in engine:
+            collation = f", {{ collation: new URL('./{engine['collate/']}', self.location.href) }}"
         worker = worker.replace("Fenec.open('./fenec.wasm')",
-                                f"Fenec.open('./{engine['fenec.wasm']}')")
+                                f"Fenec.open('./{engine['fenec.wasm']}'{collation})")
     worker_name = emit("engine-worker.js", worker)
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
@@ -679,8 +699,10 @@ def build():
              "  X-Frame-Options: DENY",
              ""]
     for hashed in sorted(list(assets.values()) + list(engine.values())):
+        if hashed.endswith("/"):
+            hashed += "*"
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
-    for stable in ("fenec.js", "fenec.wasm"):
+    for stable in ("fenec.js", "fenec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 

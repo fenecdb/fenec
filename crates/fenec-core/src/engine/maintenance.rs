@@ -55,6 +55,7 @@ struct IndexCopy {
     kind: IndexKind,
     ty: DataType,
     /// The field's collation, which a `@sorted` index orders its text in.
+    #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
     collate: Option<Collation>,
     values: Vec<(DocId, Option<Value>)>,
 }
@@ -63,6 +64,7 @@ enum Built {
     Vector(VectorIndex),
     Hash(HashIndex),
     Text(TextIndex),
+    #[cfg_attr(not(feature = "sorted"), allow(dead_code))]
     Sorted(SortedIndex),
     Sparse(SparseIndex),
 }
@@ -213,6 +215,9 @@ impl Database {
         if_not_exists: bool,
     ) -> Result<std::result::Result<IndexCopy, Response>> {
         self.may_write(false)?;
+        if let Some(feature) = super::missing_feature(kind) {
+            return Err(super::not_built("the index", feature));
+        }
         if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
             return Ok(Err(done));
         }
@@ -539,6 +544,9 @@ impl IndexCopy {
                 ix.shrink_to_fit();
                 Built::Text(ix)
             }
+            #[cfg(not(feature = "sorted"))]
+            IndexKind::Sorted => unreachable!("`create index` refuses what the build lacks"),
+            #[cfg(feature = "sorted")]
             IndexKind::Sorted => Built::Sorted(SortedIndex::build(
                 &self.ty,
                 self.collate,

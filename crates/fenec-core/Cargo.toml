@@ -18,6 +18,17 @@ categories.workspace = true
 fenec-ql = { path = "../fenec-ql" }
 
 [features]
-default = ["std-fs"]
+default = ["std-fs", "indexes"]
 # File support (native). The WASM build is made without this feature.
 std-fs = []
+# The indexes a page may go without, and what answers through them: the HNSW
+# graph (`near`, `fuse`), the text index (`match`, and `rerank`, which reads
+# the vectors and needs no graph), the sparse inverted index (`near` over
+# `sparse<N>`) and the ordered index (`@sorted`, whose queries the scan
+# answers the same without it). A file declaring one a build lacks opens all
+# the same, and its documents read and write.
+indexes = ["vector", "text", "sparse", "sorted"]
+vector = []
+text = []
+sparse = []
+sorted = []

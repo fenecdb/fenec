@@ -275,7 +275,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>2.19 MB</b> on amd64 and 1.90 MB on arm64 — since no target
+package manager, no libc. The image is <b>2.51 MB</b> on amd64 and 2.17 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image

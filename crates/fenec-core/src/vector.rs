@@ -8,6 +8,10 @@
 //!   length computation happens at query time (1 - dot).
 //! - A delete is a tombstone; skipped while searching, cleaned up on merge.
 
+// Without the `vector` feature the graph's code is here but unused: the
+// index is a type of no value (`off.rs`), and the compiler drops the rest.
+#![cfg_attr(not(feature = "vector"), allow(dead_code, unused_imports))]
+
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::schema::{Metric, Quant, VectorIndexSpec};
 use crate::value::{DocId, VecPrec};
@@ -1120,6 +1124,7 @@ impl<'a> GraphView<'a> {
     }
 }
 
+#[cfg(feature = "vector")]
 pub struct VectorIndex {
     pub dim: usize,
     pub spec: VectorIndexSpec,
@@ -1178,6 +1183,7 @@ thread_local! {
     static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::new());
 }
 
+#[cfg(feature = "vector")]
 impl VectorIndex {
     pub fn new(dim: usize, spec: VectorIndexSpec) -> VectorIndex {
         VectorIndex::with_precision(dim, spec, VecPrec::F32)
@@ -2200,7 +2206,10 @@ impl VectorIndex {
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "vector"))]
+pub use crate::off::VectorIndex;
+
+#[cfg(all(test, feature = "vector"))]
 mod tests {
 
     /// The branchless widening in the hot loop must match codec's exact

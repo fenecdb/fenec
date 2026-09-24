@@ -8,6 +8,10 @@
 //! (the graph, and an exact scan), `match` then `rerank`, and `match` with
 //! `near` fused by reciprocal rank.
 //!
+//! A dataset with no vectors beside it -- a corpus in a language the
+//! embedding model does not read -- is scored by BM25 alone, in the order of
+//! `corpus.jsonl` and `queries.jsonl`.
+//!
 //! With the SPLADE vectors `beir/splade.mjs` writes there as well, each
 //! document's goes into a `sparse<30522>` field, its `@inverted` index built
 //! afterwards and timed, and `near` over it -- alone, and fused with
@@ -134,10 +138,25 @@ fn main() {
         .expect("usage: beir <BEIR dataset dir>");
     let dir = Path::new(&dir);
 
-    let ids: Vec<String> = read(dir, "corpus.ids").lines().map(String::from).collect();
-    let flat = vectors(dir, "corpus.f32");
+    let corpus = read(dir, "corpus.jsonl");
+    let texts = documents(&corpus);
+    let dense = dir.join("corpus.f32").exists();
+    let in_order = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| json_str(l, "_id"))
+            .collect()
+    };
+    let ids: Vec<String> = match dense {
+        true => read(dir, "corpus.ids").lines().map(String::from).collect(),
+        false => in_order(&corpus),
+    };
+    let flat = if dense {
+        vectors(dir, "corpus.f32")
+    } else {
+        Vec::new()
+    };
     let dim = flat.len() / ids.len();
-    let texts = documents(&read(dir, "corpus.jsonl"));
 
     let splade = sparse_vectors(dir, "corpus.sparse");
     if let Some(s) = &splade {
@@ -149,28 +168,40 @@ fn main() {
     }
     let mut db = Database::new();
     let t = Instant::now();
+    let vector = match dense {
+        true => format!(", v vector<{dim}> @hnsw(cosine)"),
+        false => String::new(),
+    };
+    // `@text`'s options, to measure one: `FENECBENCH_TEXT=chars`,
+    // `FENECBENCH_TEXT=prefix=6`.
+    let text = match std::env::var("FENECBENCH_TEXT") {
+        Ok(args) if !args.is_empty() => format!("@text({args})"),
+        _ => "@text".to_string(),
+    };
     db.execute(
         &fenec_ql::parse_one(&format!(
-            "create collection d (doc text, body text @text, v vector<{dim}> @hnsw(cosine), \
-             s sparse<{VOCAB}>)"
+            "create collection d (doc text, body text {text}{vector}, s sparse<{VOCAB}>)"
         ))
         .unwrap(),
     )
     .unwrap();
-    for (n, (chunk, vs)) in ids.chunks(1_000).zip(flat.chunks(1_000 * dim)).enumerate() {
+    for (n, chunk) in ids.chunks(1_000).enumerate() {
         let docs = chunk
             .iter()
-            .zip(vs.chunks(dim))
             .enumerate()
-            .map(|(k, (id, v))| {
+            .map(|(k, id)| {
                 let mut doc = vec![
                     ("doc".to_string(), Expr::Lit(Value::Text(id.clone()))),
                     (
                         "body".to_string(),
                         Expr::Lit(Value::Text(texts[id].clone())),
                     ),
-                    ("v".to_string(), Expr::Lit(Value::Vector(v.to_vec()))),
                 ];
+                if dense {
+                    let at = (n * 1_000 + k) * dim;
+                    let v = flat[at..at + dim].to_vec();
+                    doc.push(("v".to_string(), Expr::Lit(Value::Vector(v))));
+                }
                 if let Some(s) = &splade {
                     let e = s[n * 1_000 + k].clone();
                     doc.push(("s".to_string(), Expr::Lit(Value::Sparse(VOCAB, e))));
@@ -190,6 +221,14 @@ fn main() {
         ids.len(),
         t.elapsed().as_secs_f64()
     );
+    for st in &db.collection("d").unwrap().stats().text_indexes {
+        eprintln!(
+            "the text index: {} terms, {} postings, {:.1} MB",
+            st.terms,
+            st.postings,
+            st.bytes as f64 / 1e6
+        );
+    }
     if splade.is_some() {
         let t = Instant::now();
         db.execute(&fenec_ql::parse_one("create index on d (s) @inverted").unwrap())
@@ -217,29 +256,36 @@ fn main() {
             }
         }
     }
-    let qids: Vec<String> = read(dir, "queries.ids").lines().map(String::from).collect();
-    let qflat = vectors(dir, "queries.f32");
+    let queries = read(dir, "queries.jsonl");
+    let qids: Vec<String> = match dense {
+        true => read(dir, "queries.ids").lines().map(String::from).collect(),
+        false => in_order(&queries),
+    };
+    let qflat = if dense {
+        vectors(dir, "queries.f32")
+    } else {
+        Vec::new()
+    };
     let qsparse = sparse_vectors(dir, "queries.sparse");
-    let qtext: HashMap<String, String> = read(dir, "queries.jsonl")
+    let qtext: HashMap<String, String> = queries
         .lines()
         .filter(|l| !l.is_empty())
         .map(|l| (json_str(l, "_id"), json_str(l, "text")))
         .collect();
 
-    let mut methods: Vec<(String, String)> = vec![
-        (
-            "match (BM25)".into(),
-            "get d select doc match body $1 limit 10".into(),
-        ),
-        (
-            "near, the graph".into(),
-            "get d select doc near v $2 limit 10".into(),
-        ),
-        (
-            "near, exact scan".into(),
-            "get d select doc near v $2 exact limit 10".into(),
-        ),
-    ];
+    let mut methods: Vec<(String, String)> = vec![(
+        "match (BM25)".into(),
+        "get d select doc match body $1 limit 10".into(),
+    )];
+    let dense_methods = methods.len();
+    methods.push((
+        "near, the graph".into(),
+        "get d select doc near v $2 limit 10".into(),
+    ));
+    methods.push((
+        "near, exact scan".into(),
+        "get d select doc near v $2 exact limit 10".into(),
+    ));
     for c in [50, 200, 1_000] {
         methods.push((
             format!("match -> rerank, {c} candidates"),
@@ -258,6 +304,9 @@ fn main() {
             format!("match + near, fuse, k {k}"),
             format!("get d select doc match body $1 near v $2 fuse k {k} candidates 20 limit 10"),
         ));
+    }
+    if !dense {
+        methods.truncate(dense_methods);
     }
     if qsparse.is_some() {
         methods.push((
@@ -279,7 +328,10 @@ fn main() {
             let Some(rels) = qrels.get(qid) else { continue };
             let params = [
                 Value::Text(qtext[qid].clone()),
-                Value::Vector(qflat[i * dim..(i + 1) * dim].to_vec()),
+                match dense {
+                    true => Value::Vector(qflat[i * dim..(i + 1) * dim].to_vec()),
+                    false => Value::Null,
+                },
                 match &qsparse {
                     Some(q) => Value::Sparse(VOCAB, q[i].clone()),
                     None => Value::Null,

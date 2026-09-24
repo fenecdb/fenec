@@ -2,7 +2,7 @@
 
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
-use crate::collate::Collation;
+use crate::collate::{self, Collation};
 use crate::error::{Error, Result};
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
@@ -343,6 +343,15 @@ pub struct Collection {
 }
 
 impl Collection {
+    #[cfg_attr(
+        not(all(
+            feature = "vector",
+            feature = "text",
+            feature = "sparse",
+            feature = "sorted"
+        )),
+        allow(unused_mut)
+    )]
     fn new(id: u32, schema: Schema) -> Collection {
         let mut vectors = HashMap::new();
         let mut hashes = HashMap::new();
@@ -351,6 +360,7 @@ impl Collection {
         let mut sparse = Vec::new();
         for f in &schema.fields {
             match (&f.index, &f.ty) {
+                #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
                     vectors.insert(
                         f.name.clone(),
@@ -360,12 +370,15 @@ impl Collection {
                 (IndexKind::Hash, _) => {
                     hashes.insert(f.name.clone(), HashIndex::default());
                 }
+                #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
                     texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     sorted.push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
+                #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     sparse.push((f.name.clone(), SparseIndex::new()));
                 }
@@ -400,6 +413,7 @@ impl Collection {
         self.sparse.clear();
         for f in &self.schema.fields {
             match (&f.index, &f.ty) {
+                #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
                     self.vectors.insert(
                         f.name.clone(),
@@ -409,13 +423,16 @@ impl Collection {
                 (IndexKind::Hash, _) => {
                     self.hashes.insert(f.name.clone(), HashIndex::default());
                 }
+                #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
                     self.texts.insert(f.name.clone(), TextIndex::new(*spec));
                 }
+                #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
                     self.sorted
                         .push((f.name.clone(), SortedIndex::new(ty, f.collate)));
                 }
+                #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
                     self.sparse.push((f.name.clone(), SparseIndex::new()));
                 }
@@ -676,6 +693,48 @@ fn hash_key(v: &Value) -> Vec<u8> {
     out
 }
 
+/// The feature `kind` needs when this build was made without it
+/// (`Cargo.toml`): a file declaring such an index opens all the same, the
+/// index unbuilt, and what needs it is refused.
+fn missing_feature(kind: &IndexKind) -> Option<&'static str> {
+    match kind {
+        IndexKind::Vector(_) if !cfg!(feature = "vector") => Some("vector"),
+        IndexKind::Text(_) if !cfg!(feature = "text") => Some("text"),
+        IndexKind::Inverted if !cfg!(feature = "sparse") => Some("sparse"),
+        IndexKind::Sorted if !cfg!(feature = "sorted") => Some("sorted"),
+        _ => None,
+    }
+}
+
+fn not_built(what: &str, feature: &str) -> Error {
+    Error::Query(format!(
+        "{what} needs the `{feature}` feature, which this build was made without"
+    ))
+}
+
+/// Whether this build has every index, which is where the checks for one
+/// it lacks fold away.
+const EVERY_INDEX: bool = cfg!(all(
+    feature = "vector",
+    feature = "text",
+    feature = "sparse",
+    feature = "sorted"
+));
+
+/// The refusal of a `near` or a `match` over `field` when it declares an
+/// index this build was made without, ahead of the one for a field that
+/// declares none -- whose message stays whole at each call site: put
+/// together here from parts passed in, it cost the module with every index
+/// 197 bytes brotli. That module asks nothing, since the lookup of the field
+/// is a loop the compiler cannot prove ends, and it would stay in.
+fn not_built_on(c: &Collection, field: &str, what: &str) -> Option<Error> {
+    if EVERY_INDEX {
+        return None;
+    }
+    let feature = missing_feature(&c.schema.field(field)?.index)?;
+    Some(not_built(&format!("field `{field}`'s {what}"), feature))
+}
+
 /// Whether an index files `a` and `b` as one entry: the same hash key, which
 /// every index's own key follows. `==` would call a NaN changed that files
 /// where it did, and was 570 bytes of the browser module besides.
@@ -685,6 +744,18 @@ fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
         (Some(a), Some(b)) => hash_key(a) == hash_key(b),
         _ => false,
     }
+}
+
+/// The collation data the text of `doc`'s collated fields needs and the
+/// browser module has not been handed, a bit a chunk (collate.rs).
+fn collation_missing(schema: &Schema, doc: &Document) -> u32 {
+    schema
+        .fields
+        .iter()
+        .filter(|f| f.collate.is_some())
+        .fold(0, |m, f| {
+            m | doc.get(&f.name).map_or(0, collate::missing_in)
+        })
 }
 
 /// One resolved level of a `lookup` chain: the parts that do not depend on
@@ -1094,6 +1165,10 @@ impl Database {
         self.changes.set_capacity(n);
     }
 
+    pub fn change_capacity(&self) -> usize {
+        self.changes.capacity()
+    }
+
     /// Sets the party to wake after writes.
     pub fn set_watcher(&mut self, w: Arc<dyn Watcher>) {
         self.watcher = Some(w);
@@ -1471,6 +1546,28 @@ impl Database {
     /// the next open lost it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<usize> {
         self.load_from(bytes, None)
+    }
+
+    /// The collation data the text this database holds in collated fields
+    /// needs and the browser module has not been handed, a bit a chunk
+    /// (collate.rs). A load with some missing is refused (`fenec_load`):
+    /// its `@sorted` indexes were built comparing without it. Every write
+    /// after keeps it so, checking what it writes before it writes it.
+    pub fn collation_missing(&self) -> u32 {
+        if !collate::PARTIAL {
+            return 0;
+        }
+        let mut mask = 0;
+        for c in self.collections.values() {
+            if c.schema.fields.iter().any(|f| f.collate.is_some()) {
+                for id in c.store.iter_ids() {
+                    if let Ok(Some(doc)) = c.store.read(&c.schema, id) {
+                        mask |= collation_missing(&c.schema, &doc);
+                    }
+                }
+            }
+        }
+        mask
     }
 
     /// [`Self::load`] over a mapped file (`fs::open_mapped`): the documents
@@ -2018,6 +2115,7 @@ impl Database {
             }
             // Each ordered index is sorted once from its keys rather than
             // inserted row by row.
+            #[cfg(feature = "sorted")]
             for (p, ix, rows) in sorted_ix.iter_mut() {
                 **ix = SortedIndex::build(
                     &schema.fields[*p].ty,
@@ -2425,6 +2523,18 @@ impl Database {
                 w.notify(after);
             }
         }
+        // The browser module compares text only in the collation data it
+        // has been handed. A read that reached for more is refused rather
+        // than answered in the order of what it had, and runs again once
+        // the module has it; a write was checked before it changed anything
+        // (`put`, `update`, `delete`), and one refused leaves its note for
+        // the module to read.
+        if collate::PARTIAL && out.is_ok() {
+            let missing = collate::take_missing();
+            if stmt.is_read_only() {
+                collate::refuse(missing)?;
+            }
+        }
         out
     }
 
@@ -2508,6 +2618,9 @@ impl Database {
         kind: &IndexKind,
         if_not_exists: bool,
     ) -> Result<Response> {
+        if let Some(feature) = missing_feature(kind) {
+            return Err(not_built("the index", feature));
+        }
         if let Some(done) = self.check_index(collection, field, kind, if_not_exists)? {
             return Ok(done);
         }
@@ -2576,6 +2689,13 @@ impl Database {
         let mut built = Vec::with_capacity(docs.len());
         for pairs in docs {
             built.push(self.build_document(&schema, pairs, params)?);
+        }
+        if collate::PARTIAL {
+            collate::refuse(
+                built
+                    .iter()
+                    .fold(0, |m, d| m | collation_missing(&schema, d)),
+            )?;
         }
 
         let mut n = 0usize;
@@ -3188,10 +3308,12 @@ impl Database {
             return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
         }
         let ix = c.vectors.get(&near.field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{}` has no vector index (declare it with @hnsw)",
-                near.field
-            ))
+            not_built_on(c, &near.field, "vector index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{}` has no vector index (declare it with @hnsw)",
+                    near.field
+                ))
+            })
         })?;
         let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
         if qv.len() != ix.dim {
@@ -3261,9 +3383,11 @@ impl Database {
     ) -> Result<Vec<(DocId, f32)>> {
         let field = &near.field;
         let ix = c.sparse_index(field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{field}` has no inverted index (declare it with @inverted)"
-            ))
+            not_built_on(c, field, "inverted index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{field}` has no inverted index (declare it with @inverted)"
+                ))
+            })
         })?;
         if near.ef.is_some() {
             return Err(Error::Query(format!(
@@ -3404,10 +3528,12 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         let ix = c.texts.get(&m.field).ok_or_else(|| {
-            Error::Query(format!(
-                "field `{}` has no full-text index (declare it with @text)",
-                m.field
-            ))
+            not_built_on(c, &m.field, "full-text index").unwrap_or_else(|| {
+                Error::Query(format!(
+                    "field `{}` has no full-text index (declare it with @text)",
+                    m.field
+                ))
+            })
         })?;
         let query = match eval(&m.query, &mut NoRow, ctx)? {
             Value::Text(t) => t,
@@ -4307,26 +4433,29 @@ impl Database {
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = self.registry.hooks().to_vec();
         let mut n = 0;
+        // What the filter compared without, and what the new values would:
+        // worked out in a pass of their own, since a write that stopped
+        // half way could not be run again.
+        if collate::PARTIAL {
+            let mut missing = collate::take_missing();
+            if schema.fields.iter().any(|f| f.collate.is_some()) {
+                let c = self.collection(collection)?;
+                for &id in &ids {
+                    if let Some(doc) = c.store.read(&schema, id)? {
+                        let doc = self.updated(&schema, doc, set, params)?;
+                        missing |= collation_missing(&schema, &doc) | collate::take_missing();
+                    }
+                }
+            }
+            collate::refuse(missing)?;
+        }
 
         for id in ids {
             let c = self.collections.get_mut(collection).unwrap();
-            let Some(mut doc) = c.store.read(&schema, id)? else {
+            let Some(doc) = c.store.read(&schema, id)? else {
                 continue;
             };
-            {
-                let snapshot = doc.clone();
-                let ctx = EvalCtx {
-                    params,
-                    registry: &self.registry,
-                };
-                for (k, e) in set {
-                    let f = schema
-                        .field(k)
-                        .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
-                    let v = eval(e, &mut DocRow(&snapshot, &schema), &ctx)?;
-                    doc.set(k, v.coerce(&f.ty)?);
-                }
-            }
+            let mut doc = self.updated(&schema, doc, set, params)?;
             let c = self.collections.get_mut(collection).unwrap();
             for h in &hooks {
                 h.before_write(&schema, WriteOp::Update, &mut doc)?;
@@ -4348,6 +4477,30 @@ impl Database {
         Ok(Response::Affected(n))
     }
 
+    /// `doc` with `set` applied, every expression over the document as it
+    /// was.
+    fn updated(
+        &self,
+        schema: &Schema,
+        mut doc: Document,
+        set: &[(String, Expr)],
+        params: &[Value],
+    ) -> Result<Document> {
+        let snapshot = doc.clone();
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+        };
+        for (k, e) in set {
+            let f = schema
+                .field(k)
+                .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
+            let v = eval(e, &mut DocRow(&snapshot, schema), &ctx)?;
+            doc.set(k, v.coerce(&f.ty)?);
+        }
+        Ok(doc)
+    }
+
     fn delete(
         &mut self,
         collection: &str,
@@ -4355,6 +4508,9 @@ impl Database {
         params: &[Value],
     ) -> Result<Response> {
         let ids = self.matching_ids(collection, filter, params)?;
+        if collate::PARTIAL {
+            collate::refuse(collate::take_missing())?;
+        }
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = self.registry.hooks().to_vec();
@@ -4486,6 +4642,13 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
 /// [`Collection::reset_index_structures`] is.
 #[inline(always)]
 fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
+    // An index this build lacks is not built: a file's log replays the
+    // `create index` that made it, and the file opens all the same. Asked
+    // after `EVERY_INDEX`, or the bounds check of the lookup stays in the
+    // module that has every index.
+    if !EVERY_INDEX && missing_feature(&c.schema.fields[pos].index).is_some() {
+        return Ok(());
+    }
     let field = c.schema.fields[pos].name.clone();
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
@@ -4508,6 +4671,9 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             ix.shrink_to_fit();
             c.texts.insert(field, ix);
         }
+        #[cfg(not(feature = "sorted"))]
+        IndexKind::Sorted => return Err(not_built("the index", "sorted")),
+        #[cfg(feature = "sorted")]
         IndexKind::Sorted => {
             let ty = c.schema.fields[pos].ty.clone();
             let mut rows = Vec::with_capacity(c.store.len());

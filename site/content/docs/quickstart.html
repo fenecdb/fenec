@@ -163,12 +163,13 @@ const rows = await db.from('articles').select('title', 'year').rows();
 <tbody>
 <tr><td><code>make test</code></td><td>Rust suite, then the JS suite</td></tr>
 <tr><td><code>make wasm</code></td><td>Build for wasm32 and copy to <code>web/fenec.wasm</code></td></tr>
+<tr><td><code>make wasm FEATURES="text sorted"</code></td><td>The same without the other indexes (<a href="javascript.html#features">A smaller module</a>)</td></tr>
 <tr><td><code>make serve</code></td><td>Build the wasm and serve the browser console</td></tr>
 <tr><td><code>make bench</code></td><td>Scale measurement</td></tr>
 <tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>
 <tr><td><code>make sweep</code></td><td>The ef/recall trade-off</td></tr>
 <tr><td><code>make compare</code></td><td>Against SQLite and pgvector (run <code>make pgvector-up</code> first)</td></tr>
-<tr><td><code>make small</code></td><td>The 878 KB binary: <code>--profile cli --no-default-features</code></td></tr>
+<tr><td><code>make small</code></td><td>The 1039 KB binary: <code>--profile cli --no-default-features</code></td></tr>
 </tbody>
 </table>
 </div>
