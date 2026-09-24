@@ -52,6 +52,7 @@ wasm:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm 2>&1 | tail -2 || \
 		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)
 	@cp $(WASM_OUT) web/fenec.wasm
+	@mkdir -p web/collate && rm -f web/collate/*.bin && cp crates/fenec-core/src/collate/*.bin web/collate/
 	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
 
 ## Serves the browser demo locally
@@ -243,4 +244,4 @@ site-deploy: site
 clean:
 	$(CARGO) clean
 	rm -f web/fenec.wasm
-	rm -rf site/dist
+	rm -rf web/collate site/dist

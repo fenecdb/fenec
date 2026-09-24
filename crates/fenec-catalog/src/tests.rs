@@ -399,8 +399,9 @@ fn queries_outside_the_subset_are_refused() {
 }
 
 /// A `collate tr` field is a column in `tr-x-icu`, the name PostgreSQL gives
-/// ICU's Turkish collation, and `\d` says so where a text column in the
-/// default collation says nothing.
+/// ICU's Turkish collation, a `collate und` one in `und-x-icu`, its root
+/// collation, and `\d` says so where a text column in the default
+/// collation says nothing.
 #[test]
 fn a_collated_column_shows_its_collation() {
     let mut db = Database::new();
@@ -409,6 +410,7 @@ fn a_collated_column_shows_its_collation() {
         vec![
             Field::new("name", DataType::Text).collated(Collation::Turkish),
             Field::new("city", DataType::Text),
+            Field::new("title", DataType::Text).collated(Collation::Root),
         ],
     )
     .unwrap();
@@ -430,6 +432,11 @@ ORDER BY a.attnum;",
     );
     assert_eq!(
         text(&columns),
-        [["id", "-"], ["name", "tr-x-icu"], ["city", "-"]]
+        [
+            ["id", "-"],
+            ["name", "tr-x-icu"],
+            ["city", "-"],
+            ["title", "und-x-icu"]
+        ]
     );
 }

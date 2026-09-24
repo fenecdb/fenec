@@ -271,17 +271,21 @@ so a node that is down takes its tenants with it.</p>
     has no place in an order, takes the sorting path. Without
     <code>order</code>, a scan stops at <code>offset + limit</code>
     matches.</li>
-  <li><b>One collation, Turkish, and only for <code>order</code>.</b>
-    <code>collate tr</code> orders a text key as ICU's <code>tr</code> does;
-    a comparison in <code>where</code> stays a comparison of bytes, and a
-    <code>@sorted</code> field keeps the bytes' order, so a collated key is
-    always sorted — 837 ms for a million names, against 362 ms by their bytes
-    — and a Turkish listing pages by <code>offset</code>. The order is ICU's
-    exactly over the Latin script, decomposed letters included. Two marks on
-    one letter written out of their canonical order can sort apart from ICU,
-    which normalises them, and past the Latin script the order is an
-    approximation: another script's letters after the Latin ones, other
-    symbols before the digits, each by code point.</li>
+  <li><b>Two collations: Unicode's root and Turkish.</b>
+    <code>collate und</code> orders text as ICU's root collation does, for
+    every script, and <code>collate tr</code> as its Turkish one; another
+    language's own order — Swedish <code>å ä ö</code> after <code>z</code>,
+    German phonebook order — is the root's until its tailoring is added.
+    The order is ICU's exactly but for a mark that composes with its letter
+    across another mark between them, or marks out of their canonical
+    order, which ICU's normalisation finds and fenecdb sorts as marks of
+    their own: five in 1 250 000 random pairs. A key collated in the query
+    over a field declared in no collation is sorted rather than walked —
+    890 ms for a million names, against 374 ms by their bytes — and a
+    comparison in <code>where</code> over it compares bytes; a field
+    declared in the collation has both. In the browser a statement that needs
+    a script's weights the module has not been handed is refused until it has
+    them (<a href="javascript.html#collation">JavaScript</a>).</li>
   <li><code>near</code> and <code>order</code> cannot be used together;
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's

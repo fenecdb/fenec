@@ -6,7 +6,8 @@ description: The browser client, the immutable query builder, transport binding,
 <h1>JavaScript</h1>
 <p class="kicker"><code>web/fenec.js</code> is one dependency-free ES module:
 the WebAssembly glue, the query builder, the HTTP client and the sync layer.
-Copy two files and you are done.</p>
+Copy two files — and the <code>collate/</code> directory beside the module,
+for text in a collation — and you are done.</p>
 
 <h2>Opening a database</h2>
 
@@ -26,6 +27,40 @@ await restore(db);     // read it back
 <p><code>db.run()</code> is synchronous because raw FenecQL is a single wasm
 call. The builder's endpoints return promises, because a builder has to pick
 its transport first.</p>
+
+<h2 id="collation">Collation data</h2>
+
+<pre data-lang="js">const db = await Fenec.open('./fenec.wasm');            // collate/ beside it
+db.run('create collection people (name text collate und @sorted)');
+
+await db.from('people').insert([{ name: 'Ζωή' }, { name: '山田' }]);   // fetches greek, han
+const rows = await db.query('get people order name');                  // the same, raw
+
+await db.collation('cyrillic', 'arabic');   // ahead of the first statement that needs them
+await db.collation('all');                  // every script's: 145 KB, 67 KB gzip, 61 KB brotli
+</pre>
+
+<p><code>collate und</code> and <code>collate tr</code> need the weights of
+the scripts they compare (<a href="fenecql.html#collation">Collation</a>).
+The module carries the Latin ones and is handed the others as a page first
+needs them, a chunk a group of scripts, from <code>collate/</code> beside the
+module — or from where <code>Fenec.open(src, { collation })</code> says: a
+URL, or a function handed the chunk's name that returns its bytes.
+<code>make wasm</code> writes the chunks next to <code>fenec.wasm</code>.</p>
+
+<p>A statement that would compare text of a script whose chunk the module
+has not got is refused rather than answered in another order:
+<code>db.run()</code>, which is synchronous, throws a
+<code>FenecError</code> whose <code>collation</code> names the chunks, and
+<code>db.query()</code> and the builder fetch them and run the statement
+again. A write is refused before it changes anything, so running it again is
+safe; of several statements in one text only the first is run again by
+itself. <code>restore</code> and <code>db.loadAsync()</code> fetch what an
+image's collated text needs — its <code>@sorted</code> indexes would be
+out of order without it — and the sync layer fetches what its seed, the
+changes it is sent and its optimistic writes need
+(<code>sync({ collation })</code> says where from). A chunk of another
+version's tables is refused: its ranks would mean something else.</p>
 
 <h2>The query builder</h2>
 
@@ -76,7 +111,7 @@ call site.</p>
 <tr><td><b>Null</b></td><td><code>{ summary: null }</code> becomes <code>is null</code>; <code>{ summary: { not: null } }</code> becomes <code>is not null</code></td></tr>
 <tr><td><b>Combining</b></td><td><code>or(...)</code> <code>not(...)</code> <code>and(...)</code> — <code>where</code> already <code>and</code>s</td></tr>
 <tr><td><b>Escape hatch</b></td><td><code>raw('cosine(embed, ?) > ?', vector, 0.5)</code></td></tr>
-<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'tr' })</code> puts text in Turkish order (<a href="fenecql.html#collation">Collation</a>)</td></tr>
+<tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fenecql.html#collation">Collation</a>)</td></tr>
 <tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
 <tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>

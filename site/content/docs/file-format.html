@@ -88,8 +88,12 @@ same refusal as for a record kind it does not know.</p>
 
 <p>A field whose text orders in a collation (<code>name text collate
 tr</code>) is written with type tag 11 and the collation's code in front of
-its type. An older binary meets a type tag it does not know and refuses the
-file, rather than read the field and order it by its bytes.</p>
+its type: 1 for <code>tr</code>, 2 for <code>und</code>. An older binary meets
+a type tag it does not know, or a collation code, and refuses the file,
+rather than read the field and order it in another order. The collation's
+weights are not in the file: they are the binary's, and a
+<code>@sorted</code> index over the field is built from the documents on
+open.</p>
 
 <h2>The change counter, and why it is at the front</h2>
 

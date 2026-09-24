@@ -1,7 +1,7 @@
 //! `order ... collate tr`: Turkish text in the order ICU's `tr` collation
 //! gives it, on every path that orders -- the sort, a `@sorted` field, a
 //! `lookup`'s children, an aggregate's groups -- and refused where it would
-//! mean nothing.
+//! mean nothing; `collate und`, every script in the order of ICU's root.
 
 use fenec_core::prelude::*;
 
@@ -461,4 +461,51 @@ fn a_collation_on_anything_but_text_is_refused() {
     assert!(err.contains("`at` is timestamp"), "{err}");
     let mut db = Database::new();
     exec(&mut db, "create collection u (tags [text] collate tr)", &[]);
+}
+
+/// `Intl.Collator("und")`'s order (Node 26.7, ICU 78.3): a name in each of
+/// the scripts, the Latin ones with their accents and case, a digit of
+/// another script, a symbol, an emoji, a Roman numeral that sorts as its
+/// letters, an Adlam name and a Han one of another plane.
+const UND: &str = "\
+★ star, 😀 smile, ١٢٣, 1st, Ängström, anna, Anna, ǅemal, emile, Émile, Éva, Ḥasan, \
+Łukasz, Ngô, Nguyễn, Øystein, Strasse, Straße, Ṭāhā, Ⅻ, Ẓafer, Zoe, Zoë, Άννα, Ζωή, \
+борис, Борис, Ёлка, მარიამი, Արամ, דוד, علي, عمر, ሰላም, रमेश, राम, রহিম, முருகன், \
+เกศินี, สมชาย, 𞤀𞤣𞤤𞤢𞤥, 김민준, 이서연, さくら, サクラ, 𠀀字, 山田";
+
+/// `collate und` is Unicode's order for every script, on every path a
+/// field's collation takes: the sort and a `@sorted` field walked, a
+/// comparison in `where`, and back out of the file.
+#[test]
+fn a_und_field_orders_every_script() {
+    let und: Vec<&str> = UND.split(", ").collect();
+    for index in ["", " @sorted"] {
+        let mut db = Database::new();
+        exec(
+            &mut db,
+            &format!("create collection people (name text collate und{index})"),
+            &[],
+        );
+        for i in 0..und.len() {
+            exec(
+                &mut db,
+                "put people {name: $1}",
+                &[text(und[(i * 29) % und.len()])],
+            );
+        }
+        let rs = query(&db, "get people select name order name");
+        assert_eq!(texts(&rs.rows, 0), und, "{index}");
+        let at = und.iter().position(|n| *n == "Zoë").unwrap();
+        let rs = query_with(
+            &db,
+            "get people select name where name > $1 order name",
+            &[text("Zoë")],
+        );
+        assert_eq!(texts(&rs.rows, 0), &und[at + 1..], "{index}");
+        let mut back = Database::new();
+        back.load(&db.snapshot()).expect("load");
+        let rs = query(&back, "get people select name order name desc limit 3");
+        let n = und.len();
+        assert_eq!(texts(&rs.rows, 0), [und[n - 1], und[n - 2], und[n - 3]]);
+    }
 }

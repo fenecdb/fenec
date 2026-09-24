@@ -79,14 +79,14 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 `fenec-core` modules: `store` (segments, offset index), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
-execution), `schema`, `value`, `codec`, `collate` (ICU's Turkish order, a
-generated table),
+execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
+tailoring, generated tables in chunks),
 `json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `sparse`
 (sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature).
 
-The browser client is `web/fenec.js` — WASM glue (~190 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~305 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -386,31 +386,52 @@ The structure is a sorted `Vec` of chunks of at most 512 entries, not a
 every filter, order and page against a twin collection without the index. It is
 derived data like the hash and text indexes: built on open, never in the file.
 
-**`collate tr` is ICU's order, a query's or a field's.** Its weights are
-ICU's own -- `tools/collate/gen.py` reads them out of macOS's libicucore
-into `collate/table.rs`, one `u32` per code point over the Latin script, the
-combining marks and general punctuation -- and a comparison walks ICU's three
-levels, letters then accents then case, over the whole string before it falls
-back to the bytes, so the order is total. `web/fenec.test.js` holds it to
-`Intl.Collator("tr")` on every run; what it does not do is ICU's
-normalisation, so two marks on one letter out of canonical order can sort
-apart. A comparison starts at the first byte the two strings do not share, a
-character earlier when that is a mark, since `c` and U+0327 are one letter:
-68 -> 30 ns a comparison over a million names. `order name collate tr`
-names it for one key; a field declared `name text collate tr` has it
-wherever its text compares -- `order` naming none, `<` and `>` in `where`
-(`RowAccess::collation`), `min` and `max`, and a `@sorted` index over it,
-whose chunks order through `sorted::Entry` with the collation passed in
-(a key type of its own would have been a third copy of the module). So a
-Turkish list pages by its last row, and the index answers as the scan does;
-equality stays the bytes', since the collation ties no two strings. A
-`@sorted` field without one keeps byte order and is never walked for a
-collated key. The schema writes a collated field behind type tag 11
-(`TAG_COLLATED`), which an older binary refuses rather than read the field
-in byte order, and `\d` shows it as `tr-x-icu`. The collation costs the
-browser module 8.5 KB, 3.2 KB brotli, and the field's 1.9 KB, 0.7 KB more:
-two sort closures in `SortedIndex::build` had been two copies of the sort,
-4.5 KB.
+**`collate und` and `collate tr` are ICU's orders, a query's or a field's.**
+The weights are ICU's own for every assigned code point --
+`tools/collate/gen.py` reads ICU 76.1 out of macOS's libicucore into
+`collate/`: the root cut into twelve chunks by script and each tailoring as
+what it changes, with ICU's own contractions (a letter and a mark it
+composes with, a two-part vowel sign, a Thai or Lao vowel written before its
+consonant; up to three characters) and Hangul syllables decomposed into
+jamo. ICU gives 133 535 primary weights, which no packed entry has the bits
+for, so consecutive code points that alone give consecutive primaries share
+a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
+them one range (`UNIFORM`), and a table's words are written as differences
+in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
+`make small`'s 1039. A comparison walks ICU's three levels, letters then
+accents then case, over the whole string before it falls back to the
+bytes, so the order is total.
+It starts at the first byte the two strings do not share, stepped back past
+any character that can continue a contraction (`CONTINUES`; a fixed step is
+wrong, Gurung Khema's overlap), and a Latin letter's element is made once
+per collation (`Collation::latin`): 68 -> 30 ns before the root, and 33.5 ns
+for `tr` and 35.2 for `und` now over a million Turkish names -- 41 while
+every letter went through the tailoring's table and the root's chunk. Held
+to ICU itself over 1 250 000 random pairs, five apart -- marks that compose
+with their letter across another mark or out of canonical order, which
+ICU's normalisation and discontiguous contractions find and fenecdb does
+not -- and to `Intl.Collator` in `web/fenec.test.js`.
+`order name collate und` names it for one key; a field declared `name text
+collate und` has it wherever its text compares -- `order` naming none, `<`
+and `>` in `where` (`RowAccess::collation`), `min` and `max`, and a
+`@sorted` index over it, whose chunks order through `sorted::Entry` with the
+collation passed in. Equality stays the bytes'. The schema writes a collated
+field behind type tag 11 (`TAG_COLLATED`) and the collation's code (1 `tr`,
+2 `und`), which an older binary refuses rather than read the field in byte
+order; `\d` shows `tr-x-icu` and `und-x-icu`. A native build carries every
+chunk. The browser module carries `latin` (9 KB) and is handed the rest
+(`fenec_add_chunk`), which `make wasm` puts in `web/collate/`: a comparison
+that meets a script it has not got notes the chunk (`collate::take_missing`)
+and the statement is refused (`collate::refuse`) -- a read after it ran, a
+write before it changes anything (`put`, `update`'s pass of its own,
+`delete`'s filter), a load after it (`fenec_load`: its `@sorted` indexes
+were built without the chunk) -- and `Fenec.query`, the builder, `restore`
+and the sync layer fetch the chunks and run it again. So every stored
+collated value's chunks are there, which keeps a `@sorted` index in order.
+A chunk carries the tables' stamp, and another version's is refused. The
+root cost the browser module 17.5 KB, 8.2 KB gzip and 6.8 KB brotli,
+over the 10.4 KB `tr` and the field had; the other chunks are 145 KB, 67
+KB gzip, 61 KB brotli, where plain words were 102 and 90.
 
 **`lookup` chains, and the chain is still positional.** `lookup a ... lookup b
 ...` hangs `b` off `a`'s rows: what follows a `lookup` binds to *its*

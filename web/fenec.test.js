@@ -601,6 +601,108 @@ test('a collate tr field pages by its last row on wasm, in Intl.Collator("tr") o
   }
 });
 
+test('collate und on wasm is Intl.Collator("und") in every script, handed the data a statement needs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  // Words in a script each, now and then two scripts in one, with their
+  // case changed or an accent composed another way: the comparison reaches
+  // the accents and the case, and every chunk of the root's data but the
+  // Latin one the module carries. The Han are common ones and one of
+  // another plane: a character whose radical or strokes Unicode revised
+  // since ICU 76 would move in Intl's ICU and not here.
+  const scripts = [
+    'aábcçdeéèêfghiíjklmnñoóöpqrsßtuúüvwxyzAÁBCÇDEÉFGHIÍJKLMNÑOÓÖPRSTUÚÜVWXYZăâđêôơưĂÂĐÊÔƠƯ',
+    'αάβγδεέζηθικλμνξοπρσςτυφχψωΑΆΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ',
+    'абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЭЮЯІЇЄҐ',
+    'աբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆԱԲԳԴԵԶ',
+    'אבגדהוזחטיכךלמםנןסעפףצץקרשת',
+    'ابتثجحخدذرزسشصضطظعغفقكلمنهويءآأؤإئةىپچژکگی',
+    'अआइईउऊएऐओऔकखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसह्ािीुूेैोौंः',
+    'অআইঈউএকখগঘচছজঝটঠডঢণতথদধনপফবভমযরলশষসহািীুূেৈোৌ',
+    'அஆஇஈஉஊஎஏஐஒஓகஙசஞடணதநபமயரலவழளறன்ாிீுூெேைொோ',
+    'กขคฆงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรลวศษสหฬอฮะัาำิีึืุูเแโใไ่้๊๋',
+    'ກຂຄງຈຊຍດຕຖທນບປຜຝພຟມຢຣລວສຫອຮະັາິີຶືຸູເແໂໃໄ່້',
+    'აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰ',
+    'ሀለሐመሠረሰሸቀበተቸኀነኘአከኸወዐዘዠየደጀገጠጨጰጸፀፈፐ',
+    '가각간갈감갑강개객거건걸검게격견결경고곡공과관광교구국군굴궁권귀규그극근글금기긴길김까꽃나남너노누눈느늘다단달담대더도동두드들등디따때또뜻라람러로루르를리마만말맛머먹면명모목무문물미민바반발밤방배백버번법벽변별병보복본봄부북분불비빛사산살삼상새색생서석선설성세소속손수숙순술숨쉬스시식신실심십아안알암앞애야약양어언얼엄업없여역연열염영예오온올옷와왕외요용우운울원월위유육으은을음응의이인일임입자작잔장재저적전절점정제조족종좌주죽준중즈즉증지직진질짐집차참창책처천철첫청초촌총최추축출충치친칠침카커코크키타터토통투트특파판팔패퍼편평포표품프피필하학한할함합항해행향허현형호혼화확환활황회효후훈휘흐흑흔흘흙흥희흰히힘',
+    'あいうえおかがきぎくぐけげこごさざしじすずせぜそぞただちっつてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろわをんアイウエオカガキクケコサシスセソタチッツテトナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロワヲンー',
+    '一丁七三上下不中九乙二人入八力十千口土大女子小山川工己巾干弓心戈手支文斗方日月木欠止毛水火爪父片牛犬玉瓜瓦甘生用田白皮目矛矢石示禾穴立竹米糸缶羊羽老耳肉臣自至舌舟色艸虫血行衣西見角言谷豆貝赤走足身車辛辰金長門阜隹雨青非面革音頁風飛食首香馬骨高鬼魚鳥鹿麦麻黄黒鼻齒學國語𠀀',
+    '0123456789٠١٢٣٤٥٦٧٨٩०१२३४५६७८९๐๑๒๓๔５６７',
+    '!"#$%&()*+,-./:;<=>?@[]^_{|}~¡¿§¶©®°±×÷€£¥₺₹←→↑↓∀∂∑√∞≈≠≤≥★☆♠♣♥♦♪☀☁✓✗😀😂🍕🎉👍🚀🌍',
+    '𞤀𞤁𞤂𞤃𞤄𞤅𞤢𞤣𞤤𞤥𞤦𞤧',
+  ].map((s) => [...s]);
+  let seed = 23;
+  const rnd = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return (seed >>> 12) % n;
+  };
+  const word = (letters) => {
+    let w = '';
+    for (let i = rnd(4); i >= 0; i--) w += letters[rnd(letters.length)];
+    return w;
+  };
+  const words = new Set();
+  while (words.size < 2000) {
+    let w = word(scripts[rnd(scripts.length)]);
+    if (rnd(6) === 0) w += ' ' + word(scripts[rnd(scripts.length)]);
+    words.add(w);
+    const twin = [w.toUpperCase(), w.toLowerCase(), w.normalize('NFD'), w.normalize('NFC')][rnd(4)];
+    if (twin.normalize('NFD') === twin || twin.normalize('NFC') === twin) words.add(twin);
+  }
+  const icu = new Intl.Collator('und');
+  const bytes = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  const want = [...words].sort((a, b) => icu.compare(a, b) || bytes(a, b));
+
+  const { readFile } = await import('node:fs/promises');
+  const fetched = [];
+  const collation = (name) => {
+    fetched.push(name);
+    return readFile(new URL(`./collate/${name}.bin`, import.meta.url));
+  };
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm, { collation });
+  db.run('create collection words (w text collate und @sorted)');
+  // A write whose collated text needs data the module has not got is
+  // refused before it changes anything, the data named.
+  assert.throws(() => db.run('put words {w: $1}', ['Ελλάδα']), (e) => e.collation?.includes('greek'));
+  assert.equal(db.rows('get words').length, 0);
+  // The builder fetches what a statement needs and runs it again, each
+  // chunk once.
+  await db.from('words').insert([...words].map((w) => ({ w })));
+  assert.equal(new Set(fetched).size, fetched.length, fetched.join());
+  assert.ok(fetched.length >= 10, fetched.join());
+  const got = (await db.from('words').select('w').order('w').rows()).map((r) => r.w);
+  assert.deepEqual(got, want);
+
+  // An image whose collated text needs data a module has not got loads
+  // once handed it: its `@sorted` index was built without it.
+  const image = db.snapshot();
+  const again = await Fenec.open(wasm, { collation });
+  assert.throws(() => again.load(image), (e) => e.collation?.includes('han'));
+  await again.loadAsync(image);
+  assert.deepEqual((await again.from('words').select('w').order('w').rows()).map((r) => r.w), want);
+
+  // A read that orders text of no collation in one is refused too, and
+  // answered once the module has the data.
+  const plain = await Fenec.open(wasm, { collation });
+  plain.run('create collection t (w text)');
+  plain.run('put t [{w: "б"}, {w: "a"}, {w: "β"}]');
+  assert.throws(() => plain.run('get t order w collate und'), (e) => e.collation?.length === 2);
+  assert.deepEqual((await plain.query('get t order w collate und')).rows.map((r) => r.w), ['a', 'β', 'б']);
+
+  // Data of other tables -- another version's -- is refused.
+  const stale = await Fenec.open(wasm, {
+    collation: async (name) => {
+      const b = new Uint8Array(await readFile(new URL(`./collate/${name}.bin`, import.meta.url)));
+      b[8] ^= 1;
+      return b;
+    },
+  });
+  await assert.rejects(stale.collation('greek'), /not this module's collation data/);
+  // Without a source, the error says where the data would come from.
+  const bare = await Fenec.open(wasm);
+  await assert.rejects(bare.collation('greek'), /open the module with \{ collation \}/);
+  for (const d of [db, again, plain, stale, bare]) d.close();
+});
+
 // ----------------------------------------------------------- HTTP endpoint
 //
 // Tests against a real server live on the Rust side (`crates/fenec-http/tests`).

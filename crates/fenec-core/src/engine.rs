@@ -2,7 +2,7 @@
 
 use crate::changes::{ChangeLog, Since, SCHEMA_MARK};
 use crate::codec::{get_uvarint, put_uvarint};
-use crate::collate::Collation;
+use crate::collate::{self, Collation};
 use crate::error::{Error, Result};
 use crate::history::History;
 use crate::plugin::{Plugin, Registry, WriteOp};
@@ -687,6 +687,18 @@ fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
     }
 }
 
+/// The collation data the text of `doc`'s collated fields needs and the
+/// browser module has not been handed, a bit a chunk (collate.rs).
+fn collation_missing(schema: &Schema, doc: &Document) -> u32 {
+    schema
+        .fields
+        .iter()
+        .filter(|f| f.collate.is_some())
+        .fold(0, |m, f| {
+            m | doc.get(&f.name).map_or(0, collate::missing_in)
+        })
+}
+
 /// One resolved level of a `lookup` chain: the parts that do not depend on
 /// a row, plus the collection the key is read *from*.
 ///
@@ -1094,6 +1106,10 @@ impl Database {
         self.changes.set_capacity(n);
     }
 
+    pub fn change_capacity(&self) -> usize {
+        self.changes.capacity()
+    }
+
     /// Sets the party to wake after writes.
     pub fn set_watcher(&mut self, w: Arc<dyn Watcher>) {
         self.watcher = Some(w);
@@ -1471,6 +1487,28 @@ impl Database {
     /// the next open lost it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<usize> {
         self.load_from(bytes, None)
+    }
+
+    /// The collation data the text this database holds in collated fields
+    /// needs and the browser module has not been handed, a bit a chunk
+    /// (collate.rs). A load with some missing is refused (`fenec_load`):
+    /// its `@sorted` indexes were built comparing without it. Every write
+    /// after keeps it so, checking what it writes before it writes it.
+    pub fn collation_missing(&self) -> u32 {
+        if !collate::PARTIAL {
+            return 0;
+        }
+        let mut mask = 0;
+        for c in self.collections.values() {
+            if c.schema.fields.iter().any(|f| f.collate.is_some()) {
+                for id in c.store.iter_ids() {
+                    if let Ok(Some(doc)) = c.store.read(&c.schema, id) {
+                        mask |= collation_missing(&c.schema, &doc);
+                    }
+                }
+            }
+        }
+        mask
     }
 
     /// [`Self::load`] over a mapped file (`fs::open_mapped`): the documents
@@ -2425,6 +2463,18 @@ impl Database {
                 w.notify(after);
             }
         }
+        // The browser module compares text only in the collation data it
+        // has been handed. A read that reached for more is refused rather
+        // than answered in the order of what it had, and runs again once
+        // the module has it; a write was checked before it changed anything
+        // (`put`, `update`, `delete`), and one refused leaves its note for
+        // the module to read.
+        if collate::PARTIAL && out.is_ok() {
+            let missing = collate::take_missing();
+            if stmt.is_read_only() {
+                collate::refuse(missing)?;
+            }
+        }
         out
     }
 
@@ -2576,6 +2626,13 @@ impl Database {
         let mut built = Vec::with_capacity(docs.len());
         for pairs in docs {
             built.push(self.build_document(&schema, pairs, params)?);
+        }
+        if collate::PARTIAL {
+            collate::refuse(
+                built
+                    .iter()
+                    .fold(0, |m, d| m | collation_missing(&schema, d)),
+            )?;
         }
 
         let mut n = 0usize;
@@ -4307,26 +4364,29 @@ impl Database {
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = self.registry.hooks().to_vec();
         let mut n = 0;
+        // What the filter compared without, and what the new values would:
+        // worked out in a pass of their own, since a write that stopped
+        // half way could not be run again.
+        if collate::PARTIAL {
+            let mut missing = collate::take_missing();
+            if schema.fields.iter().any(|f| f.collate.is_some()) {
+                let c = self.collection(collection)?;
+                for &id in &ids {
+                    if let Some(doc) = c.store.read(&schema, id)? {
+                        let doc = self.updated(&schema, doc, set, params)?;
+                        missing |= collation_missing(&schema, &doc) | collate::take_missing();
+                    }
+                }
+            }
+            collate::refuse(missing)?;
+        }
 
         for id in ids {
             let c = self.collections.get_mut(collection).unwrap();
-            let Some(mut doc) = c.store.read(&schema, id)? else {
+            let Some(doc) = c.store.read(&schema, id)? else {
                 continue;
             };
-            {
-                let snapshot = doc.clone();
-                let ctx = EvalCtx {
-                    params,
-                    registry: &self.registry,
-                };
-                for (k, e) in set {
-                    let f = schema
-                        .field(k)
-                        .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
-                    let v = eval(e, &mut DocRow(&snapshot, &schema), &ctx)?;
-                    doc.set(k, v.coerce(&f.ty)?);
-                }
-            }
+            let mut doc = self.updated(&schema, doc, set, params)?;
             let c = self.collections.get_mut(collection).unwrap();
             for h in &hooks {
                 h.before_write(&schema, WriteOp::Update, &mut doc)?;
@@ -4348,6 +4408,30 @@ impl Database {
         Ok(Response::Affected(n))
     }
 
+    /// `doc` with `set` applied, every expression over the document as it
+    /// was.
+    fn updated(
+        &self,
+        schema: &Schema,
+        mut doc: Document,
+        set: &[(String, Expr)],
+        params: &[Value],
+    ) -> Result<Document> {
+        let snapshot = doc.clone();
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+        };
+        for (k, e) in set {
+            let f = schema
+                .field(k)
+                .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
+            let v = eval(e, &mut DocRow(&snapshot, schema), &ctx)?;
+            doc.set(k, v.coerce(&f.ty)?);
+        }
+        Ok(doc)
+    }
+
     fn delete(
         &mut self,
         collection: &str,
@@ -4355,6 +4439,9 @@ impl Database {
         params: &[Value],
     ) -> Result<Response> {
         let ids = self.matching_ids(collection, filter, params)?;
+        if collate::PARTIAL {
+            collate::refuse(collate::take_missing())?;
+        }
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = self.registry.hooks().to_vec();

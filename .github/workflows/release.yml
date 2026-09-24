@@ -109,8 +109,10 @@ jobs:
           version="${tag#v}"
           make wasm
           mkdir -p dist "fenec-web-v${version}"
-          # What a page actually needs: the module, the bundle and the types.
+          # What a page actually needs: the module, the bundle and the types,
+          # and the collation data the module fetches beside it.
           cp web/fenec.js web/fenec.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
+          cp -r web/collate "fenec-web-v${version}/"
           tar -czf "dist/fenec-web-v${version}.tar.gz" "fenec-web-v${version}"
 
       - uses: actions/upload-artifact@v7
