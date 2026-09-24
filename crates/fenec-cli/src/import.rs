@@ -683,7 +683,10 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!((v.quant, v.ef_search), (Quant::Bit, 400));
+        assert_eq!(
+            (v.quant, v.ef_search),
+            (Quant::Bit, fenec_core::schema::BIT_EF_SEARCH)
+        );
         let (_, IndexKind::Vector(v)) =
             parse_index("embed@hnsw(cosine, quant=int8, ef_search=64)").unwrap()
         else {

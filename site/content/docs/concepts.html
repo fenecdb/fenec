@@ -161,11 +161,18 @@ everywhere and conversion happens only at the storage boundary. Same data,
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">vector&lt;128&gt;</th><th class="n">vector&lt;128, f16&gt;</th></tr></thead>
 <tbody>
-<tr><td>vector arena</td><td class="n">51.2 MB</td><td class="n"><b>25.6 MB</b></td></tr>
-<tr><td>file image</td><td class="n">57.9 MB</td><td class="n"><b>32.3 MB</b></td></tr>
-<tr><td>index build</td><td class="n"><b>10.4 s</b></td><td class="n">12.5 s</td></tr>
-<tr><td>ANN p50</td><td class="n"><b>0.127 ms</b></td><td class="n">0.147 ms</td></tr>
-<tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">99.6%</td></tr>
+<tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>105 MB</b></td></tr>
+<tr><td>heap, the documents included</td><td class="n">3 397 MB</td><td class="n">2 596 MB</td><td class="n"><b>1 897 MB</b></td></tr>
+<tr><td>index build</td><td class="n">1 017 s</td><td class="n"><b>758 s</b></td><td class="n">937 s</td></tr>
+<tr><td>recall@10, beam of 100</td><td class="n">97.4%</td><td class="n">97.1%</td><td class="n"><b>97.9%</b></td></tr>
+<tr><td>recall@10, beam of 200</td><td class="n">98.4%</td><td class="n">98.7%</td><td class="n"><b>99.8%</b></td></tr>
+<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n">98.8%</td><td class="n"><b>100%</b></td></tr>
+<tr><td>ANN p50, beam of 100</td><td class="n">1.30 ms</td><td class="n"><b>0.62 ms</b></td><td class="n">0.74 ms</td></tr>
+<tr><td>ANN p50, beam of 200</td><td class="n">2.08 ms</td><td class="n"><b>1.09 ms</b></td><td class="n">1.21 ms</td></tr>
+<tr><td>ANN p50, beam of 400</td><td class="n">3.38 ms</td><td class="n"><b>1.66 ms</b></td><td class="n">2.01 ms</td></tr>
+<tr><td>documents read a query, beam of 100 / 400</td><td class="n">—</td><td class="n"><b>20 / 20</b></td><td class="n">100 / 400</td></tr>
+<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.26 ms</td><td class="n">1.36 ms</td><td class="n"><b>1.30 ms</b></td></tr>
+<tr><td>filtered to 3 003 rows, documents read</td><td class="n">—</td><td class="n"><b>12</b></td><td class="n">100</td></tr>
 </tbody>
 </table>
 </div>
@@ -188,8 +195,8 @@ three decimal digits) and the measured recall loss is 0.3 points.</p>
 
 <p>Half precision shrinks the record and the arena together. A quantized
 index leaves the record alone and shrinks the arena further, by holding codes
-instead of vectors: a byte a component with <code>quant=int8</code>, the sign
-of each with <code>quant=bit</code>.</p>
+instead of vectors: a byte a component with <code>quant=int8</code>, a bit a
+component with <code>quant=bit</code>.</p>
 
 <pre data-lang="fenecql">create collection docs (embed vector&lt;768, f16&gt; @hnsw(cosine, quant=int8))
 </pre>
@@ -208,6 +215,18 @@ the page is left unread. A bit code keeps no step, and the whole beam is
 read. A filtered set too small for the walk to pay — fewer rows than the
 distances a walk would measure, <code>ef</code> × 2<code>m</code> — is
 ranked by its codes and read the same way.</p>
+
+<p>A bit code holds the signs of how far a vector lies from its centre, not
+the signs of the vector. Vectors crowd around the few directions they are
+about, so most of a vector's own signs are its neighbours' too, and the
+signs could not tell the neighbours apart. The index learns 128 centres by
+k-means from its first 2 048 vectors, which it holds whole until then — a
+smaller index searches exactly — and keeps with each vector the centre it
+is nearest and two numbers that scale its signs into an estimate. A search
+takes its query's product with each centre once, and only the query's part
+away from the centre goes through the signs. The centres are kept in the
+file with the graph, so a graph restored codes its vectors as they were
+coded.</p>
 
 <p>One million vectors of 768 dimensions, stored as <code>f16</code>, in 64
 clusters each spread along 32 directions — embeddings vary along far fewer
@@ -237,20 +256,23 @@ latencies are high for all three (<code>make quant-bench</code>):</p>
 and closely enough that 20 of its hundred candidates are read, with the
 recall of reading them all. What is left unread is further off than six
 times the spread of its rounding, which a candidate passes less than 1.5e-8
-of the time. Bit codes take the wider beam, and a <code>quant=bit</code>
-index searches 400 unless told otherwise, reading all of it; they are for
-the arena, an eighth of int8's. The rest of the heap is the documents, whose
-vectors the answers are ordered by.</p>
+of the time. Bit codes, taken from the centres, find as many of the true ten
+at the same beam, but bound nothing, so every candidate is read; a
+<code>quant=bit</code> index searches 200 unless told otherwise. They are
+for the arena, a seventh of int8's. The rest of the heap is the documents,
+whose vectors the answers are ordered by.</p>
 
 <div class="note trap">
   <p><b>How well a bit code estimates depends on the vectors.</b> Spread in
   every dimension instead — as many degrees of freedom as dimensions, the
   hardest case for any graph — 100 000 such vectors gave full vectors 97.8%
-  at a beam of 100, int8 codes 98.0%, and bit codes 36%, 75% at 400: when a
-  cluster is crowded around its centre, most of its members' signs are the
-  centre's, and the signs cannot tell them apart. int8 codes held with full
-  vectors on every set measured; measure bit codes on the vectors they are
-  for.</p>
+  at a beam of 100, int8 codes 98.0%, and bit codes 89.5%, 97.6% at their
+  default of 200 and 99.7% at 400.
+  The vectors' own signs, which bit codes were until they were taken from
+  centres, held 36% and 75% there: when a cluster is crowded around its
+  centre, most of its members' signs are the centre's, and they could not
+  tell the members apart. int8 codes held with full vectors on every set
+  measured; measure bit codes on the vectors they are for.</p>
 </div>
 
 <p>The kernels over codes are scalar on every target, in the eight-strip

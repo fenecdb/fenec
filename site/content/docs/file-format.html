@@ -92,6 +92,16 @@ leaves them waiting again, or links them there when it is not a server's.
 An older binary does not know version 5 and rebuilds the graph, as it does
 from any record it cannot read.</p>
 
+<p>A graph over bit codes (<code>quant=bit</code>) also carries the centres
+its codes are taken from, since a restored graph has to code its vectors
+against the ones it was built with. Where the quantization's code goes, a
+bit graph writes 3; the number of centres follows, then each centre as
+<code>dim</code> little-endian f32s — none while the index still holds its
+vectors whole. A tombstone's vector is its code: the signs, the centre's
+number in a byte and two f32s. A bit graph written before the centres, with
+the vectors' own signs and code 2, is built again on open; a binary from
+before them does not know 3, and builds its own.</p>
+
 <h2>Indexes in the schema</h2>
 
 <p>A schema names each field's index by a kind byte: 0 none, 1

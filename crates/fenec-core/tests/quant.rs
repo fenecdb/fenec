@@ -143,9 +143,9 @@ fn found(got: &[(u64, f32)], exact: &[(u64, f32)]) -> usize {
 fn near_over_codes_finds_the_exact_ten_in_exact_order() {
     let plain = shared("@hnsw(cosine)");
     for (index, least) in [
-        // Measured 0.993; full vectors 0.994.
+        // Measured 1.000.
         ("@hnsw(cosine, quant=int8)", 0.98),
-        // Measured 0.958, at the default beam of 400 bit codes take.
+        // Measured 1.000, at the default beam of 200 bit codes take.
         ("@hnsw(cosine, quant=bit)", 0.93),
     ] {
         let db = shared(index);
@@ -224,7 +224,7 @@ fn a_code_reads_only_what_can_make_the_page() {
         ("@hnsw(cosine, quant=int8)", 100, 0.25),
         ("@hnsw(l2, quant=int8)", 100, 0.25),
         ("@hnsw(dot, quant=int8)", 100, 0.25),
-        ("@hnsw(cosine, quant=bit)", 400, 1.0),
+        ("@hnsw(cosine, quant=bit)", 200, 1.0),
     ] {
         let own;
         let db = match index {
@@ -259,10 +259,10 @@ fn a_code_reads_only_what_can_make_the_page() {
 fn a_small_set_reads_the_beam_rather_than_the_set() {
     let plain = shared("@hnsw(cosine)");
     // Measured: every one of the exact 200 found both ways, int8 codes
-    // reading 239 vectors over the twenty queries, bit codes 8 000.
+    // reading 239 vectors over the twenty queries, bit codes 4 000.
     for (index, beam, least, most) in [
         ("@hnsw(cosine, quant=int8)", 100, 200, 600),
-        ("@hnsw(cosine, quant=bit)", 400, 190, 8000),
+        ("@hnsw(cosine, quant=bit)", 200, 190, 4000),
     ] {
         let db = shared(index);
         let sql = r#"get docs where kind = "a" near v $1 limit 10"#;
@@ -297,14 +297,16 @@ fn arena(db: &Database) -> usize {
 fn a_checkpoint_keeps_the_graph_over_codes() {
     // A restored graph keeps its tombstones, as the live one does; a rebuilt
     // one holds the live rows alone -- which is how the arena tells them
-    // apart. A byte a component and a scale, or a bit a component.
-    for (index, per_node) in [
-        ("@hnsw(cosine, quant=int8)", DIM + 4),
-        ("@hnsw(cosine, quant=bit)", DIM / 8),
+    // apart. A byte a component and a scale; or a bit a component, the
+    // centre and two factors, beside 128 centres learned from the first
+    // 2 048 vectors, each with half its squared length.
+    for (index, per_node, centres) in [
+        ("@hnsw(cosine, quant=int8)", DIM + 4, 0),
+        ("@hnsw(cosine, quant=bit)", DIM / 8 + 9, 128 * (DIM + 1) * 4),
     ] {
         let mut db = filled(index);
         run(&mut db, "del docs where id > 2700");
-        assert_eq!(arena(&db), ROWS * per_node, "{index}");
+        assert_eq!(arena(&db), ROWS * per_node + centres, "{index}");
         let before: Vec<_> = queries()
             .iter()
             .take(20)
@@ -315,7 +317,7 @@ fn a_checkpoint_keeps_the_graph_over_codes() {
         back.load(&db.snapshot()).unwrap();
         assert_eq!(
             arena(&back),
-            ROWS * per_node,
+            ROWS * per_node + centres,
             "{index}: the graph was rebuilt"
         );
         let after: Vec<_> = queries()
@@ -347,7 +349,7 @@ fn the_quantization_is_part_of_the_index() {
         "create collection docs (v vector<8> @hnsw(cosine, quant=bit))",
     );
     let s = spec(&mut db);
-    assert_eq!((s.quant, s.ef_search), (Quant::Bit, 400));
+    assert_eq!((s.quant, s.ef_search), (Quant::Bit, 200));
     let mut back = Database::new();
     back.load(&db.snapshot()).unwrap();
     assert_eq!(spec(&mut back), s);

@@ -300,17 +300,44 @@ alone.
 
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
-vector, `quant=bit` the signs (cosine only). A code only estimates a distance,
+vector, `quant=bit` the signs of its distance from a centre (cosine only). A
+code only estimates a distance,
 so `Space` (`engine.rs`) takes the beam's `ef` candidates and puts them in
 order by the vectors read out of the store, as `rerank` does; `exact` and a
 filtered set searched exactly read the store as well, so every score is exact.
-Bit codes need the wider beam `BIT_EF_SEARCH` -- 400: over a million
-clustered 768-dim vectors a beam of 100 held 82.5% of the true ten, 400 held
-98.4%, int8 codes 97.1% at 100 (`make quant-bench`). How well bits estimate
-depends on the vectors: spread in every dimension, 36% at 100. The code kernels are scalar on
+Bit codes take the wider beam `BIT_EF_SEARCH` -- 200: over a million
+clustered 768-dim vectors a beam of 100 held 97.9% of the true ten and 200
+held 99.8% in 1.21 ms, int8 codes 97.1% at 100 (`make quant-bench`); over
+the vectors' own signs the beam was 400, for 98.4% in 2.16 ms. How well bits estimate
+depends on the vectors: spread in every dimension, 89.5% at 100 and 97.6% at
+200. The code kernels are scalar on
 every target in `strip8!`'s order, so they need no SIMD twin to agree with the
 browser. A graph over codes is record version 4; every other graph stays 3,
 so no file is rebuilt for the feature.
+
+**A bit code is a residual's signs, from a centre the index learned.** The
+vectors' own signs were the code before: most of a crowded cluster's signs
+are its centre's, and over 100 000 x 768 spread in every dimension a beam of
+100 held 36.1% of the true ten, 400 held 74.9%. A bit index learns 128
+centres by k-means++ and four Lloyd rounds over its first 2 048 vectors
+(`BIT_TRAIN`), holding those whole until then -- an index under that
+searches exactly -- in one order on every target, so the browser learns a
+server's centres; the insert that learns them takes 195 ms at 768
+dimensions. A code is the signs `b` of `r = v - C`, the centre's byte, and a
+word after the signs holding `σ = |r|²/|r|₁` and `κ = ⟨C, r⟩ - σ⟨b, C⟩`;
+`⟨q, v⟩` is estimated as `⟨q, C⟩ + κ + σ⟨b, q⟩` -- RaBitQ's estimator
+without its rotation, the query taken from the centre so that only its part
+off the centre goes through the signs (`⟨q, r⟩` estimated whole held
+38.7% over centres that gave 92.8%). `query_for` appends the query's product with each centre, once a
+search, and a distance between two codes counts both `κ` (`Arena::offset`),
+which a widened code leaves out. The same beams hold 89.5% and 99.7%, and
+over 32 directions a beam of 100 went 96.8% -> 100% at 100 000 and 82.5% ->
+97.9% at a million, for 105 bytes a 768-dim vector against 96. In an array of their own the factors were a cache miss
+more a distance: the build took 69.7 s against 62.8, a query at a beam of
+100 0.414 ms against 0.378. The centres travel in the graph record behind
+quantization code 3 (`BIT_CENTRED`): a graph over the plain signs (code 2)
+is built again, and a binary from before them builds its own. The browser
+module grew 7.0 KB, 2.4 KB brotli, most of it the k-means.
 
 **Filtered `near` needs its fallback.** The filter's rows are probed first -- in
 blocks spread over the collection, and only until more than `ef × m0` match,

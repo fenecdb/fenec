@@ -20,6 +20,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 // -------------------------------------------------------------- metrics
 
@@ -481,24 +482,294 @@ type Candidates = Vec<(u32, usize, Vec<(usize, Vec<u32>)>)>;
 /// extra allocation on the search path.
 ///
 /// `I8` and `Bit` hold codes instead (`quant=`): a byte a component over a
-/// scale a vector -- the largest component over 127 -- or the sign of each
-/// component, 64 to a word. Their distances are estimates, and `near` puts
-/// the candidates they find in order again by the documents' own vectors.
+/// scale a vector -- the largest component over 127 -- or the signs of each
+/// vector's distance from the nearest of a few centres ([`Bits`]). Their
+/// distances are estimates, and `near` puts the candidates they find in
+/// order again by the documents' own vectors.
 pub(crate) enum Arena {
     F32(Vec<f32>),
     F16(Vec<u16>),
     I8(Vec<i8>, Vec<f32>),
-    Bit(Vec<u64>),
+    Bit(Bits),
+}
+
+/// Vectors a `quant=bit` index holds whole, at the field's precision, before
+/// it learns its centres from them and codes them all: with fewer, a code
+/// has no centres to be taken from. An index smaller than this searches
+/// exactly.
+const BIT_TRAIN: usize = 2048;
+
+/// Centres per vector learned from, one in sixteen: over 100 000 vectors in
+/// 64 clusters, spread in every dimension, 128 centres from the first 2 048
+/// vectors let a beam of 100 by the codes hold 91.2% of the true ten, 64
+/// held 81.4% -- a centre between two clusters -- and 256 from as many
+/// vectors 89.4%, 92.5% from 4 096 (brute force, the codes' best 100 in
+/// exact order). The cell is a byte.
+const BIT_PER_CENTRE: usize = 16;
+
+/// Lloyd rounds after the seeding: on those clusters two gave what eight
+/// did, to the fourth decimal.
+const BIT_ROUNDS: usize = 4;
+
+/// What a bit graph record writes where the quantization's code goes: bit
+/// codes taken from centres, the centres following. The plain signs before
+/// them wrote [`Quant::Bit`]'s own code, which a graph is now built again
+/// for, and a binary before them does not know this one, and builds its own.
+const BIT_CENTRED: u8 = 3;
+
+/// A bit arena's codes. A unit vector `v` is the nearest centre `C` plus a
+/// residual `r`, and the code keeps `r`'s signs `b`. For any `u`, `⟨r, u⟩`
+/// is estimated as `σ⟨b, u⟩` with `σ = |r|²/|r|₁` -- exact for `u = r`, as
+/// `⟨b, r⟩ = |r|₁` (RaBitQ's estimator, without its rotation) -- and off by
+/// as much more as `u` lies away from `r`. So the query is taken from the
+/// centre: `⟨q, v⟩ = ⟨q, C⟩ + ⟨C, r⟩ + ⟨q - C, r⟩`, the first once a query a
+/// centre, the second exact, and only the third estimated, which comes to
+/// `⟨q, C⟩ + κ + σ⟨b, q⟩` with `κ = ⟨C, r⟩ - σ⟨b, C⟩` kept beside `σ`.
+///
+/// The signs of the vectors themselves were the code before: in a cluster
+/// crowded around its centre most signs are the centre's, and they told the
+/// members apart so poorly that a beam of 100 by them held 36.9% of the true
+/// ten over 100 000 vectors spread in every dimension, against 91.2% now
+/// (brute force). Estimated whole, `⟨q, r⟩` put the query's share along the
+/// centre through the signs as well: over the same 256 centres, 38.7%
+/// against 92.8%.
+pub(crate) struct Bits {
+    /// A node's residual's signs, `dim.div_ceil(64)` words, and a word of
+    /// its `σ` and `κ`, [`Bits::stride`] words a node: in an array of their
+    /// own, the factors were a cache miss more a distance.
+    words: Vec<u64>,
+    /// The centre each node's residual is from: a byte a node, an array
+    /// small enough to stay in the cache.
+    cells: Vec<u8>,
+    stride: usize,
+    /// Shared with the arena `retire` codes a vector into to compare it.
+    centres: Arc<Centres>,
+    /// Whether a vector is coded through half precision, as the field's
+    /// first vectors were held: coded from f32 after them, a vector written
+    /// again unchanged no longer matched its code, and was retired.
+    half: bool,
+}
+
+/// The centres a bit arena's residuals are taken from: k-means over the
+/// first [`BIT_TRAIN`] vectors, kept in the graph record so that a restored
+/// graph codes its vectors as they were coded.
+pub(crate) struct Centres {
+    /// `dim`-strided.
+    at: Vec<f32>,
+    /// Half each centre's squared length: the nearest to a vector is the one
+    /// whose dot product with it, less this, is largest.
+    half: Vec<f32>,
+}
+
+impl Centres {
+    fn new(at: Vec<f32>, dim: usize) -> Centres {
+        let half = at.chunks(dim).map(|c| dot(c, c) / 2.0).collect();
+        Centres { at, half }
+    }
+
+    #[inline]
+    fn centre(&self, c: usize, dim: usize) -> &[f32] {
+        &self.at[c * dim..(c + 1) * dim]
+    }
+
+    /// The centre nearest `v`, and its score: not finite for a vector that
+    /// is not all numbers.
+    fn nearest(&self, v: &[f32]) -> (usize, f32) {
+        let dim = v.len();
+        let (mut best, mut at) = (f32::NEG_INFINITY, 0);
+        for (c, half) in self.half.iter().enumerate() {
+            let s = dot(v, self.centre(c, dim)) - half;
+            if s > best {
+                (best, at) = (s, c);
+            }
+        }
+        (at, best)
+    }
+
+    /// k-means over `rows`: seeded by k-means++ -- each next centre a row
+    /// drawn by its squared distance from the nearest so far -- then
+    /// [`BIT_ROUNDS`] rounds of each centre moved to the mean of its rows.
+    /// Deterministic, in one order on every target, so the browser learns
+    /// the centres a server does. A row holding what is not a number weighs
+    /// nothing and moves no centre: one would have made every centre after
+    /// it not a number.
+    fn learn(rows: &[f32], dim: usize) -> Centres {
+        let n = rows.len() / dim;
+        let row = |i: usize| &rows[i * dim..(i + 1) * dim];
+        let want = (n / BIT_PER_CENTRE).clamp(1, 256);
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let mut far = vec![0.0f32; n];
+        let mut at = Vec::with_capacity(want * dim);
+        let mut next = (0..n)
+            .find(|&i| l2_sq(row(i), row(i)).is_finite())
+            .unwrap_or(0);
+        loop {
+            let c = row(next);
+            at.extend_from_slice(c);
+            for (i, far) in far.iter_mut().enumerate() {
+                let d = l2_sq(row(i), c);
+                if at.len() == dim {
+                    *far = if d.is_finite() { d } else { 0.0 };
+                } else if d < *far {
+                    *far = d;
+                }
+            }
+            let total: f64 = far.iter().map(|&d| d as f64).sum();
+            // Enough, or every row a centre already.
+            if at.len() == want * dim || total <= 0.0 {
+                break;
+            }
+            let mut pick = rng.next_f32() as f64 * total;
+            next = n - 1;
+            for (i, &d) in far.iter().enumerate() {
+                pick -= d as f64;
+                if pick < 0.0 {
+                    next = i;
+                    break;
+                }
+            }
+        }
+        let k = at.len() / dim;
+        for _ in 0..BIT_ROUNDS {
+            let centres = Centres::new(at, dim);
+            let (mut sum, mut count) = (vec![0.0f32; k * dim], vec![0u32; k]);
+            for i in 0..n {
+                let (c, score) = centres.nearest(row(i));
+                if score.is_finite() {
+                    count[c] += 1;
+                    for (s, x) in sum[c * dim..(c + 1) * dim].iter_mut().zip(row(i)) {
+                        *s += x;
+                    }
+                }
+            }
+            at = centres.at;
+            // A centre no row is nearest stays where it was.
+            for c in (0..k).filter(|&c| count[c] > 0) {
+                for j in c * dim..(c + 1) * dim {
+                    at[j] = sum[j] / count[c] as f32;
+                }
+            }
+        }
+        Centres::new(at, dim)
+    }
+}
+
+impl Bits {
+    fn new(centres: Arc<Centres>, dim: usize, half: bool) -> Bits {
+        Bits {
+            words: Vec::new(),
+            cells: Vec::new(),
+            stride: dim.div_ceil(64) + 1,
+            centres,
+            half,
+        }
+    }
+
+    /// A node's signs and its `[σ, κ]`.
+    #[inline]
+    fn code(&self, node: u32) -> (&[u64], [f32; 2]) {
+        let at = node as usize * self.stride;
+        let (signs, terms) = self.words[at..at + self.stride].split_at(self.stride - 1);
+        let t = terms[0];
+        (
+            signs,
+            [f32::from_bits(t as u32), f32::from_bits((t >> 32) as u32)],
+        )
+    }
+
+    fn push_terms(&mut self, [sigma, kappa]: [f32; 2]) {
+        self.words
+            .push(sigma.to_bits() as u64 | (kappa.to_bits() as u64) << 32);
+    }
+
+    /// Codes `v`, a unit vector under cosine, at the field's precision,
+    /// against the nearest centre: the residual's signs, and its `σ` and
+    /// `κ` summed in one pass in the components' order, which is every
+    /// target's.
+    fn push(&mut self, v: &[f32]) {
+        let dim = v.len();
+        let cell = self.centres.nearest(v).0;
+        let c = self.centres.centre(cell, dim);
+        let (mut rr, mut l1, mut cr, mut cb) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let mut w = 0u64;
+        for (i, (x, y)) in v.iter().zip(c).enumerate() {
+            let r = x - y;
+            rr += r * r;
+            l1 += r.abs();
+            cr += y * r;
+            if r > 0.0 {
+                w |= 1 << (i % 64);
+                cb += y;
+            } else {
+                cb -= y;
+            }
+            if i % 64 == 63 || i + 1 == dim {
+                self.words.push(w);
+                w = 0;
+            }
+        }
+        let sigma = if l1 > 0.0 { rr / l1 } else { 0.0 };
+        self.cells.push(cell as u8);
+        self.push_terms([sigma, cr - sigma * cb]);
+    }
+
+    /// `⟨q, v⟩` as the code estimates it. `q` is `dim` long, or a search's
+    /// query followed by its dot product with each centre
+    /// ([`VectorIndex::query_for`]).
+    #[inline]
+    fn estimate(&self, q: &[f32], node: u32, dim: usize) -> f32 {
+        let cell = self.cells[node as usize] as usize;
+        let qc = match q.get(dim + cell) {
+            Some(x) => *x,
+            None => dot(&q[..dim], self.centres.centre(cell, dim)),
+        };
+        let (signs, [sigma, kappa]) = self.code(node);
+        qc + kappa + sigma * dot_bits(signs, &q[..dim])
+    }
 }
 
 impl Arena {
+    /// An empty arena for vectors of `prec` under `quant`: a bit index's
+    /// holds them whole until it has learned its centres from them.
     fn new(prec: VecPrec, quant: Quant) -> Arena {
         match (quant, prec) {
             (Quant::Int8, _) => Arena::I8(Vec::new(), Vec::new()),
-            (Quant::Bit, _) => Arena::Bit(Vec::new()),
-            (Quant::None, VecPrec::F32) => Arena::F32(Vec::new()),
-            (Quant::None, VecPrec::F16) => Arena::F16(Vec::new()),
+            (_, VecPrec::F32) => Arena::F32(Vec::new()),
+            (_, VecPrec::F16) => Arena::F16(Vec::new()),
         }
+    }
+
+    /// An empty arena that codes as this one does.
+    fn empty_like(&self) -> Arena {
+        match self {
+            Arena::F32(_) => Arena::F32(Vec::new()),
+            Arena::F16(_) => Arena::F16(Vec::new()),
+            Arena::I8(..) => Arena::I8(Vec::new(), Vec::new()),
+            Arena::Bit(b) => Arena::Bit(Bits {
+                words: Vec::new(),
+                cells: Vec::new(),
+                centres: b.centres.clone(),
+                ..*b
+            }),
+        }
+    }
+
+    /// The vectors of this arena, held whole, coded against centres learned
+    /// from them.
+    fn coded(&self, nodes: usize, dim: usize) -> Arena {
+        let mut rows = Vec::with_capacity(nodes * dim);
+        let mut v = Vec::with_capacity(dim);
+        for node in 0..nodes {
+            self.read_into(node as u32, dim, &mut v);
+            rows.extend_from_slice(&v);
+        }
+        let half = matches!(self, Arena::F16(_));
+        let mut bits = Bits::new(Arc::new(Centres::learn(&rows, dim)), dim, half);
+        bits.words.reserve(nodes * bits.stride);
+        for row in rows.chunks(dim) {
+            bits.push(row);
+        }
+        Arena::Bit(bits)
     }
 
     fn quantized(&self) -> bool {
@@ -513,7 +784,21 @@ impl Arena {
                 c.reserve(nodes * dim);
                 s.reserve(nodes);
             }
-            Arena::Bit(b) => b.reserve(nodes * dim.div_ceil(64)),
+            Arena::Bit(b) => {
+                b.words.reserve(nodes * b.stride);
+                b.cells.reserve(nodes);
+            }
+        }
+    }
+
+    /// What a node's code adds to every product it estimates: `κ` over bit
+    /// codes, which a product of two codes takes from both, and nothing
+    /// otherwise.
+    #[inline]
+    fn offset(&self, node: u32) -> f32 {
+        match self {
+            Arena::Bit(b) => b.code(node).1[1],
+            _ => 0.0,
         }
     }
 
@@ -560,15 +845,15 @@ impl Arena {
                 codes.extend(raw.iter().map(|x| (x * inv / scale).round() as i8));
                 scales.push(scale);
             }
-            // A sign needs no normalising.
-            Arena::Bit(words) => {
-                for part in raw.chunks(64) {
-                    let mut w = 0u64;
-                    for (i, x) in part.iter().enumerate() {
-                        w |= ((*x > 0.0) as u64) << i;
-                    }
-                    words.push(w);
-                }
+            Arena::Bit(bits) => {
+                let v: Vec<f32> = raw
+                    .iter()
+                    .map(|x| match bits.half {
+                        true => half(crate::codec::f16_from_f32(x * inv)),
+                        false => x * inv,
+                    })
+                    .collect();
+                bits.push(&v);
             }
         }
     }
@@ -598,12 +883,7 @@ impl Arena {
                     Metric::Dot => -scale * dot_i8(code, q),
                 }
             }
-            // A code stands for the unit vector of its signs, ±1/√dim.
-            Arena::Bit(b) => {
-                let w = dim.div_ceil(64);
-                let at = node as usize * w;
-                1.0 - dot_bits(&b[at..at + w], q) / (dim as f32).sqrt()
-            }
+            Arena::Bit(b) => 1.0 - b.estimate(q, node, dim),
         }
     }
 
@@ -617,6 +897,8 @@ impl Arena {
             // keeps them, as it does halves.
             Arena::I8(..) | Arena::Bit(_) => {
                 distance(metric, &self.vec_at(a, dim), &self.vec_at(b, dim))
+                    - self.offset(a)
+                    - self.offset(b)
             }
         }
     }
@@ -649,14 +931,17 @@ impl Arena {
                 let scale = sc[node as usize];
                 out.extend(c[s..s + dim].iter().map(|x| *x as f32 * scale));
             }
+            // The centre and the residual's signs at its scale: what the
+            // code's products with a vector estimate, `κ` apart
+            // ([`Arena::offset`]).
             Arena::Bit(b) => {
-                let at = node as usize * dim.div_ceil(64);
-                let unit = 1.0 / (dim as f32).sqrt();
-                out.extend((0..dim).map(|i| {
-                    if b[at + i / 64] >> (i % 64) & 1 == 1 {
-                        unit
+                let (signs, [sigma, _]) = b.code(node);
+                let c = b.centres.centre(b.cells[node as usize] as usize, dim);
+                out.extend(c.iter().enumerate().map(|(i, x)| {
+                    if signs[i / 64] >> (i % 64) & 1 == 1 {
+                        x + sigma
                     } else {
-                        -unit
+                        x - sigma
                     }
                 }));
             }
@@ -678,8 +963,12 @@ impl Arena {
                 out.extend_from_slice(&sc[node as usize].to_le_bytes());
             }
             Arena::Bit(b) => {
-                let w = dim.div_ceil(64);
-                b[node as usize * w..(node as usize + 1) * w]
+                let (signs, terms) = b.code(node);
+                signs
+                    .iter()
+                    .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
+                out.push(b.cells[node as usize]);
+                terms
                     .iter()
                     .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
             }
@@ -709,13 +998,20 @@ impl Arena {
                 c.extend(code.iter().map(|x| *x as i8));
                 sc.push(f32::from_le_bytes([scale[0], scale[1], scale[2], scale[3]]));
             }
-            Arena::Bit(b) => b.extend(
-                bytes
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|x| u64::from_le_bytes(*x)),
-            ),
+            Arena::Bit(b) => {
+                let (words, rest) = bytes.split_at(bytes.len() - 9);
+                let f =
+                    |i: usize| f32::from_le_bytes([rest[i], rest[i + 1], rest[i + 2], rest[i + 3]]);
+                b.words.extend(
+                    words
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|x| u64::from_le_bytes(*x)),
+                );
+                b.cells.push(rest[0]);
+                b.push_terms([f(1), f(5)]);
+            }
         }
     }
 
@@ -725,7 +1021,7 @@ impl Arena {
             Arena::F32(_) => dim * 4,
             Arena::F16(_) => dim * 2,
             Arena::I8(..) => dim + 4,
-            Arena::Bit(_) => dim.div_ceil(64) * 8,
+            Arena::Bit(_) => dim.div_ceil(64) * 8 + 9,
         }
     }
 
@@ -735,7 +1031,9 @@ impl Arena {
             Arena::F32(d) => d.len() * 4,
             Arena::F16(d) => d.len() * 2,
             Arena::I8(c, s) => c.len() + s.len() * 4,
-            Arena::Bit(b) => b.len() * 8,
+            Arena::Bit(b) => {
+                b.words.len() * 8 + b.cells.len() + (b.centres.at.len() + b.centres.half.len()) * 4
+            }
         }
     }
 }
@@ -1025,6 +1323,7 @@ impl<'a> GraphView<'a> {
         // the old path is kept exactly as it was.
         let decode = !matches!(self.data, Arena::F32(_));
         let mut picked: Vec<f32> = Vec::new(); // same order as `out`, dim-strided
+        let mut offsets: Vec<f32> = Vec::new(); // `Arena::offset`, the same order
         let mut cbuf: Vec<f32> = Vec::new();
         for c in cands {
             if out.len() >= m {
@@ -1036,9 +1335,10 @@ impl<'a> GraphView<'a> {
             let mut diverse = true;
             if decode {
                 self.data.read_into(c.node, self.dim, &mut cbuf);
+                let off = self.data.offset(c.node);
                 for i in 0..out.len() {
                     let r = &picked[i * self.dim..(i + 1) * self.dim];
-                    if distance(self.metric, &cbuf, r) < c.dist {
+                    if distance(self.metric, &cbuf, r) - off - offsets[i] < c.dist {
                         diverse = false;
                         break;
                     }
@@ -1055,6 +1355,7 @@ impl<'a> GraphView<'a> {
                 out.push(c.node);
                 if decode {
                     picked.extend_from_slice(&cbuf);
+                    offsets.push(self.data.offset(c.node));
                 }
             }
         }
@@ -1361,7 +1662,7 @@ impl VectorIndex {
     /// and `None`, the arena's own vector, over vectors, whose graphs stay
     /// as they were built.
     fn build_query(&self, raw: &[f32]) -> Option<Vec<f32>> {
-        self.quantized().then(|| self.prepare_query(raw))
+        (self.spec.quant != Quant::None).then(|| self.query_for(raw))
     }
 
     // --- neighbour access ------------------------------------------------
@@ -1471,6 +1772,21 @@ impl VectorIndex {
         }
     }
 
+    /// The query a search measures with: prepared, and over bit codes
+    /// followed by its dot product with each centre, which every code's
+    /// estimate starts from -- once a query rather than once a node.
+    fn query_for(&self, q: &[f32]) -> Vec<f32> {
+        let mut q = self.prepare_query(q);
+        if let (Arena::Bit(b), true) = (&self.data, q.len() == self.dim) {
+            let at = b.centres.half.len();
+            q.reserve(at);
+            for c in 0..at {
+                q.push(dot(&q[..self.dim], b.centres.centre(c, self.dim)));
+            }
+        }
+        q
+    }
+
     fn random_level(&mut self) -> usize {
         let r = self.rng.next_f32().max(f32::MIN_POSITIVE);
         (-r.ln() * self.level_mult) as usize
@@ -1481,6 +1797,10 @@ impl VectorIndex {
     /// is no intermediate `Vec` allocation.
     fn alloc_node(&mut self, doc: DocId, raw: &[f32], level: usize) -> u32 {
         self.data.push(raw, self.spec.metric == Metric::Cosine);
+        let nodes = self.doc_ids.len() + 1;
+        if self.spec.quant == Quant::Bit && nodes >= BIT_TRAIN && !self.data.quantized() {
+            self.data = self.data.coded(nodes, self.dim);
+        }
         self.alloc_links(doc, level)
     }
 
@@ -1738,8 +2058,7 @@ impl VectorIndex {
             let query = match self.quantized() {
                 true => {
                     let doc = self.doc_ids[node as usize];
-                    (lookup(doc, &mut raw) && raw.len() == self.dim)
-                        .then(|| self.prepare_query(&raw))
+                    (lookup(doc, &mut raw) && raw.len() == self.dim).then(|| self.query_for(&raw))
                 }
                 false => None,
             };
@@ -1830,15 +2149,16 @@ impl VectorIndex {
                 let mut buf = std::mem::take(&mut self.prune_buf);
                 buf.clear();
                 // `nb` is fixed across all the comparisons: widen it once.
-                let nbv = self.vec_at(nb);
+                // Widened, a code leaves out its own offset.
+                let (nbv, off) = (self.vec_at(nb), self.data.offset(nb));
                 for &x in self.neighbors(nb, l) {
                     buf.push(Cand {
-                        dist: self.dist_to(&nbv, x),
+                        dist: self.dist_to(&nbv, x) - off,
                         node: x,
                     });
                 }
                 buf.push(Cand {
-                    dist: self.dist_to(&nbv, node),
+                    dist: self.dist_to(&nbv, node) - off,
                     node,
                 });
                 drop(nbv);
@@ -1868,7 +2188,7 @@ impl VectorIndex {
         if self.deleted[node as usize] {
             return false;
         }
-        let mut probe = Arena::new(self.prec, self.spec.quant);
+        let mut probe = self.data.empty_like();
         probe.push(raw, self.spec.metric == Metric::Cosine);
         let (mut held, mut new) = (Vec::new(), Vec::new());
         self.data.write_stored(node, self.dim, &mut held);
@@ -1920,7 +2240,7 @@ impl VectorIndex {
         if k == 0 || (self.entry.is_none() && self.unlinked() == 0) {
             return Vec::new();
         }
-        let q = self.prepare_query(query);
+        let q = self.query_for(query);
         let ef = ef.unwrap_or(self.spec.ef_search).max(k);
 
         let mut found = match self.entry {
@@ -2016,7 +2336,21 @@ impl VectorIndex {
             VecPrec::F16 => 1,
         });
         if kept || quant != Quant::None || !unlinked.is_empty() {
-            out.push(quant.code());
+            match quant {
+                Quant::Bit => out.push(BIT_CENTRED),
+                _ => out.push(quant.code()),
+            }
+        }
+        // The centres a bit index's codes are taken from: none while it
+        // holds its vectors whole.
+        if quant == Quant::Bit {
+            let at = match &self.data {
+                Arena::Bit(b) => &b.centres.at[..],
+                _ => &[],
+            };
+            put_uvarint(&mut out, (at.len() / self.dim.max(1)) as u64);
+            at.iter()
+                .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
         }
         put_uvarint(&mut out, self.doc_ids.len() as u64);
         put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
@@ -2111,14 +2445,40 @@ impl VectorIndex {
             return None;
         }
         if version != GRAPH_VERSION {
-            spec.quant = Quant::from_code(*bytes.get(pos)?)?;
+            spec.quant = match *bytes.get(pos)? {
+                BIT_CENTRED => Quant::Bit,
+                // The plain signs, which this build codes no longer.
+                c if c == Quant::Bit.code() => return None,
+                c => Quant::from_code(c)?,
+            };
             pos += 1;
+        }
+        let mut ix = VectorIndex::with_precision(dim, spec, prec);
+        let mut centred = false;
+        if spec.quant == Quant::Bit {
+            let k = get_uvarint(bytes, &mut pos).ok()? as usize;
+            if k > 256 {
+                return None;
+            }
+            if k > 0 {
+                let len = k * dim * 4;
+                let at = bytes.get(pos..pos.checked_add(len)?)?;
+                pos += len;
+                let at = at.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b));
+                let centres = Centres::new(at.collect(), dim);
+                ix.data = Arena::Bit(Bits::new(Arc::new(centres), dim, prec == VecPrec::F16));
+                centred = true;
+            }
         }
         let count = get_uvarint(bytes, &mut pos).ok()? as usize;
         let entry_raw = get_uvarint(bytes, &mut pos).ok()?;
         let max_level = get_uvarint(bytes, &mut pos).ok()? as usize;
+        // Whole vectors past the count they are coded at: not a record this
+        // build wrote.
+        if spec.quant == Quant::Bit && !centred && count >= BIT_TRAIN {
+            return None;
+        }
 
-        let mut ix = VectorIndex::with_precision(dim, spec, prec);
         ix.reserve(count);
         ix.max_level = max_level;
         ix.entry = if entry_raw == 0 {
@@ -2208,7 +2568,7 @@ impl VectorIndex {
         if k == 0 {
             return Vec::new();
         }
-        let q = self.prepare_query(query);
+        let q = self.query_for(query);
         let mut all: Vec<Cand> = ids
             .iter()
             .filter_map(|doc| self.by_doc.get(doc).copied())
@@ -2244,7 +2604,7 @@ impl VectorIndex {
     where
         F: Fn(DocId) -> bool,
     {
-        let q = self.prepare_query(query);
+        let q = self.query_for(query);
         let mut all: Vec<Cand> = (0..self.doc_ids.len() as u32)
             .filter(|n| !self.is_deleted(*n))
             .filter(|n| accept(self.doc_ids[*n as usize]))
@@ -2711,7 +3071,9 @@ mod tests {
     #[test]
     fn a_graph_over_codes_round_trips() {
         let mut r = Rng(42);
-        let docs: Vec<Vec<f32>> = (0..600)
+        // Past the vectors a bit index holds whole: its codes, and the
+        // centres they were taken from, come back as they were.
+        let docs: Vec<Vec<f32>> = (0..BIT_TRAIN + 400)
             .map(|_| (0..16).map(|_| r.next_f32() - 0.5).collect())
             .collect();
         for quant in [Quant::None, Quant::Int8, Quant::Bit] {
@@ -2752,6 +3114,98 @@ mod tests {
                 assert_eq!(ranked(&back, q), ranked(&ix, q), "{quant:?}");
             }
         }
+    }
+
+    /// A vector written again as it was keeps its node over bit codes, at
+    /// either precision: the ones held whole until the centres were
+    /// learned, coded from what they were held as, and the ones after.
+    #[test]
+    fn a_bit_code_written_again_keeps_its_node() {
+        for prec in [VecPrec::F32, VecPrec::F16] {
+            let spec = VectorIndexSpec {
+                metric: Metric::Cosine,
+                quant: Quant::Bit,
+                ..spec()
+            };
+            let mut ix = VectorIndex::with_precision(16, spec, prec);
+            let docs = items(3, BIT_TRAIN as u64 + 100, 16);
+            for (doc, v) in &docs {
+                ix.insert(*doc, v);
+            }
+            assert!(ix.quantized());
+            for (doc, v) in docs.iter().take(100).chain(docs.iter().rev().take(100)) {
+                ix.insert(*doc, v);
+            }
+            assert_eq!(ix.dead(), 0, "{prec:?}");
+            let moved: Vec<f32> = docs[5].1.iter().map(|x| x + 0.25).collect();
+            ix.insert(docs[5].0, &moved);
+            assert_eq!((ix.dead(), ix.len()), (1, docs.len()), "{prec:?}");
+        }
+    }
+
+    /// A bit code is the signs of a vector's distance from the nearest of
+    /// the centres the index learned, not of the vector: in clusters
+    /// crowded around centres away from the origin, most of a vector's own
+    /// signs are its centre's, and tell the cluster's members apart poorly.
+    /// Ranked by the codes, the best 40 of 3 000 hold 91.5% of the true ten;
+    /// by the vectors' own signs, 19%.
+    #[test]
+    fn bit_codes_tell_a_cluster_apart_by_its_residuals() {
+        let dim = 64;
+        let mut r = Rng(7);
+        let centres: Vec<Vec<f32>> = (0..8)
+            .map(|_| (0..dim).map(|_| r.next_f32() * 2.0 - 1.0).collect())
+            .collect();
+        let mut near = |i: usize| -> Vec<f32> {
+            centres[i % 8]
+                .iter()
+                .map(|c| c + 0.3 * (r.next_f32() - 0.5))
+                .collect()
+        };
+        let docs: Vec<Vec<f32>> = (0..3000).map(&mut near).collect();
+        let queries: Vec<Vec<f32>> = (0..40).map(&mut near).collect();
+        let spec = VectorIndexSpec {
+            metric: Metric::Cosine,
+            quant: Quant::Bit,
+            ..spec()
+        };
+        let mut ix = VectorIndex::new(dim, spec);
+        for (i, v) in docs.iter().enumerate() {
+            ix.insert(i as u64, v);
+        }
+        assert!(ix.quantized());
+        let unit: Vec<Vec<f32>> = docs.iter().map(|v| normalized(v)).collect();
+        let best = |score: &dyn Fn(usize) -> f32, k: usize| -> Vec<u64> {
+            let mut all: Vec<(f32, u64)> = (0..unit.len()).map(|i| (score(i), i as u64)).collect();
+            all.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            all[..k].iter().map(|x| x.1).collect()
+        };
+        let (mut coded, mut signed) = (0, 0);
+        for q in &queries {
+            let q = normalized(q);
+            let truth = best(&|i| dot(&q, &unit[i]), 10);
+            let codes: Vec<u64> = ix
+                .search_exact(&q, 40, |_| true)
+                .iter()
+                .map(|x| x.0)
+                .collect();
+            // The vector's own signs, as bit codes were.
+            let signs = best(
+                &|i| {
+                    unit[i]
+                        .iter()
+                        .zip(&q)
+                        .map(|(x, y)| if *x > 0.0 { *y } else { -*y })
+                        .sum()
+                },
+                40,
+            );
+            coded += truth.iter().filter(|d| codes.contains(d)).count();
+            signed += truth.iter().filter(|d| signs.contains(d)).count();
+        }
+        let all = queries.len() as f64 * 10.0;
+        assert!(coded as f64 / all >= 0.9, "{coded} of {all}");
+        assert!(signed < coded, "{signed} against {coded}");
     }
 
     /// `n` random `(doc, vector)` items from a seed, docs counted from 0.
