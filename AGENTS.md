@@ -150,8 +150,8 @@ and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
 where it stopped. So every write goes through `wal`, one record and one tick;
 a record that moved no counter would leave every replica one change off. The
-history (record kind 8, `History`) is the one record that moves none, and it is
-never sent: a promotion forks it, a replica is continued only from a position
+history (record kind 8, `History`) moves none, as a graph a server keeps in
+the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
 following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
 p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
@@ -198,18 +198,25 @@ after. A record cut short inside the checkpoint image is refused as corrupt
 instead (an image is renamed in whole), and `fenec types` opens with
 `fs::open_read_only`, which writes nothing to a server's live file. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
-the history (kind 8) is the one appended record that is not a write.
+the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
+appended records that are not writes.
 
-**The HNSW graph is derived data, not a cache.** It is written only by
-`snapshot`, `compact` and `checkpoint` — never on the write path. On open the
+**The HNSW graph is derived data, not a cache.** It is written by
+`snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
+(below) — never on the write path. On open the
 version, dimension, precision and link bounds are validated, and the live nodes
 against the documents holding a vector; anything off means a silent full
-rebuild. A corrupt graph can therefore never lose data. It is restored where the
-checkpoint's image ends, against the documents it was written with, and the tail
-after it is applied as the write path would (a touched document keeps its node
-while it holds the same vector, and has it retired for the new one otherwise) --
-restored after the whole file, one write in the
-tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99. A
+rebuild. A corrupt graph can therefore never lose data. It is restored where
+its last record is -- a checkpoint's image holds one after each collection's
+data; `last_graphs` walks the record heads for it first, since restoring each
+record read every vector again -- against the documents as they stood there,
+and the writes after it are applied as the write path would (a touched
+document keeps its node while it holds the same vector, and has it retired for
+the new one otherwise) -- restored after the whole file, one write in the
+tail threw it away, and a crash cost 48 s at 100 000 x 768 instead of 0.99.
+An index added in the tail (`create index`) leaves the graphs restored
+before it, as a replica leaves them; reset with the rest, it had the next
+open build them all again. A
 tombstone carries its own vector in the record, since its document may be gone:
 without that, one `del` rebuilt the graph on every open until `compact`, which
 rebuilds a graph holding tombstones (nothing else takes one out). A rewrite
@@ -219,6 +226,27 @@ longer takes the vector out of the graph and back in (1.89 -> 0.006 ms at
 `near` the tombstones cut short walks again with the beam wider by their
 number, or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
+
+**A server keeps its graphs in its file.** It checkpoints only on its way
+down, so a crash after a long run left every vector written since the start
+to link again. `fenec_http::link::keep` looks at every database the process
+serves every 5 s, and appends to the tail each graph that changed in 10 000
+nodes since it last reached the file, has none waiting to be linked, and
+whose record the file has grown three times over since
+(`Database::save_graphs`, under the read lock, which keeps the writes out
+while the graph is written). The record holds the whole graph, so a bound
+on the linking alone would have a big graph written over and over for a
+little of it; waiting for the linking kept a crash from leaving the nodes
+waiting again. It is a graph record (kind 4) of version 6, which an older
+binary does not know and rebuilds from -- it restored a record in the tail
+against the documents the whole file left, and a vector rewritten after it
+kept the links of the one before -- and like the history it moves no
+counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
+leaves at most 10 000 vectors to link, 7.9 s with `near` at 2.06 ms p50
+meanwhile, where every vector waited 55.2 s in the same run with `near` at
+the exact scan's 14.89 ms; the ten records were 35.2 MB of a 370.3 MB file
+until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
+at most (`make reopen-bench`).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
@@ -241,8 +269,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.4 KB
-brotli with all four, 117.3 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.7 KB
+brotli with all four, 117.2 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

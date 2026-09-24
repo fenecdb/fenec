@@ -220,15 +220,20 @@ open-bench:
 ## What a crash costs the next open: 100 000 x 768 written and never
 ## checkpointed, so every vector is in the tail, then opened as a server did
 ## (linked first) and does (linked beside the queries), alone and with two
-## clients sending a near every 20 ms. Each open is a process of its own.
+## clients sending a near every 20 ms. Then written as a server keeps its
+## graphs in the file, and crashed a row before the next one was due: the
+## most a crash can leave to link. Each open is a process of its own.
 REOPEN_ROWS ?= 100000
 REOPEN_FILE ?= target/reopen-$(REOPEN_ROWS).fenec
+REOPEN_KEPT ?= target/reopen-$(REOPEN_ROWS)-kept.fenec
 reopen-bench:
 	$(CARGO) build --release -p fenec-core --example reopen
 	test -f $(REOPEN_FILE) || ./target/release/examples/reopen write $(REOPEN_FILE) $(REOPEN_ROWS) 768
 	./target/release/examples/reopen open $(REOPEN_FILE) linked
 	./target/release/examples/reopen open $(REOPEN_FILE) deferred
 	./target/release/examples/reopen open $(REOPEN_FILE) deferred 2 20
+	test -f $(REOPEN_KEPT) || ./target/release/examples/reopen write $(REOPEN_KEPT) $(REOPEN_ROWS) 768 worst
+	./target/release/examples/reopen open $(REOPEN_KEPT) deferred
 
 ## Quantized vector indexes against full vectors: the arena, the heap,
 ## recall@10, latency and the documents' vectors read at beams of 100, 200

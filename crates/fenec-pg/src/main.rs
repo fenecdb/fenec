@@ -494,9 +494,12 @@ fn main() {
 
     let shared = Arc::new(RwLock::new(db));
     // What the open left out of the graphs is linked beside the queries: the
-    // port opens in the time the documents take to read.
+    // port opens in the time the documents take to read. The graphs are kept
+    // in the file as they change, so a crash leaves only what came after
+    // the last of them to link.
     if let Some(path) = &file {
         fenec_http::link::beside(path, &shared);
+        fenec_http::link::keep(path, &shared);
     }
 
     // The follower applies the primary's writes; this server's own feed

@@ -454,6 +454,7 @@ impl Tenants {
         db.set_change_capacity(self.change_capacity);
         let db = Arc::new(RwLock::new(db));
         crate::link::beside(&format!("tenant `{name}`"), &db);
+        crate::link::keep(&format!("tenant `{name}`"), &db);
         // The follower applies the primary node's writes for this tenant, and
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.

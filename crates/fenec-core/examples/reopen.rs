@@ -1,13 +1,18 @@
 //! What a crash costs the next open: `make reopen-bench`.
 //!
 //! ```text
-//! cargo run --release -p fenec-core --example reopen -- write <path> <rows> <dim> [<checkpoint at>]
+//! cargo run --release -p fenec-core --example reopen -- write <path> <rows> <dim> [<checkpoint at>] [kept|worst]
 //! cargo run --release -p fenec-core --example reopen -- open <path> linked|deferred [<clients> <ms>]
 //! ```
 //!
 //! `write` fills a file the way a server does and leaves it the way a crash
 //! does: the graph as of the last checkpoint -- taken at `<checkpoint at>`
-//! rows, or never -- and every write after it in the tail. `open` opens it
+//! rows, or never -- and every write after it in the tail. With `kept` it
+//! writes a thousand rows at a time and appends the graph whenever one is
+//! due, as a server's keeper does (`fenec_http::link::keep`), and says what
+//! that cost; `worst` goes on writing a row at a time past `<rows>` and
+//! crashes one row before the next graph would have been appended, which
+//! is the most a crash can leave to link. `open` opens it
 //! as a server did before (`linked`: the tail's vectors linked into the
 //! graph before the open returns) or does now (`deferred`,
 //! `fs::open_serving`: linked beside the queries, a slice at a time under
@@ -66,45 +71,106 @@ fn centres(dim: usize) -> Vec<Vec<f32>> {
 
 const QUERY_BASE: u64 = 1 << 40;
 
-fn write(path: &str, rows: u64, dim: usize, checkpoint_at: Option<u64>) {
+/// What `write` does about the graph between checkpoints.
+#[derive(PartialEq)]
+enum Keep {
+    /// Nothing, as a server did.
+    No,
+    /// Appends it whenever one is due, as a server's keeper does.
+    Kept,
+    /// `Kept`, and crashes one row before the next would be due.
+    Worst,
+}
+
+/// The graphs `db` has due, appended and pushed to disk as the keeper does;
+/// how long that held the database and how many bytes it wrote.
+fn keep(db: &Database, path: &str) -> Option<(Duration, u64)> {
+    if !db.graphs_due() {
+        return None;
+    }
+    let before = std::fs::metadata(path).unwrap().len();
+    let t = Instant::now();
+    let (_, durable) = db.save_graphs().expect("save the graphs");
+    let held = t.elapsed();
+    if let Some(d) = durable {
+        d().expect("sync");
+    }
+    Some((held, std::fs::metadata(path).unwrap().len() - before))
+}
+
+fn put(db: &mut Database, centres: &[Vec<f32>], rows: std::ops::Range<u64>) {
+    let docs = rows
+        .map(|j| {
+            vec![(
+                "e".to_string(),
+                Expr::Lit(Value::Vector(vector(centres, j))),
+            )]
+        })
+        .collect();
+    db.execute(&Statement::Put {
+        collection: "d".into(),
+        docs,
+    })
+    .unwrap();
+}
+
+fn write(path: &str, rows: u64, dim: usize, checkpoint_at: Option<u64>, kept: Keep) {
     let _ = std::fs::remove_file(path);
     let centres = centres(dim);
     let mut db = fenec_core::fs::open(path).expect("open");
     let create = format!("create collection d (e vector<{dim}> @hnsw(cosine))");
     db.execute(&fenec_ql::parse_one(&create).unwrap()).unwrap();
     let t = Instant::now();
+    let step = if kept == Keep::No { 10_000 } else { 1_000 };
+    let (mut held, mut graphs, mut saved_at) = (Vec::new(), 0u64, 0u64);
     let mut i = 0;
     while i < rows {
-        let end = (i + 10_000).min(rows);
+        let end = (i + step).min(rows);
         let end = match checkpoint_at {
             Some(c) if i < c => end.min(c),
             _ => end,
         };
-        let docs = (i..end)
-            .map(|j| {
-                vec![(
-                    "e".to_string(),
-                    Expr::Lit(Value::Vector(vector(&centres, j))),
-                )]
-            })
-            .collect();
-        db.execute(&Statement::Put {
-            collection: "d".into(),
-            docs,
-        })
-        .unwrap();
+        put(&mut db, &centres, i..end);
         i = end;
         if checkpoint_at == Some(i) {
             db.checkpoint().expect("checkpoint");
+            saved_at = i;
+        }
+        if kept != Keep::No {
+            if let Some((h, bytes)) = keep(&db, path) {
+                held.push(ms(h));
+                graphs += bytes;
+                saved_at = i;
+            }
+        }
+    }
+    if kept == Keep::Worst {
+        while !db.graphs_due() {
+            put(&mut db, &centres, i..i + 1);
+            i += 1;
         }
     }
     db.sync().expect("sync");
-    let tail = rows - checkpoint_at.unwrap_or(0);
+    let saved_at = match kept {
+        Keep::No => checkpoint_at.unwrap_or(0),
+        _ => saved_at,
+    };
     println!(
-        "wrote {rows} x {dim} in {:.1} s: the graph checkpointed at {} rows, {tail} in the tail",
+        "wrote {i} x {dim} in {:.1} s: the graph last reached the file at {saved_at} rows, {} in the tail",
         t.elapsed().as_secs_f64(),
-        checkpoint_at.unwrap_or(0)
+        i - saved_at
     );
+    if !held.is_empty() {
+        let size = std::fs::metadata(path).unwrap().len();
+        println!(
+            "         {} graphs appended, {:.1} MB of a {:.1} MB file; each held the database {:.1} ms p50, {:.1} max",
+            held.len(),
+            graphs as f64 / 1e6,
+            size as f64 / 1e6,
+            pct(&mut held, 0.5),
+            pct(&mut held, 1.0),
+        );
+    }
     // Dropped without a checkpoint, as a crash leaves it.
 }
 
@@ -262,12 +328,22 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
     match arg(0) {
-        "write" => write(
-            arg(1),
-            arg(2).parse().expect("rows"),
-            arg(3).parse().expect("dim"),
-            args.get(4).map(|s| s.parse().expect("checkpoint at")),
-        ),
+        "write" => {
+            let rest = &args[args.len().min(4)..];
+            let kept = match rest.iter().find(|a| a.parse::<u64>().is_err()).map(String::as_str) {
+                None => Keep::No,
+                Some("kept") => Keep::Kept,
+                Some("worst") => Keep::Worst,
+                Some(other) => panic!("keep how? {other}"),
+            };
+            write(
+                arg(1),
+                arg(2).parse().expect("rows"),
+                arg(3).parse().expect("dim"),
+                rest.iter().find_map(|a| a.parse().ok()),
+                kept,
+            )
+        }
         "open" => open(
             arg(1),
             arg(2),
@@ -275,7 +351,7 @@ fn main() {
             Duration::from_millis(args.get(4).map_or(10, |s| s.parse().expect("ms"))),
         ),
         _ => eprintln!(
-            "reopen write <path> <rows> <dim> [<checkpoint at>] | reopen open <path> linked|deferred [<clients> <ms>]"
+            "reopen write <path> <rows> <dim> [<checkpoint at>] [kept|worst] | reopen open <path> linked|deferred [<clients> <ms>]"
         ),
     }
 }

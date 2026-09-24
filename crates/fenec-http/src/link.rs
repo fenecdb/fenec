@@ -1,14 +1,18 @@
 //! Links what a server's open left out of the graphs, beside the queries.
 //!
 //! A server opens its file with `fs::open_serving`: the vectors written
-//! after the last checkpoint -- every vector, when there is no graph to
-//! restore -- go into the arena unlinked, and `near` measures each of them
-//! until they are linked. Linked at the open instead, they kept the port
-//! closed for as long as they took: 56.6 s at 100 000 x 768 never
+//! after the last graph that reached the file -- every vector, when there
+//! is none to restore -- go into the arena unlinked, and `near` measures
+//! each of them until they are linked. Linked at the open instead, they kept
+//! the port closed for as long as they took: 56.6 s at 100 000 x 768 never
 //! checkpointed, which opens in 0.96 s this way and is linked 61.8 s later.
+//!
+//! And it keeps its graphs in the file ([`keep`]), since it checkpoints only
+//! on its way down: without them a crash after a long run left every vector
+//! written since the start to link again.
 
 use fenec_core::prelude::Database;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 /// How long a slice holds the write lock. Every query and write waits a
@@ -61,5 +65,74 @@ pub fn beside(what: &str, db: &Arc<RwLock<Database>>) {
         });
     if let Err(e) = started {
         crate::log!("could not start linking {what}'s vectors: {e}; near measures them one by one");
+    }
+}
+
+/// How often the keeper looks at the databases it keeps. A graph is due a
+/// record only after thousands of changes, so a look costs a pass over the
+/// indexes, nothing more, and a crash between two looks leaves at most
+/// what a few seconds wrote beyond the due point to link again.
+const KEEP_EVERY: Duration = Duration::from_secs(5);
+
+/// The databases the keeper appends graphs for, each named for the log.
+static KEPT: Mutex<Vec<(String, Weak<RwLock<Database>>)>> = Mutex::new(Vec::new());
+static KEEPER: Once = Once::new();
+
+/// Keeps the database's graphs in its file: every few seconds one thread,
+/// for every database the process serves, appends each graph that changed
+/// enough since it last reached the file (`Database::save_graphs`), under
+/// the read lock. A crash then links only what was written after it. The
+/// thread holds a database only while it looks, so a tenant closed
+/// meanwhile is let go of.
+pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
+    KEPT.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((what.to_string(), Arc::downgrade(db)));
+    KEEPER.call_once(|| {
+        let started = std::thread::Builder::new()
+            .name("fenec-graphs".into())
+            .spawn(|| loop {
+                std::thread::sleep(KEEP_EVERY);
+                let kept = {
+                    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+                    kept.retain(|(_, db)| db.strong_count() > 0);
+                    kept.clone()
+                };
+                for (what, db) in kept {
+                    if let Some(db) = db.upgrade() {
+                        save(&what, &db);
+                    }
+                }
+            });
+        if let Err(e) = started {
+            crate::log!("could not start keeping the graphs in the files: {e}");
+        }
+    });
+}
+
+/// Appends what of `db`'s graphs is due, and pushes it to disk once the
+/// lock is let go.
+fn save(what: &str, db: &RwLock<Database>) {
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    if !g.graphs_due() {
+        return;
+    }
+    let t = Instant::now();
+    let saved = g.save_graphs();
+    let held = t.elapsed();
+    drop(g);
+    let r = saved.and_then(|(n, durable)| {
+        durable.map_or(Ok(()), |d| d())?;
+        Ok(n)
+    });
+    match r {
+        Ok(n) => crate::log!(
+            "{what}: {n} graph{} written into the file, {held:.1?} under the read lock",
+            if n == 1 { "" } else { "s" }
+        ),
+        Err(e) => {
+            crate::log!("{what}: could not write the graphs into the file: {e}");
+            db.write().unwrap_or_else(|e| e.into_inner()).fail(&e);
+        }
     }
 }

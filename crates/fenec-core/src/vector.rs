@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::atomic::AtomicU64;
 
 // -------------------------------------------------------------- metrics
 
@@ -798,10 +799,16 @@ impl Rng {
 /// quantization existed is not rebuilt for it. 5 marks the nodes not linked
 /// yet ([`VectorIndex::defer_batch`]), and is written only while there are
 /// some: a server that shut down before linking them keeps them waiting
-/// rather than rebuilding, and a build before it rebuilds once.
+/// rather than rebuilding, and a build before it rebuilds once. 6 is a
+/// graph a server kept in its file's tail (`Database::save_graphs`), in
+/// version 5's layout: a binary before it restored a record there against
+/// the documents as the whole file left them, and a vector rewritten after
+/// the record kept the links of the one before it. It does not know 6, and
+/// rebuilds.
 const GRAPH_VERSION: u8 = 3;
 const GRAPH_VERSION_QUANT: u8 = 4;
 const GRAPH_VERSION_UNLINKED: u8 = 5;
+const GRAPH_VERSION_KEPT: u8 = 6;
 
 /// Whether a graph can hold nodes not linked yet: a server's open leaves
 /// them for a thread beside its queries (`fs::open_serving`). The browser
@@ -1124,6 +1131,17 @@ impl<'a> GraphView<'a> {
     }
 }
 
+/// What of a graph has reached the file: the change count it had and the
+/// file's length right after its record, and what a node took there. Set by
+/// the load that restored it, a rewrite, and `Database::save_graphs` --
+/// which writes a graph under the read lock, hence the atomics.
+#[derive(Default)]
+pub struct Persisted {
+    pub changes: AtomicU64,
+    pub at: AtomicU64,
+    pub node_bytes: AtomicU64,
+}
+
 #[cfg(feature = "vector")]
 pub struct VectorIndex {
     pub dim: usize,
@@ -1168,6 +1186,12 @@ pub struct VectorIndex {
     /// [`VectorIndex::link_pending`] takes them into the graph. A tombstone
     /// among them is dropped when its turn comes.
     pending: Vec<u32>,
+    /// Changes to the graph since it was made or restored: nodes added,
+    /// retired and linked. What a server weighs against a graph record's
+    /// size before it appends one (`Database::save_graphs`): as many as
+    /// these would be linked again after a crash.
+    changes: u64,
+    persisted: Persisted,
 }
 
 thread_local! {
@@ -1210,6 +1234,8 @@ impl VectorIndex {
             level_mult: 1.0 / (spec.m.max(2) as f32).ln(),
             prune_buf: Vec::new(),
             pending: Vec::new(),
+            changes: 0,
+            persisted: Persisted::default(),
         }
     }
 
@@ -1465,6 +1491,7 @@ impl VectorIndex {
     }
 
     fn alloc_links(&mut self, doc: DocId, level: usize) -> u32 {
+        self.changes += 1;
         let node = self.doc_ids.len() as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
@@ -1718,6 +1745,7 @@ impl VectorIndex {
             };
             todo.push((node, self.node_levels(node), query));
         }
+        self.changes += todo.len() as u64;
         // The nodes the graph holds, as `insert_batch` counts them.
         let mut linked = self.doc_ids.len() - self.pending.len() - todo.len();
         let mut rest = &todo[..];
@@ -1850,6 +1878,7 @@ impl VectorIndex {
         }
         self.deleted[node as usize] = true;
         self.deleted_count += 1;
+        self.changes += 1;
         false
     }
 
@@ -1858,9 +1887,21 @@ impl VectorIndex {
             if !self.deleted[node as usize] {
                 self.deleted[node as usize] = true;
                 self.deleted_count += 1;
+                self.changes += 1;
             }
             self.by_doc.remove(&doc);
         }
+    }
+
+    /// Changes to the graph since it was made or restored: nodes added,
+    /// retired and linked.
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
+    /// What of this graph has reached the file.
+    pub fn persisted(&self) -> &Persisted {
+        &self.persisted
     }
 
     /// k nearest neighbours. The `accept` predicate is applied to the result
@@ -1929,6 +1970,16 @@ impl VectorIndex {
     /// while filling the arena is a linear copy. Only the links, the levels
     /// and the entry point are therefore stored.
     pub fn serialize_graph(&self) -> Vec<u8> {
+        self.serialize(false)
+    }
+
+    /// [`Self::serialize_graph`] for a record in the file's tail
+    /// ([`GRAPH_VERSION_KEPT`]).
+    pub fn serialize_graph_kept(&self) -> Vec<u8> {
+        self.serialize(true)
+    }
+
+    fn serialize(&self, kept: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.doc_ids.len() * 96);
         let quant = self.spec.quant;
         // The nodes still to be linked, flagged as such: written as nodes
@@ -1942,7 +1993,9 @@ impl VectorIndex {
                 }
             }
         }
-        out.push(if !unlinked.is_empty() {
+        out.push(if kept {
+            GRAPH_VERSION_KEPT
+        } else if !unlinked.is_empty() {
             GRAPH_VERSION_UNLINKED
         } else if quant == Quant::None {
             GRAPH_VERSION
@@ -1962,7 +2015,7 @@ impl VectorIndex {
             VecPrec::F32 => 0,
             VecPrec::F16 => 1,
         });
-        if quant != Quant::None || !unlinked.is_empty() {
+        if kept || quant != Quant::None || !unlinked.is_empty() {
             out.push(quant.code());
         }
         put_uvarint(&mut out, self.doc_ids.len() as u64);
@@ -2020,8 +2073,11 @@ impl VectorIndex {
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
         let version = *bytes.first()?;
-        let waits = UNLINKED && version == GRAPH_VERSION_UNLINKED;
-        if !waits && version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
+        // A browser keeps no graph of its own in a tail, and rebuilds one a
+        // server kept, as it does one with nodes waiting.
+        let kept = UNLINKED && version == GRAPH_VERSION_KEPT;
+        let waits = UNLINKED && (version == GRAPH_VERSION_UNLINKED || kept);
+        if !waits && !kept && version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
             return None;
         }
         pos += 1;
@@ -2078,6 +2134,8 @@ impl VectorIndex {
             let (is_deleted, unlinked) = match (*bytes.get(pos)?, waits) {
                 (0, _) => (false, false),
                 (2, true) => (false, true),
+                // Kept with a node waiting, which this build cannot hold.
+                (2, false) if kept => return None,
                 (1, true) | (_, false) => (true, false),
                 _ => return None,
             };
@@ -2133,6 +2191,8 @@ impl VectorIndex {
         if ix.entry.map(|e| e as usize >= count).unwrap_or(false) {
             return None;
         }
+        // As its record has it: nothing to write again.
+        ix.changes = 0;
         Some(ix)
     }
 

@@ -421,10 +421,12 @@ fn tombstones_and_missing_vectors_do_not_cost_a_rebuild() {
     assert_eq!(arena(&back, "d"), arena(&db, "d"));
 }
 
-/// A tail that changes a collection's schema resets its indexes; the graph
-/// it had is then rebuilt, and the answers stay right.
+/// An index added in the tail leaves the graph the checkpoint holds, as it
+/// leaves the live one: the documents are the same. Reset with the rest,
+/// every `create index` had the next open build the collection's graphs
+/// again.
 #[test]
-fn a_schema_change_in_the_tail_rebuilds_that_graph() {
+fn an_index_added_in_the_tail_keeps_the_graph() {
     let file = File::default();
     let mut db = Database::with_sink(Box::new(file.clone()));
     exec(
@@ -440,6 +442,12 @@ fn a_schema_change_in_the_tail_rebuilds_that_graph() {
             &[Value::Int(k), Value::Vector(r.vector(4))],
         );
     }
+    // A tombstone, which a restored graph carries and a rebuilt one has not.
+    exec(
+        &mut db,
+        "set d {e: $1} where id = 3",
+        &[Value::Vector(r.vector(4))],
+    );
     db.checkpoint().unwrap();
     exec(&mut db, "create index on d (k) @hash", &[]);
     exec(&mut db, "put d {k: 7, e: [1, 0, 0, 0]}", &[]);
@@ -450,8 +458,129 @@ fn a_schema_change_in_the_tail_rebuilds_that_graph() {
         &[Value::Vector(vec![1.0, 0.0, 0.0, 0.0])],
     );
     assert_eq!(hit[0].0, 201);
-    // Rebuilt: live vectors only, no tombstones to carry.
-    assert_eq!(arena(&back, "d").0, 201 * 4 * 4);
+    assert_eq!(arena(&back, "d").0, 202 * 4 * 4);
+    assert_eq!(arena(&back, "d"), arena(&db, "d"));
+}
+
+/// A new file, as `fs::open` makes one, and a database writing into it
+/// that appends a graph once `changes` nodes changed and the file grew by
+/// `growth` times the record.
+fn saving(changes: u64, growth: u64) -> (File, Database) {
+    let file = File(Arc::new(Mutex::new(fenec_core::engine::MAGIC.to_vec())));
+    let mut db = Database::with_sink(Box::new(file.clone()));
+    db.set_graph_saves(changes, growth);
+    exec(
+        &mut db,
+        &format!("create collection d (e vector<{DIM}> @hnsw(cosine, m=8, ef_construction=64))"),
+        &[],
+    );
+    (file, db)
+}
+
+fn put(db: &mut Database, r: &mut Rng, n: usize) -> Vec<Vec<f32>> {
+    (0..n)
+        .map(|_| {
+            let v = r.vector(DIM);
+            exec(db, "put d {e: $1}", &[Value::Vector(v.clone())]);
+            v
+        })
+        .collect()
+}
+
+/// A server appends its graphs to the tail now and then (`save_graphs`),
+/// since it checkpoints only on its way down: a crash then opens with the
+/// graph as the last record has it, and only what was written after it
+/// waits to be linked -- where a file never checkpointed had every vector
+/// wait. The record is not a write, and moves no counter.
+#[test]
+fn a_graph_saved_in_the_tail_is_what_a_crash_opens_with() {
+    let (file, mut db) = saving(500, 1);
+    let mut r = Rng(33);
+    let mut vectors = vec![Vec::new()];
+    vectors.extend(put(&mut db, &mut r, 1500));
+    let seq = db.change_seq();
+    assert!(db.graphs_due());
+    assert_eq!(db.save_graphs().unwrap().0, 1);
+    assert_eq!(db.change_seq(), seq);
+    assert!(!db.graphs_due());
+    assert_eq!(db.save_graphs().unwrap().0, 0);
+
+    // After the record: new documents, rewritten vectors, deletes.
+    put(&mut db, &mut r, 200);
+    let mut updated = Vec::new();
+    for id in (10..=1500u64).step_by(97) {
+        let new = r.vector(DIM);
+        exec(
+            &mut db,
+            "set d {e: $1} where id = $2",
+            &[Value::Vector(new.clone()), Value::Int(id as i64)],
+        );
+        updated.push((id, vectors[id as usize].clone(), new));
+    }
+    let mut deleted = Vec::new();
+    for id in (40..=1500u64).step_by(151) {
+        exec(&mut db, "del d where id = $1", &[Value::Int(id as i64)]);
+        deleted.push((id, vectors[id as usize].clone()));
+    }
+    let crash = Crash {
+        live: db,
+        file,
+        rng: r,
+        updated,
+        deleted,
+    };
+    let mut back = reopen_serving(&crash.file);
+    assert_eq!(back.unlinked(), 200 + crash.updated.len());
+    answers_the_tail(&back, &crash, "saved in the tail, waiting");
+    answers_the_tail(&reopen(&crash.file), &crash, "saved in the tail, linked");
+
+    // Nothing is saved while vectors wait to be linked: the record would
+    // have them wait again after the next crash.
+    back.set_graph_saves(100, 0);
+    assert!(!back.graphs_due());
+    while back.link_pending(64) > 0 {}
+    assert!(back.graphs_due());
+    assert_eq!(back.save_graphs().unwrap().0, 1);
+    assert_eq!(reopen_serving(&crash.file).unlinked(), 0);
+    answers_the_tail(
+        &reopen_serving(&crash.file),
+        &crash,
+        "saved after the linking",
+    );
+}
+
+/// A graph is appended once the file grew since its last record by the
+/// record's size times the growth asked for, not before: the record holds
+/// the whole graph. Only the last of its records is restored -- an earlier
+/// one would read every vector again for nothing -- and one a crash cut
+/// short is cut off the file, the one before it restored.
+#[test]
+fn the_last_whole_graph_record_is_the_one_restored() {
+    let (file, mut db) = saving(300, 1);
+    let mut r = Rng(34);
+    put(&mut db, &mut r, 1000);
+    assert_eq!(db.save_graphs().unwrap().0, 1);
+    let first = file.0.lock().unwrap().len();
+    put(&mut db, &mut r, 400);
+    assert!(
+        !db.graphs_due(),
+        "400 writes outweigh no graph of 1400 nodes"
+    );
+    put(&mut db, &mut r, 800);
+    assert!(db.graphs_due());
+    let before = file.0.lock().unwrap().len();
+    assert_eq!(db.save_graphs().unwrap().0, 1);
+    let record = file.0.lock().unwrap().len() - before;
+    assert!(before - first >= record, "{} < {record}", before - first);
+    put(&mut db, &mut r, 50);
+    assert_eq!(reopen_serving(&file).unlinked(), 50);
+
+    let torn = File(Arc::new(Mutex::new(
+        file.0.lock().unwrap()[..before + record / 2].to_vec(),
+    )));
+    let back = reopen_serving(&torn);
+    assert_eq!(back.unlinked(), 1200);
+    assert_eq!(ids(&back, "get d select id limit 5000", &[]).len(), 2200);
 }
 
 /// `rerank` reads the stored vectors, and a `vector<N, f16>` field is
