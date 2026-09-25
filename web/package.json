@@ -1,0 +1,47 @@
+{
+  "name": "@fenecdb/web",
+  "version": "0.1.4",
+  "description": "fenecdb in the browser: the engine as WebAssembly, and one dependency-free ES module with its query builder, HTTP client and sync layer",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "fenec.js",
+  "types": "fenec.d.ts",
+  "exports": {
+    ".": {
+      "types": "./fenec.d.ts",
+      "default": "./fenec.js"
+    },
+    "./fenec.wasm": "./fenec.wasm",
+    "./fenec-lite.wasm": "./fenec-lite.wasm",
+    "./collate/*": "./collate/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "fenec.js",
+    "fenec.d.ts",
+    "fenec.wasm",
+    "fenec-lite.wasm",
+    "collate/"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "database",
+    "vector",
+    "embedded",
+    "wasm",
+    "hnsw",
+    "bm25",
+    "local-first",
+    "sync"
+  ],
+  "homepage": "https://fenecdb.com/docs/javascript",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fenecdb/fenec.git",
+    "directory": "web"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

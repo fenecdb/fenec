@@ -10,6 +10,23 @@
   "peerDependencies": {
     "react": ">=18"
   },
+  "keywords": [
+    "fenecdb",
+    "react",
+    "live-query",
+    "local-first",
+    "sync"
+  ],
+  "homepage": "https://fenecdb.com/docs/sync",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fenecdb/fenec.git",
+    "directory": "integrations/react"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "devDependencies": {
     "jsdom": "^27.0.0",
     "react": "^19.0.0",
