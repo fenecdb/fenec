@@ -100,6 +100,18 @@ jobs:
       - name: Build WASM
         run: make wasm wasm-lite
 
+      # site/build.py holds every size the docs quote against the module just
+      # built, and under CI refuses one that drifted. The site is built only
+      # on main, so phase 8 grew the module 490 -> 497 KB through two pull
+      # requests that passed and a deploy that failed after the merge. One
+      # runner is enough: the module is the one the site workflow builds, to
+      # the byte, and brotli comes from apt.
+      - name: Check the sizes the docs quote
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y --no-install-recommends brotli
+          python3 site/build.py
+
       # Rust first, then the JS tests -- `cargo test` is also what builds the
       # fenec-pg binary that the sync tests run against.
       - name: Test
