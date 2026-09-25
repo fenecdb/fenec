@@ -469,6 +469,47 @@ fn dot_bits(bits: &[u64], q: &[f32]) -> f32 {
     s
 }
 
+/// The bits a query is cut to a component, a plane each ([`dot_planes`]).
+/// RaBitQ cuts to four the query's distance from a centre. Cut whole, as
+/// here, a query is mostly its own centre, and four bits were too coarse
+/// for what tells a crowded cluster's members apart: the best 40 of 3 000
+/// by the codes held 84% of the true ten, five bits 89.5%, and six the
+/// 91.5% the query whole holds, which more bits did not add to. Six planes
+/// are 72 popcounts over 768 dimensions: at 100 000 x 768 a query at a
+/// beam of 200 took 0.292 ms against 0.510 whole, and eight planes 0.303.
+const QUERY_BITS: usize = 6;
+
+/// `Σ ±q̄`, the sign each bit gives, over a query cut to [`QUERY_BITS`] bits
+/// a component ([`VectorIndex::query_for`]): `planes` holds, a code word at
+/// a time, that word of each of the query's bit planes in two's complement,
+/// as the bits of two `f32`s each -- they ride in the query's own vector,
+/// which every search hands on. `Σ ±q̄` is `2T - Σq̄` with `T` the query
+/// summed where a sign is set: the planes' popcounts under the sign words,
+/// weighed 1, 2, 4 and on, the top plane's negative. A few dozen integer
+/// steps where [`dot_bits`] adds a float a component, and exact, so every
+/// target sums it alike.
+#[inline]
+fn dot_planes(bits: &[u64], planes: &[f32]) -> i32 {
+    let mut t = [0u32; QUERY_BITS];
+    let (words, _) = planes.as_chunks::<{ 2 * QUERY_BITS }>();
+    for (b, p) in bits.iter().zip(words) {
+        for (j, t) in t.iter_mut().enumerate() {
+            let plane = p[2 * j].to_bits() as u64 | (p[2 * j + 1].to_bits() as u64) << 32;
+            *t += (b & plane).count_ones();
+        }
+    }
+    let mut sum = 0i32;
+    for (j, t) in t.iter().enumerate() {
+        let weight = if j + 1 == QUERY_BITS {
+            -(1 << j)
+        } else {
+            1 << j
+        };
+        sum += weight * *t as i32;
+    }
+    sum
+}
+
 // ----------------------------------------------------------------- arena
 
 /// Per node of a batch insert: its id, its level, and the neighbours found
@@ -713,18 +754,28 @@ impl Bits {
         self.push_terms([sigma, cr - sigma * cb]);
     }
 
-    /// `⟨q, v⟩` as the code estimates it. `q` is `dim` long, or a search's
-    /// query followed by its dot product with each centre
-    /// ([`VectorIndex::query_for`]).
+    /// `⟨q, v⟩` as the code estimates it. `q` is `dim` long -- a code
+    /// widened back, which `select_heuristic` measures with, measured whole
+    /// -- or a search's query as [`VectorIndex::query_for`] makes it: its
+    /// dot product with each centre follows it, then the query cut to
+    /// [`QUERY_BITS`] bits a component, its step and its sum, and its bit
+    /// planes.
     #[inline]
     fn estimate(&self, q: &[f32], node: u32, dim: usize) -> f32 {
         let cell = self.cells[node as usize] as usize;
-        let qc = match q.get(dim + cell) {
-            Some(x) => *x,
-            None => dot(&q[..dim], self.centres.centre(cell, dim)),
-        };
         let (signs, [sigma, kappa]) = self.code(node);
-        qc + kappa + sigma * dot_bits(signs, &q[..dim])
+        let cut = dim + self.centres.half.len();
+        match q.get(cut..cut + 2) {
+            Some(&[step, sum]) => {
+                // `2T - Σq̄` is a whole number short of 2^24: exact as a float.
+                let t = dot_planes(signs, &q[cut + 2..]);
+                q[dim + cell] + kappa + sigma * (step * ((2 * t) as f32 - sum))
+            }
+            _ => {
+                let qc = dot(&q[..dim], self.centres.centre(cell, dim));
+                qc + kappa + sigma * dot_bits(signs, &q[..dim])
+            }
+        }
     }
 }
 
@@ -1773,15 +1824,44 @@ impl VectorIndex {
     }
 
     /// The query a search measures with: prepared, and over bit codes
-    /// followed by its dot product with each centre, which every code's
-    /// estimate starts from -- once a query rather than once a node.
+    /// followed by what every code's estimate takes from it, once a query
+    /// rather than once a node -- its dot product with each centre, then
+    /// itself cut to [`QUERY_BITS`] bits a component for [`dot_planes`]:
+    /// the step, the sum of the parts, and the bit planes a code word at a
+    /// time. The step is the largest component over the largest part, and
+    /// a part the component over the step, rounded.
     fn query_for(&self, q: &[f32]) -> Vec<f32> {
         let mut q = self.prepare_query(q);
         if let (Arena::Bit(b), true) = (&self.data, q.len() == self.dim) {
-            let at = b.centres.half.len();
-            q.reserve(at);
+            let (dim, at) = (self.dim, b.centres.half.len());
+            let words = dim.div_ceil(64);
+            q.reserve(at + 2 + words * 2 * QUERY_BITS);
             for c in 0..at {
-                q.push(dot(&q[..self.dim], b.centres.centre(c, self.dim)));
+                q.push(dot(&q[..dim], b.centres.centre(c, dim)));
+            }
+            let top = q[..dim].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            let step = if top > 0.0 {
+                top / ((1 << (QUERY_BITS - 1)) - 1) as f32
+            } else {
+                1.0
+            };
+            let mut planes = vec![0u64; words * QUERY_BITS];
+            let mut sum = 0i32;
+            for (i, x) in q[..dim].iter().enumerate() {
+                let part = (x / step).round() as i32;
+                sum += part;
+                for (j, plane) in planes[i / 64 * QUERY_BITS..][..QUERY_BITS]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *plane |= ((part >> j) as u64 & 1) << (i % 64);
+                }
+            }
+            q.push(step);
+            q.push(sum as f32);
+            for plane in planes {
+                q.push(f32::from_bits(plane as u32));
+                q.push(f32::from_bits((plane >> 32) as u32));
             }
         }
         q
@@ -3063,6 +3143,73 @@ mod tests {
                 "{dim}"
             );
         }
+    }
+
+    /// The planes' popcounts are the sum of the query's parts under the
+    /// signs, to the unit, at every length a code word can end on.
+    #[test]
+    fn planes_sum_the_parts_under_the_signs() {
+        let mut r = Rng(7);
+        for dim in [1usize, 7, 63, 64, 65, 127, 128, 300, 768] {
+            let top = (1 << (QUERY_BITS - 1)) - 1;
+            let parts: Vec<i32> = (0..dim)
+                .map(|_| (r.next_f32() * (2 * top + 1) as f32) as i32 - top)
+                .collect();
+            let mut planes = vec![0u64; dim.div_ceil(64) * QUERY_BITS];
+            for (i, part) in parts.iter().enumerate() {
+                for j in 0..QUERY_BITS {
+                    planes[i / 64 * QUERY_BITS + j] |= ((part >> j) as u64 & 1) << (i % 64);
+                }
+            }
+            let packed: Vec<f32> = planes
+                .iter()
+                .flat_map(|p| [f32::from_bits(*p as u32), f32::from_bits((*p >> 32) as u32)])
+                .collect();
+            let mut bits = vec![0u64; dim.div_ceil(64)];
+            let mut want = 0;
+            for (i, part) in parts.iter().enumerate() {
+                if r.next_f32() > 0.5 {
+                    bits[i / 64] |= 1 << (i % 64);
+                    want += part;
+                }
+            }
+            assert_eq!(dot_planes(&bits, &packed), want, "{dim}");
+        }
+    }
+
+    /// Cut to [`QUERY_BITS`] bits a component, a query estimates as well as
+    /// whole: what cutting it adds is lost in what the codes miss anyway.
+    #[test]
+    fn a_query_in_planes_estimates_as_the_query_whole() {
+        let mut r = Rng(11);
+        let dim = 384;
+        let spec = VectorIndexSpec {
+            metric: Metric::Cosine,
+            quant: Quant::Bit,
+            ..spec()
+        };
+        let docs: Vec<Vec<f32>> = (0..BIT_TRAIN + 100)
+            .map(|_| (0..dim).map(|_| r.next_f32() - 0.5).collect())
+            .collect();
+        let mut ix = VectorIndex::new(dim, spec);
+        for (i, v) in docs.iter().enumerate() {
+            ix.insert(i as u64, v);
+        }
+        let Arena::Bit(b) = &ix.data else {
+            panic!("the arena is not coded")
+        };
+        let (mut whole, mut cut) = (0.0f64, 0.0f64);
+        for _ in 0..20 {
+            let raw: Vec<f32> = (0..dim).map(|_| r.next_f32() - 0.5).collect();
+            let (q, planes) = (ix.prepare_query(&raw), ix.query_for(&raw));
+            assert!(planes.len() > dim + b.centres.half.len() + 2);
+            for (node, doc) in ix.doc_ids.iter().enumerate() {
+                let exact = dot(&q, &normalized(&docs[*doc as usize])) as f64;
+                whole += (b.estimate(&q, node as u32, dim) as f64 - exact).powi(2);
+                cut += (b.estimate(&planes, node as u32, dim) as f64 - exact).powi(2);
+            }
+        }
+        assert!(cut < whole * 1.02, "{cut} against {whole}");
     }
 
     /// A graph over codes goes through the file as one over vectors does:

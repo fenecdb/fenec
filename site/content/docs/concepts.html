@@ -219,9 +219,12 @@ k-means from its first 2 048 vectors, which it holds whole until then — a
 smaller index searches exactly — and keeps with each vector the centre it
 is nearest and two numbers that scale its signs into an estimate. A search
 takes its query's product with each centre once, and only the query's part
-away from the centre goes through the signs. The centres are kept in the
-file with the graph, so a graph restored codes its vectors as they were
-coded.</p>
+away from the centre goes through the signs. The query goes through them
+cut to six bits a component, a bit plane each, so a code's signs meet it in
+popcounts: 72 over 768 dimensions where a float was added a component,
+which took a query at 100 000 × 768 from 0.51 ms to 0.29 at a beam of 200
+with the same recall. The centres are kept in the file with the graph, so a
+graph restored codes its vectors as they were coded.</p>
 
 <p>One million vectors of 768 dimensions, stored as <code>f16</code>, in 64
 clusters each spread along 32 directions — embeddings vary along far fewer
@@ -235,19 +238,23 @@ latencies are high for all three (<code>make quant-bench</code>):</p>
 <tbody>
 <tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>105 MB</b></td></tr>
 <tr><td>heap, the documents included</td><td class="n">3 397 MB</td><td class="n">2 596 MB</td><td class="n"><b>1 897 MB</b></td></tr>
-<tr><td>index build</td><td class="n">1 017 s</td><td class="n"><b>758 s</b></td><td class="n">937 s</td></tr>
+<tr><td>index build</td><td class="n">1 017 s</td><td class="n"><b>758 s</b></td><td class="n">874 s</td></tr>
 <tr><td>recall@10, beam of 100</td><td class="n">97.4%</td><td class="n">97.1%</td><td class="n"><b>97.9%</b></td></tr>
-<tr><td>recall@10, beam of 200</td><td class="n">98.4%</td><td class="n">98.7%</td><td class="n"><b>99.8%</b></td></tr>
-<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n">98.8%</td><td class="n"><b>100%</b></td></tr>
-<tr><td>ANN p50, beam of 100</td><td class="n">1.30 ms</td><td class="n"><b>0.62 ms</b></td><td class="n">0.74 ms</td></tr>
-<tr><td>ANN p50, beam of 200</td><td class="n">2.08 ms</td><td class="n"><b>1.09 ms</b></td><td class="n">1.21 ms</td></tr>
-<tr><td>ANN p50, beam of 400</td><td class="n">3.38 ms</td><td class="n"><b>1.66 ms</b></td><td class="n">2.01 ms</td></tr>
+<tr><td>recall@10, beam of 200</td><td class="n">98.4%</td><td class="n">98.7%</td><td class="n"><b>99.7%</b></td></tr>
+<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n">98.8%</td><td class="n"><b>99.9%</b></td></tr>
+<tr><td>ANN p50, beam of 100</td><td class="n">1.30 ms</td><td class="n">0.62 ms</td><td class="n"><b>0.41 ms</b></td></tr>
+<tr><td>ANN p50, beam of 200</td><td class="n">2.08 ms</td><td class="n">1.09 ms</td><td class="n"><b>0.66 ms</b></td></tr>
+<tr><td>ANN p50, beam of 400</td><td class="n">3.38 ms</td><td class="n">1.66 ms</td><td class="n"><b>1.25 ms</b></td></tr>
 <tr><td>documents read a query, beam of 100 / 400</td><td class="n">—</td><td class="n"><b>20 / 20</b></td><td class="n">100 / 400</td></tr>
-<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.26 ms</td><td class="n">1.36 ms</td><td class="n"><b>1.30 ms</b></td></tr>
+<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.26 ms</td><td class="n">1.36 ms</td><td class="n"><b>0.97 ms</b></td></tr>
 <tr><td>filtered to 3 003 rows, documents read</td><td class="n">—</td><td class="n"><b>12</b></td><td class="n">100</td></tr>
 </tbody>
 </table>
 </div>
+
+<p>The bit column was measured again once the query met the codes in
+popcounts, in a run of bit codes alone: in that run the query whole took
+0.80, 1.30 and 2.16 ms at the three beams, and 1.36 ms filtered.</p>
 
 <p>int8 codes follow the vectors closely enough for the default beam of 100,
 and closely enough that 20 of its hundred candidates are read, with the
@@ -256,15 +263,16 @@ times the spread of its rounding, which a candidate passes less than 1.5e-8
 of the time. Bit codes, taken from the centres, find as many of the true ten
 at the same beam, but bound nothing, so every candidate is read; a
 <code>quant=bit</code> index searches 200 unless told otherwise. They are
-for the arena, a seventh of int8's. The rest of the heap is the documents,
-whose vectors the answers are ordered by.</p>
+for the arena, a seventh of int8's, and walk the graph fastest of the three.
+The rest of the heap is the documents, whose vectors the answers are ordered
+by.</p>
 
 <div class="note trap">
   <p><b>How well a bit code estimates depends on the vectors.</b> Spread in
   every dimension instead — as many degrees of freedom as dimensions, the
   hardest case for any graph — 100 000 such vectors gave full vectors 97.8%
-  at a beam of 100, int8 codes 98.0%, and bit codes 89.5%, 97.6% at their
-  default of 200 and 99.7% at 400.
+  at a beam of 100, int8 codes 98.0%, and bit codes 89.7%, 97.5% at their
+  default of 200 and 99.6% at 400.
   The vectors' own signs, which bit codes were until they were taken from
   centres, held 36% and 75% there: when a cluster is crowded around its
   centre, most of its members' signs are the centre's, and they could not
@@ -275,7 +283,8 @@ whose vectors the answers are ordered by.</p>
 <p>The kernels over codes are scalar on every target, in the eight-strip
 order of the vector kernels: natively LLVM vectorises them, and in the
 browser they add in the same order, so a graph over codes is the same graph
-in both.</p>
+in both. A bit code's popcounts are whole numbers, exact everywhere, and
+the few floats they are scaled by are taken in one order.</p>
 
 <h3 id="sparse-vectors">Sparse vectors</h3>
 
