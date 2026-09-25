@@ -285,7 +285,7 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.6 KB
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 146.8 KB
 brotli with all four, 117.2 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
@@ -304,10 +304,11 @@ full build rebuilds on open like a graph that does not validate. `rerank`
 reads vectors out of the store and needs only `text`. The checks for a
 missing index ask `EVERY_INDEX` first: the lookup of a field is a loop the
 compiler cannot prove ends, and one left in cost the full module 197 bytes
-brotli; it is the size it was before the features, to the byte. A crate
-that depends on `fenec-core` names `indexes` itself (the workspace takes it
-without default features), and `fenec-ql` only as a dev dependency -- in its
-normal ones it would put them back into every browser module.
+brotli; asked first, `EVERY_INDEX` left it the size it had been before the
+features, to the byte. A crate that depends on `fenec-core` names `indexes`
+itself (the workspace takes it without default features), and `fenec-ql`
+only as a dev dependency -- in its normal ones it would put them back into
+every browser module.
 `tests/features.rs` and the unit tests run without them in `make test`,
 `web/fenec.test.js` hands files between the full module and the one
 `make wasm-lite` makes, both ways, and CI runs clippy over none and each
@@ -352,7 +353,7 @@ more a distance: the build took 69.7 s against 62.8, a query at a beam of
 100 0.414 ms against 0.378. The centres travel in the graph record behind
 quantization code 3 (`BIT_CENTRED`): a graph over the plain signs (code 2)
 is built again, and a binary from before them builds its own. The browser
-module grew 7.0 KB, 2.4 KB brotli, most of it the k-means.
+module grew 6.9 KB, 2.2 KB brotli, most of it the k-means.
 
 **Filtered `near` needs its fallback.** The filter's rows are probed first -- in
 blocks spread over the collection, and only until more than `ef × m0` match,
@@ -409,7 +410,7 @@ for, so consecutive code points that alone give consecutive primaries share
 a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
 them one range (`UNIFORM`), and a table's words are written as differences
 in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1039. A comparison walks ICU's three levels, letters then
+`make small`'s 1056. A comparison walks ICU's three levels, letters then
 accents then case, over the whole string before it falls back to the
 bytes, so the order is total.
 It starts at the first byte the two strings do not share, stepped back past
@@ -589,7 +590,11 @@ copy still being made is left for the next start) before its checkpoint;
 an error it cannot wait out ends the process rather than leave it serving
 a mirror that no longer moves. This is why the pg wire's framing and client
 are `fenec-wire`'s: in fenec-pg they made the importer depend on the
-server, which could then not run it. A subscriber hears a PostgreSQL commit 0.15 ms after it returned at the median, a row inserted with a vector under HNSW 0.33 ms (`make mirror-bench`); a server killed while the table was written to held every row 880 ms after it started again. The follower adds 178 KB to `fenec-pg`.
+server, which could then not run it. A subscriber hears a PostgreSQL
+commit 0.15 ms after it returned at the median, a row inserted with a
+vector under HNSW 0.33 ms (`make mirror-bench`); a server killed while the
+table was written to held every row 880 ms after it started again. The
+follower adds 178 KB to `fenec-pg`.
 
 **The catalog is run, not matched.** psql's `\d`, JDBC's `DatabaseMetaData`
 and DBeaver send SQL over `pg_catalog` -- joins, `CASE`, `regclass` casts,

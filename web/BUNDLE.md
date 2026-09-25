@@ -6,7 +6,7 @@ What a page needs, as the release's `fenec-web` bundle ships it:
 | --- | --- |
 | `fenec.js` | the client: the module's glue, the query builder, the HTTP client and the sync layer, one dependency-free ES module |
 | `fenec.d.ts` | its types |
-| `fenec.wasm` | the engine with every index: 145 KB brotli |
+| `fenec.wasm` | the engine with every index: 147 KB brotli |
 | `fenec-lite.wasm` | the engine without its four indexes: 117 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
