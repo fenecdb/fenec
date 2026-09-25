@@ -17,6 +17,10 @@
 //!   ([`Config::checkpoint_on_exit`]).
 //! - `CancelRequest` is a real cancellation: the pending lock is released and
 //!   the remaining statements are dropped with `57014`.
+//! - A transaction's writes are one block ([`Database::begin`]): the write
+//!   lock is taken at its first write and held until `COMMIT` lands it or
+//!   `ROLLBACK` puts it back ([`Hold`]). A pipeline of the extended protocol
+//!   is one block the same way, up to its `Sync`.
 
 use crate::catalog;
 use crate::compat;
@@ -29,8 +33,9 @@ use fenec_core::value::DataType;
 use fenec_http::metrics::Transport;
 use fenec_http::tenants::{Refused, Tenant, Tenants};
 use fenec_ql::parse;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
@@ -44,6 +49,11 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Sleep step for checking cancellation while waiting on a lock.
 const LOCK_POLL: Duration = Duration::from_millis(1);
+
+/// How often a session holding the write lock between messages looks up
+/// from its wait for the client, to let go of it for a shutdown: the
+/// shutdown takes that lock, and would otherwise wait on the client.
+const HOLD_POLL: Duration = Duration::from_millis(200);
 
 /// Tries at the lock that yield the thread before the waits turn into
 /// `LOCK_POLL` sleeps. A lock held for a write's few microseconds is free
@@ -149,6 +159,11 @@ pub struct Config {
     /// message is closed (`None` = off). It applies mid-message too: both are
     /// signs of a dropped connection.
     pub idle_timeout: Option<Duration>,
+    /// A transaction that has written holds the write lock until it ends,
+    /// and every other session waits on it: one whose client stays silent
+    /// this long is put back and its session closed (`25P03`, PostgreSQL's
+    /// `idle_in_transaction_session_timeout`). `None` = never.
+    pub idle_in_transaction: Option<Duration>,
     /// Ceiling of a single protocol message. The protocol allows up to 1 GiB;
     /// in a memory-limited container, letting one client force an allocation
     /// that large is a free OOM.
@@ -175,6 +190,7 @@ impl Default for Config {
             checkpoint_on_exit: true,
             max_connections: 100,
             idle_timeout: None,
+            idle_in_transaction: Some(Duration::from_secs(10)),
             max_message: 64 << 20,
             max_memory: 0,
         }
@@ -585,6 +601,9 @@ fn write_lock(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
 enum Guard<'a> {
     Read(RwLockReadGuard<'a, Database>),
     Write(RwLockWriteGuard<'a, Database>),
+    /// The lock the session holds between messages, and the block open
+    /// under it, which its statements join ([`Hold`]).
+    Held(&'a mut Database),
 }
 
 impl Guard<'_> {
@@ -592,6 +611,7 @@ impl Guard<'_> {
         match self {
             Guard::Read(g) => g,
             Guard::Write(g) => g,
+            Guard::Held(d) => d,
         }
     }
 
@@ -599,21 +619,23 @@ impl Guard<'_> {
         match self {
             Guard::Read(g) => g.query(stmt, params),
             Guard::Write(g) => g.execute_with(stmt, params),
+            Guard::Held(d) => d.execute_with(stmt, params),
         }
     }
 
-    /// A block over the write lock ([`Database::begin`]); a read needs none.
+    /// A block over the write lock ([`Database::begin`]); a read needs none,
+    /// and a held lock's block is the transaction's.
     fn begin(&mut self) -> fenec_core::error::Result<()> {
         match self {
             Guard::Write(g) => g.begin(),
-            Guard::Read(_) => Ok(()),
+            Guard::Read(_) | Guard::Held(_) => Ok(()),
         }
     }
 
     fn commit(&mut self) -> fenec_core::error::Result<()> {
         match self {
             Guard::Write(g) => g.commit(),
-            Guard::Read(_) => Ok(()),
+            Guard::Read(_) | Guard::Held(_) => Ok(()),
         }
     }
 
@@ -635,6 +657,7 @@ impl Guard<'_> {
             Guard::Write(g) if policy == SyncPolicy::Always => g
                 .flush()
                 .inspect_err(|e| fenec_http::log!("sync error: {e}")),
+            // A held block reaches the sink when it lands, not before.
             _ => Ok(None),
         }
     }
@@ -645,7 +668,6 @@ impl Guard<'_> {
 fn maintain(
     db: &Arc<RwLock<Database>>,
     cfg: &Config,
-    tx: &mut TxState,
     stmt: &Statement,
     out: &mut Writer,
 ) -> Option<(Durability, Option<usize>)> {
@@ -656,9 +678,6 @@ fn maintain(
     if let Err(e) = Database::maintain(db, stmt).expect("a maintenance statement") {
         out.error(sqlstate(&e), &e.to_string());
         return None;
-    }
-    if matches!(stmt, Statement::CreateIndex { .. }) {
-        tx.note_write();
     }
     // The index's record waits for the disk under `always`, as any write
     // does; a compact's image was synced when it replaced the file.
@@ -734,6 +753,187 @@ fn acquire<'a>(db: &'a RwLock<Database>, write: bool, be: &Backend) -> Option<Gu
             std::thread::sleep(LOCK_POLL);
         }
     }
+}
+
+// ------------------------------------------------------------- held locks
+
+/// The write lock a session holds between its messages, and the block open
+/// under it: from a transaction's first write to its end, or from a
+/// pipeline's first write to its `Sync`. Every other session waits on it
+/// meanwhile. The block's writes are in the database already, and nobody
+/// else may read them before they land -- nor write after them, since a
+/// block is put back by cutting each store back to where it stood.
+struct Hold<'c> {
+    db: &'c Arc<RwLock<Database>>,
+    guard: RwLockWriteGuard<'c, Database>,
+    /// The tenant, kept from an idle close while its database is held.
+    /// After `guard`, so it goes after the lock: a last reference let go
+    /// of flushes the database, under that lock.
+    tenant: Held,
+    /// Taken for a pipeline outside a transaction: it lands at the `Sync`.
+    implicit: bool,
+}
+
+impl Drop for Hold<'_> {
+    /// Let go of any other way than by landing -- a failed statement, the
+    /// client gone, a timeout, a shutdown, a panic -- the block is put back
+    /// first: the next holder of the lock would find it open, and write
+    /// into it.
+    fn drop(&mut self) {
+        self.guard.rollback();
+    }
+}
+
+/// Where a session's statements find the database: under a lock each takes
+/// for itself, or the one the session holds.
+struct Lock<'c> {
+    /// The database a hold is taken over, found once a pass of the
+    /// session's loop: the hold borrows it for as long as it lasts, and the
+    /// next pass finds it afresh, as a tenant's is found for each statement.
+    found: &'c OnceCell<Arc<RwLock<Database>>>,
+    hold: Option<Hold<'c>>,
+}
+
+impl<'c> Lock<'c> {
+    /// The database the next statement runs against, and its tenant: the
+    /// one held while there is one.
+    fn open(
+        &self,
+        source: &Source,
+        tenant: &str,
+    ) -> std::result::Result<(Arc<RwLock<Database>>, Held), Refused> {
+        match &self.hold {
+            Some(h) => Ok((Arc::clone(h.db), h.tenant.clone())),
+            None => source.open(tenant),
+        }
+    }
+
+    /// Runs `f` over the database: the one held, or `db` under a read lock
+    /// -- which the session could never take over one it holds.
+    fn read<R>(&self, db: &RwLock<Database>, f: impl FnOnce(&Database) -> R) -> R {
+        match &self.hold {
+            Some(h) => f(&h.guard),
+            None => f(&read_lock(db)),
+        }
+    }
+
+    /// Takes the write lock over `db`, as cancellably as any lock, and opens
+    /// a block under it to hold between messages.
+    fn take(
+        &mut self,
+        db: &Arc<RwLock<Database>>,
+        tenant: &Held,
+        be: &Backend,
+        implicit: bool,
+    ) -> std::result::Result<(), (&'static str, String)> {
+        let cell: &'c OnceCell<_> = self.found;
+        let found = cell.get_or_init(|| Arc::clone(db));
+        debug_assert!(Arc::ptr_eq(found, db), "a pass holds one database");
+        let mut guard = match acquire(found, true, be) {
+            Some(Guard::Write(g)) => g,
+            Some(_) => unreachable!("the write lock was asked for"),
+            None if SHUTDOWN.load(Ordering::Relaxed) => {
+                return Err(("57P01", "the server is shutting down".into()))
+            }
+            None => return Err(("57014", "the query was cancelled".into())),
+        };
+        guard.begin().map_err(|e| (sqlstate(&e), e.to_string()))?;
+        self.hold = Some(Hold {
+            db: found,
+            guard,
+            tenant: tenant.clone(),
+            implicit,
+        });
+        Ok(())
+    }
+
+    /// Lands the held block and lets go of the lock. Under `always` its
+    /// record is handed to the disk first, and what that returns is waited
+    /// for once the lock is let go, as a lone statement's is.
+    fn land(&mut self, cfg: &Config) -> fenec_core::error::Result<Option<Durability>> {
+        let Some(mut h) = self.hold.take() else {
+            return Ok(None);
+        };
+        h.guard.commit()?;
+        match cfg.sync {
+            SyncPolicy::Always => h.guard.flush(),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// Lands a pipeline's block, at its `Sync`. Its statements' answers are
+/// written already, as PostgreSQL writes them before the commit, so a
+/// failure is an error of its own before the ReadyForQuery.
+fn land_pipeline(lock: &mut Lock<'_>, cfg: &Config, out: &mut Writer) {
+    let Some(db) = lock.hold.as_ref().map(|h| Arc::clone(h.db)) else {
+        return;
+    };
+    match lock.land(cfg) {
+        Ok(Some(durability)) => durable_or_refused(&db, durability, Some(out.mark()), out),
+        Ok(None) => {}
+        Err(e) => out.error(sqlstate(&e), &e.to_string()),
+    }
+}
+
+/// How a wait for the client ended while the session held the lock.
+enum Waited {
+    Ready,
+    Gone,
+    Idle,
+    Shutdown,
+}
+
+/// Waits for the client's next message while the session holds the write
+/// lock. Every other session waits on the lock meanwhile, so the wait is
+/// bounded by `limit`, and looks up every `HOLD_POLL` for a shutdown.
+fn hold_wait(r: &mut BufReader<TcpStream>, limit: Option<Duration>) -> io::Result<Waited> {
+    let deadline = limit.map(|l| Instant::now() + l);
+    loop {
+        if !r.buffer().is_empty() {
+            return Ok(Waited::Ready);
+        }
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return Ok(Waited::Shutdown);
+        }
+        let step = match deadline {
+            Some(d) => match d.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => left.min(HOLD_POLL),
+                _ => return Ok(Waited::Idle),
+            },
+            None => HOLD_POLL,
+        };
+        r.get_ref().set_read_timeout(Some(step))?;
+        match r.fill_buf() {
+            Ok([]) => return Ok(Waited::Gone),
+            Ok(_) => return Ok(Waited::Ready),
+            Err(e) if is_timeout(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Writes the answers out. While the session holds the lock, a client that
+/// stopped reading would keep it held, so the socket's writes are bounded
+/// then as the wait for its next message is -- and only then: otherwise a
+/// slow reader of a large answer holds up nobody.
+fn send(
+    out: &mut Writer,
+    w: &mut BufWriter<TcpStream>,
+    holding: bool,
+    cfg: &Config,
+    bounded: &mut bool,
+) -> io::Result<()> {
+    if holding != *bounded {
+        let limit = if holding {
+            cfg.idle_in_transaction
+        } else {
+            None
+        };
+        w.get_ref().set_write_timeout(limit)?;
+        *bounded = holding;
+    }
+    out.flush_to(w)
 }
 
 // ------------------------------------------------------------------ session
@@ -927,233 +1127,313 @@ fn session(
     // whether it failed. Checked at the top of the loop, which every arm
     // reaches -- a refusal `continue`s -- and before waiting on the client.
     let mut before: Option<u64> = None;
+    // Whether the socket's writes are bounded, as they are while the
+    // session holds the lock (`send`).
+    let mut bounded = false;
 
+    // A pass holds at most one lock between messages, over the database
+    // found for it; the next pass finds its database afresh.
     loop {
-        if before.take().is_some_and(|n| out.errors() > n) {
-            skipping = true;
-            // Sent as it happens rather than at the Sync, as PostgreSQL
-            // sends one: a client that waits on it before sending more
-            // would otherwise wait for good.
-            out.flush_to(&mut w)?;
-        }
-        let m = match read_message_max(&mut r, cfg.max_message) {
-            Ok(m) => m,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            // Timeout: the client is silent. We say why and close;
-            // PostgreSQL's `idle_session_timeout` also uses 57P05.
-            Err(e) if is_timeout(&e) => {
-                out.error("57P05", "the session went idle, closing the connection");
-                let _ = out.flush_to(&mut w);
-                return Ok(());
-            }
-            // A message over the ceiling: its body was never read, so the
-            // stream is no longer in sync and closing is mandatory. Say why first.
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                out.error("54000", &e.to_string());
-                let _ = out.flush_to(&mut w);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
+        let found = OnceCell::new();
+        let mut lock = Lock {
+            found: &found,
+            hold: None,
         };
-        if skipping && !matches!(m.tag, b'S' | b'X') {
-            continue;
-        }
-        if matches!(m.tag, b'P' | b'B' | b'D' | b'E' | b'C') {
-            before = Some(out.errors());
-        }
-
-        match m.tag {
-            // ------------------------------------------------ simple query
-            b'Q' => {
-                let mut pos = 0;
-                let sql = take_cstr(&m.body, &mut pos);
-                let (db, held) = match source.open(&tenant) {
-                    Ok(v) => v,
-                    Err(refused) => {
-                        let (code, msg) = tenant_error(refused);
-                        out.error(code, &msg);
-                        out.ready(tx.status());
-                        out.flush_to(&mut w)?;
-                        continue;
-                    }
+        loop {
+            if lock.hold.is_none() && found.get().is_some() {
+                break;
+            }
+            if before.take().is_some_and(|n| out.errors() > n) {
+                skipping = true;
+                // Sent as it happens rather than at the Sync, as PostgreSQL
+                // sends one: a client that waits on it before sending more
+                // would otherwise wait for good.
+                send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
+            }
+            if lock.hold.is_some() {
+                let limit = cfg.idle_in_transaction.or(cfg.idle_timeout);
+                let waited = hold_wait(&mut r, limit)?;
+                r.get_ref().set_read_timeout(cfg.idle_timeout).ok();
+                let (code, msg) = match waited {
+                    Waited::Ready => ("", ""),
+                    Waited::Gone => return Ok(()),
+                    Waited::Shutdown => (
+                        "57P01",
+                        "the server is shutting down: the transaction was put back",
+                    ),
+                    Waited::Idle if cfg.idle_in_transaction.is_some() => (
+                        "25P03",
+                        "the transaction sat idle holding the database: it was put back, \
+                         and the connection is closing",
+                    ),
+                    Waited::Idle => ("57P05", "the session went idle, closing the connection"),
                 };
-                // Held against a move for the length of the statement, as a
-                // request is held on the HTTP path -- and let go before the
-                // answer is written. The socket has no write timeout: a
-                // client that stopped reading a large answer held the tenant
-                // through the write, a freeze waited on it, and every
-                // request for the tenant queued behind the freeze.
-                {
+                if !code.is_empty() {
+                    lock.hold = None;
+                    out.error(code, msg);
+                    let _ = send(&mut out, &mut w, false, &cfg, &mut bounded);
+                    return Ok(());
+                }
+            }
+            let m = match read_message_max(&mut r, cfg.max_message) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                // Timeout: the client is silent. We say why and close;
+                // PostgreSQL's `idle_session_timeout` also uses 57P05.
+                Err(e) if is_timeout(&e) => {
+                    out.error("57P05", "the session went idle, closing the connection");
+                    let _ = out.flush_to(&mut w);
+                    return Ok(());
+                }
+                // A message over the ceiling: its body was never read, so the
+                // stream is no longer in sync and closing is mandatory. Say why first.
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    out.error("54000", &e.to_string());
+                    let _ = out.flush_to(&mut w);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+            if skipping && !matches!(m.tag, b'S' | b'X') {
+                continue;
+            }
+            if matches!(m.tag, b'P' | b'B' | b'D' | b'E' | b'C') {
+                before = Some(out.errors());
+            }
+
+            match m.tag {
+                // ------------------------------------------------ simple query
+                b'Q' => {
+                    let mut pos = 0;
+                    let sql = take_cstr(&m.body, &mut pos);
+                    let errors = out.errors();
+                    let (db, held) = match lock.open(&source, &tenant) {
+                        Ok(v) => v,
+                        Err(refused) => {
+                            let (code, msg) = tenant_error(refused);
+                            out.error(code, &msg);
+                            tx.settle(&mut lock, errors, &out);
+                            out.ready(tx.status());
+                            send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
+                            continue;
+                        }
+                    };
+                    // Held against a move for the length of the statement, as a
+                    // request is held on the HTTP path -- and let go before the
+                    // answer is written. The socket has no write timeout: a
+                    // client that stopped reading a large answer held the tenant
+                    // through the write, a freeze waited on it, and every
+                    // request for the tenant queued behind the freeze.
+                    {
+                        let _gate = held.as_ref().map(|t| t.enter());
+                        let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
+                        be.busy.store(true, Ordering::SeqCst);
+                        be.canceled.store(false, Ordering::SeqCst);
+                        execute_into(
+                            &db,
+                            &held,
+                            frozen,
+                            &cfg,
+                            &be,
+                            &mut tx,
+                            &mut lock,
+                            &sql,
+                            &[],
+                            &mut out,
+                            false,
+                            false,
+                        );
+                        be.busy.store(false, Ordering::SeqCst);
+                        be.canceled.store(false, Ordering::SeqCst);
+                    }
+                    tx.settle(&mut lock, errors, &out);
+                    // A pipeline left without its Sync ends at a simple query,
+                    // its block landing as at one.
+                    if lock.hold.as_ref().is_some_and(|h| h.implicit) {
+                        land_pipeline(&mut lock, &cfg, &mut out);
+                    }
+                    drop(held);
+                    drop(db);
+                    out.ready(tx.status());
+                    send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
+                }
+
+                // ------------------------------------------------ extended
+                b'P' => {
+                    let mut pos = 0;
+                    let name = take_cstr(&m.body, &mut pos);
+                    let sql = take_cstr(&m.body, &mut pos);
+                    described_stmts.remove(&name);
+                    prepared.insert(name, Prepared { sql });
+                    out.parse_complete();
+                }
+                b'B' => {
+                    let mut pos = 0;
+                    let portal = take_cstr(&m.body, &mut pos);
+                    let stmt = take_cstr(&m.body, &mut pos);
+                    let sql = prepared
+                        .get(&stmt)
+                        .map(|p| p.sql.clone())
+                        .unwrap_or_default();
+
+                    // parameter format codes
+                    let nfmt = be_i16(&m.body, &mut pos);
+                    let mut fmts = Vec::new();
+                    for _ in 0..nfmt {
+                        fmts.push(be_i16(&m.body, &mut pos));
+                    }
+                    // parameter values
+                    let nparams = be_i16(&m.body, &mut pos);
+                    let mut values = Vec::new();
+                    for i in 0..nparams {
+                        let len = be_i32(&m.body, &mut pos);
+                        if len < 0 {
+                            values.push(Value::Null);
+                            continue;
+                        }
+                        let raw = &m.body[pos..pos + len as usize];
+                        pos += len as usize;
+                        let binary =
+                            fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
+                        values.push(decode_param(raw, binary));
+                    }
+                    described_portals.remove(&portal);
+                    portals.insert(
+                        portal,
+                        Portal {
+                            sql,
+                            stmt_name: stmt,
+                            params: values,
+                        },
+                    );
+                    out.bind_complete();
+                }
+                // ------------------------------------------------ Describe
+                b'D' => {
+                    let mut pos = 0;
+                    let kind = m.body.first().copied().unwrap_or(b'S');
+                    pos += 1;
+                    let name = take_cstr(&m.body, &mut pos);
+                    let sql = if kind == b'S' {
+                        prepared.get(&name).map(|p| p.sql.clone())
+                    } else {
+                        portals.get(&name).map(|p| p.sql.clone())
+                    };
+                    let sql = sql.unwrap_or_default();
+                    // An error here is answered as Execute answers one: the
+                    // client's Sync brings the ReadyForQuery. Sent here as well,
+                    // it made two for one Sync, and libpq read every answer after
+                    // it one query late.
+                    let errors = out.errors();
+                    let (db, held) = match lock.open(&source, &tenant) {
+                        Ok(v) => v,
+                        Err(refused) => {
+                            let (code, msg) = tenant_error(refused);
+                            out.error(code, &msg);
+                            tx.settle(&mut lock, errors, &out);
+                            continue;
+                        }
+                    };
+                    let _gate = held.as_ref().map(|t| t.enter());
+                    be.busy.store(true, Ordering::SeqCst);
+                    let shape = describe(&db, &cfg, &sql, &be, &lock);
+                    be.busy.store(false, Ordering::SeqCst);
+                    be.canceled.store(false, Ordering::SeqCst);
+                    let shape = match shape {
+                        Some(s) => s,
+                        None => {
+                            out.error("57014", "the query was cancelled");
+                            tx.settle(&mut lock, errors, &out);
+                            continue;
+                        }
+                    };
+                    if kind == b'S' {
+                        out.parameter_description(&shape.params);
+                    }
+                    match &shape.columns {
+                        Some(cols) => {
+                            out.row_description(cols);
+                            if kind == b'S' {
+                                described_stmts.insert(name);
+                            } else {
+                                described_portals.insert(name);
+                            }
+                        }
+                        None => out.no_data(),
+                    }
+                }
+                b'E' => {
+                    let mut pos = 0;
+                    let portal = take_cstr(&m.body, &mut pos);
+                    let p = portals.get(&portal).cloned().unwrap_or_default();
+                    // If RowDescription was already sent with Describe we do not
+                    // repeat it (the protocol says so); when Describe was skipped
+                    // it is sent anyway, so the client is not left without column
+                    // names.
+                    let already = described_portals.contains(&portal)
+                        || described_stmts.contains(&p.stmt_name);
+                    let errors = out.errors();
+                    let (db, held) = match lock.open(&source, &tenant) {
+                        Ok(v) => v,
+                        Err(refused) => {
+                            let (code, msg) = tenant_error(refused);
+                            out.error(code, &msg);
+                            tx.settle(&mut lock, errors, &out);
+                            // No ReadyForQuery here: the client sends Sync.
+                            continue;
+                        }
+                    };
+                    // More of the pipeline before its Sync: a write in it holds
+                    // the lock to there, so the pipeline lands whole. The last
+                    // statement before the Sync -- most often the only one --
+                    // runs as a statement on its own does.
+                    let pipeline = r.buffer().first() != Some(&b'S');
                     let _gate = held.as_ref().map(|t| t.enter());
                     let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
                     be.busy.store(true, Ordering::SeqCst);
                     be.canceled.store(false, Ordering::SeqCst);
-                    execute_into(&db, frozen, &cfg, &be, &mut tx, &sql, &[], &mut out, false);
+                    execute_into(
+                        &db, &held, frozen, &cfg, &be, &mut tx, &mut lock, &p.sql, &p.params,
+                        &mut out, already, pipeline,
+                    );
                     be.busy.store(false, Ordering::SeqCst);
                     be.canceled.store(false, Ordering::SeqCst);
+                    tx.settle(&mut lock, errors, &out);
                 }
-                drop(held);
-                drop(db);
-                out.ready(tx.status());
-                out.flush_to(&mut w)?;
-            }
-
-            // ------------------------------------------------ extended
-            b'P' => {
-                let mut pos = 0;
-                let name = take_cstr(&m.body, &mut pos);
-                let sql = take_cstr(&m.body, &mut pos);
-                described_stmts.remove(&name);
-                prepared.insert(name, Prepared { sql });
-                out.parse_complete();
-            }
-            b'B' => {
-                let mut pos = 0;
-                let portal = take_cstr(&m.body, &mut pos);
-                let stmt = take_cstr(&m.body, &mut pos);
-                let sql = prepared
-                    .get(&stmt)
-                    .map(|p| p.sql.clone())
-                    .unwrap_or_default();
-
-                // parameter format codes
-                let nfmt = be_i16(&m.body, &mut pos);
-                let mut fmts = Vec::new();
-                for _ in 0..nfmt {
-                    fmts.push(be_i16(&m.body, &mut pos));
-                }
-                // parameter values
-                let nparams = be_i16(&m.body, &mut pos);
-                let mut values = Vec::new();
-                for i in 0..nparams {
-                    let len = be_i32(&m.body, &mut pos);
-                    if len < 0 {
-                        values.push(Value::Null);
-                        continue;
+                b'C' => {
+                    let mut pos = 0;
+                    let kind = m.body.first().copied().unwrap_or(b'S');
+                    pos += 1;
+                    let name = take_cstr(&m.body, &mut pos);
+                    if kind == b'S' {
+                        prepared.remove(&name);
+                        described_stmts.remove(&name);
+                    } else {
+                        portals.remove(&name);
+                        described_portals.remove(&name);
                     }
-                    let raw = &m.body[pos..pos + len as usize];
-                    pos += len as usize;
-                    let binary = fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
-                    values.push(decode_param(raw, binary));
+                    out.close_complete();
                 }
-                described_portals.remove(&portal);
-                portals.insert(
-                    portal,
-                    Portal {
-                        sql,
-                        stmt_name: stmt,
-                        params: values,
-                    },
-                );
-                out.bind_complete();
-            }
-            // ------------------------------------------------ Describe
-            b'D' => {
-                let mut pos = 0;
-                let kind = m.body.first().copied().unwrap_or(b'S');
-                pos += 1;
-                let name = take_cstr(&m.body, &mut pos);
-                let sql = if kind == b'S' {
-                    prepared.get(&name).map(|p| p.sql.clone())
-                } else {
-                    portals.get(&name).map(|p| p.sql.clone())
-                };
-                let sql = sql.unwrap_or_default();
-                // An error here is answered as Execute answers one: the
-                // client's Sync brings the ReadyForQuery. Sent here as well,
-                // it made two for one Sync, and libpq read every answer after
-                // it one query late.
-                let (db, held) = match source.open(&tenant) {
-                    Ok(v) => v,
-                    Err(refused) => {
-                        let (code, msg) = tenant_error(refused);
-                        out.error(code, &msg);
-                        continue;
+                b'S' => {
+                    skipping = false;
+                    if lock.hold.as_ref().is_some_and(|h| h.implicit) {
+                        land_pipeline(&mut lock, &cfg, &mut out);
                     }
-                };
-                let _gate = held.as_ref().map(|t| t.enter());
-                be.busy.store(true, Ordering::SeqCst);
-                let shape = describe(&db, &cfg, &sql, &be);
-                be.busy.store(false, Ordering::SeqCst);
-                be.canceled.store(false, Ordering::SeqCst);
-                let shape = match shape {
-                    Some(s) => s,
-                    None => {
-                        out.error("57014", "the query was cancelled");
-                        continue;
-                    }
-                };
-                if kind == b'S' {
-                    out.parameter_description(&shape.params);
+                    out.ready(tx.status());
+                    send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
                 }
-                match &shape.columns {
-                    Some(cols) => {
-                        out.row_description(cols);
-                        if kind == b'S' {
-                            described_stmts.insert(name);
-                        } else {
-                            described_portals.insert(name);
-                        }
-                    }
-                    None => out.no_data(),
+                b'H' => {
+                    send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
                 }
-            }
-            b'E' => {
-                let mut pos = 0;
-                let portal = take_cstr(&m.body, &mut pos);
-                let p = portals.get(&portal).cloned().unwrap_or_default();
-                // If RowDescription was already sent with Describe we do not
-                // repeat it (the protocol says so); when Describe was skipped
-                // it is sent anyway, so the client is not left without column
-                // names.
-                let already =
-                    described_portals.contains(&portal) || described_stmts.contains(&p.stmt_name);
-                let (db, held) = match source.open(&tenant) {
-                    Ok(v) => v,
-                    Err(refused) => {
-                        let (code, msg) = tenant_error(refused);
-                        out.error(code, &msg);
-                        // No ReadyForQuery here: the client sends Sync.
-                        continue;
-                    }
-                };
-                let _gate = held.as_ref().map(|t| t.enter());
-                let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
-                be.busy.store(true, Ordering::SeqCst);
-                be.canceled.store(false, Ordering::SeqCst);
-                execute_into(
-                    &db, frozen, &cfg, &be, &mut tx, &p.sql, &p.params, &mut out, already,
-                );
-                be.busy.store(false, Ordering::SeqCst);
-                be.canceled.store(false, Ordering::SeqCst);
-            }
-            b'C' => {
-                let mut pos = 0;
-                let kind = m.body.first().copied().unwrap_or(b'S');
-                pos += 1;
-                let name = take_cstr(&m.body, &mut pos);
-                if kind == b'S' {
-                    prepared.remove(&name);
-                    described_stmts.remove(&name);
-                } else {
-                    portals.remove(&name);
-                    described_portals.remove(&name);
+                // A transaction left open is put back as the lock is let go.
+                b'X' => return Ok(()),
+                other => {
+                    let errors = out.errors();
+                    out.error("0A000", &format!("unsupported message `{}`", other as char));
+                    tx.settle(&mut lock, errors, &out);
+                    out.ready(tx.status());
+                    send(&mut out, &mut w, lock.hold.is_some(), &cfg, &mut bounded)?;
                 }
-                out.close_complete();
-            }
-            b'S' => {
-                skipping = false;
-                out.ready(tx.status());
-                out.flush_to(&mut w)?;
-            }
-            b'H' => {
-                out.flush_to(&mut w)?;
-            }
-            b'X' => return Ok(()),
-            other => {
-                out.error("0A000", &format!("unsupported message `{}`", other as char));
-                out.ready(tx.status());
-                out.flush_to(&mut w)?;
             }
         }
     }
@@ -1489,13 +1769,16 @@ struct Shape {
 /// their types, and its rows. One the catalog cannot read answers empty.
 fn catalog_answer(
     db: &RwLock<Database>,
+    lock: &Lock<'_>,
     cfg: &Config,
     sql: &str,
     params: &[Value],
 ) -> catalog::Answer {
     // The schemas are copied under the read lock and the query runs without
     // it: a catalog join is cheap, but a writer need not wait for one.
-    let mut snap = catalog::Snapshot::of(&read_lock(db), "fenec", &cfg.server_version);
+    let mut snap = lock.read(db, |d| {
+        catalog::Snapshot::of(d, "fenec", &cfg.server_version)
+    });
     // What the server counted, only for a query that reads it.
     if sql.contains("pg_stat_statements") {
         let rows = SCOPE.with(|s| fenec_http::statements::snapshot(view_of(&s.borrow())));
@@ -1528,7 +1811,13 @@ fn catalog_answer(
 /// derived from the schema and the parameter count from the largest `$n` in
 /// the statement.
 /// `None` -> the query was cancelled while waiting for the lock.
-fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Option<Shape> {
+fn describe(
+    db: &RwLock<Database>,
+    cfg: &Config,
+    sql: &str,
+    be: &Backend,
+    lock: &Lock<'_>,
+) -> Option<Shape> {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
         return Some(Shape {
@@ -1537,7 +1826,7 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
         });
     }
     // Compatibility-layer queries are pure and fixed; the shape is read from there.
-    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)) {
         return Some(match shim {
             compat::Shim::Rows { columns, .. } => Shape {
                 params: Vec::new(),
@@ -1547,7 +1836,7 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
             // is run with every one null to learn them.
             compat::Shim::Catalog => {
                 let n = catalog::params(trimmed).unwrap_or(0);
-                let answer = catalog_answer(db, cfg, trimmed, &vec![Value::Null; n]);
+                let answer = catalog_answer(db, lock, cfg, trimmed, &vec![Value::Null; n]);
                 Shape {
                     params: vec![OID_UNSPECIFIED; n],
                     columns: Some(answer.columns),
@@ -1577,14 +1866,18 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
     let params = vec![OID_UNSPECIFIED; nparams];
 
     let columns = match stmts.last() {
-        Some(Statement::Select(sel)) => {
-            // Reading the schema needs a shared lock; a cancellation arriving
-            // while waiting behind a long write has to be seen here too.
-            let guard = acquire(db, false, be)?;
-            // When the collection does not exist yet we cannot know the
-            // shape; rather than erroring we say NoData and let Execute speak.
-            select_columns(guard.db(), sel)
-        }
+        // When the collection does not exist yet we cannot know the shape;
+        // rather than erroring we say NoData and let Execute speak.
+        Some(Statement::Select(sel)) => match &lock.hold {
+            Some(h) => select_columns(&h.guard, sel),
+            None => {
+                // Reading the schema needs a shared lock; a cancellation
+                // arriving while waiting behind a long write has to be seen
+                // here too.
+                let guard = acquire(db, false, be)?;
+                select_columns(guard.db(), sel)
+            }
+        },
         Some(Statement::ListCollections) | Some(Statement::Describe(_)) => Some(schema_columns()),
         Some(Statement::Explain(_)) => {
             Some(vec![(fenec_core::query::PLAN_COLUMN.to_string(), OID_TEXT)])
@@ -1596,73 +1889,178 @@ fn describe(db: &RwLock<Database>, cfg: &Config, sql: &str, be: &Backend) -> Opt
 
 // ---------------------------------------------------------------- execution
 
-/// What a session did since `BEGIN`. There are no transactions -- every
-/// statement is applied as it runs -- but drivers still bracket their work
-/// with `BEGIN` and `COMMIT`/`ROLLBACK`, and a `ROLLBACK` that answers
-/// "done" after a write is a wrong answer believed right: the caller thinks
-/// the writes were undone. So the session counts the writes it lets through
-/// and `ROLLBACK` succeeds only when there is nothing it would have had to
-/// undo, which keeps it harmless for the pools that send it on every
-/// check-in.
+/// A session's transaction, as PostgreSQL keeps one. Between `BEGIN` and
+/// its end its writes are one block ([`Database::begin`]), which `COMMIT`
+/// lands and `ROLLBACK` puts back -- as do a failed statement and the
+/// session's end. The write lock is taken at its first write and held to
+/// its end ([`Hold`]), so up to that write it reads what others have
+/// committed, statement by statement -- PostgreSQL's read committed -- and
+/// from it on it runs alone. `SERIALIZABLE` and `REPEATABLE READ` take the
+/// lock at its first statement instead, so everything it reads is of one
+/// database, and nothing it read changes before it ends.
 #[derive(Default)]
 struct TxState {
     open: bool,
-    writes: usize,
+    /// A statement in it failed: its block is put back already, and every
+    /// statement up to `COMMIT` or `ROLLBACK` is refused, as PostgreSQL
+    /// refuses them -- a client that went on would take the ones before
+    /// the failure for landed.
+    failed: bool,
+    /// Whether a statement has run in it: its isolation is settled by then.
+    ran: bool,
+    /// Schema changes run in it before its first write, each on its own:
+    /// they cannot be put back, and its `ROLLBACK` says so.
+    schema: usize,
+    mode: compat::Mode,
+    /// Every transaction's mode (`SET SESSION CHARACTERISTICS`).
+    default: compat::Mode,
 }
 
 impl TxState {
-    /// The ReadyForQuery status. It has to say `T` inside a block: libpq-based
-    /// drivers such as psycopg 3 read their transaction state from it, and
-    /// with a permanent `I` they never send the `ROLLBACK` at all.
+    /// The ReadyForQuery status. libpq-based drivers such as psycopg 3 read
+    /// their transaction state from it: `T` inside a transaction, `E` in one
+    /// that failed, where they send `ROLLBACK` rather than more statements.
     fn status(&self) -> u8 {
-        if self.open {
-            b'T'
-        } else {
-            b'I'
+        match (self.open, self.failed) {
+            (false, _) => b'I',
+            (true, false) => b'T',
+            (true, true) => b'E',
         }
     }
 
-    /// Called for a statement that left something behind, which the caller
-    /// reads off the change counter rather than the statement's result: a
-    /// `put` can fail after writing part of its documents, and one that
-    /// failed validation wrote nothing a `ROLLBACK` would have had to undo.
-    fn note_write(&mut self) {
-        if self.open {
-            self.writes += 1;
+    fn begin(&mut self, mode: compat::Mode) {
+        *self = TxState {
+            open: true,
+            mode,
+            default: self.default,
+            ..TxState::default()
+        };
+    }
+
+    fn end(&mut self) {
+        *self = TxState {
+            default: self.default,
+            ..TxState::default()
+        };
+    }
+
+    /// After a message: an error in a transaction fails it, and puts its
+    /// block back now rather than at its end -- the others need not wait on
+    /// a transaction that can only be rolled back -- and an error in a
+    /// pipeline puts its block back before the `Sync` the rest of it is
+    /// skipped to.
+    fn settle(&mut self, lock: &mut Lock<'_>, errors: u64, out: &Writer) {
+        if out.errors() > errors {
+            if self.open {
+                self.failed = true;
+            }
+            lock.hold = None;
         }
     }
 
-    fn apply(&mut self, tx: compat::Tx, out: &mut Writer) {
-        match tx {
-            // A second `BEGIN` keeps the block, and the count, it is in.
-            compat::Tx::Begin => {
-                if !self.open {
-                    *self = TxState {
-                        open: true,
-                        writes: 0,
-                    };
+    fn apply(
+        &mut self,
+        t: compat::Tx,
+        lock: &mut Lock<'_>,
+        cfg: &Config,
+        out: &mut Writer,
+    ) -> Option<(Durability, Option<usize>)> {
+        match t {
+            compat::Tx::Begin(change) => {
+                if self.open {
+                    out.notice("25001", "there is already a transaction in progress");
+                } else {
+                    self.begin(change.over(self.default));
+                    // A pipeline's writes before it are the transaction's,
+                    // as PostgreSQL makes them.
+                    if let Some(h) = &mut lock.hold {
+                        h.implicit = false;
+                        self.ran = true;
+                    }
                 }
                 out.command_complete("BEGIN");
+                None
             }
-            compat::Tx::Commit => {
-                *self = TxState::default();
-                out.command_complete("COMMIT");
-            }
-            compat::Tx::Rollback => {
-                let n = self.writes;
-                *self = TxState::default();
-                if n == 0 {
-                    out.command_complete("ROLLBACK");
+            compat::Tx::Set(change) => {
+                if !self.open {
+                    out.notice(
+                        "25P01",
+                        "SET TRANSACTION can only be used in transaction blocks",
+                    );
+                } else if change.serial.is_some() && self.ran {
+                    out.error(
+                        "25001",
+                        "SET TRANSACTION ISOLATION LEVEL must be called before any query",
+                    );
+                    return None;
                 } else {
-                    let (s, are) = if n == 1 { ("", "is") } else { ("s", "are") };
+                    self.mode = change.over(self.mode);
+                }
+                out.command_complete("SET");
+                None
+            }
+            compat::Tx::Default(change) => {
+                self.default = change.over(self.default);
+                out.command_complete("SET");
+                None
+            }
+            compat::Tx::Commit { chain } => {
+                let (open, failed, mode) = (self.open, self.failed, self.mode);
+                if !open {
+                    out.notice("25P01", "there is no transaction in progress");
+                }
+                self.end();
+                if failed {
+                    // What PostgreSQL answers a failed transaction's
+                    // COMMIT: it was put back when it failed.
+                    out.command_complete("ROLLBACK");
+                    return None;
+                }
+                // Outside a transaction a pipeline's block lands here, as
+                // PostgreSQL commits one at a COMMIT.
+                let wait = match lock.land(cfg) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        out.error(sqlstate(&e), &e.to_string());
+                        return None;
+                    }
+                };
+                if open && chain {
+                    self.begin(mode);
+                }
+                let answer = out.mark();
+                out.command_complete("COMMIT");
+                wait.map(|d| (d, Some(answer)))
+            }
+            compat::Tx::Rollback { chain } => {
+                let (open, mode, schema) = (self.open, self.mode, self.schema);
+                if !open {
+                    out.notice("25P01", "there is no transaction in progress");
+                }
+                // Outside a transaction, a pipeline's block.
+                lock.hold = None;
+                self.end();
+                if schema > 0 {
+                    let (s, them) = if schema == 1 {
+                        ("", "it")
+                    } else {
+                        ("s", "them")
+                    };
                     out.error(
                         "0A000",
                         &format!(
-                            "ROLLBACK undid nothing: fenecdb has no transactions, and the \
-                             {n} write statement{s} since BEGIN {are} already applied"
+                            "ROLLBACK put back the writes, but not the {schema} schema \
+                             change{s} before {them}: a create, a drop or a create index \
+                             cannot be undone"
                         ),
                     );
+                    return None;
                 }
+                if open && chain {
+                    self.begin(mode);
+                }
+                out.command_complete("ROLLBACK");
+                None
             }
         }
     }
@@ -1680,21 +2078,40 @@ impl TxState {
 /// over eight clients on macOS, 268 durable writes/s became 1 156, and a
 /// read's p99 under that load 320 ms became 0.44. A write the disk refused
 /// has its answer taken back and replaced by the error.
+///
+/// `pipeline`: an Execute with more of its pipeline to come before the
+/// `Sync`, which a write in it holds the lock to.
 #[allow(clippy::too_many_arguments)]
 fn execute_into(
     db: &Arc<RwLock<Database>>,
+    tenant: &Held,
     frozen: bool,
     cfg: &Config,
     be: &Backend,
     tx: &mut TxState,
+    lock: &mut Lock<'_>,
     sql: &str,
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
+    pipeline: bool,
 ) {
     let started = Instant::now();
     let (errors, rows) = (out.errors(), out.rows());
-    let wait = run_locked(db, frozen, cfg, be, tx, sql, params, out, row_desc_sent);
+    let wait = run_locked(
+        db,
+        tenant,
+        frozen,
+        cfg,
+        be,
+        tx,
+        lock,
+        sql,
+        params,
+        out,
+        row_desc_sent,
+        pipeline,
+    );
     if let Some((durability, answer)) = wait {
         durable_or_refused(db, durability, answer, out);
     }
@@ -1750,14 +2167,17 @@ fn durable_or_refused(
 #[allow(clippy::too_many_arguments)]
 fn run_locked(
     db: &Arc<RwLock<Database>>,
+    tenant: &Held,
     frozen: bool,
     cfg: &Config,
     be: &Backend,
     tx: &mut TxState,
+    lock: &mut Lock<'_>,
     sql: &str,
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
+    pipeline: bool,
 ) -> Option<(Durability, Option<usize>)> {
     let trimmed = sql.trim();
     if trimmed.is_empty() {
@@ -1765,11 +2185,28 @@ fn run_locked(
         return None;
     }
 
+    // A failed transaction takes nothing but its end.
+    if tx.failed {
+        return match compat::handle(trimmed, cfg, &|| false) {
+            Some(compat::Shim::Tx(
+                t @ (compat::Tx::Commit { .. } | compat::Tx::Rollback { .. }),
+            )) => tx.apply(t, lock, cfg, out),
+            _ => {
+                out.error(
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of \
+                     transaction block",
+                );
+                None
+            }
+        };
+    }
+
     // The standard queries PostgreSQL clients send at startup
-    if let Some(shim) = compat::handle(trimmed, cfg, &|| read_lock(db).history().following) {
+    if let Some(shim) = compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)) {
         match shim {
             compat::Shim::Catalog => {
-                let answer = catalog_answer(db, cfg, trimmed, params);
+                let answer = catalog_answer(db, lock, cfg, trimmed, params);
                 if !row_desc_sent {
                     out.row_description(&answer.columns);
                 }
@@ -1791,7 +2228,7 @@ fn run_locked(
                 out.command_complete(&format!("{tag} {}", rows.len()));
             }
             compat::Shim::Tag(tag) => out.command_complete(&tag),
-            compat::Shim::Tx(t) => tx.apply(t, out),
+            compat::Shim::Tx(t) => return tx.apply(t, lock, cfg, out),
             compat::Shim::Refuse { code, message } => out.error(code, &message),
         }
         return None;
@@ -1804,6 +2241,22 @@ fn run_locked(
             return None;
         }
     };
+    if tx.open {
+        tx.ran = true;
+    }
+
+    // A schema change cannot be put back, so it cannot join a block held
+    // open. Before a transaction's first write it runs on its own, as
+    // outside one, and the transaction's ROLLBACK says it stays.
+    let schema = stmts.iter().any(|s| !s.fits_block());
+    if schema && lock.hold.is_some() {
+        out.error(
+            "25001",
+            "create, drop, create index and compact cannot follow a write in a \
+             transaction or a pipeline: they cannot be put back with it",
+        );
+        return None;
+    }
 
     // `create index` and `compact` on their own are built beside the
     // database: readers and writers go on, and the write lock is taken only
@@ -1814,11 +2267,20 @@ fn run_locked(
             return None;
         }
         fenec_http::metrics::wrote();
-        return maintain(db, cfg, tx, stmt, out);
+        let errors = out.errors();
+        let wait = maintain(db, cfg, stmt, out);
+        if tx.open && out.errors() == errors && matches!(stmt, Statement::CreateIndex { .. }) {
+            tx.schema += 1;
+        }
+        return wait;
     }
 
     // A shared lock suffices when everything is read-only: reads flow in parallel.
     let needs_write = stmts.iter().any(|s| !s.is_read_only());
+    if needs_write && tx.open && tx.mode.read_only {
+        out.error("25006", "cannot execute a write in a read-only transaction");
+        return None;
+    }
     // A frozen tenant is being exported for a move: the HTTP path answers
     // 503 with `Retry-After`, and this is that answer on the wire. Reads go
     // on -- the export is what they would read.
@@ -1829,26 +2291,47 @@ fn run_locked(
     if needs_write {
         fenec_http::metrics::wrote();
     }
-    let mut guard = match acquire(db, needs_write, be) {
-        Some(g) => g,
-        // `acquire` returns `None` both on cancellation and on shutdown; the
-        // two differ for the client: one can be retried, the other means the
-        // connection is over.
-        None if SHUTDOWN.load(Ordering::Relaxed) => {
-            out.error("57P01", "the server is shutting down");
+
+    // A transaction takes the write lock at its first write -- at its first
+    // statement if serializable -- and holds it to its end; a pipeline takes
+    // it at a write with more of the pipeline to come, and holds it to its
+    // Sync, as PostgreSQL runs a pipeline as one transaction.
+    let takes = if tx.open {
+        needs_write || tx.mode.serial
+    } else {
+        pipeline && needs_write
+    };
+    if takes && !schema && lock.hold.is_none() {
+        if let Err((code, msg)) = lock.take(db, tenant, be, !tx.open) {
+            out.error(code, &msg);
             return None;
         }
-        None => {
-            out.error("57014", "the query was cancelled");
-            return None;
-        }
+    }
+    let held = lock.hold.is_some();
+    let mut guard = match &mut lock.hold {
+        Some(h) => Guard::Held(&mut h.guard),
+        None => match acquire(db, needs_write, be) {
+            Some(g) => g,
+            // `acquire` returns `None` both on cancellation and on shutdown;
+            // the two differ for the client: one can be retried, the other
+            // means the connection is over.
+            None if SHUTDOWN.load(Ordering::Relaxed) => {
+                out.error("57P01", "the server is shutting down");
+                return None;
+            }
+            None => {
+                out.error("57014", "the query was cancelled");
+                return None;
+            }
+        },
     };
 
     // A text of several statements with a write among them is one block,
     // as PostgreSQL runs a query of several as one transaction: its writes
     // land together, or -- an error, a cancel, the ceiling -- none of them.
-    // A schema change among them runs each on its own, as ever.
-    let block = needs_write && stmts.len() > 1 && stmts.iter().all(|s| s.fits_block());
+    // A schema change among them runs each on its own, as ever. Under a
+    // held lock the statements join the block held open.
+    let block = !held && needs_write && stmts.len() > 1 && !schema;
     if block {
         if let Err(e) = guard.begin() {
             out.error(sqlstate(&e), &e.to_string());
@@ -1878,17 +2361,15 @@ fn run_locked(
             return durability.map(|d| (d, None));
         }
         let last = i == stmts.len() - 1;
-        // The change counter moves for every document and schema change, and
-        // for nothing else -- in a block, once it lands.
-        let before = guard.db().change_seq();
         let mut result = guard.run(stmt, params);
         if block && last && result.is_ok() {
             if let Err(e) = guard.commit() {
                 result = Err(e);
             }
         }
-        if guard.db().change_seq() != before {
-            tx.note_write();
+        if tx.open && result.is_ok() && !stmt.fits_block() && !matches!(stmt, Statement::Compact(_))
+        {
+            tx.schema += 1;
         }
         match result {
             Err(e) => {

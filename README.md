@@ -171,7 +171,8 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
-What it deliberately does **not** do — no transactions, no JOIN, no subqueries,
+What it deliberately does **not** do — no second writer (a transaction holds the
+database from its first write to its end), no JOIN, no subqueries,
 no schema migration, no multi-writer replication, no decimal type — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
 ceiling baked into the code. Relations are `lookup`, which attaches a

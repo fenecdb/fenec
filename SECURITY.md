@@ -61,8 +61,10 @@ These are deliberate, and README explains each one:
 - **Two processes opening the same file corrupts it.** There is a single writer
   and no lock file; this is why `fenec-http` is a second listener inside
   `fenec-pg` rather than its own binary.
-- **There are no transactions.** `BEGIN`/`COMMIT` are accepted and do nothing,
-  and an import that stops halfway cannot be rolled back.
+- **A transaction holds the database.** From its first write to its end every
+  other session waits on it, so a client that stops mid-transaction stalls the
+  server until `--idle-in-transaction-timeout` (10 s by default) puts it back.
+  An import that stops halfway cannot be rolled back.
 - **The whole database is resident**, with no page cache and no eviction. An
   authenticated client can ask for work that costs memory; `--max-memory` is
   the bound, and `make memory` is how you calibrate it.

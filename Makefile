@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench file-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -120,6 +120,11 @@ replica-bench:
 	$(CARGO) build --release -p fenec-pg
 	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
 	$(CARGO) run --release -p fenec-pg --example failover -- 10
+
+## A pg transaction: a lone write under each sync policy, a write in a
+## transaction of 100, and a read, over the wire.
+tx-bench:
+	$(CARGO) run --release -p fenec-pg --example transactions -- 20000
 
 ## When size comes first: no import, abort instead of panic unwinding.
 small:

@@ -33,6 +33,7 @@ make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds t
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
+make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100
 make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
@@ -144,11 +145,28 @@ of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
 image, written elsewhere, is walked.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
-exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
-`BEGIN`/`COMMIT` and does nothing with them, and refuses (`0A000`) a `ROLLBACK`
-that follows a write in the block rather than answering "done". Two processes
-opening the same file corrupts it, which is why `fenec-http` is a second
-listener inside `fenec-pg`, never its own binary.
+exclusive one (`execute_with`). A pg transaction is a block held open
+(`fenec-pg/src/server.rs`, `Hold`): it takes the write lock at its first
+write -- its first statement under `SERIALIZABLE` -- and holds it across
+messages until `COMMIT` lands the block or `ROLLBACK`, a failed statement
+(`25P02` after it, as PostgreSQL), the client's going or
+`--idle-in-transaction-timeout` (`25P03`, 10 s) puts it back. One writer is
+the isolation: nothing reads a block's writes before they land because
+nothing else runs, reads included, which is the cost. A `Hold` puts its
+block back when dropped, however the session ends: the next holder would
+find it open and write into it. The guard borrows a database found once a
+pass of the session loop (a `OnceCell` a pass), so a tenant's is found
+afresh for the next transaction. A pipeline of the extended protocol is one
+block up to its `Sync` when a write in it has more of the pipeline after
+it; the last statement before a `Sync` runs as one on its own. A schema
+change runs on its own before a transaction's first write (and its
+`ROLLBACK` says it stays, `0A000`) and is refused after one (`25001`);
+`ROLLBACK TO` and `COMMIT PREPARED` are refused rather than read as the
+command they begin with. Under `--sync always` a transaction lands with one
+fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
+statement what it did (`make tx-bench`). Two processes opening the same file corrupts it,
+which is why `fenec-http` is a second listener inside `fenec-pg`, never
+its own binary.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -167,8 +185,8 @@ whatever counts records -- the replication feed, the archive,
 stops before it. A schema change or a compact cannot be undone, so it is
 refused in a block (`Statement::fits_block`), and a `/batch` or a pg text
 holding one runs each statement on its own, as before. A `/batch`, a pg text
-of several statements and the browser module's `run` of several are one
-block. The buffers are kept from one block to the next (`Block::cleared`),
+of several statements, a pg transaction and pipeline, and the browser
+module's `run` of several are one block. The buffers are kept from one block to the next (`Block::cleared`),
 the record's header written into room left before the frames: allocated
 anew they took a lone `put` from 832 to 985 ns; kept, a put costs 841
 against the 829 before blocks, a `del` 648 against 634.

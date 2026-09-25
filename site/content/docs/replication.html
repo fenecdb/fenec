@@ -56,8 +56,8 @@ replication token refuses to start with it.</p>
 <p>Every write moves the change counter by one, on the primary and on each
 replica alike, so a replica's position is its own counter and a subscriber's
 cursor means the same change on either. A block — the writes of one statement,
-or of a <code>/batch</code> — is one record numbered by its last write, and
-is sent and applied whole: a replica never stands inside one.
+a <code>/batch</code> or a transaction — is one record numbered by its last
+write, and is sent and applied whole: a replica never stands inside one.
 A replica of a replica is fed exactly as its primary was.</p>
 
 <p>Numbers alone stop being enough once a history forks. A replica promoted

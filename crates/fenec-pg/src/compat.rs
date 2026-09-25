@@ -14,8 +14,8 @@ pub enum Shim {
         tag: String,
     },
     Tag(String),
-    /// Transaction control. The answer depends on what the session did since
-    /// `BEGIN`, which this layer cannot see, so the session decides.
+    /// Transaction control, which the session carries out: the transaction
+    /// is its own.
     Tx(Tx),
     /// A command whose honest answer is "no": accepting it would tell the
     /// client something happened that did not.
@@ -30,9 +30,83 @@ pub enum Shim {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tx {
-    Begin,
-    Commit,
-    Rollback,
+    Begin(Change),
+    /// `AND CHAIN` begins the next transaction, in the same mode, as this
+    /// one ends.
+    Commit {
+        chain: bool,
+    },
+    Rollback {
+        chain: bool,
+    },
+    /// `SET TRANSACTION`: the open transaction's mode.
+    Set(Change),
+    /// `SET SESSION CHARACTERISTICS AS TRANSACTION`: the mode of every
+    /// transaction after it.
+    Default(Change),
+}
+
+/// How a transaction runs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Mode {
+    /// `SERIALIZABLE` or `REPEATABLE READ`: the transaction runs alone from
+    /// its first statement rather than from its first write, so every read
+    /// in it is of the database as it leaves it.
+    pub serial: bool,
+    /// `READ ONLY`: a write in it is refused.
+    pub read_only: bool,
+}
+
+/// What a statement says of a transaction's mode. What it leaves unsaid
+/// stays as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Change {
+    pub serial: Option<bool>,
+    pub read_only: Option<bool>,
+}
+
+impl Change {
+    fn of(words: &[&str]) -> Change {
+        let pair = |a: &str, b: &str| words.windows(2).any(|w| w[0] == a && w[1] == b);
+        Change {
+            serial: if words.contains(&"serializable") || pair("repeatable", "read") {
+                Some(true)
+            } else if pair("read", "committed") || pair("read", "uncommitted") {
+                Some(false)
+            } else {
+                None
+            },
+            read_only: if pair("read", "only") {
+                Some(true)
+            } else if pair("read", "write") {
+                Some(false)
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn over(self, m: Mode) -> Mode {
+        Mode {
+            serial: self.serial.unwrap_or(m.serial),
+            read_only: self.read_only.unwrap_or(m.read_only),
+        }
+    }
+}
+
+fn no_savepoints() -> Shim {
+    Shim::Refuse {
+        code: "0A000",
+        message: "savepoints are not supported: a transaction is put back whole, with ROLLBACK"
+            .into(),
+    }
+}
+
+fn no_two_phase() -> Shim {
+    Shim::Refuse {
+        code: "0A000",
+        message: "two-phase commit is not supported".into(),
+    }
 }
 
 fn one(col: &str, val: &str) -> Shim {
@@ -69,16 +143,35 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
     if is_fenecql(&lower) {
         return None;
     }
-    let first = lower.split_whitespace().next().unwrap_or("");
+    let words: Vec<&str> = lower
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let first = words.first().copied().unwrap_or("");
+    let second = words.get(1).copied().unwrap_or("");
 
     match first {
-        // Transaction control: there are no transactions, every statement is
-        // applied as it runs. `BEGIN` and `COMMIT` are still accepted so
-        // drivers can open, but `ROLLBACK` is answered by the session: it
-        // succeeds only when there is nothing it would have had to undo.
-        "begin" | "start" => return Some(Shim::Tx(Tx::Begin)),
-        "commit" | "end" => return Some(Shim::Tx(Tx::Commit)),
-        "rollback" | "abort" => return Some(Shim::Tx(Tx::Rollback)),
+        // Transaction control, carried out by the session. Savepoints and
+        // two-phase commit are refused rather than read as what they begin
+        // with: `ROLLBACK TO s` taken for `ROLLBACK` put back the whole
+        // transaction and went on outside one, and `COMMIT PREPARED 'x'`
+        // committed the transaction open instead of the one named.
+        "rollback" if second == "to" => return Some(no_savepoints()),
+        "commit" | "rollback" if second == "prepared" => return Some(no_two_phase()),
+        "prepare" if second == "transaction" => return Some(no_two_phase()),
+        "savepoint" | "release" => return Some(no_savepoints()),
+        "begin" | "start" => return Some(Shim::Tx(Tx::Begin(Change::of(&words)))),
+        "commit" | "end" | "rollback" | "abort" => {
+            let chain = words.windows(2).any(|w| w == ["and", "chain"]);
+            return Some(Shim::Tx(match first {
+                "commit" | "end" => Tx::Commit { chain },
+                _ => Tx::Rollback { chain },
+            }));
+        }
+        "set" if second == "transaction" => return Some(Shim::Tx(Tx::Set(Change::of(&words)))),
+        "set" if words.starts_with(&["set", "session", "characteristics"]) => {
+            return Some(Shim::Tx(Tx::Default(Change::of(&words))))
+        }
         "set" => return Some(Shim::Tag("SET".into())),
         "discard" => return Some(Shim::Tag("DISCARD ALL".into())),
         // `UNLISTEN` stays a no-op because it is true: nothing is listening.
@@ -202,12 +295,67 @@ mod tests {
             Some(Shim::Tx(t)) => Some(t),
             _ => None,
         };
-        assert_eq!(tx("BEGIN"), Some(Tx::Begin));
-        assert_eq!(tx("start transaction"), Some(Tx::Begin));
-        assert_eq!(tx("COMMIT;"), Some(Tx::Commit));
-        assert_eq!(tx("end"), Some(Tx::Commit));
-        assert_eq!(tx("ROLLBACK"), Some(Tx::Rollback));
-        assert_eq!(tx("abort"), Some(Tx::Rollback));
+        let plain = Change::default();
+        assert_eq!(tx("BEGIN"), Some(Tx::Begin(plain)));
+        assert_eq!(tx("start transaction"), Some(Tx::Begin(plain)));
+        assert_eq!(tx("COMMIT;"), Some(Tx::Commit { chain: false }));
+        assert_eq!(tx("end"), Some(Tx::Commit { chain: false }));
+        assert_eq!(tx("ROLLBACK"), Some(Tx::Rollback { chain: false }));
+        assert_eq!(tx("abort"), Some(Tx::Rollback { chain: false }));
+        assert_eq!(tx("commit and chain"), Some(Tx::Commit { chain: true }));
+        assert_eq!(tx("COMMIT AND NO CHAIN"), Some(Tx::Commit { chain: false }));
+
+        // The modes a transaction can be begun or set in.
+        let serial = Change {
+            serial: Some(true),
+            read_only: None,
+        };
+        assert_eq!(
+            tx("BEGIN ISOLATION LEVEL SERIALIZABLE"),
+            Some(Tx::Begin(serial))
+        );
+        assert_eq!(
+            tx("begin isolation level repeatable read"),
+            Some(Tx::Begin(serial))
+        );
+        assert_eq!(
+            tx("START TRANSACTION READ ONLY, ISOLATION LEVEL READ COMMITTED"),
+            Some(Tx::Begin(Change {
+                serial: Some(false),
+                read_only: Some(true),
+            }))
+        );
+        assert_eq!(
+            tx("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"),
+            Some(Tx::Set(serial))
+        );
+        assert_eq!(
+            tx("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"),
+            Some(Tx::Default(Change {
+                serial: None,
+                read_only: Some(false),
+            }))
+        );
+        assert!(serial.over(Mode::default()).serial);
+
+        // What begins like transaction control and is not.
+        for q in [
+            "SAVEPOINT s1",
+            "RELEASE SAVEPOINT s1",
+            "ROLLBACK TO SAVEPOINT s1",
+            "rollback to s1",
+            "COMMIT PREPARED 'x'",
+            "ROLLBACK PREPARED 'x'",
+            "PREPARE TRANSACTION 'x'",
+        ] {
+            assert!(
+                matches!(
+                    handle(q, &cfg, &|| false),
+                    Some(Shim::Refuse { code: "0A000", .. })
+                ),
+                "`{q}` must be refused"
+            );
+        }
 
         for q in ["LISTEN jobs", "notify jobs, 'x'"] {
             assert!(

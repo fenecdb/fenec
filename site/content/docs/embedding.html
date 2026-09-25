@@ -29,8 +29,8 @@ block with <code>execute_block</code>, or between <code>begin</code> and
 opens one holds the exclusive lock until it ends. A <code>create</code>, a
 <code>drop</code>, a <code>create index</code> or a <code>compact</code> runs
 on its own, outside a block. FenecQL has no <code>BEGIN</code> or
-<code>COMMIT</code>; <code>fenec-pg</code> accepts them for the drivers that
-send them.</p>
+<code>COMMIT</code>: <code>fenec-pg</code> runs a transaction as a block held
+open (<a href="postgres.html#transactions">Transactions</a>).</p>
 
 <pre data-lang="rust">let stmts: Vec&lt;Statement&gt; = parse("put orders {total: 12}; set stock {n: 4} where id = 7")?;
 let block: Vec&lt;(&amp;Statement, &amp;[Value])&gt; = stmts.iter().map(|s| (s, &amp;[][..])).collect();
