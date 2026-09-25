@@ -131,7 +131,8 @@ it as a read replica with `--replica-of`: it is sent the writes on the
 primary's disk, serves reads, refuses writes with `25006`, and is promoted by
 hand; `fenec backup`, `fenec archive` and `fenec restore --to <time>` take a
 running database whole, keep its writes, and rebuild it as it stood at a
-moment. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
+moment. With `--follow postgres://...` it mirrors a PostgreSQL table into its
+file as the table commits, and serves the mirror while it follows. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 

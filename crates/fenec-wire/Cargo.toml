@@ -1,0 +1,16 @@
+[package]
+name = "fenec-wire"
+description = "The PostgreSQL v3 wire protocol for fenecdb: its framing, and a client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# No external dependencies: the framing is written by hand, and SCRAM's
+# hashing is fenec-http's.
+fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-http.workspace = true

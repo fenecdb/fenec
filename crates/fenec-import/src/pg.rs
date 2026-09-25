@@ -6,15 +6,15 @@
 //!
 //! Why text format and not binary: a binary COPY needs a separate decoder
 //! per type. In text format a single escape decoder suffices, and it is
-//! consistent with `fenec-pg`'s own choice (see `fenec_pg::proto`).
+//! consistent with `fenec-pg`'s own choice (see `fenec_wire::proto`).
 
 use crate::{Column, Source};
 use fenec_core::error::{Error, Result};
 use fenec_core::value::{DataType, Value, VecPrec};
-use fenec_pg::client::{Client, CopyOut, FieldDesc};
+use fenec_wire::client::{Client, CopyOut, FieldDesc};
 
-/// The connection string. Passed through from `fenec_pg::client` as is.
-pub use fenec_pg::client::Url;
+/// The connection string. Passed through from `fenec_wire::client` as is.
+pub use fenec_wire::client::Url;
 
 // PostgreSQL builtin type OIDs.
 const BOOL: i32 = 16;

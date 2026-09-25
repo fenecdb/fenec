@@ -18,7 +18,7 @@ use fenec_core::query::Statement as Stmt;
 use fenec_core::value::VecPrec;
 use fenec_import::pg::{Query, Reader, Url};
 use fenec_import::{load, map, Options, Source};
-use fenec_pg::client::Client;
+use fenec_wire::client::Client;
 
 /// The server the Makefile's `pgvector-up` target starts.
 const DEFAULT_URL: &str = "postgres://postgres:fenec@127.0.0.1:55432/fenecbench";

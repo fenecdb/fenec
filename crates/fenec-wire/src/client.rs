@@ -6,7 +6,7 @@
 //! -- and for `--follow`, a logical replication stream ([`WalStream`]).
 //!
 //! Framing comes from [`crate::proto`], crypto from [`crate::crypto`]. The
-//! server half of SCRAM is in [`crate::scram`]; this is the client half.
+//! server half of SCRAM is in fenec-pg's `scram`; this is the client half.
 //!
 //! No TLS is spoken. The password is protected by SCRAM but the data flows
 //! in plain text; on an open network it has to go behind a tunnel.

@@ -17,7 +17,7 @@ use fenec_core::prelude::*;
 use fenec_import::follow::{self, Event, Follow};
 use fenec_import::pg::Url;
 use fenec_import::Options;
-use fenec_pg::client::Client;
+use fenec_wire::client::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};

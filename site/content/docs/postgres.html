@@ -259,8 +259,16 @@ connects to a real PostgreSQL server and streams
 <code>COPY ... TO STDOUT</code>, and with <code>--follow</code> reads a
 logical replication slot through <code>pgoutput</code>. The server half of
 SCRAM lives in
-<code>scram.rs</code> and the client half in <code>client.rs</code>; both are
-hand-written, so they test each other. See <a href="import.html">Import</a>.</p>
+<code>scram.rs</code> and the client half in <code>fenec-wire</code>'s
+<code>client.rs</code>; both are hand-written, so they test each other. See
+<a href="import.html">Import</a>.</p>
+
+<p><code>fenec-pg --follow postgres://...</code> runs that follower inside
+the server, over the file it serves: a table of PostgreSQL mirrored as it
+commits, and served over this protocol, HTTP and subscriptions at once. The
+mirrored collection refuses every write but the follower's with
+<code>25006</code>. See <a href="import.html#serving">Serving the mirror as it
+follows</a>.</p>
 
 <h2>Plugins</h2>
 
