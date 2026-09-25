@@ -163,18 +163,11 @@ everywhere and conversion happens only at the storage boundary. Same data,
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">vector&lt;128&gt;</th><th class="n">vector&lt;128, f16&gt;</th></tr></thead>
 <tbody>
-<tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>105 MB</b></td></tr>
-<tr><td>heap, the documents included</td><td class="n">3 397 MB</td><td class="n">2 596 MB</td><td class="n"><b>1 897 MB</b></td></tr>
-<tr><td>index build</td><td class="n">1 017 s</td><td class="n"><b>758 s</b></td><td class="n">937 s</td></tr>
-<tr><td>recall@10, beam of 100</td><td class="n">97.4%</td><td class="n">97.1%</td><td class="n"><b>97.9%</b></td></tr>
-<tr><td>recall@10, beam of 200</td><td class="n">98.4%</td><td class="n">98.7%</td><td class="n"><b>99.8%</b></td></tr>
-<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n">98.8%</td><td class="n"><b>100%</b></td></tr>
-<tr><td>ANN p50, beam of 100</td><td class="n">1.30 ms</td><td class="n"><b>0.62 ms</b></td><td class="n">0.74 ms</td></tr>
-<tr><td>ANN p50, beam of 200</td><td class="n">2.08 ms</td><td class="n"><b>1.09 ms</b></td><td class="n">1.21 ms</td></tr>
-<tr><td>ANN p50, beam of 400</td><td class="n">3.38 ms</td><td class="n"><b>1.66 ms</b></td><td class="n">2.01 ms</td></tr>
-<tr><td>documents read a query, beam of 100 / 400</td><td class="n">—</td><td class="n"><b>20 / 20</b></td><td class="n">100 / 400</td></tr>
-<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.26 ms</td><td class="n">1.36 ms</td><td class="n"><b>1.30 ms</b></td></tr>
-<tr><td>filtered to 3 003 rows, documents read</td><td class="n">—</td><td class="n"><b>12</b></td><td class="n">100</td></tr>
+<tr><td>vector arena</td><td class="n">51.2 MB</td><td class="n"><b>25.6 MB</b></td></tr>
+<tr><td>file image</td><td class="n">57.9 MB</td><td class="n"><b>32.3 MB</b></td></tr>
+<tr><td>index build</td><td class="n"><b>10.4 s</b></td><td class="n">12.5 s</td></tr>
+<tr><td>ANN p50</td><td class="n"><b>0.127 ms</b></td><td class="n">0.147 ms</td></tr>
+<tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">99.6%</td></tr>
 </tbody>
 </table>
 </div>
@@ -240,15 +233,17 @@ latencies are high for all three (<code>make quant-bench</code>):</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">vectors</th><th class="n">quant=int8</th><th class="n">quant=bit</th></tr></thead>
 <tbody>
-<tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>96 MB</b></td></tr>
-<tr><td>heap, the documents included</td><td class="n">3 397 MB</td><td class="n">2 596 MB</td><td class="n"><b>1 920 MB</b></td></tr>
-<tr><td>index build</td><td class="n">875 s</td><td class="n"><b>615 s</b></td><td class="n">847 s</td></tr>
-<tr><td>recall@10, beam of 100</td><td class="n"><b>97.4%</b></td><td class="n">97.1%</td><td class="n">82.5%</td></tr>
-<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n"><b>98.8%</b></td><td class="n">98.4%</td></tr>
-<tr><td>ANN p50, beam of 100</td><td class="n">1.21 ms</td><td class="n"><b>0.55 ms</b></td><td class="n">0.66 ms</td></tr>
-<tr><td>ANN p50, beam of 400</td><td class="n">2.80 ms</td><td class="n"><b>1.41 ms</b></td><td class="n">1.66 ms</td></tr>
+<tr><td>vector arena</td><td class="n">1 536 MB</td><td class="n">772 MB</td><td class="n"><b>105 MB</b></td></tr>
+<tr><td>heap, the documents included</td><td class="n">3 397 MB</td><td class="n">2 596 MB</td><td class="n"><b>1 897 MB</b></td></tr>
+<tr><td>index build</td><td class="n">1 017 s</td><td class="n"><b>758 s</b></td><td class="n">937 s</td></tr>
+<tr><td>recall@10, beam of 100</td><td class="n">97.4%</td><td class="n">97.1%</td><td class="n"><b>97.9%</b></td></tr>
+<tr><td>recall@10, beam of 200</td><td class="n">98.4%</td><td class="n">98.7%</td><td class="n"><b>99.8%</b></td></tr>
+<tr><td>recall@10, beam of 400</td><td class="n">98.6%</td><td class="n">98.8%</td><td class="n"><b>100%</b></td></tr>
+<tr><td>ANN p50, beam of 100</td><td class="n">1.30 ms</td><td class="n"><b>0.62 ms</b></td><td class="n">0.74 ms</td></tr>
+<tr><td>ANN p50, beam of 200</td><td class="n">2.08 ms</td><td class="n"><b>1.09 ms</b></td><td class="n">1.21 ms</td></tr>
+<tr><td>ANN p50, beam of 400</td><td class="n">3.38 ms</td><td class="n"><b>1.66 ms</b></td><td class="n">2.01 ms</td></tr>
 <tr><td>documents read a query, beam of 100 / 400</td><td class="n">—</td><td class="n"><b>20 / 20</b></td><td class="n">100 / 400</td></tr>
-<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.74 ms</td><td class="n">1.17 ms</td><td class="n"><b>1.11 ms</b></td></tr>
+<tr><td>filtered to 3 003 rows, p50</td><td class="n">2.26 ms</td><td class="n">1.36 ms</td><td class="n"><b>1.30 ms</b></td></tr>
 <tr><td>filtered to 3 003 rows, documents read</td><td class="n">—</td><td class="n"><b>12</b></td><td class="n">100</td></tr>
 </tbody>
 </table>
