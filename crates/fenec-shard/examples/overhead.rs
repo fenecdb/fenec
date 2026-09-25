@@ -9,6 +9,9 @@
 //!     graph travels in the image, so it is not rebuilt)
 //!   * a node's standby: how long a write takes to be visible on the
 //!     replica, and what a failover of every tenant costs
+//!   * three nodes whose tenants follow on each other (`--replicas`): the
+//!     same lag, a node's failover across the other two, and the repair
+//!     that gives every tenant a replica again
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
@@ -296,6 +299,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(d2);
 
     replicas();
+    spread();
 }
 
 /// A node and its standby: what a write costs to reach the replica, and
@@ -414,6 +418,143 @@ fn replicas() {
 
     let _ = std::fs::remove_dir_all(d1);
     let _ = std::fs::remove_dir_all(d2);
+}
+
+/// Three nodes in no pair, each tenant followed on another (`--replicas`):
+/// a write's way to its replica, a node's failover across the two others,
+/// and the repair after it.
+fn spread() {
+    const TENANTS: usize = 30;
+    const WRITES: usize = 200;
+    let nodes: Vec<(String, std::path::PathBuf)> = (1..=3)
+        .map(|i| started(&format!("s{i}"), None, true))
+        .collect();
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            replicas: true,
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let raddr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut r = Client::new(&raddr);
+    for (i, (addr, _)) in nodes.iter().enumerate() {
+        let body = format!(r#"{{"addr":"{addr}","token":"adm"}}"#);
+        let target = format!("/_shard/nodes/n{}", i + 1);
+        assert_eq!(r.send("PUT", &target, None, body.as_bytes()).0, 201);
+    }
+    let query = |c: &mut Client, tenant: &str, sql: &str| -> (u16, String) {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, sql);
+        body.push('}');
+        let (status, b) = c.send("POST", &format!("/t/{tenant}/query"), None, body.as_bytes());
+        (status, String::from_utf8_lossy(&b).into_owned())
+    };
+    let t = Instant::now();
+    let mut replica_of = Vec::with_capacity(TENANTS);
+    for i in 0..TENANTS {
+        let body = format!(r#"{{"node":"n{}"}}"#, i % 3 + 1);
+        let (status, answer) = r.send(
+            "PUT",
+            &format!("/_shard/tenants/t{i}"),
+            None,
+            body.as_bytes(),
+        );
+        let answer = String::from_utf8_lossy(&answer).into_owned();
+        assert_eq!(status, 201, "{answer}");
+        let on = answer
+            .split("\"replica_on\":\"")
+            .nth(1)
+            .expect("a replica")
+            .split('"')
+            .next()
+            .unwrap();
+        replica_of.push(on.to_string());
+    }
+    let created = t.elapsed().as_secs_f64() * 1e3 / TENANTS as f64;
+    for i in 0..TENANTS {
+        assert_eq!(
+            query(&mut r, &format!("t{i}"), "create collection notes (n int)").0,
+            200
+        );
+    }
+
+    // ---- commit to visible on t0's replica
+    let at = |name: &str| &nodes[name[1..].parse::<usize>().unwrap() - 1].0;
+    let mut replica = Client::new(at(&replica_of[0]));
+    let mut lag = Vec::with_capacity(WRITES);
+    for k in 0..WRITES {
+        let t = Instant::now();
+        assert_eq!(query(&mut r, "t0", &format!("put notes {{n: {k}}}")).0, 200);
+        let ack = t.elapsed().as_secs_f64() * 1e3;
+        loop {
+            let (status, body) = query(&mut replica, "t0", "get notes count");
+            assert_eq!(status, 200, "{body}");
+            if body.contains(&format!(":{}}}", k + 1)) || body.contains(&format!("[{}]", k + 1)) {
+                break;
+            }
+        }
+        lag.push(t.elapsed().as_secs_f64() * 1e3 - ack);
+    }
+    lag.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let on = |n: &str| replica_of.iter().filter(|r| r.as_str() == n).count();
+    println!(
+        "\nreplicas of their own: {TENANTS} tenants over 3 nodes, each created with its replica \
+         in {created:.1} ms, the replicas {} / {} / {} a node; a write is on t0's {:.3} ms \
+         after it was answered, {:.3} ms at p99",
+        on("n1"),
+        on("n2"),
+        on("n3"),
+        pct(&lag, 0.5),
+        pct(&lag, 0.99)
+    );
+
+    // ---- failover of n1, across n2 and n3
+    for i in 1..TENANTS {
+        assert_eq!(query(&mut r, &format!("t{i}"), "put notes {n: 1}").0, 200);
+    }
+    let t = Instant::now();
+    let (status, body) = r.send("POST", "/_shard/nodes/n1/failover", None, b"");
+    let took = t.elapsed().as_secs_f64() * 1e3;
+    let body = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, 200, "{body}");
+    let moved = TENANTS / 3;
+    println!(
+        "failover: n1's {moved} tenants promoted on their replicas in {took:.0} ms \
+         ({:.1} ms each), {} onto n2 and {} onto n3",
+        took / moved as f64,
+        body.matches("\"to\":\"n2\"").count(),
+        body.matches("\"to\":\"n3\"").count()
+    );
+    let t = Instant::now();
+    let (status, body) = query(&mut r, "t0", "put notes {n: 999}");
+    assert_eq!(status, 200, "{body}");
+    println!(
+        "first write after it: {:.2} ms (an fsync: every node here syncs as it answers)",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+
+    // ---- the repair: every tenant a replica again, n1's copies first
+    let t = Instant::now();
+    let (status, body) = r.send("POST", "/_shard/replicas", None, b"");
+    let took = t.elapsed().as_secs_f64() * 1e3;
+    let body = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, 200, "{body}");
+    println!(
+        "repair: {} tenants given a replica in {took:.0} ms, {} of them on n1's copies",
+        body.matches("\"replica\":").count(),
+        body.matches("\"replica\":\"n1\"").count()
+    );
+
+    for (_, dir) in &nodes {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// A deterministic pseudo-random vector as FenecQL list text.

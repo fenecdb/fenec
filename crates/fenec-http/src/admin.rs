@@ -11,7 +11,8 @@
 //! GET    /_admin/tenants/<t>/file      the whole image (octet-stream)
 //! PUT    /_admin/tenants/<t>/file      install an image as a new tenant
 //! POST   /_admin/tenants/<t>/promote   a replica node takes this tenant's writes
-//! POST   /_admin/tenants/<t>/follow    a primary's file follows this node's upstream
+//! POST   /_admin/tenants/<t>/follow    {from}: follow the node at `from`, or
+//!                                      without it this node's upstream
 //! ```
 //!
 //! A separate token from the data one: a client that may read and write a
@@ -69,13 +70,32 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             )
         }),
         // The other way: a node rejoining as the standby has its tenants
-        // follow, as the router asks when it records the pair.
-        (Method::Post, ["tenants", t, "follow"]) => tenants
-            .follow(t)
-            .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
+        // follow, as the router asks when it records the pair -- or one
+        // tenant follows the node its primary is on, where the router
+        // placed its replica.
+        (Method::Post, ["tenants", t, "follow"]) => match from(&req.body) {
+            Ok(from) => tenants
+                .follow(t, from.as_deref())
+                .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
+            Err(e) => Err(e),
+        },
         _ => Err(Refused(404, "no such admin endpoint".into())),
     };
     result.unwrap_or_else(|Refused(status, msg)| Response::error(status, &msg))
+}
+
+/// The `from` of a follow's body, when it has one.
+fn from(body: &[u8]) -> Result<Option<String>, Refused> {
+    let text = String::from_utf8_lossy(body);
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let fields = fenec_core::json::parse_object(&text)
+        .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
+    Ok(fields.into_iter().find_map(|(k, v)| match (k.as_str(), v) {
+        ("from", fenec_core::prelude::Value::Text(url)) => Some(url),
+        _ => None,
+    }))
 }
 
 /// Flat on purpose: it is what a router reads, and a flat object is what

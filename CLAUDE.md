@@ -222,7 +222,20 @@ database rather than the tenant, and a close left it writing the file under
 the next instance. The router never promotes on its own: it cannot tell a node
 that is gone from one it cannot reach, and guessing makes two primaries. A
 write is on the standby 0.089 ms after the primary answered it (p99 0.448),
-and 20 tenants failed over in 60 ms (`make shard-bench`).
+and 20 tenants failed over in 60 ms (`make shard-bench`). A standby waits
+idle and takes all of a node at once, so with `fenec-shard --replicas` a
+tenant on a node in no pair gets a replica of its own instead (the
+`replicas` collection): on the node holding the fewest replicas of its node,
+then the fewest in all -- the fewest in all alone had every tenant of a node
+follow on the same other, ties going by name. The node is told
+(`POST /_admin/tenants/<t>/follow {from}`) and keeps the URL in
+`<t>.follows` beside the file for its restarts (`resume_following`); a file
+made to follow ends what it served first (`release`, as a delete does), or
+the old primary's feed held it. A failover of a node in no pair promotes each
+tenant on its own replica, `POST /_shard/replicas` gives replicas back -- on
+a node holding a copy first, so a returning node's old primaries follow --
+and a move re-points the replica or, onto its node, places another. Three
+nodes, 10 tenants each: one node's failover took 57 ms, 5 onto each other.
 
 **A scoped token is held to its rules at every level, twice for writes**
 (`fenec-http/src/access.rs`). A JWT's policy filter is ANDed into the statement

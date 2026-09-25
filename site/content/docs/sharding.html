@@ -124,7 +124,7 @@ image:</p>
 <tr><td><code>GET /_admin/tenants/&lt;t&gt;/file</code></td><td>the whole image, graph included</td></tr>
 <tr><td><code>PUT /_admin/tenants/&lt;t&gt;/file</code></td><td>install an image as a new tenant</td></tr>
 <tr><td><code>POST /_admin/tenants/&lt;t&gt;/promote</code></td><td>a replica's file takes writes: its history forks there</td></tr>
-<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>a primary's file follows the node's <code>--replica-of</code></td></tr>
+<tr><td><code>POST /_admin/tenants/&lt;t&gt;/follow</code></td><td>the file follows <code>{"from": "http://host:port"}</code>, kept in <code>&lt;t&gt;.follows</code> beside it, or without it the node's <code>--replica-of</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -305,6 +305,56 @@ curl -X PUT localhost:8090/_shard/nodes/n2 \
 that left it behind, and the node restarted without <code>--replica-of</code>
 — refuses writes, says so in the log, and is promoted where it stands with
 <code>POST /_admin/tenants/&lt;t&gt;/promote</code>.</p>
+
+<h3 id="replicas-of-their-own">Replicas of their own</h3>
+
+<p>A standby waits idle, and takes every tenant of its node at once when the
+node goes. With <code>--replicas</code> the router gives each tenant a
+replica of its own instead, on another node in no pair: the one holding the
+fewest replicas of that tenant's node, then the fewest tenants and replicas
+altogether. Each node's tenants then follow on all the others, and every
+node holds primaries and replicas both.</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 --replication-token r1 --sync always
+fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 --replication-token r1 --sync always
+fenec-pg --dir /data/n3 --http 127.0.0.1:8083 --admin-token a3 --replication-token r1 --sync always
+fenec-shard --replicas
+
+curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
+{"tenant":"acme","node":"n1","replica_on":"n2"}
+</pre>
+
+<p>The replica's node is told which node to follow
+(<code>POST /_admin/tenants/acme/follow</code> with
+<code>{"from": "http://127.0.0.1:8081"}</code>) and keeps it in
+<code>acme.follows</code> beside the file, so the tenant follows again when
+the node starts over. The replication token is the nodes', one for the
+cluster. A move takes the replica along: the copy goes on following the
+tenant on its new node, since the image carried its history, and when the
+tenant moves onto the node holding its replica, that copy goes and another
+is placed. A delete removes both.</p>
+
+<p>A failover of a node in no pair promotes each of its tenants on its own
+replica, one at a time, and routes it there. The tenants whose replicas it
+held are named as unreplicated. <code>POST /_shard/replicas</code> gives every
+tenant without a replica one, on a node holding a copy of it first: a node
+back from a failover has its old primaries follow the nodes that took them
+over, and nothing of theirs is left lying there.</p>
+
+<pre data-lang="bash">curl -X POST localhost:8090/_shard/nodes/n1/failover
+{"node":"n1","promoted":[{"tenant":"acme","to":"n2"},{"tenant":"beta","to":"n3"}],"failed":[],"unreplicated":["gamma"]}
+curl -X POST localhost:8090/_shard/replicas
+{"replicated":[{"tenant":"acme","replica":"n1"},{"tenant":"beta","replica":"n1"},{"tenant":"gamma","replica":"n1"}],"failed":[]}
+</pre>
+
+<p>Measured with <code>make shard-bench</code>, three nodes and the router in
+one process, 30 tenants: each is created with its replica in 33 ms, the
+replicas 10 a node, and a write is on its replica 0.179 ms after it was
+answered, 0.421 ms at p99. A failover of one node's 10 tenants took 57 ms, 5
+onto each of the other two, and the repair after it gave 20 tenants a
+replica in 176 ms, all on the returning node's copies. Placed by the fewest
+altogether alone, every tenant of one node followed on the same other: a
+tie went by name each time, and its failover put them all there.</p>
 
 <h2>A standby router</h2>
 

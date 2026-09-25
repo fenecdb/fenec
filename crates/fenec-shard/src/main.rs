@@ -28,6 +28,11 @@ usage: fenec-shard [options]
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
       --upstream-timeout <s> connect/read bound towards a node  default: 60
+      --replicas            give each tenant created on a node in no pair a
+                            replica on another node -- the one holding the
+                            fewest -- so a node's tenants fail over across
+                            the others rather than onto one idle standby.
+                            The nodes need --replication-token, the same one
       --replication-token <value>  serve the directory to standby routers at
                             /_replication, and present this to a primary
       --replica-of <url>    follow the primary router at http://host:port:
@@ -75,6 +80,7 @@ fn main() {
             "--directory" | "-d" => path = next(&mut i, "--directory"),
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--insecure" => cfg.insecure = true,
+            "--replicas" => cfg.replicas = true,
             "--max-connections" => {
                 cfg.max_connections =
                     number(next(&mut i, "--max-connections"), "--max-connections") as usize
