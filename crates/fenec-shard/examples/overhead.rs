@@ -2,7 +2,8 @@
 //!
 //! What is measured, all on loopback with node and router in one process
 //!   * one keep-alive client, the same request straight to the node and
-//!     through the router: p50 / p95 / p99 of each and the difference
+//!     through the router: p50 / p95 / p99 of each and the difference, and
+//!     what counting a request for `/_metrics` costs
 //!   * a tenant move: N documents with a DIM vector and an HNSW index,
 //!     image size and wall time, and the first query on the target (the
 //!     graph travels in the image, so it is not rebuilt)
@@ -11,6 +12,7 @@
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
+use fenec_shard::metrics::{self, Route};
 use fenec_shard::{Config, Router};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -212,6 +214,32 @@ fn main() {
         pct(&routed, 0.5) - pct(&direct, 0.5),
         pct(&routed, 0.95) - pct(&direct, 0.95),
         pct(&routed, 0.99) - pct(&direct, 0.99)
+    );
+
+    // ----------------------------------------------------------- counting
+    // What `/_metrics` adds to a request: a count and two histograms in the
+    // thread's own shard. One thread, then eight at once, as a busy
+    // router's connections count.
+    let per = |threads: usize| -> f64 {
+        let rounds = 2_000_000u64;
+        let t = Instant::now();
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(move || {
+                    for i in 0..rounds {
+                        let took = Duration::from_micros(20 + i % 50);
+                        metrics::request(Route::Tenant, 200, took);
+                        metrics::upstream(took);
+                    }
+                });
+            }
+        });
+        t.elapsed().as_secs_f64() * 1e9 / rounds as f64
+    };
+    println!(
+        "  counting  {:>6.1} ns a request, {:.1} ns with eight threads counting",
+        per(1),
+        per(8)
     );
 
     // --------------------------------------------------------------- move

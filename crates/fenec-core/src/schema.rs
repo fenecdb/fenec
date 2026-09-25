@@ -54,8 +54,9 @@ pub enum Quant {
     None,
     /// A byte a component, over a scale a vector: a quarter of `f32`.
     Int8,
-    /// A bit a component, its sign: a thirty-second of `f32`. The signs
-    /// of a unit vector, so cosine only.
+    /// A bit a component and nine bytes a vector, about a thirtieth of
+    /// `f32`: the signs of the unit vector's distance from the nearest of
+    /// the centres the index learns, so cosine only.
     Bit,
 }
 
@@ -92,13 +93,16 @@ impl Quant {
     }
 }
 
-/// `ef_search` for a `quant=bit` index that names none. Its codes estimate
-/// distances coarsely, so the beam has to be wider to hold the true
-/// neighbours for the documents' own vectors to put in order: over a million
-/// clustered 768-dimension vectors a beam of 100 held 82.5% of the true ten
-/// and one of 400 held 98.4%, where int8 codes held 97.1% at 100 and full
-/// vectors 97.4% (`make quant-bench`).
-pub const BIT_EF_SEARCH: usize = 400;
+/// `ef_search` for a `quant=bit` index that names none. A bit code bounds
+/// nothing, so the whole beam is read, and it estimates less closely than
+/// an int8 code: over a million clustered 768-dimension vectors a beam of
+/// 100 held 97.9% of the true ten and one of 200 99.8%, where int8 codes
+/// held 97.1% at 100 and full vectors 97.4%; spread in every dimension, 100
+/// held 89.5% and 200 97.6%, full vectors 97.8% at 100 (`make
+/// quant-bench`). It was 400 while the codes were the vectors' own signs,
+/// which a beam of 400 held 98.4% of the million's ten with, in 2.16 ms
+/// where 200 takes 1.21 now.
+pub const BIT_EF_SEARCH: usize = 200;
 
 /// `ef_search` for every other index that names none. recall@10 measured at
 /// 100 is 100%; at 64 it is 99%. ANN latency rises from 0.10 -> 0.13 ms,
@@ -129,8 +133,9 @@ impl VectorIndexSpec {
     /// [`DEFAULT_EF_SEARCH`] otherwise. Only the parser used to know the bit
     /// beam, so an index built through the Rust API with `quant: Bit`
     /// searched a beam of 100: 82.5% of the true ten over a million
-    /// vectors, where 400 held 98.4%. Settled wherever a spec comes in -- a
-    /// schema, a `create index`, a graph -- the file holds the number.
+    /// vectors, where 400 held 98.4%, over the signs bit codes were then.
+    /// Settled wherever a spec comes in -- a schema, a `create index`, a
+    /// graph -- the file holds the number.
     pub fn resolved(mut self) -> VectorIndexSpec {
         if self.ef_search == 0 {
             self.ef_search = match self.quant {

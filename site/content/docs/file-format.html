@@ -92,6 +92,16 @@ leaves them waiting again, or links them there when it is not a server's.
 An older binary does not know version 5 and rebuilds the graph, as it does
 from any record it cannot read.</p>
 
+<p>A graph over bit codes (<code>quant=bit</code>) also carries the centres
+its codes are taken from, since a restored graph has to code its vectors
+against the ones it was built with. Where the quantization's code goes, a
+bit graph writes 3; the number of centres follows, then each centre as
+<code>dim</code> little-endian f32s — none while the index still holds its
+vectors whole. A tombstone's vector is its code: the signs, the centre's
+number in a byte and two f32s. A bit graph written before the centres, with
+the vectors' own signs and code 2, is built again on open; a binary from
+before them does not know 3, and builds its own.</p>
+
 <h2>Indexes in the schema</h2>
 
 <p>A schema names each field's index by a kind byte: 0 none, 1
@@ -199,4 +209,9 @@ as it is.</p>
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record
 cut short inside it, or an image longer than the file, is refused as a damaged
-file rather than cut off as a crash's torn tail is.</p>
+file rather than cut off as a crash's torn tail is. A server's
+<code>compact</code> writes its image beside the database into
+<code>&lt;file&gt;.fenec.beside</code>, with no lock held; the documents written
+meanwhile go into it as a data record at the end of the image, and its header
+takes the counter as it stands when it is renamed into place. A side file left
+by a crash is written over by the next compact, and can be deleted.</p>

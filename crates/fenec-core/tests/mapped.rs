@@ -204,10 +204,11 @@ fn a_new_file_is_read_from_the_file_once_checkpointed() {
 
 /// A server's `compact` runs beside the database, and over a mapped one it
 /// copies no record: the graphs holding tombstones are rebuilt beside it,
-/// and the live records streamed from the old file into the new one under
-/// the lock, the stores pointed at them. It once copied every record into a
-/// fresh store and left the collection in memory for good -- and still has
-/// to take in the writes made while it ran.
+/// and the live records streamed from the old file into a side file, the
+/// stores pointed at them. It once copied every record into a fresh store
+/// and left the collection in memory for good -- and still has to take in
+/// the writes made while it ran, here while the graphs were built and
+/// again while the file was written.
 #[test]
 fn a_compact_beside_a_mapped_database_copies_no_record() {
     let path = tmp("compact-beside");
@@ -267,13 +268,16 @@ fn a_compact_beside_a_mapped_database_copies_no_record() {
     let db = db.into_inner().unwrap();
     let c = db.collection("docs").unwrap();
     assert!(c.store.is_mapped());
-    assert_eq!(c.store.heap_bytes(), 0);
+    // The records stay in the file; what was written while it was written
+    // is held, as any write after an open is -- a document, twice.
+    assert!(c.store.heap_bytes() < 512, "{}", c.store.heap_bytes());
     // The rebuilt graph holds a tombstone for the document deleted
     // meanwhile -- the one rewritten meanwhile kept its vector, and with it
     // its node -- and none of the hundred rewritten before.
     assert_eq!(c.vectors["v"].dead(), 1);
 
     let mut twin = open_mapped(&twin_path).unwrap();
+    meanwhile(&mut twin);
     meanwhile(&mut twin);
     run(&mut twin, "compact");
     for sql in [
@@ -397,4 +401,250 @@ fn a_rewrite_points_the_stores_where_the_file_has_them() {
     drop(read);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&twin);
+}
+
+/// The side file a compact writes beside a mapped database: while it is
+/// written, reads go on and writes land -- new documents, rewrites of old
+/// ones with and without their vector, deletes, an id handed out and taken
+/// back -- and what the compact leaves, in memory and in the file, is what
+/// the same writes and a compact under the lock leave, change for change.
+#[test]
+fn a_compact_writes_its_file_beside_the_database() {
+    let path = tmp("side");
+    let twin_path = tmp("side-twin");
+    let setup = |db: &mut Database| {
+        run(
+            db,
+            "create collection docs (kind text @hash, n int @sorted, v vector<4> @hnsw(l2, m=8)); \
+             create collection other (x int)",
+        );
+        for i in 0..300 {
+            run(
+                db,
+                &format!(
+                    "put docs {{kind: \"k{}\", n: {i}, v: [{}.0, 1.0, {}.0, 0.5]}}",
+                    i % 5,
+                    i % 13,
+                    i % 7
+                ),
+            );
+        }
+        run(db, "put other {x: 1}; del docs where n >= 250");
+        db.sync().unwrap();
+    };
+    let meanwhile = |db: &mut Database| {
+        run(
+            db,
+            "put docs {kind: \"k9\", n: 999, v: [9.0, 1.0, 0.0, 0.5]}; \
+             set docs {kind: \"k7\"} where n = 10; \
+             set docs {v: [0.0, 0.0, 1.0, 0.5]} where n = 11; \
+             del docs where n = 12; \
+             put docs {kind: \"gone\"}; del docs where kind = \"gone\"; \
+             put other {x: 2}",
+        );
+    };
+    for p in [&path, &twin_path] {
+        setup(&mut open_mapped(p).unwrap());
+    }
+    let side = path.with_extension("fenec.beside");
+
+    let db = std::sync::RwLock::new(open_mapped(&path).unwrap());
+    let compact = fenec_ql::parse_one("compact").unwrap();
+    let mut calls = 0;
+    Database::maintain_with(&db, &compact, &mut || {
+        calls += 1;
+        if calls == 2 {
+            // The side file is being written, and the database is free.
+            assert!(side.exists());
+            meanwhile(&mut db.write().unwrap());
+            let g = db.read().unwrap();
+            assert_eq!(
+                answer(&g, "get docs count", &[]).rows[0].values[0],
+                Value::Int(250)
+            );
+        }
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert!(!side.exists());
+    let db = db.into_inner().unwrap();
+
+    let mut twin = open_mapped(&twin_path).unwrap();
+    meanwhile(&mut twin);
+    run(&mut twin, "compact");
+    let queries = [
+        "get docs count",
+        "get docs select id, kind, n order id",
+        "get docs select id where kind = \"k7\"",
+        "get docs select id, n where n >= 5 and n < 40 order n desc",
+        "get docs select id near v [0.0, 0.0, 1.0, 0.5] exact limit 9",
+        "get other order id",
+    ];
+    for sql in queries {
+        assert_eq!(
+            answer(&db, sql, &[]).rows,
+            answer(&twin, sql, &[]).rows,
+            "{sql}"
+        );
+    }
+    assert_eq!(db.change_seq(), twin.change_seq());
+    // What the writes made meanwhile superseded is in the image, dead, and
+    // goes with the next compact: three documents' worth, and no more.
+    let dead = db.collection("docs").unwrap().store.dead_bytes();
+    assert!(dead > 0 && dead < 128, "{dead}");
+
+    // The file holds all of it: reopened, the same answers, the same
+    // change, and the id counter past the one handed out and taken back.
+    let seq = db.change_seq();
+    drop(db);
+    let mut back = open_mapped(&path).unwrap();
+    for sql in queries {
+        assert_eq!(
+            answer(&back, sql, &[]).rows,
+            answer(&twin, sql, &[]).rows,
+            "{sql}"
+        );
+    }
+    assert_eq!(back.change_seq(), seq);
+    run(&mut back, "put docs {kind: \"next\"}");
+    run(&mut twin, "put docs {kind: \"next\"}");
+    let next = "get docs select id where kind = \"next\"";
+    assert_eq!(answer(&back, next, &[]).rows, answer(&twin, next, &[]).rows);
+    drop(back);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&twin_path);
+}
+
+/// A collection altered while the side file was written leaves an image
+/// that no longer fits: the compact says so, the side file goes, and the
+/// database and its file stand as they were. So does a second compact
+/// while one is writing: one side file at a time.
+#[test]
+fn a_compact_beside_refuses_what_changed_under_it() {
+    let path = tmp("side-refused");
+    {
+        let mut db = open_mapped(&path).unwrap();
+        run(&mut db, "create collection docs (n int)");
+        for i in 0..50 {
+            run(&mut db, &format!("put docs {{n: {i}}}"));
+        }
+        run(&mut db, "del docs where n < 10");
+        db.sync().unwrap();
+    }
+    let side = path.with_extension("fenec.beside");
+    let db = std::sync::RwLock::new(open_mapped(&path).unwrap());
+    let compact = fenec_ql::parse_one("compact").unwrap();
+    let mut calls = 0;
+    let err = Database::maintain_with(&db, &compact, &mut || {
+        calls += 1;
+        if calls == 2 {
+            let again = Database::maintain(&db, &compact).unwrap().unwrap_err();
+            assert!(again.to_string().contains("already"), "{again}");
+            run(&mut db.write().unwrap(), "create index on docs (n) @sorted");
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(err.to_string().contains("run `compact` again"), "{err}");
+    assert!(!side.exists());
+    {
+        let mut g = db.write().unwrap();
+        assert_eq!(
+            answer(&g, "get docs count", &[]).rows[0].values[0],
+            Value::Int(40)
+        );
+        run(&mut g, "put docs {n: 100}");
+        g.sync().unwrap();
+    }
+    // Nothing is left holding the side file's name.
+    Database::maintain(&db, &compact).unwrap().unwrap();
+    drop(db);
+    let back = open_mapped(&path).unwrap();
+    assert_eq!(
+        answer(&back, "get docs count", &[]).rows[0].values[0],
+        Value::Int(41)
+    );
+    drop(back);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A compact of one collection writes the others into the side file as
+/// they stand, their dead records with them, and each still takes the
+/// writes made while the side file was written.
+#[test]
+fn a_compact_of_one_collection_beside_keeps_the_others_as_they_are() {
+    let path = tmp("side-one");
+    let twin_path = tmp("side-one-twin");
+    let setup = |db: &mut Database| {
+        run(
+            db,
+            "create collection docs (n int); create collection other (x int @hash)",
+        );
+        for i in 0..100 {
+            run(db, &format!("put docs {{n: {i}}}; put other {{x: {i}}}"));
+        }
+        run(db, "del docs where n < 30; del other where x < 30");
+        db.sync().unwrap();
+    };
+    let meanwhile = |db: &mut Database| {
+        run(
+            db,
+            "put docs {n: 500}; put other {x: 500}; del other where x = 40",
+        );
+    };
+    for p in [&path, &twin_path] {
+        setup(&mut open_mapped(p).unwrap());
+    }
+    let db = std::sync::RwLock::new(open_mapped(&path).unwrap());
+    let other_dead = db
+        .read()
+        .unwrap()
+        .collection("other")
+        .unwrap()
+        .store
+        .dead_bytes();
+    assert!(other_dead > 0);
+    let compact = fenec_ql::parse_one("compact docs").unwrap();
+    let mut calls = 0;
+    Database::maintain_with(&db, &compact, &mut || {
+        calls += 1;
+        if calls == 2 {
+            meanwhile(&mut db.write().unwrap());
+        }
+    })
+    .unwrap()
+    .unwrap();
+    let db = db.into_inner().unwrap();
+    assert_eq!(db.collection("docs").unwrap().store.dead_bytes(), 0);
+    assert!(db.collection("other").unwrap().store.dead_bytes() > other_dead);
+
+    let mut twin = open_mapped(&twin_path).unwrap();
+    meanwhile(&mut twin);
+    run(&mut twin, "compact docs");
+    let queries = [
+        "get docs order id",
+        "get other order id",
+        "get other where x = 500",
+    ];
+    for sql in queries {
+        assert_eq!(
+            answer(&db, sql, &[]).rows,
+            answer(&twin, sql, &[]).rows,
+            "{sql}"
+        );
+    }
+    drop(db);
+    let back = open_mapped(&path).unwrap();
+    for sql in queries {
+        assert_eq!(
+            answer(&back, sql, &[]).rows,
+            answer(&twin, sql, &[]).rows,
+            "{sql}"
+        );
+    }
+    assert_eq!(back.change_seq(), twin.change_seq());
+    drop(back);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&twin_path);
 }

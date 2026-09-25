@@ -258,6 +258,23 @@ pub trait Sink: Send {
     fn remapped(&self) -> Option<crate::store::Base> {
         None
     }
+    /// Where a rewrite beside the database writes the file that will take
+    /// this one's place ([`Self::adopt`]): a `compact` on a server, written
+    /// with no lock held. `None` for every sink but a file's, and the
+    /// rewrite then holds the write lock ([`Self::rewrite_with`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn side(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    /// Puts the file at `side`, an image of every write so far and fsynced,
+    /// in place of this one, and appends to it from then on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &std::path::Path) -> Result<()> {
+        Err(Error::Io(format!(
+            "{} has no file to take the place of",
+            side.display()
+        )))
+    }
     /// Pushes to disk what an earlier process wrote and never synced: a
     /// primary calls it before it tells a replica those bytes exist.
     fn sync_existing(&mut self) -> Result<()> {
@@ -1164,6 +1181,10 @@ pub struct Database {
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
+    /// Whether a rewrite beside the database is writing its side file: one
+    /// at a time, since the file has one name.
+    #[cfg(not(target_arch = "wasm32"))]
+    beside: std::sync::atomic::AtomicBool,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -1209,6 +1230,8 @@ impl Database {
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
+            #[cfg(not(target_arch = "wasm32"))]
+            beside: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

@@ -236,12 +236,23 @@ write passes through `Database::note`, which hands the id to the `Tail` of each
 maintenance on that collection -- so a write path that skipped `note` would
 leave a built index missing it. A schema change there (another index, a drop)
 fails the maintenance rather than installing what no longer fits. At 100 000 x
-128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
+128 reads waited at most 21 ms through an HNSW build and 30 ms through a compact
 (file rewrite included), against the full ~20 s under the write lock. Over a
 mapped file a compact copies no record: the graphs holding tombstones are
-rebuilt beside the database, and the live records streamed into the new file
-under the write lock. Only a lone statement takes this path; a batch, the
-shell and `execute` hold the lock.
+rebuilt beside the database, then each store is cloned under the read lock --
+the records in the old file and the sealed segments shared (`SegmentBytes` is
+an `Arc` natively), the index copied, each graph's record written -- the live
+records written into `<file>.fenec.beside` with no lock held and fsynced, and
+the clones relocated onto it without reading it back (`relocate_live`). Under
+the write lock only the documents written meanwhile go in, as a data record
+inside the image, whose header then takes the counter as it stands, and the
+side file is renamed into place (`Sink::adopt`, through a primary's `Tee`
+too). What they superseded stays in the new file, dead, for the next compact.
+At 1.8 million x 128, a 1.1 GB file, writes waited at most 24 ms against 1.22
+s, for a peak of +67 MB; cloning the segments rather than sharing them held
+the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
+created, dropped or altered meanwhile fails it. Only a lone statement takes
+this path; a batch, the shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
@@ -382,7 +393,8 @@ alone.
 
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
-vector, `quant=bit` the signs (cosine only). A code only estimates a distance,
+vector, `quant=bit` the signs of its distance from a centre (cosine only). A
+code only estimates a distance,
 so `Space` (`engine.rs`) takes the beam's `ef` candidates and puts them in
 order by the vectors read out of the store, as `rerank` does, so every score
 is exact -- reading one only while it can still make the page. An int8 code
@@ -394,19 +406,45 @@ is 16.8 of a beam of 100, and of 400, and 20 over a million, with recall
 unchanged; a bit code bounds nothing and reads the whole beam. A filtered set under the ANN budget is
 ranked by its codes and its beam's worth ordered the same way -- read whole it
 was up to 12 800 vectors a query under bit codes -- and `exact` reads every
-vector. Bit codes need the wider beam `BIT_EF_SEARCH` -- 400: over a million
-clustered 768-dim vectors a beam of 100 held 82.5% of the true ten, 400 held
-98.4%, int8 codes 97.1% at 100 (`make quant-bench`). The core settles it
+vector. Bit codes take the wider beam `BIT_EF_SEARCH` -- 200: over a million
+clustered 768-dim vectors a beam of 100 held 97.9% of the true ten and 200
+held 99.8% in 1.21 ms, int8 codes 97.1% at 100 (`make quant-bench`); over
+the vectors' own signs the beam was 400, for 98.4% in 2.16 ms. The core settles it
 wherever a spec comes in -- `VectorIndexSpec::default()` leaves `ef_search`
 0 for `resolved` to fill by the codes -- since only the parser knew it once,
 and the Rust API's bit indexes searched 100. How well bits estimate
-depends on the vectors: spread in every dimension, 36% at 100. The code
+depends on the vectors: spread in every dimension, 89.5% at 100 and 97.6% at
+200. The code
 kernels add in `strip8!`'s order on every target, so a graph over codes is the
 browser's graph bit for bit; on aarch64 the int8 strips are NEON intrinsics
 (`vector::neon`), because the vectoriser widened codes through a register it
 also accumulated in, which chained every strip to the one before -- 5x slower,
 or not, depending on the code around it. A graph over codes is record version
 4; every other graph stays 3, so no file is rebuilt for the feature.
+
+**A bit code is a residual's signs, from a centre the index learned.** The
+vectors' own signs were the code before: most of a crowded cluster's signs
+are its centre's, and over 100 000 x 768 spread in every dimension a beam of
+100 held 36.1% of the true ten, 400 held 74.9%. A bit index learns 128
+centres by k-means++ and four Lloyd rounds over its first 2 048 vectors
+(`BIT_TRAIN`), holding those whole until then -- an index under that
+searches exactly -- in one order on every target, so the browser learns a
+server's centres; the insert that learns them takes 195 ms at 768
+dimensions. A code is the signs `b` of `r = v - C`, the centre's byte, and a
+word after the signs holding `σ = |r|²/|r|₁` and `κ = ⟨C, r⟩ - σ⟨b, C⟩`;
+`⟨q, v⟩` is estimated as `⟨q, C⟩ + κ + σ⟨b, q⟩` -- RaBitQ's estimator
+without its rotation, the query taken from the centre so that only its part
+off the centre goes through the signs (`⟨q, r⟩` estimated whole held
+38.7% over centres that gave 92.8%). `query_for` appends the query's product with each centre, once a
+search, and a distance between two codes counts both `κ` (`Arena::offset`),
+which a widened code leaves out. The same beams hold 89.5% and 99.7%, and
+over 32 directions a beam of 100 went 96.8% -> 100% at 100 000 and 82.5% ->
+97.9% at a million, for 105 bytes a 768-dim vector against 96. In an array of their own the factors were a cache miss
+more a distance: the build took 69.7 s against 62.8, a query at a beam of
+100 0.414 ms against 0.378. The centres travel in the graph record behind
+quantization code 3 (`BIT_CENTRED`): a graph over the plain signs (code 2)
+is built again, and a binary from before them builds its own. The browser
+module grew 7.0 KB, 2.4 KB brotli, most of it the k-means.
 
 **Filtered `near` needs its fallback.** The filter's rows are probed first -- in
 blocks spread over the collection, and only until more than `ef × m0` match,
@@ -677,7 +715,13 @@ path has an underscore because a collection may be called `metrics`.
 `--metrics <addr>` is a listener for it alone that never attaches a watcher
 -- a second one would take the HTTP endpoint's subscription wake-ups -- and a
 tenant node publishes counts of its tenants, never a tenant's collection
-names.
+names. The router counts its own the same way (`fenec-shard/src/metrics.rs`,
+over `fenec_http::metrics::Timings`): requests by route and status class, a
+forwarded one's time at its node, the nodes it could not reach and its moves,
+never a tenant in a label -- 13.3 ns a request with eight threads counting,
+beside the 17 µs the router adds. A subscription is timed to its head, and a
+standby's replication stream only counted: both last as long as their
+client.
 
 **`/_stats/statements` counts by shape, a tenant's apart.** Every
 statement is also counted by its text with each literal and parameter as
