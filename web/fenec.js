@@ -29,6 +29,9 @@ const MAX_LOOKUP_DEPTH = 8;
 
 export class FenecError extends Error {}
 
+/** A second database over a database's module (`Fenec`'s static block). */
+let sibling;
+
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
 // probe -- one function returning a v128 -- turns that into one that says why.
@@ -50,6 +53,11 @@ export class Fenec {
     this.#wasm = wasm;
     this.#handle = handle;
     this.#collation = collation;
+  }
+
+  static {
+    // For `openFile` to try bytes in without touching the database it keeps.
+    sibling = (f) => new Fenec(f.#wasm, f.#wasm.fenec_open(), f.#collation);
   }
 
   /**
@@ -142,6 +150,9 @@ export class Fenec {
       this.#wasm.fenec_free(sp, sl || 1);
       this.#wasm.fenec_free(pp, pl || 1);
     }
+    // Before the answer, and before an error too: a statement that failed
+    // may follow ones in the same text that wrote.
+    kept.get(this)?.flush();
     const res = JSON.parse(out);
     if (res.kind === 'error') {
       const e = new FenecError(res.message);
@@ -295,9 +306,12 @@ export class Fenec {
     return this.#readBytes(this.#wasm.fenec_snapshot(this.#handle));
   }
 
-  /** Starts keeping the writes for `drain()`; `persist` does it itself. */
-  journal() {
-    this.#wasm.fenec_journal(this.#handle);
+  /**
+   * Starts keeping the writes for `drain()`, or with `false` stops;
+   * `persist` and `openFile` start it themselves.
+   */
+  journal(on = true) {
+    this.#wasm.fenec_journal(this.#handle, on ? 0 : 1);
   }
 
   /**
@@ -310,12 +324,14 @@ export class Fenec {
   }
 
   /**
-   * Restores from a byte image. An image whose collated text needs
-   * collation data the module has not been handed is refused, as `run`
-   * refuses a statement (`e.collation`): `restore` fetches it and loads the
-   * image again.
+   * Restores from a byte image, and returns how many of its bytes that
+   * took: all of them, or those before a last record a crash cut short. An
+   * image whose collated text needs collation data the module has not been
+   * handed is refused, as `run` refuses a statement (`e.collation`):
+   * `restore` fetches it and loads the image again.
    */
   load(bytes) {
+    if (kept.has(this)) throw new FenecError('the database is kept in a file (openFile): a load would leave the file behind');
     const ptr = this.#wasm.fenec_alloc(bytes.length);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
     let r;
@@ -330,6 +346,7 @@ export class Fenec {
       throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
     }
     if (r !== 0) throw new FenecError('could not load image (corrupt or incompatible version)');
+    return this.#wasm.fenec_loaded(this.#handle) >>> 0;
   }
 
   /** `load`, fetching the collation data the image needs and loading it again. */
@@ -1264,6 +1281,7 @@ function idb() {
  * written.
  */
 export async function persist(fenec, key = 'default') {
+  if (kept.has(fenec)) throw new FenecError('the database is kept in a file (openFile): persist would take the writes it appends');
   const db = await idb();
   let s = stored.get(fenec);
   let image = null;
@@ -1355,6 +1373,253 @@ export async function restore(fenec, key = 'default') {
   fenec.journal();
   stored.set(fenec, { key, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
   return true;
+}
+
+// ------------------------------------------------------------- file (OPFS)
+// A database kept in a file of the origin private file system holds what
+// fenec-pg holds on disk, byte for byte: an image, then every write since,
+// appended as it is made. So a page's file opens with `fenec`, and a
+// server's file loads in a page. `run` hands each statement's writes to the
+// file and flushes it before it answers, where `persist` stores what was
+// written when it is called.
+//
+// A new image -- a `compact`, or appended writes outgrowing half the image,
+// folded as `persist` folds its chunks -- is written into a copy beside the
+// file (`<name>~`) and flushed before the file is touched, then over the
+// file, and the copy emptied. A crash at any point leaves one of the two
+// whole: `openFile` takes the copy when its image is whole -- it holds every
+// write the file does and more -- and the file otherwise.
+
+/** Per database, the file it is kept in. */
+const kept = new WeakMap();
+/**
+ * Nor before the writes appended since the image reach this: without it
+ * every write to a small database folded, and a new image costs the file
+ * three flushes where an append costs one -- 0.92 ms against 0.31 in
+ * Chrome 153 (`make file-bench`).
+ */
+const FOLD_FLOOR = 64 * 1024;
+const MAGIC = enc.encode('FENECDB\x01');
+/** An image's head: the signature, then `[6][u64 counter][u64 body length]`. */
+const HEAD = MAGIC.length + 17;
+
+/** Where the image beginning with `head` ends, or -1 when it is not an image's head. */
+function imageEnd(head) {
+  if (head.length < HEAD || head[MAGIC.length] !== 6 || MAGIC.some((b, i) => head[i] !== b)) return -1;
+  return HEAD + Number(new DataView(head.buffer, head.byteOffset).getBigUint64(MAGIC.length + 9, true));
+}
+
+function writeAt(h, bytes, at) {
+  for (let done = 0; done < bytes.length; ) {
+    const n = h.write(bytes.subarray(done), { at: at + done });
+    if (!(n > 0)) throw new FenecError('the file took none of a write');
+    done += n;
+  }
+}
+
+function readAt(h, size) {
+  const out = new Uint8Array(size);
+  for (let done = 0; done < size; ) {
+    const n = h.read(out.subarray(done), { at: done });
+    if (!(n > 0)) throw new FenecError('the file ended before its size');
+    done += n;
+  }
+  return out;
+}
+
+/** `h` holding `bytes` and nothing else, flushed. */
+function overwrite(h, bytes) {
+  h.truncate(0);
+  writeAt(h, bytes, 0);
+  h.flush();
+}
+
+function refused(name, e) {
+  return new FenecError(`${name} refused a write (${e?.message ?? e}); it holds what was written before, and the database has to be opened from it again`, { cause: e });
+}
+
+/** A database kept in a file of the origin private file system (`openFile`). */
+class FenecFile {
+  #fenec; #main; #aside; #name; #size; #image;
+  #failed = null;
+
+  constructor(fenec, name, main, aside, size, image) {
+    this.#fenec = fenec;
+    this.#name = name;
+    this.#main = main;
+    this.#aside = aside;
+    this.#size = size;
+    this.#image = image;
+  }
+
+  /** The file's name in its directory. */
+  get name() {
+    return this.#name;
+  }
+
+  /** Bytes in the file. */
+  get size() {
+    return this.#size;
+  }
+
+  /**
+   * Writes what the database wrote since the last call into the file and
+   * flushes it; `run` calls it after every statement. Returns the bytes
+   * written. Once the file has refused a write every later one is refused:
+   * it holds what was written before, and the drained writes are nowhere.
+   */
+  flush() {
+    const { replace, bytes } = this.#fenec.drain();
+    if (!replace && bytes.length === 0) return 0;
+    if (this.#failed) throw refused(this.#name, this.#failed);
+    try {
+      if (replace) return this.#rewrite(bytes);
+      // Updates to the same rows would grow the file, and the replay of
+      // the next open, without end.
+      const appended = this.#size - this.#image + bytes.length;
+      if (appended > Math.max(this.#image * FOLD, FOLD_FLOOR)) return this.#rewrite(this.#fenec.snapshot());
+      writeAt(this.#main, bytes, this.#size);
+      this.#main.flush();
+      this.#size += bytes.length;
+      return bytes.length;
+    } catch (e) {
+      this.#failed = e;
+      throw refused(this.#name, e);
+    }
+  }
+
+  /** The file's bytes, which `fenec` and a server open: to download them. */
+  bytes() {
+    this.flush();
+    return readAt(this.#main, this.#size);
+  }
+
+  /** Flushes and lets the file go: the database is kept in it no longer. */
+  close() {
+    try {
+      this.flush();
+    } finally {
+      kept.delete(this.#fenec);
+      this.#fenec.journal(false);
+      this.#main.close();
+      this.#aside.close();
+    }
+  }
+
+  /** The file holding `image` (and the writes after it) instead, beside it first. */
+  #rewrite(image) {
+    overwrite(this.#aside, image);
+    overwrite(this.#main, image);
+    this.#aside.truncate(0);
+    this.#aside.flush();
+    this.#size = image.length;
+    this.#image = Math.max(imageEnd(image), 0);
+    return image.length;
+  }
+}
+
+/** Synchronous access to `name` in `dir`, which is created if absent. */
+async function syncAccess(dir, name) {
+  const fh = await dir.getFileHandle(name, { create: true });
+  if (typeof fh.createSyncAccessHandle !== 'function') {
+    throw new FenecError('openFile needs a dedicated worker: the file system hands out synchronous access nowhere else');
+  }
+  try {
+    return await fh.createSyncAccessHandle();
+  } catch (e) {
+    if (e?.name !== 'NoModificationAllowedError') throw e;
+    throw new FenecError(`${name} is open elsewhere (another worker or tab): one database at a time writes a file`, { cause: e });
+  }
+}
+
+/**
+ * Whether `bytes` load, tried in a database of their own. Only the module's
+ * word that they are no database says no: anything else -- memory running
+ * out, say -- is thrown, since the copy may be the one whole database left.
+ */
+function loads(fenec, bytes) {
+  const trial = sibling(fenec);
+  try {
+    trial.load(bytes);
+    return true;
+  } catch (e) {
+    // Refused for collation data: they loaded, and the text needs it.
+    if (e.collation) return true;
+    if (e instanceof FenecError) return false;
+    throw e;
+  } finally {
+    trial.close();
+  }
+}
+
+/**
+ * Keeps the database in a file of the origin private file system, the bytes
+ * fenec-pg keeps on disk. A file holding some is loaded into the database,
+ * which must hold nothing yet; an empty one takes the database's image. From
+ * then on `run` appends every statement's writes to it and flushes it before
+ * it answers.
+ *
+ * Only in a dedicated worker, the one place the file system hands out the
+ * synchronous access this needs; and one worker at a time, since a second
+ * opener is refused -- as a second process over a server's file would
+ * corrupt it.
+ *
+ * @param {Fenec} fenec
+ * @param {string} name  the file's name in `opts.dir`
+ * @param {{dir?: FileSystemDirectoryHandle}} opts  the directory, the root
+ *   of the origin private file system unless given
+ * @returns {Promise<FenecFile>}
+ */
+export async function openFile(fenec, name = 'default.fenec', opts = {}) {
+  if (kept.has(fenec)) throw new FenecError('the database is already kept in a file');
+  if (stored.has(fenec)) throw new FenecError('persist keeps this database in IndexedDB: a file would take the writes it stores');
+  const dir = opts.dir ?? (await globalThis.navigator?.storage?.getDirectory?.());
+  if (!dir) throw new FenecError('openFile needs the origin private file system (navigator.storage.getDirectory)');
+  const main = await syncAccess(dir, name);
+  let aside = null;
+  try {
+    aside = await syncAccess(dir, `${name}~`);
+    const beside = aside.getSize();
+    if (beside > 0) {
+      // A rewrite stopped: its copy was flushed before the file was
+      // touched when its image is whole, and the file was never touched
+      // when it is not.
+      const end = imageEnd(readAt(aside, Math.min(beside, HEAD)));
+      const copy = end > 0 && end <= beside ? readAt(aside, beside) : null;
+      if (copy && loads(fenec, copy)) overwrite(main, copy);
+      aside.truncate(0);
+      aside.flush();
+    }
+    let size = main.getSize();
+    let image;
+    if (size === 0) {
+      fenec.journal();
+      const snap = fenec.snapshot();
+      overwrite(main, snap);
+      size = snap.length;
+      image = imageEnd(snap);
+    } else {
+      if (fenec.schemas().length) throw new FenecError(`${name} holds a database: open it into one that holds nothing`);
+      const bytes = readAt(main, size);
+      const took = await fenec.loadAsync(bytes);
+      // A last record a crash cut short: appended after, the next write
+      // would be read back as the rest of it.
+      if (took < size) {
+        main.truncate(took);
+        main.flush();
+        size = took;
+      }
+      image = imageEnd(bytes);
+      fenec.journal();
+    }
+    const file = new FenecFile(fenec, name, main, aside, size, Math.max(image, 0));
+    kept.set(fenec, file);
+    return file;
+  } catch (e) {
+    main.close();
+    aside?.close();
+    throw e;
+  }
 }
 
 // -------------------------------------------------------------------- sync

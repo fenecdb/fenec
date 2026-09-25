@@ -28,6 +28,57 @@ await restore(db);     // read it back
 call. The builder's endpoints return promises, because a builder has to pick
 its transport first.</p>
 
+<h2 id="keeping">Keeping a database</h2>
+
+<pre data-lang="js">// in a dedicated worker
+import { Fenec, openFile } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');
+const file = await openFile(db, 'notes.fenec');   // loads what it holds, or takes the database's image
+db.run('put notes {text: $1}', ['in the file before run returns']);
+const bytes = file.bytes();                        // what fenec and fenec-pg open
+</pre>
+
+<p><code>openFile</code> keeps the database in a file of the origin private
+file system, byte for byte the file <code>fenec-pg</code> keeps on disk:
+download it and <code>fenec notes.fenec</code> opens it, and a server's file
+handed to a page loads there. <code>run</code> appends each statement's
+writes to it and flushes the file before it answers. It needs a dedicated
+worker, the one place a page gets synchronous access to a file, and it takes
+the file for itself: a second worker or tab that opens the file is refused,
+where a second process over a server's file would corrupt it.</p>
+
+<p>A <code>compact</code>, and writes appended past half the image (and past
+64 KB), put a new image in the file. It is written into a copy beside the
+file (<code>notes.fenec~</code>) and flushed before the file is touched, so a
+crash at any point leaves one of the two whole, and the next
+<code>openFile</code> takes whichever holds every write <code>run</code>
+answered. A write a crash cut short is cut off. What updates and deletes
+leave behind stays in the image until a <code>compact</code>, as it does in
+a server's checkpoint. Once the file refuses a write, every later write is
+refused too; the database has to be opened from the file again.</p>
+
+<p><code>persist</code> and <code>restore</code> keep the same bytes in
+IndexedDB, wherever a page runs: the image once, then only the writes since
+the last call, as chunks. <code>persist</code> stores what was written when
+it is called, and IndexedDB decides when that reaches the disk; the file is
+flushed before every answer. Over 32.4 MB (61 000 rows with a
+<code>vector&lt;128&gt;</code>), in a worker (<code>make file-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th></th><th class="n">IndexedDB, Chrome 153</th><th class="n">File, Chrome 153</th><th class="n">IndexedDB, Safari 26.1</th><th class="n">File, Safari 26.1</th></tr></thead>
+<tbody>
+<tr><td>the first image</td><td class="n">97 ms</td><td class="n">39 ms</td><td class="n">349 ms</td><td class="n">131 ms</td></tr>
+<tr><td>a new row stored, p50</td><td class="n">0.21 ms</td><td class="n">0.60 ms</td><td class="n">1.42 ms</td><td class="n">1.42 ms</td></tr>
+<tr><td>opened again</td><td class="n">46 ms</td><td class="n">22 ms</td><td class="n">226 ms</td><td class="n">148 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The file's row includes its statement, 0.09 ms in Chrome and 1.04 ms in
+Safari, and its flush. Firefox was not measured.</p>
+
 <h2 id="collation">Collation data</h2>
 
 <pre data-lang="js">const db = await Fenec.open('./fenec.wasm');            // collate/ beside it

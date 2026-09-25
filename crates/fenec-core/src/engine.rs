@@ -1182,8 +1182,9 @@ pub struct Database {
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
     /// Whether a rewrite beside the database is writing its side file: one
-    /// at a time, since the file has one name.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// at a time, since the file has one name. Only where a file is mapped,
+    /// the one place a rewrite writes beside it.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
     beside: std::sync::atomic::AtomicBool,
 }
 
@@ -1230,7 +1231,7 @@ impl Database {
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
         }
     }

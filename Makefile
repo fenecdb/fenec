@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench file-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -32,9 +32,11 @@ test:
 ##   fenec.sync.test.js  sync layer -- against a real `fenec-pg --http` server;
 ##                     skipped when `web/fenec.wasm` or the binary is missing
 ##   fenec.persist.test.js  incremental persistence, over an in-memory IndexedDB
+##   fenec.file.test.js  a database kept in an OPFS file, over in-memory files,
+##                     and handed to and from a real `fenec-pg`
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js web/fenec.file.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -77,6 +79,12 @@ statements-bench:
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
 wasm-sizes:
 	@python3 crates/fenec-wasm/sizes.py
+
+## What keeping a database costs a page: IndexedDB (persist) against an
+## OPFS file (openFile), 32 MB, in a worker of headless Chrome --
+## BROWSER=safari opens Safari instead, BROWSER=firefox runs Firefox.
+file-bench: wasm
+	@python3 crates/fenec-bench/browser/serve.py
 
 ## Serves the browser demo locally
 serve: wasm

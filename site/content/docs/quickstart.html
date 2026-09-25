@@ -89,6 +89,8 @@ const near = await db.from('docs').near('embed', queryVector).limit(5).rows();
 
 await persist(db);      // write the snapshot to IndexedDB
 await restore(db);      // read it back next session
+// or, in a worker: a file every statement is flushed into, which fenec-pg opens too
+// const file = await openFile(db, 'notes.fenec');
 </pre>
 
 <div class="note trap">
