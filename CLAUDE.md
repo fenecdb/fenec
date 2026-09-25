@@ -94,14 +94,21 @@ tailoring, generated tables in chunks),
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~305 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~318 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
 image, then the writes since as chunks, from the journal `fenec_journal` starts
 and `fenec_drain` empties (off until asked for -- a page that never drains would
-hold every write). One row persists in 0.6 ms over 32 MB, against 136 ms for the
-image.
+hold every write). One row persists in 0.21 ms over 32 MB in Chrome, against 97
+ms for the image. `openFile` (a dedicated worker) keeps the same bytes as a file
+of the origin private file system -- the file `fenec-pg` keeps, so each opens
+the other's -- and `run` appends each statement's writes and flushes before it
+answers: 0.60 ms a row, statement included, and it opens in 22 ms against
+IndexedDB's 46 (`make file-bench`; Safari 1.42 ms both ways). A new image
+(`compact`, or appended writes past half the image and 64 KB) goes into
+`<name>~` and is flushed before the file is written over, so a crash leaves
+one of the two whole; `openFile` takes the copy when its image is whole.
 
 ## Invariants worth knowing before you change things
 
@@ -365,8 +372,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 146.8 KB
-brotli with all four, 117.2 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 146.9 KB
+brotli with all four, 117.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

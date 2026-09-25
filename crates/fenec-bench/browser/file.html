@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fenecdb file bench</title>
+<!-- make file-bench: the measurement runs in file-worker.js, where a page
+     keeps its database, and its result goes back to the server that
+     opened this page (crates/fenec-bench/browser/serve.py). -->
+<pre id="out">running</pre>
+<script type="module">
+  const out = document.getElementById('out');
+  const post = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+  const worker = new Worker('./file-worker.js', { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    if (data.msg) {
+      out.textContent += `\n${data.msg}`;
+      post('/progress', data.msg);
+    }
+    if (data.result) {
+      out.textContent += `\n${JSON.stringify(data.result, null, 2)}`;
+      post('/result', data.result);
+    }
+  };
+  worker.onerror = (e) => post('/result', { error: e.message ?? String(e) });
+</script>

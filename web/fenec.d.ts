@@ -473,17 +473,24 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   schemas(): SchemaInfo[];
   stats(): unknown;
   snapshot(): Uint8Array;
-  /** Starts keeping the writes for `drain()`; `persist` does it itself. */
-  journal(): void;
+  /**
+   * Starts keeping the writes for `drain()`, or with `false` stops;
+   * `persist` and `openFile` start it themselves.
+   */
+  journal(on?: boolean): void;
   /**
    * The writes since the last drain: frames to append to a stored image, or
    * with `replace` an image to store instead (after a `compact`).
    */
   drain(): { replace: boolean; bytes: Uint8Array };
-  /** Restores from a byte image; refused like `run` for collation data. */
-  load(bytes: Uint8Array): void;
+  /**
+   * Restores from a byte image, and returns how many of its bytes that took:
+   * all, or those before a last record a crash cut short. Refused like `run`
+   * for collation data.
+   */
+  load(bytes: Uint8Array): number;
   /** `load`, fetching the collation data the image needs. */
-  loadAsync(bytes: Uint8Array): Promise<void>;
+  loadAsync(bytes: Uint8Array): Promise<number>;
   close(): void;
 
   /**
@@ -507,6 +514,37 @@ export function restore(fenec: Fenec<any>, key?: string): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
+
+/** A database kept in a file of the origin private file system (`openFile`). */
+export interface FenecFile {
+  /** The file's name in its directory. */
+  readonly name: string;
+  /** Bytes in the file. */
+  readonly size: number;
+  /**
+   * Writes what the database wrote since the last call into the file and
+   * flushes it; `run` calls it after every statement. Returns the bytes
+   * written. Once the file has refused a write, every later one is refused.
+   */
+  flush(): number;
+  /** The file's bytes, which `fenec` and a server open. */
+  bytes(): Uint8Array;
+  /** Flushes and lets the file go: the database is kept in it no longer. */
+  close(): void;
+}
+
+/**
+ * Keeps the database in a file of the origin private file system, the bytes
+ * fenec-pg keeps on disk: a file holding some is loaded into the database
+ * (which must hold nothing yet), an empty one takes its image, and from then
+ * on `run` appends every statement's writes to it and flushes before it
+ * answers. Only in a dedicated worker, one at a time a file.
+ */
+export function openFile(
+  fenec: Fenec<any>,
+  name?: string,
+  opts?: { dir?: FileSystemDirectoryHandle },
+): Promise<FenecFile>;
 
 // -------------------------------------------------------------------- sync
 

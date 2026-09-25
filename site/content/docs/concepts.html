@@ -378,7 +378,7 @@ means they test each other.</p>
 <h2>Straight into the browser</h2>
 
 <p><code>fenec-wasm</code> exposes a C ABI and there is no
-<code>wasm-bindgen</code>. The glue is about 305 lines of JavaScript inside
+<code>wasm-bindgen</code>. The glue is about 318 lines of JavaScript inside
 <code>web/fenec.js</code>, alongside the query builder, the HTTP client and the
 sync layer — one dependency-free ES module.</p>
 
@@ -386,12 +386,23 @@ sync layer — one dependency-free ES module.</p>
 and out of IndexedDB the way a file holds it: an image, and the writes since
 as chunks after it. The first <code>persist</code> stores the image; every
 later one stores only what was written since the last, from a journal the
-wasm side keeps once asked to. In Chrome, over a 32 MB database, persisting
-one new row takes 0.6 ms where writing the image again took 136 ms. Once the
-chunks outgrow half the image, a new image replaces them, and
-<code>compact</code> replaces them too. <code>restore</code> reads the image
-and its chunks back as one file, so the graph restored from the image takes
-the chunks' writes rather than being rebuilt.</p>
+wasm side keeps once asked to. In Chrome 153, over a 32 MB database,
+persisting one new row takes 0.21 ms where the image took 97 ms; in Safari
+26.1, 1.42 ms and 349 ms. Once the chunks outgrow half the image, a new
+image replaces them, and <code>compact</code> replaces them too.
+<code>restore</code> reads the image and its chunks back as one file, so the
+graph restored from the image takes the chunks' writes rather than being
+rebuilt.</p>
+
+<p>In a worker, <code>openFile(db, name)</code> keeps it in a file of the
+origin private file system instead, which is the file itself: the bytes
+<code>fenec-pg</code> keeps, so <code>fenec</code> opens a page's file and a
+page loads a server's. The same journal feeds it, a statement at a time:
+<code>run</code> appends the writes and flushes the file before it answers,
+0.60 ms a row in Chrome and 1.42 ms in Safari, statement included, and the
+file opens again in half the time the chunks are restored in. A new image
+is written beside the file and flushed before it is written over it, so a
+crash leaves one of the two whole.</p>
 
 <div class="note">
   <p><b>Threads are compiled out of wasm32.</b> The parallel HNSW build path

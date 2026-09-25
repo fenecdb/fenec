@@ -29,6 +29,8 @@ thread_local! {
 struct Slot {
     db: Database,
     journal: Option<Arc<Mutex<Journal>>>,
+    /// The bytes the last `fenec_load` took (`fenec_loaded`).
+    loaded: usize,
 }
 
 /// What a page's database wrote since the page last took it: the frames
@@ -113,6 +115,7 @@ pub extern "C" fn fenec_open() -> u32 {
         h.push(Some(Slot {
             db: Database::new(),
             journal: None,
+            loaded: 0,
         }));
         (h.len() - 1) as u32
     })
@@ -323,12 +326,18 @@ pub extern "C" fn fenec_snapshot(handle: u32) -> *mut u8 {
     }
 }
 
-/// Starts keeping the database's writes for `fenec_drain`. Off until asked
-/// for: a page that never drains would hold every write it made. What was
-/// written before is not kept; the page stores a snapshot first.
+/// Starts keeping the database's writes for `fenec_drain`, or with `off`
+/// stops. Off until asked for: a page that never drains would hold every
+/// write it made -- which is why a page that lets its file go stops it. What
+/// was written before is not kept; the page stores a snapshot first.
 #[no_mangle]
-pub extern "C" fn fenec_journal(handle: u32) {
+pub extern "C" fn fenec_journal(handle: u32, off: u32) {
     with_slot(handle, |s| {
+        if off != 0 {
+            s.db.set_sink(Box::new(fenec_core::engine::NullSink));
+            s.journal = None;
+            return;
+        }
         let journal = Arc::new(Mutex::new(Journal::default()));
         s.db.set_sink(Box::new(JournalSink(Arc::clone(&journal))));
         s.journal = Some(journal);
@@ -383,7 +392,7 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
     let bytes = std::slice::from_raw_parts(ptr, len);
     collate::take_missing();
     let out = with_slot(handle, |s| {
-        s.db.load(bytes).ok()?;
+        s.loaded = s.db.load(bytes).ok()?;
         let missing = s.db.collation_missing() | collate::take_missing();
         if missing != 0 {
             let mut empty = Database::new();
@@ -400,6 +409,15 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
         Some(missing) => (2 | missing << 2) as i32,
         None => 1,
     }
+}
+
+/// The bytes the last `fenec_load` took: all of them, or those before a
+/// last record a crash cut short. A page's file is cut back there before
+/// anything is appended to it: a write appended after the torn bytes is
+/// read back as the rest of them, and the next load loses it.
+#[no_mangle]
+pub extern "C" fn fenec_loaded(handle: u32) -> usize {
+    with_slot(handle, |s| s.loaded).unwrap_or(0)
 }
 
 /// Returns the collection statistics as JSON.
