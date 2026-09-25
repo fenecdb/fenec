@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -79,6 +79,16 @@ statements-bench:
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
 wasm-sizes:
 	@python3 crates/fenec-wasm/sizes.py
+
+## PyPI's fenecdb and npm's @fenecdb/web and @fenecdb/react as a release
+## publishes them, installed into a project and a venv of their own and
+## used (PYTHON=... picks the interpreter; it wants 3.10 or newer).
+packages: wasm wasm-lite
+	@integrations/packages.sh
+
+## One version wherever a release reads it: make version V=0.1.5
+version:
+	@python3 tools/version.py $(or $(V),$(error V=<version> is required))
 
 ## What keeping a database costs a page: IndexedDB (persist) against an
 ## OPFS file (openFile), 32 MB, in a worker of headless Chrome --

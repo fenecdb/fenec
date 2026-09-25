@@ -9,6 +9,7 @@ description = "fenecdb over HTTP: a client, and vector stores for LangChain and 
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
+keywords = ["fenecdb", "vector", "database", "langchain", "llama-index"]
 # The client is the standard library alone, as the server is std alone.
 dependencies = []
 
@@ -22,6 +23,11 @@ test = [
     "langchain-tests>=1.0",
     "llama-index-core>=0.12",
 ]
+
+[project.urls]
+Homepage = "https://fenecdb.com"
+Documentation = "https://fenecdb.com/docs/integrations"
+Source = "https://github.com/fenecdb/fenec"
 
 [tool.setuptools]
 packages = ["fenecdb"]

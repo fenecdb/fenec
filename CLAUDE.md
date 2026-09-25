@@ -16,6 +16,8 @@ make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
+make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
+make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make serve         # wasm + python3 http.server -> http://localhost:8787
 make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
@@ -841,8 +843,13 @@ the standard library for its client) and `useLiveQuery`
 `make python-test` runs LangChain's standard suite and the tests LlamaIndex's
 integrations run from a `python:3.13` container against a fenec-pg started
 here, `make react-test` runs the hook against a real replica, and CI runs
-both (`integrations`), with the wheel and the npm tarball built as a publish
-would build them -- publishing itself is not decided there. With
+both (`integrations`). CI also builds the three packages as a release
+publishes them and installs and uses them (`integrations/packages.sh`):
+PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
+`collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
+release's draft is published (`packages.yml`), only after that same check,
+and with trusted publishing: the registries trust the workflow's OIDC
+identity, and the repository keeps no key (RELEASING.md). With
 `full_text=True` a store indexes its text for BM25 as well and searches by
 the words (`match`) or by the words and the vector fused (`fuse`):
 LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
