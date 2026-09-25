@@ -53,6 +53,72 @@ shared lock; writes take the exclusive one. HNSW search buffers are
 thread-local, so the same index can be searched in parallel — eight concurrent
 full scans on eight cores measured 4.3×.</p>
 
+<h2 id="transactions">Transactions</h2>
+
+<p>Between <code>BEGIN</code> and <code>COMMIT</code> a session's writes are
+one block: <code>COMMIT</code> lands them in the file as one record, and
+<code>ROLLBACK</code> puts them back — as do a statement that fails, a client
+that goes away and a server going down. A crash holds none of an open
+transaction, whose writes reach the file only when it lands, and cuts off
+none of a landed one. A replica applies a transaction whole, and a subscriber
+is woken once for all of it.</p>
+
+<p>A transaction lands with one fsync where its statements alone would take
+one each: under <code>--sync always</code> a write in a transaction of a
+hundred costs 90 µs against 3.97 ms on its own, and a lone statement costs
+what it did (<code>make tx-bench</code>).</p>
+
+<p>There is one writer, so a transaction takes the write lock at its first
+write and holds it until it ends: its writes are in the database already, and
+nothing else may read them before they land, or write after them. Until its
+first write it reads what others have committed, statement by statement —
+PostgreSQL's <i>read committed</i> — and holds nobody up.
+<code>BEGIN ISOLATION LEVEL SERIALIZABLE</code>, or <code>REPEATABLE
+READ</code>, takes the lock at its first statement instead, so nothing it
+read changes before it ends; <code>BEGIN READ ONLY</code> refuses a write
+with <code>25006</code>.</p>
+
+<div class="note trap">
+  <p><b>A transaction that has written holds every other session,</b> reads
+  included. Keep it short, and have the client send <code>COMMIT</code> rather
+  than work between statements. One whose client stays silent for
+  <code>--idle-in-transaction-timeout</code> seconds — 10 by default, 0 for
+  never — is put back and its session closed with <code>25P03</code>, as
+  PostgreSQL's <code>idle_in_transaction_session_timeout</code> closes
+  one.</p>
+</div>
+
+<p>As in PostgreSQL:</p>
+
+<ul>
+  <li>A statement that fails fails the transaction. Its writes are put back
+    at once, ReadyForQuery reports <code>E</code>, and every statement up to
+    <code>COMMIT</code> or <code>ROLLBACK</code> is refused with
+    <code>25P02</code>; the <code>COMMIT</code> of a failed transaction
+    answers <code>ROLLBACK</code>.</li>
+  <li>A pipeline of the extended protocol is one block up to its
+    <code>Sync</code>: JDBC's <code>executeBatch</code>, pgx's batches and
+    libpq's pipeline mode land whole or not at all. A text of several
+    statements sent as one query is one block as well.</li>
+  <li><code>COMMIT AND CHAIN</code> begins the next transaction in the same
+    mode; <code>SET TRANSACTION</code> sets a transaction's before its first
+    statement, and <code>SET SESSION CHARACTERISTICS AS TRANSACTION</code>
+    every later one's.</li>
+  <li>Outside a transaction <code>COMMIT</code> and <code>ROLLBACK</code>
+    warn with <code>25P01</code> and succeed, as the pools that send them on
+    every check-in expect.</li>
+</ul>
+
+<p>Unlike it, a <code>create</code>, a <code>drop</code> or a <code>create
+index</code> cannot be put back. Before a transaction's first write it runs
+on its own, and the transaction's <code>ROLLBACK</code> puts back the writes
+after it and says the schema change stays (<code>0A000</code>); after a write
+it is refused (<code>25001</code>). Savepoints and two-phase commit are
+refused (<code>0A000</code>): taken for the <code>ROLLBACK</code> or the
+<code>COMMIT</code> they begin with, they would end a transaction other than
+the one named. <code>BEGIN</code>, <code>COMMIT</code> and
+<code>ROLLBACK</code> go in a query of their own.</p>
+
 <h2>Resource ceilings</h2>
 
 <p>One thread per connection means unlimited connections would leave the stack
@@ -64,6 +130,7 @@ memory ceiling to the client.</p>
 <tbody>
 <tr><td><code>--max-connections</code></td><td class="n">100</td><td><code>53300</code>, PostgreSQL's <i>sorry, too many clients already</i></td></tr>
 <tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td><code>57P05</code> on a session that has gone quiet</td></tr>
+<tr><td><code>--idle-in-transaction-timeout &lt;s&gt;</code></td><td class="n">10</td><td><code>25P03</code>, and the transaction put back, on a session gone quiet holding the database</td></tr>
 <tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>the length is read before the body, so an oversized body is never allocated</td></tr>
 <tr><td>startup packet</td><td class="n">10 000 B</td><td>the same as PostgreSQL; the only allocation before authentication</td></tr>
 <tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data, <code>507</code> over HTTP</td></tr>
@@ -201,8 +268,9 @@ as PostgreSQL does, and is sent at once rather than at the
 batches, JDBC's — writes off what it queued behind a failure, so none of it
 runs: run anyway, a write the client counted as aborted would be made, and
 psycopg 3, reading answers it did not expect, fails with <i>cannot exit
-pipeline mode while busy</i>. What ran <i>before</i> the error stays
-written: there are no transactions to roll it back.</p>
+pipeline mode while busy</i>. What ran <i>before</i> the error in the
+pipeline is put back as well: a pipeline is one block up to its
+<code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
 
 <h2 id="catalog">The catalog</h2>
 
@@ -283,7 +351,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>2.84 MB</b> on amd64 and 2.45 MB on arm64 — since no target
+package manager, no libc. The image is <b>2.89 MB</b> on amd64 and 2.51 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image

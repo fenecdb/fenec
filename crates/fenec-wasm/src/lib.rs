@@ -181,12 +181,28 @@ fn run(handle: u32, sql: &str, params_src: &str) -> String {
     // A note left by anything before is not these statements'.
     collate::take_missing();
     let res = with_db(handle, |db| {
+        // Without a schema change among them, the statements are one block:
+        // their writes land together or not at all, and one refused for
+        // collation data puts back the ones before it, so the page runs the
+        // whole text again. A text with one -- a page setting itself up --
+        // runs a statement at a time, each write on its own a block.
+        let block = stmts.len() > 1 && stmts.iter().all(|s| s.fits_block());
+        if block {
+            db.begin().map_err(|e| (e, 0))?;
+        }
         let mut last = Response::Ok("empty".into());
         for (ran, s) in stmts.iter().enumerate() {
             match db.execute_with(s, &params) {
                 Ok(r) => last = r,
+                Err(e) if block => {
+                    db.rollback();
+                    return Err((e, 0));
+                }
                 Err(e) => return Err((e, ran)),
             }
+        }
+        if block {
+            db.commit().map_err(|e| (e, 0))?;
         }
         Ok(last)
     });

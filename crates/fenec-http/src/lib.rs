@@ -822,9 +822,13 @@ fn counted(resp: &fenec_core::prelude::Response) -> u64 {
     }
 }
 
-/// Batch: statements in order, **under a single write lock**. It stops at the
-/// first error and reports how many were applied -- nothing is rolled back,
-/// because fenecdb has no transaction to roll back.
+/// Batch: statements in order, under a single write lock, as **one block**:
+/// every write in it lands, as one record, or none does
+/// ([`Database::execute_block`]). The first error puts back what the ones
+/// before it did, and says so -- `completed` is 0. A batch holding a
+/// create, a drop, a `create index` or a `compact` runs each statement on
+/// its own instead, as a text of several does over the pg wire: it stops at
+/// the first error, and `completed` says how many were applied.
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
     let body = match std::str::from_utf8(&req.body) {
         Ok(b) => b,
@@ -852,6 +856,12 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
 
     let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
+    let block = stmts.iter().all(|(s, _)| s.fits_block());
+    if block {
+        if let Err(e) = guard.begin() {
+            return error_response(&e);
+        }
+    }
     let mut results = Vec::with_capacity(stmts.len());
     for (stmt, params) in &stmts {
         // Measured before each statement, as a lone one is: the batch
@@ -867,6 +877,11 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 statements::rows(counted(&r));
                 results.push(r)
             }
+            Err((status, why)) if block => {
+                // Nothing of the block reached the file: none of it is left.
+                guard.rollback();
+                return api::render_batch_stop(status, &why, 0, fenec_core::VERSION);
+            }
             Err((status, why)) => {
                 // Sync on the error path too: whatever was applied is durable.
                 // The statement's error is the one reported.
@@ -878,6 +893,9 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
                 return api::render_batch_stop(status, &why, results.len(), fenec_core::VERSION);
             }
         }
+    }
+    if let Err(e) = guard.commit() {
+        return error_response(&e);
     }
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,

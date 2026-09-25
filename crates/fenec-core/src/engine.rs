@@ -113,6 +113,167 @@ const REC_NEXTID: u8 = 7;
 /// replica never receives it as one; see [`History`].
 const REC_HISTORY: u8 = crate::history::RECORD;
 
+/// A block of writes to more than one collection, which lands whole or not
+/// at all ([`Database::execute_block`]): `[9][0][length]{record}`, each a
+/// data record. A block's writes to one collection go into one data record
+/// of as many frames instead -- the form an image's records take, which a
+/// version before blocks reads -- so only a block across collections needs
+/// this kind, which such a version refuses. Either way the block is one
+/// record, appended whole or cut off whole: a crash leaves none of it.
+const REC_BLOCK: u8 = 9;
+
+/// The writes a record holds, which is how far it moves the change counter:
+/// a data record's frames, a block's records' writes, one for a schema
+/// change, none for what is not a write. A feed counting records by their
+/// numbers -- a replica's, an archive's -- counts them with this.
+pub fn writes_in(record: &[u8]) -> Result<u64> {
+    let mut pos = 1;
+    get_uvarint(record, &mut pos)?;
+    let len = get_uvarint(record, &mut pos)? as usize;
+    let body = record
+        .get(pos..pos + len)
+        .ok_or_else(|| Error::Corrupt("a record cut short".into()))?;
+    match record.first() {
+        Some(&REC_DATA) => frames_in(body),
+        Some(&REC_BLOCK) => {
+            let mut n = 0;
+            each_inner(body, &mut |_, inner| {
+                n += frames_in(inner)?;
+                Ok(())
+            })?;
+            Ok(n)
+        }
+        Some(&(REC_CREATE | REC_DROP | REC_ALTER)) => Ok(1),
+        _ => Ok(0),
+    }
+}
+
+/// The frames in a data record's body.
+fn frames_in(body: &[u8]) -> Result<u64> {
+    let mut n = 0;
+    let mut pos = 0;
+    while pos < body.len() {
+        pos += 1;
+        get_uvarint(body, &mut pos)?;
+        pos += get_uvarint(body, &mut pos)? as usize;
+        n += 1;
+    }
+    if pos > body.len() {
+        return Err(Error::Corrupt("a frame runs past its record".into()));
+    }
+    Ok(n)
+}
+
+/// Walks a block's records, each a data record -- a block holds nothing
+/// else -- handing `f` its collection id and body.
+fn each_inner(body: &[u8], f: &mut dyn FnMut(u32, &[u8]) -> Result<()>) -> Result<()> {
+    let mut pos = 0;
+    while pos < body.len() {
+        let kind = body[pos];
+        pos += 1;
+        let cid = get_uvarint(body, &mut pos)? as u32;
+        let len = get_uvarint(body, &mut pos)? as usize;
+        let inner = body
+            .get(pos..pos + len)
+            .ok_or_else(|| Error::Corrupt("a block's record runs past it".into()))?;
+        if kind != REC_DATA {
+            return Err(Error::Corrupt(
+                "a block holds a record that is no write".into(),
+            ));
+        }
+        f(cid, inner)?;
+        pos += len;
+    }
+    Ok(())
+}
+
+/// `[kind][collection id][length][body]`.
+fn framed(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + HEAD_ROOM);
+    frame_into(&mut out, kind, cid, body);
+    out
+}
+
+fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
+    out.push(kind);
+    put_uvarint(out, cid as u64);
+    put_uvarint(out, body.len() as u64);
+    out.extend_from_slice(body);
+}
+
+/// The room a block leaves before its frames for the header of the data
+/// record they land as -- a kind, then a collection id and a length, at
+/// most 5 and 10 bytes as uvarints -- so the frames are not copied again.
+const HEAD_ROOM: usize = 16;
+
+/// The writes of a block not yet landed ([`Database::execute_block`]).
+#[derive(Default)]
+struct Block {
+    /// `HEAD_ROOM` bytes, then each write's frame, as the store holds it.
+    frames: Vec<u8>,
+    /// Per write: its collection, and where its frame ends in `frames`.
+    heads: Vec<(u32, usize)>,
+    /// The writes to note on the change feed once the block lands.
+    notes: Vec<(u32, DocId)>,
+    /// Per collection written: where its store stood before the first.
+    marks: Vec<(u32, crate::store::Mark)>,
+    /// Per write: where its id's record was before it.
+    was: Vec<(u32, DocId, Option<crate::store::Loc>)>,
+}
+
+impl Block {
+    /// Emptied for the next block, what it allocated kept: every write is a
+    /// block, and allocated anew each time -- five buffers, and the record
+    /// a copy of the frames -- they took a lone `put` from 832 ns to 985.
+    /// Kept, a put takes 841 against the 829 it took before blocks, a `del`
+    /// 648 against 634. A large block's are let go of, since a node holds
+    /// one of these for every database it has open.
+    fn cleared(mut self) -> Block {
+        if self.frames.capacity() > 1 << 16 || self.was.capacity() > 1 << 10 {
+            self = Block::default();
+        }
+        self.frames.clear();
+        self.frames.extend_from_slice(&[0; HEAD_ROOM]);
+        self.heads.clear();
+        self.notes.clear();
+        self.marks.clear();
+        self.was.clear();
+        self
+    }
+
+    /// The block as the one record it lands as: one data record of every
+    /// frame when they are all one collection's -- a lone write's record
+    /// as it always was -- and a block record around one data record a
+    /// write otherwise.
+    fn record(&mut self) -> std::borrow::Cow<'_, [u8]> {
+        let cid = self.heads[0].0;
+        if self.heads.iter().all(|h| h.0 == cid) {
+            // The header goes into the room before the frames.
+            let mut head = [0u8; HEAD_ROOM];
+            head[0] = REC_DATA;
+            let mut n = 1;
+            for mut v in [cid as u64, (self.frames.len() - HEAD_ROOM) as u64] {
+                while v >= 0x80 {
+                    head[n] = (v as u8) | 0x80;
+                    v >>= 7;
+                    n += 1;
+                }
+                head[n] = v as u8;
+                n += 1;
+            }
+            self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&head[..n]);
+            return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
+        }
+        let mut body = Vec::with_capacity(self.frames.len() + HEAD_ROOM * self.heads.len());
+        let mut start = HEAD_ROOM;
+        for &(cid, end) in &self.heads {
+            frame_into(&mut body, REC_DATA, cid, &self.frames[start..end]);
+            start = end;
+        }
+        std::borrow::Cow::Owned(framed(REC_BLOCK, 0, &body))
+    }
+}
+
 /// Whether the record at `at` is all there, rather than cut short where the
 /// bytes end -- in its header or its body -- as a crash in the middle of an
 /// append leaves the last one. Only the kinds written with a length are
@@ -121,7 +282,14 @@ const REC_HISTORY: u8 = crate::history::RECORD;
 fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
     if !matches!(
         bytes[at],
-        REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY
+        REC_CREATE
+            | REC_DROP
+            | REC_DATA
+            | REC_GRAPH
+            | REC_ALTER
+            | REC_NEXTID
+            | REC_HISTORY
+            | REC_BLOCK
     ) {
         return Ok(true);
     }
@@ -152,8 +320,8 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
                 pos += REC_SEQ_LEN;
                 continue;
             }
-            REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY => {
-            }
+            REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY
+            | REC_BLOCK => {}
             _ => break,
         }
         pos += 1;
@@ -1152,6 +1320,12 @@ pub struct Database {
     changes: ChangeLog,
     /// The party to wake after a write (if any).
     watcher: Option<Arc<dyn Watcher>>,
+    /// The block of writes running, if one is: its writes are held back
+    /// from the sink and the feed until it lands, and put back if it does
+    /// not ([`Self::execute_block`]).
+    block: Option<Block>,
+    /// The last block's buffers, for the next one ([`Block::cleared`]).
+    spare: Block,
     /// Which history the writes belong to, and whether they come from a
     /// primary; see [`History`].
     history: History,
@@ -1222,6 +1396,8 @@ impl Database {
             failed: None,
             changes: ChangeLog::default(),
             watcher: None,
+            block: None,
+            spare: Block::default(),
             history: History::default(),
             #[cfg(not(target_arch = "wasm32"))]
             mapped: false,
@@ -1284,6 +1460,12 @@ impl Database {
     /// Marks a write on the feed, and for any maintenance running beside
     /// the database on that collection.
     fn note(&mut self, cid: u32, id: DocId) {
+        // In a block, once it lands: a subscriber or a maintenance sees the
+        // block whole, and one that does not land moves nothing.
+        if let Some(b) = &mut self.block {
+            b.notes.push((cid, id));
+            return;
+        }
         self.changes.record(cid, id);
         if *self.watched.get_mut() {
             self.note_watched(cid, id);
@@ -1932,27 +2114,44 @@ impl Database {
                 REC_DATA => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
                     let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let name = by_id
-                        .get(&cid)
-                        .cloned()
-                        .ok_or_else(|| Error::Corrupt(format!("unknown collection {cid}")))?;
                     let chunk_at = pos;
-                    let chunk = &bytes[pos..pos + len];
                     pos += len;
-                    let c = self.collections.get_mut(&name).unwrap();
-                    let frames = if restored.iter().any(|(n, _, _)| *n == name) {
-                        let at = match touched.iter().position(|(n, _)| *n == name) {
-                            Some(at) => at,
-                            None => {
-                                touched.push((name, Vec::new()));
-                                touched.len() - 1
-                            }
-                        };
-                        let ids = &mut touched[at].1;
-                        replay(&mut c.store, chunk_at, chunk, &mut |id| ids.push(id))?
-                    } else {
-                        replay(&mut c.store, chunk_at, chunk, &mut |_| {})?
-                    } as u64;
+                    let frames = self.load_data(
+                        cid,
+                        bytes,
+                        chunk_at,
+                        len,
+                        &by_id,
+                        &restored,
+                        &mut touched,
+                        replay,
+                    )?;
+                    if tail {
+                        seq_seen += frames;
+                    }
+                }
+                REC_BLOCK => {
+                    let _ = get_uvarint(bytes, &mut pos)?;
+                    let len = get_uvarint(bytes, &mut pos)? as usize;
+                    let body = &bytes[pos..pos + len];
+                    let mut frames = 0;
+                    each_inner(body, &mut |cid, inner| {
+                        // Where the record's frames are in the file, which a
+                        // mapped store reads them from.
+                        let at = inner.as_ptr() as usize - bytes.as_ptr() as usize;
+                        frames += self.load_data(
+                            cid,
+                            bytes,
+                            at,
+                            inner.len(),
+                            &by_id,
+                            &restored,
+                            &mut touched,
+                            replay,
+                        )?;
+                        Ok(())
+                    })?;
+                    pos += len;
                     if tail {
                         seq_seen += frames;
                     }
@@ -2094,6 +2293,43 @@ impl Database {
         *self.appended.get_mut() = whole as u64;
         self.defer_links = false;
         Ok(whole)
+    }
+
+    /// A data record's frames, `len` bytes at `at` in the file, into their
+    /// collection's store -- noting each id for a graph restored before it,
+    /// which takes the writes after it. How many frames it held.
+    #[allow(clippy::too_many_arguments)]
+    fn load_data(
+        &mut self,
+        cid: u32,
+        bytes: &[u8],
+        at: usize,
+        len: usize,
+        by_id: &HashMap<u32, String>,
+        restored: &[(String, String, usize)],
+        touched: &mut Vec<(String, Vec<DocId>)>,
+        replay: &mut Replay<'_>,
+    ) -> Result<u64> {
+        let name = by_id
+            .get(&cid)
+            .cloned()
+            .ok_or_else(|| Error::Corrupt(format!("unknown collection {cid}")))?;
+        let chunk = &bytes[at..at + len];
+        let c = self.collections.get_mut(&name).unwrap();
+        let frames = if restored.iter().any(|(n, _, _)| *n == name) {
+            let i = match touched.iter().position(|(n, _)| *n == name) {
+                Some(i) => i,
+                None => {
+                    touched.push((name, Vec::new()));
+                    touched.len() - 1
+                }
+            };
+            let ids = &mut touched[i].1;
+            replay(&mut c.store, at, chunk, &mut |id| ids.push(id))?
+        } else {
+            replay(&mut c.store, at, chunk, &mut |_| {})?
+        };
+        Ok(frames as u64)
     }
 
     /// Restores a persisted graph against the documents as they stand where
@@ -2410,6 +2646,12 @@ impl Database {
     /// counter right after, so the record is numbered as the one after the
     /// counter's current value.
     fn wal(&mut self, rec: u8, cid: u32, payload: &[u8]) -> Result<()> {
+        // In a block, held back: the block lands as one record, or none.
+        if let Some(b) = &mut self.block {
+            b.frames.extend_from_slice(payload);
+            b.heads.push((cid, b.frames.len()));
+            return Ok(());
+        }
         let mut frame = Vec::with_capacity(payload.len() + 12);
         frame.push(rec);
         put_uvarint(&mut frame, cid as u64);
@@ -2561,6 +2803,7 @@ impl Database {
         let cut = || Error::Corrupt("a write record cut short".into());
         let mut n = 0;
         let mut pos = 0;
+        let mut notes: Vec<(u32, DocId)> = Vec::new();
         while pos < bytes.len() {
             let start = pos;
             let rec = bytes[pos];
@@ -2570,17 +2813,9 @@ impl Database {
             let body = bytes.get(pos..pos + len).ok_or_else(cut)?;
             pos += len;
 
-            let mut marked = SCHEMA_MARK;
-            if rec == REC_DATA {
-                let mut p = 1;
-                marked = get_uvarint(body, &mut p)?;
-            }
             // The graph takes a batch as the graph stands before it: a
-            // record that needs it as it stands after -- a document the
-            // batch holds, another collection, a schema change -- ends it.
-            if !batch.docs.is_empty()
-                && (rec != REC_DATA || cid != batch.cid || batch.ids.contains(&marked))
-            {
+            // schema change needs it as it stands after, and ends it.
+            if rec != REC_DATA && rec != REC_BLOCK && !batch.docs.is_empty() {
                 self.index_batch(batch);
             }
             match rec {
@@ -2597,11 +2832,13 @@ impl Database {
                     self.order.push(schema.name.clone());
                     self.collections
                         .insert(schema.name.clone(), Collection::new(cid, schema));
+                    notes.push((cid, SCHEMA_MARK));
                 }
                 REC_DROP => {
                     let name = self.named(cid).ok_or_else(|| missing(cid))?;
                     self.collections.remove(&name);
                     self.order.retain(|n| *n != name);
+                    notes.push((cid, SCHEMA_MARK));
                 }
                 REC_ALTER => {
                     let name = self.named(cid).ok_or_else(|| missing(cid))?;
@@ -2637,48 +2874,81 @@ impl Database {
                             build_index(c, i)?;
                         }
                     }
+                    notes.push((cid, SCHEMA_MARK));
                 }
-                REC_DATA => {
-                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
-                    let c = self.collections.get_mut(&name).unwrap();
-                    let op = body[0];
-                    let mut p = 1;
-                    let id = get_uvarint(body, &mut p)?;
-                    let plen = get_uvarint(body, &mut p)? as usize;
-                    let payload = body.get(p..p + plen).ok_or_else(cut)?;
-                    let old = c.store.read(&c.schema, id)?;
-                    c.store.append(op, id, payload);
-                    let new = match op == OP_PUT {
-                        true => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
-                        false => None,
-                    };
-                    if let Some(old) = &old {
-                        c.unindex_doc(old, new.as_ref());
-                    }
-                    if let Some(doc) = new {
-                        c.index_scalar(&doc, old.as_ref());
-                        if !c.vectors.is_empty() {
-                            batch.cid = cid;
-                            batch.ids.insert(id);
-                            batch.docs.push(doc);
-                        }
-                    }
-                }
+                REC_DATA => self.apply_frames(cid, body, batch, &mut notes)?,
+                // A block's records, whole: they came as one, and reach this
+                // database's file as one.
+                REC_BLOCK => each_inner(body, &mut |cid, inner| {
+                    self.apply_frames(cid, inner, batch, &mut notes)
+                })?,
                 other => {
                     return Err(Error::Corrupt(format!(
                         "record kind {other} is not a write"
                     )))
                 }
             }
-            let seq = self.changes.seq() + 1;
+            // Numbered as its last write, as the primary numbered it.
+            let seq = self.changes.seq() + notes.len() as u64;
             let r = self.sink_mut().record(seq, &bytes[start..pos]);
             self.storage(r)?;
             *self.appended.get_mut() += (pos - start) as u64;
             self.dirty = true;
-            self.note(cid, marked);
+            for (cid, id) in notes.drain(..) {
+                self.note(cid, id);
+            }
             n += 1;
         }
         Ok(n)
+    }
+
+    /// A data record's frames into collection `cid`, each through the index
+    /// upkeep the write path does -- vectors into `batch`, which each frame
+    /// that needs the graph as it stands after the ones before ends -- and
+    /// each noted in `notes`.
+    fn apply_frames(
+        &mut self,
+        cid: u32,
+        body: &[u8],
+        batch: &mut VectorBatch,
+        notes: &mut Vec<(u32, DocId)>,
+    ) -> Result<()> {
+        let cut = || Error::Corrupt("a write record cut short".into());
+        let name = self.named(cid).ok_or_else(|| missing(cid))?;
+        let mut p = 0;
+        while p < body.len() {
+            let op = body[p];
+            p += 1;
+            let id = get_uvarint(body, &mut p)?;
+            let plen = get_uvarint(body, &mut p)? as usize;
+            let payload = body.get(p..p + plen).ok_or_else(cut)?;
+            p += plen;
+            // Another collection's, or a document the batch holds: the
+            // graph has to take the batch first.
+            if !batch.docs.is_empty() && (cid != batch.cid || batch.ids.contains(&id)) {
+                self.index_batch(batch);
+            }
+            let c = self.collections.get_mut(&name).unwrap();
+            let old = c.store.read(&c.schema, id)?;
+            c.store.append(op, id, payload);
+            let new = match op == OP_PUT {
+                true => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
+                false => None,
+            };
+            if let Some(old) = &old {
+                c.unindex_doc(old, new.as_ref());
+            }
+            if let Some(doc) = new {
+                c.index_scalar(&doc, old.as_ref());
+                if !c.vectors.is_empty() {
+                    batch.cid = cid;
+                    batch.ids.insert(id);
+                    batch.docs.push(doc);
+                }
+            }
+            notes.push((cid, id));
+        }
+        Ok(())
     }
 
     /// The name of the collection with id `cid`.
@@ -2736,6 +3006,193 @@ impl Database {
         Ok(())
     }
 
+    // ---------------------------------------------------------------- blocks
+
+    /// Remembers, for a block that does not land, where `id`'s record was
+    /// before this write -- and where its collection's store stood before
+    /// the block's first write to it.
+    fn remember(
+        &mut self,
+        cid: u32,
+        id: DocId,
+        was: Option<crate::store::Loc>,
+        mark: crate::store::Mark,
+    ) {
+        if let Some(b) = &mut self.block {
+            if !b.marks.iter().any(|(c, _)| *c == cid) {
+                b.marks.push((cid, mark));
+            }
+            b.was.push((cid, id, was));
+        }
+    }
+
+    /// Whether a block of writes is open ([`Self::begin`]).
+    pub fn in_block(&self) -> bool {
+        self.block.is_some()
+    }
+
+    /// Opens a block: the writes from here to [`Self::commit`] land whole or
+    /// not at all, and [`Self::rollback`] puts them back. The database is
+    /// the block's alone meanwhile, as it is a statement's -- whoever opens
+    /// one holds the write lock until it ends. Reads in it see its writes.
+    pub fn begin(&mut self) -> Result<()> {
+        if self.block.is_some() {
+            return Err(Error::Query("a block is open already".into()));
+        }
+        self.open_block();
+        Ok(())
+    }
+
+    fn open_block(&mut self) {
+        self.block = Some(std::mem::take(&mut self.spare).cleared());
+    }
+
+    /// Lands the open block as one record -- written whole or cut off whole
+    /// by a crash -- numbered as its last write, and notes its writes on the
+    /// change feed, where a subscriber sees them all at once. When the sink
+    /// refuses it, the block is put back, and the database takes no more
+    /// writes (see `failed`).
+    pub fn commit(&mut self) -> Result<()> {
+        let Some(mut b) = self.block.take() else {
+            return Ok(());
+        };
+        if b.heads.is_empty() {
+            self.spare = b;
+            return Ok(());
+        }
+        let seq = self.changes.seq() + b.heads.len() as u64;
+        let (r, len) = {
+            let record = b.record();
+            (self.sink_mut().record(seq, &record), record.len())
+        };
+        if let Err(e) = self.storage(r) {
+            self.undo(b);
+            return Err(e);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.appended.get_mut() += len as u64;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = len;
+        self.dirty = true;
+        for &(cid, id) in &b.notes {
+            self.note(cid, id);
+        }
+        self.spare = b;
+        if let Some(w) = &self.watcher {
+            w.notify(self.changes.seq());
+        }
+        Ok(())
+    }
+
+    /// Puts the open block's writes back: every store as it stood before
+    /// the block's first write to it, and every document it wrote out of
+    /// the indexes, the version before it back in. Nothing reached the sink
+    /// or the feed, so there is nothing else to undo. Ids a block handed out
+    /// are handed out again.
+    pub fn rollback(&mut self) {
+        if let Some(b) = self.block.take() {
+            self.undo(b);
+        }
+    }
+
+    fn undo(&mut self, mut b: Block) {
+        for (cid, mark) in std::mem::take(&mut b.marks) {
+            let Some(name) = self.named(cid) else {
+                continue;
+            };
+            let c = self.collections.get_mut(&name).unwrap();
+            // Each id the block wrote, with where it was before the first of
+            // its writes.
+            let mut was: Vec<(DocId, Option<crate::store::Loc>)> = Vec::new();
+            for &(wc, id, loc) in &b.was {
+                if wc == cid && !was.iter().any(|(i, _)| *i == id) {
+                    was.push((id, loc));
+                }
+            }
+            let now: Vec<Option<Document>> = was
+                .iter()
+                .map(|&(id, _)| c.store.read(&c.schema, id).ok().flatten())
+                .collect();
+            c.store.rewind(mark, &was);
+            for (&(id, _), now) in was.iter().zip(&now) {
+                let before = c.store.read(&c.schema, id).ok().flatten();
+                if let Some(now) = now {
+                    c.unindex_doc(now, before.as_ref());
+                }
+                if let Some(before) = &before {
+                    c.index_doc(before, now.as_ref());
+                }
+            }
+        }
+        self.spare = b;
+    }
+
+    /// Runs `stmts` as one block: every write in it lands, as one record,
+    /// or none does, and a read in it sees the writes before it. What each
+    /// answered; or where it stopped and why, nothing of it applied. A
+    /// schema change or a compact is refused in a block of more than one --
+    /// it runs on its own ([`Statement::fits_block`]). A `put` of many
+    /// documents is a block of its own ([`Self::execute_with`]).
+    pub fn execute_block(
+        &mut self,
+        stmts: &[(&Statement, &[Value])],
+    ) -> std::result::Result<Vec<Response>, (usize, Error)> {
+        if let Some(i) = stmts.iter().position(|(s, _)| !s.fits_block()) {
+            return Err((
+                i,
+                Error::Query(
+                    "create, drop, create index and compact run on their own, not in a block"
+                        .into(),
+                ),
+            ));
+        }
+        if let Some(i) = stmts.iter().position(|(s, _)| !s.is_read_only()) {
+            self.may_write(false).map_err(|e| (i, e))?;
+        }
+        let outer = self.block.is_some();
+        if !outer {
+            self.open_block();
+        }
+        let mut out = Vec::with_capacity(stmts.len());
+        for (i, (stmt, params)) in stmts.iter().enumerate() {
+            match self.run_one(stmt, params) {
+                Ok(r) => out.push(r),
+                Err(e) => {
+                    if !outer {
+                        self.rollback();
+                    }
+                    return Err((i, e));
+                }
+            }
+        }
+        if !outer {
+            self.commit()
+                .map_err(|e| (stmts.len().saturating_sub(1), e))?;
+        }
+        Ok(out)
+    }
+
+    /// One statement as a block runs it: its reads refused for collation
+    /// data the module has not been handed.
+    fn run_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        let out = self.execute_inner(stmt, params);
+        // The browser module compares text only in the collation data it
+        // has been handed. A read that reached for more is refused rather
+        // than answered in the order of what it had, and runs again once
+        // the module has it; a write was checked before it changed anything
+        // (`put`, `update`, `delete`), and one refused leaves its note for
+        // the module to read.
+        if collate::PARTIAL && out.is_ok() {
+            let missing = collate::take_missing();
+            if stmt.is_read_only() {
+                collate::refuse(missing)?;
+            }
+        }
+        out
+    }
+
     // ------------------------------------------------------------ execution
 
     pub fn execute(&mut self, stmt: &Statement) -> Result<Response> {
@@ -2767,33 +3224,40 @@ impl Database {
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        // A write is a block of one: a `put` of many documents stopped half
+        // way -- a hook's refusal, a crash -- left the ones before applied.
+        // Its writes land as one record, which for a lone document is the
+        // record it always was.
+        if !stmt.is_read_only() && stmt.fits_block() {
+            self.may_write(false)?;
+            if self.block.is_some() {
+                return self.run_one(stmt, params);
+            }
+            self.open_block();
+            return match self.run_one(stmt, params) {
+                Ok(r) => self.commit().map(|_| r),
+                Err(e) => {
+                    self.rollback();
+                    Err(e)
+                }
+            };
+        }
         if !stmt.is_read_only() {
-            self.refuse_if_failed()?;
-            // `compact` changes no document, only how the file holds them.
-            if self.history.following && !matches!(stmt, Statement::Compact(_)) {
-                return Err(Error::ReadOnly(
-                    "this database is a replica: its writes come from its primary".into(),
+            if self.block.is_some() {
+                return Err(Error::Query(
+                    "create, drop, create index and compact run on their own, not in a block"
+                        .into(),
                 ));
             }
+            // `compact` changes no document, only how the file holds them.
+            self.may_write(matches!(stmt, Statement::Compact(_)))?;
         }
         let before = self.changes.seq();
-        let out = self.execute_inner(stmt, params);
+        let out = self.run_one(stmt, params);
         let after = self.changes.seq();
         if after != before {
             if let Some(w) = &self.watcher {
                 w.notify(after);
-            }
-        }
-        // The browser module compares text only in the collation data it
-        // has been handed. A read that reached for more is refused rather
-        // than answered in the order of what it had, and runs again once
-        // the module has it; a write was checked before it changed anything
-        // (`put`, `update`, `delete`), and one refused leaves its note for
-        // the module to read.
-        if collate::PARTIAL && out.is_ok() {
-            let missing = collate::take_missing();
-            if stmt.is_read_only() {
-                collate::refuse(missing)?;
             }
         }
         out
@@ -2963,6 +3427,7 @@ impl Database {
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
         for mut doc in built {
             let c = self.collections.get_mut(collection).unwrap();
+            let mark = c.store.mark();
             let op = if doc.id == 0 {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
@@ -2983,8 +3448,10 @@ impl Database {
                 c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
+            let was = c.store.loc(doc.id);
             let frame = c.store.append(OP_PUT, doc.id, &payload);
             c.index_scalar(&doc, old.as_ref());
+            self.remember(cid, doc.id, was, mark);
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, doc.id);
             for h in &hooks {
@@ -4726,8 +5193,10 @@ impl Database {
                 c.unindex_doc(old, Some(&doc));
             }
             let payload = Store::encode_doc(&schema, &doc);
+            let (mark, was) = (c.store.mark(), c.store.loc(id));
             let frame = c.store.append(OP_PUT, id, &payload);
             c.index_doc(&doc, old.as_ref());
+            self.remember(cid, id, was, mark);
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, id);
             for h in &hooks {
@@ -4784,7 +5253,9 @@ impl Database {
                 }
                 c.unindex_doc(&doc, None);
             }
+            let (mark, was) = (c.store.mark(), c.store.loc(id));
             let frame = c.store.append(OP_DEL, id, &[]);
+            self.remember(cid, id, was, mark);
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, id);
             n += 1;

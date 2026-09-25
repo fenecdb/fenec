@@ -938,6 +938,20 @@ impl Statement {
         )
     }
 
+    /// Statements a block of writes may hold: reads, puts, sets and
+    /// deletes. A schema change or a compact runs on its own -- putting one
+    /// back when the block does not land would undo a file rewrite or a
+    /// graph build, which the block's undo has no way to.
+    pub fn fits_block(&self) -> bool {
+        !matches!(
+            self,
+            Statement::CreateCollection { .. }
+                | Statement::DropCollection { .. }
+                | Statement::CreateIndex { .. }
+                | Statement::Compact(_)
+        )
+    }
+
     /// Number of parameters the statement expects: the highest `$n` used.
     pub fn max_param(&self) -> usize {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);

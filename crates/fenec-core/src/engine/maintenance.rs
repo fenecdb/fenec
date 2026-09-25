@@ -248,9 +248,9 @@ impl Database {
         Ok(None)
     }
 
-    /// What `execute_with` refuses before a write, for a maintenance that
-    /// does not go through it.
-    fn may_write(&self, stmt_is_compact: bool) -> Result<()> {
+    /// What a write is refused for before it runs: a storage error, or a
+    /// replica's -- whose writes come from its primary, though it compacts.
+    pub(super) fn may_write(&self, stmt_is_compact: bool) -> Result<()> {
         self.refuse_if_failed()?;
         if self.history.following && !stmt_is_compact {
             return Err(Error::ReadOnly(

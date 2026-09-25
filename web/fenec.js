@@ -1977,11 +1977,10 @@ export class FenecSync {
   /**
    * Sends several writes in **a single round trip**.
    *
-   * **Not a transaction.** fenecdb has no transactions and this batch does
-   * not invent one. The local side is rolled back exactly; the server side
-   * cannot be: it stops at the first error and reports how many were
-   * applied in that error. The gain is twofold -- one round trip instead
-   * of N, and no other writer slipping in between.
+   * **One block.** The server lands every write in it, as one record, or
+   * none of them, and on an error the local side is rolled back exactly as
+   * the server's was. The gain is threefold -- one round trip instead of N,
+   * no other writer slipping in between, and nothing half done.
    */
   async batch(fn) {
     if (this.#queue) throw new FenecError('nested batches are not supported');

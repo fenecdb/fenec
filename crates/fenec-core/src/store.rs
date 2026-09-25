@@ -289,6 +289,20 @@ fn grow(b: &mut SegmentBytes) -> &mut Vec<u8> {
     b
 }
 
+/// Where a store stood before a block of writes, for [`Store::rewind`] to
+/// take it back there.
+#[derive(Clone, Copy)]
+pub struct Mark {
+    segments: usize,
+    /// The last segment's length, and whether it was sealed: a block that
+    /// filled it sealed it and opened another.
+    len: usize,
+    sealed: bool,
+    next_id: DocId,
+    dead_bytes: usize,
+    total_bytes: usize,
+}
+
 /// Cloned, a store is what it held at that moment: the records in the
 /// mapped file shared, the ones in memory copied -- what a rewrite beside
 /// the database writes from, with no lock held.
@@ -383,6 +397,49 @@ impl Store {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// Where the store stands: what [`Self::rewind`] takes it back to.
+    pub fn mark(&self) -> Mark {
+        let last = self.segments.last();
+        Mark {
+            segments: self.segments.len(),
+            len: last.map_or(0, |s| s.data.len()),
+            sealed: last.is_some_and(|s| s.sealed),
+            next_id: self.next_id,
+            dead_bytes: self.dead_bytes,
+            total_bytes: self.total_bytes,
+        }
+    }
+
+    /// Where `id`'s record is, if it has one: what a block remembers of the
+    /// ids it writes, to point them back.
+    pub fn loc(&self, id: DocId) -> Option<Loc> {
+        self.index.get(id)
+    }
+
+    /// Takes the store back to `mark`, dropping every record appended since
+    /// -- a block of writes that did not land -- with each id in `was`
+    /// pointing where it pointed then, or nowhere. The records dropped are
+    /// all in memory: a block appends to the segments, never to a mapped
+    /// file, so the segments are cut back where they stood.
+    pub fn rewind(&mut self, mark: Mark, was: &[(DocId, Option<Loc>)]) {
+        for &(id, loc) in was {
+            match loc {
+                Some(l) => self.index.insert(id, l),
+                None => drop(self.index.remove(id)),
+            }
+        }
+        self.segments.truncate(mark.segments.max(1));
+        if let Some(last) = self.segments.last_mut() {
+            if last.data.len() > mark.len {
+                grow(&mut last.data).truncate(mark.len);
+            }
+            last.sealed = mark.sealed;
+        }
+        self.next_id = mark.next_id;
+        self.dead_bytes = mark.dead_bytes;
+        self.total_bytes = mark.total_bytes;
     }
 
     /// Raises the counter to at least `v`; never lowers it.

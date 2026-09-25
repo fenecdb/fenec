@@ -58,12 +58,14 @@ get articles select title
 
 <h2>What it gave up</h2>
 
-<p>The list is short and none of it is coming back. These are consequences of
-the design, not a roadmap.</p>
+<p>The list is short, and it is made of consequences of the design rather
+than a roadmap. Transactions were on it until one writer could give them:
+a transaction holds the database from its first write to its end.</p>
 
 <ul>
-  <li><b>No transactions.</b> <code>BEGIN</code> and <code>COMMIT</code> are
-    accepted and do nothing. There is one writer.</li>
+  <li><b>One writer, no MVCC.</b> A transaction runs alone from its first
+    write to its <code>COMMIT</code>, and every other session waits on it,
+    reads included. A schema change cannot be put back.</li>
   <li><b>No JOIN and no subqueries.</b> A query reads one collection, plus
     the children <code>lookup</code> attaches to each of its rows — and,
     chained, the children of those.</li>
@@ -85,9 +87,9 @@ the design, not a roadmap.</p>
 <table>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
-<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">499 KB wasm<br><small>171 KB brotli, with the client</small></td></tr>
-<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1056–1493 KB</td></tr>
-<tr><td>Server</td><td><code>fenec-pg</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">2.84 MB image</td></tr>
+<tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">506 KB wasm<br><small>174 KB brotli, with the client</small></td></tr>
+<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1072–1509 KB</td></tr>
+<tr><td>Server</td><td><code>fenec-pg</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">2.89 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
 </table>

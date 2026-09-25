@@ -275,19 +275,19 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1493 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1185 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1056 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>499 KB</b></td><td class="n"><b>147 KB</b></td><td class="n">179 KB</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1509 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1201 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1072 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>506 KB</b></td><td class="n"><b>150 KB</b></td><td class="n">182 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">88 KB</td><td class="n">24 KB</td><td class="n">28 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">2.84 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">2.89 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>171 KB brotli</b> for both together. A binary you execute and an image
+<b>174 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -296,7 +296,7 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  193 KB at <code>-q 5</code>, nginx's dynamic default, and 204 KB at
+  195 KB at <code>-q 5</code>, nginx's dynamic default, and 207 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
   number by 12–19%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is
@@ -323,29 +323,29 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">498.6</td><td class="n">147.4</td><td class="n">178.5</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">469.3</td><td class="n">140.5</td><td class="n">169.4</td><td class="n">6.9</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">494.1</td><td class="n">146.2</td><td class="n">176.8</td><td class="n">1.2</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">475.2</td><td class="n">142.5</td><td class="n">171.7</td><td class="n">4.9</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">446.0</td><td class="n">133.2</td><td class="n">160.5</td><td class="n">14.1</td></tr>
-<tr><td><code>vector text</code></td><td class="n">464.1</td><td class="n">138.7</td><td class="n">167.3</td><td class="n">8.6</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">445.3</td><td class="n">135.2</td><td class="n">162.4</td><td class="n">12.2</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">468.3</td><td class="n">140.3</td><td class="n">169.2</td><td class="n">7.0</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">416.0</td><td class="n">125.6</td><td class="n">150.8</td><td class="n">21.8</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">440.5</td><td class="n">131.4</td><td class="n">158.3</td><td class="n">15.9</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">420.0</td><td class="n">127.3</td><td class="n">152.8</td><td class="n">20.0</td></tr>
-<tr><td><code>vector</code></td><td class="n">438.2</td><td class="n">132.8</td><td class="n">159.6</td><td class="n">14.5</td></tr>
-<tr><td><code>text</code></td><td class="n">410.5</td><td class="n">123.8</td><td class="n">148.6</td><td class="n">23.6</td></tr>
-<tr><td><code>sparse</code></td><td class="n">390.0</td><td class="n">119.7</td><td class="n">143.4</td><td class="n">27.6</td></tr>
-<tr><td><code>sorted</code></td><td class="n">412.9</td><td class="n">125.0</td><td class="n">150.1</td><td class="n">22.3</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">382.7</td><td class="n">117.4</td><td class="n">140.5</td><td class="n">30.0</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">506.2</td><td class="n">150.0</td><td class="n">181.7</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">476.4</td><td class="n">142.8</td><td class="n">172.2</td><td class="n">7.2</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">501.7</td><td class="n">148.7</td><td class="n">180.1</td><td class="n">1.3</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">482.8</td><td class="n">145.0</td><td class="n">175.0</td><td class="n">5.0</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">453.7</td><td class="n">135.6</td><td class="n">163.7</td><td class="n">14.4</td></tr>
+<tr><td><code>vector text</code></td><td class="n">471.2</td><td class="n">141.1</td><td class="n">170.2</td><td class="n">8.9</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">452.5</td><td class="n">137.7</td><td class="n">165.5</td><td class="n">12.3</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">476.0</td><td class="n">143.1</td><td class="n">172.3</td><td class="n">6.9</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">423.2</td><td class="n">127.9</td><td class="n">153.8</td><td class="n">22.1</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">448.2</td><td class="n">133.9</td><td class="n">161.6</td><td class="n">16.1</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">427.7</td><td class="n">129.7</td><td class="n">155.8</td><td class="n">20.3</td></tr>
+<tr><td><code>vector</code></td><td class="n">445.3</td><td class="n">135.3</td><td class="n">162.7</td><td class="n">14.7</td></tr>
+<tr><td><code>text</code></td><td class="n">417.7</td><td class="n">126.2</td><td class="n">151.6</td><td class="n">23.8</td></tr>
+<tr><td><code>sparse</code></td><td class="n">397.2</td><td class="n">122.1</td><td class="n">146.1</td><td class="n">27.9</td></tr>
+<tr><td><code>sorted</code></td><td class="n">420.6</td><td class="n">127.5</td><td class="n">153.2</td><td class="n">22.5</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">389.9</td><td class="n">119.7</td><td class="n">143.4</td><td class="n">30.3</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>Left out alone, the graph saves 14.1 KB brotli, the ordered index 6.9,
-the text index 4.9 and the sparse index 1.2, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.3. All four
-save 30.0 KB, 20% of the module. Making them optional cost the module with
+<p>Left out alone, the graph saves 14.4 KB brotli, the ordered index 7.2,
+the text index 5.0 and the sparse index 1.3, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.4. All four
+save 30.3 KB, 20% of the module. Making them optional cost the module with
 every index nothing: it came out the size it had been before any could be
 left out, to the byte.</p>

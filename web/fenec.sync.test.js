@@ -394,15 +394,15 @@ test('on error a batch rolls the local side back from end to start', opts, async
   }
 });
 
-test('a half-finished batch reports how many were applied', opts, async () => {
+test('a batch that fails lands none of it, and says so', opts, async () => {
   const s = await server();
   const db = await open(s.url);
   try {
     await db.ready();
     // The second statement fails on the server (a field that does not
-    // exist); the batch stops there and reports that the first one was
-    // applied -- it is not rolled back, because fenecdb has no transaction
-    // to roll back.
+    // exist). A batch is one block: the first one's write is put back, and
+    // the response says nothing was applied -- which is what the sync
+    // layer's own rollback of the whole batch assumes.
     const res = await fetch(`${s.url}/batch`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-ndjson' },
@@ -413,9 +413,12 @@ test('a half-finished batch reports how many were applied', opts, async () => {
     });
     const body = await res.json();
     assert.equal(res.ok, false);
-    assert.equal(body.completed, 1, 'how many were applied must be in the response');
-    await until(async () => (await db.from('tasks').where('title', 'x').first()) !== null,
-      'the first statement persists');
+    assert.equal(body.completed, 0, 'what was applied must be in the response');
+    // A write after it lands, and the first statement's never did.
+    await s.run('put tasks {key: $1, title: $2, status: $3, priority: $4}', ['z', 'after', 'open', 1]);
+    await until(async () => (await db.from('tasks').where('title', 'after').first()) !== null,
+      'the write after it arrives');
+    assert.equal(await db.from('tasks').where('title', 'x').first(), null, 'the first statement landed');
   } finally {
     db.close();
     s.close();

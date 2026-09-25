@@ -122,14 +122,14 @@ more than the local query itself.</p>
 });
 </pre>
 
-<p>There are no transactions in fenecdb and this batch does not fake one. The
-statements run in order under a single write lock and stop at the first error.
-The gain is one round trip instead of N, and no other writer slipping in
-between.</p>
+<p>The batch is one block on the server: its statements run in order under a
+single write lock, and their writes land together, as one record, or not at
+all. The gain is one round trip instead of N, no other writer slipping in
+between, and nothing half done.</p>
 
-<p><b>The local side rolls back fully; the server side cannot.</b> A batch that
-stops halfway reports how many statements were applied, because a silent error
-would permanently separate the client's optimistic state from the server's.</p>
+<p><b>Both sides roll back.</b> A batch that fails lands nothing on the
+server, and the local side puts back exactly what it applied optimistically,
+so the two stay one state.</p>
 
 <h2>Multiple tabs share one stream</h2>
 

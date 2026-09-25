@@ -28,6 +28,7 @@ make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
 make mirror-bench  # fenec-pg --follow: commit to a subscriber, a server killed and started again
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
+make tx-bench      # a pg transaction: a lone write per sync policy, a write in one of 100
 make maintenance-bench # reads and writes during create index / compact
 make open-bench # opening a 1 GB file, read into memory or mapped
 make quant-bench # quant=int8|bit against full vectors: memory, recall, latency
@@ -130,11 +131,51 @@ record -- on a server either -- and rebuilds only a graph holding
 tombstones.
 
 **Single writer.** Reads take a shared lock (`Database::query`), writes the
-exclusive one (`execute_with`). There are no transactions — `fenec-pg` accepts
-`BEGIN`/`COMMIT` and does nothing with them, and refuses (`0A000`) a `ROLLBACK`
-that follows a write in the block rather than answering "done". Two processes
-opening the same file corrupts it, which is why `fenec-http` is a second
-listener inside `fenec-pg`, never its own binary.
+exclusive one (`execute_with`). A pg transaction is a block held open
+(`fenec-pg/src/server.rs`, `Hold`): it takes the write lock at its first
+write -- its first statement under `SERIALIZABLE` -- and holds it across
+messages until `COMMIT` lands the block or `ROLLBACK`, a failed statement
+(`25P02` after it, as PostgreSQL), the client's going or
+`--idle-in-transaction-timeout` (`25P03`, 10 s) puts it back. One writer is
+the isolation: nothing reads a block's writes before they land because
+nothing else runs, reads included, which is the cost. A `Hold` puts its
+block back when dropped, however the session ends: the next holder would
+find it open and write into it. The guard borrows a database found once a
+pass of the session loop (a `OnceCell` a pass), so a tenant's is found
+afresh for the next transaction. A pipeline of the extended protocol is one
+block up to its `Sync` when a write in it has more of the pipeline after
+it; the last statement before a `Sync` runs as one on its own. A schema
+change runs on its own before a transaction's first write (and its
+`ROLLBACK` says it stays, `0A000`) and is refused after one (`25001`);
+`ROLLBACK TO` and `COMMIT PREPARED` are refused rather than read as the
+command they begin with. Under `--sync always` a transaction lands with one
+fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
+statement what it did (`make tx-bench`). Two processes opening the same file corrupts it,
+which is why `fenec-http` is a second listener inside `fenec-pg`, never
+its own binary.
+
+**Every write is a block, and a block is one record.** `execute_with` runs a
+write as a block of one (`Database::execute_block` runs several, `begin`,
+`commit` and `rollback` hold one open): `wal` and `note` hold its frames and
+ids back (`Block`), and `commit` appends them as one record -- within one
+collection a data record of as many frames, which a binary from before
+blocks reads, across collections a `REC_BLOCK` (kind 9) of one data record a
+write -- and only then notes them, so a crash, a replica and a subscriber
+see all of it or none. A block that fails is undone in memory:
+`Store::rewind` cuts each store back to its `Mark` and the offset index to
+where each id's record was, the documents it wrote are unindexed and the
+versions before them indexed again, and the ids it handed out are handed out
+again. A record is numbered by its last write, `writes_in` counts them, and
+whatever counts records -- the replication feed, the archive,
+`apply_records` -- counts that way; a restore to a change inside a block
+stops before it. A schema change or a compact cannot be undone, so it is
+refused in a block (`Statement::fits_block`), and a `/batch` or a pg text
+holding one runs each statement on its own, as before. A `/batch`, a pg text
+of several statements, a pg transaction and pipeline, and the browser
+module's `run` of several are one block. The buffers are kept from one block to the next (`Block::cleared`),
+the record's header written into room left before the frames: allocated
+anew they took a lone `put` from 832 to 985 ns; kept, a put costs 841
+against the 829 before blocks, a `del` 648 against 634.
 
 **A storage error stops writes.** Once the sink refuses an append, a sync or a
 rewrite, every later write and sync returns `Error::Io` until the file is
@@ -159,8 +200,9 @@ primary back from a crash holds every write any replica was sent. A replica
 applies them with `Database::apply`, which does the write path's index upkeep
 and hands each record on to its own sink with `Sink::record(seq, ..)`: its
 change counter matches the primary's write for write, and its file reopens
-where it stopped. So every write goes through `wal`, one record and one tick;
-a record that moved no counter would leave every replica one change off. The
+where it stopped. So every write goes through `wal`, and a record moves the
+counter by the writes it holds (a block's, `writes_in`); a record that moved
+no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
 the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
@@ -222,7 +264,8 @@ instead (an image is renamed in whole), and `fenec types` opens with
 `fs::open_read_only`, which writes nothing to a server's live file. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
-appended records that are not writes.
+appended records that are not writes; a block across collections (kind 9)
+holds a data record for each of its writes.
 
 **The HNSW graph is derived data, not a cache.** It is written by
 `snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
@@ -292,8 +335,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 147.4 KB
-brotli with all four, 117.4 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.0 KB
+brotli with all four, 119.7 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -429,7 +472,7 @@ for, so consecutive code points that alone give consecutive primaries share
 a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
 them one range (`UNIFORM`), and a table's words are written as differences
 in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1056. A comparison walks ICU's three levels, letters then
+`make small`'s 1072. A comparison walks ICU's three levels, letters then
 accents then case, over the whole string before it falls back to the
 bytes, so the order is total.
 It starts at the first byte the two strings do not share, stepped back past

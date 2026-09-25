@@ -16,6 +16,7 @@ extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 const SIGTERM: i32 = 15;
+const SIGKILL: i32 = 9;
 
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fenecpg-shutdown-{}", std::process::id()));
@@ -75,8 +76,12 @@ impl Running {
     }
 
     /// Sends SIGTERM and waits for the process to end; exit code + stderr.
-    fn terminate(mut self) -> (i32, String) {
-        unsafe { kill(self.child.id() as i32, SIGTERM) };
+    fn terminate(self) -> (i32, String) {
+        self.signal(SIGTERM)
+    }
+
+    fn signal(mut self, sig: i32) -> (i32, String) {
+        unsafe { kill(self.child.id() as i32, sig) };
         let status = self.child.wait().expect("could not wait for the process");
         let mut rest = String::new();
         self.err.read_to_string(&mut rest).unwrap_or_default();
@@ -120,6 +125,53 @@ fn sigterm_flushes_pending_writes() {
         "writes did not reach the disk on shutdown ({before} -> {after} bytes)"
     );
     assert_eq!(documents(&path, "t"), 2, "a write was lost");
+}
+
+/// A transaction open at a SIGTERM is put back, not landed, and the
+/// shutdown does not wait on the client holding it: the session looks up
+/// from its wait for the client to let go of the lock.
+#[test]
+fn sigterm_puts_an_open_transaction_back() {
+    let path = tmp("open-tx.fenec");
+    let server = start(&path, &["--sync", "off"]);
+    let mut c = server.client();
+    c.query("create collection t (name text)").unwrap();
+    c.query(r#"put t {name: "landed"}"#).unwrap();
+    c.query("BEGIN").unwrap();
+    c.query(r#"put t {name: "open"}"#).unwrap();
+
+    let started = std::time::Instant::now();
+    let (code, log) = server.terminate();
+    assert_eq!(code, 0, "expected a clean exit\n{log}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the shutdown waited on the open transaction\n{log}"
+    );
+    assert_eq!(documents(&path, "t"), 1, "the open transaction landed");
+}
+
+/// Killed, a server holds every transaction it landed, whole, and nothing
+/// of the one open: its writes reach the file only when it lands.
+#[test]
+fn a_killed_server_holds_what_landed_and_nothing_open() {
+    let path = tmp("killed-tx.fenec");
+    let server = start(&path, &["--sync", "always"]);
+    let mut c = server.client();
+    c.query("create collection t (name text)").unwrap();
+    c.query("create collection u (n int)").unwrap();
+    c.query("BEGIN").unwrap();
+    c.query(r#"put t {name: "a"}"#).unwrap();
+    c.query("put u {n: 1}").unwrap();
+    c.query(r#"put t {name: "b"}"#).unwrap();
+    c.query("COMMIT").unwrap();
+    c.query("BEGIN").unwrap();
+    c.query(r#"put t {name: "open"}"#).unwrap();
+    c.query("put u {n: 2}").unwrap();
+
+    let (code, _) = server.signal(SIGKILL);
+    assert_ne!(code, 0, "the server was not killed");
+    assert_eq!(documents(&path, "t"), 2);
+    assert_eq!(documents(&path, "u"), 1);
 }
 
 /// Checkpoint on shutdown: the HNSW graph lands in the file. With

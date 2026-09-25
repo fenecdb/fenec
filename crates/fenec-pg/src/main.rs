@@ -50,6 +50,12 @@ usage: fenec-pg [options]
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
                             default: 100. Every connection is a thread
       --idle-timeout <s>    close a session silent for this long (0 = off)
+      --idle-in-transaction-timeout <s>  put back a transaction whose
+                            client stays silent this long after it wrote,
+                            and close its session (25P03; 0 = never)
+                            default: 10. From its first write to its end
+                            a transaction holds the database: every other
+                            session waits on it
       --max-message <MiB>   ceiling of a single protocol message  default: 64
       --max-memory <MiB>    data footprint ceiling (0 = off, the default).
                             Above it, writes stop with 53200; reads, `del`
@@ -273,6 +279,15 @@ fn main() {
                     fail(&format!("--idle-timeout expects seconds, got `{v}`"))
                 });
                 cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+            }
+            "--idle-in-transaction-timeout" => {
+                let v = next(&mut i, "--idle-in-transaction-timeout");
+                let secs: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!(
+                        "--idle-in-transaction-timeout expects seconds, got `{v}`"
+                    ))
+                });
+                cfg.idle_in_transaction = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-memory" => {
                 let v = next(&mut i, "--max-memory");

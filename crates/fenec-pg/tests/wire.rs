@@ -1305,96 +1305,351 @@ fn status(msgs: &[Msg]) -> u8 {
     z.body[0]
 }
 
-/// `ROLLBACK` after a write cannot undo it, so it says so rather than
-/// answering "done"; the block closes either way and the write stays.
+/// The names in `t`, in id order.
+fn names(c: &mut Client) -> Vec<String> {
+    c.simple("get t select name")
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells()[0].clone().unwrap())
+        .collect()
+}
+
+/// Whether the server answers within `ms`: a statement waiting on another
+/// session's transaction does not.
+fn answers_within(c: &mut Client, ms: u64) -> bool {
+    c.s.set_read_timeout(Some(Duration::from_millis(ms)))
+        .unwrap();
+    let got = c.s.peek(&mut [0u8; 1]).is_ok();
+    c.s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    got
+}
+
+/// `COMMIT` lands a transaction's writes and `ROLLBACK` puts them back. In
+/// between another session waits rather than read them: they may yet be
+/// put back.
 #[test]
-fn rollback_after_a_write_is_refused() {
+fn a_transaction_lands_at_commit_or_not_at_all() {
     let h = trust_server();
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
     c.simple("create collection t (name text)");
 
     let r = c.simple("BEGIN");
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "BEGIN");
-    assert_eq!(status(&r), b'T', "inside a block the session reports T");
-    let r = c.simple("put t {name: \"a\"}");
-    assert_eq!(status(&r), b'T');
-    c.simple("put t {name: \"b\"}");
-
-    let r = c.simple("ROLLBACK");
-    let e = find(&r, b'E').expect("ROLLBACK after a write must fail");
-    assert_eq!(e.sqlstate().unwrap(), "0A000");
-    let msg = e.message().unwrap();
-    assert!(msg.contains("2 write statements"), "{msg}");
-    assert_eq!(status(&r), b'I', "the block is closed after the refusal");
-
-    let names: Vec<_> = c
-        .simple("get t select name")
-        .iter()
-        .filter(|m| m.tag == b'D')
-        .map(|m| m.cells()[0].clone().unwrap())
-        .collect();
     assert_eq!(
-        names,
-        vec!["a", "b"],
-        "nothing was undone, and that is what it said"
+        status(&r),
+        b'T',
+        "inside a transaction the session reports T"
     );
-}
+    c.simple("put t {name: \"a\"}");
+    let r = c.simple("put t {name: \"b\"}");
+    assert_eq!(status(&r), b'T');
+    assert_eq!(
+        names(&mut c),
+        ["a", "b"],
+        "a transaction reads its own writes"
+    );
+    other.send("get t count");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a read went past an open transaction"
+    );
 
-/// With nothing to undo, `ROLLBACK` is true and succeeds: pools send it on
-/// every check-in, and refusing it there would only break them.
-#[test]
-fn rollback_with_nothing_to_undo_succeeds() {
-    let h = trust_server();
-    let mut c = Client::connect(h.port, "fenec", None).unwrap();
-    c.simple("create collection t (name text)");
-
-    // No block at all.
     let r = c.simple("ROLLBACK");
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
     assert_eq!(status(&r), b'I');
+    let r = other.until_ready();
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("0".to_string())]);
+    assert!(names(&mut c).is_empty());
 
-    // A block that only read, or wrote nothing it matched.
     c.simple("BEGIN");
-    c.simple("get t");
-    c.simple("del t where name = \"nobody\"");
-    let r = c.simple("ROLLBACK");
-    assert!(find(&r, b'E').is_none(), "{:?}", find(&r, b'E'));
+    c.simple("put t {name: \"c\"}");
+    let r = c.simple("COMMIT");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["c"]);
 
-    // A write that failed before touching anything.
-    c.simple("BEGIN");
-    let r = c.simple("put t {name: 1}");
-    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
-    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
-
-    // A write made outside a block does not count against a later one.
-    c.simple("put t {name: \"outside\"}");
-    c.simple("BEGIN");
-    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
-}
-
-/// `COMMIT` closes the block; the extended protocol sees the same status, so
-/// a driver that reads its state from ReadyForQuery sends its own `COMMIT`.
-#[test]
-fn transaction_status_follows_the_block() {
-    let h = trust_server();
-    let mut c = Client::connect(h.port, "fenec", None).unwrap();
-    c.simple("create collection t (name text)");
-
+    // The extended protocol sees the same, so a driver that reads its state
+    // from ReadyForQuery sends its own COMMIT.
     assert_eq!(status(&c.extended("BEGIN", &[], false)), b'T');
-    let r = c.extended("put t {name: $1}", &["x"], false);
+    let r = c.extended("put t {name: $1}", &["d"], false);
     assert_eq!(status(&r), b'T');
     let r = c.extended("COMMIT", &[], false);
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
     assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["c", "d"]);
+}
 
-    // After COMMIT the count starts over: nothing is left to refuse.
-    assert!(find(&c.simple("ROLLBACK"), b'E').is_none());
-    // A second BEGIN keeps the block it is in, and its count.
+/// Until its first write a transaction reads what others commit, statement
+/// by statement, and holds nobody up.
+#[test]
+fn a_transaction_holds_the_database_from_its_first_write() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
     c.simple("BEGIN");
-    c.simple("put t {name: \"y\"}");
+    assert!(names(&mut c).is_empty());
+    let r = other.simple("put t {name: \"committed\"}");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut c), ["committed"]);
+    c.simple("put t {name: \"mine\"}");
+    other.send("put t {name: \"late\"}");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a write went past an open transaction"
+    );
+    c.simple("COMMIT");
+    assert_eq!(
+        find(&other.until_ready(), b'C').unwrap().tag_text(),
+        "INSERT 0 1"
+    );
+    assert_eq!(names(&mut c), ["committed", "mine", "late"]);
+}
+
+/// A statement that fails in a transaction fails the transaction, as in
+/// PostgreSQL: what it wrote is put back at once, and every statement up
+/// to its end is refused -- a client that went on would take them for
+/// landed.
+#[test]
+fn an_error_fails_the_transaction_until_its_end() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
     c.simple("BEGIN");
+    c.simple("put t {name: \"a\"}");
+    let r = c.simple("put t {name: 1}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
+    assert_eq!(status(&r), b'E');
+    let r = c.simple("put t {name: \"b\"}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25P02");
+    assert_eq!(status(&r), b'E');
+    // Nobody waits on it: the lock went with the failure.
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    assert!(names(&mut other).is_empty());
+
+    // A failed transaction's COMMIT is a ROLLBACK, as PostgreSQL answers it.
+    let r = c.simple("COMMIT");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'I');
+    assert!(names(&mut c).is_empty());
+
+    // A read that fails fails it too.
+    c.simple("BEGIN");
+    let r = c.simple("get nosuch");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
+    assert_eq!(status(&r), b'E');
     let r = c.simple("ROLLBACK");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'I');
+}
+
+/// With nothing to put back, ROLLBACK and COMMIT are what they say; outside
+/// a transaction they warn, as PostgreSQL's do, and succeed: pools send
+/// them on every check-in.
+#[test]
+fn transaction_control_outside_a_transaction_warns() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    for q in ["ROLLBACK", "COMMIT"] {
+        let r = c.simple(q);
+        assert_eq!(find(&r, b'N').unwrap().sqlstate().unwrap(), "25P01");
+        assert_eq!(find(&r, b'C').unwrap().tag_text(), q);
+        assert_eq!(status(&r), b'I');
+    }
+    c.simple("BEGIN");
+    let r = c.simple("BEGIN");
+    assert_eq!(find(&r, b'N').unwrap().sqlstate().unwrap(), "25001");
+    assert_eq!(status(&r), b'T');
+    assert_eq!(
+        find(&c.simple("ROLLBACK"), b'C').unwrap().tag_text(),
+        "ROLLBACK"
+    );
+}
+
+/// A pipeline of the extended protocol is one block up to its Sync, as
+/// PostgreSQL runs one as a transaction: a failure in it puts back what came
+/// before it in the pipeline.
+#[test]
+fn a_pipeline_lands_whole_at_its_sync() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    let mut pipe = Client::step("put t {name: \"a\"}");
+    pipe.extend(Client::step("put t {name: \"b\"}"));
+    pipe.extend(Client::step("put t {name: 1}"));
+    pipe.extend(Client::step("put t {name: \"skipped\"}"));
+    pipe.extend(framed(b'S', &[]));
+    c.s.write_all(&pipe).unwrap();
+    let r = c.until_ready();
+    assert_eq!(tags(&r), vec!['1', '2', 'C', '1', '2', 'C', '1', '2', 'E']);
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
+    assert_eq!(status(&r), b'I');
+    assert!(
+        names(&mut c).is_empty(),
+        "what came before the error landed"
+    );
+
+    let mut pipe = Client::step("put t {name: \"a\"}");
+    pipe.extend(Client::step("put t {name: \"b\"}"));
+    pipe.extend(framed(b'S', &[]));
+    c.s.write_all(&pipe).unwrap();
+    assert_eq!(tags(&c.until_ready()), vec!['1', '2', 'C', '1', '2', 'C']);
+    assert_eq!(names(&mut c), ["a", "b"]);
+}
+
+/// A schema change cannot be put back. Before a transaction's first write it
+/// runs on its own and the ROLLBACK says it stays; after one it is refused.
+#[test]
+fn a_schema_change_in_a_transaction_runs_on_its_own_or_not_at_all() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+
+    c.simple("BEGIN");
+    let r = c.simple("create collection t (name text)");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "CREATE TABLE");
+    c.simple("put t {name: \"a\"}");
+    let r = c.simple("ROLLBACK");
+    let e = find(&r, b'E').expect("the ROLLBACK has to say the collection stays");
+    assert_eq!(e.sqlstate().unwrap(), "0A000");
+    assert!(
+        e.message().unwrap().contains("1 schema change"),
+        "{:?}",
+        e.message()
+    );
+    assert_eq!(status(&r), b'I');
+    assert!(names(&mut c).is_empty(), "the write was put back");
+
+    c.simple("BEGIN");
+    c.simple("put t {name: \"b\"}");
+    let r = c.simple("create collection u (x int)");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25001");
+    assert_eq!(status(&r), b'E');
+    c.simple("ROLLBACK");
+    assert!(names(&mut c).is_empty());
+    let r = c.simple("get u");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
+}
+
+/// READ ONLY refuses a write; SERIALIZABLE takes the lock at its first
+/// statement, so nothing it read changes before it ends.
+#[test]
+fn read_only_and_serializable_transactions() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN READ ONLY");
+    let r = c.simple("put t {name: \"a\"}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25006");
+    assert_eq!(status(&r), b'E');
+    c.simple("ROLLBACK");
+
+    c.simple("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    assert!(names(&mut c).is_empty());
+    other.send("put t {name: \"late\"}");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a write went past a serializable transaction"
+    );
+    assert!(names(&mut c).is_empty(), "what it read changed under it");
+    // Its isolation is settled by its first statement.
+    let r = c.simple("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25001");
+    c.simple("ROLLBACK");
+    assert_eq!(
+        find(&other.until_ready(), b'C').unwrap().tag_text(),
+        "INSERT 0 1"
+    );
+
+    // The session's default, as JDBC's setTransactionIsolation sets it.
+    c.simple("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY");
+    c.simple("BEGIN");
+    let r = c.simple("put t {name: \"b\"}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25006");
+    c.simple("ROLLBACK");
+    assert_eq!(names(&mut c), ["late"]);
+}
+
+/// Savepoints and two-phase commit are refused rather than read as the
+/// command they begin with: `ROLLBACK TO s` taken for `ROLLBACK` put back
+/// the whole transaction and went on outside one.
+#[test]
+fn savepoints_and_two_phase_commit_are_refused() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN");
+    c.simple("put t {name: \"a\"}");
+    let r = c.simple("ROLLBACK TO SAVEPOINT s1");
     assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "0A000");
+    assert_eq!(status(&r), b'E', "the transaction failed rather than ended");
+    c.simple("ROLLBACK");
+    for q in [
+        "SAVEPOINT s1",
+        "COMMIT PREPARED 'x'",
+        "PREPARE TRANSACTION 'x'",
+    ] {
+        let r = c.simple(q);
+        assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "0A000", "{q}");
+    }
+    assert!(names(&mut c).is_empty());
+}
+
+/// `COMMIT AND CHAIN` lands the transaction and begins the next.
+#[test]
+fn commit_and_chain_begins_the_next_transaction() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN");
+    c.simple("put t {name: \"a\"}");
+    let r = c.simple("COMMIT AND CHAIN");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
+    assert_eq!(status(&r), b'T');
+    c.simple("put t {name: \"b\"}");
+    c.simple("ROLLBACK");
+    assert_eq!(names(&mut c), ["a"]);
+}
+
+/// A transaction that has written holds the database: one whose client
+/// goes silent is put back after `idle_in_transaction`, and its session
+/// closed with the reason; one whose client goes away is put back at once.
+#[test]
+fn an_idle_or_abandoned_transaction_is_put_back() {
+    let h = start(
+        Config {
+            idle_in_transaction: Some(Duration::from_millis(300)),
+            ..Config::default()
+        },
+        bare_db(),
+    );
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    c.simple("BEGIN");
+    c.simple("put t {name: \"idle\"}");
+    let started = Instant::now();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    assert!(names(&mut other).is_empty(), "the idle transaction landed");
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    let m = c.read_msg().expect("the server closed without saying why");
+    assert_eq!(m.tag, b'E');
+    assert_eq!(m.sqlstate().as_deref(), Some("25P03"), "{:?}", m.message());
+
+    let mut gone = Client::connect(h.port, "fenec", None).unwrap();
+    gone.simple("BEGIN");
+    gone.simple("put t {name: \"gone\"}");
+    drop(gone);
+    assert!(
+        names(&mut other).is_empty(),
+        "the abandoned transaction landed"
+    );
 }
 
 /// `LISTEN` would leave a client waiting for notifications that never come;
