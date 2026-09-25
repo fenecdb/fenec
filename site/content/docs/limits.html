@@ -177,16 +177,22 @@ so a node that is down takes its tenants with it.</p>
     under the read lock, builds with no lock held, and takes the write lock
     only to apply the writes made meanwhile and put the result in place. At
     100 000 × 128, where either takes about 20 s, reads waited at most 21 ms
-    through an HNSW build and 69 ms through a compact — the compact's includes
+    through an HNSW build and 30 ms through a compact — the compact's includes
     rewriting the file — against the full 20 s under the write lock, and
     writes went on at the same pace. Over a mapped file the compact copies no
     record: the graphs holding tombstones are rebuilt beside the database,
-    and the live records streamed into the new file under the write lock. One
-    in a batch, or run by the shell or an embedding program, still holds the
+    the live records are written into a side file with no lock held, and the
+    write lock is taken only to add the documents written meanwhile and
+    rename it into place. Over 1.8 million × 128, a 1.1 GB file, writes
+    waited at most 24 ms, where the rewrite under the lock held them 1.22 s,
+    for 67 MB more heap at the peak. The records those documents superseded
+    stay in the new file as dead ones until the next compact. One in a
+    batch, or run by the shell or an embedding program, still holds the
     write lock throughout. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
-    fits. It cannot be cancelled once begun.</li>
+    fits, and so does a second compact while one writes its file. It cannot
+    be cancelled once begun.</li>
   <li>A delete is a tombstone and the graph node stays in memory until
     <code>compact</code>. Changing a document's vector also marks the old
     node deleted and adds a new one, so in collections whose vectors change,

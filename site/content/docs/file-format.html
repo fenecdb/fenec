@@ -209,4 +209,9 @@ as it is.</p>
 <p>The rewrite goes to a side file and is renamed, so a half-written checkpoint
 cannot corrupt the database — and since an image is only ever whole, a record
 cut short inside it, or an image longer than the file, is refused as a damaged
-file rather than cut off as a crash's torn tail is.</p>
+file rather than cut off as a crash's torn tail is. A server's
+<code>compact</code> writes its image beside the database into
+<code>&lt;file&gt;.fenec.beside</code>, with no lock held; the documents written
+meanwhile go into it as a data record at the end of the image, and its header
+takes the counter as it stands when it is renamed into place. A side file left
+by a crash is written over by the next compact, and can be deleted.</p>

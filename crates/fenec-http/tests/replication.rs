@@ -249,6 +249,65 @@ fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
 }
 
+/// A primary's `compact` writes its file beside the database, through the
+/// feed as a server without replicas does, and the writes made while it
+/// does reach the replica as any others: numbered on, and in the new file
+/// when the primary opens it again.
+#[test]
+fn a_primary_compacts_beside_the_database_while_a_replica_follows() {
+    let d = dir("compact");
+    let file = d.join("p.fenec");
+    let p = primary(&file, replication::DEFAULT_BUFFER);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    write_some(&p, 0, 40);
+    assert_eq!(query(&p, "del items where n < 10").0, 200);
+    let r = replica(&d.join("r.fenec"), p.port);
+    caught_up(&r, &p);
+
+    let compact = fenec_ql::parse_one("compact").unwrap();
+    let mut calls = 0;
+    Database::maintain_with(&p.db, &compact, &mut || {
+        calls += 1;
+        // The second copy is the file's: its side file is being written.
+        assert_eq!(file.with_extension("fenec.beside").exists(), calls == 2);
+        write_some(&p, 100 * calls, 5);
+        assert_eq!(
+            query(&p, &format!("del items where n = {}", 10 + calls)).0,
+            200
+        );
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert!(!file.with_extension("fenec.beside").exists());
+    write_some(&p, 300, 5);
+    caught_up(&r, &p);
+    assert_eq!(r.follower.as_ref().unwrap().images(), 0);
+    for sql in [
+        "get items",
+        "get items select id near e [3.0, 1.0, 0.5] exact limit 3",
+    ] {
+        assert_eq!(rows(&r, sql), rows(&p, sql), "{sql}");
+    }
+
+    let (seq_was, rows_were) = (seq(&p), rows(&p, "get items"));
+    r.follower.as_ref().unwrap().halt();
+    drop(p);
+    let back = fenec_core::fs::open(&file).unwrap();
+    assert_eq!(back.change_seq(), seq_was);
+    let g = back
+        .query(&fenec_ql::parse_one("get items").unwrap(), &[])
+        .unwrap();
+    let got: Vec<(u64, Vec<Value>)> = g
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| (r.id, r.values.clone()))
+        .collect();
+    assert_eq!(got, rows_were);
+}
+
 #[test]
 fn a_replica_behind_the_buffer_is_sent_an_image() {
     let d = dir("image");

@@ -79,7 +79,7 @@ pub type Base = std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
 /// the dense slot for an id in that range, so a sparse entry the dense array
 /// grew over would vanish from every lookup while `ids()` still listed it --
 /// which is what happened before [`IdIndex::insert`] moved them over.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct IdIndex {
     /// `dense[i]` -> id `i + 1`
     dense: Vec<Loc>,
@@ -263,12 +263,36 @@ impl IdIndex {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Segment {
-    pub data: Vec<u8>,
+    pub data: SegmentBytes,
     pub sealed: bool,
 }
 
+/// A segment's bytes: shared on native targets, so that a store cloned for
+/// a rewrite beside the database (`compact` on a server) shares its sealed
+/// segments rather than copying them -- a gigabyte written since the open
+/// was a gigabyte copied under the read lock. The open one is copied the
+/// first time it is written to while a clone holds it. The browser has no
+/// such rewrite, and keeps the bytes as they are.
+#[cfg(not(target_arch = "wasm32"))]
+pub type SegmentBytes = std::sync::Arc<Vec<u8>>;
+#[cfg(target_arch = "wasm32")]
+pub type SegmentBytes = Vec<u8>;
+
+/// The segment's bytes to append to.
+#[inline]
+fn grow(b: &mut SegmentBytes) -> &mut Vec<u8> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::sync::Arc::make_mut(b);
+    #[cfg(target_arch = "wasm32")]
+    b
+}
+
+/// Cloned, a store is what it held at that moment: the records in the
+/// mapped file shared, the ones in memory copied -- what a rewrite beside
+/// the database writes from, with no lock held.
+#[derive(Clone)]
 pub struct Store {
     segments: Vec<Segment>,
     /// Records that stayed in a mapped file rather than being copied into a
@@ -379,7 +403,13 @@ impl Store {
                 // A segment grows by doubling and is sealed just past 8 MiB,
                 // so it held up to twice its records: a 1 GB file's took
                 // 1.66 GB of heap. Sealed, it grows no more; one reallocation
-                // per 8 MiB gives the rest back.
+                // per 8 MiB gives the rest back -- unless a clone holds it,
+                // which a copy to give back the slack would not be worth.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(data) = std::sync::Arc::get_mut(&mut last.data) {
+                    data.shrink_to_fit();
+                }
+                #[cfg(target_arch = "wasm32")]
                 last.data.shrink_to_fit();
             }
             self.segments.push(Segment::default());
@@ -423,7 +453,7 @@ impl Store {
         let seg = &mut self.segments[seg_ix];
         let header_len = frame.len() - payload.len();
         let off = seg.data.len() + header_len;
-        seg.data.extend_from_slice(&frame);
+        grow(&mut seg.data).extend_from_slice(&frame);
         self.total_bytes += frame.len();
 
         match op {
@@ -468,6 +498,15 @@ impl Store {
         seg.data
             .get(s..e)
             .ok_or_else(|| Error::Corrupt("offset outside the segment".into()))
+    }
+
+    /// The payload held for `id`, as it was written: what a rewrite copies
+    /// without decoding it.
+    pub fn raw(&self, id: DocId) -> Result<Option<&[u8]>> {
+        match self.index.get(id) {
+            Some(loc) => self.payload(loc).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Decodes the whole document.
@@ -844,7 +883,7 @@ impl Store {
             }
         }
         for s in &self.segments {
-            out.write(&s.data)?;
+            out.write(s.data.as_slice())?;
         }
         Ok(())
     }
@@ -862,7 +901,7 @@ impl Store {
             }
         }
         for s in &self.segments {
-            out.extend_from_slice(&s.data);
+            out.extend_from_slice(s.data.as_slice());
         }
         out
     }

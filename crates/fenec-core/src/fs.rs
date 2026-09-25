@@ -96,6 +96,35 @@ impl Disk {
 }
 
 impl FileSink {
+    /// Renames `from`, a whole image fsynced, over the file and appends to
+    /// it from then on. Whatever was pending is in the image: written after
+    /// it, it would be there twice. A failure after the rename leaves the
+    /// sink failed, so nothing waiting is told its write is durable.
+    fn swap_in(&self, disk: &mut Disk, from: &Path) -> Result<()> {
+        let swapped = (|| -> Result<File> {
+            std::fs::rename(from, &self.path)?;
+            sync_dir(&self.path)?;
+            let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            f.seek(SeekFrom::End(0))?;
+            Ok(f)
+        })();
+        lock(&self.pending).clear();
+        match swapped {
+            Ok(f) => {
+                // Everything appended so far is in the image, and the image
+                // is on disk.
+                disk.file = f;
+                disk.written = self.appended;
+                disk.synced = self.appended;
+                Ok(())
+            }
+            Err(e) => {
+                disk.failed = Some(e.clone());
+                Err(e)
+            }
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<(FileSink, Vec<u8>)> {
         let (mut file, path) = FileSink::create(path)?;
         let mut existing = Vec::new();
@@ -207,30 +236,21 @@ impl Sink for FileSink {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
-        let swapped = (|| -> Result<File> {
-            std::fs::rename(&tmp, &self.path)?;
-            sync_dir(&self.path)?;
-            let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
-            f.seek(SeekFrom::End(0))?;
-            Ok(f)
-        })();
-        // Whatever was pending is in the image: written after it, it would
-        // be there twice.
-        lock(&self.pending).clear();
-        match swapped {
-            Ok(f) => {
-                // Everything appended so far is in the image, and the image
-                // is on disk.
-                disk.file = f;
-                disk.written = self.appended;
-                disk.synced = self.appended;
-                Ok(())
-            }
-            Err(e) => {
-                disk.failed = Some(e.clone());
-                Err(e)
-            }
+        self.swap_in(&mut disk, &tmp)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn side(&self) -> Option<PathBuf> {
+        Some(self.path.with_extension("fenec.beside"))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &Path) -> Result<()> {
+        let mut disk = lock(&self.disk);
+        if let Some(e) = &disk.failed {
+            return Err(e.clone());
         }
+        self.swap_in(&mut disk, side)
     }
     /// The file as it stands, mapped read-only: what a mapped database
     /// points its stores at after a rewrite. The mapping it had covers the
@@ -377,6 +397,85 @@ impl AsRef<[u8]> for Mapping {
 impl Drop for Mapping {
     fn drop(&mut self) {
         unsafe { munmap(self.ptr, self.len) };
+    }
+}
+
+/// The file a rewrite beside the database writes (`compact` on a server):
+/// the image with no lock held, and then, under the write lock, the writes
+/// made meanwhile, before the sink takes it in place of the database's file
+/// ([`Sink::adopt`]). Removed when dropped unless it was adopted.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub struct SideFile {
+    path: PathBuf,
+    out: FileImage,
+    adopted: bool,
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl SideFile {
+    pub fn create(path: &Path) -> Result<SideFile> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        Ok(SideFile {
+            path: path.to_path_buf(),
+            out: FileImage {
+                w: BufWriter::with_capacity(WRITE_BUF, file),
+                at: 0,
+            },
+            adopted: false,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Pushes what is written to disk: the image, before the lock is taken
+    /// for the rest, so that the fsync under it covers only that.
+    pub fn sync(&mut self) -> Result<()> {
+        self.out.w.flush()?;
+        self.out.w.get_ref().sync_data()?;
+        Ok(())
+    }
+
+    /// The file as written so far, mapped: where the stores of the image
+    /// read from once it is the database's file. Appends after it land past
+    /// the mapping, as a database's own do.
+    pub fn map(&mut self) -> Result<crate::store::Base> {
+        self.out.w.flush()?;
+        let m = Mapping::of(self.out.w.get_ref(), self.out.at as usize)?;
+        Ok(Arc::new(m))
+    }
+
+    /// Taken in place of the database's file: not to be removed.
+    pub fn adopted(&mut self) {
+        self.adopted = true;
+    }
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl ImageOut for SideFile {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.out.write(bytes)
+    }
+    fn at(&self) -> u64 {
+        self.out.at()
+    }
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()> {
+        self.out.patch(at, bytes)
+    }
+}
+
+#[cfg(all(unix, target_pointer_width = "64"))]
+impl Drop for SideFile {
+    fn drop(&mut self) {
+        if !self.adopted {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

@@ -66,9 +66,11 @@ knows where it put each record, so the stores work their new places out
 without reading the new file back: that read cost 1.8 to 2.3 s of a 1 GB
 checkpoint, under the write lock, where working the places out takes 19 ms.
 A <code>compact</code> over a mapped file therefore copies no record into
-memory — on a server either, where it runs beside the database — and rebuilds
-no index but a graph holding tombstones: the documents are the same ones, and
-every index is keyed by id.</p>
+memory, and rebuilds no index but a graph holding tombstones: the documents
+are the same ones, and every index is keyed by id. On a server it runs beside
+the database: the new file is written with no lock held, and the writers wait
+only while the documents written meanwhile are added to it — 24 ms at most
+over a 1.1 GB file, where writing it under the lock held them 1.22 s.</p>
 
 <p><code>fenec-pg --no-mmap</code> reads the file into memory instead — a
 replicated one, and every tenant of a <code>--dir</code> node, as well — over

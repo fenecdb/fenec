@@ -108,6 +108,55 @@ impl Drop for Watching<'_> {
     }
 }
 
+/// A compact's rewrite beside the database: every collection as it stood
+/// when it was taken, its image written into a side file with no lock held,
+/// and under the write lock only the writes made meanwhile added to it
+/// before it takes the file's place. Written under the lock, 2.1 s of a
+/// 1 GB file's compact held every writer out.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+struct Beside {
+    side: crate::fs::SideFile,
+    parts: Vec<BesidePart>,
+    history: Option<Vec<u8>>,
+    reclaimed: usize,
+    /// Where the counter's header is in the side file, and where the body
+    /// it measures begins.
+    head_at: u64,
+    body_at: u64,
+}
+
+/// One collection of a [`Beside`], as it stood.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+struct BesidePart {
+    token: u64,
+    cid: u32,
+    name: String,
+    schema: Vec<u8>,
+    next_id: DocId,
+    /// The store as it stood: its records in the old file shared, the ones
+    /// in memory copied. Pointed at the side file once its image is
+    /// written, and handed the writes made meanwhile.
+    store: Store,
+    /// Whether its dead records are left out.
+    compact: bool,
+    /// Each graph's field, record, and changes when it was written.
+    graphs: Vec<(String, Vec<u8>, u64)>,
+}
+
+/// Lets the next rewrite beside the database go ahead however this one
+/// ends.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+struct Rewriting<'a>(&'a RwLock<Database>);
+
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+impl Drop for Rewriting<'_> {
+    fn drop(&mut self) {
+        read(self.0)
+            .beside
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 fn read(db: &RwLock<Database>) -> std::sync::RwLockReadGuard<'_, Database> {
     db.read().unwrap_or_else(|e| e.into_inner())
 }
@@ -125,10 +174,11 @@ impl Database {
         Self::maintain_with(db, stmt, &mut || {})
     }
 
-    /// [`Self::maintain`], calling `during` once the copy is taken and
-    /// before the build, with no lock held: how a test makes its writes
-    /// land while a build runs, every time rather than when the timing
-    /// happens to allow.
+    /// [`Self::maintain`], calling `during` once each copy is taken and
+    /// before what is built from it, with no lock held: how a test makes
+    /// its writes land while a build runs, every time rather than when the
+    /// timing happens to allow. A compact of a mapped file takes two, its
+    /// graphs' and then its file's.
     #[doc(hidden)]
     pub fn maintain_with(
         db: &RwLock<Database>,
@@ -476,10 +526,9 @@ impl Database {
     }
 
     /// Puts the rebuilt graphs in place, each caught up with the writes
-    /// made while it was built, and runs the compact itself: the live
-    /// records streamed into the new file and the stores pointed at it.
+    /// made while it was built. The rewrite follows ([`rewrite_beside`]).
     #[cfg(not(target_arch = "wasm32"))]
-    fn finish_graphs(&mut self, which: Option<&str>, built: Vec<BuiltIndex>) -> Result<Response> {
+    fn finish_graphs(&mut self, built: Vec<BuiltIndex>) -> Result<()> {
         let tails: Vec<Option<Tail>> = built.iter().map(|b| self.unwatch(b.copy.token)).collect();
         self.refuse_if_failed()?;
         for (b, t) in built.into_iter().zip(tails) {
@@ -508,7 +557,215 @@ impl Database {
         // The writes made meanwhile may have left the new graphs a tombstone
         // or two; those wait for the next compact rather than having the
         // graph rebuilt again under the lock.
-        self.compact(which, false)
+        Ok(())
+    }
+
+    /// What a rewrite beside the database copies under the read lock: each
+    /// collection's schema, counter and store as they stand -- its records
+    /// in the mapped file shared, the ones in memory copied -- and its
+    /// graphs' records, written here, as `save_graphs` writes them, with
+    /// the writers held off. `None` where the sink has no file to write
+    /// beside, and the rewrite holds the write lock instead.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    fn begin_beside(&self, which: Option<&str>) -> Result<Option<Beside>> {
+        self.may_write(true)?;
+        let Some(path) = self.sink.lock().unwrap_or_else(|e| e.into_inner()).side() else {
+            return Ok(None);
+        };
+        let targets: Vec<&str> = match which {
+            Some(n) => {
+                self.collection(n)?;
+                vec![n]
+            }
+            None => self.order.iter().map(String::as_str).collect(),
+        };
+        let side = crate::fs::SideFile::create(&path)?;
+        let mut parts = Vec::with_capacity(self.order.len());
+        for name in &self.order {
+            let c = &self.collections[name];
+            let graphs = c
+                .vectors
+                .iter()
+                .filter(|(_, ix)| !ix.is_empty())
+                .map(|(f, ix)| (f.clone(), ix.serialize_graph(), ix.changes()))
+                .collect();
+            parts.push(BesidePart {
+                token: 0,
+                cid: c.id,
+                name: name.clone(),
+                schema: c.schema.encode(),
+                next_id: c.store.next_id(),
+                store: c.store.clone(),
+                compact: targets.contains(&name.as_str()),
+                graphs,
+            });
+        }
+        let reclaimed = targets
+            .iter()
+            .map(|n| self.collections[*n].store.dead_bytes())
+            .sum();
+        let history = (self.history.following || !self.history.lineage.is_empty())
+            .then(|| self.history.record());
+        for p in &mut parts {
+            p.token = self.watch(p.cid);
+        }
+        Ok(Some(Beside {
+            side,
+            parts,
+            history,
+            reclaimed,
+            head_at: 0,
+            body_at: 0,
+        }))
+    }
+
+    /// Adds to a rewrite written beside the database the writes made while
+    /// it was, and puts it in place: under the write lock, the side file
+    /// takes the file's place and each collection the store pointed at it.
+    /// A collection created, dropped or altered meanwhile leaves the image
+    /// not fitting, and the compact says so rather than put it in place.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    fn finish_beside(&mut self, mut b: Beside) -> Result<Response> {
+        let tails: Vec<Option<Tail>> = b.parts.iter().map(|p| self.unwatch(p.token)).collect();
+        self.refuse_if_failed()?;
+        let history = (self.history.following || !self.history.lineage.is_empty())
+            .then(|| self.history.record());
+        let same = self.order.len() == b.parts.len()
+            && history == b.history
+            && b.parts.iter().zip(&tails).all(|(p, t)| {
+                t.as_ref().is_some_and(|t| !t.schema)
+                    && self.collections.get(&p.name).is_some_and(|c| c.id == p.cid)
+            });
+        if !same {
+            return Err(Error::Query(
+                "the collections changed while they were compacted; run `compact` again".into(),
+            ));
+        }
+        // Each document written meanwhile takes the state it has now, over
+        // the one the image holds, in a data record after it: inside the
+        // image, where the counter's header says it stands.
+        for (p, t) in b.parts.iter_mut().zip(tails) {
+            let live = &self.collections[&p.name];
+            let mut ids = t.unwrap().ids;
+            ids.sort_unstable();
+            ids.dedup();
+            let mut frames = Vec::new();
+            for id in ids {
+                match live.store.raw(id)? {
+                    Some(payload) => frames.extend(p.store.append(OP_PUT, id, payload)),
+                    None if p.store.contains(id) => frames.extend(p.store.append(OP_DEL, id, &[])),
+                    None => {}
+                }
+            }
+            if !frames.is_empty() {
+                b.side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
+                b.side.write(&frames)?;
+            }
+            // An id handed out and deleted meanwhile left no record; it must
+            // not come back.
+            let next = live.store.next_id();
+            if next > p.store.next_id() {
+                p.store.raise_next_id(next);
+                let mut counter = Vec::with_capacity(9);
+                put_uvarint(&mut counter, next);
+                b.side
+                    .write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
+                b.side.write(&counter)?;
+            }
+        }
+        let len = b.side.at();
+        b.side
+            .patch(b.head_at + 1, &self.changes.seq().to_le_bytes())?;
+        b.side
+            .patch(b.head_at + 9, &(len - b.body_at).to_le_bytes())?;
+        b.side.sync()?;
+        let r = self.sink_mut().adopt(b.side.path());
+        self.storage(r)?;
+        b.side.adopted();
+        *self.appended.get_mut() = len;
+        for p in b.parts {
+            let c = self.collections.get_mut(&p.name).unwrap();
+            c.store = p.store;
+            // Each graph is as its record left it, and changed by the
+            // writes after it.
+            for (field, graph, changes) in &p.graphs {
+                if let Some(ix) = c.vectors.get(field) {
+                    let saved = ix.persisted();
+                    saved.changes.store(*changes, Relaxed);
+                    saved.at.store(len, Relaxed);
+                    saved
+                        .node_bytes
+                        .store((graph.len() / ix.len().max(1)) as u64, Relaxed);
+                }
+            }
+        }
+        self.dirty = false;
+        Ok(Response::Ok(format!(
+            "compaction done, {} bytes reclaimed",
+            b.reclaimed
+        )))
+    }
+}
+
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+impl Beside {
+    /// Writes the image into the side file, with no lock held, in the
+    /// layout `Database::image_into` writes, and points each store at it.
+    fn write(&mut self) -> Result<()> {
+        let side = &mut self.side;
+        let mut head = Vec::from(&MAGIC[..]);
+        self.head_at = head.len() as u64;
+        head.push(REC_SEQ);
+        // The counter and the body's length, both put in under the lock.
+        head.extend_from_slice(&0u64.to_le_bytes());
+        head.extend_from_slice(&0u64.to_le_bytes());
+        side.write(&head)?;
+        self.body_at = side.at();
+        if let Some(h) = &self.history {
+            side.write(h)?;
+        }
+        let mut placed = Vec::with_capacity(self.parts.len());
+        for p in &self.parts {
+            side.write(&record_head(REC_CREATE, p.cid, p.schema.len()))?;
+            side.write(&p.schema)?;
+            let mut counter = Vec::with_capacity(9);
+            put_uvarint(&mut counter, p.next_id);
+            side.write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
+            side.write(&counter)?;
+            let bytes = match p.compact {
+                true => p.store.live_len(),
+                false => p.store.image_len(),
+            };
+            if bytes > 0 {
+                side.write(&record_head(REC_DATA, p.cid, bytes))?;
+                placed.push(Some(side.at()));
+                match p.compact {
+                    true => p.store.write_live(side)?,
+                    false => p.store.write_image(side)?,
+                }
+            } else {
+                placed.push(None);
+            }
+            for (field, graph, _) in &p.graphs {
+                let mut payload = Vec::with_capacity(field.len() + 9 + graph.len());
+                crate::codec::encode_str(&mut payload, field);
+                payload.extend_from_slice(graph);
+                side.write(&record_head(REC_GRAPH, p.cid, payload.len()))?;
+                side.write(&payload)?;
+            }
+        }
+        // The image on disk now, so that the fsync under the lock covers
+        // only what is added there.
+        side.sync()?;
+        let base = side.map()?;
+        for (p, at) in self.parts.iter_mut().zip(placed) {
+            match at {
+                Some(at) if p.compact => p.store.relocate_live(&base, at),
+                Some(at) => p.store.relocate_image(&base, at),
+                None => p.store.let_go(),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -620,9 +877,10 @@ fn compact_online(
         };
         during();
         let built: Vec<BuiltIndex> = copies.into_iter().map(IndexCopy::build).collect();
-        let r = write(db).finish_graphs(which, built);
+        let r = write(db).finish_graphs(built);
         watching.tokens.clear();
-        return r;
+        r?;
+        return rewrite_beside(db, which, during);
     }
     let mut parts = read(db).begin_compact(which)?;
     let mut watching = Watching {
@@ -638,5 +896,42 @@ fn compact_online(
     }
     let r = write(db).finish_compact(parts);
     watching.tokens.clear();
+    r
+}
+
+/// The rewrite a compact of a mapped file ends with: the live records
+/// written into a side file beside the database, the writes made meanwhile
+/// added under the write lock, and the side file put in the file's place.
+/// Where the sink has no file to write beside, the rewrite holds the lock.
+#[cfg(not(target_arch = "wasm32"))]
+fn rewrite_beside(
+    db: &RwLock<Database>,
+    which: Option<&str>,
+    during: &mut dyn FnMut(),
+) -> Result<Response> {
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    {
+        use std::sync::atomic::Ordering::AcqRel;
+        if read(db).beside.swap(true, AcqRel) {
+            return Err(Error::Query(
+                "a compact is writing its file beside the database already".into(),
+            ));
+        }
+        let _rewriting = Rewriting(db);
+        let begun = read(db).begin_beside(which)?;
+        if let Some(mut b) = begun {
+            let mut watching = Watching {
+                db,
+                tokens: b.parts.iter().map(|p| p.token).collect(),
+            };
+            during();
+            b.write()?;
+            let r = write(db).finish_beside(b);
+            watching.tokens.clear();
+            return r;
+        }
+    }
+    let _ = during;
+    let r = write(db).compact(which, false);
     r
 }

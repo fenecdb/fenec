@@ -183,11 +183,23 @@ write passes through `Database::note`, which hands the id to the `Tail` of each
 maintenance on that collection -- so a write path that skipped `note` would
 leave a built index missing it. A schema change there (another index, a drop)
 fails the maintenance rather than installing what no longer fits. At 100 000 x
-128 reads waited at most 21 ms through an HNSW build and 69 ms through a compact
+128 reads waited at most 21 ms through an HNSW build and 30 ms through a compact
 (file rewrite included), against the full ~20 s under the write lock. Over a
-mapped file a compact copies no record: graphs holding tombstones are rebuilt
-beside it, the live records streamed into the new file under the lock. Only a
-lone statement takes this path; a batch, the shell and `execute` hold the lock.
+mapped file a compact copies no record: the graphs holding tombstones are
+rebuilt beside the database, then each store is cloned under the read lock --
+the records in the old file and the sealed segments shared (`SegmentBytes` is
+an `Arc` natively), the index copied, each graph's record written -- the live
+records written into `<file>.fenec.beside` with no lock held and fsynced, and
+the clones relocated onto it without reading it back (`relocate_live`). Under
+the write lock only the documents written meanwhile go in, as a data record
+inside the image, whose header then takes the counter as it stands, and the
+side file is renamed into place (`Sink::adopt`, through a primary's `Tee`
+too). What they superseded stays in the new file, dead, for the next compact.
+At 1.8 million x 128, a 1.1 GB file, writes waited at most 24 ms against 1.22
+s, for a peak of +67 MB; cloning the segments rather than sharing them held
+the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
+created, dropped or altered meanwhile fails it. Only a lone statement takes
+this path; a batch, the shell and `execute` hold the lock.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty

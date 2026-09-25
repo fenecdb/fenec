@@ -333,6 +333,20 @@ impl Sink for Tee {
     fn remapped(&self) -> Option<fenec_core::store::Base> {
         self.file.remapped()
     }
+    /// Passed on, so a primary's `compact` writes its file beside the
+    /// database as a server without replicas does.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn side(&self) -> Option<std::path::PathBuf> {
+        self.file.side()
+    }
+    /// The side file holds every write, and is fsynced before it takes the
+    /// file's place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopt(&mut self, side: &std::path::Path) -> fenec_core::error::Result<()> {
+        self.file.adopt(side)?;
+        self.feed.mark_durable(self.feed.seq());
+        Ok(())
+    }
     fn record(&mut self, seq: u64, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.record(seq, bytes)?;
         self.feed.push(seq, bytes);

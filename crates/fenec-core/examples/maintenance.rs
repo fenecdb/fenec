@@ -1,16 +1,52 @@
 //! What a `create index` and a `compact` cost the readers and writers of a
-//! running database: `cargo run --release -p fenec-core --example maintenance -- [N] [DIM]`
+//! running database: `cargo run --release -p fenec-core --example maintenance -- [N] [DIM] [compact]`
 //!
 //! N documents with a DIM vector, in a file -- a compact rewrites it. While
 //! each statement runs -- under the write lock as `execute` does, then beside
 //! the database as `Database::maintain` does -- four threads read one
 //! document by id in a loop and one writes a document every 5 ms; each read
-//! and write is timed from the moment it asked for the lock.
+//! and write is timed from the moment it asked for the lock. With `compact`
+//! the index is left out and the compact alone is run, over a file of any
+//! size: 1 800 000 x 128 is a gigabyte. The heap the statement took at its
+//! peak is counted by the allocator.
 
 use fenec_core::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+struct Counting;
+
+static HEAP: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(l) };
+        if !p.is_null() {
+            let now = HEAP.fetch_add(l.size(), Ordering::Relaxed) + l.size();
+            PEAK.fetch_max(now, Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        unsafe { System.dealloc(p, l) };
+        HEAP.fetch_sub(l.size(), Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        let q = unsafe { System.realloc(p, l, new) };
+        if !q.is_null() {
+            let now = HEAP.fetch_add(new, Ordering::Relaxed) + new;
+            PEAK.fetch_max(now, Ordering::Relaxed);
+            HEAP.fetch_sub(l.size(), Ordering::Relaxed);
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 struct Rng(u64);
 impl Rng {
@@ -101,6 +137,8 @@ fn under_load(db: &Arc<RwLock<Database>>, sql: &str, beside: bool, n: usize) {
     }
     std::thread::sleep(Duration::from_millis(300));
     let stmt = fenec_ql::parse_one(sql).unwrap();
+    let base = HEAP.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
     let t = Instant::now();
     if beside {
         Database::maintain(db, &stmt).unwrap().unwrap();
@@ -108,19 +146,21 @@ fn under_load(db: &Arc<RwLock<Database>>, sql: &str, beside: bool, n: usize) {
         db.write().unwrap().execute(&stmt).unwrap();
     }
     let took = t.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
     std::thread::sleep(Duration::from_millis(300));
     stop.store(true, Ordering::Relaxed);
     for t in threads {
         t.join().unwrap();
     }
     println!(
-        "{sql}, {}: {:.2} s\n  {}\n  {}",
+        "{sql}, {}: {:.2} s, heap +{:.1} MB at its peak\n  {}\n  {}",
         if beside {
             "beside the database"
         } else {
             "under the write lock"
         },
         took.as_secs_f64(),
+        peak as f64 / 1e6,
         percentiles("reads", std::mem::take(&mut reads.lock().unwrap())),
         percentiles("writes", std::mem::take(&mut writes.lock().unwrap())),
     );
@@ -130,12 +170,17 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n: usize = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(100_000);
     let dim: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(128);
+    let compact_only = args.iter().any(|a| a == "compact");
 
     let path = std::env::temp_dir().join(format!("fenec-maintenance-{}.fenec", std::process::id()));
     for beside in [false, true] {
         let db = Arc::new(RwLock::new(database(n, dim, &path)));
         db.write().unwrap().sync().unwrap();
-        under_load(&db, "create index on c (v) @hnsw(cosine)", beside, n);
+        let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        println!("{n} x {dim} in a file of {:.1} MB", len as f64 / 1e6);
+        if !compact_only {
+            under_load(&db, "create index on c (v) @hnsw(cosine)", beside, n);
+        }
         // A fifth of the documents rewritten, so compact has dead bytes to
         // drop and the graph tombstones to leave behind.
         {
