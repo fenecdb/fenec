@@ -444,7 +444,7 @@ fn batch_runs_every_statement() {
 }
 
 #[test]
-fn batch_stops_at_the_first_error_and_says_how_far_it_got() {
+fn a_batch_that_fails_lands_none_of_it() {
     let h = start(Config::default());
     let body = concat!(
         r#"{"query":"put tasks {key: $1, title: $2, status: $3}","params":["d","four","open"]}"#,
@@ -455,14 +455,35 @@ fn batch_stops_at_the_first_error_and_says_how_far_it_got() {
     );
     let (st, out) = post(h.port, "/batch", body);
     assert_eq!(st, 404, "{out}");
-    assert!(out.contains("\"completed\":1"), "{out}");
+    assert!(out.contains("\"completed\":0"), "{out}");
 
-    // The first was applied and the third never ran: no rollback, reported
-    // exactly as it happened.
+    // A batch is one block: the first is put back, and the third never ran.
     let (_, rows) = call(h.port, "GET", "/tasks?key=eq.d", None, &[]);
-    assert!(rows.contains("four"), "{rows}");
+    assert_eq!(rows.trim(), "[]");
     let (_, rows) = call(h.port, "GET", "/tasks?key=eq.e", None, &[]);
     assert_eq!(rows.trim(), "[]");
+}
+
+/// A create cannot be put back, so a batch holding one runs each statement
+/// on its own, as it always did: what ran before the error stays, and the
+/// answer says how much that was.
+#[test]
+fn a_batch_with_a_schema_change_runs_each_statement_on_its_own() {
+    let h = start(Config::default());
+    let body = concat!(
+        r#"{"query":"create collection notes (body text)"}"#,
+        "\n",
+        r#"{"query":"put notes {body: $1}","params":["kept"]}"#,
+        "\n",
+        r#"{"query":"put tasks {nofield: $1}","params":[1]}"#,
+        "\n",
+        r#"{"query":"put notes {body: $1}","params":["never"]}"#,
+    );
+    let (st, out) = post(h.port, "/batch", body);
+    assert_eq!(st, 404, "{out}");
+    assert!(out.contains("\"completed\":2"), "{out}");
+    let (_, rows) = call(h.port, "GET", "/notes", None, &[]);
+    assert!(rows.contains("kept") && !rows.contains("never"), "{rows}");
 }
 
 #[test]

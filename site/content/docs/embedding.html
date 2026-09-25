@@ -20,9 +20,25 @@ for stmt in parse("get docs near embed $1 limit 5")? {
 <h2>Reads and writes take different locks</h2>
 
 <p><code>Database::query</code> takes a shared lock and
-<code>execute_with</code> the exclusive one. There are no transactions, and
-FenecQL has no <code>BEGIN</code> or <code>COMMIT</code>; <code>fenec-pg</code>
-accepts them for the drivers that send them.</p>
+<code>execute_with</code> the exclusive one. Every write is a block: what a
+statement writes lands in the file as one record, or — a hook's refusal, a
+document the schema refuses half way through a <code>put</code> of many —
+none of it does, and the database is as it was. Several statements are one
+block with <code>execute_block</code>, or between <code>begin</code> and
+<code>commit</code>, with <code>rollback</code> to put them back; whoever
+opens one holds the exclusive lock until it ends. A <code>create</code>, a
+<code>drop</code>, a <code>create index</code> or a <code>compact</code> runs
+on its own, outside a block. FenecQL has no <code>BEGIN</code> or
+<code>COMMIT</code>; <code>fenec-pg</code> accepts them for the drivers that
+send them.</p>
+
+<pre data-lang="rust">let stmts: Vec&lt;Statement&gt; = parse("put orders {total: 12}; set stock {n: 4} where id = 7")?;
+let block: Vec&lt;(&amp;Statement, &amp;[Value])&gt; = stmts.iter().map(|s| (s, &amp;[][..])).collect();
+match db.execute_block(&amp;block) {
+    Ok(answers) =&gt; { /* both landed, as one record */ }
+    Err((at, e)) =&gt; { /* statement `at` failed: neither landed */ }
+}
+</pre>
 
 <div class="note trap">
   <p><b>One process per file.</b> Two processes opening the same file and

@@ -128,18 +128,22 @@ struct Ring {
     closed: bool,
 }
 
-/// Consecutive records, the first numbered `first`.
+/// Consecutive records, the first write in them numbered `first`.
 struct Chunk {
     first: u64,
     data: Vec<u8>,
-    /// Where each record ends in `data`, and when it was appended.
+    /// Where each record ends in `data`, the last write it holds -- a
+    /// statement's writes are one record, a block's too -- and when it was
+    /// appended.
     ends: Vec<usize>,
+    lasts: Vec<u64>,
     times: Vec<u64>,
 }
 
 enum Next {
-    /// The first one's number, their times, the records.
-    Records(u64, Vec<u64>, Vec<u8>),
+    /// The first write's number, the last's, the records' times, the
+    /// records.
+    Records(u64, u64, Vec<u64>, Vec<u8>),
     Nothing,
     /// The records after the cursor are no longer kept.
     Behind,
@@ -206,16 +210,20 @@ impl Feed {
         lock(&self.ring).epoch
     }
 
+    /// A record numbered `seq`, as its last write: it holds as many as
+    /// [`fenec_core::engine::writes_in`] says, a statement's or a block's.
     fn push(&self, seq: u64, bytes: &[u8]) {
+        let writes = fenec_core::engine::writes_in(bytes).unwrap_or(1).max(1);
+        let first = (seq + 1).saturating_sub(writes);
         let mut r = lock(&self.ring);
-        if seq != r.seq + 1 {
+        if first != r.seq + 1 {
             // Not the write after the last one: what the ring holds no
             // longer leads here. Never seen, since every write passes
             // through; kept so a mistake costs images, not wrong replicas.
             r.chunks.clear();
             r.bytes = 0;
             r.epoch += 1;
-            r.durable = r.durable.min(seq - 1);
+            r.durable = r.durable.min(first.saturating_sub(1));
         }
         let room = match r.chunks.back() {
             Some(c) => c.data.len() + bytes.len() <= r.chunk,
@@ -223,15 +231,17 @@ impl Feed {
         };
         if !room {
             r.chunks.push_back(Chunk {
-                first: seq,
+                first,
                 data: Vec::new(),
                 ends: Vec::new(),
+                lasts: Vec::new(),
                 times: Vec::new(),
             });
         }
         let c = r.chunks.back_mut().unwrap();
         c.data.extend_from_slice(bytes);
         c.ends.push(c.data.len());
+        c.lasts.push(seq);
         c.times.push(now_ms());
         r.bytes += bytes.len();
         r.seq = seq;
@@ -273,16 +283,29 @@ impl Feed {
         let Some(at) = r
             .chunks
             .iter()
-            .position(|c| first >= c.first && first < c.first + c.ends.len() as u64)
+            .position(|c| first >= c.first && c.lasts.last().is_some_and(|&l| first <= l))
         else {
             return Next::Behind;
         };
+        // The record that starts at `first`. A cursor inside one -- a
+        // block's -- is no place a replica stands, since it applies a record
+        // whole; it takes an image.
+        let c = &r.chunks[at];
+        let k0 = c.lasts.partition_point(|&l| l < first);
+        let starts = if k0 == 0 {
+            c.first
+        } else {
+            c.lasts[k0 - 1] + 1
+        };
+        if starts != first {
+            return Next::Behind;
+        }
         let mut out = Vec::new();
         let mut times = Vec::new();
-        let mut seq = first;
-        'chunks: for c in r.chunks.iter().skip(at) {
-            let mut k = (seq - c.first) as usize;
-            while k < c.ends.len() && seq <= r.durable {
+        let mut last = cursor;
+        'chunks: for (i, c) in r.chunks.iter().enumerate().skip(at) {
+            let mut k = if i == at { k0 } else { 0 };
+            while k < c.ends.len() && c.lasts[k] <= r.durable {
                 let start = if k == 0 { 0 } else { c.ends[k - 1] };
                 let end = c.ends[k];
                 if !out.is_empty() && out.len() + (end - start) > max {
@@ -290,14 +313,17 @@ impl Feed {
                 }
                 out.extend_from_slice(&c.data[start..end]);
                 times.push(c.times[k]);
-                seq += 1;
+                last = c.lasts[k];
                 k += 1;
             }
-            if seq > r.durable {
+            if k < c.ends.len() {
                 break;
             }
         }
-        Next::Records(first, times, out)
+        if out.is_empty() {
+            return Next::Nothing;
+        }
+        Next::Records(first, last, times, out)
     }
 
     /// Waits until a write after `cursor` is on disk, the feed starts over,
@@ -811,14 +837,14 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     let mut cursor = seq;
     loop {
         match feed.next(cursor, epoch, MESSAGE) {
-            Next::Records(first, times, records) => {
+            Next::Records(first, last, times, records) => {
                 let n = times.len() as u64;
                 let sent = message(&mut w, b'W', &[&u64s(&[first, n]), &u64s(&times), &records])
                     .and_then(|_| w.flush());
                 if sent.is_err() {
                     return;
                 }
-                cursor = first + n - 1;
+                cursor = last;
                 if let Some(s) = lock(&repl.streams).iter_mut().find(|s| s.key == key) {
                     s.sent = cursor;
                 }
@@ -1357,11 +1383,56 @@ mod tests {
     use super::*;
 
     fn record(n: usize) -> Vec<u8> {
-        // [kind][cid][length][body]
+        // [kind][cid][length][body], the body one frame `n` bytes long:
+        // [op][id][length][payload].
+        let plen = if n - 3 < 128 { n - 3 } else { n - 4 };
+        let mut body = vec![1u8, 1];
+        fenec_core::codec::put_uvarint(&mut body, plen as u64);
+        body.extend(std::iter::repeat_n(0xab, plen));
+        assert_eq!(body.len(), n);
         let mut r = vec![3, 1];
         fenec_core::codec::put_uvarint(&mut r, n as u64);
-        r.extend(std::iter::repeat_n(0xab, n));
+        r.extend(body);
         r
+    }
+
+    /// A record of `frames` writes, as a statement of that many documents
+    /// or a block to one collection is appended.
+    fn frames(frames: usize) -> Vec<u8> {
+        let mut body = Vec::new();
+        for id in 1..=frames as u64 {
+            body.extend_from_slice(&[1, id as u8, 1, 0xcd]);
+        }
+        let mut r = vec![3, 1];
+        fenec_core::codec::put_uvarint(&mut r, body.len() as u64);
+        r.extend(body);
+        r
+    }
+
+    #[test]
+    fn a_record_of_many_writes_is_sent_whole_and_numbered_as_its_last() {
+        let feed = Feed::new(1 << 20);
+        feed.start(10);
+        let epoch = feed.epoch();
+        feed.push(11, &record(4));
+        feed.push(15, &frames(4));
+        feed.push(16, &record(4));
+        feed.mark_durable(16);
+        match feed.next(11, epoch, MESSAGE) {
+            Next::Records(first, last, times, bytes) => {
+                assert_eq!((first, last, times.len()), (12, 16, 2));
+                assert_eq!(bytes, [frames(4), record(4)].concat());
+            }
+            _ => panic!("records expected"),
+        }
+        // Inside the record is no place a replica stands.
+        assert!(matches!(feed.next(13, epoch, MESSAGE), Next::Behind));
+        // Durable only up to its last write, it waits for it.
+        let feed = Feed::new(1 << 20);
+        feed.start(0);
+        feed.push(3, &frames(3));
+        feed.mark_durable(2);
+        assert!(matches!(feed.next(0, feed.epoch(), MESSAGE), Next::Nothing));
     }
 
     #[test]
@@ -1376,7 +1447,7 @@ mod tests {
         assert!(matches!(feed.next(10, epoch, MESSAGE), Next::Nothing));
         feed.mark_durable(13);
         match feed.next(10, epoch, MESSAGE) {
-            Next::Records(first, times, bytes) => {
+            Next::Records(first, _, times, bytes) => {
                 assert_eq!(first, 11);
                 assert_eq!(times.len(), 3);
                 assert_eq!(bytes, record(4).repeat(3));
@@ -1412,14 +1483,14 @@ mod tests {
             feed.next(oldest - 1, epoch, MESSAGE),
             Next::Behind
         ));
-        let Next::Records(first, times, _) = feed.next(oldest, epoch, MESSAGE) else {
+        let Next::Records(first, _, times, _) = feed.next(oldest, epoch, MESSAGE) else {
             panic!("records expected");
         };
         assert_eq!((first, times.len()), (oldest + 1, 29));
         // A message stops at its size, across the line between two chunks
         // as anywhere.
         let across = oldest + 2;
-        let Next::Records(first, times, bytes) = feed.next(across, epoch, 4 * big.len()) else {
+        let Next::Records(first, _, times, bytes) = feed.next(across, epoch, 4 * big.len()) else {
             panic!("records expected");
         };
         assert_eq!((first, times.len()), (across + 1, 4));

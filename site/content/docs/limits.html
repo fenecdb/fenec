@@ -400,8 +400,12 @@ so a node that is down takes its tenants with it.</p>
     ring. Waking moves the cursor forward, and no empty batch is sent for a
     change that does not match the shape. The cost is one read lock and an
     empty scan.</li>
-  <li><code>POST /batch</code> is not atomic. It stops at the first error and
-    reports how many were applied. There is no rollback.</li>
+  <li><b>A batch holding a schema change is not one block.</b> A
+    <code>create</code>, a <code>drop</code>, a <code>create index</code> or
+    a <code>compact</code> cannot be put back, so a <code>POST /batch</code>
+    holding one runs each statement on its own, stops at the first error and
+    reports how many were applied. Every other batch lands whole or not at
+    all.</li>
 </ul>
 
 <h2>Import</h2>

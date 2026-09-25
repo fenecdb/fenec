@@ -85,10 +85,17 @@ fn record_len(bytes: &[u8]) -> Option<usize> {
     (bytes.len() >= pos + len && !bytes.is_empty()).then_some(pos + len)
 }
 
-/// `(time, start, end)` of each write in a segment's bytes.
-type Entries = Vec<(u64, usize, usize)>;
+/// `(time, start, end, writes)` of each record in a segment's bytes: a
+/// statement's writes are one record, a block's too, numbered on from the
+/// write before it.
+type Entries = Vec<(u64, usize, usize, u64)>;
 
-/// A segment's writes, and where the last whole one ends -- a crash can
+/// The writes a record holds -- one, when it cannot say.
+fn writes(record: &[u8]) -> u64 {
+    fenec_core::engine::writes_in(record).unwrap_or(1).max(1)
+}
+
+/// A segment's records, and where the last whole one ends -- a crash can
 /// leave a torn one after it.
 fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
     if data.len() < LOG_MAGIC.len() || &data[..LOG_MAGIC.len()] != LOG_MAGIC {
@@ -101,7 +108,8 @@ fn entries(data: &[u8]) -> io::Result<(Entries, usize)> {
         let Some(len) = record_len(&data[pos + 8..]) else {
             break;
         };
-        out.push((time, pos + 8, pos + 8 + len));
+        let n = writes(&data[pos + 8..pos + 8 + len]);
+        out.push((time, pos + 8, pos + 8 + len, n));
         pos += 8 + len;
     }
     Ok((out, pos))
@@ -213,7 +221,7 @@ impl Archive {
             let path = self.segment_path(first);
             let data = fs::read(&path)?;
             let (list, end) = entries(&data)?;
-            let last = first + list.len() as u64 - 1;
+            let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
             if !list.is_empty() && last >= at {
                 at = last;
                 let mut file = OpenOptions::new().write(true).open(&path)?;
@@ -322,6 +330,9 @@ impl Archive {
                     for time in times {
                         let len = record_len(&records[pos..])
                             .ok_or_else(|| io::Error::other("a write record cut short"))?;
+                        // Numbered by its first write here, as a segment's
+                        // name is: a block's writes are one record.
+                        let n = writes(&records[pos..pos + len]);
                         let seq = at + 1;
                         let s = match &mut segment {
                             Some(s) if s.next == seq && s.len < SEGMENT => s,
@@ -343,11 +354,11 @@ impl Archive {
                         s.file.write_all(&time.to_le_bytes())?;
                         s.file.write_all(&records[pos..pos + len])?;
                         s.len += 8 + len;
-                        s.next += 1;
+                        s.next += n;
                         s.dirty = true;
                         pos += len;
-                        at = seq;
-                        written += 1;
+                        at = seq + n - 1;
+                        written += n;
                     }
                     if let Some(s) = &mut segment {
                         if s.synced.elapsed() >= SYNC_EVERY {
@@ -380,16 +391,29 @@ impl Archive {
         let segments = self.segments()?;
         let last_image = images.last().map_or(0, |i| i.0);
 
-        // Where to stop, and when the last write kept was appended.
+        // Where to stop, and when the last write kept was appended. A
+        // record's writes are kept or left together: a block landed whole,
+        // so the database never stood at a change inside one, and a change
+        // asked for there is the one before the block.
         let mut last = last_image;
         let mut kept: Option<(u64, u64)> = None;
+        // The change before the record that holds the one asked for, when
+        // that one is not the record's last.
+        let mut inside: Option<u64> = None;
         let mut past = false;
         for &first in &segments {
             let bytes = fs::read(self.segment_path(first))?;
             let (list, _) = entries(&bytes)?;
-            for (i, &(time, _, _)) in list.iter().enumerate() {
-                let seq = first + i as u64;
+            let mut seq = first - 1;
+            for &(time, _, _, n) in &list {
+                let from = seq + 1;
+                seq += n;
                 last = last.max(seq);
+                if let Target::Change(c) = to {
+                    if from <= c && c < seq {
+                        inside = Some(from - 1);
+                    }
+                }
                 if let Target::Time(t) = to {
                     // The first write appended after `t` ends it.
                     past |= time > t;
@@ -406,7 +430,7 @@ impl Archive {
                     "the archive holds changes up to {last}, not {c}"
                 )))
             }
-            Target::Change(c) => (c, None),
+            Target::Change(c) => (inside.unwrap_or(c), None),
             Target::Time(t) => match kept {
                 Some((seq, time)) => (seq, Some(time)),
                 // Before any write, an image taken by then is the answer.
@@ -439,16 +463,18 @@ impl Archive {
             }
             let bytes = fs::read(self.segment_path(first))?;
             let (list, _) = entries(&bytes)?;
-            for (i, &(_, start, end)) in list.iter().enumerate() {
-                let seq = first + i as u64;
-                if seq < want {
+            let mut seq = first;
+            for &(_, start, end, n) in &list {
+                let (from, to) = (seq, seq + n - 1);
+                seq += n;
+                if to < want {
                     continue;
                 }
-                if seq > stop || seq != want {
+                if to > stop || from != want {
                     break;
                 }
                 f.write_all(&bytes[start..end])?;
-                want += 1;
+                want = to + 1;
             }
         }
         if want != stop + 1 {

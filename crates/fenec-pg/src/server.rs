@@ -602,6 +602,27 @@ impl Guard<'_> {
         }
     }
 
+    /// A block over the write lock ([`Database::begin`]); a read needs none.
+    fn begin(&mut self) -> fenec_core::error::Result<()> {
+        match self {
+            Guard::Write(g) => g.begin(),
+            Guard::Read(_) => Ok(()),
+        }
+    }
+
+    fn commit(&mut self) -> fenec_core::error::Result<()> {
+        match self {
+            Guard::Write(g) => g.commit(),
+            Guard::Read(_) => Ok(()),
+        }
+    }
+
+    fn rollback(&mut self) {
+        if let Guard::Write(g) = self {
+            g.rollback();
+        }
+    }
+
     /// Under `always`, hands the writes over before the answer is written,
     /// and returns what the answer has to wait for to be true. The error is
     /// returned rather than logged: a client told "done" for a write the
@@ -1823,10 +1844,25 @@ fn run_locked(
         }
     };
 
+    // A text of several statements with a write among them is one block,
+    // as PostgreSQL runs a query of several as one transaction: its writes
+    // land together, or -- an error, a cancel, the ceiling -- none of them.
+    // A schema change among them runs each on its own, as ever.
+    let block = needs_write && stmts.len() > 1 && stmts.iter().all(|s| s.fits_block());
+    if block {
+        if let Err(e) = guard.begin() {
+            out.error(sqlstate(&e), &e.to_string());
+            return None;
+        }
+    }
     for (i, stmt) in stmts.iter().enumerate() {
-        // A cancellation arriving mid-batch drops the rest. What ran before
-        // it stays applied, so under `always` it still goes to disk.
+        // A cancellation arriving mid-batch drops the rest. Outside a block
+        // what ran before it stays applied, so under `always` it still goes
+        // to disk; in one, it is put back.
         if be.take_cancel() {
+            if block {
+                guard.rollback();
+            }
             let durability = guard.flush_if_needed(cfg.sync).ok().flatten();
             out.error("57014", "the query was cancelled");
             return durability.map(|d| (d, None));
@@ -1834,26 +1870,37 @@ fn run_locked(
         // The memory ceiling is checked *before* the statement: the overshoot
         // is at most one statement, whose body is capped by `--max-message`.
         if let Some(msg) = fenec_http::over_ceiling(cfg.max_memory, guard.db(), stmt) {
+            if block {
+                guard.rollback();
+            }
             let durability = guard.flush_if_needed(cfg.sync).ok().flatten();
             out.error("53200", &msg);
             return durability.map(|d| (d, None));
         }
         let last = i == stmts.len() - 1;
         // The change counter moves for every document and schema change, and
-        // for nothing else.
+        // for nothing else -- in a block, once it lands.
         let before = guard.db().change_seq();
-        let result = guard.run(stmt, params);
+        let mut result = guard.run(stmt, params);
+        if block && last && result.is_ok() {
+            if let Err(e) = guard.commit() {
+                result = Err(e);
+            }
+        }
         if guard.db().change_seq() != before {
             tx.note_write();
         }
         match result {
             Err(e) => {
                 let code = sqlstate(&e);
-                // An error does not undo the statements written before it
-                // (there are no transactions): the `always` policy must push
-                // those to disk as well. The statement's own error is the one
-                // reported; a failed sync has already refused every later
-                // write in the engine.
+                // In a block the statements before it are put back. Outside
+                // one an error does not undo them: the `always` policy must
+                // push those to disk as well. The statement's own error is
+                // the one reported; a failed sync has already refused every
+                // later write in the engine.
+                if block {
+                    guard.rollback();
+                }
                 let durability = guard.flush_if_needed(cfg.sync).ok().flatten();
                 out.error(code, &e.to_string());
                 return durability.map(|d| (d, None));

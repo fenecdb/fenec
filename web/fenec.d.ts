@@ -635,8 +635,9 @@ export declare class FenecSync<S extends AnySchema<S> = Schema> {
   ): () => void;
 
   /**
-   * Sends several writes in a single round trip. **Not a transaction**:
-   * the local side is rolled back exactly, the server side cannot be.
+   * Sends several writes in a single round trip, as **one block**: the
+   * server lands all of them or none, and on an error the local side is
+   * rolled back exactly as the server's was.
    */
   batch(fn: (t: Batch<S>) => Promise<void>): Promise<number>;
 

@@ -854,12 +854,14 @@ pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
 /// query endpoint and goes down that same path. Escaping rules mean no JSON
 /// encoder can write a bare `\n` into the body, so the split is unambiguous.
 ///
-/// **It is not a transaction.** fenecdb has no transactions (single-writer
-/// model) and this endpoint does not invent one: the statements run in
-/// order, **under a single write lock**, and stop at the first error. The
-/// gain is not atomicity but two things: one round trip instead of N, and no
-/// other writer slipping in between. On an error the response says how many
-/// were applied -- nothing is rolled back, because nothing can be.
+/// **It is one block.** The statements run in order, under a single write
+/// lock, and their writes land as one record or not at all: the first error
+/// puts back what the ones before it did, and the response says so
+/// (`completed` is 0). One round trip instead of N, no other writer
+/// slipping in between, and nothing half done. A create, a drop, a
+/// `create index` or a `compact` cannot be put back, so a batch holding one
+/// runs each statement on its own: it stops at the first error, and
+/// `completed` says how many were applied.
 pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
     let mut out = Vec::new();
     for (i, line) in body.lines().enumerate() {
@@ -911,9 +913,10 @@ pub fn render_batch(results: &[Response2], version: &str) -> Response {
     Response::json(200, out).header("X-Fenecdb-Version", version)
 }
 
-/// A batch that stopped halfway: we **have to say** how many were applied.
-/// A silent error would permanently separate the client's optimistic local
-/// state from the server.
+/// A batch that stopped: we **have to say** what was applied -- nothing for
+/// a block, the statements before the error otherwise. A silent error would
+/// permanently separate the client's optimistic local state from the
+/// server.
 pub fn render_batch_error(e: &Error, completed: usize, version: &str) -> Response {
     render_batch_stop(status_of(e), &e.to_string(), completed, version)
 }

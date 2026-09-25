@@ -175,11 +175,14 @@ fn a_restore_holds_what_the_primary_held_at_that_moment() {
     );
 
     // To a change: each document a statement writes is a change of its
-    // own, so the delete's first is one note gone, its tenth all ten.
+    // own, but the statement's writes land together -- the primary never
+    // held nineteen notes. Its first change is the moment before it, its
+    // tenth all ten gone.
     let (db, r) = restored(&arch, &d.join("change.fenec"), Target::Change(early + 1));
-    assert_eq!(r.seq, early + 1);
-    assert_eq!(rows(&db, "get notes").len(), 19);
-    let (db, _) = restored(&arch, &d.join("change.fenec"), Target::Change(early + 10));
+    assert_eq!(r.seq, early);
+    assert_eq!(rows(&db, "get notes").len(), 20);
+    let (db, r) = restored(&arch, &d.join("change.fenec"), Target::Change(early + 10));
+    assert_eq!(r.seq, early + 10);
     assert_eq!(rows(&db, "get notes").len(), 10);
 
     // To the end: what the primary holds now.
@@ -278,4 +281,61 @@ fn a_backup_is_a_database_of_its_own() {
     let (db, r) = restored(&arch, &d.join("from-image.fenec"), Target::End);
     assert_eq!((r.seq, r.image), (seq, seq));
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
+}
+
+/// A block's writes are one record in the archive, as on the primary: a
+/// restore to the end holds them all, and one to a change inside the block
+/// stops before it -- the primary never stood there, the block landing
+/// whole.
+#[test]
+fn a_block_is_archived_and_restored_whole() {
+    let d = dir("block");
+    let p = primary(&d.join("primary.fenec"), 1 << 20);
+    p.exec("create collection a (n int)");
+    p.exec("create collection b (n int)");
+    p.exec("put a {n: 1}");
+    let arch = d.join("arch");
+    let a = archiver(&arch, &p.url);
+    // The archive's image first: the block has to come after it.
+    let before = p.seq();
+    archived(&arch, before);
+    let durable = {
+        let mut g = p.db.write().unwrap();
+        let s: Vec<Statement> = ["put a {n: 2}", "put b {n: 3}", "put a [{n: 4}, {n: 5}]"]
+            .iter()
+            .map(|q| fenec_ql::parse_one(q).unwrap())
+            .collect();
+        let block: Vec<(&Statement, &[Value])> = s.iter().map(|s| (s, &[][..])).collect();
+        g.execute_block(&block).unwrap();
+        g.flush().unwrap()
+    };
+    if let Some(d) = durable {
+        d().unwrap();
+    }
+    p.exec("put b {n: 6}");
+    let end = p.seq();
+    assert_eq!(end, before + 5);
+    archived(&arch, end);
+    a.finish();
+
+    let ns = |db: &Database, c: &str| -> Vec<Value> {
+        rows(db, &format!("get {c} select n order n"))
+            .into_iter()
+            .map(|(_, v)| v[0].clone())
+            .collect()
+    };
+    let (db, r) = restored(&arch, &d.join("end.fenec"), Target::End);
+    assert_eq!(r.seq, end);
+    assert_eq!(ns(&db, "a"), [1, 2, 4, 5].map(Value::Int));
+    assert_eq!(ns(&db, "b"), [3, 6].map(Value::Int));
+    // Inside the block: before it.
+    let (db, r) = restored(&arch, &d.join("mid.fenec"), Target::Change(before + 2));
+    assert_eq!(r.seq, before);
+    assert_eq!(ns(&db, "a"), [Value::Int(1)]);
+    assert!(ns(&db, "b").is_empty());
+    // At its last write: the block whole.
+    let (db, r) = restored(&arch, &d.join("whole.fenec"), Target::Change(before + 4));
+    assert_eq!(r.seq, before + 4);
+    assert_eq!(ns(&db, "a"), [1, 2, 4, 5].map(Value::Int));
+    assert_eq!(ns(&db, "b"), [Value::Int(3)]);
 }

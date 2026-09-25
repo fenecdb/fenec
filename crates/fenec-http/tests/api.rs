@@ -475,11 +475,15 @@ fn the_data_ceiling_holds_http_writes_too() {
         "/query",
         Some(r#"{"query":"create index on remarks (stars) @sorted"}"#),
     ));
+    // A batch is one block: the put refused, the del before it is put back.
     let batch = "{\"query\":\"del remarks where stars = 2\"}\n\
                  {\"query\":\"put remarks {stars: 4}\"}\n";
     let r = refused(call(h.port, "POST", "/batch", Some(batch)));
-    assert!(r.body.contains("\"completed\":1"), "{}", r.body);
+    assert!(r.body.contains("\"completed\":0"), "{}", r.body);
     assert_eq!(get(h.port, "/articles?count").body.trim(), "{\"count\":3}");
+    assert_eq!(get(h.port, "/remarks?count").body.trim(), "{\"count\":3}");
+    let batch = "{\"query\":\"del remarks where stars = 2\"}\n";
+    assert_eq!(call(h.port, "POST", "/batch", Some(batch)).status, 200);
     assert_eq!(get(h.port, "/remarks?count").body.trim(), "{\"count\":2}");
 
     let r = call(h.port, "DELETE", "/articles?year=eq.1999", None);

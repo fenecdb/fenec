@@ -17,6 +17,7 @@ exception are worth knowing before you touch the reader.</p>
   [3][collection-id][length][records]      data
   [4][collection-id][length][field][graph] HNSW graph (optional)
   [8][0][length][history]                  replication history (optional)
+  [9][0][length][records]                  a block across collections
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>,
@@ -145,6 +146,25 @@ record after it was written <i>after</i> the checkpoint and carries the counter
 forward. Old files without the record load fine — the counter is then counted
 from the records. The reverse does not hold: an old binary cannot open a new
 file and reports <code>unknown record kind 6</code>.</p>
+
+<h2>A statement's writes are one record</h2>
+
+<p>Every write is a block: the documents a <code>put</code>, a
+<code>set</code> or a <code>del</code> writes, the statements of a
+<code>/batch</code> or of a text sent over the pg wire. Their frames are held
+back until the block ends and are appended as one record, so a crash cuts all
+of them off the file or none; a block that fails is put back in memory
+instead, and nothing of it reaches the file. Within one collection the record
+is a data record of as many frames — the form an image's data records have
+always had, so a binary from before blocks reads it. Across collections it is
+record kind 9, holding a data record for each write, which such a binary
+refuses with <code>unknown record kind 9</code>.</p>
+
+<p>The change counter moves by the writes a record holds, not by one a
+record: a block of five writes is numbered by its last, and whatever counts
+records by their numbers — a replica, an archive — counts them that way. A
+restore to a change inside a block stops before it, since the database never
+stood there.</p>
 
 <h2>The history record is not a write</h2>
 

@@ -3,6 +3,7 @@
 //! the primary does -- through its indexes as well as its documents -- and
 //! reopening from its own file at the same change.
 
+use fenec_core::engine::writes_in;
 use fenec_core::prelude::*;
 use std::sync::{Arc, Mutex};
 
@@ -233,15 +234,21 @@ fn a_replica_applying_the_writes_answers_as_its_primary_does() {
     let mut replica = replica_file.database();
     replica.follow(vec![(7, 0)]).unwrap();
     let writes = primary_file.since(0);
-    assert_eq!(writes.len() as u64, primary.change_seq());
+    // A statement's writes are one record, of as many frames.
+    let counted: u64 = writes.iter().map(|(_, r)| writes_in(r).unwrap()).sum();
+    assert_eq!(counted, primary.change_seq());
+    assert!(writes.len() < counted as usize);
     let mut at = 0;
     let probe = rng.vector(DIM);
     while at < writes.len() {
         let n = (1 + rng.below(40) as usize).min(writes.len() - at);
         let mut records = Vec::new();
-        for (k, (seq, bytes)) in writes[at..at + n].iter().enumerate() {
-            // The primary numbered them on from where the replica stands.
-            assert_eq!(*seq, replica.change_seq() + 1 + k as u64);
+        let mut last = replica.change_seq();
+        for (seq, bytes) in &writes[at..at + n] {
+            // Each numbered as its last write, on from where the replica
+            // stands.
+            last += writes_in(bytes).unwrap();
+            assert_eq!(*seq, last);
             records.extend_from_slice(bytes);
         }
         assert_eq!(replica.apply(&records).unwrap(), n);
@@ -353,7 +360,8 @@ fn a_write_that_is_not_there_to_apply_is_refused() {
     let primary_file = Tap::default();
     let mut primary = primary_file.database();
     exec(&mut primary, "create collection c (x int @hash)", &[]);
-    exec(&mut primary, "put c [{x: 1}, {x: 2}]", &[]);
+    exec(&mut primary, "put c {x: 1}", &[]);
+    exec(&mut primary, "put c {x: 2}", &[]);
     let w = primary_file.since(0);
 
     // A write to a collection the replica never saw.
