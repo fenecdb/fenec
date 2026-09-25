@@ -372,7 +372,7 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 146.9 KB
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 147.4 KB
 brotli with all four, 117.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
@@ -418,12 +418,12 @@ ranked by its codes and its beam's worth ordered the same way -- read whole it
 was up to 12 800 vectors a query under bit codes -- and `exact` reads every
 vector. Bit codes take the wider beam `BIT_EF_SEARCH` -- 200: over a million
 clustered 768-dim vectors a beam of 100 held 97.9% of the true ten and 200
-held 99.8% in 1.21 ms, int8 codes 97.1% at 100 (`make quant-bench`); over
+held 99.7% in 0.66 ms, int8 codes 97.1% at 100 (`make quant-bench`); over
 the vectors' own signs the beam was 400, for 98.4% in 2.16 ms. The core settles it
 wherever a spec comes in -- `VectorIndexSpec::default()` leaves `ef_search`
 0 for `resolved` to fill by the codes -- since only the parser knew it once,
 and the Rust API's bit indexes searched 100. How well bits estimate
-depends on the vectors: spread in every dimension, 89.5% at 100 and 97.6% at
+depends on the vectors: spread in every dimension, 89.7% at 100 and 97.5% at
 200. The code
 kernels add in `strip8!`'s order on every target, so a graph over codes is the
 browser's graph bit for bit; on aarch64 the int8 strips are NEON intrinsics
@@ -445,13 +445,25 @@ word after the signs holding `σ = |r|²/|r|₁` and `κ = ⟨C, r⟩ - σ⟨b, 
 `⟨q, v⟩` is estimated as `⟨q, C⟩ + κ + σ⟨b, q⟩` -- RaBitQ's estimator
 without its rotation, the query taken from the centre so that only its part
 off the centre goes through the signs (`⟨q, r⟩` estimated whole held
-38.7% over centres that gave 92.8%). `query_for` appends the query's product with each centre, once a
-search, and a distance between two codes counts both `κ` (`Arena::offset`),
-which a widened code leaves out. The same beams hold 89.5% and 99.7%, and
-over 32 directions a beam of 100 went 96.8% -> 100% at 100 000 and 82.5% ->
-97.9% at a million, for 105 bytes a 768-dim vector against 96. In an array of their own the factors were a cache miss
+38.7% over centres that gave 92.8%). `query_for` appends the query's
+product with each centre, once a search, and a distance between two codes
+counts both `κ` (`Arena::offset`), which a widened code leaves out. The same
+beams hold 89.7% and 99.6%, and over 32 directions a beam of 100 went 96.8%
+-> 100% at 100 000 and 82.5% -> 97.9% at a million, for 105 bytes a 768-dim
+vector against 96. In an array of their own the factors were a cache miss
 more a distance: the build took 69.7 s against 62.8, a query at a beam of
-100 0.414 ms against 0.378. The centres travel in the graph record behind
+100 0.414 ms against 0.378. `⟨b, q⟩` is counted, not summed: `query_for`
+also cuts the query to six bits a component (`QUERY_BITS`), two's
+complement bit planes after the centre products, and `dot_planes` takes the
+planes' popcounts under the signs -- 72 over 768 dimensions where `dot_bits`
+added a float a component, whole numbers exact on every target. RaBitQ cuts
+to four bits the query's distance from a centre; cut whole, a query is
+mostly its own centre, and four bits held 84% of a crowded cluster's ten
+against the 91.5% six hold, as the query whole does. At a million a query
+at a beam of 200 went 1.30 -> 0.66 ms at 99.8% -> 99.7%, filtered 1.36 ->
+0.97, the build 1 012 -> 874 s; the browser module's 0.557 -> 0.470 ms at
+20 000 x 384. The planes ride in the query's `Vec<f32>` as the bits of two
+floats a word, since every search hands that vector on. The centres travel in the graph record behind
 quantization code 3 (`BIT_CENTRED`): a graph over the plain signs (code 2)
 is built again, and a binary from before them builds its own. The browser
 module grew 6.9 KB, 2.2 KB brotli, most of it the k-means.
