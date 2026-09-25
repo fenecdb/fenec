@@ -452,3 +452,248 @@ fn a_replica_file_on_a_node_following_nobody_is_promoted_where_it_stands() {
     );
     assert_eq!(status, 409, "{body}");
 }
+
+// ---------------------------------------------------------- replicas of their own
+//
+// With `--replicas`, a tenant on a node in no pair follows on another node,
+// the one holding the fewest: a node's tenants are replicated across the
+// others, and a failover spreads them there rather than onto an idle standby.
+
+/// A router that gives each tenant a replica of its own (`--replicas`).
+fn replicating_router() -> u16 {
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        upstream_timeout: Duration::from_secs(10),
+        replicas: true,
+        ..Config::default()
+    };
+    let router = Router::new(Directory::in_memory(), cfg);
+    let listener = router.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    port
+}
+
+/// Three nodes in no pair, `n1` to `n3`, behind a replicating router.
+fn three(tag: &str) -> ([Node; 3], u16) {
+    let nodes = [1, 2, 3].map(|i| node(&format!("{tag}{i}"), None));
+    let port = replicating_router();
+    for (i, nd) in nodes.iter().enumerate() {
+        register(
+            port,
+            &format!("n{}", i + 1),
+            nd,
+            &format!("adm-{tag}{}", i + 1),
+            None,
+        );
+    }
+    (nodes, port)
+}
+
+fn by_name<'a>(nodes: &'a [Node; 3], name: &str) -> &'a Node {
+    &nodes[name[1..].parse::<usize>().unwrap() - 1]
+}
+
+/// Where the directory keeps `tenant`: its node, and its replica's.
+fn placed(port: u16, tenant: &str) -> (String, Option<String>) {
+    let (_, list) = call(port, "GET", "/_shard/tenants", "", None);
+    let entry = list
+        .split("},{")
+        .find(|e| e.contains(&format!("\"name\":\"{tenant}\"")))
+        .unwrap_or_else(|| panic!("no {tenant} in {list}"));
+    let value = |key: &str| {
+        let rest = entry.split(&format!("\"{key}\":\"")).nth(1)?;
+        Some(rest.split('"').next()?.to_string())
+    };
+    (value("node").unwrap(), value("replica"))
+}
+
+fn create(port: u16, tenant: &str, on: &str) -> String {
+    let (status, body) = call(
+        port,
+        "PUT",
+        &format!("/_shard/tenants/{tenant}"),
+        &format!(r#"{{"node":"{on}"}}"#),
+        None,
+    );
+    assert_eq!(status, 201, "{body}");
+    let path = format!("/t/{tenant}/query");
+    assert_eq!(
+        query(port, &path, "create collection notes (title text)").0,
+        200
+    );
+    assert_eq!(query(port, &path, r#"put notes {title: "one"}"#).0, 200);
+    body
+}
+
+#[test]
+fn every_tenant_follows_on_another_node_and_a_failover_spreads_a_nodes_tenants() {
+    let (nodes, port) = three("sp");
+    let all = ["t1", "t2", "t3", "t4", "t5", "t6"];
+    for (t, n) in all.iter().zip(["n1", "n1", "n2", "n2", "n3", "n3"]) {
+        create(port, t, n);
+    }
+    // Two replicas a node, none on its tenant's own, each holding the row.
+    let mut held = [0; 3];
+    let mut replica_of = std::collections::HashMap::new();
+    for t in all {
+        let (node, replica) = placed(port, t);
+        let replica = replica.unwrap_or_else(|| panic!("{t} has no replica"));
+        assert_ne!(node, replica, "{t}");
+        held[replica[1..].parse::<usize>().unwrap() - 1] += 1;
+        until(
+            by_name(&nodes, &replica).port,
+            &format!("/t/{t}/query"),
+            "get notes select title",
+            "one",
+        );
+        replica_of.insert(t, replica);
+    }
+    assert_eq!(held, [2, 2, 2]);
+    assert_ne!(
+        replica_of["t1"], replica_of["t2"],
+        "n1's tenants follow on one node"
+    );
+
+    // n1 is lost: each of its tenants goes to the node holding its replica.
+    let (status, body) = call(port, "POST", "/_shard/nodes/n1/failover", "", None);
+    assert_eq!(status, 200, "{body}");
+    for t in ["t1", "t2"] {
+        let to = &replica_of[t];
+        assert!(
+            body.contains(&format!(r#"{{"tenant":"{t}","to":"{to}"}}"#)),
+            "{body}"
+        );
+        assert_eq!(placed(port, t), (to.clone(), None));
+        let path = format!("/t/{t}/query");
+        let (status, body) = query(port, &path, r#"put notes {title: "after"}"#);
+        assert_eq!(status, 200, "{body}");
+        let (_, body) = query(port, &path, "get notes count");
+        assert!(body.contains('2'), "{body}");
+    }
+    // The tenants whose replicas n1 held have none now.
+    for t in ["t3", "t4", "t5", "t6"] {
+        let lost = replica_of[t] == "n1";
+        assert_eq!(body.contains(&format!("\"{t}\"")), lost, "{t}: {body}");
+        assert_eq!(placed(port, t).1.is_none(), lost, "{t}");
+    }
+
+    // A repair gives each a replica again, on the node holding a copy
+    // first: n1's old primaries follow the nodes that took them over.
+    let (status, body) = call(port, "POST", "/_shard/replicas", "", None);
+    assert_eq!(status, 200, "{body}");
+    for t in all {
+        assert!(placed(port, t).1.is_some(), "{t}: {body}");
+    }
+    assert_eq!(placed(port, "t1").1.as_deref(), Some("n1"));
+    let (status, body) = query(port, "/t/t1/query", r#"put notes {title: "back"}"#);
+    assert_eq!(status, 200, "{body}");
+    until(
+        nodes[0].port,
+        "/t/t1/query",
+        "get notes select title",
+        "back",
+    );
+}
+
+#[test]
+fn a_moved_tenants_replica_follows_it_and_one_on_its_target_goes_elsewhere() {
+    let (nodes, port) = three("mv");
+    let body = create(port, "acme", "n1");
+    assert!(body.contains(r#""replica_on":"n2""#), "{body}");
+    until(
+        nodes[1].port,
+        "/t/acme/query",
+        "get notes select title",
+        "one",
+    );
+
+    // To a third node: the replica on n2 goes on, following it there.
+    let (status, body) = call(
+        port,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"to":"n3"}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""replica_on":"n2""#), "{body}");
+    assert_eq!(
+        query(port, "/t/acme/query", r#"put notes {title: "two"}"#).0,
+        200
+    );
+    until(
+        nodes[1].port,
+        "/t/acme/query",
+        "get notes select title",
+        "two",
+    );
+
+    // Onto the node holding its replica: that copy goes, and another is
+    // placed on the node holding the fewest.
+    let (status, body) = call(
+        port,
+        "POST",
+        "/_shard/tenants/acme/move",
+        r#"{"to":"n2"}"#,
+        None,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""replica_on":"n1""#), "{body}");
+    assert_eq!(placed(port, "acme"), ("n2".into(), Some("n1".into())));
+    assert_eq!(
+        query(port, "/t/acme/query", r#"put notes {title: "three"}"#).0,
+        200
+    );
+    until(
+        nodes[0].port,
+        "/t/acme/query",
+        "get notes select title",
+        "three",
+    );
+    assert!(!nodes[2].tenants.names().contains(&"acme".to_string()));
+}
+
+#[test]
+fn a_tenant_deleted_goes_from_its_replicas_node_too() {
+    let (nodes, port) = three("dl");
+    create(port, "acme", "n1");
+    assert!(nodes[1].tenants.names().contains(&"acme".to_string()));
+    assert_eq!(
+        call(port, "DELETE", "/_shard/tenants/acme", "", None).0,
+        204
+    );
+    for nd in &nodes {
+        assert!(!nd.tenants.names().contains(&"acme".to_string()));
+    }
+    assert!(!nodes[1].dir.join("acme.follows").exists());
+}
+
+/// A tenant following a node of its own does so again once its node starts
+/// over: which node, the file beside its own says.
+#[test]
+fn a_replica_follows_its_own_primary_again_after_its_node_starts_over() {
+    let (nodes, port) = three("rs");
+    create(port, "acme", "n1");
+    until(
+        nodes[1].port,
+        "/t/acme/query",
+        "get notes select title",
+        "one",
+    );
+    let copy = node_over("rs2b", None, |dir| {
+        for f in ["acme.fenec", "acme.follows"] {
+            std::fs::copy(nodes[1].dir.join(f), dir.join(f)).unwrap();
+        }
+    });
+    assert!(copy.tenants.resume_following().is_empty());
+    assert_eq!(
+        query(port, "/t/acme/query", r#"put notes {title: "two"}"#).0,
+        200
+    );
+    until(copy.port, "/t/acme/query", "get notes select title", "two");
+    let (status, body) = query(copy.port, "/t/acme/query", r#"put notes {title: "no"}"#);
+    assert_eq!(status, 403, "{body}");
+}

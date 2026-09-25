@@ -43,13 +43,14 @@ type Setup = Box<dyn Fn(&mut Database) -> Result<()> + Send + Sync>;
 
 /// How a node replicates its tenants: every tenant file is opened through a
 /// feed and serves `/t/<tenant>/_replication`, the way a single file serves
-/// `/_replication`. With `upstream` this node is the replica: each tenant it
+/// `/_replication`. With `upstream` this node is a standby: each tenant it
 /// opens follows the tenant of the same name on that node.
 ///
-/// A node, not a tenant, is the unit: the pair is what an operator moves
-/// traffic between, and a tenant's replica is then wherever its node's
-/// standby is. Spreading one node's tenants over several replicas would need
-/// a placement of its own, which the directory does not keep.
+/// A tenant can also follow a node of its own, whichever holds its primary
+/// ([`Tenants::follow`] with `from`), kept in `<tenant>.follows` beside its
+/// file: the router spreading one node's tenants over the others' replicas
+/// rather than onto a standby that waits idle, and takes them all when the
+/// node goes. The token is this one, the cluster's.
 pub struct Replicated {
     pub token: String,
     /// Bytes of writes kept per tenant for a replica that falls behind.
@@ -231,6 +232,59 @@ impl Tenants {
         self.dir.join(format!("{name}.fenec"))
     }
 
+    /// Where a tenant that follows a node of its own keeps that node's URL.
+    fn follows_path(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.follows"))
+    }
+
+    /// The node a tenant's file follows when it is a replica's: its own,
+    /// recorded by [`Self::follow`], or this node's standby upstream.
+    fn upstream_of(&self, name: &str) -> Option<String> {
+        let own = std::fs::read_to_string(self.follows_path(name)).ok();
+        match own.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+            Some(url) => Some(url),
+            None => self.repl.as_ref()?.upstream.clone(),
+        }
+    }
+
+    /// Records the node a tenant follows, whole or not at all: written
+    /// beside and renamed, as a tenant's file is installed.
+    fn record_upstream(&self, name: &str, url: Option<&str>) -> std::io::Result<()> {
+        let path = self.follows_path(name);
+        let Some(url) = url else {
+            return match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        };
+        let tmp = self.dir.join(format!("{name}.follows.writing"));
+        std::fs::File::create(&tmp)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(url.as_bytes())?;
+                f.sync_all()
+            })
+            .and_then(|_| std::fs::rename(&tmp, &path))
+    }
+
+    /// Opens every tenant that follows a node of its own, and on a standby
+    /// every tenant: a follower that is not running is a replica falling
+    /// behind, and nothing else opens a replica's tenant. What did not
+    /// open, and why.
+    pub fn resume_following(&self) -> Vec<(String, Refused)> {
+        let standby = self.repl.as_ref().is_some_and(|r| r.upstream.is_some());
+        let mut failed = Vec::new();
+        for name in self.names() {
+            if !standby && !self.follows_path(&name).exists() {
+                continue;
+            }
+            if let Err(e) = self.get(&name) {
+                failed.push((name, e));
+            }
+        }
+        failed
+    }
+
     fn now(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
@@ -315,10 +369,18 @@ impl Tenants {
     /// to make atomic between them.
     pub fn promote(&self, name: &str) -> std::result::Result<(u64, u64), Refused> {
         let t = self.get(name)?;
+        // Promoted, it follows nobody: the record would have the next open
+        // make it follow its old primary again.
+        let forget = |done| {
+            self.record_upstream(name, None)
+                .map_err(|e| Refused(500, format!("tenant `{name}` promoted, but {e}")))?;
+            Ok(done)
+        };
         if let Some(follower) = t.repl.as_ref().and_then(|r| r.follower()) {
-            return follower
+            let done = follower
                 .promote(fresh_id())
-                .map_err(|e| Refused(500, e.to_string()));
+                .map_err(|e| Refused(500, e.to_string()))?;
+            return forget(done);
         }
         // A replica's file with nothing following for it -- a node started
         // without --replica-of, after a failover left it unpromoted -- is
@@ -333,38 +395,71 @@ impl Tenants {
         g.fork(id)
             .and_then(|_| g.sync())
             .map_err(|e| Refused(500, e.to_string()))?;
-        Ok((g.change_seq(), id))
+        forget((g.change_seq(), id))
     }
 
-    /// Has a tenant follow the node this one is the replica of: a primary's
-    /// file made a replica's. What a node rejoining as the standby of the one
-    /// its tenants failed over to needs -- the writes it took that were never
-    /// sent are gone, the trade a failover makes -- and what the router asks
-    /// of a standby for each tenant as it records the pair.
-    pub fn follow(&self, name: &str) -> std::result::Result<(), Refused> {
+    /// Has a tenant follow `from`, the node its primary is on -- or, with
+    /// none, the node this one is the standby of: a primary's file made a
+    /// replica's, or a replica's made to follow the node its tenant moved
+    /// to. What the router asks of the node it places a replica on, and of
+    /// a node rejoining after a failover, for each tenant it held: the
+    /// writes that node took that were never sent are gone, the trade a
+    /// failover makes.
+    pub fn follow(&self, name: &str, from: Option<&str>) -> std::result::Result<(), Refused> {
         check_name(name)?;
-        if self.repl.as_ref().is_none_or(|r| r.upstream.is_none()) {
+        let Some(repl) = &self.repl else {
             return Err(Refused(
                 409,
-                "this node follows no other (--replica-of, --replication-token)".into(),
+                "this node replicates nothing (--replication-token)".into(),
             ));
+        };
+        match from {
+            Some(url) => {
+                crate::replication::Upstream::check_node(url).map_err(|_| {
+                    Refused(
+                        400,
+                        format!("`{url}` is not a node's address: http://host:port"),
+                    )
+                })?;
+            }
+            None if repl.upstream.is_none() => {
+                return Err(Refused(
+                    409,
+                    "this node is nobody's standby (--replica-of): name the node to follow, \
+                     {\"from\": \"http://host:port\"}"
+                        .into(),
+                ));
+            }
+            _ => {}
         }
+        let wanted = from.map(str::to_string).or_else(|| repl.upstream.clone());
         self.with_slot(name, |held| {
             self.refuse_if_shutting_down()?;
             let path = self.path(name);
             if let Held::Open(t) = &*held {
-                if t.read().history().following {
+                if t.read().history().following && self.upstream_of(name) == wanted {
                     return Ok(());
                 }
-                // Closed first: one instance over the file, always.
-                if Arc::strong_count(t) > 1 || t.is_frozen() {
-                    return Err(Refused(409, format!("tenant `{name}` is still in use")));
+                // Closed first: one instance over the file, always. What it
+                // served ends -- a primary's file made a replica's feeds a
+                // replica no longer -- and its follower, which holds the
+                // database rather than the tenant, is halted, or it would go
+                // on writing the file under the next instance.
+                if t.is_frozen() {
+                    return Err(Refused(409, format!("tenant `{name}` is frozen")));
                 }
+                release(t, name)?;
                 *held = Held::Closed;
             }
             if !path.exists() {
                 return Err(Refused(404, format!("no tenant `{name}` on this node")));
             }
+            self.record_upstream(name, from).map_err(|e| {
+                Refused(
+                    500,
+                    format!("could not record the node tenant `{name}` follows: {e}"),
+                )
+            })?;
             let t = self.open_as(name, &path, true)?;
             *held = Held::Open(t);
             Ok(())
@@ -423,8 +518,8 @@ impl Tenants {
         // and the old primary's image then wiped the writes taken since. A
         // rejoining node's tenants follow when told to (`follow`).
         let history = db.history().clone();
-        let upstream = self.repl.as_ref().and_then(|r| r.upstream.as_ref());
-        let following = match (upstream, history.following) {
+        let upstream = self.upstream_of(name);
+        let following = match (&upstream, history.following) {
             (Some(_), true) => true,
             (Some(_), false) if demote || history.lineage.is_empty() => {
                 db.follow(history.lineage.clone()).map_err(failed)?;
@@ -459,7 +554,7 @@ impl Tenants {
         // holds the database -- not the tenant -- while it runs; `close`
         // therefore keeps a tenant with a running follower open.
         let mut follower = None;
-        if let (Some(r), Some(url), true) = (&self.repl, upstream, following) {
+        if let (Some(r), Some(url), true) = (&self.repl, &upstream, following) {
             let f = Follower::new(
                 &format!("{}/t/{name}", url.trim_end_matches('/')),
                 r.token.clone(),
@@ -653,6 +748,9 @@ impl Tenants {
             if matches!(held, Held::Open(_)) || path.exists() {
                 return Err(Refused(409, format!("tenant `{name}` already exists")));
             }
+            // A tenant installed here is its primary: a record left by a
+            // replica of the same name deleted before would have it follow.
+            let _ = std::fs::remove_file(self.follows_path(name));
             let tmp = self.dir.join(format!("{name}.fenec.importing"));
             let written = std::fs::File::create(&tmp).and_then(|mut f| {
                 use std::io::Write;
@@ -677,26 +775,7 @@ impl Tenants {
         check_name(name)?;
         self.with_slot(name, |held| {
             if let Held::Open(t) = &*held {
-                t.hub.close();
-                // A replica's stream holds the tenant as a subscription
-                // does: it is ended for the same reason.
-                if let Some(repl) = &t.repl {
-                    repl.close_streams();
-                }
-                let deadline = Instant::now() + RELEASE_WAIT;
-                while Arc::strong_count(t) > 1 {
-                    if Instant::now() >= deadline {
-                        // The tenant stays, so everything it was told to end
-                        // goes on: left ended, it took writes its replicas
-                        // were never sent.
-                        t.hub.reopen();
-                        if let Some(repl) = &t.repl {
-                            repl.reopen_streams(format!("fenec-replica-{name}"));
-                        }
-                        return Err(Refused(409, format!("tenant `{name}` is still in use")));
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                release(t, name)?;
                 // The last `Arc`: dropping it syncs, and the file is closed
                 // before it is removed.
                 *held = Held::Closed;
@@ -708,6 +787,7 @@ impl Tenants {
             std::fs::remove_file(&path)
                 .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
             let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
+            let _ = std::fs::remove_file(self.follows_path(name));
             Ok(())
         })
     }
@@ -790,6 +870,31 @@ impl Tenants {
         }
         count
     }
+}
+
+/// Ends what holds an open tenant besides its slot -- its subscriptions, the
+/// replicas it feeds and its follower -- and waits up to [`RELEASE_WAIT`]
+/// for a request still running. A replica's stream holds the tenant as a
+/// subscription does, and is ended for the same reason. 409 when something
+/// does not let go, with everything started again: left ended, the tenant
+/// took writes its replicas were never sent.
+fn release(t: &Arc<Tenant>, name: &str) -> std::result::Result<(), Refused> {
+    t.hub.close();
+    if let Some(repl) = &t.repl {
+        repl.close_streams();
+    }
+    let deadline = Instant::now() + RELEASE_WAIT;
+    while Arc::strong_count(t) > 1 {
+        if Instant::now() >= deadline {
+            t.hub.reopen();
+            if let Some(repl) = &t.repl {
+                repl.reopen_streams(format!("fenec-replica-{name}"));
+            }
+            return Err(Refused(409, format!("tenant `{name}` is still in use")));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 pub struct Stats {

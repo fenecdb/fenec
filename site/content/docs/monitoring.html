@@ -176,6 +176,7 @@ stays; a standby router's replication stream is counted and not timed.</p>
 <tr><td><code>fenec_router_move_duration_seconds</code></td><td>histogram</td><td>how long a move that was done took, the tenant frozen for all of it, in buckets from 10 ms to 1 000 s</td></tr>
 <tr><td><code>fenec_router_connections</code></td><td>gauge</td><td>client connections open now, the scrape's own among them</td></tr>
 <tr><td><code>fenec_router_nodes</code>, <code>fenec_router_tenants{node}</code></td><td>gauge</td><td>the nodes in the directory, and the tenants placed on each</td></tr>
+<tr><td><code>fenec_router_replicas{node}</code></td><td>gauge</td><td>the replicas of their own each node holds, with <code>--replicas</code>; a node's count falls to 0 after a failover took the node's replicas away, until <code>POST /_shard/replicas</code></td></tr>
 <tr><td><code>fenec_router_tenants_moving</code></td><td>gauge</td><td>tenants a move began on and did not record done — served from where they were, and cleared by moving them again</td></tr>
 <tr><td><code>fenec_router_following</code></td><td>gauge</td><td>1 on a standby router; its directory's <code>fenec_replica_*</code> gauges follow, and a primary's <code>fenec_replicas</code></td></tr>
 </tbody>

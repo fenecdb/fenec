@@ -720,16 +720,15 @@ fn serve_dir(
         "serving tenants from: {dir}  ({} on disk)",
         tenants.names().len()
     );
-    // A replica node's tenants have to be open to follow: nothing else
-    // touches them there, and a follower that is not running is a replica
-    // falling behind. Opening one starts its follower.
+    // A replica's tenants have to be open to follow: nothing else touches
+    // them there, and a follower that is not running is a replica falling
+    // behind. Opening one starts its follower -- every tenant on a standby,
+    // and elsewhere those following a node of their own.
     if let Some(url) = &follows {
         fenec_http::log!("following the tenants of: {url}");
-        for name in tenants.names() {
-            if let Err(Refused(status, msg)) = tenants.get(&name) {
-                fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
-            }
-        }
+    }
+    for (name, Refused(status, msg)) in tenants.resume_following() {
+        fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
     }
 
     // The pg listener, when an address was named: there the database in the

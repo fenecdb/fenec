@@ -56,6 +56,10 @@ pub struct Config {
     pub idle_timeout: Option<Duration>,
     /// Connect and read bound when talking to a node.
     pub upstream_timeout: Duration,
+    /// Whether a tenant created on a node in no pair gets a replica of its
+    /// own on another node (`--replicas`): spread over the nodes rather
+    /// than kept whole on an idle standby.
+    pub replicas: bool,
 }
 
 impl Default for Config {
@@ -68,6 +72,7 @@ impl Default for Config {
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
             upstream_timeout: Duration::from_secs(60),
+            replicas: false,
         }
     }
 }
@@ -389,7 +394,10 @@ impl Router {
     ///                                       whose --replica-of follows this
     ///                                       one, where its tenants are copied
     /// POST   /_shard/nodes/<n>/failover      promote this node's tenants on
-    ///                                       its standby and route them there
+    ///                                       its standby -- or each on its own
+    ///                                       replica -- and route them there
+    /// POST   /_shard/replicas                  give every tenant in no pair
+    ///                                       that has no replica one
     /// ```
     pub fn admin(&self, req: &Request) -> Response {
         if let Some(refused) = self.refused(req) {
@@ -419,6 +427,7 @@ impl Router {
             (Method::Put, ["nodes", n]) => self.set_node(n, &body),
             (Method::Delete, ["nodes", n]) => self.remove_node(n),
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
+            (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants()),
             (Method::Put, ["tenants", t]) => self.create(t, field(&body, "node")),
             (Method::Delete, ["tenants", t]) => self.delete(t),
@@ -470,6 +479,14 @@ impl Router {
                 out.sample("fenec_router_tenants", &[("node", node)], n);
             }
             out.family(
+                "fenec_router_replicas",
+                "gauge",
+                "Tenants' replicas of their own each node holds.",
+            );
+            for (node, n) in dir.replicas_by_node() {
+                out.sample("fenec_router_replicas", &[("node", node)], n);
+            }
+            out.family(
                 "fenec_router_tenants_moving",
                 "gauge",
                 "Tenants a move began on and has not recorded done: served from where they were.",
@@ -514,13 +531,17 @@ impl Router {
     }
 
     fn list_tenants(&self) -> Response {
-        let items: Vec<String> = self
-            .read_dir()
+        let dir = self.read_dir();
+        let items: Vec<String> = dir
             .tenants()
             .iter()
             .map(|(name, p)| {
+                let replica = match dir.replica(name) {
+                    Some(r) => format!(",\"replica\":{}", quote(r)),
+                    None => String::new(),
+                };
                 format!(
-                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"}}",
+                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}}}",
                     quote(name),
                     quote(&p.node),
                     if p.state == State::Moving {
@@ -637,24 +658,222 @@ impl Router {
         }
     }
 
+    /// Where a tenant on `primary` would keep its replica: the node holding
+    /// the fewest of `primary`'s replicas, then the fewest tenants and
+    /// replicas, besides `primary` and those in a pair -- a standby's files
+    /// follow its node's, and a paired node's tenants are replicated by its
+    /// standby. Fewest overall alone had every tenant of one node follow on
+    /// the same other: a tie went by name each time, and a failover of the
+    /// node put all its tenants there. Among `holding`, the nodes with a
+    /// copy of the tenant already, first: its old primary after a failover
+    /// follows from where it is, and nothing is left behind there.
+    fn replica_node(&self, primary: &str, holding: &[String]) -> Option<String> {
+        let dir = self.read_dir();
+        let (tenants, _) = dir.load_by_node();
+        let replicas = dir.replicas_by_node();
+        let from = dir.replicas_from(primary);
+        let held = |n: &str| tenants.get(n).unwrap_or(&0) + replicas.get(n).unwrap_or(&0);
+        let free =
+            |n: &&String| n.as_str() != primary && dir.standby(n).is_none() && !dir.is_standby(n);
+        let least = |it: &mut dyn Iterator<Item = &String>| {
+            it.min_by_key(|n| (*from.get(n.as_str()).unwrap_or(&0), held(n), n.to_string()))
+                .cloned()
+        };
+        least(
+            &mut dir
+                .nodes()
+                .keys()
+                .filter(free)
+                .filter(|n| holding.contains(n)),
+        )
+        .or_else(|| least(&mut dir.nodes().keys().filter(free)))
+    }
+
+    /// Gives `tenant`, on `primary`, a replica on `on`: the tenant created
+    /// there -- or found there, a copy a failover left -- and made to follow
+    /// `primary`. Recorded once it follows, not before.
+    fn attach(&self, tenant: &str, primary: &str, on: &str) -> std::result::Result<(), String> {
+        let (p, r) = {
+            let dir = self.read_dir();
+            let node = |n: &str| dir.node(n).cloned().ok_or(format!("no node `{n}`"));
+            (node(primary)?, node(on)?)
+        };
+        let base = format!("/_admin/tenants/{tenant}");
+        let from = format!("{{\"from\":{}}}", quote(&format!("http://{}", p.addr)));
+        for (method, target, body, ok) in [
+            ("PUT", base.clone(), &b""[..], &[201u16, 409][..]),
+            (
+                "POST",
+                format!("{base}/follow"),
+                from.as_bytes(),
+                &[200][..],
+            ),
+        ] {
+            match self.pool.call(&r.addr, method, &target, &r.token, body) {
+                Ok((status, _)) if ok.contains(&status) => {}
+                Ok((status, body)) => {
+                    return Err(format!(
+                        "`{on}` answered {status}: {}",
+                        String::from_utf8_lossy(&body).trim()
+                    ))
+                }
+                Err(e) => return Err(format!("`{on}` did not answer: {e}")),
+            }
+        }
+        self.write_dir()
+            .set_replica(tenant, Some(on))
+            .map_err(|e| message(&e))
+    }
+
+    /// Takes a tenant's replica off its node and out of the directory. A
+    /// node that does not answer keeps its copy, which follows nothing the
+    /// router routes to; the record goes either way.
+    fn detach(&self, tenant: &str) -> Option<String> {
+        let (on, node) = {
+            let dir = self.read_dir();
+            let on = dir.replica(tenant)?.to_string();
+            let node = dir.node(&on).cloned();
+            (on, node)
+        };
+        let why = node.and_then(|n| {
+            let target = format!("/_admin/tenants/{tenant}");
+            match self.pool.call(&n.addr, "DELETE", &target, &n.token, b"") {
+                Ok((204 | 404, _)) => None,
+                Ok((status, body)) => Some(format!(
+                    "`{on}` answered {status}: {}",
+                    String::from_utf8_lossy(&body).trim()
+                )),
+                Err(e) => Some(format!("`{on}` did not answer: {e}")),
+            }
+        });
+        match self.write_dir().set_replica(tenant, None) {
+            Err(e) => Some(message(&e)),
+            Ok(()) => why,
+        }
+    }
+
+    /// A replica for a tenant created or moved onto `primary`, where the
+    /// router gives them (`--replicas`) and `primary` is in no pair: the
+    /// node it went on, or why none did -- the tenant goes on without one
+    /// until a repair.
+    fn replicate(
+        &self,
+        tenant: &str,
+        primary: &str,
+    ) -> Option<std::result::Result<String, String>> {
+        if !self.cfg.replicas || self.read_dir().standby(primary).is_some() {
+            return None;
+        }
+        Some(match self.replica_node(primary, &[]) {
+            None => Err("there is no other node to keep it".into()),
+            Some(on) => self.attach(tenant, primary, &on).map(|_| on),
+        })
+    }
+
+    /// `POST /_shard/replicas`: every tenant in no pair, not moving, without
+    /// a replica, is given one -- on a node that holds a copy already where
+    /// there is one, so a node back from a failover has its old primaries
+    /// follow the new ones rather than lie there.
+    fn repair(&self) -> Response {
+        let holding: Vec<(String, Vec<String>)> = {
+            let nodes: Vec<(String, Node)> = self
+                .read_dir()
+                .nodes()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            nodes
+                .into_iter()
+                .filter_map(|(name, n)| {
+                    let (status, body) = self
+                        .pool
+                        .call(&n.addr, "GET", "/_admin/tenants", &n.token, b"")
+                        .ok()?;
+                    (status == 200).then(|| (name, names_in(&body)))
+                })
+                .collect()
+        };
+        let wanting: Vec<(String, String)> = {
+            let dir = self.read_dir();
+            dir.tenants()
+                .into_iter()
+                .filter(|(t, p)| {
+                    p.state == State::Active
+                        && dir.replica(t).is_none()
+                        && dir.standby(&p.node).is_none()
+                })
+                .map(|(t, p)| (t, p.node))
+                .collect()
+        };
+        let (mut done, mut failed) = (Vec::new(), Vec::new());
+        for (tenant, primary) in wanting {
+            let Ok(_claim) = self.claim(&tenant) else {
+                failed.push(why(&tenant, "another operation is in progress"));
+                continue;
+            };
+            let copies: Vec<String> = holding
+                .iter()
+                .filter(|(_, names)| names.contains(&tenant))
+                .map(|(node, _)| node.clone())
+                .collect();
+            let placed = match self.replica_node(&primary, &copies) {
+                None => Err("there is no other node to keep it".to_string()),
+                Some(on) => self.attach(&tenant, &primary, &on).map(|_| on),
+            };
+            match placed {
+                Ok(on) => done.push(format!(
+                    "{{\"tenant\":{},\"replica\":{}}}",
+                    quote(&tenant),
+                    quote(&on)
+                )),
+                Err(e) => failed.push(why(&tenant, &e)),
+            }
+        }
+        Response::json(
+            if failed.is_empty() { 200 } else { 502 },
+            format!(
+                "{{\"replicated\":[{}],\"failed\":[{}]}}",
+                done.join(","),
+                failed.join(",")
+            ),
+        )
+    }
+
     /// Moves every tenant of `name` to the node its writes went to: each is
     /// promoted there -- its history forks and it stops following -- and the
     /// directory points at it. One tenant at a time, because they are
     /// separate databases: there is nothing to make atomic between them, and
     /// one that will not promote leaves the others promoted and says so.
     fn failover(&self, name: &str) -> Outcome<Response> {
+        if self.read_dir().node(name).is_none() {
+            return Err(Fail(404, format!("no node `{name}`")));
+        }
+        if self.read_dir().standby(name).is_none() {
+            // Tenants of its own with replicas, or others' replicas on it:
+            // with neither, there is nothing to fail over to.
+            let dir = self.read_dir();
+            let replicated = dir
+                .tenants()
+                .iter()
+                .any(|(t, p)| p.node == name && dir.replica(t).is_some())
+                || !dir.replicas_on(name).is_empty();
+            drop(dir);
+            if !replicated {
+                return Err(Fail(
+                    409,
+                    format!(
+                        "node `{name}` has no standby, and none of its tenants a replica: \
+                         PUT /_shard/nodes/{name} {{standby}}, or POST /_shard/replicas"
+                    ),
+                ));
+            }
+            return Ok(self.failover_replicas(name));
+        }
         let (to, standby) = {
             let dir = self.read_dir();
             let s = dir
                 .standby(name)
-                .ok_or_else(|| {
-                    Fail(
-                        409,
-                        format!(
-                            "node `{name}` has no standby: PUT /_shard/nodes/{name} {{standby}}"
-                        ),
-                    )
-                })?
+                .ok_or_else(|| Fail(409, format!("node `{name}` has no standby")))?
                 .to_string();
             let n = dir
                 .node(&s)
@@ -729,6 +948,84 @@ impl Router {
             if failed.is_empty() { 200 } else { 502 },
             body,
         ))
+    }
+
+    /// The failover of a node in no pair: each of its tenants promoted on
+    /// its own replica and routed there, so its tenants spread over the
+    /// nodes that held their replicas. One at a time, as a pair's are. The
+    /// tenants whose replica it held have none now, and are named: a repair
+    /// gives them one.
+    fn failover_replicas(&self, name: &str) -> Response {
+        let (tenants, lost) = {
+            let dir = self.read_dir();
+            let tenants: Vec<(String, Option<String>)> = dir
+                .tenants()
+                .into_iter()
+                .filter(|(_, p)| p.node == name)
+                .map(|(t, _)| {
+                    let r = dir.replica(&t).map(str::to_string);
+                    (t, r)
+                })
+                .collect();
+            (tenants, dir.replicas_on(name))
+        };
+        let (mut promoted, mut failed) = (Vec::new(), Vec::new());
+        for (tenant, replica) in tenants {
+            let Ok(_claim) = self.claim(&tenant) else {
+                failed.push(why(&tenant, "another operation is in progress"));
+                continue;
+            };
+            let Some(to) = replica else {
+                failed.push(why(&tenant, "it has no replica"));
+                continue;
+            };
+            let Some(node) = self.read_dir().node(&to).cloned() else {
+                failed.push(why(&tenant, &format!("no node `{to}`")));
+                continue;
+            };
+            let target = format!("/_admin/tenants/{tenant}/promote");
+            match self
+                .pool
+                .call(&node.addr, "POST", &target, &node.token, b"")
+            {
+                Ok((200, _)) => {
+                    let mut dir = self.write_dir();
+                    match dir
+                        .place(&tenant, &to, State::Active)
+                        .and_then(|_| dir.set_replica(&tenant, None))
+                    {
+                        Ok(()) => promoted.push(format!(
+                            "{{\"tenant\":{},\"to\":{}}}",
+                            quote(&tenant),
+                            quote(&to)
+                        )),
+                        Err(e) => failed.push(why(&tenant, &message(&e))),
+                    }
+                }
+                Ok((status, body)) => failed.push(why(
+                    &tenant,
+                    &format!("{status}: {}", String::from_utf8_lossy(&body).trim()),
+                )),
+                Err(e) => failed.push(why(&tenant, &format!("`{to}` did not answer: {e}"))),
+            }
+        }
+        let mut unreplicated = Vec::new();
+        for tenant in lost {
+            match self.write_dir().set_replica(&tenant, None) {
+                Ok(()) => unreplicated.push(quote(&tenant)),
+                Err(e) => failed.push(why(&tenant, &message(&e))),
+            }
+        }
+        Response::json(
+            if failed.is_empty() { 200 } else { 502 },
+            format!(
+                "{{\"node\":{},\"promoted\":[{}],\"failed\":[{}],\"unreplicated\":[{}]}}",
+                quote(name),
+                promoted.join(","),
+                failed.join(","),
+                unreplicated.join(",")
+            ),
+        )
     }
 
     fn remove_node(&self, name: &str) -> Outcome<Response> {
@@ -838,16 +1135,21 @@ impl Router {
         if let Some(w) = &warning {
             fenec_http::log!("tenant `{tenant}` has no replica yet: {w}");
         }
+        let own = self.replicate(tenant, &name);
+        if let Some(Err(w)) = &own {
+            fenec_http::log!("tenant `{tenant}` has no replica yet: {w}");
+        }
         Ok(Response::json(
             201,
             format!(
-                "{{\"tenant\":{},\"node\":{}{}}}",
+                "{{\"tenant\":{},\"node\":{}{}{}}}",
                 quote(tenant),
                 quote(&name),
                 match &warning {
                     None => String::new(),
                     Some(w) => format!(",\"replica\":{}", quote(w)),
-                }
+                },
+                replica_field(&own)
             ),
         ))
     }
@@ -860,6 +1162,7 @@ impl Router {
             .cloned()
             .ok_or_else(|| Fail(404, format!("no tenant `{tenant}` in the directory")))?;
         let n = self.node(&placement.node)?;
+        let replica = self.read_dir().replica(tenant).map(str::to_string);
         let (status, body) = self
             .pool
             .call(
@@ -886,6 +1189,16 @@ impl Router {
             &format!("/_admin/tenants/{tenant}"),
         ) {
             fenec_http::log!("tenant `{tenant}`'s replica was not removed: {w}");
+        }
+        // Its own replica: the record went with the tenant, the file here.
+        if let Some(r) = replica.and_then(|r| self.read_dir().node(&r).cloned()) {
+            let target = format!("/_admin/tenants/{tenant}");
+            if !matches!(
+                self.pool.call(&r.addr, "DELETE", &target, &r.token, b""),
+                Ok((204 | 404, _))
+            ) {
+                fenec_http::log!("tenant `{tenant}`'s replica on {} stayed", r.addr);
+            }
         }
         Ok(Response::empty(204))
     }
@@ -926,6 +1239,16 @@ impl Router {
         let src = self.node(&from)?;
         let dst = self.node(to)?;
         let base = format!("/_admin/tenants/{tenant}");
+        // A replica on the target goes first: the tenant arrives there as its
+        // primary, and a node holds one copy of a tenant. It gets another
+        // replica once it has moved.
+        let mut replica = self.read_dir().replica(tenant).map(str::to_string);
+        if replica.as_deref() == Some(to) {
+            if let Some(w) = self.detach(tenant) {
+                fenec_http::log!("tenant `{tenant}`'s replica on `{to}` stayed: {w}");
+            }
+            replica = None;
+        }
 
         self.write_dir()
             .place(tenant, &from, State::Moving)
@@ -983,6 +1306,21 @@ impl Router {
             fenec_http::log!("tenant `{tenant}`'s replica on `{from}`'s standby stayed: {w}");
         }
 
+        // Its replica follows it there: the image carried the history, so
+        // the copy goes on from where it stood. One that will not is taken
+        // off, and the tenant given another.
+        let own = match replica {
+            Some(r) => match self.attach(tenant, to, &r) {
+                Ok(()) => Some(Ok(r)),
+                Err(w) => {
+                    fenec_http::log!("tenant `{tenant}`'s replica on `{r}` did not follow it: {w}");
+                    let _ = self.detach(tenant);
+                    self.replicate(tenant, to)
+                }
+            },
+            None => self.replicate(tenant, to),
+        };
+
         // From here the tenant is on `to`. The source copy ends its streams
         // as it goes, and the clients reconnect through the router.
         let cleanup = self.pool.call(&src.addr, "DELETE", &base, &src.token, b"");
@@ -997,13 +1335,14 @@ impl Router {
         Ok(Response::json(
             200,
             format!(
-                "{{\"tenant\":{},\"from\":{},\"to\":{},\"bytes\":{},\"ms\":{},\"source_removed\":{}}}",
+                "{{\"tenant\":{},\"from\":{},\"to\":{},\"bytes\":{},\"ms\":{},\"source_removed\":{}{}}}",
                 quote(tenant),
                 quote(&from),
                 quote(to),
                 image.len(),
                 started.elapsed().as_millis(),
-                !left
+                !left,
+                replica_field(&own)
             ),
         ))
     }
@@ -1035,6 +1374,33 @@ fn expect(got: std::io::Result<(u16, Vec<u8>)>, want: u16, node: &str) -> Outcom
         )),
         Err(e) => Err(Fail(502, format!("node `{node}` did not answer: {e}"))),
     }
+}
+
+/// `{tenant, why}`, a failure's entry in a list of them.
+fn why(tenant: &str, why: &str) -> String {
+    format!("{{\"tenant\":{},\"why\":{}}}", quote(tenant), quote(why))
+}
+
+/// What an answer says of a tenant's own replica: where it went, or why it
+/// went nowhere.
+fn replica_field(own: &Option<std::result::Result<String, String>>) -> String {
+    match own {
+        None => String::new(),
+        Some(Ok(on)) => format!(",\"replica_on\":{}", quote(on)),
+        Some(Err(w)) => format!(",\"unreplicated\":{}", quote(w)),
+    }
+}
+
+/// The names in a node's `GET /_admin/tenants`, a JSON array of strings.
+fn names_in(body: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(body);
+    text.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|n| n.trim().trim_matches('"').to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 /// Headers that describe one connection, not the message: never forwarded.

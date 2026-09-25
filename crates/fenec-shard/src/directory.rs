@@ -15,13 +15,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-const SCHEMA: [&str; 3] = [
+const SCHEMA: [&str; 4] = [
     "create collection if not exists nodes (name text @hash, addr text, token text)",
     "create collection if not exists tenants (name text @hash, node text @hash, state text)",
     // Which node replicates which. A collection of its own rather than a
     // field on `nodes`: a directory written before this existed opens as it
     // is, and the engine has no schema migration to add one.
     "create collection if not exists pairs (node text @hash, standby text)",
+    // Which node holds a tenant's replica, where it has one of its own
+    // rather than its node's standby -- a collection of its own for the
+    // reason `pairs` is.
+    "create collection if not exists replicas (tenant text @hash, node text @hash)",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +69,9 @@ pub struct Placement {
 /// Which node a node's tenants are replicated to.
 pub type Pairs = HashMap<String, String>;
 
+/// Which node holds a tenant's replica.
+pub type Replicas = HashMap<String, String>;
+
 pub struct Directory {
     /// Shared, because a standby follows it: the follower thread applies the
     /// primary's writes to the same database (`fenec-shard --replica-of`).
@@ -79,6 +86,7 @@ pub struct Directory {
     nodes: BTreeMap<String, Node>,
     tenants: HashMap<String, Placement>,
     pairs: Pairs,
+    replicas: Replicas,
     /// Whether the maps exist: a standby's arrive with the primary's first
     /// writes, and until then it knows of no tenant rather than that there
     /// is none.
@@ -90,12 +98,14 @@ pub struct Directory {
     ids: Ids,
 }
 
-/// Document id -> key, one map a collection: nodes, tenants, pairs.
+/// Document id -> key, one map a collection: nodes, tenants, pairs,
+/// replicas.
 #[derive(Default)]
 struct Ids {
     nodes: HashMap<DocId, String>,
     tenants: HashMap<DocId, String>,
     pairs: HashMap<DocId, String>,
+    replicas: HashMap<DocId, String>,
     kept: bool,
 }
 
@@ -130,6 +140,7 @@ impl Directory {
             nodes: BTreeMap::new(),
             tenants: HashMap::new(),
             pairs: Pairs::new(),
+            replicas: Replicas::new(),
             arrived: false,
             ids: Ids::default(),
         };
@@ -186,11 +197,17 @@ impl Directory {
             ids.pairs.insert(id, text(&row[0]));
             pairs.insert(text(&row[0]), text(&row[1]));
         }
+        let mut replicas = Replicas::new();
+        for (id, row) in rows(&g, "get replicas select tenant, node")? {
+            ids.replicas.insert(id, text(&row[0]));
+            replicas.insert(text(&row[0]), text(&row[1]));
+        }
         self.seq = g.change_seq();
         self.adopted = g.adoptions();
         self.nodes = nodes;
         self.tenants = tenants;
         self.pairs = pairs;
+        self.replicas = replicas;
         self.ids = ids;
         self.arrived = g.collection("tenants").is_ok();
         Ok(())
@@ -208,7 +225,7 @@ impl Directory {
         if !self.arrived || !self.ids.kept || g.adoptions() != self.adopted {
             return Ok(false);
         }
-        // All three read before any map changes, so a collection the ring
+        // All four read before any map changes, so a collection the ring
         // cannot answer for leaves the maps as they were for the reload.
         let changes = |coll: &str, fields: &[&str]| -> Result<Option<ChangeBatch>> {
             let project: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
@@ -218,10 +235,11 @@ impl Directory {
                 Err(e) => Err(e),
             }
         };
-        let (Some(nodes), Some(tenants), Some(pairs)) = (
+        let (Some(nodes), Some(tenants), Some(pairs), Some(replicas)) = (
             changes("nodes", &["name", "addr", "token"])?,
             changes("tenants", &["name", "node", "state"])?,
             changes("pairs", &["node", "standby"])?,
+            changes("replicas", &["tenant", "node"])?,
         ) else {
             return Ok(false);
         };
@@ -237,6 +255,10 @@ impl Directory {
         apply(&mut ids.pairs, pairs, |k, v| match v {
             Some(v) => drop(self.pairs.insert(k.into(), text(&v[1]))),
             None => drop(self.pairs.remove(k)),
+        });
+        apply(&mut ids.replicas, replicas, |k, v| match v {
+            Some(v) => drop(self.replicas.insert(k.into(), text(&v[1]))),
+            None => drop(self.replicas.remove(k)),
         });
         self.seq = g.change_seq();
         Ok(true)
@@ -274,6 +296,67 @@ impl Directory {
                     self.run("put pairs {node: $1, standby: $2}", &params)?;
                 }
                 self.pairs.insert(node.into(), s.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The node holding a tenant's replica of its own, if it has one.
+    pub fn replica(&self, tenant: &str) -> Option<&str> {
+        self.replicas.get(tenant).map(String::as_str)
+    }
+
+    /// The tenants whose replica `node` holds, sorted.
+    pub fn replicas_on(&self, node: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .replicas
+            .iter()
+            .filter(|(_, n)| n.as_str() == node)
+            .map(|(t, _)| t.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The replicas of `primary`'s tenants on each node that holds any.
+    pub fn replicas_from(&self, primary: &str) -> BTreeMap<&str, usize> {
+        let mut by = BTreeMap::new();
+        for (t, n) in &self.replicas {
+            if self.tenants.get(t).is_some_and(|p| p.node == primary) {
+                *by.entry(n.as_str()).or_default() += 1;
+            }
+        }
+        by
+    }
+
+    /// The replicas on each node, every node named.
+    pub fn replicas_by_node(&self) -> BTreeMap<&str, usize> {
+        let mut by: BTreeMap<&str, usize> = self.nodes.keys().map(|n| (n.as_str(), 0)).collect();
+        for n in self.replicas.values() {
+            *by.entry(n.as_str()).or_default() += 1;
+        }
+        by
+    }
+
+    /// Records (or clears) the node holding a tenant's replica.
+    pub fn set_replica(&mut self, tenant: &str, node: Option<&str>) -> Result<()> {
+        match node {
+            None if self.replicas.contains_key(tenant) => {
+                self.run(
+                    "del replicas where tenant = $1",
+                    &[Value::Text(tenant.into())],
+                )?;
+                self.replicas.remove(tenant);
+            }
+            None => {}
+            Some(n) => {
+                let params = [Value::Text(tenant.into()), Value::Text(n.into())];
+                if self.replicas.contains_key(tenant) {
+                    self.run("set replicas {node: $2} where tenant = $1", &params)?;
+                } else {
+                    self.run("put replicas {tenant: $1, node: $2}", &params)?;
+                }
+                self.replicas.insert(tenant.into(), n.into());
             }
         }
         Ok(())
@@ -352,6 +435,10 @@ impl Directory {
         for n in holders {
             self.set_standby(&n, None)?;
         }
+        // And the replicas on it: those tenants have none until a repair.
+        for t in self.replicas_on(name) {
+            self.set_replica(&t, None)?;
+        }
         Ok(())
     }
 
@@ -380,7 +467,7 @@ impl Directory {
     pub fn remove_tenant(&mut self, tenant: &str) -> Result<()> {
         self.run("del tenants where name = $1", &[Value::Text(tenant.into())])?;
         self.tenants.remove(tenant);
-        Ok(())
+        self.set_replica(tenant, None)
     }
 
     /// One statement, then a sync: a directory change the router has
@@ -501,6 +588,40 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A tenant's replica is kept with the directory, and goes with the
+    /// tenant, or with the node that held it.
+    #[test]
+    fn a_replica_is_kept_and_goes_with_its_tenant_or_node() {
+        let path = std::env::temp_dir().join(format!("fenec-dir-r-{}.fenec", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut d = Directory::open(&path).unwrap();
+            for n in ["n1", "n2", "n3"] {
+                d.set_node(n, node(n)).unwrap();
+            }
+            d.place("acme", "n1", State::Active).unwrap();
+            d.place("beta", "n2", State::Active).unwrap();
+            d.place("gamma", "n1", State::Active).unwrap();
+            d.set_replica("acme", Some("n2")).unwrap();
+            d.set_replica("beta", Some("n3")).unwrap();
+            d.set_replica("gamma", Some("n3")).unwrap();
+            d.set_replica("acme", Some("n3")).unwrap();
+        }
+        let mut d = Directory::open(&path).unwrap();
+        assert_eq!(d.replica("acme"), Some("n3"));
+        assert_eq!(d.replicas_on("n3"), ["acme", "beta", "gamma"]);
+        assert_eq!(d.replicas_by_node()["n2"], 0);
+        d.remove_tenant("gamma").unwrap();
+        assert_eq!(d.replica("gamma"), None);
+        d.remove_tenant("beta").unwrap();
+        d.remove_node("n3").unwrap();
+        assert_eq!(d.replica("acme"), None);
+        let d = Directory::open(&path).unwrap();
+        assert_eq!(d.replica("acme"), None);
+        assert!(d.replicas_on("n3").is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Writes made underneath the directory, as a standby's arrive from its
     /// primary.
     fn underneath(d: &Directory, sql: &str) {
@@ -508,11 +629,14 @@ mod tests {
         g.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
     }
 
-    /// The three maps, in an order that does not depend on hashing.
+    /// The four maps, in an order that does not depend on hashing.
     fn maps(d: &Directory) -> String {
         let mut pairs: Vec<String> = d.pairs.iter().map(|(k, v)| format!("{k}>{v}")).collect();
         pairs.sort();
-        format!("{:?} {:?} {pairs:?}", d.nodes(), d.tenants())
+        let mut replicas: Vec<String> =
+            d.replicas.iter().map(|(k, v)| format!("{k}@{v}")).collect();
+        replicas.sort();
+        format!("{:?} {:?} {pairs:?} {replicas:?}", d.nodes(), d.tenants())
     }
 
     /// Catching up from the change ring leaves the maps a read of them
@@ -539,6 +663,10 @@ mod tests {
             r#"set nodes {addr: "a1b"} where name = "n1""#,
             r#"put nodes {name: "n3", addr: "a3", token: "t"}"#,
             r#"del nodes where name = "n3""#,
+            r#"put replicas {tenant: "acme", node: "n1"}"#,
+            r#"put replicas {tenant: "beta2", node: "n2"}"#,
+            r#"set replicas {node: "n2"} where tenant = "acme""#,
+            r#"del replicas where tenant = "beta2""#,
         ] {
             underneath(&d, sql);
             assert!(d.stale());
