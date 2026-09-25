@@ -19,6 +19,7 @@
 //! # Ok::<(), fenec_core::error::Error>(())
 //! ```
 
+pub mod args;
 pub mod follow;
 pub mod load;
 pub mod map;

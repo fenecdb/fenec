@@ -26,6 +26,7 @@ make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
+make mirror-bench  # fenec-pg --follow: commit to a subscriber, a server killed and started again
 make small         # smallest `fenec` binary: --profile cli --no-default-features
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds the pg wire)
@@ -70,11 +71,12 @@ fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
      |                                fenec-catalog (pg_catalog SQL, core only)
 fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
      |                     \
-fenec-pg    (wire protocol:  fenec-shard (tenant router: directory,
-     |      server AND client,            placement, move)
-     |      catalog from fenec-catalog)
+fenec-wire  (pg wire:        fenec-shard (tenant router: directory,
+     |      framing, client)              placement, move)
 fenec-import (SQLite file reader + PG COPY source + --follow)
      |
+fenec-pg    (wire protocol server, catalog from fenec-catalog,
+     |      --follow running the importer's follower)
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
 ```
 
@@ -104,7 +106,7 @@ image.
 ## Invariants worth knowing before you change things
 
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
-`fenec-http`, `fenec-pg`, `fenec-import`, `fenec-shard`, `fenec-catalog`. The WASM output has to stay small and
+`fenec-http`, `fenec-wire`, `fenec-pg`, `fenec-import`, `fenec-shard`, `fenec-catalog`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 (`str::parse` drags in a 12 KB table -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
@@ -687,7 +689,21 @@ which would lose the rows it never reached. An update arrives without its
 TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
 before each such read cost the batching, 5 900 rows/s against 17 100. Commit
-to visible: p50 0.32 ms (`make follow-bench`).
+to visible: p50 0.32 ms (`make follow-bench`). `fenec-pg --follow` runs the
+same follower on a thread of the server's, over the database it serves, so
+the mirror is served over the pg wire, HTTP and subscriptions with no second
+process over the file -- two corrupt it (`fenec-pg/src/mirror.rs`). The
+importer's options come as `--follow-index` and the rest
+(`fenec_import::args`, which `fenec import` reads its own with too). The
+collection takes no write but the follower thread's (a write hook, 25006):
+the next change from PostgreSQL would write over one, or a copy made again
+forget it. The follower stops at the server's shutdown flag, and the
+shutdown waits for it (`server::before_shutdown`, 5 s at most, past which a
+copy still being made is left for the next start) before its checkpoint;
+an error it cannot wait out ends the process rather than leave it serving
+a mirror that no longer moves. This is why the pg wire's framing and client
+are `fenec-wire`'s: in fenec-pg they made the importer depend on the
+server, which could then not run it. A subscriber hears a PostgreSQL commit 0.15 ms after it returned at the median, a row inserted with a vector under HNSW 0.33 ms (`make mirror-bench`); a server killed while the table was written to held every row 880 ms after it started again. The follower adds 178 KB to `fenec-pg`.
 
 **The catalog is run, not matched.** psql's `\d`, JDBC's `DatabaseMetaData`
 and DBeaver send SQL over `pg_catalog` -- joins, `CASE`, `regclass` casts,

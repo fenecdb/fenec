@@ -1,6 +1,6 @@
 //! PostgreSQL wire protocol v3 -- message encoding/decoding.
 //!
-//! Referans: https://www.postgresql.org/docs/current/protocol-message-formats.html
+//! Reference: https://www.postgresql.org/docs/current/protocol-message-formats.html
 //! Only the subset fenecdb needs; every value is sent in text format (format
 //! code 0), which every client supports.
 
@@ -30,7 +30,7 @@ pub const OID_FLOAT8: i32 = 701;
 /// rather than the zoneless `timestamp` (1114).
 pub const OID_TIMESTAMPTZ: i32 = 1184;
 /// A parameter whose type was not resolved. Seeing this, the client sends
-/// the value as text; on the server side [`decode_param`](crate::server) infers it.
+/// the value as text; on the server side fenec-pg's `decode_param` infers it.
 pub const OID_UNSPECIFIED: i32 = 0;
 
 pub struct Writer {

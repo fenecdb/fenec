@@ -117,6 +117,22 @@ usage: fenec-pg [options]
       --replication-buffer <MiB>  writes kept for replicas that fall behind
                             default: 64. One further behind is sent an image
 
+      --follow <url>        mirror a table of the PostgreSQL server at
+                            postgres://user@host/db into --file, and serve it:
+                            its copy when there is no whole one, then its
+                            changes as they commit, through a logical
+                            replication slot. The collection takes no write
+                            but the follower's (25006)
+      --follow-table <name> the table (required with --follow)
+      --follow-into <name>  the collection  default: the table's name
+      --follow-slot <name>, --follow-publication <name>
+                            made if missing  default: fenec_<collection>
+      --follow-index, --follow-vector, --follow-cast, --follow-id,
+      --follow-where, --follow-batch
+                            as `fenec import`'s --index and the rest: how the
+                            rows become documents, the copy's and the
+                            changes' alike
+
       --ping                connect to the server and exit: 0 = up, 1 = not.
                             For health checks; `--listen`, `--user` and the
                             password options pick the target
@@ -193,6 +209,13 @@ fn main() {
     let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
     let mut policy: Option<String> = None;
     let mut mint: Option<String> = None;
+    let mut follow_url: Option<String> = None;
+    let mut follow_table: Option<String> = None;
+    let mut follow_into: Option<String> = None;
+    let mut follow_slot: Option<String> = None;
+    let mut follow_publication: Option<String> = None;
+    let mut follow_opts = fenec_import::Options::new("");
+    let mut follow_named = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut http: Option<String> = None;
@@ -337,6 +360,22 @@ fn main() {
             "--ping" => ping = true,
             "--no-mmap" => mmap = false,
             "--insecure" => cfg.insecure = true,
+            "--follow" => follow_url = Some(next(&mut i, "--follow")),
+            "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
+            "--follow-into" => follow_into = Some(next(&mut i, "--follow-into")),
+            "--follow-slot" => follow_slot = Some(next(&mut i, "--follow-slot")),
+            "--follow-publication" => {
+                follow_publication = Some(next(&mut i, "--follow-publication"))
+            }
+            flag if flag.starts_with("--follow-") => {
+                let v = next(&mut i, flag);
+                let as_import = format!("--{}", &flag["--follow-".len()..]);
+                match fenec_import::args::option(&mut follow_opts, &as_import, &v) {
+                    Some(Ok(())) => follow_named = true,
+                    Some(Err(e)) => fail(&e.replace(&as_import, flag)),
+                    None => fail(&format!("unknown option: {flag}\n\n{USAGE}")),
+                }
+            }
             "--help" | "-h" => {
                 fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
                 return;
@@ -391,6 +430,51 @@ fn main() {
     if replicating && replica_of.is_none() && http.is_none() {
         fail("replicas are fed over HTTP: give --http <address>");
     }
+
+    // `--follow`: the follower writes the file this server serves, the one
+    // writer of the collection it mirrors.
+    let mirror = match follow_url {
+        None => {
+            let named = follow_table.is_some()
+                || follow_into.is_some()
+                || follow_slot.is_some()
+                || follow_publication.is_some()
+                || follow_named;
+            if named {
+                fail("the --follow-* options belong to --follow <postgres://...>");
+            }
+            None
+        }
+        Some(url) => {
+            if dir.is_some() {
+                fail("--follow mirrors a table into one file: give --file, not --dir");
+            }
+            if file.is_none() {
+                fail(
+                    "--follow mirrors a table into a file, and confirms to PostgreSQL only \
+                     what is on its disk: give --file",
+                );
+            }
+            if replica_of.is_some() {
+                fail("--follow writes the file, and a replica's writes come from its primary: pick one");
+            }
+            let url = fenec_import::pg::Url::parse(&url).unwrap_or_else(|e| fail(&e.to_string()));
+            let table =
+                follow_table.unwrap_or_else(|| fail("--follow needs --follow-table <name>"));
+            follow_opts.into = follow_into.unwrap_or_else(|| table.clone());
+            let named = fenec_import::follow::Follow::named_after(&follow_opts.into);
+            let follow = fenec_import::follow::Follow {
+                slot: follow_slot.unwrap_or(named.slot),
+                publication: follow_publication.unwrap_or(named.publication),
+            };
+            Some(fenec_pg::mirror::Mirror {
+                url,
+                table,
+                opts: follow_opts,
+                follow,
+            })
+        }
+    };
 
     cfg.auth = match &password {
         Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
@@ -477,6 +561,12 @@ fn main() {
         fenec_http::log!("could not load the plugin: {e}");
         std::process::exit(1);
     }
+    if let Some(m) = &mirror {
+        if let Err(e) = db.install_plugin(&fenec_pg::mirror::GuardPlugin(m.opts.into.clone())) {
+            fenec_http::log!("could not load the plugin: {e}");
+            std::process::exit(1);
+        }
+    }
 
     if let Some(path) = &file {
         if let Err(e) = replication::settle_history(
@@ -525,6 +615,13 @@ fn main() {
     // Before the HTTP thread announces its listener, as `Server::serve_on`
     // does before its own: the flag a signal sets waits for the syncer.
     server::install_signal_handlers();
+
+    if let Some(m) = mirror {
+        let table = m.table.clone();
+        fenec_pg::mirror::start(m, Arc::clone(&shared))
+            .unwrap_or_else(|e| fail(&format!("could not start the follower: {e}")));
+        fenec_http::log!("following: {table}");
+    }
 
     // `--metrics`: /_metrics alone on a listener of its own, readable with
     // the tokens the HTTP endpoint takes.

@@ -186,11 +186,67 @@ follow-bench</code>):</p>
 </div>
 
 <p>The follower is the file's only writer, as every fenecdb file has exactly
-one. Stop it to open the mirror elsewhere. A column added to the table after
-the copy is reported and left out. A column the collection needs that is
-dropped from the table stops the follower. <code>--source-where</code> and
+one: stop it to open the mirror elsewhere, or serve the mirror from the
+server that follows (below). A column added to the table after the copy is
+reported and left out. A column the collection needs that is dropped from
+the table stops the follower. <code>--source-where</code> and
 <code>--limit</code> do not combine with it: the first narrows the copy but
 not the stream, and a mirror keeps every row.</p>
+
+<h3 id="serving">Serving the mirror as it follows</h3>
+
+<p>A second process over the follower's file corrupts it, so serving the
+mirror took a copy of it and a process of its own. <code>fenec-pg
+--follow</code> runs the follower inside the server instead, over the file
+the server serves: the table is served over the pg wire, HTTP and
+subscriptions as it follows, with no second copy.</p>
+
+<pre data-lang="bash">fenec-pg --file articles.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8080 \
+    --follow postgres://app@db:5432/app --follow-table docs --follow-into articles \
+    --follow-index "embed@hnsw(cosine)"
+follow: docs: slot fenec_articles (created), publication fenec_articles (created)
+follow: copying docs: there is none yet
+follow: docs copied, 100000 rows in 3.1s
+follow: docs: streaming its changes
+</pre>
+
+<p>Every option of <code>fenec import</code> that says how a row becomes a
+document — <code>--index</code>, <code>--vector</code>, <code>--cast</code>,
+<code>--id</code>, <code>--where</code>, <code>--batch</code> — is taken as
+<code>--follow-index</code> and so on, as are <code>--follow-slot</code> and
+<code>--follow-publication</code>. The collection takes no write but the
+follower's: a client's is refused with <code>25006</code>, since the next
+change from PostgreSQL would write over it. The rest of the file takes
+writes as ever. A subscriber of the collection
+(<code>GET /articles/changes</code>) hears each change as the follower
+applies it, and so does a replica of the server.</p>
+
+<p>The follower stops with the server, its last changes on disk and
+confirmed, before the shutdown's checkpoint. A server killed outright starts
+the stream again from what it last confirmed; the changes it applies again
+are puts and deletes by id, so nothing is lost and nothing comes twice. An
+error the follower cannot wait out ends the server rather than leave it
+answering from a mirror that no longer moves.</p>
+
+<p>Against the Makefile's server, 10 000 rows with a <code>vector(384)</code>
+under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
+(<code>make mirror-bench</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>commit to the subscriber</th><th class="n">p50</th><th class="n">p99</th></tr></thead>
+<tbody>
+<tr><td>an update of a title</td><td class="n">0.15 ms</td><td class="n">3.82 ms</td></tr>
+<tr><td>a row inserted with its vector, put into the graph first</td><td class="n">0.33 ms</td><td class="n">0.56 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Commit to visible in the file, with no server between
+(<code>make follow-bench</code>), was 0.16 ms at the median on the same
+machine. Killed while the table took a row a transaction, the server was up
+again in 98 ms and held every one of the table's 16 295 rows 880 ms after it
+started. The follower adds 178 KB to <code>fenec-pg</code>.</p>
 
 <h2>Speed and testing</h2>
 

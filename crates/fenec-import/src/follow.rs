@@ -32,13 +32,13 @@ use fenec_core::plugin::Registry;
 use fenec_core::prelude::*;
 use fenec_core::query::EvalCtx;
 use fenec_core::schema::Field;
-use fenec_pg::client::{self, Client, FieldDesc, Wal, WalStream};
+use fenec_wire::client::{self, Client, FieldDesc, Wal, WalStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 /// A log position as PostgreSQL prints it, for reporting one.
-pub use fenec_pg::client::lsn_text;
+pub use fenec_wire::client::lsn_text;
 
 /// The collection in the target file that remembers what follows what.
 pub const MARKER: &str = "_follow";

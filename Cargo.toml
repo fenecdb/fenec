@@ -5,6 +5,7 @@ members = [
     "crates/fenec-ql",
     "crates/fenec-wasm",
     "crates/fenec-pg",
+    "crates/fenec-wire",
     "crates/fenec-catalog",
     "crates/fenec-http",
     "crates/fenec-import",
@@ -34,6 +35,7 @@ fenec-ql = { version = "0.1.3", path = "crates/fenec-ql" }
 fenec-http = { version = "0.1.3", path = "crates/fenec-http" }
 fenec-catalog = { version = "0.1.3", path = "crates/fenec-catalog" }
 fenec-pg = { version = "0.1.3", path = "crates/fenec-pg" }
+fenec-wire = { version = "0.1.4", path = "crates/fenec-wire" }
 fenec-import = { version = "0.1.3", path = "crates/fenec-import" }
 
 [profile.release]

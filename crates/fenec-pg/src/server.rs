@@ -456,6 +456,27 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::SeqCst)
 }
 
+/// The flag a shutdown signal sets, for a thread of the server's that has
+/// to stop with it: `--follow`'s follower stops at it, with every change it
+/// applied on disk and confirmed to PostgreSQL.
+pub fn shutdown_flag() -> &'static AtomicBool {
+    &SHUTDOWN
+}
+
+/// What runs before the shutdown's sync and checkpoint.
+type Before = Box<dyn FnOnce() + Send>;
+static BEFORE_SHUTDOWN: std::sync::Mutex<Vec<Before>> = std::sync::Mutex::new(Vec::new());
+
+/// Runs `f` once a shutdown signal has arrived, before the final sync and
+/// checkpoint: the follower's thread is waited for there, so that the
+/// checkpoint holds what it applied last.
+pub fn before_shutdown(f: impl FnOnce() + Send + 'static) {
+    BEFORE_SHUTDOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Box::new(f));
+}
+
 /// The periodic syncer + the shutdown hook.
 fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool) {
     let tick = match policy {
@@ -505,6 +526,10 @@ fn spawn_syncer(db: Arc<RwLock<Database>>, policy: SyncPolicy, checkpoint: bool)
 /// Sessions waiting on the lock do not wait for nothing: [`acquire`] sees
 /// the shutdown flag and returns `57P01`.
 fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
+    let before = std::mem::take(&mut *BEFORE_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()));
+    for f in before {
+        f();
+    }
     let mut g = write_lock(db);
     let dirty = g.is_dirty();
     if dirty {

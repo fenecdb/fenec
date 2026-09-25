@@ -195,8 +195,8 @@ name = "fenec-import"
 version = "0.1.4"
 dependencies = [
  "fenec-core",
- "fenec-pg",
  "fenec-ql",
+ "fenec-wire",
 ]
 
 [[package]]
@@ -206,7 +206,9 @@ dependencies = [
  "fenec-catalog",
  "fenec-core",
  "fenec-http",
+ "fenec-import",
  "fenec-ql",
+ "fenec-wire",
 ]
 
 [[package]]
@@ -231,6 +233,14 @@ version = "0.1.4"
 dependencies = [
  "fenec-core",
  "fenec-ql",
+]
+
+[[package]]
+name = "fenec-wire"
+version = "0.1.4"
+dependencies = [
+ "fenec-core",
+ "fenec-http",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes statements-bench web serve pg node shard shard-bench replica-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -158,7 +158,8 @@ collate-bench:
 
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
-	@$(CARGO) test -p fenec-import --test pg --test follow -- --ignored; \
+	@$(CARGO) test -p fenec-import --test pg --test follow -- --ignored && \
+	  $(CARGO) test -p fenec-pg --test follow -- --ignored; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
 ## `fenec import --follow` against a live server: commit-to-visible latency,
@@ -170,6 +171,13 @@ follow-bench:
 ## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
 ## is for `fenec import --follow` and its tests; it changes what is logged
 ## for updates and deletes, not how the compared reads run.
+## `fenec-pg --follow` serving what it follows: commit to a subscriber of
+## the collection, and a server killed while the table is written to,
+## started again. Needs `make pgvector-up` first.
+mirror-bench:
+	$(CARGO) build --release -p fenec-pg
+	$(CARGO) run --release -p fenec-pg --example mirror -- 10000
+
 pgvector-up:
 	docker run -d --name fenecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
