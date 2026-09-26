@@ -518,6 +518,22 @@ the smaller one faster -- `near` 12%, a page of vectors as JSON 15% (`make
 wasm-speed`). A build that keeps the names strips the debug information
 the flag refuses (`strip = "debuginfo"`, as `make size-report` does).
 
+**aarch64's strips are written out as well, to the same bits.**
+`vector::neon` holds every distance strip on aarch64 -- f32, f16 and int8
+codes -- over one `strips`, eight accumulators as two four-lane registers,
+each lane doing the scalar loop's multiply and add (no fused multiply-add)
+and the lanes summed in `strip8!`'s order. Left to the vectoriser, the f32
+and f16 strips read through four-way de-interleaving loads into two-lane
+registers, half of NEON's width: a 128-dim dot product took 21 ns in cache
+against 9.4, and 91 against 60 out of an arena of 100 000; the int8 ones
+chained every strip to the one before. f16 is widened with `half`'s own
+masks, shifts and multiply, not NEON's conversion, which would turn
+infinities and NaNs into what `half` does not.
+`f32_and_f16_kernels_match_the_scalar_strips` holds them to the scalar
+strips bit for bit. A 100 000 x 128 build went 5.2 -> 4.3 s (f16 6.0 ->
+4.5), and `near` at 768 dimensions over f16 0.54 -> 0.34 ms p50. x86_64's
+vectoriser keeps four-lane SSE registers and is left as it is.
+
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
@@ -598,9 +614,10 @@ depends on the vectors: spread in every dimension, 89.7% at 100 and 97.5% at
 200. The code
 kernels add in `strip8!`'s order on every target, so a graph over codes is the
 browser's graph bit for bit; on aarch64 the int8 strips are NEON intrinsics
-(`vector::neon`), because the vectoriser widened codes through a register it
-also accumulated in, which chained every strip to the one before -- 5x slower,
-or not, depending on the code around it. A graph over codes is record version
+(`vector::neon`, as every strip there is), because the vectoriser widened
+codes through a register it also accumulated in, which chained every strip to
+the one before -- 5x slower, or not, depending on the code around it. A graph
+over codes is record version
 4; every other graph stays 3, so no file is rebuilt for the feature.
 
 **A bit code is a residual's signs, from a centre the index learned.** The

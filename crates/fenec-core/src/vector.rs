@@ -138,7 +138,10 @@ mod simd {
     }
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(not(any(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -159,7 +162,10 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(not(any(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
 #[inline]
 pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
@@ -178,6 +184,20 @@ pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
         s += d * d;
     }
     s
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    // SAFETY: the build has NEON, which is all `neon::dot` requires.
+    unsafe { neon::dot(a, b) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn l2_sq(a: &[f32], b: &[f32]) -> f32 {
+    // SAFETY: as for `dot`.
+    unsafe { neon::l2(a, b) }
 }
 
 pub fn norm(v: &[f32]) -> f32 {
@@ -219,6 +239,11 @@ pub fn score_from_distance(metric: Metric, d: f32) -> f32 {
 // loop. Widening into an intermediate f32 buffer was possible too; it measured
 // slower, because the win comes from memory bandwidth anyway.
 
+// aarch64 writes every strip out (`neon`), and the tests hold them to this.
+#[cfg_attr(
+    all(target_arch = "aarch64", target_feature = "neon"),
+    allow(unused_macros)
+)]
 macro_rules! strip8 {
     ($a:expr, $b:expr, $get_a:expr, $get_b:expr, $step:expr, $tail:expr) => {{
         let (a, b) = ($a, $b);
@@ -296,7 +321,10 @@ fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
     }
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(not(any(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
 #[inline]
 fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
     match metric {
@@ -306,13 +334,42 @@ fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
     }
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(not(any(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
 #[inline]
 fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
     match metric {
         Metric::Cosine => 1.0 - strip8!(a, b, half, half, mul, 0),
         Metric::L2 => strip8!(a, b, half, half, diff_sq, 0),
         Metric::Dot => -strip8!(a, b, half, half, mul, 0),
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn distance_hf(metric: Metric, a: &[u16], b: &[f32]) -> f32 {
+    // SAFETY: as for `dot`.
+    unsafe {
+        match metric {
+            Metric::Cosine => 1.0 - neon::dot_hf(a, b),
+            Metric::L2 => neon::l2_hf(a, b),
+            Metric::Dot => -neon::dot_hf(a, b),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn distance_hh(metric: Metric, a: &[u16], b: &[u16]) -> f32 {
+    // SAFETY: as for `dot`.
+    unsafe {
+        match metric {
+            Metric::Cosine => 1.0 - neon::dot_hh(a, b),
+            Metric::L2 => neon::l2_hh(a, b),
+            Metric::Dot => -neon::dot_hh(a, b),
+        }
     }
 }
 
@@ -346,79 +403,241 @@ fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[inline]
 fn dot_i8(code: &[i8], q: &[f32]) -> f32 {
-    // SAFETY: the build has NEON, which is all `neon::dot` requires.
-    unsafe { neon::dot(code, q) }
+    // SAFETY: the build has NEON, which is all `neon::dot_codes` requires.
+    unsafe { neon::dot_codes(code, q) }
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[inline]
 fn l2_i8(code: &[i8], q: &[f32], scale: f32) -> f32 {
     // SAFETY: as for `dot_i8`.
-    unsafe { neon::l2(code, q, scale) }
+    unsafe { neon::l2_codes(code, q, scale) }
 }
 
-/// The int8 strips on aarch64, with NEON's own sign extension. Left to the
-/// vectoriser, eight codes were widened as two halves, each zipped with a
-/// register it took for spare -- and where that register was an
-/// accumulator, every strip waited on the one before: 505 ns a 768-code
-/// distance, against 78 written out, and whether a build got that register
-/// depended on the code around the loop. A walk over int8 codes ran 2.5x
-/// slower than one over bit codes that way, and a build 1.5x slower than
-/// now. Each lane does the scalar loop's multiply and add, and the lanes
-/// are summed as `strip8!` sums its accumulators, so the result is the
-/// scalar one, bit for bit.
+/// The strips on aarch64, written out. Left to the vectoriser, eight codes
+/// were widened as two halves, each zipped with a register it took for
+/// spare -- and where that register was an accumulator, every strip waited
+/// on the one before: 505 ns a 768-code distance, against 78 written out,
+/// and whether a build got that register depended on the code around the
+/// loop. A walk over int8 codes ran 2.5x slower than one over bit codes
+/// that way, and a build 1.5x slower than now. The f32 and f16 strips it
+/// read with four-way de-interleaving loads into registers of two lanes,
+/// half of NEON's: a 128-dim dot product took 21 ns where two four-lane
+/// registers take 9.4 with the vectors in cache, and 91 against 60 read
+/// from an arena of 100 000. Each lane does the scalar loop's multiply and
+/// add, and the lanes are summed as `strip8!` sums its accumulators, so the
+/// result is the scalar one, bit for bit.
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon {
     use core::arch::aarch64::*;
 
+    /// Σ a·b.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| f32s(x),
+            |y| f32s(y),
+            |x, y| mul(x, y),
+            super::mul,
+            super::ident,
+            super::ident,
+        )
+    }
+
+    /// Σ (a − b)².
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2(a: &[f32], b: &[f32]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| f32s(x),
+            |y| f32s(y),
+            |x, y| diff_sq(x, y),
+            super::diff_sq,
+            super::ident,
+            super::ident,
+        )
+    }
+
+    /// Σ a·b, `a` in half precision.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dot_hf(a: &[u16], b: &[f32]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| halves(x),
+            |y| f32s(y),
+            |x, y| mul(x, y),
+            super::mul,
+            super::half,
+            super::ident,
+        )
+    }
+
+    /// Σ (a − b)², `a` in half precision.
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2_hf(a: &[u16], b: &[f32]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| halves(x),
+            |y| f32s(y),
+            |x, y| diff_sq(x, y),
+            super::diff_sq,
+            super::half,
+            super::ident,
+        )
+    }
+
+    /// Σ a·b, both in half precision.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dot_hh(a: &[u16], b: &[u16]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| halves(x),
+            |y| halves(y),
+            |x, y| mul(x, y),
+            super::mul,
+            super::half,
+            super::half,
+        )
+    }
+
+    /// Σ (a − b)², both in half precision.
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2_hh(a: &[u16], b: &[u16]) -> f32 {
+        strips(
+            a,
+            b,
+            |x| halves(x),
+            |y| halves(y),
+            |x, y| diff_sq(x, y),
+            super::diff_sq,
+            super::half,
+            super::half,
+        )
+    }
+
     /// Σ code·q.
     #[target_feature(enable = "neon")]
-    pub(super) fn dot(code: &[i8], q: &[f32]) -> f32 {
-        strips(code, q, |c, x| vmulq_f32(c, x), |c, x| c * x)
+    pub(super) fn dot_codes(code: &[i8], q: &[f32]) -> f32 {
+        strips(
+            code,
+            q,
+            |c| codes(c),
+            |x| f32s(x),
+            |c, x| mul(c, x),
+            super::mul,
+            |c| c as f32,
+            super::ident,
+        )
     }
 
     /// Σ (scale·code − q)².
     #[target_feature(enable = "neon")]
-    pub(super) fn l2(code: &[i8], q: &[f32], scale: f32) -> f32 {
+    pub(super) fn l2_codes(code: &[i8], q: &[f32], scale: f32) -> f32 {
         strips(
             code,
             q,
-            |c, x| {
-                let d = vsubq_f32(vmulq_n_f32(c, scale), x);
-                vmulq_f32(d, d)
-            },
+            |c| codes(c),
+            |x| f32s(x),
+            |c, x| diff_sq(vmulq_n_f32(c, scale), x),
             |c, x| super::diff_sq(c * scale, x),
+            |c| c as f32,
+            super::ident,
         )
     }
 
-    /// `strip8!` over codes and a query: `step` four lanes at a time, the
-    /// eight accumulators as two registers, `tail` past the last strip.
+    /// `strip8!` four lanes at a time: `la` and `lb` read a strip of eight
+    /// of each side as two registers, `step` is each lane's part of the
+    /// scalar loop, and the eight accumulators are two registers. Past the
+    /// last strip `tail` runs the scalar loop over each side widened by
+    /// `wa` and `wb`.
+    #[allow(clippy::too_many_arguments)]
     #[target_feature(enable = "neon")]
     #[inline]
-    fn strips(
-        code: &[i8],
-        q: &[f32],
+    fn strips<A: Copy, B: Copy>(
+        a: &[A],
+        b: &[B],
+        la: impl Fn(&[A; 8]) -> (float32x4_t, float32x4_t),
+        lb: impl Fn(&[B; 8]) -> (float32x4_t, float32x4_t),
         step: impl Fn(float32x4_t, float32x4_t) -> float32x4_t,
         tail: impl Fn(f32, f32) -> f32,
+        wa: impl Fn(A) -> f32,
+        wb: impl Fn(B) -> f32,
     ) -> f32 {
-        debug_assert_eq!(code.len(), q.len());
-        let (cc, rc) = code.as_chunks::<8>();
-        let (cq, rq) = q.as_chunks::<8>();
+        debug_assert_eq!(a.len(), b.len());
+        let (ca, ra) = a.as_chunks::<8>();
+        let (cb, rb) = b.as_chunks::<8>();
         let (mut lo, mut hi) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
-        for (c, x) in cc.iter().zip(cq) {
-            // Eight codes, sign-extended to sixteen bits and then to 32.
-            let w = vmovl_s8(vcreate_s8(u64::from_le_bytes(c.map(|b| b as u8))));
-            let c0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(w)));
-            let c1 = vcvtq_f32_s32(vmovl_high_s16(w));
-            lo = vaddq_f32(lo, step(c0, four(&x[..4])));
-            hi = vaddq_f32(hi, step(c1, four(&x[4..])));
+        for (x, y) in ca.iter().zip(cb) {
+            let ((x0, x1), (y0, y1)) = (la(x), lb(y));
+            lo = vaddq_f32(lo, step(x0, y0));
+            hi = vaddq_f32(hi, step(x1, y1));
         }
         let (l, h) = (lanes(lo), lanes(hi));
         let mut s = (l[0] + l[1]) + (l[2] + l[3]) + ((h[0] + h[1]) + (h[2] + h[3]));
-        for (c, x) in rc.iter().zip(rq) {
-            s += tail(*c as f32, *x);
+        for (x, y) in ra.iter().zip(rb) {
+            s += tail(wa(*x), wb(*y));
         }
         s
+    }
+
+    /// Each lane's multiply, not fused with the add: the scalar loop rounds
+    /// between the two.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn mul(x: float32x4_t, y: float32x4_t) -> float32x4_t {
+        vmulq_f32(x, y)
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn diff_sq(x: float32x4_t, y: float32x4_t) -> float32x4_t {
+        let d = vsubq_f32(x, y);
+        vmulq_f32(d, d)
+    }
+
+    /// Eight f32 as two registers.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn f32s(x: &[f32; 8]) -> (float32x4_t, float32x4_t) {
+        (four(&x[..4]), four(&x[4..]))
+    }
+
+    /// Eight codes, sign-extended to sixteen bits and then to 32.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn codes(c: &[i8; 8]) -> (float32x4_t, float32x4_t) {
+        let w = vmovl_s8(vcreate_s8(u64::from_le_bytes(c.map(|b| b as u8))));
+        (
+            vcvtq_f32_s32(vmovl_s16(vget_low_s16(w))),
+            vcvtq_f32_s32(vmovl_high_s16(w)),
+        )
+    }
+
+    /// Eight f16 widened as [`super::half`] widens one -- the same masks,
+    /// shifts and multiply, so the same bits, where NEON's own conversion
+    /// would turn infinities and NaNs into what `half` does not.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn halves(x: &[u16; 8]) -> (float32x4_t, float32x4_t) {
+        let pack = |h: &[u16]| {
+            (h[0] as u64) | (h[1] as u64) << 16 | (h[2] as u64) << 32 | (h[3] as u64) << 48
+        };
+        let v = vcombine_u16(vcreate_u16(pack(&x[..4])), vcreate_u16(pack(&x[4..])));
+        let widen = |u: uint32x4_t| {
+            let sign = vshlq_n_u32::<16>(vandq_u32(u, vdupq_n_u32(0x8000)));
+            let mag = vshlq_n_u32::<13>(vandq_u32(u, vdupq_n_u32(0x7fff)));
+            vmulq_f32(
+                vreinterpretq_f32_u32(vorrq_u32(sign, mag)),
+                vdupq_n_f32(f32::from_bits((254 - 15) << 23)),
+            )
+        };
+        (widen(vmovl_u16(vget_low_u16(v))), widen(vmovl_high_u16(v)))
     }
 
     /// Four f32 as a register, built from the elements: LLVM folds the
@@ -2903,6 +3122,58 @@ mod tests {
                 );
                 assert_eq!(dot_i8(&code, &q).to_bits(), dot.to_bits(), "dot, {len}");
                 assert_eq!(l2_i8(&code, &q, scale).to_bits(), l2.to_bits(), "l2, {len}");
+            }
+        }
+    }
+
+    /// `dot`, `l2_sq` and the half-precision distances add as `strip8!`
+    /// adds, bit for bit: aarch64 writes them out, and a graph has to be the
+    /// same graph on every target, the browser's included. Signed zeros,
+    /// subnormals, values near the ends of the range and every f16 bit
+    /// pattern go through them.
+    #[test]
+    fn f32_and_f16_kernels_match_the_scalar_strips() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let odd = [0.0, -0.0, 1e-40, -1e-40, 3.0e38, -65504.0, 1e-8, 1.0];
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        for len in (0..70).chain([767, 768, 1536]) {
+            for _ in 0..30 {
+                let mut f = |_| match next() % 16 {
+                    0 => odd[(next() % odd.len() as u64) as usize],
+                    _ => (next() % 20_001) as f32 / 10_000.0 - 1.0,
+                };
+                let a: Vec<f32> = (0..len).map(&mut f).collect();
+                let b: Vec<f32> = (0..len).map(&mut f).collect();
+                let (h, g): (Vec<u16>, Vec<u16>) =
+                    (0..len).map(|_| (next() as u16, next() as u16)).unzip();
+                let dot_ab = strip8!(&a[..], &b[..], ident, ident, mul, 0);
+                let l2_ab = strip8!(&a[..], &b[..], ident, ident, diff_sq, 0);
+                assert!(same(dot(&a, &b), dot_ab), "dot, {len}");
+                assert!(same(l2_sq(&a, &b), l2_ab), "l2, {len}");
+                let dot_hb = strip8!(&h[..], &b[..], half, ident, mul, 0);
+                let l2_hb = strip8!(&h[..], &b[..], half, ident, diff_sq, 0);
+                let dot_hg = strip8!(&h[..], &g[..], half, half, mul, 0);
+                let l2_hg = strip8!(&h[..], &g[..], half, half, diff_sq, 0);
+                for (metric, want_hb, want_hg) in [
+                    (Metric::Cosine, 1.0 - dot_hb, 1.0 - dot_hg),
+                    (Metric::L2, l2_hb, l2_hg),
+                    (Metric::Dot, -dot_hb, -dot_hg),
+                ] {
+                    assert!(
+                        same(distance_hf(metric, &h, &b), want_hb),
+                        "{metric:?} hf, {len}"
+                    );
+                    assert!(
+                        same(distance_hh(metric, &h, &g), want_hg),
+                        "{metric:?} hh, {len}"
+                    );
+                }
             }
         }
     }
