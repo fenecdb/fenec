@@ -159,7 +159,16 @@ a savepoint after a write keeps the failed block and the lock
 (`TxState::keeps`), as would one in a serializable transaction; one before
 every write lets both go, and taken back to, the lock as well. `COMMIT
 PREPARED` is refused rather than read as the `COMMIT` it begins with, and
-`ROLLBACK TRANSACTION TO s` was once read as a `ROLLBACK`. Under `--sync always` a transaction lands with one
+`ROLLBACK TRANSACTION TO s` was once read as a `ROLLBACK`. A simple
+query's text holding transaction control, or anything else `compat`
+answers, runs a statement at a time (`compat::statements` splits it,
+quotes and comments kept whole) through the pipeline's path: the
+statements outside a transaction take its implicit hold, which a `BEGIN`
+makes the transaction's, a `COMMIT` lands and the text's end lands, and
+the first error ends the text -- as PostgreSQL's implicit block. Read
+whole, `BEGIN ; put ...` was taken for its `BEGIN`, the rest dropped; a
+text of FenecQL alone still runs whole, one block, and the extended
+protocol refuses several commands (`42601`). Under `--sync always` a transaction lands with one
 fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
 statement what it did (`make tx-bench`). A savepoint costs its round trips:
 a put in one of its own, released, 58.3 us against 20.7 under `--sync 250`,
