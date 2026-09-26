@@ -970,7 +970,6 @@ test('lookup names go through the same identifier check as every other name', ()
 test('a text of several writes lands whole or not at all', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);
-  // Schema changes cannot be put back: a text of them runs each on its own.
   db.run('create collection a (n int); create collection b (n int)');
   assert.throws(() => db.run('put a {n: 1}; put b {n: 2}; put a {nofield: 3}'), /nofield/);
   assert.deepEqual(db.run('get a').rows, []);
@@ -978,6 +977,16 @@ test('a text of several writes lands whole or not at all', { skip: wasm ? false 
   db.run('put a {n: 1}; put b {n: 2}');
   assert.deepEqual(db.run('get a select n').rows, [{ n: 1 }]);
   assert.deepEqual(db.run('get b select n').rows, [{ n: 2 }]);
+  // A schema change is one of the text's writes, put back with the rest.
+  assert.throws(
+    () => db.run('create collection c (n int); put c {n: 1}; drop collection a; create index on b (n) @hash; put b {nofield: 4}'),
+    /nofield/,
+  );
+  assert.throws(() => db.run('get c'), /collection `c`/);
+  assert.deepEqual(db.run('get a select n').rows, [{ n: 1 }]);
+  assert.throws(() => db.run('create index on a (n) @hash; drop collection a; put b {nofield: 5}'), /nofield/);
+  db.run('create index on b (n) @hash');
+  assert.deepEqual(db.run('get b select n where n = 2').rows, [{ n: 2 }]);
 });
 
 test('lookup end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

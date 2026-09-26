@@ -51,10 +51,10 @@ class Client:
 
     def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
         """Runs statements in order under one write lock, as one block:
-        their writes all land or, at the first error, none of them do. A
-        batch holding a create, a drop, a `create index` or a `compact`
-        runs each statement on its own, and what ran before an error
-        stays."""
+        their writes -- a create, a drop or a `create index` among them --
+        all land or, at the first error, none of them do. A batch holding a
+        `compact` runs each statement on its own, and what ran before an
+        error stays."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return self._post("/batch", "\n".join(lines).encode(), "application/x-ndjson")
 

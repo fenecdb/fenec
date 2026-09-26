@@ -27,8 +27,12 @@ none of it does, and the database is as it was. Several statements are one
 block with <code>execute_block</code>, or between <code>begin</code> and
 <code>commit</code>, with <code>rollback</code> to put them back; whoever
 opens one holds the exclusive lock until it ends. A <code>create</code>, a
-<code>drop</code>, a <code>create index</code> or a <code>compact</code> runs
-on its own, outside a block. FenecQL has no <code>BEGIN</code> or
+<code>drop</code> or a <code>create index</code> in it is put back with the
+rest: the collection made goes, the one dropped comes back, the index goes.
+<code>savepoint</code> marks where the open block stands, and
+<code>rollback_to</code> puts back only what came after the mark, the block
+still open. A <code>compact</code> rewrites the file and runs on its own,
+outside a block. FenecQL has no <code>BEGIN</code> or
 <code>COMMIT</code>: <code>fenec-pg</code> runs a transaction as a block held
 open (<a href="postgres.html#transactions">Transactions</a>).</p>
 

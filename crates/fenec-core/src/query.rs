@@ -938,18 +938,12 @@ impl Statement {
         )
     }
 
-    /// Statements a block of writes may hold: reads, puts, sets and
-    /// deletes. A schema change or a compact runs on its own -- putting one
-    /// back when the block does not land would undo a file rewrite or a
-    /// graph build, which the block's undo has no way to.
+    /// Statements a block of writes may hold: every one but a compact,
+    /// which rewrites the file -- nothing a block's undo could put back. A
+    /// schema change is put back as a write is: a collection made goes, one
+    /// dropped comes back, an index built goes.
     pub fn fits_block(&self) -> bool {
-        !matches!(
-            self,
-            Statement::CreateCollection { .. }
-                | Statement::DropCollection { .. }
-                | Statement::CreateIndex { .. }
-                | Statement::Compact(_)
-        )
+        !matches!(self, Statement::Compact(_))
     }
 
     /// Number of parameters the statement expects: the highest `$n` used.
