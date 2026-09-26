@@ -76,10 +76,7 @@ impl History {
     /// replaces the image's history without moving its change counter.
     pub fn record(&self) -> Vec<u8> {
         let body = self.encode();
-        let mut out = Vec::with_capacity(body.len() + 4);
-        out.push(RECORD);
-        put_uvarint(&mut out, 0);
-        put_uvarint(&mut out, body.len() as u64);
+        let mut out = crate::engine::record_head(RECORD, 0, body.len());
         out.extend_from_slice(&body);
         out
     }

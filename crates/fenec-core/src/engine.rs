@@ -131,12 +131,11 @@ const REC_BLOCK: u8 = 9;
 /// change, none for what is not a write. A feed counting records by their
 /// numbers -- a replica's, an archive's -- counts them with this.
 pub fn writes_in(record: &[u8]) -> Result<u64> {
-    let mut pos = 1;
-    get_uvarint(record, &mut pos)?;
-    let len = get_uvarint(record, &mut pos)? as usize;
-    let body = record
-        .get(pos..pos + len)
-        .ok_or_else(|| Error::Corrupt("a record cut short".into()))?;
+    if record.is_empty() {
+        return Ok(0);
+    }
+    let r = record_at(record, &mut 0)?;
+    let body = r.body;
     match record.first() {
         Some(&REC_DATA) => frames_in(body),
         Some(&REC_BLOCK) => {
@@ -181,20 +180,13 @@ type Inner<'a> = dyn FnMut(u8, u32, &[u8]) -> Result<()> + 'a;
 fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
     let mut pos = 0;
     while pos < body.len() {
-        let kind = body[pos];
-        pos += 1;
-        let cid = get_uvarint(body, &mut pos)? as u32;
-        let len = get_uvarint(body, &mut pos)? as usize;
-        let inner = body
-            .get(pos..pos + len)
-            .ok_or_else(|| Error::Corrupt("a block's record runs past it".into()))?;
-        if !matches!(kind, REC_DATA | REC_CREATE | REC_DROP | REC_ALTER) {
+        let r = record_at(body, &mut pos)?;
+        if !matches!(r.kind, REC_DATA | REC_CREATE | REC_DROP | REC_ALTER) {
             return Err(Error::Corrupt(
                 "a block holds a record that is no write".into(),
             ));
         }
-        f(kind, cid, inner)?;
-        pos += len;
+        f(r.kind, r.cid, r.body)?;
     }
     Ok(())
 }
@@ -207,10 +199,105 @@ fn framed(kind: u8, cid: u32, body: &[u8]) -> Vec<u8> {
 }
 
 fn frame_into(out: &mut Vec<u8>, kind: u8, cid: u32, body: &[u8]) {
-    out.push(kind);
-    put_uvarint(out, cid as u64);
-    put_uvarint(out, body.len() as u64);
+    let (h, n) = head(kind, cid, body.len());
+    out.extend_from_slice(&h[..n]);
     out.extend_from_slice(body);
+}
+
+/// A record, as a walk over a file or a feed of them finds it.
+struct Rec<'a> {
+    kind: u8,
+    cid: u32,
+    /// Where it starts, and where its body does, in the bytes walked.
+    at: usize,
+    body_at: usize,
+    body: &'a [u8],
+}
+
+/// The record at `*pos` -- `[kind][collection][length][body]`, or the
+/// counter's fixed-width head -- and `*pos` moved past it: the one place a
+/// head is read.
+fn record_at<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<Rec<'a>> {
+    let at = *pos;
+    let kind = bytes[at];
+    if kind == REC_SEQ {
+        let body = bytes
+            .get(at + 1..at + REC_SEQ_LEN)
+            .ok_or_else(|| Error::Corrupt("truncated counter header".into()))?;
+        *pos = at + REC_SEQ_LEN;
+        return Ok(Rec {
+            kind,
+            cid: 0,
+            at,
+            body_at: at + 1,
+            body,
+        });
+    }
+    let mut p = at + 1;
+    let cid = get_uvarint(bytes, &mut p)? as u32;
+    let len = get_uvarint(bytes, &mut p)? as usize;
+    let body = bytes
+        .get(p..p.saturating_add(len))
+        .ok_or_else(|| Error::Corrupt("a record cut short".into()))?;
+    *pos = p + len;
+    Ok(Rec {
+        kind,
+        cid,
+        at,
+        body_at: p,
+        body,
+    })
+}
+
+/// The whole records of a file, from `pos`: what a load, a repoint and the
+/// search for the last graphs each walk. It stops at the end or at a record
+/// cut short -- `torn`, `pos` where it starts -- which is the walker's to
+/// judge: a crash's torn tail, or damage inside an image.
+struct Walk<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    torn: bool,
+}
+
+impl<'a> Walk<'a> {
+    fn new(bytes: &'a [u8], pos: usize) -> Walk<'a> {
+        Walk {
+            bytes,
+            pos,
+            torn: false,
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<Rec<'a>>> {
+        if self.pos >= self.bytes.len() {
+            return Ok(None);
+        }
+        if !whole_record(self.bytes, self.pos)? {
+            self.torn = true;
+            return Ok(None);
+        }
+        record_at(self.bytes, &mut self.pos).map(Some)
+    }
+}
+
+/// A record's head, `[kind][collection][length]`, and how many of the bytes
+/// it took: the one place a head is written, the counter's fixed-width one
+/// aside ([`image_head`]). Into an array, so that a block's can go into the
+/// room it left before its frames.
+fn head(kind: u8, cid: u32, len: usize) -> ([u8; HEAD_ROOM], usize) {
+    let mut h = [0u8; HEAD_ROOM];
+    h[0] = kind;
+    let mut n = 1;
+    for mut v in [cid as u64, len as u64] {
+        while v >= 0x80 {
+            h[n] = (v as u8) | 0x80;
+            v >>= 7;
+            n += 1;
+        }
+        h[n] = v as u8;
+        n += 1;
+    }
+    (h, n)
 }
 
 /// The room a block leaves before its frames for the header of the data
@@ -277,19 +364,8 @@ impl Block {
         let (kind, cid, _) = self.heads[0];
         if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
             // The header goes into the room before the frames.
-            let mut head = [0u8; HEAD_ROOM];
-            head[0] = kind;
-            let mut n = 1;
-            for mut v in [cid as u64, (self.frames.len() - HEAD_ROOM) as u64] {
-                while v >= 0x80 {
-                    head[n] = (v as u8) | 0x80;
-                    v >>= 7;
-                    n += 1;
-                }
-                head[n] = v as u8;
-                n += 1;
-            }
-            self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&head[..n]);
+            let (h, n) = head(kind, cid, self.frames.len() - HEAD_ROOM);
+            self.frames[HEAD_ROOM - n..HEAD_ROOM].copy_from_slice(&h[..n]);
             return std::borrow::Cow::Borrowed(&self.frames[HEAD_ROOM - n..]);
         }
         let mut body = Vec::with_capacity(self.frames.len() + HEAD_ROOM * self.heads.len());
@@ -365,30 +441,30 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
 /// refuses -- so the load says what is wrong.
 fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
     let mut last: Vec<(u32, String, usize)> = Vec::new();
-    let mut pos = MAGIC.len();
-    while pos < bytes.len() && whole_record(bytes, pos)? {
-        let at = pos;
-        match bytes[pos] {
-            REC_SEQ => {
-                pos += REC_SEQ_LEN;
-                continue;
-            }
-            REC_CREATE | REC_DROP | REC_DATA | REC_GRAPH | REC_ALTER | REC_NEXTID | REC_HISTORY
-            | REC_BLOCK => {}
-            _ => break,
+    let mut walk = Walk::new(bytes, MAGIC.len());
+    while walk.pos < bytes.len() {
+        if !matches!(
+            bytes[walk.pos],
+            REC_SEQ
+                | REC_CREATE
+                | REC_DROP
+                | REC_DATA
+                | REC_GRAPH
+                | REC_ALTER
+                | REC_NEXTID
+                | REC_HISTORY
+                | REC_BLOCK
+        ) {
+            break;
         }
-        pos += 1;
-        let cid = get_uvarint(bytes, &mut pos)? as u32;
-        let len = get_uvarint(bytes, &mut pos)? as usize;
-        if bytes[at] == REC_GRAPH {
-            let mut cp = 0usize;
-            let field = crate::codec::decode_str(&bytes[pos..pos + len], &mut cp)?;
-            match last.iter_mut().find(|(c, f, _)| *c == cid && *f == field) {
-                Some(l) => l.2 = at,
-                None => last.push((cid, field, at)),
+        let Some(r) = walk.next()? else { break };
+        if r.kind == REC_GRAPH {
+            let field = crate::codec::decode_str(r.body, &mut 0)?;
+            match last.iter_mut().find(|(c, f, _)| *c == r.cid && *f == field) {
+                Some(l) => l.2 = r.at,
+                None => last.push((r.cid, field, r.at)),
             }
         }
-        pos += len;
     }
     Ok(last)
 }
@@ -540,11 +616,19 @@ pub trait Watcher: Send + Sync {
 }
 
 /// `[kind][collection][length]`, the head every record but the counter has.
-fn record_head(kind: u8, cid: u32, len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12);
-    out.push(kind);
-    put_uvarint(&mut out, cid as u64);
-    put_uvarint(&mut out, len as u64);
+pub(crate) fn record_head(kind: u8, cid: u32, len: usize) -> Vec<u8> {
+    let (h, n) = head(kind, cid, len);
+    h[..n].to_vec()
+}
+
+/// The front of an image: the signature, and the change counter's head,
+/// fixed width -- `seq`, and a zero for the body's length, which is
+/// patched in place once the body is written (`head_at + 9`).
+fn image_head(seq: u64) -> Vec<u8> {
+    let mut out = Vec::from(&MAGIC[..]);
+    out.push(REC_SEQ);
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
     out
 }
 
@@ -1761,14 +1845,10 @@ impl Database {
         #[cfg_attr(target_arch = "wasm32", allow(unused_variables, clippy::ptr_arg))]
         placed: &mut Vec<(u32, u64)>,
     ) -> Result<()> {
-        let mut head = Vec::from(&MAGIC[..]);
         // Counter header: a placeholder now, the body's length once it is
         // written -- fixed width, so it is patched where it stands.
-        let head_at = head.len() as u64;
-        head.push(REC_SEQ);
-        head.extend_from_slice(&self.changes.seq().to_le_bytes());
-        head.extend_from_slice(&0u64.to_le_bytes());
-        out.write(&head)?;
+        let head_at = MAGIC.len() as u64;
+        out.write(&image_head(self.changes.seq()))?;
         let body_at = out.at();
 
         if self.history.following || !self.history.lineage.is_empty() {
@@ -1854,38 +1934,24 @@ impl Database {
         }
         let mut by_id: HashMap<u32, String> = HashMap::new();
         let mut fresh: HashMap<String, Store> = HashMap::new();
-        let mut pos = MAGIC.len();
-        while pos < bytes.len() {
-            if !whole_record(bytes, pos)? {
-                break;
-            }
-            let rec = bytes[pos];
-            pos += 1;
-            if rec == REC_SEQ {
-                pos += REC_SEQ_LEN - 1;
-                continue;
-            }
-            let cid = get_uvarint(bytes, &mut pos)? as u32;
-            let len = get_uvarint(bytes, &mut pos)? as usize;
-            let at = pos;
-            pos += len;
-            match rec {
+        let mut walk = Walk::new(bytes, MAGIC.len());
+        while let Some(r) = walk.next()? {
+            match r.kind {
                 REC_CREATE => {
-                    let mut sp = 0usize;
-                    let schema = Schema::decode(&bytes[at..at + len], &mut sp)?;
-                    by_id.insert(cid, schema.name.clone());
+                    let schema = Schema::decode(r.body, &mut 0)?;
+                    by_id.insert(r.cid, schema.name.clone());
                     fresh.insert(schema.name, Store::new());
                 }
                 REC_NEXTID => {
-                    let mut np = 0usize;
-                    let next = get_uvarint(&bytes[at..at + len], &mut np)?;
-                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
+                    let next = get_uvarint(r.body, &mut 0)?;
+                    if let Some(store) = by_id.get(&r.cid).and_then(|n| fresh.get_mut(n)) {
                         store.raise_next_id(next);
                     }
                 }
                 REC_DATA => {
-                    if let Some(store) = by_id.get(&cid).and_then(|n| fresh.get_mut(n)) {
-                        store.replay_mapped(&base, at as u64, len as u64, &mut |_| {})?;
+                    if let Some(store) = by_id.get(&r.cid).and_then(|n| fresh.get_mut(n)) {
+                        let (at, len) = (r.body_at as u64, r.body.len() as u64);
+                        store.replay_mapped(&base, at, len, &mut |_| {})?;
                     }
                 }
                 _ => {}
@@ -1942,18 +2008,12 @@ impl Database {
         self.load_from((*keep).as_ref(), Some(&file))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// In the browser `base` is always `None`: its `Base` is a type of no
+    /// value, and the arm that maps folds away.
     fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
         self.load_records(bytes, &mut |store, chunk_at, chunk, note| match base {
             Some(b) => store.replay_mapped(b, chunk_at as u64, chunk.len() as u64, note),
             None => store.replay_noting(chunk, note),
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn load_from(&mut self, bytes: &[u8], _base: Option<&()>) -> Result<usize> {
-        self.load_records(bytes, &mut |store, _, chunk, note| {
-            store.replay_noting(chunk, note)
         })
     }
 
@@ -2095,7 +2155,7 @@ impl Database {
         if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC[..] {
             return Err(Error::Corrupt("invalid fenecdb signature".into()));
         }
-        let mut pos = MAGIC.len();
+        let pos = MAGIC.len();
         let mut by_id: HashMap<u32, String> = HashMap::new();
         // Each graph is restored where its last record is, against the
         // documents as they stood when it was written, and the writes after
@@ -2130,49 +2190,20 @@ impl Database {
         // and the map's code was 1.5 KB of the browser module.
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         let mut whole = bytes.len();
-        while pos < bytes.len() {
-            if !whole_record(bytes, pos)? {
-                // A crash in the middle of an append leaves the last record
-                // cut short, and only past the image: an image is written
-                // beside the file and renamed over it whole. One cut short
-                // inside it is a damaged or truncated file, and cutting the
-                // file there -- as a torn tail is cut -- destroyed every
-                // record after it, intact ones included.
-                if pos < body_end {
-                    return Err(Error::Corrupt(
-                        "a record of the checkpoint image runs past the end of the file".into(),
-                    ));
-                }
-                whole = pos;
-                break;
-            }
-            let tail = pos >= body_end;
-            let at = pos;
-            let rec = bytes[pos];
-            pos += 1;
-            match rec {
+        let mut walk = Walk::new(bytes, pos);
+        while let Some(r) = walk.next()? {
+            let tail = r.at >= body_end;
+            match r.kind {
                 REC_CREATE | REC_DROP | REC_ALTER => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    // A drop's body is empty but its length is still written
-                    // (see [`Database::wal`]); if it is not skipped that `0`
-                    // byte is read as the next record kind and the whole file
-                    // becomes unopenable with "unknown record kind 0".
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let body = &bytes[pos..pos + len];
-                    pos += len;
                     seq_seen += tail as u64;
-                    self.load_schema(rec, cid, body, &mut by_id, &mut restored)?;
+                    self.load_schema(r.kind, r.cid, r.body, &mut by_id, &mut restored)?;
                 }
                 REC_DATA => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let chunk_at = pos;
-                    pos += len;
                     let frames = self.load_data(
-                        cid,
+                        r.cid,
                         bytes,
-                        chunk_at,
-                        len,
+                        r.body_at,
+                        r.body.len(),
                         &by_id,
                         &restored,
                         &mut touched,
@@ -2183,11 +2214,8 @@ impl Database {
                     }
                 }
                 REC_BLOCK => {
-                    let _ = get_uvarint(bytes, &mut pos)?;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let body = &bytes[pos..pos + len];
                     let mut frames = 0;
-                    each_inner(body, &mut |kind, cid, inner| {
+                    each_inner(r.body, &mut |kind, cid, inner| {
                         if kind != REC_DATA {
                             frames += 1;
                             return self.load_schema(kind, cid, inner, &mut by_id, &mut restored);
@@ -2207,29 +2235,21 @@ impl Database {
                         )?;
                         Ok(())
                     })?;
-                    pos += len;
                     if tail {
                         seq_seen += frames;
                     }
                 }
                 REC_NEXTID => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let mut np = 0usize;
-                    let next = get_uvarint(&bytes[pos..pos + len], &mut np)?;
-                    pos += len;
                     // Not a write but the counter itself: it does not move `seq`.
-                    if let Some(name) = by_id.get(&cid) {
+                    let next = get_uvarint(r.body, &mut 0)?;
+                    if let Some(name) = by_id.get(&r.cid) {
                         if let Some(c) = self.collections.get_mut(name) {
                             c.store.raise_next_id(next);
                         }
                     }
                 }
                 REC_GRAPH => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let chunk = &bytes[pos..pos + len];
-                    pos += len;
+                    let (cid, at, chunk) = (r.cid, r.at, r.body);
                     let mut cp = 0usize;
                     let field = crate::codec::decode_str(chunk, &mut cp)?;
                     let latest = last.as_ref().is_none_or(|last| {
@@ -2252,31 +2272,23 @@ impl Database {
                             {
                                 let ix = &self.collections[&name].vectors[&field];
                                 let p = ix.persisted();
-                                p.at.store(pos as u64, Relaxed);
-                                p.node_bytes.store((len / ix.len().max(1)) as u64, Relaxed);
+                                p.at.store(walk.pos as u64, Relaxed);
+                                p.node_bytes
+                                    .store((chunk.len() / ix.len().max(1)) as u64, Relaxed);
                             }
                             forget(&mut restored, &name, &|f| f != field);
                             restored.push((name, field, from));
                         }
                     }
                 }
-                REC_HISTORY => {
-                    let _ = get_uvarint(bytes, &mut pos)?;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    // Not a write: it does not move `seq`.
-                    self.history = History::decode(&bytes[pos..pos + len])?;
-                    pos += len;
-                }
+                // Not a write: it does not move `seq`.
+                REC_HISTORY => self.history = History::decode(r.body)?,
                 REC_SEQ => {
-                    if pos + REC_SEQ_LEN - 1 > bytes.len() {
-                        return Err(Error::Corrupt("truncated counter header".into()));
-                    }
                     let mut w = [0u8; 8];
-                    w.copy_from_slice(&bytes[pos..pos + 8]);
+                    w.copy_from_slice(&r.body[..8]);
                     seq_base = u64::from_le_bytes(w);
-                    w.copy_from_slice(&bytes[pos + 8..pos + 16]);
-                    pos += 16;
-                    body_end = pos.saturating_add(u64::from_le_bytes(w) as usize);
+                    w.copy_from_slice(&r.body[8..16]);
+                    body_end = walk.pos.saturating_add(u64::from_le_bytes(w) as usize);
                     // An image that says it is longer than the file was cut
                     // short between two of its records, which no record's own
                     // length can show.
@@ -2288,6 +2300,20 @@ impl Database {
                 }
                 other => return Err(Error::Corrupt(format!("unknown record kind {other}"))),
             }
+        }
+        if walk.torn {
+            // A crash in the middle of an append leaves the last record cut
+            // short, and only past the image: an image is written beside the
+            // file and renamed over it whole. One cut short inside it is a
+            // damaged or truncated file, and cutting the file there -- as a
+            // torn tail is cut -- destroyed every record after it, intact
+            // ones included.
+            if walk.pos < body_end {
+                return Err(Error::Corrupt(
+                    "a record of the checkpoint image runs past the end of the file".into(),
+                ));
+            }
+            whole = walk.pos;
         }
         // A database loaded from a file has no *history*, only its current
         // state: the ring is emptied and the horizon is set to the counter.
@@ -2733,18 +2759,11 @@ impl Database {
             b.heads.push((rec, cid, b.frames.len()));
             return Ok(());
         }
-        let mut frame = Vec::with_capacity(payload.len() + 12);
-        frame.push(rec);
-        put_uvarint(&mut frame, cid as u64);
-        put_uvarint(&mut frame, payload.len() as u64);
-        frame.extend_from_slice(payload);
+        let frame = framed(rec, cid, payload);
         let seq = self.changes.seq() + 1;
         let r = self.sink_mut().record(seq, &frame);
         self.storage(r)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            *self.appended.get_mut() += frame.len() as u64;
-        }
+        *self.appended.get_mut() += frame.len() as u64;
         self.dirty = true;
         Ok(())
     }
@@ -2881,18 +2900,17 @@ impl Database {
     }
 
     fn apply_records(&mut self, bytes: &[u8], batch: &mut VectorBatch) -> Result<usize> {
-        let cut = || Error::Corrupt("a write record cut short".into());
         let mut n = 0;
         let mut pos = 0;
         let mut notes: Vec<(u32, DocId)> = Vec::new();
         while pos < bytes.len() {
-            let start = pos;
-            let rec = bytes[pos];
-            pos += 1;
-            let cid = get_uvarint(bytes, &mut pos)? as u32;
-            let len = get_uvarint(bytes, &mut pos)? as usize;
-            let body = bytes.get(pos..pos + len).ok_or_else(cut)?;
-            pos += len;
+            let Rec {
+                kind: rec,
+                cid,
+                at: start,
+                body,
+                ..
+            } = record_at(bytes, &mut pos)?;
 
             // The graph takes a batch as the graph stands before it: a
             // schema change needs it as it stands after, and ends it.
@@ -3190,12 +3208,7 @@ impl Database {
             self.undo(b);
             return Err(e);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            *self.appended.get_mut() += len as u64;
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = len;
+        *self.appended.get_mut() += len as u64;
         self.dirty = true;
         for &(cid, id) in &b.notes {
             self.note(cid, id);

@@ -7,7 +7,7 @@ npm, and the `fenec-web` bundle of each release.
 | --- | --- |
 | `fenec.js` | the client: the module's glue, the query builder, the HTTP client and the sync layer, one dependency-free ES module |
 | `fenec.d.ts` | its types |
-| `fenec.wasm` | the engine with every index: 150 KB brotli |
+| `fenec.wasm` | the engine with every index: 151 KB brotli |
 | `fenec-lite.wasm` | the engine without its four indexes: 120 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 

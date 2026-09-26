@@ -47,7 +47,6 @@ impl Loc {
     /// A payload left in the mapped file, at byte `at` of it: the top bit of
     /// `seg` says so, and its other 31 bits are the offset's high word, so a
     /// location stays 12 bytes however large the file.
-    #[cfg(not(target_arch = "wasm32"))]
     fn mapped(at: u64, len: u32) -> Loc {
         Loc {
             seg: MAPPED | (at >> 32) as u32,
@@ -58,14 +57,18 @@ impl Loc {
 }
 
 /// The bit of [`Loc::seg`] that marks a payload in the mapped file.
-#[cfg(not(target_arch = "wasm32"))]
 const MAPPED: u32 = 1 << 31;
 
 /// The bytes a store reads records from without having copied them: a file
 /// the operating system maps in on native targets (`fs::open_mapped`). The
-/// browser has no such thing, and its module none of this.
+/// browser has no such thing: there it is a type of no value (`off.rs`), as
+/// an index a build is made without is, so every path through one compiles
+/// and the compiler drops it -- a store's `base` is always `None`, and
+/// the functions that take one have nothing to call them with.
 #[cfg(not(target_arch = "wasm32"))]
 pub type Base = std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type Base = crate::off::Mapped;
 
 /// Document id -> location mapping.
 ///
@@ -246,7 +249,6 @@ impl IdIndex {
 
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
     /// order.
-    #[cfg(not(target_arch = "wasm32"))]
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
         for (i, l) in self.dense.iter_mut().enumerate() {
             if !l.is_empty() {
@@ -312,7 +314,6 @@ pub struct Store {
     /// Records that stayed in a mapped file rather than being copied into a
     /// segment: the file as it stood when opened, and the stretches of it
     /// that are this collection's, in order -- what `image` writes back.
-    #[cfg(not(target_arch = "wasm32"))]
     base: Option<(Base, Vec<(u64, u64)>)>,
     index: IdIndex,
     next_id: DocId,
@@ -331,7 +332,6 @@ impl Store {
     pub fn new() -> Store {
         Store {
             segments: vec![Segment::default()],
-            #[cfg(not(target_arch = "wasm32"))]
             base: None,
             index: IdIndex::default(),
             next_id: 1,
@@ -367,7 +367,6 @@ impl Store {
     /// write for the tail since the last checkpoint: 16.7 of the 53.8 MB a
     /// mapped file of a million writes held, and uncounted before.
     pub fn index_bytes(&self) -> usize {
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some((_, stretches)) = &self.base {
             return self.index.bytes() + stretches.capacity() * 16;
         }
@@ -541,13 +540,16 @@ impl Store {
 
     #[inline]
     fn payload(&self, loc: Loc) -> Result<&[u8]> {
-        #[cfg(not(target_arch = "wasm32"))]
         if loc.seg & MAPPED != 0 {
-            let at = (((loc.seg & !MAPPED) as u64) << 32 | loc.off as u64) as usize;
-            let bytes = self.base.as_ref().map_or(&[][..], |(b, _)| (**b).as_ref());
-            return bytes
-                .get(at..at + loc.len as usize)
-                .ok_or_else(|| Error::Corrupt("offset outside the mapped file".into()));
+            // Only a store over a file has one: in the browser this folds
+            // away, `base` being of a type of no value.
+            if let Some((b, _)) = &self.base {
+                let at = (((loc.seg & !MAPPED) as u64) << 32 | loc.off as u64) as usize;
+                return (**b)
+                    .as_ref()
+                    .get(at..at + loc.len as usize)
+                    .ok_or_else(|| Error::Corrupt("offset outside the mapped file".into()));
+            }
         }
         let seg = self
             .segments
@@ -732,7 +734,6 @@ impl Store {
     /// the file and nothing is copied, so a record is read from pages the
     /// operating system brings in, and can drop again, rather than from
     /// memory the process holds.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn replay_mapped(
         &mut self,
         base: &Base,
@@ -792,7 +793,9 @@ impl Store {
     /// segments -- so each location moves by where its stretch or segment
     /// landed, and the new file is not read: walking its frames took 1.8 to
     /// 2.3 s of a 1 GB file's checkpoint, all of it under the write lock.
-    #[cfg(not(target_arch = "wasm32"))]
+    // In the browser, where `Base` is a type of no value, the body is
+    // unreachable, which is the point.
+    #[allow(unreachable_code)]
     pub fn relocate_image(&mut self, base: &Base, at: u64) {
         // Where each stretch started, and where it starts now.
         let mut stretches: Vec<(u64, u64)> = Vec::new();
@@ -826,7 +829,9 @@ impl Store {
     /// [`Self::relocate_image`] for the image [`Self::write_live`] wrote: the
     /// live documents alone, in `iter`'s order, each a put -- so each lands
     /// where the frames before it end.
-    #[cfg(not(target_arch = "wasm32"))]
+    // In the browser, where `Base` is a type of no value, the body is
+    // unreachable, which is the point.
+    #[allow(unreachable_code)]
     pub fn relocate_live(&mut self, base: &Base, at: u64) {
         let mut head = Vec::with_capacity(16);
         let mut to = at;
@@ -848,7 +853,6 @@ impl Store {
 
     /// A store the rewrite wrote no data record for: nothing live, and no
     /// hold on the file it read from.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn let_go(&mut self) {
         self.base = None;
         self.segments = vec![Segment::default()];
@@ -926,7 +930,6 @@ impl Store {
 
     /// Whether the records are read from a mapped file rather than held in
     /// memory (`fs::open_mapped`).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_mapped(&self) -> bool {
         self.base.is_some()
     }
@@ -935,7 +938,6 @@ impl Store {
     /// what a checkpoint of a large collection would otherwise hold beside
     /// the data.
     pub fn write_image(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some((base, stretches)) = &self.base {
             let file = (**base).as_ref();
             for &(at, len) in stretches {
@@ -953,7 +955,6 @@ impl Store {
         let mut out = Vec::with_capacity(self.total_bytes);
         // The records left in the mapped file came first; the segments hold
         // what was written after the file was opened.
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some((base, stretches)) = &self.base {
             let file = (**base).as_ref();
             for &(at, len) in stretches {

@@ -744,13 +744,9 @@ impl Beside {
     /// layout `Database::image_into` writes, and points each store at it.
     fn write(&mut self) -> Result<()> {
         let side = &mut self.side;
-        let mut head = Vec::from(&MAGIC[..]);
-        self.head_at = head.len() as u64;
-        head.push(REC_SEQ);
+        self.head_at = MAGIC.len() as u64;
         // The counter and the body's length, both put in under the lock.
-        head.extend_from_slice(&0u64.to_le_bytes());
-        head.extend_from_slice(&0u64.to_le_bytes());
-        side.write(&head)?;
+        side.write(&image_head(0))?;
         self.body_at = side.at();
         if let Some(h) = &self.history {
             side.write(h)?;
