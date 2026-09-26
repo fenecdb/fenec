@@ -4,8 +4,7 @@ A client for fenec-pg's HTTP endpoint (`fenec-pg --http <address>`), and
 vector stores for LangChain and LlamaIndex on top of it.
 
 ```sh
-pip install "fenecdb[langchain] @ git+https://github.com/fenecdb/fenec#subdirectory=integrations/python"
-# or fenecdb[llama-index]
+pip install "fenecdb[langchain]"      # or "fenecdb[llama-index]"
 ```
 
 ```python
