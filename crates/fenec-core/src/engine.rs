@@ -274,6 +274,31 @@ impl Block {
     }
 }
 
+/// A point in a block [`Database::begin`] opened, which
+/// [`Database::rollback_to`] takes it back to: the writes after it put back,
+/// the ones before it kept, and the block still open -- PostgreSQL's
+/// `SAVEPOINT`. The default is the start of whichever block is open.
+#[derive(Clone, Default)]
+pub struct Savepoint {
+    /// Which block it is of ([`Database::begin`] counts them), 0 for any.
+    block: u64,
+    /// How far the block's buffers reached.
+    frames: usize,
+    writes: usize,
+    notes: usize,
+    was: usize,
+    /// Each collection the block had written, and where its store stood.
+    marks: Vec<(u32, crate::store::Mark)>,
+}
+
+impl Savepoint {
+    /// Whether no write of its block comes before it: rolled back to, the
+    /// block is as it was opened.
+    pub fn is_start(&self) -> bool {
+        self.writes == 0
+    }
+}
+
 /// Whether the record at `at` is all there, rather than cut short where the
 /// bytes end -- in its header or its body -- as a crash in the middle of an
 /// append leaves the last one. Only the kinds written with a length are
@@ -1339,6 +1364,9 @@ pub struct Database {
     block: Option<Block>,
     /// The last block's buffers, for the next one ([`Block::cleared`]).
     spare: Block,
+    /// How many blocks [`Self::begin`] has opened: which one a savepoint
+    /// is of.
+    begun: u64,
     /// Which history the writes belong to, and whether they come from a
     /// primary; see [`History`].
     history: History,
@@ -1413,6 +1441,7 @@ impl Database {
             fence: None,
             block: None,
             spare: Block::default(),
+            begun: 0,
             history: History::default(),
             #[cfg(not(target_arch = "wasm32"))]
             mapped: false,
@@ -3071,6 +3100,7 @@ impl Database {
             return Err(Error::Query("a block is open already".into()));
         }
         self.open_block();
+        self.begun += 1;
         Ok(())
     }
 
@@ -3136,35 +3166,113 @@ impl Database {
     }
 
     fn undo(&mut self, mut b: Block) {
-        for (cid, mark) in std::mem::take(&mut b.marks) {
+        let marks = std::mem::take(&mut b.marks);
+        self.rewind(&marks, &b.was);
+        self.spare = b;
+    }
+
+    /// Puts back the writes `writes` holds, the last first, and takes each
+    /// store `marks` names back to its mark: what a block, or the end of
+    /// one, wrote.
+    fn rewind(
+        &mut self,
+        marks: &[(u32, crate::store::Mark)],
+        writes: &[(u32, DocId, Option<crate::store::Loc>)],
+    ) {
+        for &(cid, mark) in marks {
             let Some(name) = self.named(cid) else {
                 continue;
             };
             let c = self.collections.get_mut(&name).unwrap();
-            // Each id the block wrote, with where it was before the first of
-            // its writes.
-            let mut was: Vec<(DocId, Option<crate::store::Loc>)> = Vec::new();
-            for &(wc, id, loc) in &b.was {
-                if wc == cid && !was.iter().any(|(i, _)| *i == id) {
-                    was.push((id, loc));
-                }
-            }
-            let now: Vec<Option<Document>> = was
-                .iter()
-                .map(|&(id, _)| c.store.read(&c.schema, id).ok().flatten())
-                .collect();
-            c.store.rewind(mark, &was);
-            for (&(id, _), now) in was.iter().zip(&now) {
+            // Each write on its own, the last first: its document out of
+            // the indexes, and the one it replaced pointed at and put back
+            // in -- 3.0 ms for a block of 50 000 writes. Put back an id at a
+            // time, the first of each id's writes had to be found: searching
+            // the ids so far for each, those writes took 402 ms under the
+            // write lock, and sorted, the sort was 4.6 KB of the browser
+            // module. An id written again in the block is put back again,
+            // its vector re-linked each time.
+            for &(_, id, loc) in writes.iter().rev().filter(|w| w.0 == cid) {
+                let now = c.store.read(&c.schema, id).ok().flatten();
+                c.store.point(id, loc);
                 let before = c.store.read(&c.schema, id).ok().flatten();
-                if let Some(now) = now {
+                if let Some(now) = &now {
                     c.unindex_doc(now, before.as_ref());
                 }
                 if let Some(before) = &before {
                     c.index_doc(before, now.as_ref());
                 }
             }
+            c.store.rewind(mark);
         }
-        self.spare = b;
+    }
+
+    /// Where the open block stands, for [`Self::rollback_to`] to take it
+    /// back there; with none open, the start of the next.
+    pub fn savepoint(&self) -> Savepoint {
+        let Some(b) = &self.block else {
+            return Savepoint::default();
+        };
+        Savepoint {
+            block: self.begun,
+            frames: b.frames.len(),
+            writes: b.heads.len(),
+            notes: b.notes.len(),
+            was: b.was.len(),
+            marks: b
+                .marks
+                .iter()
+                .filter_map(|&(cid, _)| {
+                    let c = &self.collections[&self.named(cid)?];
+                    Some((cid, c.store.mark()))
+                })
+                .collect(),
+        }
+    }
+
+    /// Takes the open block back to `sp`, as [`Self::rollback`] takes one
+    /// back to its start: the writes after it are put back, the ones before
+    /// it stay, and the block stays open. The savepoints taken after `sp`
+    /// are over, as PostgreSQL's are, and the caller's to forget: one of
+    /// them taken back to would cut the writes made since at wherever it
+    /// stood. Refused for a savepoint of another block, or one reaching past
+    /// where this one now ends.
+    pub fn rollback_to(&mut self, sp: &Savepoint) -> Result<()> {
+        let Some(mut b) = self.block.take() else {
+            if sp.block == 0 {
+                return Ok(());
+            }
+            return Err(Error::Query("the savepoint's block has ended".into()));
+        };
+        let within = sp.writes <= b.heads.len()
+            && sp.was <= b.was.len()
+            && sp.notes <= b.notes.len()
+            && sp.frames <= b.frames.len();
+        if (sp.block != 0 && sp.block != self.begun) || !within {
+            self.block = Some(b);
+            return Err(Error::Query(
+                "the savepoint is not of the open block".into(),
+            ));
+        }
+        // A store the block had written by then goes back to where it stood
+        // there; one it had not, to where the block's first write found it.
+        let marks: Vec<_> = b
+            .marks
+            .iter()
+            .map(|&(cid, first)| {
+                let at = sp.marks.iter().find(|(c, _)| *c == cid);
+                (cid, at.map_or(first, |&(_, m)| m))
+            })
+            .collect();
+        self.rewind(&marks, &b.was[sp.was..]);
+        b.marks
+            .retain(|(cid, _)| sp.marks.iter().any(|(c, _)| c == cid));
+        b.frames.truncate(sp.frames.max(HEAD_ROOM));
+        b.heads.truncate(sp.writes);
+        b.notes.truncate(sp.notes);
+        b.was.truncate(sp.was);
+        self.block = Some(b);
+        Ok(())
     }
 
     /// Runs `stmts` as one block: every write in it lands, as one record,

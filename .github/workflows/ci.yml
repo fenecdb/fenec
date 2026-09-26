@@ -146,6 +146,11 @@ jobs:
       - name: Python stores
         run: make python-test
 
+      # psycopg's nested transactions and SQLAlchemy's begin_nested, which
+      # are savepoints, over the pg wire of a fenec-pg on the runner.
+      - name: PostgreSQL drivers
+        run: make drivers-test
+
       # useLiveQuery against a stand-in and a real fenec-pg and replica; the
       # sync layer loads the browser module.
       - name: React hook

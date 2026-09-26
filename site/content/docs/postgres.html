@@ -91,11 +91,26 @@ with <code>25006</code>.</p>
 <p>As in PostgreSQL:</p>
 
 <ul>
-  <li>A statement that fails fails the transaction. Its writes are put back
-    at once, ReadyForQuery reports <code>E</code>, and every statement up to
-    <code>COMMIT</code> or <code>ROLLBACK</code> is refused with
+  <li>A statement that fails fails the transaction. ReadyForQuery reports
+    <code>E</code>, and every statement up to <code>COMMIT</code>,
+    <code>ROLLBACK</code> or a <code>ROLLBACK TO</code> is refused with
     <code>25P02</code>; the <code>COMMIT</code> of a failed transaction
-    answers <code>ROLLBACK</code>.</li>
+    answers <code>ROLLBACK</code>. Its writes are put back at once, and the
+    lock let go — unless a savepoint after one of them is there to go back
+    to.</li>
+  <li><code>SAVEPOINT</code>, <code>ROLLBACK TO</code> and
+    <code>RELEASE</code>: <code>ROLLBACK TO</code> puts back the writes after
+    the savepoint and the transaction goes on, a failed one included; the
+    savepoint stays, and the ones after it are over. <code>RELEASE</code>
+    forgets a savepoint and the ones after it, and keeps their writes. The
+    newest of a name is the one meant, and names fold to lower case unless
+    quoted. psycopg's nested <code>transaction()</code> blocks,
+    SQLAlchemy's <code>begin_nested()</code> and psql's
+    <code>ON_ERROR_ROLLBACK</code> run on them. Outside a
+    transaction they are refused with <code>25P01</code>, and a savepoint the
+    transaction does not have with <code>3B001</code>. Taken back to a
+    savepoint before its first write, a transaction lets the lock go, and
+    reads what others commit again until its next write.</li>
   <li>A pipeline of the extended protocol is one block up to its
     <code>Sync</code>: JDBC's <code>executeBatch</code>, pgx's batches and
     libpq's pipeline mode land whole or not at all. A text of several
@@ -113,11 +128,14 @@ with <code>25006</code>.</p>
 index</code> cannot be put back. Before a transaction's first write it runs
 on its own, and the transaction's <code>ROLLBACK</code> puts back the writes
 after it and says the schema change stays (<code>0A000</code>); after a write
-it is refused (<code>25001</code>). Savepoints and two-phase commit are
-refused (<code>0A000</code>): taken for the <code>ROLLBACK</code> or the
-<code>COMMIT</code> they begin with, they would end a transaction other than
-the one named. <code>BEGIN</code>, <code>COMMIT</code> and
-<code>ROLLBACK</code> go in a query of their own.</p>
+it is refused (<code>25001</code>). A <code>ROLLBACK TO</code> a savepoint
+taken before a schema change is refused for the same reason
+(<code>0A000</code>), and changes nothing. Two-phase commit is refused
+(<code>0A000</code>): taken for the <code>COMMIT</code> or the
+<code>ROLLBACK</code> it begins with, it would end a transaction other than
+the one named. <code>BEGIN</code>, <code>COMMIT</code>,
+<code>ROLLBACK</code> and the savepoint commands go in a query of their
+own.</p>
 
 <h2>Resource ceilings</h2>
 
@@ -351,7 +369,7 @@ functions, write hooks and transport adapters can be registered.</p>
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>2.89 MB</b> on amd64 and 2.51 MB on arm64 — since no target
+package manager, no libc. The image is <b>2.92 MB</b> on amd64 and 2.51 MB on arm64 — since no target
 is written in, both come out of the same file.</p>
 
 <pre data-lang="bash">make docker                     # build the image
