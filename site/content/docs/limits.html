@@ -96,7 +96,7 @@ and text indexes, the graph, and the writes since the open.</p>
   <li><b>Open cost is proportional to data size, not constant.</b> The records
     are walked to build the offset index and the indexes are built from the
     documents, mapped or not. 100 000 × 128 with the graph in the file takes
-    about 57 ms; a process that runs a single vector query is done sooner with
+    about 46 ms; a process that runs a single vector query is done sooner with
     SQLite.</li>
 </ul>
 

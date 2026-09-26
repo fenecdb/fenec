@@ -326,6 +326,102 @@ macro_rules! strip8 {
     }};
 }
 
+/// Σ x², summed flat, one element after another: the 8-strip `norm` rounds
+/// differently, which would change the normalised vectors and with them
+/// the graph. One add waits on the one before, 120 ns at 128 dimensions
+/// and 720 at 768 on an M1 -- see [`flat_sqs`] for several at once.
+#[inline]
+fn flat_sq(v: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for x in v {
+        acc += x * x;
+    }
+    acc
+}
+
+/// [`flat_sq`] of eight vectors of one length, side by side: each sum still
+/// flat and in its own order, so the same bits, but eight chains of adds in
+/// flight rather than one. A reopen normalises every vector it reads into
+/// the arena, and one at a time that was a third of opening a 100 000 x 128
+/// graph.
+// The eight sums advance together, an element of each at a time: the index
+// is the point.
+#[allow(clippy::needless_range_loop)]
+fn flat_sqs8(v: [&[f32]; 8]) -> [f32; 8] {
+    let dim = v[0].len();
+    // Cut to one length, so no index below needs checking.
+    let v = v.map(|s| &s[..dim]);
+    let mut acc = [0.0f32; 8];
+    for i in 0..dim {
+        for j in 0..8 {
+            acc[j] += v[j][i] * v[j][i];
+        }
+    }
+    acc
+}
+
+/// [`get_uvarint`] inlined into the loop that reads a graph's links, a link
+/// being two or three bytes: called with its `Result` a link at a time, it
+/// was a quarter of opening a 100 000 x 128 graph. The same values, a
+/// longer one left to `get_uvarint`.
+#[inline(always)]
+fn graph_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+    let p = *pos;
+    if let Some(&[a, b, c]) = bytes.get(p..p + 3) {
+        let (a7, b7) = ((a & 0x7f) as u64, (b & 0x7f) as u64);
+        if a < 0x80 {
+            *pos = p + 1;
+            return Some(a as u64);
+        }
+        if b < 0x80 {
+            *pos = p + 2;
+            return Some(a7 | b7 << 7);
+        }
+        if c < 0x80 {
+            *pos = p + 3;
+            return Some(a7 | b7 << 7 | (c as u64) << 14);
+        }
+    }
+    get_uvarint(bytes, pos).ok()
+}
+
+/// Whether a restore sums its vectors' norms eight at a time: natively.
+const BATCH_NORMS: bool = cfg!(not(target_family = "wasm"));
+
+/// Pushes the vectors `batch` holds, `dim` apiece, into `arena` in order --
+/// made unit ones when `unit`, their norms summed side by side -- and
+/// empties it.
+fn flush_units(arena: &mut Arena, batch: &mut Vec<f32>, dim: usize, unit: bool) {
+    if dim == 0 || batch.is_empty() {
+        batch.clear();
+        return;
+    }
+    let mut vs = batch.chunks_exact(dim);
+    if batch.len() == 8 * dim && unit {
+        let v: [&[f32]; 8] = std::array::from_fn(|_| vs.next().unwrap_or(&[]));
+        for (v, sq) in v.iter().zip(flat_sqs8(v)) {
+            arena.push_scaled(v, unit_scale(sq));
+        }
+    } else {
+        for v in vs {
+            arena.push_scaled(v, if unit { unit_scale(flat_sq(v)) } else { 1.0 });
+        }
+    }
+    batch.clear();
+}
+
+/// What a vector is multiplied by to make it a unit one, from its
+/// [`flat_sq`]: a zero vector stays as it is.
+#[inline]
+fn unit_scale(sq: f32) -> f32 {
+    let n = sq.sqrt();
+    if n > 0.0 {
+        1.0 / n
+    } else {
+        1.0
+    }
+}
+
 /// f16 -> f32, branchless. In the hot loop the subnormal branch of
 /// `codec::f32_from_f16` blocked auto-vectorisation (build time went up 5x);
 /// here the same result falls out of a single multiply.
@@ -1281,35 +1377,19 @@ impl Arena {
     /// so there is no intermediate `Vec` allocation; on the f16 path the
     /// scale is applied during the conversion anyway.
     fn push(&mut self, raw: &[f32], unit: bool) {
-        let inv = if unit {
-            // The summation order is deliberately flat: the 8-strip `norm`
-            // rounds differently, which would change the normalised vectors
-            // and with them the graph. We keep the old order for measurement.
-            let n = {
-                let mut acc = 0.0f32;
-                for x in raw {
-                    acc += x * x;
-                }
-                acc.sqrt()
-            };
-            if n > 0.0 {
-                1.0 / n
-            } else {
-                1.0
-            }
-        } else {
-            1.0
+        let inv = match unit {
+            true => unit_scale(flat_sq(raw)),
+            false => 1.0,
         };
+        self.push_scaled(raw, inv);
+    }
+
+    /// Pushes `raw` times `inv`, the scale [`unit_scale`] gave it.
+    fn push_scaled(&mut self, raw: &[f32], inv: f32) {
         match self {
-            Arena::F32(d) => {
-                let base = d.len();
-                d.extend_from_slice(raw);
-                if inv != 1.0 {
-                    for x in &mut d[base..] {
-                        *x *= inv;
-                    }
-                }
-            }
+            // Scaled as it is copied: a pass over the vector less.
+            Arena::F32(d) if inv != 1.0 => d.extend(raw.iter().map(|x| x * inv)),
+            Arena::F32(d) => d.extend_from_slice(raw),
             Arena::F16(d) => {
                 d.extend(raw.iter().map(|x| crate::codec::f16_from_f32(x * inv)));
             }
@@ -2464,7 +2544,10 @@ impl VectorIndex {
         let node = self.doc_ids.len() as u32;
         self.doc_ids.push(doc);
         self.deleted.push(false);
-        self.l0.resize(self.l0.len() + self.m0, 0);
+        let end = self.doc_ids.len() * self.m0;
+        if self.l0.len() < end {
+            self.l0.resize(end, 0);
+        }
         self.l0_len.push(0);
         self.upper.push(if level == 0 {
             Vec::new()
@@ -3166,6 +3249,9 @@ impl VectorIndex {
         }
 
         ix.reserve(count);
+        // Every level-0 list at once, zeroed by the allocator rather than a
+        // stride at a time as the nodes come.
+        ix.l0 = vec![0; count.checked_mul(ix.m0)?];
         ix.max_level = max_level;
         ix.entry = if entry_raw == 0 {
             None
@@ -3174,6 +3260,13 @@ impl VectorIndex {
         };
 
         let mut raw: Vec<f32> = Vec::with_capacity(dim);
+        let mut lvl: Vec<u32> = Vec::new();
+        // The documents' vectors, eight at a time, into the arena in node
+        // order: their norms are summed side by side ([`flat_sqs8`]). Not
+        // in the browser, whose image of 20 000 x 128 loaded 9% faster that
+        // way for 0.5 KB brotli more of the module.
+        let mut batch: Vec<f32> = Vec::new();
+        let unit = spec.metric == Metric::Cosine;
         let stored = ix.data.stored_len(dim);
         for node in 0..count {
             let doc = get_uvarint(bytes, &mut pos).ok()?;
@@ -3193,12 +3286,23 @@ impl VectorIndex {
             let n = if is_deleted {
                 let v = bytes.get(pos..pos + stored)?;
                 pos += stored;
+                if BATCH_NORMS {
+                    flush_units(&mut ix.data, &mut batch, dim, unit);
+                }
                 ix.alloc_node_stored(doc, v, levels - 1)
             } else {
                 if !lookup(doc, &mut raw) || raw.len() != dim {
                     return None;
                 }
-                ix.alloc_node(doc, &raw, levels - 1)
+                if !BATCH_NORMS {
+                    ix.alloc_node(doc, &raw, levels - 1)
+                } else {
+                    batch.extend_from_slice(&raw);
+                    if batch.len() == 8 * dim {
+                        flush_units(&mut ix.data, &mut batch, dim, unit);
+                    }
+                    ix.alloc_links(doc, levels - 1)
+                }
             };
             debug_assert_eq!(n as usize, node);
             if is_deleted {
@@ -3216,10 +3320,10 @@ impl VectorIndex {
                 if k > count {
                     return None; // corrupt length
                 }
-                let mut lvl = Vec::with_capacity(k);
+                lvl.clear();
                 let mut prev = 0u64;
                 for _ in 0..k {
-                    let delta = get_uvarint(bytes, &mut pos).ok()?;
+                    let delta = graph_varint(bytes, &mut pos)?;
                     let nb = prev.checked_add(delta)?;
                     if nb as usize >= count {
                         return None; // out-of-range link: the graph is corrupt
@@ -3234,6 +3338,9 @@ impl VectorIndex {
             }
         }
 
+        if BATCH_NORMS {
+            flush_units(&mut ix.data, &mut batch, dim, unit);
+        }
         if ix.entry.map(|e| e as usize >= count).unwrap_or(false) {
             return None;
         }
@@ -3548,6 +3655,56 @@ mod tests {
                 }
             }
             assert!(shared > 100, "{prec:?}: only {shared} documents both found");
+        }
+    }
+
+    /// A restore normalises the documents' vectors eight at a time: the arena
+    /// it ends with holds the bits the one it restored held, over tombstones
+    /// between them and a last batch short of eight.
+    #[test]
+    fn a_restored_arena_holds_the_vectors_it_had_bit_for_bit() {
+        let mut rng = Rng(29);
+        for prec in [VecPrec::F32, VecPrec::F16] {
+            let dim = 13;
+            let spec = VectorIndexSpec {
+                m: 6,
+                ef_construction: 32,
+                ..VectorIndexSpec::default()
+            };
+            let mut ix = VectorIndex::with_precision(dim, spec, prec);
+            let mut held = HashMap::new();
+            for i in 0..45u64 {
+                let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() * 3.0 - 1.5).collect();
+                ix.insert(i, &v);
+                held.insert(i, v);
+            }
+            // Written again with another vector, and deleted: tombstones
+            // carrying their own vectors among the live nodes.
+            for i in [3u64, 11, 12, 30] {
+                let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
+                ix.insert(i, &v);
+                held.insert(i, v);
+            }
+            for i in [7u64, 20] {
+                ix.remove(i);
+                held.remove(&i);
+            }
+            let bytes = ix.serialize_graph();
+            let back = VectorIndex::restore_graph(&bytes, dim, prec, |doc, out| {
+                out.clear();
+                out.extend_from_slice(held.get(&doc).map_or(&[][..], |v| &v[..]));
+                held.contains_key(&doc)
+            })
+            .expect("the graph restores");
+            assert_eq!(back.doc_ids.len(), ix.doc_ids.len());
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for node in 0..ix.doc_ids.len() as u32 {
+                a.clear();
+                b.clear();
+                ix.data.write_stored(node, dim, &mut a);
+                back.data.write_stored(node, dim, &mut b);
+                assert_eq!(a, b, "{prec:?}, node {node}");
+            }
         }
     }
 
