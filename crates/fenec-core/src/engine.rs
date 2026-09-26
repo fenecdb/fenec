@@ -1328,9 +1328,9 @@ pub struct Database {
     /// The party to wake after a write (if any).
     watcher: Option<Arc<dyn Watcher>>,
     /// On a node a router's lease lets write, whether the lease still does
-    /// ([`Self::set_fence`]): asked as a write starts and again as its
-    /// block lands, so no write lands after the lease lapsed -- the router
-    /// promotes the tenant elsewhere once it knows the lease has.
+    /// ([`Self::set_fence`]): asked as a block lands, and as a schema change
+    /// or a maintenance starts, so no write lands after the lease lapsed --
+    /// the router promotes the tenant elsewhere once it knows the lease has.
     #[cfg(not(target_arch = "wasm32"))]
     fence: Option<Fence>,
     /// The block of writes running, if one is: its writes are held back
