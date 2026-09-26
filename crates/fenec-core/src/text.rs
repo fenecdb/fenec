@@ -598,7 +598,7 @@ impl TextIndex {
         // us, FiQA 1918 -> 311 us, Turkish WebFAQ 401 -> 82 us. The rows it
         // returns are exactly the exhaustive ones, which is what
         // `pruning_never_changes_the_answer` holds it to.
-        cursors.sort_by(|a, b| a.ceiling.total_cmp(&b.ceiling));
+        let mut cursors = by_ceiling(&cursors);
         let mut reach: Vec<f32> = Vec::with_capacity(cursors.len() + 1);
         reach.push(0.0);
         for c in &cursors {
@@ -691,7 +691,25 @@ pub(crate) fn best_first(a: &(DocId, f32), b: &(DocId, f32)) -> Ordering {
     b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
+/// `cursors` by ceiling, lowest first, ties in the order they came -- put in
+/// that order by `best_first` as `(position, -ceiling)`, since the browser
+/// module holds that sort anyway: a sort of `Cursor`s of its own was 4.2 KB
+/// of it.
+///
+/// The vector index's candidates keep theirs: this way a build of 30 000 x
+/// 128 took 2.5% longer, for 0.4 KB brotli.
+fn by_ceiling<'a>(cursors: &[Cursor<'a>]) -> Vec<Cursor<'a>> {
+    let mut order: Vec<(DocId, f32)> = cursors
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i as DocId, -c.ceiling))
+        .collect();
+    order.sort_by(best_first);
+    order.iter().map(|&(i, _)| cursors[i as usize]).collect()
+}
+
 /// One query term's walk through its postings.
+#[derive(Clone, Copy)]
 struct Cursor<'a> {
     at: usize,
     list: &'a Postings,
@@ -780,7 +798,7 @@ impl TextIndex {
         if cursors.is_empty() {
             return Vec::new();
         }
-        cursors.sort_by(|a, b| a.ceiling.total_cmp(&b.ceiling));
+        let mut cursors = by_ceiling(&cursors);
         let mut heap: BinaryHeap<ByScore> = BinaryHeap::with_capacity(k + 1);
         loop {
             let mut doc = DocId::MAX;

@@ -709,16 +709,108 @@ impl HashIndex {
     }
 }
 
+/// Field name -> index, in the order the fields were indexed: a `Vec`
+/// searched by name rather than a map, as `sorted` and `sparse` are. A
+/// collection indexes a handful of fields, and each map of them was a copy
+/// of hashbrown's code in the browser module.
+pub struct Fields<T>(Vec<(String, T)>);
+
+impl<T> Default for Fields<T> {
+    fn default() -> Self {
+        Fields(Vec::new())
+    }
+}
+
+impl<T> Fields<T> {
+    pub fn get(&self, name: &str) -> Option<&T> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut T> {
+        self.0.iter_mut().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Puts `v` under `name`, handing back what was there.
+    pub fn insert(&mut self, name: String, v: T) -> Option<T> {
+        match self.get_mut(&name) {
+            Some(slot) => Some(std::mem::replace(slot, v)),
+            None => {
+                self.0.push((name, v));
+                None
+            }
+        }
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<T> {
+        let at = self.0.iter().position(|(n, _)| n == name)?;
+        Some(self.0.remove(at).1)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &T)> {
+        self.into_iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut T)> {
+        self.0.iter_mut().map(|(k, v)| (&*k, v))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.0.iter().map(|(_, v)| v)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.0.iter_mut().map(|(_, v)| v)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear()
+    }
+}
+
+fn pair<K, V>(e: &(K, V)) -> (&K, &V) {
+    (&e.0, &e.1)
+}
+
+impl<'a, T> IntoIterator for &'a Fields<T> {
+    type Item = (&'a String, &'a T);
+    type IntoIter =
+        std::iter::Map<std::slice::Iter<'a, (String, T)>, fn(&'a (String, T)) -> Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(pair)
+    }
+}
+
+impl<T> std::ops::Index<&str> for Fields<T> {
+    type Output = T;
+
+    fn index(&self, name: &str) -> &T {
+        self.get(name).expect("no index on that field")
+    }
+}
+
 pub struct Collection {
     pub id: u32,
     pub schema: Schema,
     pub store: Store,
     /// field name -> HNSW index
-    pub vectors: HashMap<String, VectorIndex>,
+    pub vectors: Fields<VectorIndex>,
     /// field name -> hash index
-    pub hashes: HashMap<String, HashIndex>,
+    pub hashes: Fields<HashIndex>,
     /// field name -> inverted index
-    pub texts: HashMap<String, TextIndex>,
+    pub texts: Fields<TextIndex>,
     /// field name -> ordered index, in schema order. A `Vec` rather than a
     /// map: a collection has a handful of ordered fields, the map's code was
     /// 2.6 KB of the browser module, and a fixed order keeps the choice
@@ -740,9 +832,9 @@ impl Collection {
         allow(unused_mut)
     )]
     fn new(id: u32, schema: Schema) -> Collection {
-        let mut vectors = HashMap::new();
-        let mut hashes = HashMap::new();
-        let mut texts = HashMap::new();
+        let mut vectors = Fields::default();
+        let mut hashes = Fields::default();
+        let mut texts = Fields::default();
         let mut sorted = Vec::new();
         let mut sparse = Vec::new();
         for f in &schema.fields {
@@ -4978,40 +5070,22 @@ impl Database {
             }
 
             if !keys.is_empty() {
-                // Read the keys up front and sort on them, exactly as the
-                // parent path does: comparing through the store would read
-                // every row log(n) times.
-                let mut keyed: Vec<(Vec<Value>, DocId)> = Vec::with_capacity(kept.len());
-                for id in &kept {
-                    let mut vals = Vec::with_capacity(keys.len());
-                    for (pos, ..) in &keys {
-                        vals.push(match pos {
-                            None => Value::Int(*id as i64),
-                            Some(p) => child.store.read_field(*id, *p)?.unwrap_or(Value::Null),
-                        });
-                    }
-                    keyed.push((vals, *id));
-                }
-                // The id breaks a tie, ascending whichever way the keys
-                // run. A stable sort over an ascending-id input already
-                // decided ties that way, so this changes no answer -- it
-                // makes the order total, which is what lets the selection
-                // below pick the same rows the full sort would.
-                let cmp = |a: &(Vec<Value>, DocId), b: &(Vec<Value>, DocId)| {
-                    rank(&keys, &a.0, &b.0).then(a.1.cmp(&b.1))
-                };
+                // Put in order as the parent path is, through `order_ids`,
+                // which reads the keys up front -- comparing through the
+                // store would read every row log(n) times. Its ties go by
+                // position, so the children go in ascending id first: a
+                // hash bucket holds them that way almost always, not always,
+                // and a tie has gone to the lower id. A sort of its own, of
+                // `(Vec<Value>, DocId)` rows, was 8.1 KB of the browser
+                // module.
+                //
                 // `lookup` is the one place a bounded `order` is known up
                 // front: the clause carries its own `limit`, so only
                 // `offset + limit` children can ever be emitted and the rest
                 // never need an order at all. Elsewhere `order` has no such
                 // guarantee, which is why the engine sorts in full there.
-                let want = l.offset.saturating_add(limit);
-                if want < keyed.len() {
-                    keyed.select_nth_unstable_by(want, cmp);
-                    keyed.truncate(want);
-                }
-                keyed.sort_by(cmp);
-                kept = keyed.into_iter().map(|(_, id)| id).collect();
+                kept.sort_unstable();
+                kept = order_ids(&child.store, &kept, &keys, l.offset.saturating_add(limit))?;
             }
 
             let mut group = Vec::new();

@@ -136,6 +136,10 @@ pub extern "C" fn fenec_version() -> *mut u8 {
     boxed(fenec_core::VERSION.as_bytes())
 }
 
+/// Generic, so every caller compiles its own `LocalKey::with`, 17 of them.
+/// Handed its closure as `dyn` through one function that reached `HANDLES`,
+/// they went down to 9 and the module grew by 319 bytes: the work moved into
+/// each caller's closure, with the glue around it.
 fn with_slot<T>(handle: u32, f: impl FnOnce(&mut Slot) -> T) -> Option<T> {
     HANDLES.with(|h| {
         let mut h = h.borrow_mut();

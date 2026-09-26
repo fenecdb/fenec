@@ -11,7 +11,6 @@
 use crate::error::{Error, Result};
 use crate::schema::Schema;
 use crate::value::{Document, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A scalar function callable from FenecQL expressions.
@@ -60,7 +59,11 @@ pub trait Hook: Send + Sync {
 
 #[derive(Default)]
 pub struct Registry {
-    functions: HashMap<String, Arc<dyn ScalarFn>>,
+    /// Name, lowered, -> function: a `Vec` searched by name rather than a
+    /// map. Four are built in, a lookup through the map lowered the name
+    /// into a new `String` on every call of every row, and the map's code
+    /// was 0.9 KB of the browser module.
+    functions: Vec<(String, Arc<dyn ScalarFn>)>,
     hooks: Vec<Arc<dyn Hook>>,
     plugins: Vec<(String, String)>,
 }
@@ -73,12 +76,18 @@ impl Registry {
     }
 
     pub fn register_fn(&mut self, name: &str, f: Arc<dyn ScalarFn>) -> Result<()> {
-        if self.functions.contains_key(name) {
+        // The name as given against the lowered ones, as the map's
+        // `contains_key` compared it: `Lower` replaces `lower`.
+        if self.functions.iter().any(|(n, _)| n == name) {
             return Err(Error::Exists(format!(
                 "function `{name}` is already registered"
             )));
         }
-        self.functions.insert(name.to_ascii_lowercase(), f);
+        let lowered = name.to_ascii_lowercase();
+        match self.functions.iter_mut().find(|(n, _)| *n == lowered) {
+            Some(slot) => slot.1 = f,
+            None => self.functions.push((lowered, f)),
+        }
         Ok(())
     }
 
@@ -87,11 +96,14 @@ impl Registry {
     }
 
     pub fn function(&self, name: &str) -> Option<&Arc<dyn ScalarFn>> {
-        self.functions.get(&name.to_ascii_lowercase())
+        self.functions
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, f)| f)
     }
 
     pub fn function_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.functions.keys().cloned().collect();
+        let mut v: Vec<String> = self.functions.iter().map(|(n, _)| n.clone()).collect();
         v.sort();
         v
     }

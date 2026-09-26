@@ -2453,7 +2453,8 @@ impl VectorIndex {
             if self.is_deleted(node) {
                 self.data.write_stored(node, self.dim, &mut out);
             }
-            let mut sorted: Vec<u32> = Vec::with_capacity(self.m0);
+            // `u64`s, whose sort the ids take anyway.
+            let mut sorted: Vec<u64> = Vec::with_capacity(self.m0);
             for l in 0..levels {
                 let nbs = self.neighbors(node, l);
                 put_uvarint(&mut out, nbs.len() as u64);
@@ -2461,11 +2462,11 @@ impl VectorIndex {
                 // Sorting and delta coding shortens the varints: in a 100k
                 // node graph a raw id is 3 bytes, a delta about 2.
                 sorted.clear();
-                sorted.extend_from_slice(nbs);
+                sorted.extend(nbs.iter().map(|&nb| nb as u64));
                 sorted.sort_unstable();
-                let mut prev = 0u32;
+                let mut prev = 0;
                 for &nb in &sorted {
-                    put_uvarint(&mut out, (nb - prev) as u64);
+                    put_uvarint(&mut out, nb - prev);
                     prev = nb;
                 }
             }
