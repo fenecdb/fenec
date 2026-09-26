@@ -44,6 +44,12 @@ lto = true
 codegen-units = 1
 strip = true
 
+# `cargo test` builds some 70 binaries, each linked with the whole engine:
+# line tables are enough for a backtrace's lines, and the rest of the debug
+# information was most of what the linker read and wrote.
+[profile.test]
+debug = "line-tables-only"
+
 # The catalog fenec-pg answers psql, JDBC and DBeaver from is not on any hot
 # path -- a tool asks it a handful of queries when it connects -- so it is
 # built for size.

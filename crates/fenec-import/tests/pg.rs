@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! make pgvector-up
-//! cargo test -p fenec-import --test pg -- --ignored
+//! cargo test -p fenec-import --test all pg:: -- --ignored
 //! make pgvector-down
 //! ```
 //!

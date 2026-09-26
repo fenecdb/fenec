@@ -3,6 +3,7 @@ name = "fenec-pg"
 description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
 version.workspace = true
 edition.workspace = true
+autotests = false
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -21,3 +22,27 @@ fenec-import.workspace = true
 [[bin]]
 name = "fenec-pg"
 path = "src/main.rs"
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+# Apart: reads the process's own counts.
+[[test]]
+name = "metrics"
+path = "tests/metrics.rs"
+
+# Apart: reads the process's own counts.
+[[test]]
+name = "replica"
+path = "tests/replica.rs"
+
+# Apart: reads the process's own counts.
+[[test]]
+name = "statements"
+path = "tests/statements.rs"
+
+# Apart: reads the process's own counts.
+[[test]]
+name = "tenants"
+path = "tests/tenants.rs"

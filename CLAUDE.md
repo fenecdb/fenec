@@ -11,7 +11,7 @@ front door and links into them, and this file is the working summary.
 ## Commands
 
 ```bash
-make test          # cargo test, fenec-core without its indexes, then the JS tests (node --test)
+make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes, then the JS tests
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
@@ -47,11 +47,11 @@ make statements-bench    # what counting a statement by its shape costs
 Single tests:
 
 ```bash
-cargo test -p fenec-core --test persist          # one integration test file
+cargo test -p fenec-core --test all persist::   # one file of a crate's integration tests (one binary)
 cargo test -p fenec-ql near                      # by name substring (integration: fn name only)
 cargo test -p fenec-core codec::tests            # inline unit tests in a module
 cargo test -p fenec-core --no-default-features --features std-fs --lib --test features   # without the indexes
-cargo test -p fenec-import --test pg -- --ignored   # needs a live PostgreSQL
+cargo test -p fenec-import --test all pg:: -- --ignored   # needs a live PostgreSQL
 node --test web/fenec.test.js                    # JS: builder
 node --test --test-name-pattern 'shape' web/fenec.sync.test.js
 ```
@@ -936,7 +936,11 @@ panicking connection thread unwinds and drops only its own session.
 - `Error` (`fenec-core/src/error.rs`) is the single error type: allocation-free
   variants, no `Box`. `fenec-pg` maps it onto PostgreSQL SQLSTATE codes.
 - Unit tests live inline in `#[cfg(test)] mod tests`; cross-crate and protocol
-  tests live in `crates/*/tests/`. Measurement programs are
+  tests live in `crates/*/tests/`, a file each, gathered into one binary a
+  crate by `tests/all.rs` (`autotests = false`: a new file needs its `mod`
+  line there, or it is never built). One that reads the process's own
+  counts, `/_metrics` or the statements', is a `[[test]]` of its own:
+  beside the others it would count theirs. Measurement programs are
   `crates/fenec-core/examples/` and are wired to `make` targets, not to CI.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.

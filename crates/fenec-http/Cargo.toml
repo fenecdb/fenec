@@ -3,6 +3,7 @@ name = "fenec-http"
 description = "HTTP/JSON endpoint for fenecdb: a REST surface derived from the schema"
 version.workspace = true
 edition.workspace = true
+autotests = false
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -12,3 +13,12 @@ categories.workspace = true
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-ql.workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+# Apart: reads the process's own counts.
+[[test]]
+name = "tenants"
+path = "tests/tenants.rs"
