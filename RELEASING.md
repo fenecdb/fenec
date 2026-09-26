@@ -31,9 +31,23 @@ nothing reaches a registry before the notes have had a read.
 
 ## Once: the registries' side
 
-The repository keeps no key a registry takes: PyPI and npm are told to trust
-`packages.yml` itself (trusted publishing, the workflow's OIDC identity).
-Setting that up is done once, by whoever owns the names.
+`packages.yml` publishes with a token where a registry's secret holds one,
+and with its own OIDC identity (trusted publishing) where it does not.
+Either is set up once, by whoever owns the names.
+
+**With tokens.** On npm, create the organization `fenecdb` (the `@fenecdb`
+scope) and an automation token with publish access to it; on PyPI, an API
+token for the whole account, since a token scoped to a project cannot make
+the project on its first upload. Then, pasting each when asked:
+
+    gh secret set NPM_TOKEN -R fenecdb/fenec
+    gh secret set PYPI_API_TOKEN -R fenecdb/fenec
+
+After the first upload the PyPI token can be replaced by one scoped to
+`fenecdb`. A release published before the secrets were set gets its
+packages from a dispatch: `gh workflow run packages.yml -f tag=vX.Y.Z`.
+
+**Without tokens,** the registries trust the workflow itself:
 
 **PyPI.** Signed in as the account that will own `fenecdb`, under
 *Publishing*, add a pending publisher: project `fenecdb`, owner `fenecdb`,

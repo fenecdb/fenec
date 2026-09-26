@@ -5,9 +5,13 @@ name: packages
 # the release a draft so its notes get a read, and publishing the draft is
 # the moment the packages follow it. A registry keeps what it is given, so
 # nothing goes to one before every package has been built, installed and
-# used (integrations/packages.sh), and nothing is published with a stored
-# key: PyPI and npm take this workflow's OIDC identity (trusted
-# publishing). RELEASING.md has the registries' side of it.
+# used (integrations/packages.sh). Each registry takes a token when its
+# secret is set -- NPM_TOKEN, PYPI_API_TOKEN -- and this workflow's OIDC
+# identity otherwise (trusted publishing). RELEASING.md has both.
+#
+# Dispatched by hand with a tag, it builds the packages from that tag with
+# the workflow as it is on the branch it runs from: a release published
+# before its registries were ready gets them that way.
 on:
   release:
     types: [published]
@@ -69,9 +73,13 @@ jobs:
           mkdir pypi
           mv dist/fenecdb-*.whl dist/fenecdb-*.tar.gz pypi/
 
+      # An API token when the secret holds one -- an account-wide token
+      # creates the project on its first upload -- and the OIDC identity when
+      # it is empty.
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pypi/
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   npm:
     name: npm
