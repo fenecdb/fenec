@@ -65,6 +65,15 @@ opt-level = "z"
 inherits = "release"
 panic = "abort"
 
+# The shell reaches fenec-http only for `fenec backup`, `archive` and
+# `restore`, which wait on the network and the disk: built for size it is
+# 16.3 KB less of the released binary (`make size-report BIN=fenec`). The
+# importer stays fast -- built for size it took 32.6 KB off, and a
+# 200 000-row SQLite import from 251 to 285 ms -- and so does the root
+# crate: built for size it made the binary 129 KB larger.
+[profile.cli.package.fenec-http]
+opt-level = "z"
+
 # On WASM, size comes first.
 [profile.wasm]
 inherits = "release"

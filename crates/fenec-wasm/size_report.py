@@ -22,6 +22,7 @@ quote, with the same allowance.
     make size-report                 # the module as it stands
     make size-report BASE=main       # and against main, built in a worktree
     make size-report WHY=flt2dec     # which of fenec's functions pull that in
+    make size-report BIN=fenec-pg    # a native binary's code by crate
 """
 
 import collections
@@ -672,15 +673,67 @@ def report(head, base=None):
     return "\n".join(out)
 
 
+# A native binary, its package and the profile it ships with.
+BINARIES = {"fenec": ("fenec-cli", "cli"), "fenec-pg": ("fenec-pg", "release"),
+            "fenec-shard": ("fenec-shard", "release")}
+
+
+def native(name):
+    """Markdown: a native binary's code by crate, from the symbols of a
+    build that keeps them. A Mach-O symbol has no size, so each is the way to
+    the next one's address, the last the way to the end of the text."""
+    package, profile = BINARIES[name]
+    target = os.path.join(ROOT, "target", "size-report", "native")
+    env = dict(os.environ, CARGO_TARGET_DIR=target, **{f"CARGO_PROFILE_{profile.upper()}_STRIP": "false"})
+    subprocess.run([CARGO, "build", "-q", "-p", package, "--profile", profile], check=True, cwd=ROOT, env=env)
+    path = os.path.join(target, profile, name)
+    listing = subprocess.run(["nm", "-n", "--defined-only", path], capture_output=True, text=True,
+                             check=True).stdout
+    text = []
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[1] in "tT":
+            text.append((int(parts[0], 16), parts[2]))
+    if sys.platform == "darwin":
+        load = subprocess.run(["otool", "-l", path], capture_output=True, text=True, check=True).stdout
+        m = re.search(r"sectname __text\n\s+segname __TEXT\n\s+addr (0x[0-9a-f]+)\n\s+size (0x[0-9a-f]+)", load)
+    else:
+        sections = subprocess.run(["readelf", "-S", "-W", path], capture_output=True, text=True, check=True).stdout
+        m = re.search(r"\s\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)", sections)
+    start, size = int(m.group(1), 16), int(m.group(2), 16)
+    text = [t for t in text if start <= t[0] < start + size]
+    crates, fns = collections.Counter(), collections.Counter()
+    for i, (at, symbol) in enumerate(text):
+        length = (text[i + 1][0] if i + 1 < len(text) else start + size) - at
+        # Mach-O puts a `_` before every name.
+        symbol = symbol[1:] if sys.platform == "darwin" and symbol.startswith("_") else symbol
+        path_, _, home = demangle(symbol)
+        crate = home[0] if symbol.startswith(("_R", "_ZN")) else "the rest"
+        crates[crate] += length
+        fns[path_] += length
+    stripped = os.path.getsize(path)
+    lines = [f"## `{name}`, `--profile {profile}`", "",
+             f"{kb(size)} KB of code in a {kb(stripped)} KB build that keeps its symbols.", "",
+             "| crate | KB | share |", "| --- | ---: | ---: |"]
+    for crate, v in crates.most_common():
+        lines.append(f"| {crate} | {kb(v)} | {100 * v / size:.1f}% |")
+    lines += ["", f"The {TOP} largest functions:", "", "| KB | function |", "| ---: | --- |"]
+    lines += [f"| {kb(v)} | `{short(f)}` |" for f, v in fns.most_common(TOP)]
+    return "\n".join(lines)
+
+
 def main():
-    """`size_report.py [base] [what to call it] [--why pattern]`: CI passes the
-    merge's first parent and the name of the branch it is."""
+    """`size_report.py [base] [what to call it] [--why pattern] [--bin name]`:
+    CI passes the merge's first parent and the name of the branch it is."""
     args = sys.argv[1:]
     pattern = None
     if "--why" in args:
         at = args.index("--why")
         pattern = args[at + 1]
         del args[at:at + 2]
+    if "--bin" in args:
+        print(native(args[args.index("--bin") + 1]))
+        return
     base_ref = args[0] if args and args[0] else None
     called = args[1] if len(args) > 1 and args[1] else base_ref
     out = os.path.join(ROOT, "target", "size-report")
