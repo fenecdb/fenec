@@ -161,9 +161,11 @@ find it open and write into it. The guard borrows a database found once a
 pass of the session loop (a `OnceCell` a pass), so a tenant's is found
 afresh for the next transaction. A pipeline of the extended protocol is one
 block up to its `Sync` when a write in it has more of the pipeline after
-it; the last statement before a `Sync` runs as one on its own. A schema
-change runs on its own before a transaction's first write (and its
-`ROLLBACK` says it stays, `0A000`) and is refused after one (`25001`).
+it; the last statement before a `Sync` runs as one on its own. A create,
+a drop and a create index are writes of the block, put back with it; a
+compact rewrites the file, so it runs on its own before a transaction's
+first write and is refused after one (`25001`). A lone `create index`
+outside a transaction is still built beside the database.
 `SAVEPOINT` takes the held block's `Database::savepoint` -- the start of
 the block before the first write -- and `ROLLBACK TO` puts back what came
 after it (`Database::rollback_to`) and goes on, a failed transaction too:
@@ -193,9 +195,20 @@ are unindexed and the versions before them indexed again, and the ids it
 handed out are handed out again. A record is numbered by its last write, `writes_in` counts them, and
 whatever counts records -- the replication feed, the archive,
 `apply_records` -- counts that way; a restore to a change inside a block
-stops before it. A schema change or a compact cannot be undone, so it is
-refused in a block (`Statement::fits_block`), and a `/batch` or a pg text
-holding one runs each statement on its own, as before. A `/batch`, a pg text
+stops before it. A compact cannot be undone, so it is refused in a block
+(`Statement::fits_block`), and a `/batch` or a pg text holding one runs
+each statement on its own. A schema change is undone as a write is: the
+block's log (`Undo`) holds a collection made, which goes, a collection
+dropped -- kept whole until the block lands, then let go -- which comes
+back where it stood, and an index built, which goes. It lands inside the
+block's record (kind 9) as the record it is on its own, and a lone one as
+that record alone, so only a block mixing one with other writes is new to
+a binary from before 10.4, which refuses it as corrupt. Undone in one pass
+the last write first, the collection a write is of is looked up by id, not
+kept: a drop and a create of the same name in one block are two
+collections. It cost the browser module 3.0 KB, 0.6 KB brotli, the
+removal of an index from each of the five maps most of it; draining the
+log rather than popping it was 0.5 KB more. A `/batch`, a pg text
 of several statements, a pg transaction and pipeline, and the browser
 module's `run` of several are one block. A block is put back a write at
 a time, the last first, each the inverse of what it did: 3.0 ms for 50 000
@@ -367,8 +380,8 @@ every record after it. A tool that only looks (`fenec types`) opens with
 append in flight looks torn from outside. The change counter record (kind 6) is at the front and fixed width;
 the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
-appended records that are not writes; a block across collections (kind 9)
-holds a data record for each of its writes.
+appended records that are not writes; a block (kind 9) holds a record for
+each of its writes: a data record, or a create's, a drop's or an index's.
 
 **The HNSW graph is derived data, not a cache.** It is written by
 `snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
@@ -463,8 +476,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 149.8 KB
-brotli with all four, 119.5 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.3 KB
+brotli with all four, 120.2 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

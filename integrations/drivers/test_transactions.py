@@ -117,3 +117,39 @@ def test_sqlalchemy_session_begin_nested(table, engine):
                     s.execute(text(f"put {table} {{name: 4}}"))
             s.execute(text(f"put {table} {{name: 'after'}}"))
     assert landed(table) == ["outer", "kept", "after"]
+
+
+def collections() -> set[str]:
+    with psycopg.connect(DSN, autocommit=True) as c:
+        return {r[0] for r in c.execute("collections").fetchall()}
+
+
+def test_a_schema_change_is_put_back_with_its_transaction(engine):
+    """A migration run in a transaction, as Alembic runs one: a create, a
+    drop and a create index are put back with the rest, or land with it."""
+    made = f"m_{uuid.uuid4().hex[:12]}"
+    kept = f"k_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute(f"create collection {kept} (name text)")
+        c.execute(f"put {kept} {{name: 'stays'}}")
+    with pytest.raises(RuntimeError):
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"create collection {made} (x int)")
+            conn.exec_driver_sql(f"put {made} {{x: 1}}")
+            conn.exec_driver_sql(f"create index on {kept} (name) @hash")
+            conn.exec_driver_sql(f"drop collection {kept}")
+            raise RuntimeError("put back")
+    assert made not in collections()
+    assert landed(kept) == ["stays"]
+
+    with psycopg.connect(DSN) as c:
+        with c.transaction():
+            c.execute(f"create collection {made} (x int)")
+            with pytest.raises(RuntimeError):
+                with c.transaction():
+                    c.execute(f"drop collection {kept}")
+                    raise RuntimeError("back to the savepoint")
+            c.execute(f"put {made} {{x: 2}}")
+    assert made in collections() and kept in collections()
+    with psycopg.connect(DSN, autocommit=True) as c:
+        assert c.execute(f"get {made} count").fetchone()[0] == 1

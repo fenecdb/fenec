@@ -464,16 +464,19 @@ fn a_batch_that_fails_lands_none_of_it() {
     assert_eq!(rows.trim(), "[]");
 }
 
-/// A create cannot be put back, so a batch holding one runs each statement
-/// on its own, as it always did: what ran before the error stays, and the
-/// answer says how much that was.
+/// A create, a drop or a create index is put back as a write is, so a
+/// batch holding one is one block too: none of it lands. A batch holding a
+/// compact runs each statement on its own, as it always did: what ran
+/// before the error stays, and the answer says how much that was.
 #[test]
-fn a_batch_with_a_schema_change_runs_each_statement_on_its_own() {
+fn a_batch_with_a_schema_change_lands_none_of_it() {
     let h = start(Config::default());
     let body = concat!(
         r#"{"query":"create collection notes (body text)"}"#,
         "\n",
-        r#"{"query":"put notes {body: $1}","params":["kept"]}"#,
+        r#"{"query":"put notes {body: $1}","params":["gone"]}"#,
+        "\n",
+        r#"{"query":"create index on tasks (title) @hash"}"#,
         "\n",
         r#"{"query":"put tasks {nofield: $1}","params":[1]}"#,
         "\n",
@@ -481,9 +484,29 @@ fn a_batch_with_a_schema_change_runs_each_statement_on_its_own() {
     );
     let (st, out) = post(h.port, "/batch", body);
     assert_eq!(st, 404, "{out}");
+    assert!(out.contains("\"completed\":0"), "{out}");
+    let (st, rows) = call(h.port, "GET", "/notes", None, &[]);
+    assert_eq!(st, 404, "the collection outlived its batch: {rows}");
+    // The index went with it, and is built again.
+    let (st, out) = post(
+        h.port,
+        "/batch",
+        r#"{"query":"create index on tasks (title) @hash"}"#,
+    );
+    assert_eq!(st, 200, "{out}");
+
+    let body = concat!(
+        r#"{"query":"put tasks {key: $1, title: $2, status: $3}","params":["k","kept","open"]}"#,
+        "\n",
+        r#"{"query":"compact"}"#,
+        "\n",
+        r#"{"query":"put tasks {nofield: $1}","params":[1]}"#,
+    );
+    let (st, out) = post(h.port, "/batch", body);
+    assert_eq!(st, 404, "{out}");
     assert!(out.contains("\"completed\":2"), "{out}");
-    let (_, rows) = call(h.port, "GET", "/notes", None, &[]);
-    assert!(rows.contains("kept") && !rows.contains("never"), "{rows}");
+    let (_, rows) = call(h.port, "GET", "/tasks?key=eq.k", None, &[]);
+    assert!(rows.contains("kept"), "{rows}");
 }
 
 #[test]

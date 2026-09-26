@@ -339,3 +339,53 @@ fn a_block_is_archived_and_restored_whole() {
     assert_eq!(ns(&db, "a"), [1, 2, 4, 5].map(Value::Int));
     assert_eq!(ns(&db, "b"), [Value::Int(3)]);
 }
+
+/// A block holding schema changes is archived and restored whole as well:
+/// a restore inside it stops before it, with the collection it dropped
+/// still there and the one it made not yet.
+#[test]
+fn a_block_with_schema_changes_is_archived_and_restored_whole() {
+    let d = dir("schema-block");
+    let p = primary(&d.join("primary.fenec"), 1 << 20);
+    p.exec("create collection a (n int)");
+    p.exec("create collection b (n int)");
+    p.exec("put b {n: 1}");
+    let arch = d.join("arch");
+    let a = archiver(&arch, &p.url);
+    let before = p.seq();
+    archived(&arch, before);
+    let durable = {
+        let mut g = p.db.write().unwrap();
+        let s: Vec<Statement> = [
+            "create collection c (n int @hash)",
+            "put c [{n: 2}, {n: 3}]",
+            "drop collection b",
+            "create index on a (n) @sorted",
+            "put a {n: 4}",
+        ]
+        .iter()
+        .map(|q| fenec_ql::parse_one(q).unwrap())
+        .collect();
+        let block: Vec<(&Statement, &[Value])> = s.iter().map(|s| (s, &[][..])).collect();
+        g.execute_block(&block).unwrap();
+        g.flush().unwrap()
+    };
+    if let Some(d) = durable {
+        d().unwrap();
+    }
+    let end = p.seq();
+    assert_eq!(end, before + 6);
+    archived(&arch, end);
+    a.finish();
+
+    let (db, r) = restored(&arch, &d.join("end.fenec"), Target::End);
+    assert_eq!(r.seq, end);
+    assert_eq!(db.collection_names(), ["a", "c"]);
+    assert_eq!(rows(&db, "get c select n where n = 3").len(), 1);
+    assert_eq!(rows(&db, "get a select n where n > 3").len(), 1);
+    // Inside the block: before it, the dropped collection still there.
+    let (db, r) = restored(&arch, &d.join("mid.fenec"), Target::Change(before + 3));
+    assert_eq!(r.seq, before);
+    assert_eq!(db.collection_names(), ["a", "b"]);
+    assert_eq!(rows(&db, "get b").len(), 1);
+}

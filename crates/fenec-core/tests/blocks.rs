@@ -382,10 +382,8 @@ fn begin_commit_and_rollback_hold_a_block_open_between_statements() {
         "a read in it sees it"
     );
     exec(&mut db, "del docs where n >= 20", &[]);
-    // A schema change is refused, and the block stays open.
-    assert!(db
-        .execute_with(&stmt("create collection other (x int)"), &[])
-        .is_err());
+    // A compact is refused, and the block stays open.
+    assert!(db.execute_with(&stmt("compact"), &[]).is_err());
     assert!(db.in_block());
     assert!(tap.since(seq).is_empty(), "nothing lands before the commit");
     db.rollback();
@@ -402,16 +400,201 @@ fn begin_commit_and_rollback_hold_a_block_open_between_statements() {
 }
 
 #[test]
-fn a_schema_change_is_refused_in_a_block_of_more_than_one() {
+fn a_compact_is_refused_in_a_block_of_more_than_one() {
     let mut db = Database::new();
     seeded(&mut db);
-    let refused = block(
-        &mut db,
-        &[r#"put notes {k: "b"}"#, "create collection other (x int)"],
-    );
+    let refused = block(&mut db, &[r#"put notes {k: "b"}"#, "compact"]);
     assert_eq!(refused.map_err(|(i, _)| i), Err(1));
-    assert!(!db.collection_names().iter().any(|n| n == "other"));
     assert!(rows(&db, r#"get notes where k = "b""#, &[]).is_empty());
+}
+
+/// Each collection's schema as its record holds it, and what its store
+/// holds, by name.
+fn shape(db: &Database) -> Vec<(String, Vec<u8>, usize, usize, usize)> {
+    db.collection_names()
+        .into_iter()
+        .map(|n| {
+            let c = db.collection(&n).unwrap();
+            let st = c.stats();
+            (n, c.schema.encode(), st.documents, st.bytes, st.dead_bytes)
+        })
+        .collect()
+}
+
+/// The schema changes of the tests below: a collection made and written,
+/// an index built and read through, a collection dropped and another made
+/// under its name.
+const CHANGES: [&str; 8] = [
+    "create collection other (x int @hash)",
+    "put other [{x: 1}, {x: 2}]",
+    "create index on notes (body) @text",
+    r#"put notes {k: "b", body: "two words"}"#,
+    r#"get notes select id match body "two""#,
+    "drop collection docs",
+    "create collection docs (other text @hash)",
+    r#"put docs {other: "x"}"#,
+];
+
+/// What a reader could ask once the changes landed.
+fn changed_answers(db: &Database) -> Vec<Rows> {
+    [
+        "get other",
+        "get notes",
+        "get docs",
+        "get other select id where x = 2",
+        r#"get notes select id match body "two""#,
+        r#"get docs select id where other = "x""#,
+    ]
+    .iter()
+    .map(|sql| rows(db, sql, &[]))
+    .collect()
+}
+
+#[test]
+fn a_block_that_does_not_land_puts_its_schema_changes_back() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    let (before, shaped, seq) = (answers(&db), shape(&db), db.change_seq());
+
+    let mut failing = CHANGES.to_vec();
+    failing.push(r#"put notes {k: 1}"#);
+    let failed = block(&mut db, &failing);
+    assert_eq!(failed.map_err(|(i, _)| i), Err(8));
+    assert_eq!(shape(&db), shaped);
+    assert_eq!(answers(&db), before);
+    assert_eq!(db.change_seq(), seq, "the counter moved");
+    assert!(tap.since(seq).is_empty(), "a record reached the file");
+
+    // Held open, a read in it sees them all; put back, none of them.
+    db.begin().unwrap();
+    for sql in CHANGES {
+        exec(&mut db, sql, &[]);
+    }
+    assert_eq!(changed_answers(&db)[4].len(), 1);
+    db.rollback();
+    assert_eq!(shape(&db), shaped);
+    assert_eq!(answers(&db), before);
+
+    // The index is gone, and is built again; the collection is gone, and
+    // is made again, under the id it had.
+    exec(&mut db, "create index on notes (body) @text", &[]);
+    exec(&mut db, "create collection other (x int)", &[]);
+    let other = db.collection("other").unwrap().id;
+    assert_eq!(other, db.collection("notes").unwrap().id + 1);
+}
+
+#[test]
+fn a_block_of_schema_changes_lands_as_one_record() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    let seq = db.change_seq();
+    assert_eq!(
+        block(&mut db, &CHANGES).map_err(|(i, e)| (i, e.to_string())),
+        Ok(8)
+    );
+    let written = tap.since(seq);
+    assert_eq!(written.len(), 1, "one record");
+    assert_eq!(written[0].1[0], 9, "a block record");
+    // A schema change counts as a write, as it does on its own: four of
+    // them, and four documents.
+    assert_eq!(writes_in(&written[0].1).unwrap(), 8);
+    assert_eq!(db.change_seq(), seq + 8);
+    let landed = changed_answers(&db);
+    assert_eq!(landed[3].len(), 1);
+    assert_eq!(landed[4].len(), 1);
+    assert_eq!(landed[5].len(), 1);
+
+    // The file reads back to the same collections and answers...
+    let mut back = Database::new();
+    back.load(&tap.bytes()).unwrap();
+    assert_eq!(back.change_seq(), db.change_seq());
+    assert_eq!(changed_answers(&back), landed);
+    assert_eq!(
+        back.collection_names(),
+        ["notes", "other", "docs"],
+        "in the order they were made"
+    );
+    // ...and a replica applies them, numbered as its primary numbered them.
+    let replica_file = Tap::default();
+    let mut replica = replica_file.database();
+    replica.follow(vec![(7, 0)]).unwrap();
+    for (seq, record) in tap.since(0) {
+        replica.apply(&record).unwrap();
+        assert_eq!(replica.change_seq(), seq);
+    }
+    assert_eq!(changed_answers(&replica), landed);
+    assert_eq!(replica_file.since(0), tap.since(0));
+
+    // Cut anywhere in it, none of it is there.
+    let file = tap.bytes();
+    let whole = file.len() - written[0].1.len();
+    for cut in [whole + 1, (whole + file.len()) / 2, file.len() - 1] {
+        let mut back = Database::new();
+        assert_eq!(back.load(&file[..cut]).unwrap(), whole, "cut at {cut}");
+        assert_eq!(back.collection_names(), ["docs", "notes"], "cut at {cut}");
+    }
+
+    // A lone schema change is the record it always was.
+    for (sql, kind) in [
+        ("create collection lone (x int)", 1),
+        ("create index on lone (x) @hash", 5),
+        ("drop collection lone", 2),
+    ] {
+        let seq = db.change_seq();
+        exec(&mut db, sql, &[]);
+        let written = tap.since(seq);
+        assert_eq!((written.len(), written[0].1[0]), (1, kind), "{sql}");
+    }
+}
+
+#[test]
+fn a_savepoint_puts_back_the_schema_changes_after_it() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    let (before, shaped) = (answers(&db), shape(&db));
+
+    db.begin().unwrap();
+    exec(&mut db, "create collection early (x int @sorted)", &[]);
+    exec(&mut db, "put early [{x: 1}, {x: 5}]", &[]);
+    exec(&mut db, r#"put notes {k: "z", body: "before"}"#, &[]);
+    let at = (shape(&db), rows(&db, "get early where x > 2", &[]));
+    let point = db.savepoint();
+    exec(&mut db, "put early {x: 9}", &[]);
+    exec(&mut db, "drop collection early", &[]);
+    exec(&mut db, "create collection early (y text)", &[]);
+    exec(&mut db, "create index on notes (body) @text", &[]);
+    exec(&mut db, r#"put notes {k: "c", body: "after"}"#, &[]);
+    db.rollback_to(&point).unwrap();
+    assert_eq!((shape(&db), rows(&db, "get early where x > 2", &[])), at);
+
+    // A collection written before a savepoint and dropped before it too
+    // comes back whole with the rest, its store as it stood.
+    exec(&mut db, "drop collection notes", &[]);
+    let dropped = db.savepoint();
+    exec(&mut db, "create collection notes (k int)", &[]);
+    db.rollback_to(&dropped).unwrap();
+    db.rollback();
+    assert_eq!(shape(&db), shaped);
+    assert_eq!(answers(&db), before);
+
+    // Landed, the file reads back to what it held.
+    db.begin().unwrap();
+    exec(&mut db, "create collection early (x int @sorted)", &[]);
+    exec(&mut db, "put early [{x: 1}, {x: 5}]", &[]);
+    let point = db.savepoint();
+    exec(&mut db, "drop collection early", &[]);
+    db.rollback_to(&point).unwrap();
+    db.commit().unwrap();
+    let mut back = Database::new();
+    back.load(&tap.bytes()).unwrap();
+    assert_eq!(
+        rows(&back, "get early where x > 2", &[]),
+        rows(&db, "get early where x > 2", &[])
+    );
+    assert_eq!(back.collection_names(), db.collection_names());
 }
 
 #[test]

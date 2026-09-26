@@ -1501,37 +1501,62 @@ fn a_pipeline_lands_whole_at_its_sync() {
     assert_eq!(names(&mut c), ["a", "b"]);
 }
 
-/// A schema change cannot be put back. Before a transaction's first write it
-/// runs on its own and the ROLLBACK says it stays; after one it is refused.
+/// A create, a drop and a create index are writes of the transaction like
+/// any other: put back by its ROLLBACK, landed by its COMMIT, and seen by
+/// nobody before. A compact rewrites the file: it runs on its own before the
+/// first write, and is refused after one.
 #[test]
-fn a_schema_change_in_a_transaction_runs_on_its_own_or_not_at_all() {
+fn a_schema_change_in_a_transaction_lands_with_it_or_not_at_all() {
     let h = trust_server();
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
 
     c.simple("BEGIN");
     let r = c.simple("create collection t (name text)");
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "CREATE TABLE");
     c.simple("put t {name: \"a\"}");
-    let r = c.simple("ROLLBACK");
-    let e = find(&r, b'E').expect("the ROLLBACK has to say the collection stays");
-    assert_eq!(e.sqlstate().unwrap(), "0A000");
+    c.simple("create index on t (name) @hash");
+    assert_eq!(names(&mut c), ["a"]);
+    other.send("get t count");
     assert!(
-        e.message().unwrap().contains("1 schema change"),
-        "{:?}",
-        e.message()
+        !answers_within(&mut other, 300),
+        "a read went past an open transaction"
     );
+    let r = c.simple("ROLLBACK");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert!(find(&r, b'E').is_none(), "{r:?}");
     assert_eq!(status(&r), b'I');
-    assert!(names(&mut c).is_empty(), "the write was put back");
+    let r = other.until_ready();
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
 
+    // After a write too, landed by the COMMIT.
+    c.simple("create collection t (name text)");
     c.simple("BEGIN");
     c.simple("put t {name: \"b\"}");
     let r = c.simple("create collection u (x int)");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "CREATE TABLE");
+    assert_eq!(status(&r), b'T');
+    c.simple("put u {x: 1}");
+    c.simple("drop collection t");
+    let r = c.simple("COMMIT");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
+    let r = other.simple("get u count");
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("1".to_string())]);
+    let r = other.simple("get t");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
+
+    // A compact before the first write runs on its own; after one it is
+    // refused.
+    c.simple("BEGIN");
+    let r = c.simple("compact");
+    assert!(find(&r, b'E').is_none(), "{r:?}");
+    c.simple("put u {x: 2}");
+    let r = c.simple("compact");
     assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25001");
     assert_eq!(status(&r), b'E');
     c.simple("ROLLBACK");
-    assert!(names(&mut c).is_empty());
-    let r = c.simple("get u");
-    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
+    let r = other.simple("get u count");
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("1".to_string())]);
 }
 
 /// READ ONLY refuses a write; SERIALIZABLE takes the lock at its first
@@ -1759,7 +1784,7 @@ fn savepoints_are_named_and_refused_as_in_postgresql() {
     assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "3B001");
     c.simple("ROLLBACK");
 
-    // A schema change since a savepoint cannot be put back with it.
+    // A schema change since a savepoint is put back with the writes.
     c.simple("BEGIN");
     c.simple("SAVEPOINT s");
     c.simple("create collection u (x int)");
@@ -1767,16 +1792,13 @@ fn savepoints_are_named_and_refused_as_in_postgresql() {
     c.simple("put u {x: 1}");
     let r = c.simple("ROLLBACK TO after");
     assert_eq!(status(&r), b'T');
+    let r = c.simple("get u count");
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("0".to_string())]);
     let r = c.simple("ROLLBACK TO s");
-    let e = find(&r, b'E').unwrap();
-    assert_eq!(e.sqlstate().unwrap(), "0A000");
-    assert!(
-        e.message().unwrap().contains("1 schema change"),
-        "{:?}",
-        e.message()
-    );
-    assert_eq!(status(&r), b'E');
-    c.simple("ROLLBACK");
+    assert_eq!(status(&r), b'T');
+    c.simple("COMMIT");
+    let r = c.simple("get u");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42P01");
 
     // Two-phase commit stays refused rather than read as what it begins
     // with: `COMMIT PREPARED 'x'` committed the transaction open.

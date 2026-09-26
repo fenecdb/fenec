@@ -187,8 +187,9 @@ so a node that is down takes its tenants with it.</p>
     waited at most 24 ms, where the rewrite under the lock held them 1.22 s,
     for 67 MB more heap at the peak. The records those documents superseded
     stay in the new file as dead ones until the next compact. One in a
-    batch, or run by the shell or an embedding program, still holds the
-    write lock throughout. A schema
+    batch or a transaction, or run by the shell or an embedding program,
+    still holds the write lock throughout — in a transaction, as one of its
+    writes, put back with them. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
     fits, and so does a second compact while one writes its file. It cannot
@@ -325,11 +326,10 @@ so a node that is down takes its tenants with it.</p>
   <li><b>A transaction holds the database.</b> There is one writer: from its
     first write to its end every other session waits on it, reads included,
     and one whose client goes silent is put back after
-    <code>--idle-in-transaction-timeout</code>. A schema change cannot be put
-    back — before a transaction's first write it runs on its own, and its
-    <code>ROLLBACK</code> says so, as does a <code>ROLLBACK TO</code> a
-    savepoint before it; after one it is refused — and there is no
-    two-phase commit (<a href="postgres.html#transactions">Transactions</a>). <code>LISTEN</code>
+    <code>--idle-in-transaction-timeout</code>. A <code>compact</code>
+    cannot join a transaction — before its first write it runs on its own,
+    after one it is refused — and there is no two-phase commit (<a
+    href="postgres.html#transactions">Transactions</a>). <code>LISTEN</code>
     and <code>NOTIFY</code> return <code>0A000</code> — subscriptions are
     <code>GET /&lt;name&gt;/changes</code>.</li>
   <li>A cancellation is seen while waiting on the lock and between batched
@@ -401,12 +401,12 @@ so a node that is down takes its tenants with it.</p>
     ring. Waking moves the cursor forward, and no empty batch is sent for a
     change that does not match the shape. The cost is one read lock and an
     empty scan.</li>
-  <li><b>A batch holding a schema change is not one block.</b> A
-    <code>create</code>, a <code>drop</code>, a <code>create index</code> or
-    a <code>compact</code> cannot be put back, so a <code>POST /batch</code>
-    holding one runs each statement on its own, stops at the first error and
-    reports how many were applied. Every other batch lands whole or not at
-    all.</li>
+  <li><b>A batch holding a compact is not one block.</b> A
+    <code>compact</code> rewrites the file, which cannot be put back, so a
+    <code>POST /batch</code> holding one runs each statement on its own,
+    stops at the first error and reports how many were applied. Every other
+    batch — a <code>create</code>, a <code>drop</code> or a <code>create
+    index</code> among its statements — lands whole or not at all.</li>
 </ul>
 
 <h2>Import</h2>
