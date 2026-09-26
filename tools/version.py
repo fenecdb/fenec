@@ -2,10 +2,10 @@
 """One version wherever a release reads it: `make version V=0.1.5`.
 
 The workspace's version and fenec-wire's where the workspace names it, the
-Python package's, both npm packages', and the image the README pulls --
-site/build.py holds the README to the workspace, and packages.yml refuses a
-release whose packages say another number. The lock file follows at the
-next build."""
+Python package's, both npm packages' and the React package's lock file, and
+the image the README pulls -- site/build.py holds the README to the
+workspace, and packages.yml refuses a release whose packages say another
+number. Cargo.lock follows at the next build."""
 
 import pathlib
 import re
@@ -33,8 +33,14 @@ def main():
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for path in ("web/package.json", "integrations/react/package.json"):
         sub(path, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
+    # The lock file names the package's version twice, at its top and as the
+    # root of `packages`; `make react-test` installs from it with `npm ci`.
+    # The bump to 0.1.5 found it still at 0.1.4.
+    lock = "integrations/react/package-lock.json"
+    sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
+    sub(lock, r'^(    "": \{\n      "name": "@fenecdb/react",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub("README.md", r"(ghcr\.io/fenecdb/fenec-pg:)\d+\.\d+\.\d+", rf"\g<1>{v}")
-    print(f"version {v}: Cargo.toml, pyproject.toml, both package.json, README.md")
+    print(f"version {v}: Cargo.toml, pyproject.toml, both package.json, the lock, README.md")
 
 
 if __name__ == "__main__":
