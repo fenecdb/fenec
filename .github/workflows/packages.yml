@@ -76,10 +76,13 @@ jobs:
       # An API token when the secret holds one -- an account-wide token
       # creates the project on its first upload -- and the OIDC identity when
       # it is empty.
+      # `skip-existing`: a dispatch after a run that failed part of the way
+      # uploads again what already went out, and PyPI refuses a file twice.
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: pypi/
           password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
 
   npm:
     name: npm
@@ -113,5 +116,16 @@ jobs:
           set -eu
           # The web client first: the React hook's users install it beside.
           for pkg in dist/fenecdb-web-*.tgz dist/fenecdb-react-*.tgz; do
-            npm publish "$pkg" --access public --provenance
+            # A version already on npm is left, as PyPI's are: npm refuses to
+            # publish one twice, and a dispatch after a run that failed part
+            # of the way would otherwise stop at it.
+            spec=$(tar -xzOf "$pkg" package/package.json | node -p 'const p = JSON.parse(require("fs").readFileSync(0)); p.name + "@" + p.version')
+            if npm view "$spec" version >/dev/null 2>&1; then
+              echo "$spec is on npm already"
+              continue
+            fi
+            # `./`: a bare `dist/x.tgz` is read as GitHub's `owner/repo`
+            # shorthand -- 0.1.5's first publish went to `git ls-remote
+            # github.com/dist/...` and stopped there.
+            npm publish "./$pkg" --access public --provenance
           done
