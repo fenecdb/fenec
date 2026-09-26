@@ -33,7 +33,7 @@ fn num_into(out: &mut String, f: f64) {
         if f.fract() == 0.0 && f.abs() < 1e15 {
             out.push_str(&format!("{}", f as i64));
         } else {
-            out.push_str(&format!("{f}"));
+            crate::num::f64_into(out, f);
         }
     } else {
         out.push_str("null");
