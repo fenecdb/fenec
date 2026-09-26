@@ -141,7 +141,7 @@ into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
 ```bash
-docker pull ghcr.io/fenecdb/fenec-pg:0.1.4     # published, multi-arch
+docker pull ghcr.io/fenecdb/fenec-pg:0.1.5     # published, multi-arch
 make docker && make docker-run PGPASS=secret   # or build it yourself
 ```
 
