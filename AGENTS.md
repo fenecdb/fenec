@@ -374,9 +374,9 @@ binary does not know and rebuilds from -- it restored a record in the tail
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
-leaves at most 10 000 vectors to link, 3.4 s with `near` at 2.08 ms p50
-meanwhile, where every vector waited 24.3 s in the same run with `near` at
-the exact scan's 14.49 ms; the ten records were 35.2 MB of a 370.3 MB file
+leaves at most 10 000 vectors to link, 3.0 s with `near` at 1.53 ms p50
+meanwhile, where every vector waited 19.2 s in the same run with `near` at
+the exact scan's 10.32 ms; the ten records were 35.2 MB of a 370.3 MB file
 until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
 at most (`make reopen-bench`).
 
@@ -687,7 +687,7 @@ FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
 builds an inverted index that is rebuilt from the documents on open — 27 µs per
-document against the HNSW graph's ~50 µs, and the rebuild pass already reads
+document against the HNSW graph's ~44 µs, and the rebuild pass already reads
 every document for the hash indexes. Nothing about it reaches the file, so
 there is no validation path and no stale-index case to handle. It is shrunk to
 fit where it is known complete (rebuild, `create index`); live ingest keeps
