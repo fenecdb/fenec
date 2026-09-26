@@ -179,7 +179,13 @@ protocol refuses several commands (`42601`). Under `--sync always` a transaction
 fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
 statement what it did (`make tx-bench`). A savepoint costs its round trips:
 a put in one of its own, released, 58.3 us against 20.7 under `--sync 250`,
-and a `ROLLBACK TO` over 100 writes 30.9 us. Two processes opening the same file corrupts it,
+and a `ROLLBACK TO` over 100 writes 30.9 us. What one writer costs readers
+is measured against SQLite in one process (`make concurrency-bench`): four
+threads read 8.2M rows/s by id alone, 828k beside four writers, and 272k
+beside a transaction held open 20 ms at a time, a read waiting up to 34 ms
+-- where SQLite's WAL reads the last commit meanwhile, 1.18M/s and 0.2 ms
+at most. Durable writes gain from the fsync outside the lock: 252 -> 478
+writes/s from 1 to 16 writers, SQLite's 256 -> 263. Two processes opening the same file corrupts it,
 which is why `fenec-http` is a second listener inside `fenec-pg`, never
 its own binary.
 
