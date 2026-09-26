@@ -17,7 +17,7 @@ exception are worth knowing before you touch the reader.</p>
   [3][collection-id][length][records]      data
   [4][collection-id][length][field][graph] HNSW graph (optional)
   [8][0][length][history]                  replication history (optional)
-  [9][0][length][records]                  a block across collections
+  [9][0][length][records]                  a block of several records
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>,
@@ -151,14 +151,18 @@ file and reports <code>unknown record kind 6</code>.</p>
 
 <p>Every write is a block: the documents a <code>put</code>, a
 <code>set</code> or a <code>del</code> writes, the statements of a
-<code>/batch</code> or of a text sent over the pg wire. Their frames are held
-back until the block ends and are appended as one record, so a crash cuts all
-of them off the file or none; a block that fails is put back in memory
-instead, and nothing of it reaches the file. Within one collection the record
-is a data record of as many frames — the form an image's data records have
-always had, so a binary from before blocks reads it. Across collections it is
-record kind 9, holding a data record for each write, which such a binary
-refuses with <code>unknown record kind 9</code>.</p>
+<code>/batch</code>, of a text sent over the pg wire or of a transaction.
+Their frames are held back until the block ends and are appended as one
+record, so a crash cuts all of them off the file or none; a block that fails
+is put back in memory instead, and nothing of it reaches the file. Within one
+collection the record is a data record of as many frames — the form an
+image's data records have always had, so a binary from before blocks reads
+it — and a lone schema change is the record it always was. Across
+collections, or with a schema change among other writes, it is record kind
+9, holding each write's record: a data record, or a create's, a drop's or an
+index's. A binary from before blocks refuses it with <code>unknown record
+kind 9</code>, and one from before 10.4 a block holding a schema change as
+corrupt.</p>
 
 <p>The change counter moves by the writes a record holds, not by one a
 record: a block of five writes is numbered by its last, and whatever counts

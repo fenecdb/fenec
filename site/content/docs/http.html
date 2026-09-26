@@ -184,11 +184,12 @@ what the statements before it did, and the answer says so:</p>
 
 <p>No other writer slips in between, a read in the batch sees the writes
 before it, and a subscriber is woken once, for all of them. A
-<code>create</code>, a <code>drop</code>, a <code>create index</code> or a
-<code>compact</code> cannot be put back, so a batch holding one runs each
-statement on its own, as the pg wire runs a text holding one: it stops at the
-first error, and <code>completed</code> says how many were applied. Either
-way a failed batch says what it left behind, because a silent error would
+<code>create</code>, a <code>drop</code> or a <code>create index</code> in it
+is put back with the rest. A <code>compact</code> rewrites the file, which
+cannot be put back, so a batch holding one runs each statement on its own,
+as the pg wire runs a text holding one: it stops at the first error, and
+<code>completed</code> says how many were applied. Either way a failed batch
+says what it left behind, because a silent error would
 permanently separate a client's optimistic local state from the
 server's.</p>
 

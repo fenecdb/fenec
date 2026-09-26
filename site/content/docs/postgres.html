@@ -124,13 +124,16 @@ with <code>25006</code>.</p>
     every check-in expect.</li>
 </ul>
 
-<p>Unlike it, a <code>create</code>, a <code>drop</code> or a <code>create
-index</code> cannot be put back. Before a transaction's first write it runs
-on its own, and the transaction's <code>ROLLBACK</code> puts back the writes
-after it and says the schema change stays (<code>0A000</code>); after a write
-it is refused (<code>25001</code>). A <code>ROLLBACK TO</code> a savepoint
-taken before a schema change is refused for the same reason
-(<code>0A000</code>), and changes nothing. Two-phase commit is refused
+<p>A <code>create</code>, a <code>drop</code> and a <code>create
+index</code> are writes of the transaction like any other, as in PostgreSQL:
+its <code>ROLLBACK</code>, or a <code>ROLLBACK TO</code> a savepoint before
+one, puts it back — the collection made goes, the one dropped comes back with
+its documents, the index goes — and nobody sees it before the
+<code>COMMIT</code>. In a transaction a <code>create index</code> is built
+under the lock the transaction holds; on its own it is built beside the
+database. A <code>compact</code> rewrites the file, which nothing can put
+back: before a transaction's first write it runs on its own, and after one it
+is refused (<code>25001</code>). Two-phase commit is refused
 (<code>0A000</code>): taken for the <code>COMMIT</code> or the
 <code>ROLLBACK</code> it begins with, it would end a transaction other than
 the one named. <code>BEGIN</code>, <code>COMMIT</code>,

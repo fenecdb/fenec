@@ -1912,9 +1912,6 @@ struct TxState {
     savepoints: Vec<Point>,
     /// Whether a statement has run in it: its isolation is settled by then.
     ran: bool,
-    /// Schema changes run in it before its first write, each on its own:
-    /// they cannot be put back, and its `ROLLBACK` says so.
-    schema: usize,
     mode: compat::Mode,
     /// Every transaction's mode (`SET SESSION CHARACTERISTICS`).
     default: compat::Mode,
@@ -1926,9 +1923,6 @@ struct Point {
     /// Where its block stood: the start, when it was taken before the
     /// transaction's first write.
     at: fenec_core::engine::Savepoint,
-    /// How many schema changes the transaction had run: one run after it
-    /// cannot be put back with its writes.
-    schema: usize,
 }
 
 impl TxState {
@@ -2072,29 +2066,13 @@ impl TxState {
                 wait.map(|d| (d, Some(answer)))
             }
             compat::Tx::Rollback { chain } => {
-                let (open, mode, schema) = (self.open, self.mode, self.schema);
+                let (open, mode) = (self.open, self.mode);
                 if !open {
                     out.notice("25P01", "there is no transaction in progress");
                 }
                 // Outside a transaction, a pipeline's block.
                 lock.hold = None;
                 self.end();
-                if schema > 0 {
-                    let (s, them) = if schema == 1 {
-                        ("", "it")
-                    } else {
-                        ("s", "them")
-                    };
-                    out.error(
-                        "0A000",
-                        &format!(
-                            "ROLLBACK put back the writes, but not the {schema} schema \
-                             change{s} before {them}: a create, a drop or a create index \
-                             cannot be undone"
-                        ),
-                    );
-                    return None;
-                }
                 if open && chain {
                     self.begin(mode);
                 }
@@ -2110,11 +2088,7 @@ impl TxState {
                     Some(h) => h.guard.savepoint(),
                     None => fenec_core::engine::Savepoint::default(),
                 };
-                self.savepoints.push(Point {
-                    name,
-                    at,
-                    schema: self.schema,
-                });
+                self.savepoints.push(Point { name, at });
                 out.command_complete("SAVEPOINT");
                 None
             }
@@ -2141,19 +2115,6 @@ impl TxState {
                 }
                 let i = self.point(&name, out)?;
                 let p = &self.savepoints[i];
-                let since = self.schema - p.schema;
-                if since > 0 {
-                    let s = if since == 1 { "" } else { "s" };
-                    out.error(
-                        "0A000",
-                        &format!(
-                            "ROLLBACK TO \"{name}\" would not put back the {since} schema \
-                             change{s} since it: a create, a drop or a create index cannot \
-                             be undone"
-                        ),
-                    );
-                    return None;
-                }
                 if p.at.is_start() && !self.mode.serial {
                     // Before the first write: the lock goes with the writes,
                     // and up to its next write the transaction reads what
@@ -2356,34 +2317,34 @@ fn run_locked(
         tx.ran = true;
     }
 
-    // A schema change cannot be put back, so it cannot join a block held
-    // open. Before a transaction's first write it runs on its own, as
-    // outside one, and the transaction's ROLLBACK says it stays.
-    let schema = stmts.iter().any(|s| !s.fits_block());
-    if schema && lock.hold.is_some() {
+    // A compact rewrites the file, which no block can put back, so it
+    // cannot join one held open. Before a transaction's first write it runs
+    // on its own, as outside one: it changes no document.
+    let compact = stmts.iter().any(|s| !s.fits_block());
+    if compact && lock.hold.is_some() {
         out.error(
             "25001",
-            "create, drop, create index and compact cannot follow a write in a \
-             transaction or a pipeline: they cannot be put back with it",
+            "compact cannot follow a write in a transaction or a pipeline: it rewrites the \
+             file, which cannot be put back with them",
         );
         return None;
     }
 
-    // `create index` and `compact` on their own are built beside the
-    // database: readers and writers go on, and the write lock is taken only
-    // to put the result in place (see `Database::maintain`).
+    // `compact`, and a `create index` outside a transaction or a pipeline,
+    // on their own are built beside the database: readers and writers go
+    // on, and the write lock is taken only to put the result in place (see
+    // `Database::maintain`). In a transaction a `create index` is one of
+    // its writes, and is put back with them.
     if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
-        if frozen {
-            out.error("57P03", "the tenant is being moved; retry shortly");
-            return None;
+        let alone = !tx.open && !pipeline && lock.hold.is_none();
+        if alone || matches!(stmt, Statement::Compact(_)) {
+            if frozen {
+                out.error("57P03", "the tenant is being moved; retry shortly");
+                return None;
+            }
+            fenec_http::metrics::wrote();
+            return maintain(db, cfg, stmt, out);
         }
-        fenec_http::metrics::wrote();
-        let errors = out.errors();
-        let wait = maintain(db, cfg, stmt, out);
-        if tx.open && out.errors() == errors && matches!(stmt, Statement::CreateIndex { .. }) {
-            tx.schema += 1;
-        }
-        return wait;
     }
 
     // A shared lock suffices when everything is read-only: reads flow in parallel.
@@ -2412,7 +2373,7 @@ fn run_locked(
     } else {
         pipeline && needs_write
     };
-    if takes && !schema && lock.hold.is_none() {
+    if takes && !compact && lock.hold.is_none() {
         if let Err((code, msg)) = lock.take(db, tenant, be, !tx.open) {
             out.error(code, &msg);
             return None;
@@ -2440,9 +2401,9 @@ fn run_locked(
     // A text of several statements with a write among them is one block,
     // as PostgreSQL runs a query of several as one transaction: its writes
     // land together, or -- an error, a cancel, the ceiling -- none of them.
-    // A schema change among them runs each on its own, as ever. Under a
-    // held lock the statements join the block held open.
-    let block = !held && needs_write && stmts.len() > 1 && !schema;
+    // A compact among them runs each on its own, as ever. Under a held lock
+    // the statements join the block held open.
+    let block = !held && needs_write && stmts.len() > 1 && !compact;
     if block {
         if let Err(e) = guard.begin() {
             out.error(sqlstate(&e), &e.to_string());
@@ -2477,10 +2438,6 @@ fn run_locked(
             if let Err(e) = guard.commit() {
                 result = Err(e);
             }
-        }
-        if tx.open && result.is_ok() && !stmt.fits_block() && !matches!(stmt, Statement::Compact(_))
-        {
-            tx.schema += 1;
         }
         match result {
             Err(e) => {

@@ -181,11 +181,12 @@ fn run(handle: u32, sql: &str, params_src: &str) -> String {
     // A note left by anything before is not these statements'.
     collate::take_missing();
     let res = with_db(handle, |db| {
-        // Without a schema change among them, the statements are one block:
-        // their writes land together or not at all, and one refused for
-        // collation data puts back the ones before it, so the page runs the
-        // whole text again. A text with one -- a page setting itself up --
-        // runs a statement at a time, each write on its own a block.
+        // The statements are one block: their writes -- a create, a drop or
+        // a create index among them, as a page setting itself up sends --
+        // land together or not at all, and one refused for collation data
+        // puts back the ones before it, so the page runs the whole text
+        // again. A text with a compact runs a statement at a time, each
+        // write on its own a block.
         let block = stmts.len() > 1 && stmts.iter().all(|s| s.fits_block());
         if block {
             db.begin().map_err(|e| (e, 0))?;

@@ -432,8 +432,11 @@ once, and a subscriber is woken once for all of it. A statement that fails
 half way puts back what it did: each store is cut back to where it stood, and
 each document it wrote goes out of the indexes, the version before it back in.
 A <code>/batch</code>, a text of several statements over the pg wire and a
-pipeline up to its <code>Sync</code> are one block the same way; a schema change cannot be put back, so it runs on its
-own. Held back, a write costs within 2% of what it did: a lone
+pipeline up to its <code>Sync</code> are one block the same way. A
+<code>create</code>, a <code>drop</code> and a <code>create index</code> are
+put back with the rest — the collection made goes, the one dropped comes
+back, the index goes — and only a <code>compact</code>, which rewrites the
+file, runs on its own. Held back, a write costs within 2% of what it did: a lone
 <code>put</code> 841 ns in memory against 829 before blocks.</p>
 
 <p>That is what removes MVCC row headers, the WAL and the visibility map —

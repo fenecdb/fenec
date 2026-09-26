@@ -829,11 +829,12 @@ fn counted(resp: &fenec_core::prelude::Response) -> u64 {
 
 /// Batch: statements in order, under a single write lock, as **one block**:
 /// every write in it lands, as one record, or none does
-/// ([`Database::execute_block`]). The first error puts back what the ones
+/// ([`Database::execute_block`]), a create, a drop or a `create index`
+/// among them put back as they are. The first error puts back what the ones
 /// before it did, and says so -- `completed` is 0. A batch holding a
-/// create, a drop, a `create index` or a `compact` runs each statement on
-/// its own instead, as a text of several does over the pg wire: it stops at
-/// the first error, and `completed` says how many were applied.
+/// `compact` runs each statement on its own instead, as a text of several
+/// does over the pg wire: it stops at the first error, and `completed` says
+/// how many were applied.
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
     let body = match std::str::from_utf8(&req.body) {
         Ok(b) => b,

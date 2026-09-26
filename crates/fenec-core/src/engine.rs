@@ -113,13 +113,17 @@ const REC_NEXTID: u8 = 7;
 /// replica never receives it as one; see [`History`].
 const REC_HISTORY: u8 = crate::history::RECORD;
 
-/// A block of writes to more than one collection, which lands whole or not
-/// at all ([`Database::execute_block`]): `[9][0][length]{record}`, each a
-/// data record. A block's writes to one collection go into one data record
-/// of as many frames instead -- the form an image's records take, which a
-/// version before blocks reads -- so only a block across collections needs
-/// this kind, which such a version refuses. Either way the block is one
-/// record, appended whole or cut off whole: a crash leaves none of it.
+/// A block of writes to more than one collection, or holding a schema
+/// change among others, which lands whole or not at all
+/// ([`Database::execute_block`]): `[9][0][length]{record}`, each a data
+/// record or a schema change's. A block's writes to one collection go into
+/// one data record of as many frames instead -- the form an image's records
+/// take, which a version before blocks reads -- and a lone schema change is
+/// the record it always was, so only a block across collections, or a
+/// schema change with other writes, needs this kind. A version before
+/// blocks refuses it, and one before 10.4 a block holding a schema change,
+/// as corrupt. Either way the block is one record, appended whole or cut
+/// off whole: a crash leaves none of it.
 const REC_BLOCK: u8 = 9;
 
 /// The writes a record holds, which is how far it moves the change counter:
@@ -137,8 +141,11 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
         Some(&REC_DATA) => frames_in(body),
         Some(&REC_BLOCK) => {
             let mut n = 0;
-            each_inner(body, &mut |_, inner| {
-                n += frames_in(inner)?;
+            each_inner(body, &mut |kind, _, inner| {
+                n += match kind {
+                    REC_DATA => frames_in(inner)?,
+                    _ => 1,
+                };
                 Ok(())
             })?;
             Ok(n)
@@ -164,9 +171,14 @@ fn frames_in(body: &[u8]) -> Result<u64> {
     Ok(n)
 }
 
-/// Walks a block's records, each a data record -- a block holds nothing
-/// else -- handing `f` its collection id and body.
-fn each_inner(body: &[u8], f: &mut dyn FnMut(u32, &[u8]) -> Result<()>) -> Result<()> {
+/// What [`each_inner`] hands a block's records to: each one's kind,
+/// collection id and body.
+type Inner<'a> = dyn FnMut(u8, u32, &[u8]) -> Result<()> + 'a;
+
+/// Walks a block's records, each a data record or a schema change's -- a
+/// block holds nothing else -- handing `f` its kind, collection id and
+/// body.
+fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
     let mut pos = 0;
     while pos < body.len() {
         let kind = body[pos];
@@ -176,12 +188,12 @@ fn each_inner(body: &[u8], f: &mut dyn FnMut(u32, &[u8]) -> Result<()>) -> Resul
         let inner = body
             .get(pos..pos + len)
             .ok_or_else(|| Error::Corrupt("a block's record runs past it".into()))?;
-        if kind != REC_DATA {
+        if !matches!(kind, REC_DATA | REC_CREATE | REC_DROP | REC_ALTER) {
             return Err(Error::Corrupt(
                 "a block holds a record that is no write".into(),
             ));
         }
-        f(cid, inner)?;
+        f(kind, cid, inner)?;
         pos += len;
     }
     Ok(())
@@ -209,16 +221,32 @@ const HEAD_ROOM: usize = 16;
 /// The writes of a block not yet landed ([`Database::execute_block`]).
 #[derive(Default)]
 struct Block {
-    /// `HEAD_ROOM` bytes, then each write's frame, as the store holds it.
+    /// `HEAD_ROOM` bytes, then each write's frame, as the store holds it --
+    /// or, for a schema change, its record's body.
     frames: Vec<u8>,
-    /// Per write: its collection, and where its frame ends in `frames`.
-    heads: Vec<(u32, usize)>,
+    /// Per write: its record's kind, its collection, and where its frame
+    /// ends in `frames`.
+    heads: Vec<(u8, u32, usize)>,
     /// The writes to note on the change feed once the block lands.
     notes: Vec<(u32, DocId)>,
     /// Per collection written: where its store stood before the first.
     marks: Vec<(u32, crate::store::Mark)>,
-    /// Per write: where its id's record was before it.
-    was: Vec<(u32, DocId, Option<crate::store::Loc>)>,
+    /// Per write, what puts it back.
+    was: Vec<Undo>,
+}
+
+/// What puts one of a block's writes back ([`Database::rollback`]).
+enum Undo {
+    /// A document written: its collection, its id, and where its record was
+    /// before.
+    Doc(u32, DocId, Option<crate::store::Loc>),
+    /// A collection made: it goes, and its id is handed out again.
+    Created(u32),
+    /// A collection dropped, with where its name stood among the others: it
+    /// comes back as it was.
+    Dropped(Box<Collection>, usize),
+    /// An index built over a collection's field: it goes.
+    Indexed(u32, usize),
 }
 
 impl Block {
@@ -242,15 +270,15 @@ impl Block {
     }
 
     /// The block as the one record it lands as: one data record of every
-    /// frame when they are all one collection's -- a lone write's record
-    /// as it always was -- and a block record around one data record a
-    /// write otherwise.
+    /// frame when they are all one collection's writes -- a lone write's
+    /// record as it always was -- the record of a lone schema change, and a
+    /// block record around each write's record otherwise.
     fn record(&mut self) -> std::borrow::Cow<'_, [u8]> {
-        let cid = self.heads[0].0;
-        if self.heads.iter().all(|h| h.0 == cid) {
+        let (kind, cid, _) = self.heads[0];
+        if self.heads.len() == 1 || self.heads.iter().all(|h| h.0 == REC_DATA && h.1 == cid) {
             // The header goes into the room before the frames.
             let mut head = [0u8; HEAD_ROOM];
-            head[0] = REC_DATA;
+            head[0] = kind;
             let mut n = 1;
             for mut v in [cid as u64, (self.frames.len() - HEAD_ROOM) as u64] {
                 while v >= 0x80 {
@@ -266,8 +294,8 @@ impl Block {
         }
         let mut body = Vec::with_capacity(self.frames.len() + HEAD_ROOM * self.heads.len());
         let mut start = HEAD_ROOM;
-        for &(cid, end) in &self.heads {
-            frame_into(&mut body, REC_DATA, cid, &self.frames[start..end]);
+        for &(kind, cid, end) in &self.heads {
+            frame_into(&mut body, kind, cid, &self.frames[start..end]);
             start = end;
         }
         std::borrow::Cow::Owned(framed(REC_BLOCK, 0, &body))
@@ -2123,37 +2151,17 @@ impl Database {
             let rec = bytes[pos];
             pos += 1;
             match rec {
-                REC_CREATE => {
+                REC_CREATE | REC_DROP | REC_ALTER => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let mut sp = 0usize;
-                    let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
-                    pos += len;
-                    seq_seen += tail as u64;
-                    // Made again under its name: no graph restored before
-                    // is this collection's.
-                    forget(&mut restored, &schema.name, &|_| false);
-                    by_id.insert(cid, schema.name.clone());
-                    self.order.retain(|n| n != &schema.name);
-                    self.order.push(schema.name.clone());
-                    self.collections
-                        .insert(schema.name.clone(), Collection::new(cid, schema));
-                    self.next_coll_id = self.next_coll_id.max(cid + 1);
-                }
-                REC_DROP => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    // Its body is empty but the length field is still written
+                    // A drop's body is empty but its length is still written
                     // (see [`Database::wal`]); if it is not skipped that `0`
                     // byte is read as the next record kind and the whole file
                     // becomes unopenable with "unknown record kind 0".
                     let len = get_uvarint(bytes, &mut pos)? as usize;
+                    let body = &bytes[pos..pos + len];
                     pos += len;
                     seq_seen += tail as u64;
-                    if let Some(name) = by_id.remove(&cid) {
-                        self.collections.remove(&name);
-                        self.order.retain(|n| n != &name);
-                        forget(&mut restored, &name, &|_| false);
-                    }
+                    self.load_schema(rec, cid, body, &mut by_id, &mut restored)?;
                 }
                 REC_DATA => {
                     let cid = get_uvarint(bytes, &mut pos)? as u32;
@@ -2179,7 +2187,11 @@ impl Database {
                     let len = get_uvarint(bytes, &mut pos)? as usize;
                     let body = &bytes[pos..pos + len];
                     let mut frames = 0;
-                    each_inner(body, &mut |cid, inner| {
+                    each_inner(body, &mut |kind, cid, inner| {
+                        if kind != REC_DATA {
+                            frames += 1;
+                            return self.load_schema(kind, cid, inner, &mut by_id, &mut restored);
+                        }
                         // Where the record's frames are in the file, which a
                         // mapped store reads them from.
                         let at = inner.as_ptr() as usize - bytes.as_ptr() as usize;
@@ -2198,54 +2210,6 @@ impl Database {
                     pos += len;
                     if tail {
                         seq_seen += frames;
-                    }
-                }
-                REC_ALTER => {
-                    let cid = get_uvarint(bytes, &mut pos)? as u32;
-                    let len = get_uvarint(bytes, &mut pos)? as usize;
-                    let mut sp = 0usize;
-                    let schema = Schema::decode(&bytes[pos..pos + len], &mut sp)?;
-                    pos += len;
-                    seq_seen += tail as u64;
-                    if let Some(name) = by_id.get(&cid) {
-                        if let Some(c) = self.collections.get_mut(name) {
-                            // The field layout must not have changed: stored
-                            // documents are encoded positionally.
-                            let same_layout = c.schema.fields.len() == schema.fields.len()
-                                && c.schema
-                                    .fields
-                                    .iter()
-                                    .zip(&schema.fields)
-                                    .all(|(a, b)| a.name == b.name && a.ty == b.ty);
-                            if same_layout {
-                                // An index added leaves the graphs restored
-                                // before it, as a replica leaves them: the
-                                // documents are the same ones. Not in the
-                                // browser, whose schemas are declared with
-                                // their collections: 767 bytes of its module
-                                // for a rebuild it would rarely save.
-                                let mut kept = Vec::new();
-                                for (n, f, _) in
-                                    restored.iter().filter(|_| !cfg!(target_arch = "wasm32"))
-                                {
-                                    let same = schema.field_pos(f).is_some_and(|p| {
-                                        c.schema.fields.get(p).map(|x| &x.index)
-                                            == Some(&schema.fields[p].index)
-                                    });
-                                    if n == name && same {
-                                        if let Some(ix) = c.vectors.remove(f) {
-                                            kept.push((f.clone(), ix));
-                                        }
-                                    }
-                                }
-                                c.schema = schema;
-                                c.reset_index_structures();
-                                forget(&mut restored, name, &|f| kept.iter().any(|(k, _)| k == f));
-                                for (f, ix) in kept {
-                                    c.vectors.insert(f, ix);
-                                }
-                            }
-                        }
                     }
                 }
                 REC_NEXTID => {
@@ -2337,6 +2301,79 @@ impl Database {
         *self.appended.get_mut() = whole as u64;
         self.defer_links = false;
         Ok(whole)
+    }
+
+    /// A schema change of the file -- a record of its own, or one of a
+    /// block's -- made again: a collection made or dropped, or an index
+    /// added, which is built with the rest once the file is read.
+    fn load_schema(
+        &mut self,
+        kind: u8,
+        cid: u32,
+        body: &[u8],
+        by_id: &mut HashMap<u32, String>,
+        restored: &mut Vec<(String, String, usize)>,
+    ) -> Result<()> {
+        if kind == REC_DROP {
+            if let Some(name) = by_id.remove(&cid) {
+                self.collections.remove(&name);
+                self.order.retain(|n| n != &name);
+                forget(restored, &name, &|_| false);
+            }
+            return Ok(());
+        }
+        let schema = Schema::decode(body, &mut 0)?;
+        if kind == REC_CREATE {
+            // Made again under its name: no graph restored before is this
+            // collection's.
+            forget(restored, &schema.name, &|_| false);
+            by_id.insert(cid, schema.name.clone());
+            self.order.retain(|n| n != &schema.name);
+            self.order.push(schema.name.clone());
+            self.collections
+                .insert(schema.name.clone(), Collection::new(cid, schema));
+            self.next_coll_id = self.next_coll_id.max(cid + 1);
+            return Ok(());
+        }
+        let Some(name) = by_id.get(&cid) else {
+            return Ok(());
+        };
+        let Some(c) = self.collections.get_mut(name) else {
+            return Ok(());
+        };
+        // The field layout must not have changed: stored documents are
+        // encoded positionally.
+        let same_layout = c.schema.fields.len() == schema.fields.len()
+            && c.schema
+                .fields
+                .iter()
+                .zip(&schema.fields)
+                .all(|(a, b)| a.name == b.name && a.ty == b.ty);
+        if same_layout {
+            // An index added leaves the graphs restored before it, as a
+            // replica leaves them: the documents are the same ones. Not in
+            // the browser, whose schemas are declared with their
+            // collections: 767 bytes of its module for a rebuild it would
+            // rarely save.
+            let mut kept = Vec::new();
+            for (n, f, _) in restored.iter().filter(|_| !cfg!(target_arch = "wasm32")) {
+                let same = schema.field_pos(f).is_some_and(|p| {
+                    c.schema.fields.get(p).map(|x| &x.index) == Some(&schema.fields[p].index)
+                });
+                if n == name && same {
+                    if let Some(ix) = c.vectors.remove(f) {
+                        kept.push((f.clone(), ix));
+                    }
+                }
+            }
+            c.schema = schema;
+            c.reset_index_structures();
+            forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
+            for (f, ix) in kept {
+                c.vectors.insert(f, ix);
+            }
+        }
+        Ok(())
     }
 
     /// A data record's frames, `len` bytes at `at` in the file, into their
@@ -2693,7 +2730,7 @@ impl Database {
         // In a block, held back: the block lands as one record, or none.
         if let Some(b) = &mut self.block {
             b.frames.extend_from_slice(payload);
-            b.heads.push((cid, b.frames.len()));
+            b.heads.push((rec, cid, b.frames.len()));
             return Ok(());
         }
         let mut frame = Vec::with_capacity(payload.len() + 12);
@@ -2863,68 +2900,20 @@ impl Database {
                 self.index_batch(batch);
             }
             match rec {
-                REC_CREATE => {
-                    let mut sp = 0;
-                    let schema = Schema::decode(body, &mut sp)?;
-                    if self.collections.contains_key(&schema.name) || self.named(cid).is_some() {
-                        return Err(Error::Corrupt(format!(
-                            "collection `{}` is already here",
-                            schema.name
-                        )));
-                    }
-                    self.next_coll_id = self.next_coll_id.max(cid + 1);
-                    self.order.push(schema.name.clone());
-                    self.collections
-                        .insert(schema.name.clone(), Collection::new(cid, schema));
-                    notes.push((cid, SCHEMA_MARK));
-                }
-                REC_DROP => {
-                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
-                    self.collections.remove(&name);
-                    self.order.retain(|n| *n != name);
-                    notes.push((cid, SCHEMA_MARK));
-                }
-                REC_ALTER => {
-                    let name = self.named(cid).ok_or_else(|| missing(cid))?;
-                    let mut sp = 0;
-                    let schema = Schema::decode(body, &mut sp)?;
-                    let c = self.collections.get_mut(&name).unwrap();
-                    let same_layout = c.schema.fields.len() == schema.fields.len()
-                        && c.schema
-                            .fields
-                            .iter()
-                            .zip(&schema.fields)
-                            .all(|(a, b)| a.name == b.name && a.ty == b.ty);
-                    if !same_layout {
-                        return Err(Error::Corrupt(format!(
-                            "a schema change moved the fields of `{name}`"
-                        )));
-                    }
-                    // `create index` adds one; anything else rebuilds them all.
-                    let changed: Vec<usize> = (0..schema.fields.len())
-                        .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
-                        .collect();
-                    let added = changed
-                        .iter()
-                        .all(|&i| c.schema.fields[i].index == IndexKind::None);
-                    c.schema = schema;
-                    if added {
-                        for i in changed {
-                            build_index(c, i)?;
-                        }
-                    } else {
-                        c.reset_index_structures();
-                        for i in 0..c.schema.fields.len() {
-                            build_index(c, i)?;
-                        }
-                    }
-                    notes.push((cid, SCHEMA_MARK));
+                REC_CREATE | REC_DROP | REC_ALTER => {
+                    self.apply_schema(rec, cid, body, &mut notes)?
                 }
                 REC_DATA => self.apply_frames(cid, body, batch, &mut notes)?,
                 // A block's records, whole: they came as one, and reach this
                 // database's file as one.
-                REC_BLOCK => each_inner(body, &mut |cid, inner| {
-                    self.apply_frames(cid, inner, batch, &mut notes)
+                REC_BLOCK => each_inner(body, &mut |kind, cid, inner| {
+                    if kind == REC_DATA {
+                        return self.apply_frames(cid, inner, batch, &mut notes);
+                    }
+                    if !batch.docs.is_empty() {
+                        self.index_batch(batch);
+                    }
+                    self.apply_schema(kind, cid, inner, &mut notes)
                 })?,
                 other => {
                     return Err(Error::Corrupt(format!(
@@ -2944,6 +2933,70 @@ impl Database {
             n += 1;
         }
         Ok(n)
+    }
+
+    /// A schema change from a primary -- a record of its own, or one of a
+    /// block's -- made here as it was there, and noted in `notes`.
+    fn apply_schema(
+        &mut self,
+        kind: u8,
+        cid: u32,
+        body: &[u8],
+        notes: &mut Vec<(u32, DocId)>,
+    ) -> Result<()> {
+        notes.push((cid, SCHEMA_MARK));
+        if kind == REC_DROP {
+            let name = self.named(cid).ok_or_else(|| missing(cid))?;
+            self.collections.remove(&name);
+            self.order.retain(|n| *n != name);
+            return Ok(());
+        }
+        let schema = Schema::decode(body, &mut 0)?;
+        if kind == REC_CREATE {
+            if self.collections.contains_key(&schema.name) || self.named(cid).is_some() {
+                return Err(Error::Corrupt(format!(
+                    "collection `{}` is already here",
+                    schema.name
+                )));
+            }
+            self.next_coll_id = self.next_coll_id.max(cid + 1);
+            self.order.push(schema.name.clone());
+            self.collections
+                .insert(schema.name.clone(), Collection::new(cid, schema));
+            return Ok(());
+        }
+        let name = self.named(cid).ok_or_else(|| missing(cid))?;
+        let c = self.collections.get_mut(&name).unwrap();
+        let same_layout = c.schema.fields.len() == schema.fields.len()
+            && c.schema
+                .fields
+                .iter()
+                .zip(&schema.fields)
+                .all(|(a, b)| a.name == b.name && a.ty == b.ty);
+        if !same_layout {
+            return Err(Error::Corrupt(format!(
+                "a schema change moved the fields of `{name}`"
+            )));
+        }
+        // `create index` adds one; anything else rebuilds them all.
+        let changed: Vec<usize> = (0..schema.fields.len())
+            .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
+            .collect();
+        let added = changed
+            .iter()
+            .all(|&i| c.schema.fields[i].index == IndexKind::None);
+        c.schema = schema;
+        if added {
+            for i in changed {
+                build_index(c, i)?;
+            }
+        } else {
+            c.reset_index_structures();
+            for i in 0..c.schema.fields.len() {
+                build_index(c, i)?;
+            }
+        }
+        Ok(())
     }
 
     /// A data record's frames into collection `cid`, each through the index
@@ -3066,7 +3119,7 @@ impl Database {
             if !b.marks.iter().any(|(c, _)| *c == cid) {
                 b.marks.push((cid, mark));
             }
-            b.was.push((cid, id, was));
+            b.was.push(Undo::Doc(cid, id, was));
         }
     }
 
@@ -3147,6 +3200,9 @@ impl Database {
         for &(cid, id) in &b.notes {
             self.note(cid, id);
         }
+        // Now, not at the next block's start: a collection the block dropped
+        // is held here until then.
+        b.was.clear();
         self.spare = b;
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
@@ -3167,43 +3223,85 @@ impl Database {
 
     fn undo(&mut self, mut b: Block) {
         let marks = std::mem::take(&mut b.marks);
-        self.rewind(&marks, &b.was);
+        self.rewind(&marks, &mut b.was, 0);
         self.spare = b;
     }
 
-    /// Puts back the writes `writes` holds, the last first, and takes each
-    /// store `marks` names back to its mark: what a block, or the end of
-    /// one, wrote.
-    fn rewind(
-        &mut self,
-        marks: &[(u32, crate::store::Mark)],
-        writes: &[(u32, DocId, Option<crate::store::Loc>)],
-    ) {
-        for &(cid, mark) in marks {
-            let Some(name) = self.named(cid) else {
-                continue;
-            };
-            let c = self.collections.get_mut(&name).unwrap();
-            // Each write on its own, the last first: its document out of
-            // the indexes, and the one it replaced pointed at and put back
-            // in -- 3.0 ms for a block of 50 000 writes. Put back an id at a
-            // time, the first of each id's writes had to be found: searching
-            // the ids so far for each, those writes took 402 ms under the
-            // write lock, and sorted, the sort was 4.6 KB of the browser
-            // module. An id written again in the block is put back again,
-            // its vector re-linked each time.
-            for &(_, id, loc) in writes.iter().rev().filter(|w| w.0 == cid) {
-                let now = c.store.read(&c.schema, id).ok().flatten();
-                c.store.point(id, loc);
-                let before = c.store.read(&c.schema, id).ok().flatten();
-                if let Some(now) = &now {
-                    c.unindex_doc(now, before.as_ref());
+    /// Puts back the writes `undo` holds past its first `to`, the last
+    /// first, and takes each store `marks` names back to its mark: what a
+    /// block, or the end of one, wrote. Taken off the end one at a time: a
+    /// drain of the log was 0.5 KB of the browser module.
+    fn rewind(&mut self, marks: &[(u32, crate::store::Mark)], undo: &mut Vec<Undo>, to: usize) {
+        // The collection the last document was of: a block's writes come in
+        // runs of one collection.
+        let mut of: Option<(u32, String)> = None;
+        while undo.len() > to {
+            let Some(u) = undo.pop() else { break };
+            match u {
+                // Each write on its own, the last first: its document out of
+                // the indexes, and the one it replaced pointed at and put
+                // back in -- 3.0 ms for a block of 50 000 writes. Put back an
+                // id at a time, the first of each id's writes had to be
+                // found: searching the ids so far for each, those writes took
+                // 402 ms under the write lock, and sorted, the sort was 4.6 KB
+                // of the browser module. An id written again in the block is
+                // put back again, its vector re-linked each time.
+                Undo::Doc(cid, id, loc) => {
+                    if of.as_ref().is_none_or(|(c, _)| *c != cid) {
+                        of = self.named(cid).map(|n| (cid, n));
+                    }
+                    let Some((_, name)) = &of else {
+                        continue;
+                    };
+                    let c = self.collections.get_mut(name).unwrap();
+                    let now = c.store.read(&c.schema, id).ok().flatten();
+                    c.store.point(id, loc);
+                    let before = c.store.read(&c.schema, id).ok().flatten();
+                    if let Some(now) = &now {
+                        c.unindex_doc(now, before.as_ref());
+                    }
+                    if let Some(before) = &before {
+                        c.index_doc(before, now.as_ref());
+                    }
                 }
-                if let Some(before) = &before {
-                    c.index_doc(before, now.as_ref());
+                // Everything after it was put back before it, so its name is
+                // the last, where it went.
+                Undo::Created(cid) => {
+                    if let Some(name) = self.order.pop() {
+                        debug_assert_eq!(self.collections[&name].id, cid);
+                        self.collections.remove(&name);
+                    }
+                    self.next_coll_id = cid;
+                    of = None;
+                }
+                Undo::Dropped(c, at) => {
+                    let name = c.schema.name.clone();
+                    self.order.insert(at.min(self.order.len()), name.clone());
+                    self.collections.insert(name, *c);
+                    of = None;
+                }
+                Undo::Indexed(cid, pos) => {
+                    if let Some(name) = self.named(cid) {
+                        let c = self.collections.get_mut(&name).unwrap();
+                        let f = &c.schema.fields[pos].name;
+                        c.vectors.remove(f);
+                        c.hashes.remove(f);
+                        c.texts.remove(f);
+                        if let Some(i) = c.sorted.iter().position(|(n, _)| n == f) {
+                            c.sorted.remove(i);
+                        }
+                        if let Some(i) = c.sparse.iter().position(|(n, _)| n == f) {
+                            c.sparse.remove(i);
+                        }
+                        c.schema.fields[pos].index = IndexKind::None;
+                    }
                 }
             }
-            c.store.rewind(mark);
+        }
+        for &(cid, mark) in marks {
+            if let Some(name) = self.named(cid) {
+                self.collections.get_mut(&name).unwrap().store.rewind(mark);
+            }
         }
     }
 
@@ -3264,9 +3362,15 @@ impl Database {
                 (cid, at.map_or(first, |&(_, m)| m))
             })
             .collect();
-        self.rewind(&marks, &b.was[sp.was..]);
-        b.marks
-            .retain(|(cid, _)| sp.marks.iter().any(|(c, _)| c == cid));
+        self.rewind(&marks, &mut b.was, sp.was);
+        // A collection keeps its mark while a write to it before the
+        // savepoint stays -- one dropped by then too, which a rollback after
+        // this one brings back.
+        b.marks.retain(|(cid, _)| {
+            b.was
+                .iter()
+                .any(|u| matches!(u, Undo::Doc(c, ..) if c == cid))
+        });
         b.frames.truncate(sp.frames.max(HEAD_ROOM));
         b.heads.truncate(sp.writes);
         b.notes.truncate(sp.notes);
@@ -3391,8 +3495,7 @@ impl Database {
         if !stmt.is_read_only() {
             if self.block.is_some() {
                 return Err(Error::Query(
-                    "create, drop, create index and compact run on their own, not in a block"
-                        .into(),
+                    "compact runs on its own, not in a block".into(),
                 ));
             }
             // `compact` changes no document, only how the file holds them.
@@ -3463,15 +3566,27 @@ impl Database {
         self.collections
             .insert(name.clone(), Collection::new(cid, schema));
         self.order.push(name.clone());
+        if let Some(b) = &mut self.block {
+            b.was.push(Undo::Created(cid));
+        }
         Ok(Response::Ok(format!("collection `{name}` created")))
     }
 
     fn drop_collection(&mut self, name: &str, if_exists: bool) -> Result<Response> {
         match self.collections.remove(name) {
             Some(c) => {
-                self.order.retain(|n| n != name);
+                let at = self.order.iter().position(|n| n == name);
+                if let Some(at) = at {
+                    self.order.remove(at);
+                }
                 self.wal(REC_DROP, c.id, &[])?;
                 self.note(c.id, SCHEMA_MARK);
+                // Kept until the block lands, for it to come back if the
+                // block does not.
+                if let Some(b) = &mut self.block {
+                    let at = at.unwrap_or(self.order.len());
+                    b.was.push(Undo::Dropped(Box::new(c), at));
+                }
                 Ok(Response::Ok(format!("collection `{name}` dropped")))
             }
             None if if_exists => Ok(Response::Ok(format!("no collection `{name}`"))),
@@ -3499,6 +3614,12 @@ impl Database {
         let cid = c.id;
         let pos = c.schema.field_pos(field).unwrap();
         c.schema.fields[pos].index = kind.resolved();
+        // Before the build, which a block that does not land -- or a build
+        // that fails -- puts back with it.
+        if let Some(b) = &mut self.block {
+            b.was.push(Undo::Indexed(cid, pos));
+        }
+        let c = self.collections.get_mut(collection).unwrap();
         build_index(c, pos)?;
 
         let encoded = c.schema.encode();
