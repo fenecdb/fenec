@@ -1539,7 +1539,9 @@ fn render(v: &V) -> Option<String> {
             if f.fract() == 0.0 && f.abs() < 1e15 {
                 format!("{}", *f as i64)
             } else {
-                format!("{f}")
+                let mut s = String::new();
+                fenec_core::num::f64_into(&mut s, *f);
+                s
             }
         }
         V::Text(s) => s.clone(),

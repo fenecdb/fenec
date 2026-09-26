@@ -21,6 +21,7 @@ quote, with the same allowance.
 
     make size-report                 # the module as it stands
     make size-report BASE=main       # and against main, built in a worktree
+    make size-report WHY=flt2dec     # which of fenec's functions pull that in
 """
 
 import collections
@@ -376,6 +377,199 @@ def read(module):
     return b"".join(served), [(names.get(imports + i, "?"), b) for i, b in enumerate(bodies)], data
 
 
+def sleb(b, p):
+    r = s = 0
+    while True:
+        x = b[p]
+        p += 1
+        r |= (x & 0x7F) << s
+        s += 7
+        if x < 0x80:
+            return (r - (1 << s) if x & 0x40 else r), p
+
+
+# Relocation types (the linker's, tool-conventions/Linking.md): a call, a
+# function's address in code, one in data, and an address of data.
+CALLS = {0}
+TAKES = {1, 12, 18}
+POINTS = {2, 19, 26}
+DATA_AT = {3, 4, 5, 11, 14, 15, 16, 17, 21, 23, 25}
+ADDEND = DATA_AT | {8, 9, 22}
+
+
+def edges(module):
+    """`(names, edges)` of a module linked with --emit-relocs: each function
+    by index and each piece of data by `("data", name)`, and every edge from
+    one to what it calls, takes the address of or points at. A function's
+    address is only ever a constant in its code, which the relocations tell
+    apart from any other number."""
+    sections, pos = {}, 8
+    order = []
+    while pos < len(module):
+        sid = module[pos]
+        size, p = uleb(module, pos + 1)
+        if sid == 0:
+            ln, q = uleb(module, p)
+            sections[module[q:q + ln].decode()] = (q + ln, p + size)
+        else:
+            sections[sid] = (p, p + size)
+        order.append(sid)
+        pos = p + size
+    code_at, _ = sections[10]
+    n, p = uleb(module, code_at)
+    bodies = []
+    for _ in range(n):
+        ln, q = uleb(module, p)
+        bodies.append((p - code_at, q + ln - code_at))
+        p = q + ln
+    data_at, _ = sections[11]
+    n, p = uleb(module, data_at)
+    segments = []
+    for _ in range(n):
+        flags, p = uleb(module, p)
+        if flags == 2:
+            _, p = uleb(module, p)
+        if flags in (0, 2):
+            while module[p] != 0x0B:
+                p += 1
+            p += 1
+        ln, p = uleb(module, p)
+        segments.append(p - data_at)
+        p += ln
+
+    symbols, names, pieces = [], {}, []
+    p, end = sections["linking"]
+    _, p = uleb(module, p)
+    while p < end:
+        kind, (ln, p) = module[p], uleb(module, p + 1)
+        stop = p + ln
+        if kind == 8:
+            n, p = uleb(module, p)
+            for _ in range(n):
+                sk, (flags, p) = module[p], uleb(module, p + 1)
+                if sk in (0, 2, 4, 5):
+                    index, p = uleb(module, p)
+                    name = None
+                    if not flags & 0x10 or flags & 0x40:
+                        ln, p = uleb(module, p)
+                        name = module[p:p + ln].decode("utf8", "replace")
+                        p += ln
+                    symbols.append(index if sk == 0 else None)
+                    if sk == 0 and name:
+                        names.setdefault(index, name)
+                elif sk == 1:
+                    ln, p = uleb(module, p)
+                    name = module[p:p + ln].decode("utf8", "replace")
+                    p += ln
+                    if not flags & 0x10:
+                        seg, p = uleb(module, p)
+                        off, p = uleb(module, p)
+                        size, p = uleb(module, p)
+                        start = segments[seg] + off
+                        pieces.append((start, start + size, ("data", name)))
+                    symbols.append(("data", name))
+                else:
+                    _, p = uleb(module, p)
+                    symbols.append(None)
+        p = stop
+    pieces.sort()
+    starts = [a for a, _, _ in pieces]
+
+    import bisect
+
+    def piece_at(off):
+        i = bisect.bisect_right(starts, off) - 1
+        return pieces[i][2] if i >= 0 and off < pieces[i][1] else None
+
+    imports = 0
+    if 2 in sections:
+        p, _ = sections[2]
+        n, p = uleb(module, p)
+        for _ in range(n):
+            for _ in range(2):
+                ln, p = uleb(module, p)
+                p += ln
+            kind, p = module[p], p + 1
+            if kind == 0:
+                _, p = uleb(module, p)
+                imports += 1
+            elif kind in (1, 2):
+                p += kind == 1
+                flags, p = module[p], p + 1
+                _, p = uleb(module, p)
+                if flags & 1:
+                    _, p = uleb(module, p)
+            else:
+                p += 2
+    body_starts = [a for a, _ in bodies]
+
+    def function_at(off):
+        i = bisect.bisect_right(body_starts, off) - 1
+        return imports + i if i >= 0 and off < bodies[i][1] else None
+
+    out = collections.defaultdict(set)
+    for section, where in (("reloc.CODE", function_at), ("reloc.DATA", piece_at)):
+        if section not in sections:
+            continue
+        p, _ = sections[section]
+        _, p = uleb(module, p)
+        n, p = uleb(module, p)
+        for _ in range(n):
+            ty, (off, p) = module[p], uleb(module, p + 1)
+            index, p = uleb(module, p)
+            if ty in ADDEND:
+                _, p = sleb(module, p)
+            to = symbols[index] if index < len(symbols) else None
+            at = where(off)
+            if at is None or to is None:
+                continue
+            if ty in CALLS | TAKES | POINTS or (ty in DATA_AT and isinstance(to, tuple)):
+                out[at].add((to, "calls" if ty in CALLS else "takes the address of" if ty in TAKES
+                             else "points at" if ty in POINTS else "reads"))
+    return names, out
+
+
+def why(root, target, pattern):
+    """Markdown: the first of fenec's functions on each way to a function
+    whose path matches `pattern`, and the way -- what calls what, whose
+    address is taken where, which vtable points at it."""
+    env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="false",
+               CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128 -C link-arg=--emit-relocs")
+    subprocess.run([CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown",
+                    "--profile", "wasm"], check=True, cwd=root, env=env)
+    with open(os.path.join(target, WASM), "rb") as f:
+        names, out = edges(f.read())
+    text = {i: demangle(n) for i, n in names.items()}
+    label = lambda node: node[1] if isinstance(node, tuple) else text[node][0]
+    mine = lambda node: not isinstance(node, tuple) and text[node][2][0].startswith("fenec_")
+    targets = [i for i, (t, _, _) in text.items() if re.search(pattern, t)]
+    into = collections.defaultdict(list)
+    for a, tos in out.items():
+        for b, how in tos:
+            into[b].append((a, how))
+    step, queue, reached = {t: None for t in targets}, collections.deque(targets), []
+    while queue:
+        node = queue.popleft()
+        for a, how in into[node]:
+            if a in step:
+                continue
+            step[a] = (node, how)
+            if mine(a):
+                reached.append(a)
+            else:
+                queue.append(a)
+    lines = [f"## What reaches `{pattern}`", "",
+             f"{len(targets)} functions match; the first of fenec's own on each way to them:", "",
+             "| function | the way |", "| --- | --- |"]
+    for a in sorted(reached, key=lambda a: label(a)):
+        way, node = [], a
+        while step[node]:
+            node, how = step[node]
+            way.append(f"{how} `{short(label(node), 70)}`")
+        lines.append(f"| `{short(label(a), 90)}` | {', '.join(way)} |")
+    return "\n".join(lines)
+
+
 def measure(root, target):
     served, bodies, data = read(build(root, target))
     brotli = None
@@ -474,11 +668,20 @@ def report(head, base=None):
 
 
 def main():
-    """`size_report.py [base] [what to call it]`: CI passes the merge's first
-    parent and the name of the branch it is."""
-    base_ref = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
-    called = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else base_ref
+    """`size_report.py [base] [what to call it] [--why pattern]`: CI passes the
+    merge's first parent and the name of the branch it is."""
+    args = sys.argv[1:]
+    pattern = None
+    if "--why" in args:
+        at = args.index("--why")
+        pattern = args[at + 1]
+        del args[at:at + 2]
+    base_ref = args[0] if args and args[0] else None
+    called = args[1] if len(args) > 1 and args[1] else base_ref
     out = os.path.join(ROOT, "target", "size-report")
+    if pattern:
+        print(why(ROOT, os.path.join(out, "why"), pattern))
+        return
     head = measure(ROOT, os.path.join(out, "head"))
     base = None
     if base_ref:
