@@ -1229,26 +1229,75 @@ fn session(
                         let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
                         be.busy.store(true, Ordering::SeqCst);
                         be.canceled.store(false, Ordering::SeqCst);
-                        execute_into(
-                            &db,
-                            &held,
-                            frozen,
-                            &cfg,
-                            &be,
-                            &mut tx,
-                            &mut lock,
-                            &sql,
-                            &[],
-                            &mut out,
-                            false,
-                            false,
-                        );
+                        // A text holding a BEGIN, a COMMIT, a savepoint or
+                        // anything else answered here runs a statement at a
+                        // time, as PostgreSQL runs a simple query: each in
+                        // the transaction open, or in an implicit block --
+                        // the pipeline's -- which a BEGIN takes into the
+                        // transaction it opens, a COMMIT or a ROLLBACK
+                        // closes, and the text's end lands; each answered,
+                        // and none after the first error. Read whole, it was
+                        // taken for FenecQL and refused, or -- `BEGIN ;
+                        // ...` -- for its BEGIN alone. A text of FenecQL
+                        // alone runs whole, one block, as it always did.
+                        let pieces = compat::statements(&sql);
+                        let apart = pieces.len() > 1
+                            && pieces
+                                .iter()
+                                .any(|p| compat::handle(p, &cfg, &|| false).is_some());
+                        if !apart {
+                            execute_into(
+                                &db,
+                                &held,
+                                frozen,
+                                &cfg,
+                                &be,
+                                &mut tx,
+                                &mut lock,
+                                &sql,
+                                &[],
+                                &mut out,
+                                false,
+                                false,
+                            );
+                        } else if let Some(e) = pieces.iter().find_map(|p| {
+                            compat::handle(p, &cfg, &|| false)
+                                .is_none()
+                                .then(|| parse(p).err())
+                                .flatten()
+                        }) {
+                            // PostgreSQL reads the whole text before it runs
+                            // any of it: a statement it cannot read runs none.
+                            out.error("42601", &e.to_string());
+                        } else {
+                            for (i, piece) in pieces.iter().enumerate() {
+                                let before = out.errors();
+                                execute_into(
+                                    &db,
+                                    &held,
+                                    frozen,
+                                    &cfg,
+                                    &be,
+                                    &mut tx,
+                                    &mut lock,
+                                    piece,
+                                    &[],
+                                    &mut out,
+                                    false,
+                                    i + 1 < pieces.len(),
+                                );
+                                if out.errors() > before {
+                                    break;
+                                }
+                            }
+                        }
                         be.busy.store(false, Ordering::SeqCst);
                         be.canceled.store(false, Ordering::SeqCst);
                     }
                     tx.settle(&mut lock, errors, &out);
                     // A pipeline left without its Sync ends at a simple query,
-                    // its block landing as at one.
+                    // its block landing as at one -- and so does a text's
+                    // implicit block.
                     if lock.hold.as_ref().is_some_and(|h| h.implicit) {
                         land_pipeline(&mut lock, &cfg, &mut out);
                     }

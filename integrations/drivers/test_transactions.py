@@ -153,3 +153,16 @@ def test_a_schema_change_is_put_back_with_its_transaction(engine):
     assert made in collections() and kept in collections()
     with psycopg.connect(DSN, autocommit=True) as c:
         assert c.execute(f"get {made} count").fetchone()[0] == 1
+
+
+def test_a_text_holding_transaction_control(table):
+    """psql -c "BEGIN; ...; COMMIT", as psycopg sends a text without
+    parameters: over the simple protocol, a statement at a time."""
+    with psycopg.connect(DSN, autocommit=True) as c:
+        c.execute(f"BEGIN; put {table} {{name: 'a'}}; put {table} {{name: 'b'}}; COMMIT")
+        assert c.info.transaction_status == pq.TransactionStatus.IDLE
+        with pytest.raises(psycopg.errors.DatatypeMismatch):
+            c.execute(f"BEGIN; put {table} {{name: 'gone'}}; put {table} {{name: 1}}; COMMIT")
+        assert c.info.transaction_status == pq.TransactionStatus.INERROR
+        c.execute("ROLLBACK")
+    assert landed(table) == ["a", "b"]

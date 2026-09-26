@@ -115,6 +115,17 @@ with <code>25006</code>.</p>
     <code>Sync</code>: JDBC's <code>executeBatch</code>, pgx's batches and
     libpq's pipeline mode land whole or not at all. A text of several
     statements sent as one query is one block as well.</li>
+  <li>A text holding <code>BEGIN</code>, <code>COMMIT</code>,
+    <code>ROLLBACK</code> or a savepoint — <code>psql -c "BEGIN; …;
+    COMMIT"</code> — runs a statement at a time, each answered: the
+    statements outside a transaction are one implicit block, which a
+    <code>COMMIT</code> or a <code>ROLLBACK</code> in the text closes, a
+    <code>BEGIN</code> takes into the transaction it opens, and the text's
+    end lands. The first error ends the text, and a transaction the text
+    opened is left failed; a statement that cannot be read runs none of it.
+    A savepoint needs a transaction, not an implicit block
+    (<code>25P01</code>), and the extended protocol takes one command at a
+    time (<code>42601</code>).</li>
   <li><code>COMMIT AND CHAIN</code> begins the next transaction in the same
     mode; <code>SET TRANSACTION</code> sets a transaction's before its first
     statement, and <code>SET SESSION CHARACTERISTICS AS TRANSACTION</code>
@@ -136,9 +147,7 @@ back: before a transaction's first write it runs on its own, and after one it
 is refused (<code>25001</code>). Two-phase commit is refused
 (<code>0A000</code>): taken for the <code>COMMIT</code> or the
 <code>ROLLBACK</code> it begins with, it would end a transaction other than
-the one named. <code>BEGIN</code>, <code>COMMIT</code>,
-<code>ROLLBACK</code> and the savepoint commands go in a query of their
-own.</p>
+the one named.</p>
 
 <h2>Resource ceilings</h2>
 
