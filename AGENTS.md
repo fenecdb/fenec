@@ -343,6 +343,20 @@ longer takes the vector out of the graph and back in (1.89 -> 0.006 ms at
 number, or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
 
+**A restore gives back the arena it had, to the bit.** Restoring a graph
+reads each live node's vector out of its document and normalises it as the
+write path did, the flat sum's order and all (`flat_sq`: the 8-strip `norm`
+rounds otherwise, and the graph would be another). One add waiting on the
+one before made that a third of an open, so natively eight vectors are
+summed side by side, each in its own order (`flat_sqs8`), and the links --
+two or three bytes each -- are decoded inline (`graph_varint`), their list
+buffer kept: a checkpointed 100 000 x 128 file opened in 29.8 ms against
+41.0, 100 000 x 768 in 70 against 134, and
+`a_restored_arena_holds_the_vectors_it_had_bit_for_bit` holds the arena to
+the one it restored. The browser loads a 20 000 x 128 image 13% faster from
+the rest; summing side by side gained it nothing there, and would have cost
+0.5 KB brotli.
+
 **A batch links in parallel, into the graph it would link in turn.**
 `insert_batch` finds a batch's neighbours on every core against the graph
 before it (`compute_candidates`); `link_batch` then sets each node's own
