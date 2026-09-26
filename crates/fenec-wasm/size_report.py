@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 HOME_CARGO = os.path.expanduser("~/.cargo/bin/cargo")
@@ -299,8 +300,10 @@ def part_of(home):
 
 
 def build(root, target):
-    """The module built with its names, as bytes."""
-    env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="false")
+    """The module built with its names, as bytes: its debug information
+    stripped, which the link's `--compress-relocations` refuses, and its
+    symbols kept."""
+    env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="debuginfo")
     subprocess.run(
         [CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown", "--profile", "wasm"],
         check=True, cwd=root, env=env,
@@ -532,7 +535,9 @@ def edges(module):
 def why(root, target, pattern):
     """Markdown: the first of fenec's functions on each way to a function
     whose path matches `pattern`, and the way -- what calls what, whose
-    address is taken where, which vtable points at it."""
+    address is taken where, which vtable points at it. The module is linked
+    with its relocations, in place of `.cargo/config.toml`'s compressed ones,
+    which the linker cannot write together."""
     env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="false",
                CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128 -C link-arg=--emit-relocs")
     subprocess.run([CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown",
@@ -685,15 +690,17 @@ def main():
     head = measure(ROOT, os.path.join(out, "head"))
     base = None
     if base_ref:
-        tree = os.path.join(out, "tree")
-        subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Outside the repository: Cargo reads the `.cargo/config.toml` of
+        # every directory above the build, and joins their `rustflags` -- a
+        # worktree under target/ was built with the head's flags as well.
+        tree = os.path.join(tempfile.mkdtemp(prefix="fenec-size-base-"), "tree")
         subprocess.run(["git", "worktree", "add", "--detach", "-f", tree, base_ref], check=True,
                        cwd=ROOT, stdout=subprocess.DEVNULL)
         try:
             base = measure(tree, os.path.join(out, "base"))
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT)
+            shutil.rmtree(os.path.dirname(tree), ignore_errors=True)
     title = "## The browser module" + (f", against `{called}`" if base_ref else "")
     text = title + "\n\n" + report(head, base) + "\n"
     print(text)
