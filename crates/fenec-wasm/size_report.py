@@ -25,6 +25,7 @@ quote, with the same allowance.
 
 import collections
 import gzip
+import hashlib
 import os
 import re
 import shutil
@@ -389,6 +390,7 @@ def measure(root, target):
         copies[erased] += 1
         parts[part_of(home)] += size
     return {
+        "sha": hashlib.sha256(served).hexdigest(),
         "raw": len(served),
         "gzip": len(gzip.compress(served, 9, mtime=0)),
         "brotli": brotli,
@@ -424,6 +426,8 @@ def report(head, base=None):
     out = ["| | raw | gzip | brotli | code | data |", "| --- | ---: | ---: | ---: | ---: | ---: |",
            f"| KB | {kb(head['raw'])} | {kb(head['gzip'])} | {kb(head['brotli'])} "
            f"| {kb(head['code'])} | {kb(head['data'])} |"]
+    if base and base["sha"] == head["sha"]:
+        return "\n".join(out + ["", "The module is the base's, byte for byte."])
     if base:
         out.append(f"| against the base, bytes | {delta('raw')} | {delta('gzip', NOISE)} "
                    f"| {delta('brotli', NOISE)} | {delta('code')} | {delta('data')} |")
