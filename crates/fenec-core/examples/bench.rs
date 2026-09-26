@@ -5,6 +5,10 @@
 //!   * ANN query latency (p50 / p95 / p99)
 //!   * recall against an exact scan (recall@10)
 //!   * size of the out-of-memory byte image and the time to reopen it
+//!
+//! `--f16` stores the vectors in half precision, `--uniform` draws them
+//! uniformly rather than around centres, `--ef N` and `--efc N` set the
+//! beams.
 
 use fenec_core::prelude::*;
 use std::time::Instant;
@@ -42,6 +46,11 @@ fn main() {
     // and no neighbourhood structure is left. The default clustered
     // distribution resembles the output of real embedding models.
     let uniform = args.iter().any(|a| a == "--uniform");
+    // --f16 stores the vectors as `vector<DIM, f16>`: half the arena.
+    let prec = match args.iter().any(|a| a == "--f16") {
+        true => VecPrec::F16,
+        false => VecPrec::F32,
+    };
     // --efc N : candidate list width during construction
     let ef_search: usize = args
         .iter()
@@ -57,8 +66,9 @@ fn main() {
         .unwrap_or(VectorIndexSpec::default().ef_construction);
 
     println!(
-        "fenecdb {} — {n} documents × {dim} dimensions — {} distribution — ef_construction={efc} ef_search={ef_search}\n",
+        "fenecdb {} — {n} documents × {dim} dimensions{} — {} distribution — ef_construction={efc} ef_search={ef_search}\n",
         fenec_core::VERSION,
+        if prec == VecPrec::F16 { ", f16" } else { "" },
         if uniform { "uniform random (pathological)" } else { "clustered (embedding-like)" }
     );
 
@@ -69,13 +79,13 @@ fn main() {
             vec![
                 Field::new("category", DataType::Text).indexed(IndexKind::Hash),
                 Field::new("score", DataType::Int),
-                Field::new("embed", DataType::Vector(dim, VecPrec::F32)).indexed(
-                    IndexKind::Vector(VectorIndexSpec {
+                Field::new("embed", DataType::Vector(dim, prec)).indexed(IndexKind::Vector(
+                    VectorIndexSpec {
                         ef_construction: efc,
                         ef_search,
                         ..VectorIndexSpec::default()
-                    }),
-                ),
+                    },
+                )),
             ],
         )
         .unwrap(),

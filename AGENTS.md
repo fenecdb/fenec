@@ -343,6 +343,22 @@ longer takes the vector out of the graph and back in (1.89 -> 0.006 ms at
 number, or searches exactly where that walk costs more than reading every
 vector (`past_tombstones`); without it a `limit 10` answered 4 rows.
 
+**A batch links in parallel, into the graph it would link in turn.**
+`insert_batch` finds a batch's neighbours on every core against the graph
+before it (`compute_candidates`); `link_batch` then sets each node's own
+lists and groups what they add to their neighbours' lists by list, each
+group applied in node order on whichever thread is free (`spread`). A
+pruning reads only the list it prunes and the vectors, so every list ends
+as linking the nodes one after another left it, and
+`a_batch_links_as_its_nodes_would_one_after_another` holds the graph
+records to that byte for byte over every arena. Linked on one core, the
+pruning was 70% of a 100 000 x 128 build: 10.6 s then, 5.3 now; 48.9 ->
+23.4 s at 768 dimensions, and 50.6 -> 22.0 s for a crashed file's vectors
+linked at the open. A share of the work a thread left the M1's efficiency
+cores finishing last while the rest waited, so the work goes out an item
+at a time. The browser has one thread and links in turn (`link_node`),
+through the same pruning (`GraphView::pruned`).
+
 **A server keeps its graphs in its file.** It checkpoints only on its way
 down, so a crash after a long run left every vector written since the start
 to link again. `fenec_http::link::keep` looks at every database the process
@@ -358,9 +374,9 @@ binary does not know and rebuilds from -- it restored a record in the tail
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
-leaves at most 10 000 vectors to link, 7.9 s with `near` at 2.06 ms p50
-meanwhile, where every vector waited 55.2 s in the same run with `near` at
-the exact scan's 14.89 ms; the ten records were 35.2 MB of a 370.3 MB file
+leaves at most 10 000 vectors to link, 3.4 s with `near` at 2.08 ms p50
+meanwhile, where every vector waited 24.3 s in the same run with `near` at
+the exact scan's 14.49 ms; the ten records were 35.2 MB of a 370.3 MB file
 until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
 at most (`make reopen-bench`).
 
@@ -644,7 +660,7 @@ FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
 builds an inverted index that is rebuilt from the documents on open — 27 µs per
-document against the HNSW graph's ~102 µs, and the rebuild pass already reads
+document against the HNSW graph's ~50 µs, and the rebuild pass already reads
 every document for the hash indexes. Nothing about it reaches the file, so
 there is no validation path and no stale-index case to handle. It is shrunk to
 fit where it is known complete (rebuild, `create index`); live ingest keeps
