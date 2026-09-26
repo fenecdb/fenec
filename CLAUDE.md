@@ -93,7 +93,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
 execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
 tailoring, generated tables in chunks),
-`json`, `num` (decimal text to `f64` and back), `time` (calendar arithmetic), `sparse`
+`json`, `num` (decimal text to `f64` and back), `case` (a string's Unicode
+case, as the standard library's, without its code), `time` (calendar arithmetic), `sparse`
 (sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature), `off` (what stands in for an index a build is made
@@ -496,8 +497,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 140.5 KB
-brotli with all four, 110.4 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 136.2 KB
+brotli with all four, 106.3 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -540,7 +541,12 @@ stable sort of their own: through `best_first` a 30 000 x 128 build took
 registry's functions a `Vec` too -- each map was a copy of hashbrown, and
 the registry's lowered the name into a new `String` on every call of every
 row (17% of two calls a row). Against 11.2 the module lost 28.5 KB, 3.9 KB
-brotli.
+brotli. A `str` slice that can panic keeps its panic's formatting of a
+`char` -- `escape_debug` and Unicode's tables of what prints: 16.5 KB of
+the module with the standard library's `to_lowercase`, `to_uppercase` and
+`contains`, which slice that way. So the browser path slices with `get` and
+`split_at_checked`, case is `case`'s, and `~` searches the folded bytes;
+`make size-report WHY=slice_error_fail` finds a slice that brings it back.
 
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a

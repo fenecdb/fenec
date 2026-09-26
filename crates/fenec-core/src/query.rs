@@ -296,12 +296,20 @@ pub struct EvalCtx<'a> {
 ///
 /// Dropping the folding path altogether was measured and turned down. It only
 /// pays together with `lower`/`upper` in `plugin.rs`, which reach for the same
-/// Unicode tables: ASCII here alone changes the wasm by nothing at all, and
-/// both together by 5 200 bytes of brotli. That is not worth losing `ÇALIŞMA
-/// ~ çalişma`, which every non-English corpus depends on.
+/// Unicode tables: ASCII here alone changed the wasm by nothing at all, and
+/// both together by 5 200 bytes of brotli while the three were the standard
+/// library's `to_lowercase` and `to_uppercase`. That is not worth losing
+/// `ÇALIŞMA ~ çalişma`, which every non-English corpus depends on; the three
+/// fold through `case` now, which costs less.
+///
+/// Folded, the two are searched as bytes as well: a needle of valid UTF-8
+/// can only match at a character's first byte, so the answer is `contains`',
+/// whose searcher slices the string where a slice can panic.
 fn like_match(hay: &str, needle: &str) -> bool {
     if !(hay.is_ascii() && needle.is_ascii()) {
-        return hay.to_lowercase().contains(&needle.to_lowercase());
+        let (h, n) = (crate::case::lower(hay), crate::case::lower(needle));
+        let (h, n) = (h.as_bytes(), n.as_bytes());
+        return n.is_empty() || h.windows(n.len()).any(|w| w[0] == n[0] && w == n);
     }
     let (h, n) = (hay.as_bytes(), needle.as_bytes());
     if n.is_empty() {

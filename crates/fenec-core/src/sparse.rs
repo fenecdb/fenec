@@ -61,7 +61,9 @@ pub fn parse(s: &str) -> Result<(u32, Vec<(u32, f32)>)> {
         {
             *at += 1;
         }
-        let t = &s[from..*at];
+        // ASCII was scanned, so both ends are boundaries; `get` rather than
+        // an index keeps a panic's formatting out of the browser module.
+        let t = s.get(from..*at).unwrap_or("");
         space(at);
         t
     };

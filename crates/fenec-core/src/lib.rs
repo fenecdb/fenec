@@ -27,6 +27,7 @@
 //! }).unwrap();
 //! ```
 
+pub mod case;
 pub mod changes;
 pub mod codec;
 pub mod collate;

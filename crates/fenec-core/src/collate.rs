@@ -169,7 +169,10 @@ impl Collation {
                 at -= 1;
             }
         }
-        let (a, b) = (&a[at..], &b[at..]);
+        // `get`, not an index: `at` is a boundary of both, and an index's
+        // panic would format the character it cut into, which alone kept
+        // the tables that print a `char` in the browser module.
+        let (a, b) = (a.get(at..).unwrap_or(""), b.get(at..).unwrap_or(""));
         let o = self.order();
         // Past the shared part most pairs differ in their first letter, so
         // the first level decides and the other two are never walked.
@@ -208,9 +211,8 @@ fn continued(s: &str, at: usize) -> bool {
 }
 
 fn continued_past_ascii(s: &str, at: usize) -> bool {
-    s[at..]
-        .chars()
-        .next()
+    s.get(at..)
+        .and_then(|t| t.chars().next())
         .is_some_and(|c| continues_cp(c as u32))
 }
 

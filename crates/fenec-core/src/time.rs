@@ -106,12 +106,21 @@ pub fn parse(text: &str) -> Result<i64> {
             .map(|(i, _)| i);
         match idx {
             Some(i) => {
-                let (b, off) = t.split_at(i);
+                // No slice that can panic: its formatting of a `char` kept
+                // tables in the browser module that nothing else used.
+                let Some((b, off)) = t.split_at_checked(i) else {
+                    return Err(bad());
+                };
                 let sign = if off.starts_with('-') { -1 } else { 1 };
-                let digits: String = off[1..].chars().filter(|c| c.is_ascii_digit()).collect();
-                let m = match digits.len() {
-                    2 => num(&digits)? * 60,
-                    4 => num(&digits[..2])? * 60 + num(&digits[2..])?,
+                let digits: String = off
+                    .get(1..)
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .collect();
+                let m = match (digits.len(), digits.get(..2), digits.get(2..)) {
+                    (2, ..) => num(&digits)? * 60,
+                    (4, Some(hours), Some(minutes)) => num(hours)? * 60 + num(minutes)?,
                     _ => return Err(bad()),
                 };
                 (b, sign * m)
