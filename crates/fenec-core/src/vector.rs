@@ -224,6 +224,65 @@ pub fn distance(metric: Metric, a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// [`distance`] from `q` to four vectors, the same bits as four calls. Read
+/// together, the four wait on memory once rather than in turn, and their
+/// adds run side by side: out of an arena of 100 000, a 128-dim distance
+/// took 60 ns alone and 47 four at a time on an M1, a 768-dim one 242 and
+/// 149. Only aarch64 measures four at once. The browser's module built a
+/// 10 000 x 128 graph 4% slower that way and grew 9 KB -- at `opt-level =
+/// "z"`, over vectors mostly in cache, there was no wait to hide -- and a
+/// walk gathering its neighbours before measuring them one at a time still
+/// cost its `near` 7%, so everywhere else the walk is as it was.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn distances4(metric: Metric, q: &[f32], t: [&[f32]; 4]) -> [f32; 4] {
+    match metric {
+        Metric::Cosine => dots4(q, t).map(|d| 1.0 - d),
+        Metric::L2 => l2s4(q, t),
+        Metric::Dot => dots4(q, t).map(|d| -d),
+    }
+}
+
+/// [`distances4`] over vectors in half precision, as `distance_hf` measures
+/// each.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn distances4_hf(metric: Metric, q: &[f32], t: [&[u16]; 4]) -> [f32; 4] {
+    match metric {
+        Metric::Cosine => dots4_hf(q, t).map(|d| 1.0 - d),
+        Metric::L2 => l2s4_hf(q, t),
+        Metric::Dot => dots4_hf(q, t).map(|d| -d),
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn dots4(q: &[f32], t: [&[f32]; 4]) -> [f32; 4] {
+    // SAFETY: as for `dot`.
+    unsafe { neon::dots4(q, t) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn l2s4(q: &[f32], t: [&[f32]; 4]) -> [f32; 4] {
+    // SAFETY: as for `dot`.
+    unsafe { neon::l2s4(q, t) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn dots4_hf(q: &[f32], t: [&[u16]; 4]) -> [f32; 4] {
+    // SAFETY: as for `dot`.
+    unsafe { neon::dots4_hf(q, t) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn l2s4_hf(q: &[f32], t: [&[u16]; 4]) -> [f32; 4] {
+    // SAFETY: as for `dot`.
+    unsafe { neon::l2s4_hf(q, t) }
+}
+
 /// Turns a distance into the similarity score shown to the user.
 pub fn score_from_distance(metric: Metric, d: f32) -> f32 {
     match metric {
@@ -549,6 +608,101 @@ mod neon {
             |c| c as f32,
             super::ident,
         )
+    }
+
+    /// Σ q·v for four vectors.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dots4(q: &[f32], t: [&[f32]; 4]) -> [f32; 4] {
+        strips4(
+            q,
+            t,
+            |y| f32s(y),
+            |x, y| mul(x, y),
+            super::mul,
+            super::ident,
+        )
+    }
+
+    /// Σ (q − v)² for four vectors.
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2s4(q: &[f32], t: [&[f32]; 4]) -> [f32; 4] {
+        strips4(
+            q,
+            t,
+            |y| f32s(y),
+            |x, y| diff_sq(x, y),
+            super::diff_sq,
+            super::ident,
+        )
+    }
+
+    /// Σ v·q for four vectors in half precision, each product taken as
+    /// `dot_hf` takes it, the vector's side first.
+    #[target_feature(enable = "neon")]
+    pub(super) fn dots4_hf(q: &[f32], t: [&[u16]; 4]) -> [f32; 4] {
+        strips4(
+            q,
+            t,
+            |y| halves(y),
+            |x, y| mul(y, x),
+            |x, y| super::mul(y, x),
+            super::half,
+        )
+    }
+
+    /// Σ (v − q)² for four vectors in half precision.
+    #[target_feature(enable = "neon")]
+    pub(super) fn l2s4_hf(q: &[f32], t: [&[u16]; 4]) -> [f32; 4] {
+        strips4(
+            q,
+            t,
+            |y| halves(y),
+            |x, y| diff_sq(y, x),
+            |x, y| super::diff_sq(y, x),
+            super::half,
+        )
+    }
+
+    /// [`strips`] from one query to four vectors at once: each vector's
+    /// eight accumulators its own two registers, the query's strip read once
+    /// for the four, each vector's lanes added and summed as `strips` adds
+    /// them alone -- the same bits, with eight chains of adds in flight
+    /// rather than two. `step` and `tail` take the query's side first.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn strips4<B: Copy>(
+        q: &[f32],
+        t: [&[B]; 4],
+        lb: impl Fn(&[B; 8]) -> (float32x4_t, float32x4_t),
+        step: impl Fn(float32x4_t, float32x4_t) -> float32x4_t,
+        tail: impl Fn(f32, f32) -> f32,
+        wb: impl Fn(B) -> f32,
+    ) -> [f32; 4] {
+        let (cq, rq) = q.as_chunks::<8>();
+        let c = t.map(|v| v.as_chunks::<8>().0);
+        debug_assert!(t.iter().all(|v| v.len() == q.len()));
+        let z = vdupq_n_f32(0.0);
+        let (mut lo, mut hi) = ([z; 4], [z; 4]);
+        let strips = cq.iter().zip(c[0]).zip(c[1]).zip(c[2]).zip(c[3]);
+        for ((((x, y0), y1), y2), y3) in strips {
+            let (x0, x1) = f32s(x);
+            for (j, y) in [y0, y1, y2, y3].into_iter().enumerate() {
+                let (a, b) = lb(y);
+                lo[j] = vaddq_f32(lo[j], step(x0, a));
+                hi[j] = vaddq_f32(hi[j], step(x1, b));
+            }
+        }
+        let at = cq.len() * 8;
+        let mut out = [0.0f32; 4];
+        for j in 0..4 {
+            let (l, h) = (lanes(lo[j]), lanes(hi[j]));
+            let mut s = (l[0] + l[1]) + (l[2] + l[3]) + ((h[0] + h[1]) + (h[2] + h[3]));
+            for (x, y) in rq.iter().zip(&t[j][at..]) {
+                s += tail(*x, wb(*y));
+            }
+            out[j] = s;
+        }
+        out
     }
 
     /// `strip8!` four lanes at a time: `la` and `lb` read a strip of eight
@@ -1207,6 +1361,34 @@ impl Arena {
         }
     }
 
+    /// [`Arena::dist_to`] for each of `nodes`, into `out`, bit for bit: four
+    /// vectors at a time where the arena holds vectors ([`distances4`]), one
+    /// at a time over codes.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fn dists_to(&self, metric: Metric, q: &[f32], nodes: &[u32], dim: usize, out: &mut Vec<f32>) {
+        out.clear();
+        let (four, rest) = nodes.as_chunks::<4>();
+        match self {
+            Arena::F32(d) => {
+                for c in four {
+                    let t = c.map(|n| &d[n as usize * dim..][..dim]);
+                    out.extend(distances4(metric, q, t));
+                }
+            }
+            Arena::F16(d) => {
+                for c in four {
+                    let t = c.map(|n| &d[n as usize * dim..][..dim]);
+                    out.extend(distances4_hf(metric, q, t));
+                }
+            }
+            Arena::I8(..) | Arena::Bit(_) => {
+                out.extend(nodes.iter().map(|&n| self.dist_to(metric, q, n, dim)));
+                return;
+            }
+        }
+        out.extend(rest.iter().map(|&n| self.dist_to(metric, q, n, dim)));
+    }
+
     #[inline]
     fn dist_nodes(&self, metric: Metric, a: u32, b: u32, dim: usize) -> f32 {
         let (sa, sb) = (a as usize * dim, b as usize * dim);
@@ -1453,6 +1635,11 @@ struct Scratch {
     epoch: u32,
     candidates: BinaryHeap<MinCand>,
     results: BinaryHeap<Cand>,
+    /// A node's neighbours not visited yet, and their distances.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fresh: Vec<u32>,
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    dists: Vec<f32>,
 }
 
 impl Scratch {
@@ -1462,6 +1649,10 @@ impl Scratch {
             epoch: 0,
             candidates: BinaryHeap::new(),
             results: BinaryHeap::new(),
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            fresh: Vec::new(),
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            dists: Vec::new(),
         }
     }
 
@@ -1479,6 +1670,21 @@ impl Scratch {
         self.results.clear();
     }
 
+    /// A node the walk measured: kept while the beam has room or while it
+    /// is nearer than the worst the beam holds.
+    #[inline]
+    fn offer(&mut self, node: u32, dist: f32, ef: usize) {
+        let worst = self.results.peek().map(|c| c.dist).unwrap_or(f32::MAX);
+        if self.results.len() < ef || dist < worst {
+            let c = Cand { dist, node };
+            self.candidates.push(MinCand(c));
+            self.results.push(c);
+            if self.results.len() > ef {
+                self.results.pop();
+            }
+        }
+    }
+
     #[inline]
     fn see(&mut self, node: u32) -> bool {
         let slot = &mut self.visited[node as usize];
@@ -1489,6 +1695,17 @@ impl Scratch {
             true
         }
     }
+}
+
+/// What a pruning works in, kept from one to the next: the list and the
+/// node joining it, their distances, and the candidates they make.
+#[derive(Default)]
+struct Pruning {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    nodes: Vec<u32>,
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    dists: Vec<f32>,
+    cands: Vec<Cand>,
 }
 
 /// Read-only view of the graph.
@@ -1603,20 +1820,33 @@ impl<'a> GraphView<'a> {
             if cur.dist > worst && sc.results.len() >= ef {
                 break;
             }
+            #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
             for &nb in self.neighbors(cur.node, level) {
-                if !sc.see(nb) {
-                    continue;
+                if sc.see(nb) {
+                    let d = self.dist_to(q, nb);
+                    sc.offer(nb, d, ef);
                 }
-                let d = self.dist_to(q, nb);
-                let worst = sc.results.peek().map(|c| c.dist).unwrap_or(f32::MAX);
-                if sc.results.len() < ef || d < worst {
-                    let c = Cand { dist: d, node: nb };
-                    sc.candidates.push(MinCand(c));
-                    sc.results.push(c);
-                    if sc.results.len() > ef {
-                        sc.results.pop();
+            }
+            // The neighbours not visited yet are measured together, four
+            // vectors at a time, then taken in the order they come: the
+            // distances do not depend on the heaps, so the walk is the one
+            // a distance at a time made.
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            {
+                let mut fresh = std::mem::take(&mut sc.fresh);
+                let mut dists = std::mem::take(&mut sc.dists);
+                fresh.clear();
+                for &nb in self.neighbors(cur.node, level) {
+                    if sc.see(nb) {
+                        fresh.push(nb);
                     }
                 }
+                self.data
+                    .dists_to(self.metric, q, &fresh, self.dim, &mut dists);
+                for (&nb, &d) in fresh.iter().zip(&dists) {
+                    sc.offer(nb, d, ef);
+                }
+                (sc.fresh, sc.dists) = (fresh, dists);
             }
         }
 
@@ -1721,25 +1951,41 @@ impl<'a> GraphView<'a> {
         current: &[u32],
         node: u32,
         max_deg: usize,
-        buf: &mut Vec<Cand>,
+        buf: &mut Pruning,
     ) -> Vec<u32> {
-        buf.clear();
         // `nb` is fixed across all the comparisons: widen it once.
         // Widened, a code leaves out its own offset.
         let (nbv, off) = (self.vec_at(nb), self.data.offset(nb));
-        for &x in current {
-            buf.push(Cand {
-                dist: self.dist_to(&nbv, x) - off,
+        buf.cands.clear();
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        {
+            buf.nodes.clear();
+            buf.nodes.extend_from_slice(current);
+            buf.nodes.push(node);
+            self.data
+                .dists_to(self.metric, &nbv, &buf.nodes, self.dim, &mut buf.dists);
+            let measured = buf.nodes.iter().zip(&buf.dists);
+            buf.cands.extend(measured.map(|(&x, &d)| Cand {
+                dist: d - off,
                 node: x,
+            }));
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        {
+            for &x in current {
+                buf.cands.push(Cand {
+                    dist: self.dist_to(&nbv, x) - off,
+                    node: x,
+                });
+            }
+            buf.cands.push(Cand {
+                dist: self.dist_to(&nbv, node) - off,
+                node,
             });
         }
-        buf.push(Cand {
-            dist: self.dist_to(&nbv, node) - off,
-            node,
-        });
         drop(nbv);
-        buf.sort();
-        self.select_heuristic(buf, max_deg, nb)
+        buf.cands.sort();
+        self.select_heuristic(&buf.cands, max_deg, nb)
     }
 
     /// Computes a node's neighbour candidates across every level.
@@ -1832,7 +2078,7 @@ pub struct VectorIndex {
     rng: Rng,
     level_mult: f32,
     /// Buffer reused while pruning (breaks the allocation cycle).
-    prune_buf: Vec<Cand>,
+    prune_buf: Pruning,
     /// Nodes in the arena that no link reaches yet, in the order they came:
     /// a search measures each of them against the query, and
     /// [`VectorIndex::link_pending`] takes them into the graph. A tombstone
@@ -1884,7 +2130,7 @@ impl VectorIndex {
             max_level: 0,
             rng: Rng(0x9E37_79B9_7F4A_7C15),
             level_mult: 1.0 / (spec.m.max(2) as f32).ln(),
-            prune_buf: Vec::new(),
+            prune_buf: Pruning::default(),
             pending: Vec::new(),
             changes: 0,
             persisted: Persisted::default(),
@@ -1929,6 +2175,29 @@ impl VectorIndex {
     #[inline]
     fn dist_to(&self, query: &[f32], node: u32) -> f32 {
         self.data.dist_to(self.spec.metric, query, node, self.dim)
+    }
+
+    /// Each of `nodes` measured against `q`, four at a time on aarch64
+    /// ([`distances4`]).
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fn measure(&self, q: &[f32], nodes: impl Iterator<Item = u32>) -> Vec<Cand> {
+        let nodes: Vec<u32> = nodes.collect();
+        let mut dists = Vec::with_capacity(nodes.len());
+        self.data
+            .dists_to(self.spec.metric, q, &nodes, self.dim, &mut dists);
+        let measured = nodes.into_iter().zip(dists);
+        measured.map(|(node, dist)| Cand { dist, node }).collect()
+    }
+
+    /// Each of `nodes` measured against `q`.
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    fn measure(&self, q: &[f32], nodes: impl Iterator<Item = u32>) -> Vec<Cand> {
+        nodes
+            .map(|node| Cand {
+                dist: self.dist_to(q, node),
+                node,
+            })
+            .collect()
     }
 
     /// Size of the arena in memory (bytes) -- for measurement and statistics.
@@ -2310,7 +2579,7 @@ impl VectorIndex {
         // a time.
         let blocks: Vec<_> = groups.chunks(16).collect();
         let (view, m, m0) = (self.view(), self.spec.m, self.m0);
-        let mut bufs: Vec<Vec<Cand>> = (0..threads).map(|_| Vec::new()).collect();
+        let mut bufs: Vec<Pruning> = (0..threads).map(|_| Pruning::default()).collect();
         let lists = spread(blocks.len(), &mut bufs, |buf, i| {
             let mut out = Vec::with_capacity(blocks[i].len());
             for group in blocks[i] {
@@ -2671,14 +2940,12 @@ impl VectorIndex {
         // No link reaches a node not linked yet, so the walk cannot find
         // one: each is measured, and ranked with what the walk found.
         if self.unlinked() > 0 {
-            for &node in &self.pending {
-                if !self.is_deleted(node) {
-                    found.push(Cand {
-                        dist: self.dist_to(&q, node),
-                        node,
-                    });
-                }
-            }
+            let live = self
+                .pending
+                .iter()
+                .copied()
+                .filter(|&n| !self.is_deleted(n));
+            found.extend(self.measure(&q, live));
             found.sort();
         }
 
@@ -3024,14 +3291,10 @@ impl VectorIndex {
         F: Fn(DocId) -> bool,
     {
         let q = self.query_for(query);
-        let mut all: Vec<Cand> = (0..self.doc_ids.len() as u32)
+        let nodes = (0..self.doc_ids.len() as u32)
             .filter(|n| !self.is_deleted(*n))
-            .filter(|n| accept(self.doc_ids[*n as usize]))
-            .map(|n| Cand {
-                dist: self.dist_to(&q, n),
-                node: n,
-            })
-            .collect();
+            .filter(|n| accept(self.doc_ids[*n as usize]));
+        let mut all = self.measure(&q, nodes);
         all.sort();
         all.truncate(k);
         all.into_iter()
@@ -3175,6 +3438,116 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Four vectors measured together give each the bits it gets alone:
+    /// the query's side first or the vector's, as each kernel takes it, and
+    /// every length the strips and their tails cover.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[test]
+    fn four_at_a_time_is_one_at_a_time() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let odd = [0.0, -0.0, 1e-40, -1e-40, 3.0e38, -65504.0, 1e-8, 1.0];
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        for len in (0..70).chain([767, 768, 1536]) {
+            for _ in 0..10 {
+                let mut f = |_| match next() % 16 {
+                    0 => odd[(next() % odd.len() as u64) as usize],
+                    _ => (next() % 20_001) as f32 / 10_000.0 - 1.0,
+                };
+                let q: Vec<f32> = (0..len).map(&mut f).collect();
+                let v: Vec<Vec<f32>> = (0..4).map(|_| (0..len).map(&mut f).collect()).collect();
+                let h: Vec<Vec<u16>> = (0..4)
+                    .map(|_| (0..len).map(|_| next() as u16).collect())
+                    .collect();
+                let t = [&v[0][..], &v[1][..], &v[2][..], &v[3][..]];
+                let th = [&h[0][..], &h[1][..], &h[2][..], &h[3][..]];
+                for metric in [Metric::Cosine, Metric::L2, Metric::Dot] {
+                    let (four, halves) = (distances4(metric, &q, t), distances4_hf(metric, &q, th));
+                    for j in 0..4 {
+                        let one = distance(metric, &q, t[j]);
+                        assert!(same(four[j], one), "{metric:?} f32, {len}");
+                        let one = distance_hf(metric, th[j], &q);
+                        assert!(same(halves[j], one), "{metric:?} f16, {len}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `dists_to` over every kind of arena, and lists of every length past
+    /// the last four, is `dist_to` node by node.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[test]
+    fn an_arena_measures_a_list_as_it_measures_each() {
+        let mut rng = Rng(5);
+        for (quant, prec, metric) in [
+            (Quant::None, VecPrec::F32, Metric::Cosine),
+            (Quant::None, VecPrec::F32, Metric::L2),
+            (Quant::None, VecPrec::F16, Metric::Dot),
+            (Quant::None, VecPrec::F16, Metric::L2),
+            (Quant::Int8, VecPrec::F32, Metric::Cosine),
+        ] {
+            let dim = 19;
+            let spec = VectorIndexSpec {
+                metric,
+                quant,
+                m: 6,
+                ef_construction: 32,
+                ..VectorIndexSpec::default()
+            };
+            let mut ix = VectorIndex::with_precision(dim, spec, prec);
+            for i in 0..40u64 {
+                let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
+                ix.insert(i, &v);
+            }
+            let raw: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
+            let q = ix.query_for(&raw);
+            let mut out = Vec::new();
+            for n in 0..14u32 {
+                let nodes: Vec<u32> = (0..n).map(|i| (i * 7 + n) % 40).collect();
+                ix.data.dists_to(metric, &q, &nodes, dim, &mut out);
+                assert_eq!(out.len(), nodes.len());
+                for (&node, &d) in nodes.iter().zip(&out) {
+                    let one = ix.data.dist_to(metric, &q, node, dim);
+                    assert_eq!(d.to_bits(), one.to_bits(), "{quant:?} {prec:?} {metric:?}");
+                }
+            }
+        }
+    }
+
+    /// The walk measures its neighbours four at a time and the exact search
+    /// every vector: a document both find carries the same score from
+    /// each, to the bit.
+    #[test]
+    fn the_walk_scores_as_the_exact_search_does() {
+        let mut rng = Rng(17);
+        for prec in [VecPrec::F32, VecPrec::F16] {
+            let dim = 21;
+            let items: Vec<(u64, Vec<f32>)> = (0..3000u64)
+                .map(|i| (i, (0..dim).map(|_| rng.next_f32() - 0.5).collect()))
+                .collect();
+            let mut ix = VectorIndex::with_precision(dim, VectorIndexSpec::default(), prec);
+            ix.insert_batch(&items);
+            let mut shared = 0;
+            for (_, q) in items.iter().step_by(150) {
+                let walk = ix.search(q, 10, None, |_| true);
+                let exact = ix.search_exact(q, 10, |_| true);
+                for (doc, score) in &walk {
+                    if let Some((_, e)) = exact.iter().find(|(d, _)| d == doc) {
+                        assert_eq!(score.to_bits(), e.to_bits(), "{prec:?}, doc {doc}");
+                        shared += 1;
+                    }
+                }
+            }
+            assert!(shared > 100, "{prec:?}: only {shared} documents both found");
         }
     }
 
