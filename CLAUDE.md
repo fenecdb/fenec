@@ -947,8 +947,9 @@ publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
 `collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
 release's draft is published (`packages.yml`), only after that same check,
-and with trusted publishing: the registries trust the workflow's OIDC
-identity, and the repository keeps no key (RELEASING.md). With
+with a token where the registry's secret holds one (`NPM_TOKEN`,
+`PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
+where it does not (RELEASING.md). With
 `full_text=True` a store indexes its text for BM25 as well and searches by
 the words (`match`) or by the words and the vector fused (`fuse`):
 LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
