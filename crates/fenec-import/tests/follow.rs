@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! make pgvector-up
-//! cargo test -p fenec-import --test follow -- --ignored
+//! cargo test -p fenec-import --test all follow:: -- --ignored
 //! make pgvector-down
 //! ```
 //!

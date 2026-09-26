@@ -3,6 +3,7 @@ name = "fenec-core"
 description = "fenecdb storage engine: zero-buffer-pool segments, native vectors, plugin registry"
 version.workspace = true
 edition.workspace = true
+autotests = false
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -32,3 +33,12 @@ vector = []
 text = []
 sparse = []
 sorted = []
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+# Apart: run on its own without the indexes: the second command of `make test`.
+[[test]]
+name = "features"
+path = "tests/features.rs"

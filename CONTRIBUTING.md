@@ -8,7 +8,7 @@ reasoning behind each rule.
 
 ```bash
 rustup target add wasm32-unknown-unknown   # rust-toolchain.toml asks for it
-make test                                  # cargo test, then the JS tests
+make test                                  # the Rust suite, then the JS tests
 make wasm                                  # builds web/fenec.wasm
 make serve                                 # the browser demo on :8787
 ```
@@ -21,16 +21,30 @@ library, so the Makefile prefers `~/.cargo/bin/cargo`.
 skip themselves when that binary or `web/fenec.wasm` is missing, so run
 `make wasm` first if you want the end-to-end cases to actually execute.
 
+**On macOS, make your terminal a developer tool.** The system checks every
+newly linked program the first time it runs, and a change to `fenec-core`
+relinks every test binary: a program as small as hello world waited 15.5 s on
+its first run. With a binary for each test file, `make test` spent 48 of its
+60 minutes waiting so; with one a crate, 20 of its 25. Add the terminal you
+run it from under System Settings → Privacy & Security → Developer Tools
+(`sudo spctl developer-mode enable-terminal` shows the pane if it is
+missing), and start the terminal again.
+
+**Build with one toolchain.** The Makefile takes rustup's `cargo`, which reads
+`rust-toolchain.toml`; a Homebrew `cargo` earlier in `PATH` is another
+compiler, and each switch between the two rebuilds everything -- and on macOS
+has every binary checked again.
+
 Narrower runs:
 
 ```bash
-cargo test -p fenec-core --test persist        # one integration test file
+cargo test -p fenec-core --test all persist:: # one file of the integration tests
 cargo test -p fenec-ql near                    # by name substring
 cargo test -p fenec-core codec::tests          # inline unit tests in a module
 node --test web/fenec.test.js
 ```
 
-`cargo test -p fenec-import --test pg -- --ignored` needs a live PostgreSQL;
+`cargo test -p fenec-import --test all pg:: -- --ignored` needs a live PostgreSQL;
 `make import-test` starts one in Docker and tears it down afterwards.
 
 ## The rules a change must not break
@@ -79,7 +93,9 @@ empty.
 - `Error` in `fenec-core/src/error.rs` is the single error type: allocation-free
   variants, no `Box`. `fenec-pg` maps it onto PostgreSQL SQLSTATE codes.
 - Unit tests go inline in `#[cfg(test)] mod tests`. Cross-crate and protocol
-  tests go in `crates/*/tests/`. Measurement programs are
+  tests go in `crates/*/tests/`, one binary a crate: add a new file's `mod`
+  line to that crate's `tests/all.rs`, or it is never built. Measurement
+  programs are
   `crates/fenec-core/examples/` and are wired to `make`, not to CI.
 - Run `cargo fmt --all` before you push; CI checks it. rustfmt settles
   formatting so that review can be about the change itself.

@@ -254,7 +254,7 @@ started. The follower adds 178 KB to <code>fenec-pg</code>.</p>
 source. Every option is in <code>fenec import --help</code>.</p>
 
 <pre data-lang="bash">make import-test        # the PostgreSQL arm and --follow — needs Docker
-cargo test -p fenec-import --test pg --test follow -- --ignored
+cargo test -p fenec-import --test all -- --ignored pg:: follow::
 </pre>
 
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
