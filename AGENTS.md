@@ -16,7 +16,7 @@ make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
-make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main)
+make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-pg: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
@@ -550,7 +550,7 @@ for, so consecutive code points that alone give consecutive primaries share
 a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
 them one range (`UNIFORM`), and a table's words are written as differences
 in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1072. A comparison walks ICU's three levels, letters then
+`make small`'s 1040. A comparison walks ICU's three levels, letters then
 accents then case, over the whole string before it falls back to the
 bytes, so the order is total.
 It starts at the first byte the two strings do not share, stepped back past
@@ -814,7 +814,16 @@ value and not a list.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
 abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a
-panicking connection thread unwinds and drops only its own session.
+panicking connection thread unwinds and drops only its own session. A cold
+crate is built for size in the profile it is cold in: the catalog in
+`release`, and in `cli` `fenec-http`, which the shell reaches only for
+`backup`, `archive` and `restore`, waiting on the network and the disk
+(16.3 KB of the released binary). Not the importer, whose SQLite import of
+200 000 rows took 285 ms against 251 for 32.6 KB, nor the root crate, which
+built for size made the binary 129 KB larger (`make size-report BIN=fenec`).
+Both binaries hold 72 KB of the standard library's backtrace symbolizer
+(`gimli`, `addr2line`, `rustc_demangle`, `object`), which only a nightly
+`build-std` leaves out.
 
 ## Conventions
 

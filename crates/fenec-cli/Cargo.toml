@@ -18,7 +18,7 @@ fenec-ql.workspace = true
 # `cargo build --release -p fenec-cli --no-default-features`.
 fenec-import = { workspace = true, optional = true }
 # `fenec backup`, `fenec archive`, `fenec restore`: they speak the replication
-# stream through fenec-http's client -- 65 KB next to import, 82 KB alone. Off
+# stream through fenec-http's client -- 65 KB next to import, 66 KB alone. Off
 # with the rest in `make small`.
 fenec-http = { workspace = true, optional = true }
 
