@@ -4,8 +4,8 @@
 //! after the last graph that reached the file -- every vector, when there
 //! is none to restore -- go into the arena unlinked, and `near` measures
 //! each of them until they are linked. Linked at the open instead, they kept
-//! the port closed for as long as they took: 22.0 s at 100 000 x 768 never
-//! checkpointed, which opens in 0.22 s this way and is linked 24.3 s later.
+//! the port closed for as long as they took: 18.4 s at 100 000 x 768 never
+//! checkpointed, which opens in 0.23 s this way and is linked 19.2 s later.
 //!
 //! And it keeps its graphs in the file ([`keep`]), since it checkpoints only
 //! on its way down: without them a crash after a long run left every vector
@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 /// How long a slice holds the write lock. Every query and write waits a
-/// slice out; at 100 000 x 768 a node takes about 0.24 ms of the eight
-/// threads' time, so a slice is 40 or so, and the linking as a whole took
-/// 24.3 s against the open's 22.0.
+/// slice out; at 100 000 x 768 a node takes about 0.19 ms of the eight
+/// threads' time, so a slice is 50 or so, and the linking as a whole took
+/// 19.2 s against the open's 18.4.
 const SLICE: Duration = Duration::from_millis(10);
 
 /// Links the database's unlinked vectors on a thread of its own, a slice

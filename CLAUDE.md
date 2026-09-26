@@ -456,7 +456,7 @@ on its way down, so a crash after a long run leaves every vector written
 since in the tail, and linking them at the open kept the port closed for as
 long as they took: at 100 000 x 768 never checkpointed, `fenec-pg` answered
 its first `near` 67.7 s after it started, and linking at the open still
-takes 22.0 s with the lists pruned in parallel. `fenec-pg`, a tenant and a replica
+takes 18.4 s with the lists pruned in parallel. `fenec-pg`, a tenant and a replica
 open with `fs::open_serving` instead, and it answers after 1.23 s: those
 vectors go into the arena unlinked (`VectorIndex::defer_batch`, every vector
 of a graph the open cannot restore too), a search measures each of them
@@ -464,7 +464,7 @@ beside what its walk finds -- so an answer is never missing one -- and
 `fenec_http::link::beside` links them on a thread of its own, slices of
 about 10 ms under the write lock, each at most twice the last (a pace taken
 over a small graph had a slice hold the lock for 112 ms). `near` takes the
-exact scan's 14.5 ms until the 24.3 s of linking are done and 0.45 ms after,
+exact scan's 10.5 ms until the 19.2 s of linking are done and 0.31 ms after,
 recall 0.976 against 0.978 (`make reopen-bench`). A checkpoint meanwhile
 writes the waiting nodes flagged, in graph record version 5 and only then,
 and an open that does not defer links them there. The linking needs the
@@ -488,9 +488,9 @@ binary does not know and rebuilds from -- it restored a record in the tail
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
-leaves at most 10 000 vectors to link, 3.4 s with `near` at 2.08 ms p50
-meanwhile, where every vector waited 24.3 s in the same run with `near` at
-the exact scan's 14.49 ms; the ten records were 35.2 MB of a 370.3 MB file
+leaves at most 10 000 vectors to link, 3.0 s with `near` at 1.53 ms p50
+meanwhile, where every vector waited 19.2 s in the same run with `near` at
+the exact scan's 10.32 ms; the ten records were 35.2 MB of a 370.3 MB file
 until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
 at most (`make reopen-bench`).
 
@@ -836,7 +836,7 @@ FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
 builds an inverted index that is rebuilt from the documents on open — 27 µs per
-document against the HNSW graph's ~50 µs, and the rebuild pass already reads
+document against the HNSW graph's ~44 µs, and the rebuild pass already reads
 every document for the hash indexes. Nothing about it reaches the file, so
 there is no validation path and no stale-index case to handle. It is shrunk to
 fit where it is known complete (rebuild, `create index`); live ingest keeps
