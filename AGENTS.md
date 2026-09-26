@@ -419,6 +419,17 @@ infinities and NaNs into what `half` does not.
 strips bit for bit. A 100 000 x 128 build went 5.2 -> 4.3 s (f16 6.0 ->
 4.5), and `near` at 768 dimensions over f16 0.54 -> 0.34 ms p50. x86_64's
 vectoriser keeps four-lane SSE registers and is left as it is.
+A walk measures a node's unvisited neighbours four at a time there
+(`distances4`, `Arena::dists_to`) and takes them in the order it did: read
+together, four vectors wait on memory once -- out of an arena of 100 000 a
+128-dim distance took 60 ns alone and 47 four at a time, a 768-dim one 242
+and 149 -- so `near` at 768 dimensions went 0.35 -> 0.29 ms p50 over f16
+and 0.35 -> 0.28 over f32, a build 3-10% faster, and
+`the_walk_scores_as_the_exact_search_does` holds the walk's scores to the
+exact search's bit for bit. The browser's module built a graph 4% slower
+four at once and grew 9 KB, and gathering the neighbours before measuring
+them one at a time still cost its `near` 7%, so everywhere but aarch64 the
+walk is as it was (`cfg`).
 
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
