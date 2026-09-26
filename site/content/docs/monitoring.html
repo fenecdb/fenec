@@ -179,6 +179,9 @@ stays; a standby router's replication stream is counted and not timed.</p>
 <tr><td><code>fenec_router_replicas{node}</code></td><td>gauge</td><td>the replicas of their own each node holds, with <code>--replicas</code>; a node's count falls to 0 after a failover took the node's replicas away, until <code>POST /_shard/replicas</code></td></tr>
 <tr><td><code>fenec_router_tenants_moving</code></td><td>gauge</td><td>tenants a move began on and did not record done — served from where they were, and cleared by moving them again</td></tr>
 <tr><td><code>fenec_router_following</code></td><td>gauge</td><td>1 on a standby router; its directory's <code>fenec_replica_*</code> gauges follow, and a primary's <code>fenec_replicas</code></td></tr>
+<tr><td><code>fenec_router_lease_age_seconds{node}</code></td><td>gauge</td><td>with <code>--auto-failover</code>, the seconds since each node last took its lease: renewed every third of a lease, and failed over past the lease and a tenth</td></tr>
+<tr><td><code>fenec_router_node_failed_over{node}</code></td><td>gauge</td><td>1 for a node the router failed over on its own and that has not answered since; 0 again once it does and a repair has its copies follow</td></tr>
+<tr><td><code>fenec_router_auto_failovers_total{outcome}</code></td><td>counter</td><td>nodes failed over on their own, <code>done</code> when every tenant was promoted, <code>failed</code> when one was not</td></tr>
 </tbody>
 </table>
 </div>
@@ -190,6 +193,8 @@ histogram_quantile(0.5, sum by (le) (rate(fenec_router_request_duration_seconds_
 # worth an alert
 rate(fenec_router_upstream_errors_total[5m]) > 0
 fenec_router_tenants_moving > 0
+increase(fenec_router_auto_failovers_total[5m]) > 0
+fenec_router_node_failed_over > 0
 </pre>
 
 <h2>What it costs</h2>

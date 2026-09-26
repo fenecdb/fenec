@@ -28,6 +28,10 @@ usage: fenec-pg [options]
                             freeze and move tenants. Without it, off
       --idle-close <s>      close a tenant untouched for this long  default: 300
                             (0 = never). The next request reopens it
+      --lease               write a tenant only while the router's lease names
+                            it and has not lapsed (--dir), starting with none:
+                            what lets fenec-shard --auto-failover promote the
+                            node's tenants elsewhere without two primaries
       --no-mmap             read the file into memory instead of mapping it.
                             Mapping leaves the documents in the file and
                             holds only what is derived from them; read it
@@ -201,6 +205,7 @@ fn main() {
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
     let mut mmap = true;
+    let mut lease = false;
     // `--dir` opens the pg listener only when an address was named: a node
     // that serves tenants over HTTP alone should not take the default port.
     let mut listen_given = false;
@@ -374,6 +379,7 @@ fn main() {
             }
             "--ping" => ping = true,
             "--no-mmap" => mmap = false,
+            "--lease" => lease = true,
             "--insecure" => cfg.insecure = true,
             "--follow" => follow_url = Some(next(&mut i, "--follow")),
             "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
@@ -444,6 +450,9 @@ fn main() {
     }
     if replicating && replica_of.is_none() && http.is_none() {
         fail("replicas are fed over HTTP: give --http <address>");
+    }
+    if lease && dir.is_none() {
+        fail("--lease is a tenant node's, whose router grants it: give --dir");
     }
 
     // `--follow`: the follower writes the file this server serves, the one
@@ -535,7 +544,16 @@ fn main() {
                 sync_on_write: cfg.sync == SyncPolicy::Always,
             }
         });
-        serve_dir(&dir, http_cfg, cfg, idle_close, listen_given, mmap, repl);
+        serve_dir(
+            &dir,
+            http_cfg,
+            cfg,
+            idle_close,
+            listen_given,
+            mmap,
+            lease,
+            repl,
+        );
     }
 
     let mut feed = None;
@@ -707,6 +725,7 @@ fn main() {
 /// thread the syncer that a single file gets from the pg server -- periodic
 /// sync, idle close, and on the shutdown signal a final sync and checkpoint
 /// of every open tenant.
+#[allow(clippy::too_many_arguments)]
 fn serve_dir(
     dir: &str,
     http_cfg: fenec_http::Config,
@@ -714,6 +733,7 @@ fn serve_dir(
     idle_close: Duration,
     pg: bool,
     mmap: bool,
+    lease: bool,
     repl: Option<fenec_http::tenants::Replicated>,
 ) -> ! {
     let tenants = match Tenants::new(dir) {
@@ -729,6 +749,10 @@ fn serve_dir(
     let follows = repl.as_ref().and_then(|r| r.upstream.clone());
     if let Some(r) = repl {
         tenants = tenants.with_replication(r);
+    }
+    if lease {
+        tenants = tenants.with_lease();
+        fenec_http::log!("taking writes under the router's lease: none until it grants one");
     }
     let tenants = Arc::new(tenants);
     fenec_http::log!(
