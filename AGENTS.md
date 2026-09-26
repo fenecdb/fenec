@@ -17,6 +17,7 @@ make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: n
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main)
+make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make serve         # wasm + python3 http.server -> http://localhost:8787
@@ -379,13 +380,19 @@ built at `opt-level = "z"`, where LLVM does not vectorise the scalar strips
 (a 20 000 x 384 HNSW build went 28.0 -> 9.95 s). They keep the scalar loop's
 eight accumulators and reduction order, so a graph built in the browser is the
 graph built natively; `web/fenec.test.js` checks that order against a
-`Math.fround` reference.
+`Math.fround` reference. The same config links the module with
+`--compress-relocations`: wasm-ld wrote each call's function index and each
+address the code takes as a padded five-byte LEB, 36 KB of the module and
+2.2 KB brotli, and V8, which tiers a function up by its size in bytes, runs
+the smaller one faster -- `near` 12%, a page of vectors as JSON 15% (`make
+wasm-speed`). A build that keeps the names strips the debug information
+the flag refuses (`strip = "debuginfo"`, as `make size-report` does).
 
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 136.2 KB
-brotli with all four, 106.3 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 134.1 KB
+brotli with all four, 104.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

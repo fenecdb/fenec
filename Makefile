@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -63,7 +63,17 @@ types:
 # V8). Any network at all makes that a losing trade. It was the same trade
 # at 334 KB, before the text index. The size comes from `[profile.wasm]` in
 # Cargo.toml instead: opt-level "z", LTO, one codegen unit, panics that
-# abort, symbols stripped.
+# abort, symbols stripped -- and the link's `--compress-relocations`
+# (.cargo/config.toml).
+#
+# Pass by pass at 441 KB, most of what any pass took was binaryen writing
+# the module back: every one, a pass with nothing to do included, took 36.8
+# KB and 2.3 KB brotli, which were the linker's padded LEBs, and which the
+# link now leaves out itself. Beyond that only `--duplicate-function-
+# elimination` took 0.4 KB brotli and a handful of passes under 0.1;
+# `--merge-similar-functions`, `--reorder-functions` and `--local-cse` gave
+# some of it back, and `--inlining` added 16.6 KB. opt-level "s" is 20%
+# faster (`make wasm-speed`) for 16.4 KB more brotli, 12%.
 wasm:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm $(WASM_FEATURES) 2>&1 | tail -2 || \
 		(echo "the wasm32 target may be missing: rustup target add wasm32-unknown-unknown"; exit 1)
@@ -87,6 +97,12 @@ statements-bench:
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
 wasm-sizes:
 	@python3 crates/fenec-wasm/sizes.py
+
+## How fast the browser module is, in Node: an HNSW build, `near`, a filter
+## and an order, `match`, a page of vectors as JSON. A list of .wasm files
+## holds builds of it side by side: node crates/fenec-wasm/speed.mjs a.wasm b.wasm
+wasm-speed: wasm
+	@node crates/fenec-wasm/speed.mjs
 
 ## Where the browser module's bytes go: raw, gzip and brotli, its code by
 ## crate, module and part of the standard library, the largest functions and
