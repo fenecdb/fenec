@@ -12,20 +12,103 @@
 //!   * three nodes whose tenants follow on each other (`--replicas`): the
 //!     same lag, a node's failover across the other two, and the repair
 //!     that gives every tenant a replica again
+//!   * the same three leased (`--auto-failover`, a lease of a second): one
+//!     cut off, when it stops taking writes, when the router fails it over
+//!     on its own and when its tenants take writes again
 
 use fenec_http::tenants::Tenants;
 use fenec_shard::directory::Directory;
 use fenec_shard::metrics::{self, Route};
 use fenec_shard::{Config, Router};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::sync::Arc;
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const ROUNDS: usize = 5_000;
 
 fn node(tag: &str) -> (String, std::path::PathBuf) {
     started(tag, None, false)
+}
+
+/// A node taking the router's lease, syncing as it answers.
+fn leased(tag: &str) -> (String, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("fenec-overhead-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tenants = Tenants::new(&dir)
+        .unwrap()
+        .with_replication(fenec_http::tenants::Replicated {
+            token: "repl".into(),
+            buffer: 32 << 20,
+            upstream: None,
+            sync_on_write: true,
+        })
+        .with_lease();
+    let cfg = fenec_http::Config {
+        sync_on_write: true,
+        addr: "127.0.0.1:0".into(),
+        admin_token: Some("adm".into()),
+        ..fenec_http::Config::default()
+    };
+    let server = fenec_http::Server::with_tenants(Arc::new(tenants), cfg);
+    let listener = server.bind().unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    (addr, dir)
+}
+
+/// A TCP proxy in front of a node: cut, it drops what it carries and every
+/// connection after -- the node gone, as the router and its replicas see
+/// it, while its own clients still reach it.
+struct Proxy {
+    addr: String,
+    cut: Arc<AtomicBool>,
+    open: Arc<Mutex<Vec<TcpStream>>>,
+}
+
+impl Proxy {
+    fn to(target: &str) -> Proxy {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let cut = Arc::new(AtomicBool::new(false));
+        let open = Arc::new(Mutex::new(Vec::new()));
+        let (flag, streams, target) = (Arc::clone(&cut), Arc::clone(&open), target.to_string());
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { continue };
+                if flag.load(Ordering::SeqCst) {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let Ok(server) = TcpStream::connect(&target) else {
+                    continue;
+                };
+                let mut held = streams.lock().unwrap();
+                held.push(client.try_clone().unwrap());
+                held.push(server.try_clone().unwrap());
+                drop(held);
+                let (a, b) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                std::thread::spawn(move || copy(a, b));
+                std::thread::spawn(move || copy(server, client));
+            }
+        });
+        Proxy { addr, cut, open }
+    }
+
+    fn cut(&self) {
+        self.cut.store(true, Ordering::SeqCst);
+        for s in self.open.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+fn copy(mut from: TcpStream, mut to: TcpStream) {
+    let _ = std::io::copy(&mut from, &mut to);
+    let _ = to.shutdown(Shutdown::Write);
 }
 
 /// A node; `follows` makes it the standby of the node at that address, and
@@ -300,6 +383,7 @@ fn main() {
 
     replicas();
     spread();
+    automatic();
 }
 
 /// A node and its standby: what a write costs to reach the replica, and
@@ -570,4 +654,102 @@ fn vector(dim: usize, seed: u64) -> String {
         })
         .collect();
     format!("[{}]", v.join(","))
+}
+
+/// Three leased nodes and one cut off: when it stops taking writes, when
+/// the router fails it over on its own, and when the tenants it held take
+/// writes again, on their replicas.
+fn automatic() {
+    const TENANTS: usize = 30;
+    const TERM: Duration = Duration::from_secs(1);
+    let nodes: Vec<(String, std::path::PathBuf)> =
+        (1..=3).map(|i| leased(&format!("a{i}"))).collect();
+    let proxies: Vec<Proxy> = nodes.iter().map(|(addr, _)| Proxy::to(addr)).collect();
+    let router = Router::new(
+        Directory::in_memory(),
+        Config {
+            addr: "127.0.0.1:0".into(),
+            upstream_timeout: Duration::from_secs(600),
+            replicas: true,
+            auto_failover: Some(TERM),
+            ..Config::default()
+        },
+    );
+    let listener = router.bind().unwrap();
+    let raddr = listener.local_addr().unwrap().to_string();
+    router.start_leasing().unwrap();
+    std::thread::spawn(move || {
+        let _ = router.serve_on(listener);
+    });
+    let mut r = Client::new(&raddr);
+    for (i, p) in proxies.iter().enumerate() {
+        let body = format!(r#"{{"addr":"{}","token":"adm"}}"#, p.addr);
+        let target = format!("/_shard/nodes/n{}", i + 1);
+        assert_eq!(r.send("PUT", &target, None, body.as_bytes()).0, 201);
+    }
+    let query = |c: &mut Client, tenant: &str, sql: &str| -> u16 {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, sql);
+        body.push('}');
+        c.send("POST", &format!("/t/{tenant}/query"), None, body.as_bytes())
+            .0
+    };
+    for i in 0..TENANTS {
+        let body = format!(r#"{{"node":"n{}"}}"#, i % 3 + 1);
+        let (status, answer) = r.send(
+            "PUT",
+            &format!("/_shard/tenants/t{i}"),
+            None,
+            body.as_bytes(),
+        );
+        assert_eq!(status, 201, "{}", String::from_utf8_lossy(&answer));
+        assert_eq!(
+            query(&mut r, &format!("t{i}"), "create collection notes (n int)"),
+            200
+        );
+    }
+    // Every tenant's replica caught up before n1 goes.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let held: Vec<String> = (0..TENANTS)
+        .filter(|i| i % 3 == 0)
+        .map(|i| format!("t{i}"))
+        .collect();
+    let mut direct = Client::new(&nodes[0].0);
+    proxies[0].cut();
+    let cut = Instant::now();
+    let fenced = loop {
+        if query(&mut direct, &held[0], "put notes {n: 1}") == 503 {
+            break cut.elapsed();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let mut back: Vec<Duration> = Vec::with_capacity(held.len());
+    for t in &held {
+        // A connection of its own each time: the router's to n1 was cut.
+        loop {
+            let mut c = Client::new(&raddr);
+            if query(&mut c, t, "put notes {n: 2}") == 200 {
+                back.push(cut.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    println!(
+        "\nautomatic failover, a lease of {:.0} ms renewed every {:.0}: n1 cut off, it stopped taking \
+         writes {:.0} ms after, and its {} tenants took them again on their replicas {:.0} to {:.0} ms \
+         after -- the router waits the lease and a tenth ({:.0} ms), then promotes",
+        ms(TERM),
+        ms(TERM / 3),
+        ms(fenced),
+        held.len(),
+        ms(*back.iter().min().unwrap()),
+        ms(*back.iter().max().unwrap()),
+        ms(TERM + TERM / 10)
+    );
+    for (_, dir) in &nodes {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

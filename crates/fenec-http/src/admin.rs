@@ -13,6 +13,10 @@
 //! POST   /_admin/tenants/<t>/promote   a replica node takes this tenant's writes
 //! POST   /_admin/tenants/<t>/follow    {from}: follow the node at `from`, or
 //!                                      without it this node's upstream
+//! POST   /_admin/lease                 {ms, epoch, primaries?}: the router's
+//!                                      lease, on a node started to take one
+//!                                      (412: send the primaries)
+//! GET    /_admin/lease                 {epoch, primaries, left_ms}
 //! ```
 //!
 //! A separate token from the data one: a client that may read and write a
@@ -79,6 +83,11 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
                 .map(|_| Response::json(200, format!("{{\"following\":\"{t}\"}}"))),
             Err(e) => Err(e),
         },
+        (Method::Post, ["lease"]) => lease(tenants, &req.body),
+        (Method::Get, ["lease"]) => match tenants.lease() {
+            Some(l) => Ok(Response::json(200, l.describe())),
+            None => Err(no_lease()),
+        },
         _ => Err(Refused(404, "no such admin endpoint".into())),
     };
     result.unwrap_or_else(|Refused(status, msg)| Response::error(status, &msg))
@@ -96,6 +105,57 @@ fn from(body: &[u8]) -> Result<Option<String>, Refused> {
         ("from", fenec_core::prelude::Value::Text(url)) => Some(url),
         _ => None,
     }))
+}
+
+fn no_lease() -> Refused {
+    Refused(
+        409,
+        "this node takes no lease: start it with --lease for its router to fail it over \
+         on its own"
+            .into(),
+    )
+}
+
+/// A grant of the router's lease. Without the list it names by `epoch`,
+/// when the node does not hold that one -- after a restart -- the answer is
+/// 412 and the router sends it again with the list.
+fn lease(tenants: &Tenants, body: &[u8]) -> Result<Response, Refused> {
+    use fenec_core::prelude::Value;
+    let lease = tenants.lease().ok_or_else(no_lease)?;
+    let text = String::from_utf8_lossy(body);
+    let fields = fenec_core::json::parse_object(&text)
+        .map_err(|e| Refused(400, format!("the body is not a JSON object: {e}")))?;
+    let (mut ms, mut epoch, mut primaries) = (None, None, None);
+    for (k, v) in fields {
+        match (k.as_str(), v) {
+            ("ms", Value::Int(n)) if n > 0 => ms = Some(n as u64),
+            ("epoch", Value::Text(e)) => epoch = Some(e),
+            ("primaries", Value::List(list)) => {
+                let names = list.into_iter().map(|v| match v {
+                    Value::Text(name) => Ok(name),
+                    _ => Err(Refused(400, "`primaries` holds tenant names".into())),
+                });
+                primaries = Some(names.collect::<Result<Vec<_>, _>>()?);
+            }
+            _ => {}
+        }
+    }
+    let (Some(ms), Some(epoch)) = (ms, epoch) else {
+        return Err(Refused(
+            400,
+            "a lease needs {\"ms\": >0, \"epoch\": \"...\"}".into(),
+        ));
+    };
+    match lease.grant(ms, &epoch, primaries) {
+        Ok(()) => Ok(Response::json(200, lease.describe())),
+        Err(crate::lease::NeedList(held)) => Ok(Response::json(
+            412,
+            format!(
+                "{{\"error\":\"send the primaries: this node holds {}\"}}",
+                held.map_or("none".into(), |e| format!("epoch {e}"))
+            ),
+        )),
+    }
 }
 
 /// Flat on purpose: it is what a router reads, and a flat object is what

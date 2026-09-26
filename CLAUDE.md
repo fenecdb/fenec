@@ -33,7 +33,7 @@ make small         # smallest `fenec` binary: --profile cli --no-default-feature
 make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
 make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds the pg wire)
 make shard               # the router in front of the nodes (./shard.fenec)
-make shard-bench         # router overhead per request, tenant move time
+make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100
 make maintenance-bench   # reads and writes during create index / compact
@@ -263,8 +263,27 @@ node's tenants follow when the router records the pair
 tenant ends the pair, and no tenant is placed on or moved to a standby. A
 tenant whose follower runs is never closed as idle: the follower holds the
 database rather than the tenant, and a close left it writing the file under
-the next instance. The router never promotes on its own: it cannot tell a node
-that is gone from one it cannot reach, and guessing makes two primaries. A
+the next instance. The router cannot tell a node that is gone from one it cannot reach,
+and guessing makes two primaries, so it promotes on its own only under a
+lease (`fenec-shard --auto-failover`, nodes `fenec-pg --dir --lease`;
+`fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops
+writing as its lease lapses by its own clock -- measured from when the grant
+came in, where the router measures from when the answer came back, and
+waits a tenth more -- and only then are its tenants promoted. The fence is
+the engine's (`Database::set_fence`), asked in `commit` as a block lands and
+in `may_write` before a schema change or a maintenance, so every write path
+honours it; asked as a lone write started too, it took a `put` from 827 to
+898 ns, once 822 to 846. The lease names
+the node's primaries, not the node: a node back from a failover writes none
+of its stale copies before the repair its answer triggers has them follow.
+The list rides only when its epoch (FNV of the sorted names) changed, and a
+node that does not hold it answers 412; a create or a move grants the new
+list at once. Grants go out in parallel over a pool bounded by a third of
+the lease, or one silent node let the others' lapse. A standby router forgets
+its leases while it follows and counts from its promotion; a node without
+`--lease` is never failed over on its own. A lease of a second: a node cut
+off stopped writing 697 ms after, its 10 tenants took writes again 1.29 to
+1.33 s after. A
 write is on the standby 0.089 ms after the primary answered it (p99 0.448),
 and 20 tenants failed over in 60 ms (`make shard-bench`). A standby waits
 idle and takes all of a node at once, so with `fenec-shard --replicas` a

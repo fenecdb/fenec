@@ -465,6 +465,13 @@ pub trait Sink: Send {
 /// the file they went to.
 pub type Durability = Box<dyn FnOnce() -> Result<()> + Send>;
 
+/// Whether a database may take a write now, and why not: a node's lease
+/// from its router, which names the tenants the node may write and lapses
+/// unless renewed ([`Database::set_fence`]). Native only: a page has no
+/// router.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Fence = Arc<dyn Fn() -> std::result::Result<(), String> + Send + Sync>;
+
 /// The party that wants to hear that a write happened.
 ///
 /// [`Sink`] receives the raw bytes (where they land is its problem);
@@ -1320,6 +1327,12 @@ pub struct Database {
     changes: ChangeLog,
     /// The party to wake after a write (if any).
     watcher: Option<Arc<dyn Watcher>>,
+    /// On a node a router's lease lets write, whether the lease still does
+    /// ([`Self::set_fence`]): asked as a write starts and again as its
+    /// block lands, so no write lands after the lease lapsed -- the router
+    /// promotes the tenant elsewhere once it knows the lease has.
+    #[cfg(not(target_arch = "wasm32"))]
+    fence: Option<Fence>,
     /// The block of writes running, if one is: its writes are held back
     /// from the sink and the feed until it lands, and put back if it does
     /// not ([`Self::execute_block`]).
@@ -1396,6 +1409,8 @@ impl Database {
             failed: None,
             changes: ChangeLog::default(),
             watcher: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            fence: None,
             block: None,
             spare: Block::default(),
             history: History::default(),
@@ -3026,6 +3041,22 @@ impl Database {
         }
     }
 
+    /// What decides whether a write may land: a router's lease the node
+    /// holds, on a node that takes one. `None` takes every write.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_fence(&mut self, fence: Option<Fence>) {
+        self.fence = fence;
+    }
+
+    /// The fence's refusal, when it has one ([`Self::set_fence`]).
+    pub(crate) fn fenced(&self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(f) = &self.fence {
+            return f().map_err(Error::ReadOnly);
+        }
+        Ok(())
+    }
+
     /// Whether a block of writes is open ([`Self::begin`]).
     pub fn in_block(&self) -> bool {
         self.block.is_some()
@@ -3059,6 +3090,13 @@ impl Database {
         if b.heads.is_empty() {
             self.spare = b;
             return Ok(());
+        }
+        // The lease may have lapsed since the block's first write was let
+        // through: a block that lands after it would be a write the tenant's
+        // next primary never sees.
+        if let Err(e) = self.fenced() {
+            self.undo(b);
+            return Err(e);
         }
         let seq = self.changes.seq() + b.heads.len() as u64;
         let (r, len) = {
@@ -3149,7 +3187,7 @@ impl Database {
             ));
         }
         if let Some(i) = stmts.iter().position(|(s, _)| !s.is_read_only()) {
-            self.may_write(false).map_err(|e| (i, e))?;
+            self.may_start().map_err(|e| (i, e))?;
         }
         let outer = self.block.is_some();
         if !outer {
@@ -3229,7 +3267,7 @@ impl Database {
         // Its writes land as one record, which for a lone document is the
         // record it always was.
         if !stmt.is_read_only() && stmt.fits_block() {
-            self.may_write(false)?;
+            self.may_start()?;
             if self.block.is_some() {
                 return self.run_one(stmt, params);
             }

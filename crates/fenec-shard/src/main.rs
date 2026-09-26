@@ -33,6 +33,15 @@ usage: fenec-shard [options]
                             fewest -- so a node's tenants fail over across
                             the others rather than onto one idle standby.
                             The nodes need --replication-token, the same one
+      --auto-failover <s>   lease each node the tenants it holds for this long,
+                            renewed every third of it, and fail a node over on
+                            its own once it has gone a tenth past it unrenewed.
+                            The nodes need --lease: a node the router cannot
+                            reach stops taking writes as its lease lapses, so
+                            no tenant has two primaries. Off by default; 5 is a
+                            start. A standby router leases nothing until it is
+                            promoted, and then waits out a lease before it
+                            fails anything over
       --replication-token <value>  serve the directory to standby routers at
                             /_replication, and present this to a primary
       --replica-of <url>    follow the primary router at http://host:port:
@@ -81,6 +90,13 @@ fn main() {
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--insecure" => cfg.insecure = true,
             "--replicas" => cfg.replicas = true,
+            "--auto-failover" => {
+                let secs = number(next(&mut i, "--auto-failover"), "--auto-failover");
+                if secs == 0 {
+                    fail("--auto-failover is the lease's length in seconds: give one");
+                }
+                cfg.auto_failover = Some(Duration::from_secs(secs));
+            }
             "--max-connections" => {
                 cfg.max_connections =
                     number(next(&mut i, "--max-connections"), "--max-connections") as usize
@@ -179,6 +195,9 @@ fn main() {
         Ok(l) => l,
         Err(e) => fail(&format!("could not listen: {e}")),
     };
+    if let Err(e) = router.start_leasing() {
+        fail(&format!("could not start the leasing thread: {e}"));
+    }
     if let Err(e) = router.serve_on(listener) {
         fenec_http::log!("router error: {e}");
         std::process::exit(1);
