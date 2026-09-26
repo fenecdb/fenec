@@ -1677,7 +1677,13 @@ pub fn to_pg_text(v: &Value) -> Option<String> {
         // PostgreSQL's own output format; client parsers can reject the
         // ISO-8601 form that uses `T`/`Z`.
         Value::Timestamp(ms) => fenec_core::time::format_pg(*ms),
-        Value::Float(f) => format!("{f}"),
+        // What `{}` writes, from the browser module's writer: 52 ns a float
+        // against `{}`'s 73, and 38 against 62 for a vector's `f32`s.
+        Value::Float(f) => {
+            let mut s = String::new();
+            fenec_core::num::f64_into(&mut s, *f);
+            s
+        }
         Value::Text(s) => s.clone(),
         Value::Bytes(b) => {
             let mut s = String::from("\\x");
@@ -1693,7 +1699,7 @@ pub fn to_pg_text(v: &Value) -> Option<String> {
                 if i > 0 {
                     s.push(',');
                 }
-                s.push_str(&format!("{x}"));
+                fenec_core::num::f32_into(&mut s, *x);
             }
             s.push(']');
             s

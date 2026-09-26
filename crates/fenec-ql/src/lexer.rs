@@ -37,7 +37,11 @@ impl Tok {
             Tok::Ident(s) => format!("`{s}`"),
             Tok::Str(s) => format!("\"{s}\""),
             Tok::Int(i) => i.to_string(),
-            Tok::Float(f) => f.to_string(),
+            Tok::Float(f) => {
+                let mut text = String::new();
+                fenec_core::num::f64_into(&mut text, *f);
+                text
+            }
             Tok::Param(i) => format!("${}", i + 1),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),

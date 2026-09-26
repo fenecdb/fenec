@@ -178,7 +178,7 @@ pub fn format_into(out: &mut String, dim: u32, entries: &[(u32, f32)]) {
         }
         out.push_str(&(i + 1).to_string());
         out.push(':');
-        out.push_str(&v.to_string());
+        crate::num::f32_into(out, *v);
     }
     out.push_str("}/");
     out.push_str(&dim.to_string());

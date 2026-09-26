@@ -89,7 +89,7 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
 execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
 tailoring, generated tables in chunks),
-`json`, `num` (decimal text to `f64`), `time` (calendar arithmetic), `sparse`
+`json`, `num` (decimal text to `f64` and back), `time` (calendar arithmetic), `sparse`
 (sparse vectors and their inverted index), `changes`
 (the change ring), `plugin` (registry), `fs` (buffered file I/O, behind the
 `std-fs` feature), `off` (what stands in for an index a build is made
@@ -116,7 +116,8 @@ one of the two whole; `openFile` takes the copy when its image is whole.
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
 `fenec-http`, `fenec-wire`, `fenec-pg`, `fenec-import`, `fenec-catalog`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
-(`str::parse` drags in a 12 KB table -- see `num.rs`). `fenec-core` does
+and back (`str::parse` drags in a 12 KB table, `{}` on a float 20.8 KB of
+Grisu and Dragon -- see `num.rs`). `fenec-core` does
 dev-depend on `fenec-ql` (Cargo allows the cycle through a dev dependency) so tests
 can write real queries.
 
@@ -382,8 +383,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.8 KB
-brotli with all four, 120.4 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.2 KB
+brotli with all four, 114.0 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

@@ -358,7 +358,9 @@ impl Parser {
             match lowered.as_str() {
                 "k1" | "b" => {
                     if !(0.0..=100.0).contains(&v) {
-                        return self.err(format!("`{key}` must be between 0 and 100, got {v}"));
+                        let mut got = String::new();
+                        fenec_core::num::f64_into(&mut got, v);
+                        return self.err(format!("`{key}` must be between 0 and 100, got {got}"));
                     }
                     let pct = (v * 100.0).round() as u16;
                     if lowered == "k1" {
@@ -370,7 +372,10 @@ impl Parser {
                 // `prefix` is the longest prefix indexed; 0 is off.
                 "prefix" | "prefix_max" | "prefix_min" => {
                     if !(0.0..=64.0).contains(&v) || v.fract() != 0.0 {
-                        return self.err(format!("`{key}` must be a whole number 0..64, got {v}"));
+                        let mut got = String::new();
+                        fenec_core::num::f64_into(&mut got, v);
+                        return self
+                            .err(format!("`{key}` must be a whole number 0..64, got {got}"));
                     }
                     if lowered == "prefix_min" {
                         spec.prefix_min = v as u8;

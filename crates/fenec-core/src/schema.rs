@@ -242,7 +242,10 @@ impl TextIndexSpec {
     /// schema and every statement generated from one prints, so that an
     /// index made again from it is the same index.
     pub fn args(&self) -> String {
-        let mut out = format!("k1={}, b={}", self.k1(), self.b());
+        let mut out = String::from("k1=");
+        crate::num::f32_into(&mut out, self.k1());
+        out.push_str(", b=");
+        crate::num::f32_into(&mut out, self.b());
         if self.prefix_max != 0 {
             out.push_str(&format!(", prefix={}", self.prefix_max));
             if self.prefix_min != 3 {

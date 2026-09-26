@@ -4486,12 +4486,13 @@ impl Database {
                 "`fuse` ranks at most {MAX_MATCH_ROWS} candidates a side, {depth} were requested"
             )));
         }
-        let k = f.k.unwrap_or(DEFAULT_FUSE_K) as f32;
+        let whole_k = f.k.unwrap_or(DEFAULT_FUSE_K);
+        let k = whole_k as f32;
         let text = self.run_match(c, sel, m, depth, params, ctx)?;
         let vectors = self.run_near(c, sel, near, depth, params, ctx)?;
         plan(|| {
             format!(
-                "fuse: reciprocal rank, k = {k}, over {} + {} candidates",
+                "fuse: reciprocal rank, k = {whole_k}, over {} + {} candidates",
                 text.len(),
                 vectors.len()
             )

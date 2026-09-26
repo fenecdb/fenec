@@ -91,9 +91,11 @@ wasm-sizes:
 ## Where the browser module's bytes go: raw, gzip and brotli, its code by
 ## crate, module and part of the standard library, the largest functions and
 ## the generics whose copies weigh most. BASE=<git ref> builds that commit in
-## a worktree beside it and shows what changed: make size-report BASE=main
+## a worktree beside it and shows what changed: make size-report BASE=main.
+## WHY=<pattern> names the first of fenec's functions on each way to the
+## functions matching it: make size-report WHY=flt2dec
 size-report:
-	@python3 crates/fenec-wasm/size_report.py $(BASE)
+	@python3 crates/fenec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)')
 
 ## PyPI's fenecdb and npm's @fenecdb/web and @fenecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and
