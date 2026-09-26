@@ -634,24 +634,40 @@ fn route_tenant(
 /// read-only server would, then the refusal is turned into 503 with
 /// `Retry-After` -- a move or a failover is in progress, and the right thing
 /// for the client is to come back, through the router, not to give up.
+///
+/// A write let in may still be refused by the engine's fence
+/// (`Database::set_fence`) if the lease lapses between the two checks, so
+/// the node is asked again once a 403 comes back: a put let in just before
+/// the lease ran out was answered 403 on a slow CI runner, as if the write
+/// were not this server's to take, when the client should come back.
 fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
     let _held = t.enter();
-    let refused = match t.is_frozen() {
+    if cfg.read_only {
+        return handle(&t.db, cfg, req);
+    }
+    let refused = refusal(t);
+    let resp = match refused {
+        None => handle(&t.db, cfg, req),
+        Some(_) => {
+            let read_only = Config {
+                read_only: true,
+                ..cfg.clone()
+            };
+            handle(&t.db, &read_only, req)
+        }
+    };
+    match refused.or_else(|| refusal(t)) {
+        Some(why) if resp.status == 403 => Response::error(503, &why).header("Retry-After", "1"),
+        _ => resp,
+    }
+}
+
+/// Why this node takes no write for `t` now, if it takes none.
+fn refusal(t: &tenants::Tenant) -> Option<String> {
+    match t.is_frozen() {
         true => Some("the tenant is being moved; retry shortly".to_string()),
         false => t.writable().err(),
-    };
-    let Some(why) = refused.filter(|_| !cfg.read_only) else {
-        return handle(&t.db, cfg, req);
-    };
-    let read_only = Config {
-        read_only: true,
-        ..cfg.clone()
-    };
-    let resp = handle(&t.db, &read_only, req);
-    if resp.status == 403 {
-        return Response::error(503, &why).header("Retry-After", "1");
     }
-    resp
 }
 
 /// `GET /<name>/changes`
@@ -1056,5 +1072,57 @@ mod tests {
         assert!(!is_remote("127.0.0.1:8080"));
         assert!(!is_remote("localhost:8080"));
         assert!(is_remote("0.0.0.0:8080"));
+    }
+
+    /// The lease runs out between the door's check and the engine's fence:
+    /// the write is answered as one the door refused, 503 and come back, not
+    /// 403. `lapse()` makes the race certain rather than a matter of timing:
+    /// the put passes the door, and its lease lapses as its value is worked
+    /// out, before the block lands.
+    #[test]
+    fn a_write_its_lease_lapses_under_is_answered_503() {
+        struct Lapse(Arc<lease::Lease>);
+        impl fenec_core::plugin::ScalarFn for Lapse {
+            fn call(&self, _: &[Value]) -> fenec_core::error::Result<Value> {
+                self.0.grant(0, "e1", None).ok();
+                Ok(Value::Text("late".into()))
+            }
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "fenec-lease-race-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let tenants = Tenants::new(&dir).unwrap().with_lease();
+        let lease = Arc::clone(tenants.lease().unwrap());
+        let held = Arc::clone(&lease);
+        let tenants = tenants.with_setup(move |db| {
+            db.registry_mut()
+                .register_fn("lapse", Arc::new(Lapse(Arc::clone(&held))))
+        });
+        assert!(lease.grant(60_000, "e1", Some(vec!["acme".into()])).is_ok());
+        let t = tenants.create("acme").unwrap();
+        let cfg = Config::default();
+        let post = |sql: &str| {
+            let req = Request {
+                method: Method::Post,
+                target: "/query".into(),
+                path: "/query".into(),
+                query: Vec::new(),
+                headers: Vec::new(),
+                body: format!(r#"{{"query":"{sql}"}}"#).into_bytes(),
+                keep_alive: false,
+            };
+            handle_tenant(&t, &cfg, &req)
+        };
+        let made = post("create collection notes (title text)");
+        assert_eq!(made.status, 200, "{}", String::from_utf8_lossy(&made.body));
+        let late = post("put notes {title: lapse()}");
+        let body = String::from_utf8_lossy(&late.body);
+        assert_eq!(late.status, 503, "{body}");
+        assert!(body.contains("lapsed"), "{body}");
+        assert!(late.extra.iter().any(|(k, _)| k == "Retry-After"));
+        drop(t);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
