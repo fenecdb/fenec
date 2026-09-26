@@ -413,3 +413,138 @@ fn a_schema_change_is_refused_in_a_block_of_more_than_one() {
     assert!(!db.collection_names().iter().any(|n| n == "other"));
     assert!(rows(&db, r#"get notes where k = "b""#, &[]).is_empty());
 }
+
+#[test]
+fn a_savepoint_puts_back_only_the_writes_after_it() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    let seq = db.change_seq();
+
+    db.begin().unwrap();
+    let start = db.savepoint();
+    assert!(start.is_start());
+    // Before it: a write into each collection, over documents the writes
+    // after it write again.
+    exec(&mut db, r#"put notes {k: "b", body: "two"}"#, &[]);
+    exec(
+        &mut db,
+        &format!(
+            r#"set docs {{title: "gamma", v: {}}} where tag = "t1""#,
+            vector(7)
+        ),
+        &[],
+    );
+    let kept = answers(&db);
+    let point = db.savepoint();
+    assert!(!point.is_start());
+    exec(
+        &mut db,
+        &format!(
+            r#"put docs {{title: "beta", tag: "t9", n: 100, v: {}}}"#,
+            vector(100)
+        ),
+        &[],
+    );
+    exec(
+        &mut db,
+        &format!(
+            r#"set docs {{title: "delta", n: -5, v: {}}} where tag = "t1""#,
+            vector(9)
+        ),
+        &[],
+    );
+    exec(&mut db, "del docs where n < 10", &[]);
+    exec(&mut db, r#"set notes {body: "three"} where k = "b""#, &[]);
+    exec(&mut db, r#"del notes where k = "a""#, &[]);
+    let later = db.savepoint();
+    exec(&mut db, r#"put notes {k: "c"}"#, &[]);
+    // A statement stopped half way leaves what it wrote in the block, for
+    // a savepoint before it to put back.
+    db.install_plugin(&Refuse).unwrap();
+    let half = stmt(&format!(
+        r#"put docs [{{title: "ok", tag: "t1", v: {}}}, {{title: "bad"}}]"#,
+        vector(5)
+    ));
+    assert!(db.execute_with(&half, &[]).is_err());
+    assert_eq!(
+        rows(&db, r#"get docs select id where title = "ok""#, &[]).len(),
+        1
+    );
+    db.rollback_to(&point).unwrap();
+    assert!(db.in_block());
+    assert_eq!(answers(&db), kept);
+    // A savepoint after it is over: its writes were put back.
+    assert!(db.rollback_to(&later).is_err());
+
+    // Taken back to as often as asked; the ids handed out after it are
+    // handed out again.
+    exec(&mut db, r#"put docs {title: "epsilon"}"#, &[]);
+    assert_eq!(
+        rows(&db, r#"get docs select id where title = "epsilon""#, &[])[0].0,
+        41
+    );
+    db.rollback_to(&point).unwrap();
+    assert_eq!(answers(&db), kept);
+    exec(&mut db, r#"put docs {title: "zeta"}"#, &[]);
+    assert_eq!(
+        rows(&db, r#"get docs select id where title = "zeta""#, &[])[0].0,
+        41
+    );
+    db.rollback_to(&point).unwrap();
+
+    // It lands with what came before the savepoint: one record, numbered
+    // as its last write, which the file reads back.
+    assert!(tap.since(seq).is_empty());
+    db.commit().unwrap();
+    let written = tap.since(seq);
+    assert_eq!(written.len(), 1);
+    // The note, and the ten documents tagged `t1`.
+    assert_eq!(writes_in(&written[0].1).unwrap(), 11);
+    assert_eq!(db.change_seq(), seq + 11);
+    assert_eq!(answers(&db), kept);
+    let mut back = Database::new();
+    back.load(&tap.bytes()).unwrap();
+    assert_eq!(answers(&back), kept);
+
+    // Its block is over, and so is it.
+    assert!(db.rollback_to(&point).is_err());
+}
+
+#[test]
+fn a_savepoint_at_the_start_puts_back_every_write_and_keeps_the_block() {
+    let tap = Tap::default();
+    let mut db = tap.database();
+    seeded(&mut db);
+    let before = answers(&db);
+    let seq = db.change_seq();
+
+    // Taken before the block, as a transaction takes one before its first
+    // write: the start of whichever block is open.
+    let start = db.savepoint();
+    db.rollback_to(&start).unwrap();
+    db.begin().unwrap();
+    exec(&mut db, r#"put notes {k: "b"}"#, &[]);
+    exec(&mut db, "del docs where n >= 20", &[]);
+    db.rollback_to(&start).unwrap();
+    assert!(db.in_block());
+    assert_eq!(answers(&db), before);
+    db.commit().unwrap();
+    assert_eq!(db.change_seq(), seq);
+    assert!(tap.since(seq).is_empty());
+
+    // A savepoint of another block is refused.
+    db.begin().unwrap();
+    exec(&mut db, r#"put notes {k: "b"}"#, &[]);
+    let other = db.savepoint();
+    db.rollback();
+    db.begin().unwrap();
+    exec(&mut db, r#"put notes {k: "c"}"#, &[]);
+    exec(&mut db, r#"put notes {k: "d"}"#, &[]);
+    assert!(db.rollback_to(&other).is_err());
+    assert_eq!(
+        rows(&db, r#"get notes select id where k = "d""#, &[]).len(),
+        1
+    );
+    db.rollback();
+}
