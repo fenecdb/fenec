@@ -387,6 +387,23 @@ impl Directory {
         (by, moving)
     }
 
+    /// The tenants each node holds the primary of, sorted, every node named:
+    /// what a node's lease names under automatic failover. One pass, not a
+    /// [`Directory::tenants`] copy a node.
+    pub fn primaries(&self) -> BTreeMap<String, Vec<String>> {
+        let mut out: BTreeMap<String, Vec<String>> =
+            self.nodes.keys().map(|n| (n.clone(), Vec::new())).collect();
+        for (t, p) in &self.tenants {
+            if let Some(list) = out.get_mut(&p.node) {
+                list.push(t.clone());
+            }
+        }
+        for list in out.values_mut() {
+            list.sort_unstable();
+        }
+        out
+    }
+
     /// `(tenant, placement)`, sorted by name.
     pub fn tenants(&self) -> Vec<(String, Placement)> {
         let mut out: Vec<_> = self

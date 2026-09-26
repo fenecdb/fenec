@@ -89,6 +89,8 @@ static CONNECTIONS: AtomicI64 = AtomicI64::new(0);
 static UNREACHABLE: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 /// Moves `[done, failed]`, and how long a finished one took.
 static MOVES: [AtomicU64; 2] = [ZERO; 2];
+/// Automatic failovers `[every tenant promoted, some not]`.
+static FAILOVERS: [AtomicU64; 2] = [ZERO; 2];
 static MOVE_TIMES: Timings = Timings::new(&MOVE_BUCKETS);
 
 /// Counts a request answered `status` after `took`.
@@ -132,6 +134,12 @@ pub fn moved(done: bool, took: Duration) {
     if done {
         MOVE_TIMES.add(took);
     }
+}
+
+/// Counts a failover the router made on its own, and whether it promoted
+/// every tenant of the node.
+pub fn failed_over(done: bool) {
+    FAILOVERS[!done as usize].fetch_add(1, Ordering::Relaxed);
 }
 
 /// A client connection, counted open for as long as this lives.
@@ -209,6 +217,18 @@ pub fn counters(out: &mut Text) {
             "fenec_router_moves_total",
             &[("outcome", outcome)],
             MOVES[i].load(Ordering::Relaxed),
+        );
+    }
+    out.family(
+        "fenec_router_auto_failovers_total",
+        "counter",
+        "Nodes failed over on their own once their lease lapsed, by whether every tenant was promoted.",
+    );
+    for (i, outcome) in ["done", "failed"].iter().enumerate() {
+        out.sample(
+            "fenec_router_auto_failovers_total",
+            &[("outcome", outcome)],
+            FAILOVERS[i].load(Ordering::Relaxed),
         );
     }
     out.family(

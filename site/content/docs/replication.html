@@ -236,8 +236,11 @@ feeding and how far each has been sent.</p>
 <ul>
   <li><b>No synchronous replication.</b> A write is answered when it is on the
     primary's disk, never when a replica has it.</li>
-  <li><b>No automatic failover.</b> Promotion is by hand, and so is keeping
-    the old primary from taking writes.</li>
+  <li><b>No automatic failover of a single file.</b> Promotion is by hand,
+    and so is keeping the old primary from taking writes. A router's tenants
+    can have one: nodes that take its lease stop writing when they lose it,
+    and are failed over after (<a href="/docs/sharding#automatic-failover">Automatic
+    failover</a>).</li>
   <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
     here: across an open network, a tunnel carries it.</li>
   <li><b>No retention.</b> Nothing prunes an archive's images and segments on

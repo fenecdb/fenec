@@ -25,9 +25,12 @@
 //!
 //! What it owns is the directory (tenant -> node) and three operations that
 //! change it: place a new tenant, move one, delete one. See [`directory`]
-//! and the `/_shard/` endpoints in [`Router::admin`].
+//! and the `/_shard/` endpoints in [`Router::admin`]. With `--auto-failover`
+//! it also leases each node the tenants it places there, and fails a node
+//! over once its lease has certainly lapsed ([`lease`]).
 
 pub mod directory;
+pub mod lease;
 pub mod metrics;
 pub mod upstream;
 
@@ -60,6 +63,10 @@ pub struct Config {
     /// own on another node (`--replicas`): spread over the nodes rather
     /// than kept whole on an idle standby.
     pub replicas: bool,
+    /// The lease each node holds over its tenants (`--auto-failover`): the
+    /// router renews it every third of this, and fails a node over once a
+    /// tenth past it has gone by unrenewed. `None`: failover is by hand.
+    pub auto_failover: Option<Duration>,
 }
 
 impl Default for Config {
@@ -73,6 +80,7 @@ impl Default for Config {
             idle_timeout: Some(Duration::from_secs(60)),
             upstream_timeout: Duration::from_secs(60),
             replicas: false,
+            auto_failover: None,
         }
     }
 }
@@ -88,6 +96,11 @@ pub struct Router {
     /// operation on the same tenant is refused rather than interleaved.
     busy: Mutex<HashSet<String>>,
     live: AtomicUsize,
+    /// Each node's lease, under automatic failover, and the pool its grants
+    /// go through: bounded by a third of the lease rather than by
+    /// `upstream_timeout`, so a node that does not answer cannot hold up
+    /// the others' renewals until theirs lapse too.
+    leases: Option<(lease::Leases, Pool)>,
 }
 
 /// An operation failure, shaped as an HTTP status and message.
@@ -111,9 +124,12 @@ impl Router {
             dir: RwLock::new(dir),
             repl,
             pool: Pool::new(cfg.upstream_timeout),
-            cfg,
             busy: Mutex::new(HashSet::new()),
             live: AtomicUsize::new(0),
+            leases: cfg
+                .auto_failover
+                .map(|term| (lease::Leases::new(term), Pool::new(term / 3))),
+            cfg,
         })
     }
 
@@ -176,6 +192,126 @@ impl Router {
             }
         }
         Ok(())
+    }
+
+    /// Starts the leasing thread under automatic failover: every third of a
+    /// lease it renews every node's, and fails over a node whose lease has
+    /// certainly lapsed. Nothing without `--auto-failover`.
+    pub fn start_leasing(self: &Arc<Router>) -> std::io::Result<()> {
+        let Some((leases, _)) = &self.leases else {
+            return Ok(());
+        };
+        let every = leases.term / 3;
+        fenec_http::log!(
+            "leasing each node its tenants for {:?}: a node unrenewed for {:?} is failed over",
+            leases.term,
+            lease::lapse(leases.term)
+        );
+        let router = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("fenec-lease".into())
+            .spawn(move || loop {
+                std::thread::sleep(every);
+                router.lease_round();
+            })?;
+        Ok(())
+    }
+
+    /// One round: every node's lease renewed, each on a thread of its own so
+    /// that one that does not answer holds up no other, then the nodes whose
+    /// lease has certainly lapsed failed over.
+    pub fn lease_round(&self) {
+        let Some((leases, _)) = &self.leases else {
+            return;
+        };
+        // A standby router's directory follows the primary's, which leases.
+        if self.read_dir().following() {
+            leases.standby();
+            return;
+        }
+        let lists = self.read_dir().primaries();
+        std::thread::scope(|s| {
+            for (node, list) in &lists {
+                leases.know(node);
+                s.spawn(move || self.grant(node, list));
+            }
+        });
+        for node in leases.lapsed(Instant::now()) {
+            fenec_http::log!(
+                "node `{node}` renewed no lease in {:?}: failing its tenants over",
+                lease::lapse(leases.term)
+            );
+            let (status, why) = match self.failover(&node) {
+                Ok(r) => (r.status, String::from_utf8_lossy(&r.body).into_owned()),
+                Err(Fail(status, why)) => (status, why),
+            };
+            metrics::failed_over(status == 200);
+            fenec_http::log!("failover of `{node}`: {status} {why}");
+            // The nodes its tenants went to take their writes now, not at
+            // the next round.
+            let lists = self.read_dir().primaries();
+            std::thread::scope(|s| {
+                for (node, list) in &lists {
+                    s.spawn(move || self.grant(node, list));
+                }
+            });
+        }
+    }
+
+    /// Grants `node` its lease at once, over what the directory places there
+    /// now: after a create or a move, so a tenant takes writes on the node it
+    /// was placed on before the next round.
+    fn lease_now(&self, node: &str) {
+        if self.leases.is_none() {
+            return;
+        }
+        let list = self.read_dir().primaries().remove(node).unwrap_or_default();
+        self.grant(node, &list);
+    }
+
+    /// Sends `node` its lease over `primaries`: the list itself only when
+    /// the node may not hold it, and again with it when the node says it
+    /// does not. A node that answers after it was failed over has a repair
+    /// run, which has its copies follow its tenants' new primaries.
+    fn grant(&self, node: &str, primaries: &[String]) {
+        let Some((leases, pool)) = &self.leases else {
+            return;
+        };
+        let Some(n) = self.read_dir().node(node).cloned() else {
+            return;
+        };
+        let epoch = lease::epoch_of(primaries);
+        let mut with_list = leases.epoch(node).as_deref() != Some(epoch.as_str());
+        loop {
+            let mut body = format!(
+                "{{\"ms\":{},\"epoch\":{}",
+                leases.term.as_millis(),
+                quote(&epoch)
+            );
+            if with_list {
+                let names: Vec<String> = primaries.iter().map(|t| quote(t)).collect();
+                body.push_str(&format!(",\"primaries\":[{}]", names.join(",")));
+            }
+            body.push('}');
+            let answer =
+                match pool.call(&n.addr, "POST", "/_admin/lease", &n.token, body.as_bytes()) {
+                    Ok((200, _)) => lease::Answer::Taken,
+                    Ok((412, _)) => lease::Answer::NeedsList,
+                    Ok((404 | 409, _)) => lease::Answer::Refuses,
+                    _ => lease::Answer::Silent,
+                };
+            if leases.answered(node, &epoch, &answer, Instant::now()) {
+                fenec_http::log!(
+                    "node `{node}` answers again: its copies are to follow the tenants' new primaries"
+                );
+                let r = self.repair();
+                fenec_http::log!("repair: {} {}", r.status, String::from_utf8_lossy(&r.body));
+            }
+            match answer {
+                lease::Answer::NeedsList if !with_list => with_list = true,
+                _ => return,
+            }
+        }
     }
 
     fn read_dir(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
@@ -492,6 +628,28 @@ impl Router {
                 "Tenants a move began on and has not recorded done: served from where they were.",
             );
             out.sample("fenec_router_tenants_moving", &[], moving);
+            if let Some((leases, _)) = &self.leases {
+                out.family(
+                    "fenec_router_lease_age_seconds",
+                    "gauge",
+                    "Seconds since each node last took its lease: past the lease and a tenth, it is failed over.",
+                );
+                for (node, age, _) in leases.ages() {
+                    out.sample("fenec_router_lease_age_seconds", &[("node", &node)], age);
+                }
+                out.family(
+                    "fenec_router_node_failed_over",
+                    "gauge",
+                    "1 for a node failed over on its own and not answering again since.",
+                );
+                for (node, _, lost) in leases.ages() {
+                    out.sample(
+                        "fenec_router_node_failed_over",
+                        &[("node", &node)],
+                        lost as u8,
+                    );
+                }
+            }
             out.family(
                 "fenec_router_following",
                 "gauge",
@@ -1034,6 +1192,9 @@ impl Router {
             return Err(Fail(404, format!("no node `{name}`")));
         }
         dir.remove_node(name).map_err(|e| Fail(409, message(&e)))?;
+        if let Some((leases, _)) = &self.leases {
+            leases.forget(name);
+        }
         Ok(Response::empty(204))
     }
 
@@ -1129,6 +1290,7 @@ impl Router {
             let _ = self.pool.call(&n.addr, "DELETE", &target, &n.token, b"");
             return Err(internal(e));
         }
+        self.lease_now(&name);
         // The replica follows into a file of its own, so the tenant is
         // created on the standby as well.
         let warning = self.on_standby(&name, "PUT", &target);
@@ -1295,6 +1457,7 @@ impl Router {
             let _ = self.pool.call(&dst.addr, "DELETE", &base, &dst.token, b"");
             return Err(thaw(internal(e)));
         }
+        self.lease_now(to);
 
         // The replica follows the node the tenant is on now: a file there,
         // and the copy on the old node's standby is not this tenant's any

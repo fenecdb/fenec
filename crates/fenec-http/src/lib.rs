@@ -43,6 +43,7 @@ pub mod api;
 pub mod archive;
 pub mod crypto;
 pub mod http;
+pub mod lease;
 pub mod link;
 pub mod metrics;
 pub mod replication;
@@ -629,22 +630,26 @@ fn route_tenant(
 }
 
 /// A tenant request: held against `freeze` for its whole handling. A frozen
-/// tenant answers as a read-only server would, then the refusal is turned
-/// into 503 with `Retry-After` -- a freeze is a move in progress, and the
-/// right thing for the client is to come back, not to give up.
+/// tenant, or one this node's lease does not let it write, answers as a
+/// read-only server would, then the refusal is turned into 503 with
+/// `Retry-After` -- a move or a failover is in progress, and the right thing
+/// for the client is to come back, through the router, not to give up.
 fn handle_tenant(t: &tenants::Tenant, cfg: &Config, req: &Request) -> Response {
     let _held = t.enter();
-    if !t.is_frozen() || cfg.read_only {
+    let refused = match t.is_frozen() {
+        true => Some("the tenant is being moved; retry shortly".to_string()),
+        false => t.writable().err(),
+    };
+    let Some(why) = refused.filter(|_| !cfg.read_only) else {
         return handle(&t.db, cfg, req);
-    }
-    let frozen = Config {
+    };
+    let read_only = Config {
         read_only: true,
         ..cfg.clone()
     };
-    let resp = handle(&t.db, &frozen, req);
+    let resp = handle(&t.db, &read_only, req);
     if resp.status == 403 {
-        return Response::error(503, "the tenant is being moved; retry shortly")
-            .header("Retry-After", "1");
+        return Response::error(503, &why).header("Retry-After", "1");
     }
     resp
 }

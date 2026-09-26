@@ -223,10 +223,13 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
 <h2>What it does not do</h2>
 
 <ul>
-  <li><b>Failover is asked for, not decided.</b> The router does not watch
-    the nodes and promote on its own: a router that guesses wrong about a
-    node it cannot reach would have two primaries for one tenant. Someone
-    who knows the node is gone calls the failover.</li>
+  <li><b>Failover is decided on a lease, not a guess.</b> A router cannot
+    tell a node that is gone from one it cannot reach, and guessing would
+    make two primaries for one tenant. Without <code>--auto-failover</code>
+    someone who knows the node is gone calls the failover; with it, the
+    router promotes a node's tenants only once the node's own lease has
+    certainly lapsed, and the node stops its writes as it does (<a
+    href="#automatic-failover">Automatic failover</a>).</li>
   <li><b>No query across tenants.</b> Each request names one.</li>
   <li><b>No tenant larger than a node.</b> A tenant has to fit one node's
     memory, with the same 2× open and 3× checkpoint peaks as any file.</li>
@@ -355,6 +358,52 @@ onto each of the other two, and the repair after it gave 20 tenants a
 replica in 176 ms, all on the returning node's copies. Placed by the fewest
 altogether alone, every tenant of one node followed on the same other: a
 tie went by name each time, and its failover put them all there.</p>
+
+<h3 id="automatic-failover">Automatic failover</h3>
+
+<p>With <code>fenec-shard --auto-failover &lt;s&gt;</code> the router fails a
+node over on its own. It leases each node the tenants it places there for
+that long, renews the lease every third of it while the node answers, and
+fails over a node that has gone a tenth past its lease unrenewed. A node
+started with <code>--lease</code> writes a tenant only while its lease names
+the tenant and has not lapsed, and starts with none:</p>
+
+<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --replication-token r1 --sync always --lease
+fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-failover 5
+</pre>
+
+<p>The router still cannot tell a node that is gone from one cut off from it
+while its own clients reach it, and it does not have to. A node that hears
+from the router no more stops taking writes when its lease lapses, by its
+own clock, and the router promotes its tenants elsewhere only a tenth of a
+lease later, measured from the answer that came back rather than from the
+grant it sent — so no tenant has two primaries, whichever it was. What such
+a node took from clients of its own before its lease lapsed, and had not
+sent its replicas, goes with the failover as a crash takes it; a client
+going through the router loses nothing that way, since the router could not
+reach the node either. A write is refused as a replica's is: <code>503</code>
+with <code>Retry-After</code> over HTTP, <code>25006</code> over the pg wire,
+where drivers take it for a standby and connect elsewhere.</p>
+
+<p>The lease names tenants, not the node. A node failed over comes back with
+the files of tenants served elsewhere now, primaries' files still; a lease
+over the whole node would have them take writes again the moment it was
+renewed. Its new lease names none of them, and the router runs a repair as
+the node answers, which has those copies follow the tenants' new primaries.
+The list rides with a grant only when it changed, and a create or a move
+grants the node its new one at once, so a tenant takes writes as soon as it
+is placed. A router that starts leasing — a restart, or a standby promoted —
+counts every node as granted then: its predecessor may have granted a lease
+just before it stopped. A node started without <code>--lease</code> answers
+that it takes none, and is never failed over on its own.</p>
+
+<p>Measured with <code>make shard-bench</code>, three nodes and the router in
+one process and a lease of a second: a node cut off stopped taking writes 697
+ms after — its last renewal came a third of a lease before — and its 10
+tenants took writes on their replicas again 1.29 to 1.33 s after, the lease
+and a tenth, the next round and 49 ms of promotions. With a lease of five
+seconds, a node lost costs its tenants' writes 5.5 to 7.2 s.</p>
 
 <h2>A standby router</h2>
 

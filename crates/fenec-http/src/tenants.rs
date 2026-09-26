@@ -22,6 +22,7 @@
 //! and a request arriving mid-close waits for the close to finish before it
 //! opens the file again.
 
+use crate::lease::Lease;
 use crate::replication::{fresh_id, Follower, Replication};
 use crate::sse::Hub;
 use fenec_core::prelude::*;
@@ -80,6 +81,8 @@ pub struct Tenant {
     frozen: AtomicBool,
     /// Milliseconds since the registry's epoch.
     last_used: AtomicU64,
+    /// The node's lease, on a node that takes one.
+    lease: Option<Arc<Lease>>,
 }
 
 impl Tenant {
@@ -89,6 +92,17 @@ impl Tenant {
 
     pub fn is_frozen(&self) -> bool {
         self.frozen.load(Ordering::SeqCst)
+    }
+
+    /// Whether this node's lease lets it write the tenant now, and why not:
+    /// on a node that takes no lease, always. The database refuses the
+    /// same writes itself (`Database::set_fence`); this is for answering
+    /// before one is tried.
+    pub fn writable(&self) -> std::result::Result<(), String> {
+        match &self.lease {
+            Some(l) => l.allows(&self.name),
+            None => Ok(()),
+        }
     }
 
     /// Holds the tenant against `freeze` while a request is being handled.
@@ -135,6 +149,8 @@ pub struct Tenants {
     /// Whether tenant files are mapped (`fs::open`) or read into memory
     /// (`fenec-pg --no-mmap`).
     mapped: bool,
+    /// The router's lease, on a node that takes one (`--lease`).
+    lease: Option<Arc<Lease>>,
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -166,6 +182,7 @@ impl Tenants {
             max_memory: 0,
             checkpoint: true,
             mapped: true,
+            lease: None,
         })
     }
 
@@ -193,6 +210,19 @@ impl Tenants {
     pub fn with_replication(mut self, repl: Replicated) -> Tenants {
         self.repl = Some(repl);
         self
+    }
+
+    /// Writes a tenant only while the router's lease names it and has not
+    /// lapsed ([`Lease`]): starting with none, the node takes no write until
+    /// its router grants one.
+    pub fn with_lease(mut self) -> Tenants {
+        self.lease = Some(Arc::new(Lease::new()));
+        self
+    }
+
+    /// The lease, on a node that takes one.
+    pub fn lease(&self) -> Option<&Arc<Lease>> {
+        self.lease.as_ref()
     }
 
     /// The token a tenant's `/_replication` asks for, when the node
@@ -544,6 +574,12 @@ impl Tenants {
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
+        // Every write the database lands asks the lease first, whichever
+        // way it came in: HTTP, the pg wire, a maintenance.
+        if let Some(lease) = &self.lease {
+            let (lease, name) = (Arc::clone(lease), name.to_string());
+            db.set_fence(Some(Arc::new(move || lease.allows(&name))));
+        }
         let hub = Hub::new();
         db.set_watcher(Arc::clone(&hub) as Arc<dyn Watcher>);
         db.set_change_capacity(self.change_capacity);
@@ -583,6 +619,7 @@ impl Tenants {
             gate: RwLock::new(()),
             frozen: AtomicBool::new(false),
             last_used: AtomicU64::new(self.now()),
+            lease: self.lease.clone(),
         }))
     }
 

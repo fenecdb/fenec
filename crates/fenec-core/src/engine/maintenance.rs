@@ -248,16 +248,45 @@ impl Database {
         Ok(None)
     }
 
-    /// What a write is refused for before it runs: a storage error, or a
-    /// replica's -- whose writes come from its primary, though it compacts.
+    /// What a write is refused for before it runs: a storage error, a
+    /// replica's -- whose writes come from its primary -- or a lapsed lease.
+    /// A compact changes no document, so the last two let it run.
     pub(super) fn may_write(&self, stmt_is_compact: bool) -> Result<()> {
         self.refuse_if_failed()?;
-        if self.history.following && !stmt_is_compact {
+        if stmt_is_compact {
+            return Ok(());
+        }
+        if self.history.following {
+            return Err(Error::ReadOnly(
+                "this database is a replica: its writes come from its primary".into(),
+            ));
+        }
+        self.fenced()
+    }
+
+    /// [`Self::may_write`] for a write that lands as a block: the lease is
+    /// asked as the block lands ([`Database::commit`]), where a write it no
+    /// longer allows is put back. Asked here as well, it was asked twice a
+    /// write: a lone `put` took 898 ns against 827 without a fence, and
+    /// asked once takes 846 against 822.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn may_start(&self) -> Result<()> {
+        self.refuse_if_failed()?;
+        if self.history.following {
             return Err(Error::ReadOnly(
                 "this database is a replica: its writes come from its primary".into(),
             ));
         }
         Ok(())
+    }
+
+    /// A page has no fence, so the two are one, and this is inlined: a
+    /// function of its own was 130 bytes of the browser module, and one
+    /// calling the other 14.
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub(super) fn may_start(&self) -> Result<()> {
+        self.may_write(false)
     }
 
     fn begin_index(
@@ -297,6 +326,8 @@ impl Database {
         let BuiltIndex { copy, index } = b;
         let tail = self.unwatch(copy.token);
         self.refuse_if_failed()?;
+        // A long build outlives a lease: the index lands only if it still holds.
+        self.fenced()?;
         let changed = || {
             Error::Query(format!(
                 "`{}` changed while the index was built; run `create index` again",
