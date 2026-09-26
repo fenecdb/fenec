@@ -103,7 +103,9 @@ fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
                 .char_indices()
                 .find(|&(_, c)| gram(c) != n)
                 .map_or(rest.len(), |(i, _)| i);
-            let (run, after) = rest.split_at(end);
+            // Checked, though `end` is a boundary: `split_at`'s panic formats
+            // the character it would cut into.
+            let (run, after) = rest.split_at_checked(end).unwrap_or((rest, ""));
             rest = after;
             if n > 0 {
                 grams(run, n, chars && n == 2, f);
@@ -142,14 +144,16 @@ fn grams(run: &str, n: usize, chars: bool, f: &mut dyn FnMut(&str)) {
     let mut seen = 0;
     for (i, c) in run.char_indices() {
         let end = i + c.len_utf8();
+        // `get`: the ends are the characters' own, and an index would keep
+        // its panic's formatting of a `char` in the browser module.
         if chars {
-            f(&run[i..end]);
+            f(run.get(i..end).unwrap_or(""));
         }
         starts[seen % n] = i;
         seen += 1;
         if seen >= n {
             // The oldest of the last `n` characters: the one `n` back.
-            f(&run[starts[seen % n]..end]);
+            f(run.get(starts[seen % n]..end).unwrap_or(""));
         }
     }
     if seen < n && !(chars && seen == 1) {

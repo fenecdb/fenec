@@ -201,13 +201,13 @@ pub mod builtins {
             Ok(match &a[0] {
                 // Unicode, not ASCII: see the note on `query::like_match`
                 // for what the cheaper mapping was measured to cost.
-                Value::Text(s) => Value::Text(s.to_lowercase()),
+                Value::Text(s) => Value::Text(crate::case::lower(s)),
                 v => v.clone(),
             })
         });
         reg!(r, "upper", 1, Some(1), "uppercases text", |a| {
             Ok(match &a[0] {
-                Value::Text(s) => Value::Text(s.to_uppercase()),
+                Value::Text(s) => Value::Text(crate::case::upper(s)),
                 v => v.clone(),
             })
         });
