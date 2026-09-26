@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -87,6 +87,13 @@ statements-bench:
 ## (vector, text, sparse, sorted): raw, gzip -9 and brotli -q 11, in KB.
 wasm-sizes:
 	@python3 crates/fenec-wasm/sizes.py
+
+## Where the browser module's bytes go: raw, gzip and brotli, its code by
+## crate, module and part of the standard library, the largest functions and
+## the generics whose copies weigh most. BASE=<git ref> builds that commit in
+## a worktree beside it and shows what changed: make size-report BASE=main
+size-report:
+	@python3 crates/fenec-wasm/size_report.py $(BASE)
 
 ## PyPI's fenecdb and npm's @fenecdb/web and @fenecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and

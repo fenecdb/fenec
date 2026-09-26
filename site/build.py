@@ -291,7 +291,12 @@ def prev_next(active, base):
 #
 # A miss is a warning locally -- a rebuild that moves the module by forty bytes
 # should not stop you working -- and an error under CI, which is the build that
-# ships the number.
+# ships the number. A size is held to its claim to the half KB either way, and
+# a compressed one with NOISE_KB more: gzip and brotli move by up to 0.3 KB
+# with nothing but the layout of the bytes changed -- two lines of comment at
+# the top of engine.rs moved brotli 46 bytes, through the line numbers the
+# panics carry -- and held to the whole KB alone, noise that carried the
+# module across a half would fail CI with nothing wrong in the docs.
 #
 # Not everything measured is in here. The container image's size is written
 # into four files and cannot be checked from a site build, which has neither a
@@ -303,6 +308,8 @@ def prev_next(active, base):
 # two different numbers and fail honest builds. They are re-measured by hand at
 # each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
 # 684/765/927 KB when the text index went in.
+NOISE_KB = 0.3
+COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all"}
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
     ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
@@ -380,16 +387,17 @@ def check_claims():
     wasm_gz, wasm_br = compressed(wasm)
     client_size = os.path.getsize(client)
     client_gz, client_br = compressed(client)
+    kb = lambda n: None if n is None else n / 1024
     truth = {
         "bytes": size,
-        "kb": round(size / 1024),
-        "kb_gz": round(wasm_gz / 1024),
-        "kb_br": round(wasm_br / 1024) if wasm_br else None,
-        "kb_client": round(client_size / 1024),
-        "kb_client_gz": round(client_gz / 1024),
-        "kb_client_br": round(client_br / 1024) if client_br else None,
+        "kb": kb(size),
+        "kb_gz": kb(wasm_gz),
+        "kb_br": kb(wasm_br),
+        "kb_client": kb(client_size),
+        "kb_client_gz": kb(client_gz),
+        "kb_client_br": kb(client_br),
         # What the browser actually pays: the module and the client together.
-        "kb_br_all": round((wasm_br + client_br) / 1024) if wasm_br else None,
+        "kb_br_all": kb(wasm_br + client_br) if wasm_br else None,
         "glue": glue_lines(),
         # The tag the docs tell people to pull. It follows the workspace
         # version rather than the last release, so a version bump that
@@ -422,6 +430,10 @@ def check_claims():
             said, want = m.group(1), truth[fact]
             if fact == "version":
                 drifted = said != want
+            elif fact.startswith("kb"):
+                room = 0.5 + tol + (NOISE_KB if fact in COMPRESSED else 0)
+                said, drifted = int(said), abs(int(said) - want) > room
+                want = f"{want:.1f}"
             else:
                 said, drifted = int(said), abs(int(said) - want) > tol
             if drifted:
