@@ -513,8 +513,58 @@ fn dot_planes(bits: &[u64], planes: &[f32]) -> i32 {
 // ----------------------------------------------------------------- arena
 
 /// Per node of a batch insert: its id, its level, and the neighbours found
-/// for it at each level -- what the parallel half hands the serial one.
+/// for it at each level -- what finding them hands linking them.
 type Candidates = Vec<(u32, usize, Vec<(usize, Vec<u32>)>)>;
+
+/// Runs `work` for every index of `0..n` on a thread per state, and hands
+/// the indexes out one at a time as each thread comes back for another:
+/// cut into a share a thread, the M1's four efficiency cores finished
+/// their shares last while the other four waited. The results come back
+/// in no order.
+#[cfg(not(target_family = "wasm"))]
+fn spread<S: Send, T: Send>(
+    n: usize,
+    states: &mut [S],
+    work: impl Fn(&mut S, usize) -> T + Sync,
+) -> Vec<T> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (next, work) = (&next, &work);
+    let run = move |state: &mut S| {
+        let mut out = Vec::new();
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i >= n {
+                return out;
+            }
+            out.push(work(state, i));
+        }
+    };
+    let Some((mine, others)) = states.split_first_mut() else {
+        return Vec::new();
+    };
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = others
+            .iter_mut()
+            .take(n.saturating_sub(1))
+            .map(|state| scope.spawn(move || run(state)))
+            .collect();
+        // The calling thread takes a share too, rather than wait.
+        let mut out = run(mine);
+        for h in handles {
+            out.extend(h.join().unwrap_or_default());
+        }
+        out
+    })
+}
+
+/// No threads in the browser: every index in turn, on the first state.
+#[cfg(target_family = "wasm")]
+fn spread<S, T>(n: usize, states: &mut [S], work: impl Fn(&mut S, usize) -> T) -> Vec<T> {
+    match states.first_mut() {
+        Some(state) => (0..n).map(|i| work(state, i)).collect(),
+        None => Vec::new(),
+    }
+}
 
 /// Vector arena: every vector in one contiguous array, strided by `node * dim`.
 ///
@@ -1442,6 +1492,37 @@ impl<'a> GraphView<'a> {
         out
     }
 
+    /// `nb`'s neighbours at a level once `node` joins `current`, a full
+    /// list: chosen again from both by the diversity heuristic. It reads
+    /// only `nb`'s list and the vectors, which is what lets a batch prune
+    /// the lists of different nodes on different threads.
+    fn pruned(
+        &self,
+        nb: u32,
+        current: &[u32],
+        node: u32,
+        max_deg: usize,
+        buf: &mut Vec<Cand>,
+    ) -> Vec<u32> {
+        buf.clear();
+        // `nb` is fixed across all the comparisons: widen it once.
+        // Widened, a code leaves out its own offset.
+        let (nbv, off) = (self.vec_at(nb), self.data.offset(nb));
+        for &x in current {
+            buf.push(Cand {
+                dist: self.dist_to(&nbv, x) - off,
+                node: x,
+            });
+        }
+        buf.push(Cand {
+            dist: self.dist_to(&nbv, node) - off,
+            node,
+        });
+        drop(nbv);
+        buf.sort();
+        self.select_heuristic(buf, max_deg, nb)
+    }
+
     /// Computes a node's neighbour candidates across every level.
     /// It only reads, so it can be run in parallel. `query` is the vector
     /// the node was written with, over an arena of codes (see
@@ -1942,75 +2023,115 @@ impl VectorIndex {
             .unwrap_or(1)
     }
 
-    #[cfg(target_family = "wasm")]
+    /// Computes the candidates of `pending` against the graph as it stands,
+    /// which does not change meanwhile: a node at a time to whichever
+    /// thread is free, each with its own `Scratch`. They come back in no
+    /// order.
     fn compute_candidates(
         &self,
         pending: &[(u32, usize, Option<Vec<f32>>)],
-        _threads: usize,
+        scratch: &mut [Scratch],
     ) -> Candidates {
         let (efc, m) = (self.spec.ef_construction, self.spec.m);
         let view = self.view();
-        let mut sc = Scratch::new();
-        pending
-            .iter()
-            .map(|(node, level, query)| {
-                (
-                    *node,
-                    *level,
-                    view.candidates_for(&mut sc, *node, query.as_deref(), *level, efc, m),
-                )
-            })
-            .collect()
+        spread(pending.len(), scratch, |sc, i| {
+            let (node, level, query) = &pending[i];
+            let found = view.candidates_for(sc, *node, query.as_deref(), *level, efc, m);
+            (*node, *level, found)
+        })
     }
 
-    /// Computes the candidates split across threads. Every thread carries its
-    /// own `Scratch` buffer; the graph is read-only at this stage.
-    #[cfg(not(target_family = "wasm"))]
-    fn compute_candidates(
-        &self,
-        pending: &[(u32, usize, Option<Vec<f32>>)],
-        threads: usize,
-    ) -> Candidates {
-        let (efc, m) = (self.spec.ef_construction, self.spec.m);
-        let view = self.view();
-        let per = pending.len().div_ceil(threads);
-        std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for part in pending.chunks(per) {
-                handles.push(scope.spawn(move || {
-                    let mut sc = Scratch::new();
-                    part.iter()
-                        .map(|(node, level, query)| {
-                            (
-                                *node,
-                                *level,
-                                view.candidates_for(
-                                    &mut sc,
-                                    *node,
-                                    query.as_deref(),
-                                    *level,
-                                    efc,
-                                    m,
-                                ),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                }));
+    /// Links a batch whose neighbours were all found against the graph
+    /// before it -- so none of them is among another's -- link for link as
+    /// linking them one after another in node order would, with the lists
+    /// they join pruned in parallel.
+    ///
+    /// A node's own lists are its candidates. Each neighbour it chose takes
+    /// it into a list that, full, is chosen again by the diversity
+    /// heuristic: some 33 x 32 / 2 distances a list, up to 16 lists a node.
+    /// On one thread that was 70% of a 100 000 x 128 build, the candidates
+    /// taking the other 30% on eight. A pruning reads only the list it
+    /// prunes and the vectors, so the additions are grouped by the list
+    /// they join and each group applied in node order, on whichever thread
+    /// is free: a list ends as it would have in turn. The build took 5.3 s
+    /// against 10.6, and 23.4 against 48.9 at 768 dimensions.
+    fn link_batch(&mut self, mut computed: Candidates, threads: usize) {
+        computed.sort_by_key(|(node, _, _)| *node);
+        // (the list's node, its level, the node joining it)
+        let mut added: Vec<(u32, u32, u32)> = Vec::new();
+        for (node, level, per_level) in &computed {
+            for (l, selected) in per_level {
+                self.set_neighbors(*node, *l, selected);
+                for &nb in selected {
+                    // Past the neighbour's top level there is no list.
+                    if *l == 0 || *l <= self.node_levels(nb) {
+                        added.push((nb, *l as u32, *node));
+                    }
+                }
             }
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().unwrap_or_default())
-                .collect()
-        })
+            if *level > self.max_level {
+                self.max_level = *level;
+                self.entry = Some(*node);
+            }
+        }
+        // By list, and in node order within one.
+        added.sort_unstable();
+        let mut groups = Vec::new();
+        let mut at = 0;
+        while at < added.len() {
+            let (nb, l, _) = added[at];
+            let len = added[at..]
+                .iter()
+                .take_while(|&&(n, k, _)| (n, k) == (nb, l))
+                .count();
+            groups.push(at..at + len);
+            at += len;
+        }
+        // Most groups are a push or one pruning: 16 of them to a thread at
+        // a time.
+        let blocks: Vec<_> = groups.chunks(16).collect();
+        let (view, m, m0) = (self.view(), self.spec.m, self.m0);
+        let mut bufs: Vec<Vec<Cand>> = (0..threads).map(|_| Vec::new()).collect();
+        let lists = spread(blocks.len(), &mut bufs, |buf, i| {
+            let mut out = Vec::with_capacity(blocks[i].len());
+            for group in blocks[i] {
+                let (nb, l, _) = added[group.start];
+                let l = l as usize;
+                let max_deg = if l == 0 { m0 } else { m };
+                let mut list = view.neighbors(nb, l).to_vec();
+                for &(_, _, node) in &added[group.clone()] {
+                    if list.len() < max_deg {
+                        list.push(node);
+                    } else {
+                        list = view.pruned(nb, &list, node, max_deg, buf);
+                    }
+                }
+                out.push((nb, l, list));
+            }
+            out
+        });
+        for (nb, l, list) in lists.into_iter().flatten() {
+            self.set_neighbors(nb, l, &list);
+        }
+    }
+
+    /// Links a batch one node after another, in node order: what
+    /// [`Self::link_batch`] has to end with, link for link.
+    #[cfg(test)]
+    fn link_serially(&mut self, mut computed: Candidates, _threads: usize) {
+        computed.sort_by_key(|(node, _, _)| *node);
+        for (node, level, per_level) in computed {
+            self.link_node(node, level, Some(per_level), None);
+        }
     }
 
     /// Inserts one batch in parallel.
     ///
-    /// ~75% of the build time is read-only work: descent + beam search +
-    /// neighbour selection in the graph for every new node. None of that
-    /// modifies the graph, so it can be run in parallel one batch at a time.
-    /// Only the final step -- writing the links and pruning the back-links --
-    /// is serial.
+    /// Finding a new node's neighbours -- descent, beam search and the
+    /// selection among the candidates -- only reads the graph, so a batch
+    /// finds all of its nodes' at once; linking them prunes the lists they
+    /// join, which [`Self::link_batch`] runs in parallel too, grouped by
+    /// list.
     ///
     /// Nodes inside a batch cannot see each other, so the batch size scales
     /// with the graph size (`len/16`, at most 512). In a 100k graph a batch
@@ -2022,7 +2143,18 @@ impl VectorIndex {
     /// thread count does not change the output. (It is not the same graph as
     /// serial insertion -- there every node sees the ones before it.)
     pub fn insert_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
+        self.insert_batch_by(items, Self::link_batch)
+    }
+
+    /// [`Self::insert_batch`], linking each batch with `link`: the tests
+    /// hold [`Self::link_batch`] to [`Self::link_serially`] through it.
+    fn insert_batch_by(
+        &mut self,
+        items: &[(DocId, Vec<f32>)],
+        link: fn(&mut Self, Candidates, usize),
+    ) {
         let threads = Self::threads();
+        let mut scratch = Vec::new();
 
         let mut rest = items;
         while !rest.is_empty() {
@@ -2078,13 +2210,13 @@ impl VectorIndex {
             }
 
             // 2) Parallel: compute the candidates (the graph does not change).
-            let mut computed = self.compute_candidates(&pending, threads);
-
-            // 3) Serial: write the links and prune the back-links.
-            computed.sort_by_key(|(node, _, _)| *node);
-            for (node, level, per_level) in computed {
-                self.link_node(node, level, Some(per_level), None);
+            if scratch.is_empty() {
+                scratch = (0..threads).map(|_| Scratch::new()).collect();
             }
+            let computed = self.compute_candidates(&pending, &mut scratch);
+
+            // 3) Write the links; the lists they join are pruned in parallel.
+            link(self, computed, threads);
         }
     }
 
@@ -2127,6 +2259,7 @@ impl VectorIndex {
         lookup: &mut dyn FnMut(DocId, &mut Vec<f32>) -> bool,
     ) -> usize {
         let threads = Self::threads();
+        let mut scratch = Vec::new();
         let at = self.pending.len().saturating_sub(max.max(1));
         let taken = self.pending.split_off(at);
         let mut raw = Vec::new();
@@ -2161,11 +2294,11 @@ impl VectorIndex {
             let (chunk, tail) = rest.split_at((linked / 16).clamp(64, MAX_BATCH).min(rest.len()));
             rest = tail;
             linked += chunk.len();
-            let mut computed = self.compute_candidates(chunk, threads);
-            computed.sort_by_key(|(node, _, _)| *node);
-            for (node, level, per_level) in computed {
-                self.link_node(node, level, Some(per_level), None);
+            if scratch.is_empty() {
+                scratch = (0..threads).map(|_| Scratch::new()).collect();
             }
+            let computed = self.compute_candidates(chunk, &mut scratch);
+            self.link_batch(computed, threads);
         }
         self.pending.len()
     }
@@ -2227,23 +2360,9 @@ impl VectorIndex {
                 }
                 // The list is full: reselect with the diversity heuristic.
                 let mut buf = std::mem::take(&mut self.prune_buf);
-                buf.clear();
-                // `nb` is fixed across all the comparisons: widen it once.
-                // Widened, a code leaves out its own offset.
-                let (nbv, off) = (self.vec_at(nb), self.data.offset(nb));
-                for &x in self.neighbors(nb, l) {
-                    buf.push(Cand {
-                        dist: self.dist_to(&nbv, x) - off,
-                        node: x,
-                    });
-                }
-                buf.push(Cand {
-                    dist: self.dist_to(&nbv, node) - off,
-                    node,
-                });
-                drop(nbv);
-                buf.sort();
-                let pruned = self.select_heuristic(&buf, max_deg, nb);
+                let pruned = self
+                    .view()
+                    .pruned(nb, self.neighbors(nb, l), node, max_deg, &mut buf);
                 self.set_neighbors(nb, l, &pruned);
                 self.prune_buf = buf;
             }
@@ -2929,6 +3048,66 @@ mod tests {
                 .map(|x| x.0)
                 .collect();
             assert_eq!(ra, rb, "the parallel build is not deterministic");
+        }
+    }
+
+    /// The lists a batch joins are pruned in parallel, grouped by list, and
+    /// must end as linking the batch one node after another left them: the
+    /// same graph record, byte for byte, over every kind of arena -- a
+    /// code's offset included.
+    #[test]
+    fn a_batch_links_as_its_nodes_would_one_after_another() {
+        // Past the 1 024 nodes a batch needs, and bit codes past the 2 048
+        // vectors they learn their centres from.
+        let cases = [
+            (8, Metric::Cosine, Quant::None, VecPrec::F32, 2000),
+            (8, Metric::L2, Quant::None, VecPrec::F32, 2000),
+            (8, Metric::Dot, Quant::None, VecPrec::F16, 2000),
+            (8, Metric::Cosine, Quant::Int8, VecPrec::F32, 2000),
+            (16, Metric::Cosine, Quant::Bit, VecPrec::F32, 2400),
+        ];
+        for (dim, metric, quant, prec, n) in cases {
+            let mut rng = Rng(23);
+            let centres: Vec<Vec<f32>> = (0..8)
+                .map(|_| (0..dim).map(|_| rng.next_f32() - 0.5).collect())
+                .collect();
+            let items: Vec<(u64, Vec<f32>)> = (0..n as u64)
+                .map(|i| {
+                    let c = &centres[i as usize % centres.len()];
+                    (
+                        i,
+                        c.iter().map(|x| x + 0.2 * (rng.next_f32() - 0.5)).collect(),
+                    )
+                })
+                .collect();
+            // Narrow lists and a narrow beam: what is held to is how lists
+            // end, which fill the sooner, and the test runs unoptimised.
+            let spec = VectorIndexSpec {
+                metric,
+                quant,
+                m: 6,
+                ef_construction: 32,
+                ..VectorIndexSpec::default()
+            };
+            let build = |link: fn(&mut VectorIndex, Candidates, usize)| {
+                let mut ix = VectorIndex::with_precision(dim, spec, prec);
+                // Two calls, so the second starts over a graph of its own.
+                ix.insert_batch_by(&items[..n / 3], link);
+                ix.insert_batch_by(&items[n / 3..], link);
+                ix
+            };
+            let (a, b) = (
+                build(VectorIndex::link_batch),
+                build(VectorIndex::link_serially),
+            );
+            assert!(
+                a.l0_len.iter().any(|&k| k as usize == a.m0),
+                "no list filled up"
+            );
+            assert!(
+                a.serialize_graph() == b.serialize_graph(),
+                "{metric:?} {quant:?} {prec:?}: the batch linked otherwise"
+            );
         }
     }
 
