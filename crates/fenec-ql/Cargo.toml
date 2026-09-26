@@ -3,6 +3,7 @@ name = "fenec-ql"
 description = "FenecQL: fenecdb's minimal query language"
 version.workspace = true
 edition.workspace = true
+autotests = false
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -20,3 +21,7 @@ fenec-core = { workspace = true, features = ["indexes"] }
 
 [features]
 default = []
+
+[[test]]
+name = "all"
+path = "tests/all.rs"

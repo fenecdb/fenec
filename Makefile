@@ -22,8 +22,13 @@ all: test wasm
 ## Rust first: `cargo test` also builds the `fenec-pg` binary, and the sync
 ## tests on the JS side run against it (they skip themselves without it).
 ## Then fenec-core made without its indexes, as a small browser module is.
+## fenec-bench has no tests, and SQLite's C source and the postgres client
+## under it are the heaviest thing a build compiles; the examples are
+## measurement programs, a fifth of what `cargo test` compiled. Clippy's
+## --all-targets checks both, so neither rots.
 test:
-	$(CARGO) test
+	$(CARGO) test --workspace --exclude fenec-bench --lib --bins --tests
+	$(CARGO) test --workspace --exclude fenec-bench --doc
 	$(CARGO) test -p fenec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
 
@@ -190,8 +195,8 @@ collate-bench:
 
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
-	@$(CARGO) test -p fenec-import --test pg --test follow -- --ignored && \
-	  $(CARGO) test -p fenec-pg --test follow -- --ignored; \
+	@$(CARGO) test -p fenec-import --test all -- --ignored pg:: follow:: && \
+	  $(CARGO) test -p fenec-pg --test all -- --ignored follow::; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
 ## `fenec import --follow` against a live server: commit-to-visible latency,

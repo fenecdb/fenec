@@ -4,7 +4,7 @@
 //! a server stopped -- by a signal, or killed outright -- started again over
 //! its file without losing a row.
 //!
-//!     cargo test -p fenec-pg --test follow -- --ignored
+//!     cargo test -p fenec-pg --test all follow:: -- --ignored
 
 #![cfg(unix)]
 
