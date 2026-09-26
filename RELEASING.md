@@ -36,9 +36,13 @@ and with its own OIDC identity (trusted publishing) where it does not.
 Either is set up once, by whoever owns the names.
 
 **With tokens.** On npm, create the organization `fenecdb` (the `@fenecdb`
-scope) and an automation token with publish access to it; on PyPI, an API
-token for the whole account, since a token scoped to a project cannot make
-the project on its first upload. Then, pasting each when asked:
+scope) and an automation token with publish access to it. npm answers a
+publish into a scope nobody has made `404 Not Found - PUT`, as it answers a
+token without access -- 0.1.5's dispatch stopped there -- and
+`https://registry.npmjs.org/-/org/fenecdb/package` says `Scope not found`
+until the organization exists. On PyPI, an API token for the whole account,
+since a token scoped to a project cannot make the project on its first
+upload. Then, pasting each when asked:
 
     gh secret set NPM_TOKEN -R fenecdb/fenec
     gh secret set PYPI_API_TOKEN -R fenecdb/fenec
@@ -71,7 +75,8 @@ first version goes out with a token:
 workflow runs. A required reviewer on them makes a publish wait for a second
 yes.
 
-**After the first publish.** The docs install from the repository until the
-packages exist: `site/content/docs/integrations.html` and
-`integrations/python/README.md` then take `pip install "fenecdb[langchain]"`,
-and the React example imports `sync` from `@fenecdb/web`.
+**After the first publish.** The docs install what a registry holds: PyPI's
+`fenecdb` since 0.1.5 (`pip install "fenecdb[langchain]"`). Until
+`@fenecdb/web` is on npm the React example imports `sync` from
+`./fenec.js`; then from `@fenecdb/web`, with `npm install @fenecdb/web
+@fenecdb/react` beside it.
