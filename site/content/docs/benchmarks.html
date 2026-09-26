@@ -101,6 +101,49 @@ graph, and its MVCC headers are about 2.8 MB of that. fenecdb's graph stores
 links and nothing else; the vectors are read from the one arena. The WAL is in
 neither figure.</p>
 
+<h2 id="concurrency">Writers and readers at once</h2>
+
+<p>fenecdb and SQLite both take one writer at a time. What that costs when
+many want to write, and what readers wait meanwhile, measured in one process:
+fenecdb's threads share one database behind a lock, as <code>fenec-pg</code>
+does; SQLite's hold a connection each, WAL, with a 30 s busy timeout. A row a
+write, a row by id a read, median of three runs on an M1. Durable is an fsync
+per commit, <code>F_FULLFSYNC</code> for both (Rust's <code>sync_data</code>
+on macOS; <code>PRAGMA fullfsync</code> for SQLite, <code>synchronous=FULL</code>);
+without one, fenecdb's writes stay in its buffer and SQLite's reach the
+operating system (<code>synchronous=NORMAL</code>).</p>
+
+<pre data-lang="bash">make concurrency-bench
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<tbody>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 417 / <b>478</b></td><td class="n">256 / 258 / 263</td></tr>
+<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 720 k</b> / 889 k / 619 k</td><td class="n">123 k / 123 k / 121 k</td></tr>
+<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>8 200 k</b>, p99 0.7 µs</td><td class="n">1 090 k, p99 17.7 µs</td></tr>
+<tr><td>… beside 4 writers</td><td class="n"><b>828 k</b>, p99 66 µs</td><td class="n">341 k, p99 81 µs</td></tr>
+<tr><td>… beside a transaction held open 20 ms</td><td class="n">272 k, waits up to 34 ms</td><td class="n"><b>1 180 k</b>, 0.2 ms at most</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><b>Durable writes scale with the writers.</b> fenecdb's fsync runs after
+its lock is released, and a write an earlier fsync already covered waits for
+none, so sixteen writers share their fsyncs; SQLite syncs a commit while it
+holds the write lock. Without an fsync, one fenecdb writer is fourteen times
+SQLite's, and handing the lock between sixteen costs a third of that.</p>
+
+<p><b>The clearest loss is a transaction held open.</b> One writer is how
+fenecdb isolates a transaction: from its first write to its
+<code>COMMIT</code> it holds the lock, reads included, so while a client
+pauses between two statements nothing else reads — here the reads fell to
+a thirtieth and one waited 34 ms. SQLite's WAL lets a reader read the last
+commit meanwhile. A statement on its own holds the lock for microseconds;
+it is a transaction spanning round trips that stalls a server, and
+<code>--idle-in-transaction-timeout</code> (10 s) bounds how long.</p>
+
 <h2>Scale measurement</h2>
 
 <p>Apple M-series, single thread, <code>--release</code>. 100 000 documents ×

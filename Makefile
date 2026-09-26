@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -170,6 +170,12 @@ replica-bench:
 ## read, over the wire.
 tx-bench:
 	$(CARGO) run --release -p fenec-pg --example transactions -- 20000
+
+## Writers and readers at once, fenecdb against SQLite in one process:
+## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
+## beside writers and beside a transaction held open.
+concurrency-bench:
+	$(CARGO) run --release -p fenec-bench --bin concurrency
 
 ## When size comes first: no import, abort instead of panic unwinding.
 small:
