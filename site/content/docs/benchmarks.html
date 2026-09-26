@@ -310,6 +310,44 @@ a connection thread that panics unwinds and takes down only its own session,
 and the server stays up. The <code>cli</code> profile turns panic unwinding
 into abort, which is right for a single process with nothing to recover.</p>
 
+<h3 id="module-parts">Where the module's bytes go</h3>
+
+<p><code>make size-report</code> builds the module with its function names
+kept and puts each function's code where it is written: a method with its
+impl's module, a closure with its function, and an iterator adapter of the
+standard library — a <code>fold</code>, an <code>extend</code> — with the
+closure it runs, which it holds inlined. What is left of the standard library
+is split by what it is for. <code>make size-report BASE=main</code> shows what
+a change did against main, down to the ten functions that moved most, and
+every pull request's CI run shows the same against the branch it goes into.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Code, 451.2 KB of the 508.1</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
+<tbody>
+<tr><td><b>fenecdb's own</b></td><td class="n"><b>263.0</b></td><td class="n"><b>58.3%</b></td></tr>
+<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">95.0</td><td class="n">21.1%</td></tr>
+<tr><td>FenecQL's parser and lexer</td><td class="n">35.9</td><td class="n">8.0%</td></tr>
+<tr><td>the vector index</td><td class="n">28.3</td><td class="n">6.3%</td></tr>
+<tr><td><code>@sorted</code></td><td class="n">15.4</td><td class="n">3.4%</td></tr>
+<tr><td>the rest</td><td class="n">88.3</td><td class="n">19.6%</td></tr>
+<tr><td><b>the standard library's</b></td><td class="n"><b>188.3</b></td><td class="n"><b>41.7%</b></td></tr>
+<tr><td>the sort</td><td class="n">46.4</td><td class="n">10.3%</td></tr>
+<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">33.8</td><td class="n">7.5%</td></tr>
+<tr><td><code>HashMap</code></td><td class="n">31.9</td><td class="n">7.1%</td></tr>
+<tr><td>float formatting</td><td class="n">20.8</td><td class="n">4.6%</td></tr>
+<tr><td>Unicode tables</td><td class="n">10.7</td><td class="n">2.4%</td></tr>
+<tr><td>the rest</td><td class="n">44.6</td><td class="n">9.9%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The data section is another 50.7 KB. Most of the standard library's share
+is generic code compiled once for each type it is used with: the sort is 3.8
+to 8.6 KB for each of the eight element types it sorts, and
+<code>HashMap</code>'s growth is in eleven copies, one for each table's entry
+type.</p>
+
 <h3 id="module-features">The browser module, index by index</h3>
 
 <p>A page that does not search vectors, or text, loads a module built
