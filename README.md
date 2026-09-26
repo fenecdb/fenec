@@ -111,8 +111,8 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-485 KB of WebAssembly — 168 KB brotli (`-q 11`) over the wire, client included — no
-wasm-bindgen, no build step. The module alone is 144 KB of that, and 114 KB built
+457 KB of WebAssembly — 164 KB brotli (`-q 11`) over the wire, client included — no
+wasm-bindgen, no build step. The module alone is 140 KB of that, and 110 KB built
 without the four indexes for a page that uses none of them (`make wasm FEATURES=none`,
 or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
@@ -167,7 +167,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 485 KB wasm + 88 KB client (168 KB brotli served) · 1072–1526 KB binary · 2.92 MB container image |
+| **Runtime size** | 457 KB wasm + 88 KB client (164 KB brotli served) · 1072–1526 KB binary · 2.92 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

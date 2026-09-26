@@ -496,8 +496,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 144.2 KB
-brotli with all four, 114.0 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 140.5 KB
+brotli with all four, 110.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -524,6 +524,23 @@ every browser module.
 `web/fenec.test.js` hands files between the full module and the one
 `make wasm-lite` makes, both ways, and CI runs clippy over none and each
 alone.
+
+**The browser module holds one copy of a generic where it can.** Every
+type a sort, a map or a `collect` is compiled for is its own copy of the
+code, and `make size-report` lists them; `WHY=<pattern>` names what pulls
+one in. The sorts go through few: ids as `u64`s (`sort_unstable`),
+`(DocId, f32)` by `text::best_first` -- which the text index's cursors take
+too, as `(position, -ceiling)`, the stable order they had -- and rows by
+`order_rows`, which a `lookup` level's order shares (its children in
+ascending id first, a tie's order as before; 10 to 30% faster, its own
+`(Vec<Value>, DocId)` sort gone). The vector index's candidates keep a
+stable sort of their own: through `best_first` a 30 000 x 128 build took
+2.5% longer, for 0.4 KB brotli. A collection's indexes by field are
+`Fields`, a `Vec` searched by name, as `sorted` and `sparse` were, and the
+registry's functions a `Vec` too -- each map was a copy of hashbrown, and
+the registry's lowered the name into a new `String` on every call of every
+row (17% of two calls a row). Against 11.2 the module lost 28.5 KB, 3.9 KB
+brotli.
 
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a

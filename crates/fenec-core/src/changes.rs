@@ -174,10 +174,12 @@ impl ChangeLog {
             return None;
         }
         let start = self.ring.partition_point(|m| m.seq <= since);
-        let mut out: Vec<u32> = self.ring.iter().skip(start).map(|m| m.cid).collect();
+        // Sorted as `u64`s, the sort the ids take: one of `u32`s as well was
+        // 2.9 KB of the browser module.
+        let mut out: Vec<u64> = self.ring.iter().skip(start).map(|m| m.cid as u64).collect();
         out.sort_unstable();
         out.dedup();
-        Some(out)
+        Some(out.into_iter().map(|cid| cid as u32).collect())
     }
 }
 
