@@ -16,6 +16,7 @@ make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
+make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main)
 make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make serve         # wasm + python3 http.server -> http://localhost:8787

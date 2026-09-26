@@ -117,6 +117,31 @@ jobs:
       - name: Test
         run: make test
 
+  # What a pull request does to the browser module against the branch it goes
+  # into, on the run's summary page: raw, gzip and brotli, the code by crate,
+  # module and part of the standard library, the ten functions that moved
+  # most. A pull request is checked out as its merge, so the base is the
+  # merge's first parent. It fails nothing -- a size the docs quote is held
+  # by site/build.py in the test job.
+  size:
+    name: size (browser module)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - name: Measure the module against the base
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          sudo apt-get install -y --no-install-recommends brotli
+          python3 crates/fenec-wasm/size_report.py HEAD^1 "$BASE"
+
   integrations:
     name: integrations (python, react)
     runs-on: ubuntu-latest
