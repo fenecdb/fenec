@@ -191,6 +191,58 @@ fn is_fenecql(lower: &str) -> bool {
     }
 }
 
+/// The statements of a query text, split where a `;` stands outside a
+/// string, a quoted name and a comment -- `--`, `#` as FenecQL writes one,
+/// or `/* */` -- as PostgreSQL splits a simple query's. The empty ones are
+/// left out. A backslash escapes the character after it inside quotes, as
+/// FenecQL reads a string.
+pub fn statements(text: &str) -> Vec<&str> {
+    fn end<'a>(text: &'a str, from: usize, to: usize, out: &mut Vec<&'a str>) {
+        let s = text[from..to].trim();
+        if !s.is_empty() {
+            out.push(s);
+        }
+    }
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let (mut start, mut i) = (0, 0);
+    while i < b.len() {
+        match b[i] {
+            q @ (b'\'' | b'"') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += 1 + (b[i] == b'\\') as usize;
+                }
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'#' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b';' => {
+                end(text, start, i, &mut out);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    end(text, start.min(b.len()), b.len(), &mut out);
+    out
+}
+
 /// `standby` says whether the database is a replica. It is asked only by the
 /// queries that are about it, since it takes the database's read lock.
 pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shim> {
@@ -198,6 +250,18 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
     let lower = q.to_ascii_lowercase();
     if is_fenecql(&lower) {
         return None;
+    }
+    // A text of several statements the first of which is answered here --
+    // which the simple query protocol splits before it gets here -- is not
+    // that statement alone: `BEGIN ; put ...` was taken for its `BEGIN`,
+    // and the rest never ran. The extended protocol takes one command at a
+    // time, and PostgreSQL refuses it the same way.
+    let pieces = statements(q);
+    if pieces.len() > 1 && handle(pieces[0], cfg, standby).is_some() {
+        return Some(Shim::Refuse {
+            code: "42601",
+            message: "cannot insert multiple commands into a prepared statement".into(),
+        });
     }
     let words: Vec<&str> = lower
         .split(|c: char| c.is_whitespace() || c == ',')
@@ -480,6 +544,53 @@ mod tests {
             );
         }
         assert!(matches!(as_primary("UNLISTEN *", &cfg), Some(Shim::Tag(_))));
+    }
+
+    #[test]
+    fn a_text_is_split_where_a_semicolon_stands_alone() {
+        assert_eq!(
+            statements("BEGIN; put t {name: 'a;b'}; COMMIT;"),
+            ["BEGIN", "put t {name: 'a;b'}", "COMMIT"]
+        );
+        assert_eq!(
+            statements(
+                r#"put t {s: "x\";y"} ; -- a; comment
+            get t # another; one
+            ; /* and; this */ SAVEPOINT "a;b""#
+            ),
+            [
+                r#"put t {s: "x\";y"}"#,
+                "-- a; comment\n            get t # another; one",
+                r#"/* and; this */ SAVEPOINT "a;b""#
+            ]
+        );
+        assert_eq!(statements(" ; ;"), Vec::<&str>::new());
+        assert_eq!(statements("get t"), ["get t"]);
+        // Quotes and comments left open run to the end.
+        assert_eq!(statements("put t {s: 'a;"), ["put t {s: 'a;"]);
+        assert_eq!(statements("get t /* ;"), ["get t /* ;"]);
+    }
+
+    /// The extended protocol takes one command: a text of several the first
+    /// of which is answered here is refused, not taken for its first.
+    #[test]
+    fn several_commands_are_not_taken_for_their_first() {
+        let cfg = Config::default();
+        for q in [
+            "BEGIN ; put t {x: 1}",
+            "COMMIT; put t {x: 1}",
+            "SET a = 1; get t",
+        ] {
+            assert!(
+                matches!(
+                    as_primary(q, &cfg),
+                    Some(Shim::Refuse { code: "42601", .. })
+                ),
+                "`{q}` must be refused"
+            );
+        }
+        assert!(as_primary("put t {x: 1}; put t {x: 2}", &cfg).is_none());
+        assert!(matches!(as_primary("BEGIN;", &cfg), Some(Shim::Tx(_))));
     }
 
     #[test]

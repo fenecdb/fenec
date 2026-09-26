@@ -1838,6 +1838,94 @@ fn a_serializable_transaction_keeps_the_lock_through_a_rollback_to() {
     assert_eq!(names(&mut c), ["late"]);
 }
 
+/// A text holding transaction control runs a statement at a time, as
+/// PostgreSQL runs a simple query: each statement answered, a BEGIN or a
+/// COMMIT where it stands, the statements outside a transaction one
+/// implicit block the text's end lands, and nothing after the first error.
+#[test]
+fn a_text_holding_transaction_control_runs_a_statement_at_a_time() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    let tags_of = |r: &[Msg]| -> Vec<String> {
+        r.iter()
+            .filter(|m| m.tag == b'C')
+            .map(|m| m.tag_text())
+            .collect()
+    };
+
+    // A semicolon in a string is no end of a statement.
+    let r = c.simple("BEGIN; put t {name: \"a;1\"}; put t {name: 'b'}; COMMIT");
+    assert_eq!(tags_of(&r), ["BEGIN", "INSERT 0 1", "INSERT 0 1", "COMMIT"]);
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["a;1", "b"]);
+    let r = c.simple("BEGIN; put t {name: \"gone\"}; ROLLBACK");
+    assert_eq!(tags_of(&r), ["BEGIN", "INSERT 0 1", "ROLLBACK"]);
+    assert_eq!(names(&mut other), ["a;1", "b"]);
+
+    // After a COMMIT the rest is an implicit block, put back at an error.
+    let r = c.simple("BEGIN; put t {name: \"c\"}; COMMIT; put t {name: \"gone\"}; put t {name: 1}");
+    assert_eq!(tags_of(&r), ["BEGIN", "INSERT 0 1", "COMMIT", "INSERT 0 1"]);
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["a;1", "b", "c"]);
+
+    // A BEGIN takes the implicit block's writes into the transaction it
+    // opens, which the text leaves open.
+    let r = c.simple("put t {name: \"d\"}; BEGIN; put t {name: \"e\"}");
+    assert_eq!(tags_of(&r), ["INSERT 0 1", "BEGIN", "INSERT 0 1"]);
+    assert_eq!(status(&r), b'T');
+    c.simple("ROLLBACK");
+    assert_eq!(names(&mut other), ["a;1", "b", "c"]);
+
+    // A savepoint in a transaction the text opened; none outside one.
+    let r = c.simple(
+        "BEGIN; put t {name: \"d\"}; SAVEPOINT s; put t {name: \"gone\"}; ROLLBACK TO s; COMMIT",
+    );
+    assert_eq!(
+        tags_of(&r),
+        [
+            "BEGIN",
+            "INSERT 0 1",
+            "SAVEPOINT",
+            "INSERT 0 1",
+            "ROLLBACK",
+            "COMMIT"
+        ]
+    );
+    assert_eq!(names(&mut other), ["a;1", "b", "c", "d"]);
+    let r = c.simple("put t {name: \"gone\"}; SAVEPOINT s; put t {name: \"gone\"}");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25P01");
+    assert_eq!(names(&mut other), ["a;1", "b", "c", "d"]);
+
+    // A COMMIT with no transaction warns, and closes the implicit block.
+    let r = c.simple("put t {name: \"e\"}; COMMIT; SET application_name = 'x'");
+    assert_eq!(tags_of(&r), ["INSERT 0 1", "COMMIT", "SET"]);
+    assert_eq!(find(&r, b'N').unwrap().sqlstate().unwrap(), "25P01");
+    assert_eq!(names(&mut other), ["a;1", "b", "c", "d", "e"]);
+
+    // The first error ends the text, a transaction it opened left failed.
+    let r = c.simple("BEGIN; get nosuch; ROLLBACK");
+    assert_eq!(tags_of(&r), ["BEGIN"]);
+    assert_eq!(status(&r), b'E');
+    c.simple("ROLLBACK");
+
+    // A statement it cannot read runs none of it.
+    let r = c.simple("BEGIN; put t {name: \"gone\"}; COMMIT; gett t");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42601");
+    assert!(tags_of(&r).is_empty());
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["a;1", "b", "c", "d", "e"]);
+
+    // The extended protocol takes one command, as PostgreSQL's does.
+    for q in ["BEGIN; put t {name: $1}", "BEGIN ; put t {name: $1}"] {
+        let r = c.extended(q, &["gone"], false);
+        assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42601", "{q}");
+    }
+    assert_eq!(names(&mut other), ["a;1", "b", "c", "d", "e"]);
+}
+
 /// `COMMIT AND CHAIN` lands the transaction and begins the next.
 #[test]
 fn commit_and_chain_begins_the_next_transaction() {
