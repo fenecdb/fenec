@@ -282,3 +282,15 @@ impl SortedIndex {
         match *self {}
     }
 }
+
+/// A file mapped into memory, which a browser has none of
+/// ([`crate::store::Base`]).
+#[derive(Clone)]
+pub enum Mapped {}
+
+impl std::ops::Deref for Mapped {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match *self {}
+    }
+}
