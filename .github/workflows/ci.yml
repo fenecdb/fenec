@@ -151,12 +151,12 @@ jobs:
       - name: React hook
         run: make wasm react-test
 
-      # What PyPI and npm would take, built as they build it. Publishing is
-      # a decision of its own, and not made here.
+      # What PyPI and npm would take, built as they build it, installed and
+      # used. A published release publishes them (packages.yml).
       - name: Packages
         run: |
-          pip wheel -q --no-deps -w dist integrations/python
-          cd integrations/react && npm pack --dry-run
+          make wasm-lite
+          integrations/packages.sh
 
   build:
     name: build (release + cli profile)

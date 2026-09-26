@@ -1,0 +1,109 @@
+name: packages
+
+# PyPI's `fenecdb` and npm's `@fenecdb/web` and `@fenecdb/react` go out when
+# a release is published -- not when its tag is pushed: release.yml leaves
+# the release a draft so its notes get a read, and publishing the draft is
+# the moment the packages follow it. A registry keeps what it is given, so
+# nothing goes to one before every package has been built, installed and
+# used (integrations/packages.sh), and nothing is published with a stored
+# key: PyPI and npm take this workflow's OIDC identity (trusted
+# publishing). RELEASING.md has the registries' side of it.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish the packages of'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Build, install and use the packages
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          make wasm wasm-lite
+          integrations/packages.sh dist-packages
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages
+          path: dist-packages/dist/
+          if-no-files-found: error
+
+  pypi:
+    name: PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fenecdb/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: dist
+
+      - name: Keep the Python files
+        run: |
+          mkdir pypi
+          mv dist/fenecdb-*.whl dist/fenecdb-*.tar.gz pypi/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: pypi/
+
+  npm:
+    name: npm
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/org/fenecdb
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: packages
+          path: dist
+
+      # npm 11.5 takes the OIDC identity itself once a package trusts this
+      # workflow. A package's first version cannot be trusted yet -- the
+      # registry has nothing to hold the setting -- so NPM_TOKEN, when the
+      # secret is there, carries that one publish; RELEASING.md says when to
+      # delete it.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -eu
+          # The web client first: the React hook's users install it beside.
+          for pkg in dist/fenecdb-web-*.tgz dist/fenecdb-react-*.tgz; do
+            npm publish "$pkg" --access public --provenance
+          done

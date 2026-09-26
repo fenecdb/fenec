@@ -114,7 +114,7 @@ jobs:
           # types, the collation data the module fetches beside it, and a
           # note on which module to take.
           cp web/fenec.js web/fenec.wasm web/fenec-lite.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
-          cp web/BUNDLE.md "fenec-web-v${version}/README.md"
+          cp web/README.md "fenec-web-v${version}/README.md"
           cp -r web/collate "fenec-web-v${version}/"
           tar -czf "dist/fenec-web-v${version}.tar.gz" "fenec-web-v${version}"
 
