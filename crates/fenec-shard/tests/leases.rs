@@ -273,12 +273,18 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
         "fenced at {fenced:?}, promoted at {promoted:?}"
     );
     // Renewed every third of a lease: n1 stops between two thirds and one
-    // lease after the cut, and the router waits a lease and a tenth.
+    // lease after the cut, and the router waits a lease and a tenth from the
+    // last answer it had -- which came back up to a third of a lease before
+    // the cut, so a promotion 654 ms after it, against a 660 ms wait, was
+    // the router keeping its word.
     assert!(
         fenced >= TERM * 2 / 3 - Duration::from_millis(50),
         "{fenced:?}"
     );
-    assert!(promoted >= TERM + TERM / 10, "{promoted:?}");
+    assert!(
+        promoted >= TERM + TERM / 10 - TERM / 3 - Duration::from_millis(50),
+        "{promoted:?}"
+    );
     assert_eq!(placed(port, "acme").0, replica);
 
     // n1 answers again: its lease names nothing of what moved, and a repair
