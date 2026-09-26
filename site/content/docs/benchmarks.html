@@ -278,7 +278,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1526 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1201 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1072 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>508 KB</b></td><td class="n"><b>150 KB</b></td><td class="n">182 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>508 KB</b></td><td class="n"><b>151 KB</b></td><td class="n">182 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">88 KB</td><td class="n">24 KB</td><td class="n">28 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.92 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -287,7 +287,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>174 KB brotli</b> for both together. A binary you execute and an image
+<b>175 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -323,29 +323,29 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">508.2</td><td class="n">150.3</td><td class="n">182.0</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">479.0</td><td class="n">143.5</td><td class="n">173.0</td><td class="n">6.9</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">503.7</td><td class="n">149.1</td><td class="n">180.4</td><td class="n">1.2</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">484.8</td><td class="n">145.5</td><td class="n">175.3</td><td class="n">4.8</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">455.7</td><td class="n">136.2</td><td class="n">164.1</td><td class="n">14.2</td></tr>
-<tr><td><code>vector text</code></td><td class="n">473.7</td><td class="n">141.6</td><td class="n">170.9</td><td class="n">8.7</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">454.9</td><td class="n">138.3</td><td class="n">166.2</td><td class="n">12.0</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">477.9</td><td class="n">143.5</td><td class="n">172.6</td><td class="n">6.8</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">425.8</td><td class="n">128.7</td><td class="n">154.5</td><td class="n">21.6</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">450.2</td><td class="n">134.4</td><td class="n">162.0</td><td class="n">16.0</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">429.8</td><td class="n">130.1</td><td class="n">156.0</td><td class="n">20.3</td></tr>
-<tr><td><code>vector</code></td><td class="n">447.9</td><td class="n">136.1</td><td class="n">163.3</td><td class="n">14.2</td></tr>
-<tr><td><code>text</code></td><td class="n">420.2</td><td class="n">126.8</td><td class="n">152.3</td><td class="n">23.5</td></tr>
-<tr><td><code>sparse</code></td><td class="n">399.8</td><td class="n">122.7</td><td class="n">146.8</td><td class="n">27.6</td></tr>
-<tr><td><code>sorted</code></td><td class="n">422.7</td><td class="n">127.7</td><td class="n">153.4</td><td class="n">22.6</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">392.6</td><td class="n">120.2</td><td class="n">143.9</td><td class="n">30.1</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">508.1</td><td class="n">150.8</td><td class="n">182.4</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">478.8</td><td class="n">143.8</td><td class="n">173.5</td><td class="n">7.0</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">503.6</td><td class="n">149.3</td><td class="n">180.8</td><td class="n">1.5</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">484.7</td><td class="n">146.0</td><td class="n">175.8</td><td class="n">4.8</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">455.5</td><td class="n">136.1</td><td class="n">164.4</td><td class="n">14.7</td></tr>
+<tr><td><code>vector text</code></td><td class="n">473.5</td><td class="n">142.1</td><td class="n">171.3</td><td class="n">8.7</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">454.8</td><td class="n">138.7</td><td class="n">166.7</td><td class="n">12.1</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">477.8</td><td class="n">143.8</td><td class="n">173.0</td><td class="n">7.0</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">425.5</td><td class="n">128.9</td><td class="n">154.7</td><td class="n">21.9</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">450.0</td><td class="n">134.6</td><td class="n">162.3</td><td class="n">16.2</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">429.6</td><td class="n">130.3</td><td class="n">156.3</td><td class="n">20.5</td></tr>
+<tr><td><code>vector</code></td><td class="n">447.8</td><td class="n">136.4</td><td class="n">163.8</td><td class="n">14.5</td></tr>
+<tr><td><code>text</code></td><td class="n">420.0</td><td class="n">126.9</td><td class="n">152.5</td><td class="n">23.9</td></tr>
+<tr><td><code>sparse</code></td><td class="n">399.5</td><td class="n">122.8</td><td class="n">147.0</td><td class="n">28.0</td></tr>
+<tr><td><code>sorted</code></td><td class="n">422.5</td><td class="n">128.0</td><td class="n">153.6</td><td class="n">22.8</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">392.3</td><td class="n">120.4</td><td class="n">144.1</td><td class="n">30.4</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>Left out alone, the graph saves 14.2 KB brotli, the ordered index 6.9,
-the text index 4.8 and the sparse index 1.2, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.5. All four
-save 30.1 KB, 20% of the module. Making them optional cost the module with
+<p>Left out alone, the graph saves 14.7 KB brotli, the ordered index 7.0,
+the text index 4.8 and the sparse index 1.5, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.4. All four
+save 30.4 KB, 20% of the module. Making them optional cost the module with
 every index nothing: it came out the size it had been before any could be
 left out, to the byte.</p>

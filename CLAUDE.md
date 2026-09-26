@@ -135,7 +135,11 @@ index holds 188 MB that way against 1 095 read into memory, and its
 machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
 which reaches a replicated file and a `--dir` node's tenants as well) is the
 other way, for a network file system or to have `--max-memory` cover the
-data. A new file is mapped from the start. A rewrite -- `checkpoint`,
+data. In the browser `store::Base` is a type of no value (`off::Mapped`),
+as a missing index is, so the store's mapped-file code compiles for both
+targets and folds away there: 16 `cfg`s of `store.rs` down to the two
+that say which `Base` a target has. A
+new file is mapped from the start. A rewrite -- `checkpoint`,
 `compact`, an image adopted -- writes the new file and points the stores at
 it (`Database::repoint`), so the old one is let go of; a compact over a
 mapped file never copies a record into memory, on a server either, and
@@ -391,6 +395,11 @@ the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
 appended records that are not writes; a block (kind 9) holds a record for
 each of its writes: a data record, or a create's, a drop's or an index's.
+A head is written in one place (`head`, the counter's `image_head` aside)
+and read in one (`record_at`), and a walk over a file's records is a
+`Walk` -- a load, a repoint and the search for the last graphs each wrote
+their own once -- which steps over the counter's fixed-width head and
+stops at a record cut short for its caller to judge.
 
 **The HNSW graph is derived data, not a cache.** It is written by
 `snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
@@ -485,8 +494,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.3 KB
-brotli with all four, 120.2 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.8 KB
+brotli with all four, 120.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
