@@ -418,18 +418,21 @@ impl Store {
         self.index.get(id)
     }
 
-    /// Takes the store back to `mark`, dropping every record appended since
-    /// -- a block of writes that did not land -- with each id in `was`
-    /// pointing where it pointed then, or nowhere. The records dropped are
-    /// all in memory: a block appends to the segments, never to a mapped
-    /// file, so the segments are cut back where they stood.
-    pub fn rewind(&mut self, mark: Mark, was: &[(DocId, Option<Loc>)]) {
-        for &(id, loc) in was {
-            match loc {
-                Some(l) => self.index.insert(id, l),
-                None => drop(self.index.remove(id)),
-            }
+    /// Points `id` at `loc`, or at nothing: where it was before a write
+    /// that is put back.
+    pub fn point(&mut self, id: DocId, loc: Option<Loc>) {
+        match loc {
+            Some(l) => self.index.insert(id, l),
+            None => drop(self.index.remove(id)),
         }
+    }
+
+    /// Takes the store back to `mark`, dropping every record appended since
+    /// -- a block of writes that did not land, each id it wrote pointed
+    /// back first ([`Self::point`]). The records dropped are all in memory:
+    /// a block appends to the segments, never to a mapped file, so the
+    /// segments are cut back where they stood.
+    pub fn rewind(&mut self, mark: Mark) {
         self.segments.truncate(mark.segments.max(1));
         if let Some(last) = self.segments.last_mut() {
             if last.data.len() > mark.len {

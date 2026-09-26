@@ -327,9 +327,9 @@ so a node that is down takes its tenants with it.</p>
     and one whose client goes silent is put back after
     <code>--idle-in-transaction-timeout</code>. A schema change cannot be put
     back — before a transaction's first write it runs on its own, and its
-    <code>ROLLBACK</code> says so; after one it is refused — and there are no
-    savepoints or two-phase commit (<a
-    href="postgres.html#transactions">Transactions</a>). <code>LISTEN</code>
+    <code>ROLLBACK</code> says so, as does a <code>ROLLBACK TO</code> a
+    savepoint before it; after one it is refused — and there is no
+    two-phase commit (<a href="postgres.html#transactions">Transactions</a>). <code>LISTEN</code>
     and <code>NOTIFY</code> return <code>0A000</code> — subscriptions are
     <code>GET /&lt;name&gt;/changes</code>.</li>
   <li>A cancellation is seen while waiting on the lock and between batched

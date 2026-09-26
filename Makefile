@@ -12,7 +12,7 @@ FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
 .PHONY: all test test-js types wasm wasm-lite wasm-sizes packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
-	python-test react-test \
+	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -132,7 +132,8 @@ replica-bench:
 	$(CARGO) run --release -p fenec-pg --example failover -- 10
 
 ## A pg transaction: a lone write under each sync policy, a write in a
-## transaction of 100, and a read, over the wire.
+## transaction of 100, each in a savepoint, a ROLLBACK TO over 100, and a
+## read, over the wire.
 tx-bench:
 	$(CARGO) run --release -p fenec-pg --example transactions -- 20000
 
@@ -167,6 +168,11 @@ beir:
 ## crates may not.
 python-test:
 	integrations/python/run-tests.sh
+
+## psycopg and SQLAlchemy over the pg wire -- nested transactions as
+## savepoints -- from a python:3.13 container (Docker)
+drivers-test:
+	integrations/drivers/run-tests.sh
 
 ## useLiveQuery for React, against a stand-in and a real fenec-pg + replica
 ## (needs `make wasm`)

@@ -28,7 +28,7 @@ pub enum Shim {
     Catalog,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Tx {
     Begin(Change),
     /// `AND CHAIN` begins the next transaction, in the same mode, as this
@@ -44,6 +44,14 @@ pub enum Tx {
     /// `SET SESSION CHARACTERISTICS AS TRANSACTION`: the mode of every
     /// transaction after it.
     Default(Change),
+    /// `SAVEPOINT name`.
+    Savepoint(String),
+    /// `ROLLBACK TO [SAVEPOINT] name`: the writes after it put back, the
+    /// transaction going on.
+    RollbackTo(String),
+    /// `RELEASE [SAVEPOINT] name`: it and the savepoints after it
+    /// forgotten, their writes kept.
+    Release(String),
 }
 
 /// How a transaction runs.
@@ -94,11 +102,59 @@ impl Change {
     }
 }
 
-fn no_savepoints() -> Shim {
+/// The words of `q` as PostgreSQL reads identifiers: folded to lower case,
+/// or as written between double quotes, `""` a quote inside them. `None`
+/// for a quote left open.
+fn identifiers(q: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut chars = q.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let Some(&first) = chars.peek() else {
+            return Some(out);
+        };
+        let mut word = String::new();
+        if first == '"' {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    '"' if chars.next_if_eq(&'"').is_some() => word.push('"'),
+                    '"' => break,
+                    c => word.push(c),
+                }
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '"') {
+                word.push(c.to_ascii_lowercase());
+            }
+        }
+        out.push(word);
+    }
+}
+
+/// `SAVEPOINT`, `RELEASE` and `ROLLBACK TO`, with the name they give --
+/// psycopg quotes it (`SAVEPOINT "_pg3_1"`), SQLAlchemy does not.
+fn savepoint(q: &str) -> Shim {
+    let words = identifiers(q).unwrap_or_default();
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let tx = match words.as_slice() {
+        ["savepoint", name] => Tx::Savepoint(name.to_string()),
+        ["release", "savepoint", name] | ["release", name] => Tx::Release(name.to_string()),
+        ["rollback", "to", rest @ ..] | ["rollback", "work" | "transaction", "to", rest @ ..] => {
+            match rest {
+                ["savepoint", name] | [name] => Tx::RollbackTo(name.to_string()),
+                _ => return syntax(q),
+            }
+        }
+        _ => return syntax(q),
+    };
+    Shim::Tx(tx)
+}
+
+fn syntax(q: &str) -> Shim {
     Shim::Refuse {
-        code: "0A000",
-        message: "savepoints are not supported: a transaction is put back whole, with ROLLBACK"
-            .into(),
+        code: "42601",
+        message: format!("syntax error in `{q}`: a savepoint takes one name"),
     }
 }
 
@@ -151,15 +207,21 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
     let second = words.get(1).copied().unwrap_or("");
 
     match first {
-        // Transaction control, carried out by the session. Savepoints and
-        // two-phase commit are refused rather than read as what they begin
-        // with: `ROLLBACK TO s` taken for `ROLLBACK` put back the whole
-        // transaction and went on outside one, and `COMMIT PREPARED 'x'`
-        // committed the transaction open instead of the one named.
-        "rollback" if second == "to" => return Some(no_savepoints()),
+        // Transaction control, carried out by the session. A savepoint is
+        // read before the `ROLLBACK` it begins with, and two-phase commit is
+        // refused rather than read as what it begins with: `ROLLBACK TO s`
+        // taken for `ROLLBACK` put back the whole transaction and went on
+        // outside one, and `COMMIT PREPARED 'x'` committed the transaction
+        // open instead of the one named.
+        "rollback"
+            if second == "to"
+                || (matches!(second, "work" | "transaction") && words.get(2) == Some(&"to")) =>
+        {
+            return Some(savepoint(q))
+        }
+        "savepoint" | "release" => return Some(savepoint(q)),
         "commit" | "rollback" if second == "prepared" => return Some(no_two_phase()),
         "prepare" if second == "transaction" => return Some(no_two_phase()),
-        "savepoint" | "release" => return Some(no_savepoints()),
         "begin" | "start" => return Some(Shim::Tx(Tx::Begin(Change::of(&words)))),
         "commit" | "end" | "rollback" | "abort" => {
             let chain = words.windows(2).any(|w| w == ["and", "chain"]);
@@ -338,12 +400,63 @@ mod tests {
         );
         assert!(serial.over(Mode::default()).serial);
 
+        // Savepoints, named as PostgreSQL reads an identifier.
+        let name = |n: &str| n.to_string();
+        assert_eq!(tx("SAVEPOINT s1"), Some(Tx::Savepoint(name("s1"))));
+        assert_eq!(tx("savepoint SP_1;"), Some(Tx::Savepoint(name("sp_1"))));
+        assert_eq!(
+            tx(r#"SAVEPOINT "_pg3_1""#),
+            Some(Tx::Savepoint(name("_pg3_1")))
+        );
+        assert_eq!(
+            tx(r#"savepoint "A ""quoted"" One""#),
+            Some(Tx::Savepoint(name(r#"A "quoted" One"#)))
+        );
+        assert_eq!(tx("RELEASE SAVEPOINT s1"), Some(Tx::Release(name("s1"))));
+        assert_eq!(tx(r#"RELEASE "_pg3_1""#), Some(Tx::Release(name("_pg3_1"))));
+        assert_eq!(
+            tx("release savepoint"),
+            Some(Tx::Release(name("savepoint")))
+        );
+        assert_eq!(
+            tx("ROLLBACK TO SAVEPOINT sa_savepoint_1"),
+            Some(Tx::RollbackTo(name("sa_savepoint_1")))
+        );
+        assert_eq!(tx("rollback to s1"), Some(Tx::RollbackTo(name("s1"))));
+        assert_eq!(
+            tx(r#"ROLLBACK TO "_pg3_1""#),
+            Some(Tx::RollbackTo(name("_pg3_1")))
+        );
+        // Read as a plain ROLLBACK, these put back the whole transaction.
+        assert_eq!(
+            tx("ROLLBACK TRANSACTION TO SAVEPOINT s1"),
+            Some(Tx::RollbackTo(name("s1")))
+        );
+        assert_eq!(tx("rollback work to s1"), Some(Tx::RollbackTo(name("s1"))));
+        assert_eq!(tx("ROLLBACK WORK"), Some(Tx::Rollback { chain: false }));
+        // As PostgreSQL's grammar reads it: `savepoint` is the name.
+        assert_eq!(
+            tx("rollback to savepoint"),
+            Some(Tx::RollbackTo(name("savepoint")))
+        );
+        for q in [
+            "SAVEPOINT",
+            "savepoint a b",
+            "ROLLBACK TO",
+            "rollback to savepoint a b",
+            r#"release "open"#,
+        ] {
+            assert!(
+                matches!(
+                    handle(q, &cfg, &|| false),
+                    Some(Shim::Refuse { code: "42601", .. })
+                ),
+                "`{q}` must be refused"
+            );
+        }
+
         // What begins like transaction control and is not.
         for q in [
-            "SAVEPOINT s1",
-            "RELEASE SAVEPOINT s1",
-            "ROLLBACK TO SAVEPOINT s1",
-            "rollback to s1",
             "COMMIT PREPARED 'x'",
             "ROLLBACK PREPARED 'x'",
             "PREPARE TRANSACTION 'x'",

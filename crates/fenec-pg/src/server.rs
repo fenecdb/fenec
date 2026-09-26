@@ -1892,20 +1892,24 @@ fn describe(
 /// A session's transaction, as PostgreSQL keeps one. Between `BEGIN` and
 /// its end its writes are one block ([`Database::begin`]), which `COMMIT`
 /// lands and `ROLLBACK` puts back -- as do a failed statement and the
-/// session's end. The write lock is taken at its first write and held to
-/// its end ([`Hold`]), so up to that write it reads what others have
-/// committed, statement by statement -- PostgreSQL's read committed -- and
-/// from it on it runs alone. `SERIALIZABLE` and `REPEATABLE READ` take the
-/// lock at its first statement instead, so everything it reads is of one
-/// database, and nothing it read changes before it ends.
+/// session's end -- and `ROLLBACK TO` puts back as far as a savepoint. The
+/// write lock is taken at its first write and held to its end ([`Hold`]),
+/// so up to that write it reads what others have committed, statement by
+/// statement -- PostgreSQL's read committed -- and from it on it runs
+/// alone. `SERIALIZABLE` and `REPEATABLE READ` take the lock at its first
+/// statement instead, so everything it reads is of one database, and
+/// nothing it read changes before it ends.
 #[derive(Default)]
 struct TxState {
     open: bool,
-    /// A statement in it failed: its block is put back already, and every
-    /// statement up to `COMMIT` or `ROLLBACK` is refused, as PostgreSQL
-    /// refuses them -- a client that went on would take the ones before
-    /// the failure for landed.
+    /// A statement in it failed, and every statement up to `COMMIT`,
+    /// `ROLLBACK` or a `ROLLBACK TO` is refused, as PostgreSQL refuses them
+    /// -- a client that went on would take the ones before the failure for
+    /// landed. Its block is put back already, unless a savepoint keeps it
+    /// ([`Self::keeps`]).
     failed: bool,
+    /// Its savepoints, oldest first.
+    savepoints: Vec<Point>,
     /// Whether a statement has run in it: its isolation is settled by then.
     ran: bool,
     /// Schema changes run in it before its first write, each on its own:
@@ -1914,6 +1918,17 @@ struct TxState {
     mode: compat::Mode,
     /// Every transaction's mode (`SET SESSION CHARACTERISTICS`).
     default: compat::Mode,
+}
+
+/// A savepoint of a transaction.
+struct Point {
+    name: String,
+    /// Where its block stood: the start, when it was taken before the
+    /// transaction's first write.
+    at: fenec_core::engine::Savepoint,
+    /// How many schema changes the transaction had run: one run after it
+    /// cannot be put back with its writes.
+    schema: usize,
 }
 
 impl TxState {
@@ -1953,9 +1968,31 @@ impl TxState {
         if out.errors() > errors {
             if self.open {
                 self.failed = true;
+                if self.keeps() {
+                    return;
+                }
             }
             lock.hold = None;
         }
+    }
+
+    /// Whether a failed transaction's block and lock are kept for a
+    /// `ROLLBACK TO`: a savepoint after one of its writes needs the writes
+    /// before it, and a serializable transaction reads the database as it
+    /// holds it. A savepoint before every write needs neither: taken back
+    /// to, the transaction is as it was before its first.
+    fn keeps(&self) -> bool {
+        self.savepoints.iter().any(|p| !p.at.is_start())
+            || (self.mode.serial && !self.savepoints.is_empty())
+    }
+
+    /// The newest savepoint named `name`, as PostgreSQL finds one.
+    fn point(&self, name: &str, out: &mut Writer) -> Option<usize> {
+        let i = self.savepoints.iter().rposition(|p| p.name == name);
+        if i.is_none() {
+            out.error("3B001", &format!("savepoint \"{name}\" does not exist"));
+        }
+        i
     }
 
     fn apply(
@@ -2012,7 +2049,9 @@ impl TxState {
                 self.end();
                 if failed {
                     // What PostgreSQL answers a failed transaction's
-                    // COMMIT: it was put back when it failed.
+                    // COMMIT: it was put back when it failed, or is now if
+                    // a savepoint kept it.
+                    lock.hold = None;
                     out.command_complete("ROLLBACK");
                     return None;
                 }
@@ -2059,6 +2098,75 @@ impl TxState {
                 if open && chain {
                     self.begin(mode);
                 }
+                out.command_complete("ROLLBACK");
+                None
+            }
+            compat::Tx::Savepoint(name) => {
+                if !self.open {
+                    out.error("25P01", "SAVEPOINT can only be used in transaction blocks");
+                    return None;
+                }
+                let at = match &lock.hold {
+                    Some(h) => h.guard.savepoint(),
+                    None => fenec_core::engine::Savepoint::default(),
+                };
+                self.savepoints.push(Point {
+                    name,
+                    at,
+                    schema: self.schema,
+                });
+                out.command_complete("SAVEPOINT");
+                None
+            }
+            compat::Tx::Release(name) => {
+                if !self.open {
+                    out.error(
+                        "25P01",
+                        "RELEASE SAVEPOINT can only be used in transaction blocks",
+                    );
+                    return None;
+                }
+                let i = self.point(&name, out)?;
+                self.savepoints.truncate(i);
+                out.command_complete("RELEASE");
+                None
+            }
+            compat::Tx::RollbackTo(name) => {
+                if !self.open {
+                    out.error(
+                        "25P01",
+                        "ROLLBACK TO SAVEPOINT can only be used in transaction blocks",
+                    );
+                    return None;
+                }
+                let i = self.point(&name, out)?;
+                let p = &self.savepoints[i];
+                let since = self.schema - p.schema;
+                if since > 0 {
+                    let s = if since == 1 { "" } else { "s" };
+                    out.error(
+                        "0A000",
+                        &format!(
+                            "ROLLBACK TO \"{name}\" would not put back the {since} schema \
+                             change{s} since it: a create, a drop or a create index cannot \
+                             be undone"
+                        ),
+                    );
+                    return None;
+                }
+                if p.at.is_start() && !self.mode.serial {
+                    // Before the first write: the lock goes with the writes,
+                    // and up to its next write the transaction reads what
+                    // others commit again.
+                    lock.hold = None;
+                } else if let Some(h) = &mut lock.hold {
+                    if let Err(e) = h.guard.rollback_to(&p.at) {
+                        out.error(sqlstate(&e), &e.to_string());
+                        return None;
+                    }
+                }
+                self.savepoints.truncate(i + 1);
+                self.failed = false;
                 out.command_complete("ROLLBACK");
                 None
             }
@@ -2185,11 +2293,14 @@ fn run_locked(
         return None;
     }
 
-    // A failed transaction takes nothing but its end.
+    // A failed transaction takes nothing but its end, or a way back to a
+    // savepoint before the failure.
     if tx.failed {
         return match compat::handle(trimmed, cfg, &|| false) {
             Some(compat::Shim::Tx(
-                t @ (compat::Tx::Commit { .. } | compat::Tx::Rollback { .. }),
+                t @ (compat::Tx::Commit { .. }
+                | compat::Tx::Rollback { .. }
+                | compat::Tx::RollbackTo(_)),
             )) => tx.apply(t, lock, cfg, out),
             _ => {
                 out.error(

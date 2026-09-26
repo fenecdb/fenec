@@ -24,6 +24,7 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
+make drivers-test  # psycopg + SQLAlchemy over the pg wire: nested transactions (Docker)
 make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -35,7 +36,7 @@ make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds t
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
-make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100
+make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100, in a savepoint
 make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
@@ -162,11 +163,19 @@ afresh for the next transaction. A pipeline of the extended protocol is one
 block up to its `Sync` when a write in it has more of the pipeline after
 it; the last statement before a `Sync` runs as one on its own. A schema
 change runs on its own before a transaction's first write (and its
-`ROLLBACK` says it stays, `0A000`) and is refused after one (`25001`);
-`ROLLBACK TO` and `COMMIT PREPARED` are refused rather than read as the
-command they begin with. Under `--sync always` a transaction lands with one
+`ROLLBACK` says it stays, `0A000`) and is refused after one (`25001`).
+`SAVEPOINT` takes the held block's `Database::savepoint` -- the start of
+the block before the first write -- and `ROLLBACK TO` puts back what came
+after it (`Database::rollback_to`) and goes on, a failed transaction too:
+a savepoint after a write keeps the failed block and the lock
+(`TxState::keeps`), as would one in a serializable transaction; one before
+every write lets both go, and taken back to, the lock as well. `COMMIT
+PREPARED` is refused rather than read as the `COMMIT` it begins with, and
+`ROLLBACK TRANSACTION TO s` was once read as a `ROLLBACK`. Under `--sync always` a transaction lands with one
 fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
-statement what it did (`make tx-bench`). Two processes opening the same file corrupts it,
+statement what it did (`make tx-bench`). A savepoint costs its round trips:
+a put in one of its own, released, 58.3 us against 20.7 under `--sync 250`,
+and a `ROLLBACK TO` over 100 writes 30.9 us. Two processes opening the same file corrupts it,
 which is why `fenec-http` is a second listener inside `fenec-pg`, never
 its own binary.
 
@@ -177,18 +186,23 @@ ids back (`Block`), and `commit` appends them as one record -- within one
 collection a data record of as many frames, which a binary from before
 blocks reads, across collections a `REC_BLOCK` (kind 9) of one data record a
 write -- and only then notes them, so a crash, a replica and a subscriber
-see all of it or none. A block that fails is undone in memory:
-`Store::rewind` cuts each store back to its `Mark` and the offset index to
-where each id's record was, the documents it wrote are unindexed and the
-versions before them indexed again, and the ids it handed out are handed out
-again. A record is numbered by its last write, `writes_in` counts them, and
+see all of it or none. A block that fails is undone in memory: each id it
+wrote is pointed back to where its record was (`Store::point`) and
+`Store::rewind` cuts each store back to its `Mark`, the documents it wrote
+are unindexed and the versions before them indexed again, and the ids it
+handed out are handed out again. A record is numbered by its last write, `writes_in` counts them, and
 whatever counts records -- the replication feed, the archive,
 `apply_records` -- counts that way; a restore to a change inside a block
 stops before it. A schema change or a compact cannot be undone, so it is
 refused in a block (`Statement::fits_block`), and a `/batch` or a pg text
 holding one runs each statement on its own, as before. A `/batch`, a pg text
 of several statements, a pg transaction and pipeline, and the browser
-module's `run` of several are one block. The buffers are kept from one block to the next (`Block::cleared`),
+module's `run` of several are one block. A block is put back a write at
+a time, the last first, each the inverse of what it did: 3.0 ms for 50 000
+writes, where finding each id's first write by searching took 402 ms, and
+a sort was 4.6 KB of the browser module. A `Savepoint` is how far the block's buffers
+reached and each written store's `Mark`, and `rollback_to` puts back what
+follows it the same way. The buffers are kept from one block to the next (`Block::cleared`),
 the record's header written into room left before the frames: allocated
 anew they took a lone `put` from 832 to 985 ns; kept, a put costs 841
 against the 829 before blocks, a `del` 648 against 634.
@@ -449,8 +463,8 @@ graph built natively; `web/fenec.test.js` checks that order against a
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 150.0 KB
-brotli with all four, 119.7 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 149.8 KB
+brotli with all four, 119.5 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -858,11 +872,14 @@ its connection, every tenant's, named, to the admin alone.
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
 the standard library for its client) and `useLiveQuery`
-(`integrations/react`) are held to their frameworks' own tests --
-`make python-test` runs LangChain's standard suite and the tests LlamaIndex's
-integrations run from a `python:3.13` container against a fenec-pg started
-here, `make react-test` runs the hook against a real replica, and CI runs
-both (`integrations`). CI also builds the three packages as a release
+(`integrations/react`) are held to their frameworks' own tests, and the pg
+wire to what psycopg and SQLAlchemy send (`integrations/drivers`: a nested
+transaction is a savepoint to both) -- `make python-test` runs LangChain's
+standard suite and the tests LlamaIndex's integrations run from a
+`python:3.13` container against a fenec-pg started here, `make
+drivers-test` the drivers' nested transactions the same way, `make
+react-test` runs the hook against a real replica, and CI runs all three
+(`integrations`). CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
 `collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a

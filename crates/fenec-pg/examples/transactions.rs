@@ -2,9 +2,12 @@
 //! `cargo run --release -p fenec-pg --example transactions -- [WRITES]`
 //!
 //! A server in this process over a file, one client, per sync policy: a
-//! lone `put` a statement, the same writes a hundred to a transaction, and
-//! a read by id -- p50 of each. A transaction's writes land as one record,
-//! with one fsync where its statements alone took one each.
+//! lone `put` a statement, the same writes a hundred to a transaction, each
+//! of those in a savepoint of its own -- `SAVEPOINT`, the put, `RELEASE`, as
+//! psycopg's nested blocks and SQLAlchemy's `begin_nested` send them -- a
+//! `ROLLBACK TO` over a hundred writes, and a read by id: p50 of each. A
+//! transaction's writes land as one record, with one fsync where its
+//! statements alone took one each.
 
 use fenec_pg::client::{Client, Url};
 use fenec_pg::server::SyncPolicy;
@@ -41,7 +44,10 @@ fn main() {
         .unwrap_or(20_000);
     let dir = std::env::temp_dir().join(format!("fenec-tx-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    println!("                  a lone put   a put, 100 to a transaction   a read by id");
+    println!(
+        "                 a lone put  100 to a transaction  each in a savepoint  \
+         ROLLBACK TO 100  a read by id"
+    );
     // An fsync a write takes milliseconds: a tenth of the writes tells as much.
     for (name, sync, n) in [
         (
@@ -82,6 +88,32 @@ fn main() {
             c.query("COMMIT").unwrap();
             held.push(us(t) / 100.0);
         }
+        let mut nested = Vec::with_capacity(n / 100);
+        for r in 0..n / 100 {
+            let t = Instant::now();
+            c.query("BEGIN").unwrap();
+            for i in 0..100 {
+                c.query("SAVEPOINT s").unwrap();
+                c.query(&format!("put t {{k: \"s{r}-{i}\", n: {i}}}"))
+                    .unwrap();
+                c.query("RELEASE s").unwrap();
+            }
+            c.query("COMMIT").unwrap();
+            nested.push(us(t) / 100.0);
+        }
+        let mut back = Vec::with_capacity(n / 100);
+        for r in 0..n / 100 {
+            c.query("BEGIN").unwrap();
+            c.query("SAVEPOINT s").unwrap();
+            for i in 0..100 {
+                c.query(&format!("put t {{k: \"b{r}-{i}\", n: {i}}}"))
+                    .unwrap();
+            }
+            let t = Instant::now();
+            c.query("ROLLBACK TO s").unwrap();
+            back.push(us(t));
+            c.query("COMMIT").unwrap();
+        }
         let mut reads = Vec::with_capacity(n);
         for i in 0..n {
             let t = Instant::now();
@@ -89,9 +121,11 @@ fn main() {
             reads.push(us(t));
         }
         println!(
-            "{name:<16}{:>9.1} us{:>24.1} us{:>13.1} us",
+            "{name:<16}{:>8.1} us{:>19.1} us{:>18.1} us{:>14.1} us{:>12.1} us",
             p50(lone),
             p50(held),
+            p50(nested),
+            p50(back),
             p50(reads)
         );
     }

@@ -1575,30 +1575,245 @@ fn read_only_and_serializable_transactions() {
     assert_eq!(names(&mut c), ["late"]);
 }
 
-/// Savepoints and two-phase commit are refused rather than read as the
-/// command they begin with: `ROLLBACK TO s` taken for `ROLLBACK` put back
-/// the whole transaction and went on outside one.
+/// `ROLLBACK TO` puts back the writes after its savepoint and nothing
+/// before it, and the transaction goes on; the savepoint stays, and the
+/// ones after it are over. `RELEASE` forgets a savepoint and the ones after
+/// it, and keeps their writes.
 #[test]
-fn savepoints_and_two_phase_commit_are_refused() {
+fn a_savepoint_puts_back_only_what_came_after_it() {
     let h = trust_server();
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
     c.simple("create collection t (name text)");
 
     c.simple("BEGIN");
     c.simple("put t {name: \"a\"}");
-    let r = c.simple("ROLLBACK TO SAVEPOINT s1");
-    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "0A000");
-    assert_eq!(status(&r), b'E', "the transaction failed rather than ended");
+    let r = c.simple("SAVEPOINT s1");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "SAVEPOINT");
+    assert_eq!(status(&r), b'T');
+    c.simple("put t {name: \"b\"}");
+    c.simple("SAVEPOINT s2");
+    c.simple("put t {name: \"c\"}");
+    let r = c.simple("ROLLBACK TO s2");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'T');
+    assert_eq!(names(&mut c), ["a", "b"]);
+    c.simple("put t {name: \"d\"}");
+    c.simple("ROLLBACK TO SAVEPOINT s1");
+    assert_eq!(names(&mut c), ["a"]);
+    // Taken back to again, as often as asked; the one after it is over.
+    c.simple("put t {name: \"e\"}");
+    c.simple("ROLLBACK TRANSACTION TO SAVEPOINT s1");
+    assert_eq!(names(&mut c), ["a"]);
+    let r = c.simple("RELEASE s2");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "3B001");
+    assert_eq!(status(&r), b'E');
+    c.simple("ROLLBACK TO s1");
+
+    // The extended protocol, as psycopg's nested transactions send it.
+    c.simple("put t {name: \"f\"}");
+    let r = c.extended("SAVEPOINT \"_pg3_1\"", &[], true);
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "SAVEPOINT");
+    c.extended("put t {name: $1}", &["g"], false);
+    let r = c.extended("RELEASE \"_pg3_1\"", &[], false);
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "RELEASE");
+    assert_eq!(status(&r), b'T');
+    c.extended("SAVEPOINT \"_pg3_1\"", &[], false);
+    c.extended("put t {name: $1}", &["h"], false);
+    c.extended("ROLLBACK TO \"_pg3_1\"", &[], false);
+    let r = c.extended("RELEASE \"_pg3_1\"", &[], false);
+    assert_eq!(status(&r), b'T');
+    // RELEASE kept the writes of the savepoints it forgot: `g` stays.
+    assert_eq!(names(&mut c), ["a", "f", "g"]);
+    other.send("get t count");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a read went past an open transaction"
+    );
+    let r = c.simple("COMMIT");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
+    assert_eq!(status(&r), b'I');
+    let r = other.until_ready();
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("3".to_string())]);
+    assert_eq!(names(&mut other), ["a", "f", "g"]);
+}
+
+/// A transaction that failed is taken back to a savepoint before the
+/// failure and goes on, as PostgreSQL's is: its block and its lock are kept
+/// meanwhile, since the writes before the savepoint are still to land.
+#[test]
+fn a_failed_transaction_is_taken_back_to_a_savepoint() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN");
+    c.simple("put t {name: \"a\"}");
+    c.simple("SAVEPOINT s");
+    c.simple("put t {name: \"b\"}");
+    let r = c.simple("put t [{name: \"c\"}, {name: 1}]");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "42804");
+    assert_eq!(status(&r), b'E');
+    for q in ["get t", "SAVEPOINT t", "RELEASE s"] {
+        let r = c.simple(q);
+        assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25P02", "{q}");
+    }
+    other.send("get t count");
+    assert!(
+        !answers_within(&mut other, 300),
+        "the failed transaction let go of what its savepoint keeps"
+    );
+    // A savepoint it does not have leaves it failed.
+    let r = c.simple("ROLLBACK TO nosuch");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "3B001");
+    assert_eq!(status(&r), b'E');
+    let r = c.simple("ROLLBACK TO s");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'T');
+    assert_eq!(names(&mut c), ["a"]);
+    c.simple("put t {name: \"d\"}");
+    c.simple("COMMIT");
+    let r = other.until_ready();
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("2".to_string())]);
+    assert_eq!(names(&mut other), ["a", "d"]);
+
+    // Failed again with nothing to go back to, it takes only its end, and
+    // a COMMIT puts it back.
+    c.simple("BEGIN");
+    c.simple("SAVEPOINT s");
+    c.simple("put t {name: \"e\"}");
+    c.simple("SAVEPOINT u");
+    c.simple("put t {name: 1}");
+    c.simple("ROLLBACK TO u");
+    c.simple("put t {name: 1}");
+    let r = c.simple("COMMIT");
+    assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(names(&mut other), ["a", "d"]);
+}
+
+/// A savepoint before a transaction's first write holds nothing: a failure
+/// after it lets the lock go at once, and taken back to, it lets the lock go
+/// and the transaction reads what others commit again.
+#[test]
+fn a_savepoint_before_the_first_write_lets_the_lock_go() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN");
+    c.simple("SAVEPOINT s");
+    c.simple("put t {name: \"a\"}");
+    other.send("put t {name: \"other\"}");
+    assert!(!answers_within(&mut other, 300));
+    c.simple("ROLLBACK TO s");
+    assert_eq!(
+        find(&other.until_ready(), b'C').unwrap().tag_text(),
+        "INSERT 0 1"
+    );
+    assert_eq!(names(&mut c), ["other"]);
+
+    c.simple("put t {name: \"b\"}");
+    let r = c.simple("put t {name: 1}");
+    assert_eq!(status(&r), b'E');
+    assert_eq!(
+        names(&mut other),
+        ["other"],
+        "the lock stayed with a failure nothing needs kept"
+    );
+    let r = c.simple("ROLLBACK TO s");
+    assert_eq!(status(&r), b'T');
+    c.simple("put t {name: \"c\"}");
+    c.simple("COMMIT");
+    assert_eq!(names(&mut other), ["other", "c"]);
+}
+
+/// Savepoints outside a transaction, and the names PostgreSQL resolves: the
+/// newest of a name, until it is released.
+#[test]
+fn savepoints_are_named_and_refused_as_in_postgresql() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    for q in ["SAVEPOINT s", "RELEASE s", "ROLLBACK TO s"] {
+        let r = c.simple(q);
+        assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25P01", "{q}");
+        assert_eq!(status(&r), b'I');
+    }
+
+    c.simple("BEGIN");
+    c.simple("SAVEPOINT a");
+    c.simple("put t {name: \"x\"}");
+    c.simple("SAVEPOINT A");
+    c.simple("put t {name: \"y\"}");
+    // Unquoted names fold to lower case: this is the second `a`.
+    c.simple("ROLLBACK TO a");
+    assert_eq!(names(&mut c), ["x"]);
+    c.simple("RELEASE a");
+    c.simple("ROLLBACK TO \"a\"");
+    assert!(names(&mut c).is_empty());
+    let r = c.simple("RELEASE \"A\"");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "3B001");
     c.simple("ROLLBACK");
-    for q in [
-        "SAVEPOINT s1",
-        "COMMIT PREPARED 'x'",
-        "PREPARE TRANSACTION 'x'",
-    ] {
+
+    // A schema change since a savepoint cannot be put back with it.
+    c.simple("BEGIN");
+    c.simple("SAVEPOINT s");
+    c.simple("create collection u (x int)");
+    c.simple("SAVEPOINT after");
+    c.simple("put u {x: 1}");
+    let r = c.simple("ROLLBACK TO after");
+    assert_eq!(status(&r), b'T');
+    let r = c.simple("ROLLBACK TO s");
+    let e = find(&r, b'E').unwrap();
+    assert_eq!(e.sqlstate().unwrap(), "0A000");
+    assert!(
+        e.message().unwrap().contains("1 schema change"),
+        "{:?}",
+        e.message()
+    );
+    assert_eq!(status(&r), b'E');
+    c.simple("ROLLBACK");
+
+    // Two-phase commit stays refused rather than read as what it begins
+    // with: `COMMIT PREPARED 'x'` committed the transaction open.
+    for q in ["COMMIT PREPARED 'x'", "PREPARE TRANSACTION 'x'"] {
         let r = c.simple(q);
         assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "0A000", "{q}");
     }
     assert!(names(&mut c).is_empty());
+}
+
+/// A serializable transaction keeps the lock through a failure and a
+/// ROLLBACK TO, even to a savepoint before its first write: what it read
+/// before the savepoint must not change under it.
+#[test]
+fn a_serializable_transaction_keeps_the_lock_through_a_rollback_to() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    c.simple("SAVEPOINT s");
+    assert!(names(&mut c).is_empty());
+    c.simple("put t {name: \"a\"}");
+    c.simple("put t {name: 1}");
+    other.send("put t {name: \"late\"}");
+    assert!(!answers_within(&mut other, 300));
+    let r = c.simple("ROLLBACK TO s");
+    assert_eq!(status(&r), b'T');
+    assert!(!answers_within(&mut other, 300));
+    assert!(names(&mut c).is_empty());
+    c.simple("COMMIT");
+    assert_eq!(
+        find(&other.until_ready(), b'C').unwrap().tag_text(),
+        "INSERT 0 1"
+    );
+    assert_eq!(names(&mut c), ["late"]);
 }
 
 /// `COMMIT AND CHAIN` lands the transaction and begins the next.
