@@ -615,7 +615,13 @@ and 0.35 -> 0.28 over f32, a build 3-10% faster, and
 exact search's bit for bit. The browser's module built a graph 4% slower
 four at once and grew 9 KB, and gathering the neighbours before measuring
 them one at a time still cost its `near` 7%, so everywhere but aarch64 the
-walk is as it was (`cfg`).
+walk is as it was (`cfg`). There the walk also asks for the next
+candidate's list and the fresh neighbours' vectors ahead of reading them
+(`prefetch`, a `prfm` hint): each read was a cache miss waited on after
+the one before, and a 100 000 x 128 build went 3.96-4.25 -> 3.58-3.80 s,
+`near` 0.10 -> 0.08 ms p50. The diversity heuristic measures a candidate
+against four chosen neighbours at once (`any_nearer`), 5 to 9% off a build
+at 768 dimensions. Neither changes a bit of the graph.
 
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
