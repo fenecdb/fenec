@@ -416,7 +416,10 @@ stops at a record cut short for its caller to judge.
 `snapshot`, `compact` and `checkpoint`, and by a server into its file's tail
 (below) — never on the write path. On open the
 version, dimension, precision and link bounds are validated, and the live nodes
-against the documents holding a vector; anything off means a silent full
+against the documents holding a vector -- one each, no two of one document,
+and counted by reading every document's field only when the nodes are fewer
+than the documents: the scan was 5.4 ms of a 36 ms open at 100 000 x 128,
+where every document held one. Anything off means a silent full
 rebuild. A corrupt graph can therefore never lose data. It is restored where
 its last record is -- a checkpoint's image holds one after each collection's
 data; `last_graphs` walks the record heads for it first, since restoring each

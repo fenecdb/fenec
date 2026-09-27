@@ -3669,7 +3669,11 @@ impl VectorIndex {
             } else {
                 self.data.push(&raw, unit);
             }
-            self.by_doc.insert(doc, node as u32);
+            // Two live nodes of one document would count as two of the
+            // documents the engine holds this graph to.
+            if self.by_doc.insert(doc, node as u32).is_some() {
+                return None;
+            }
         }
         if BATCH_NORMS {
             flush_units(&mut self.data, &mut batch, dim, unit);
@@ -4126,6 +4130,20 @@ mod tests {
                     VectorIndex::restore_graph(cut, dim, prec, lookup).is_none(),
                     "{what}: cut short"
                 );
+                // Two live nodes of one document: as many nodes as
+                // documents, and one of them left out of the graph.
+                let mut twice = VectorIndex::restore_graph(&flat, dim, prec, lookup).expect(&what);
+                let live: Vec<usize> = (0..twice.doc_ids.len())
+                    .filter(|&n| !twice.is_deleted(n as u32))
+                    .take(2)
+                    .collect();
+                twice.doc_ids[live[1]] = twice.doc_ids[live[0]];
+                for bytes in [twice.serialize(kept), twice.serialize_varint(kept)] {
+                    assert!(
+                        VectorIndex::restore_graph(&bytes, dim, prec, lookup).is_none(),
+                        "{what}: a document twice"
+                    );
+                }
                 let mut bad = new;
                 bad.l0[0] = bad.doc_ids.len() as u32;
                 let bad = bad.serialize(kept);
