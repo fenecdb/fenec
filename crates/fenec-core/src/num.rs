@@ -7,18 +7,22 @@
 //! random enough that neither gzip nor brotli takes anything off it. The
 //! algorithm around it is only 469 bytes; the table *is* the cost.
 //!
-//! So the table goes and the two table-free paths stay:
+//! So the table goes and three table-free paths stay:
 //!
 //! * **Fast.** When the mantissa fits in 53 bits and the decimal exponent is
 //!   within ±22, both `m` and `10^e` are exact `f64`s, so one IEEE multiply
 //!   or divide is already correctly rounded (Clinger). That is nearly every
-//!   number anyone writes, an embedding component included.
+//!   number a person writes.
+//! * **Quotient.** Up to 19 digits over `10^1` to `10^25` are a whole number
+//!   divided by `5^n`, to a quotient of 55 bits and a remainder that round
+//!   exactly (`divided`). That is what JavaScript writes: seventeen digits
+//!   for most floats, every `f32` it widens among them, past Clinger's 53.
 //! * **Slow.** Otherwise the digits are shifted as a decimal string until the
 //!   value sits in `[1/2, 1)`, and the mantissa bits are read off one at a
 //!   time. This is what the standard library falls back to as well, and it
 //!   measured 2 854 bytes there -- the part worth keeping.
 //!
-//! Both paths are correctly rounded, and the tests check exactly that against
+//! Every path is correctly rounded, and the tests check exactly that against
 //! `str::parse::<f64>()`: on the host the reference costs nothing, and only
 //! the wasm build pays for the table it replaces.
 
@@ -181,8 +185,9 @@ fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
         }
     }
     // Seventeen digits, as JavaScript writes most floats and every `f32`
-    // it widens, are past the 53 bits Clinger's path takes and went the
-    // decimal way below: 40% of the time a page of vectors took to read.
+    // it widens, are past the 53 bits Clinger's path takes, and went the
+    // decimal way below: a page of 200 768-dim vectors took 74.6 ms to read
+    // in the browser module, and takes 51.9 this way.
     if !truncated && (1..STEP as i32).contains(&-e10) {
         return sign(neg, divided(mant, (-e10) as usize));
     }

@@ -571,6 +571,19 @@ emulates (`__multi3`), and they go out in one `push_str` rather than a
 27.7 -> 10.5 ms in the browser module, and a `near` answering ten 128-dim
 rows 0.373 -> 0.226 ms (`make wasm-speed`), for 37 bytes brotli.
 
+**A number is read three ways, each exact.** `num::parse_f64` takes
+Clinger's path where the digits fit in 53 bits, divides a whole number of
+up to 19 digits by `5^n` for `10^-1` to `10^-25` (`divided`; `div128`
+divides in two 32-bit digits, since a `u128` division took the compiler's
+own, 1.4 KB, into the browser module), and shifts decimal digits
+otherwise. JavaScript writes most floats, every `f32` it widens among
+them, with seventeen digits, past Clinger's 53 bits. A page of 200
+768-dim vectors took 74.6 ms to read in the browser module; divided, 51.9;
+with the JSON reader walking the text's bytes rather than collecting it
+into `char`s first, 23.7; read where the page left it rather than copied
+(`str_from`), 21.9. 10 000 128-dim vectors went in with their graph in
+1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
+
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
 vector, `quant=bit` the signs of its distance from a centre (cosine only). A
