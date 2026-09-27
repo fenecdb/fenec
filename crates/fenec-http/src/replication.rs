@@ -352,6 +352,9 @@ impl Sink for Tee {
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.file.append(bytes)
     }
+    fn append_deferred(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.file.append_deferred(bytes)
+    }
     fn sync_existing(&mut self) -> fenec_core::error::Result<()> {
         self.file.sync_existing()
     }
