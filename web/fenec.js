@@ -141,7 +141,9 @@ export class Fenec {
    * @returns {{kind:string, ...}} `{columns, rows}` for row results
    */
   run(sql, params = []) {
-    const [json, vectors] = vectorsApart(params);
+    // A module from before vectors went over as f32s takes five arguments,
+    // and would read the JSON's `null` where each vector goes.
+    const [json, vectors] = this.#wasm.fenec_query.length > 5 ? vectorsApart(params) : [params, null];
     const [sp, sl] = this.#write(sql);
     const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
