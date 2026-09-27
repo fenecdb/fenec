@@ -465,9 +465,18 @@ fn parse_string(b: &[char], i: &mut usize) -> Result<String> {
 /// imports come through this entry. A nested object is still rejected,
 /// because it cannot be a field value.
 pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
+    parse_object_listing(src, "")
+}
+
+/// An object as [`parse_object`] reads one, but the member named `list` read
+/// as [`parse_params`] reads a list: each element keeps its type, where an
+/// array of numbers read as a value is a vector. A query's parameters are
+/// that list -- read as a vector, `[123456789]` handed the query the `f32`
+/// 123456792, and `[19.99]` 19.989999771118164.
+pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
     let b: Vec<char> = src.trim().chars().collect();
     let mut i = 0;
-    let out = parse_object_at(&b, &mut i)?;
+    let out = parse_object_at(&b, &mut i, list)?;
     skip_ws(&b, &mut i);
     if i != b.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -490,7 +499,7 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
                     i += 1;
                     break;
                 }
-                docs.push(parse_object_at(&b, &mut i)?);
+                docs.push(parse_object_at(&b, &mut i, "")?);
                 skip_ws(&b, &mut i);
                 match b.get(i) {
                     Some(',') => i += 1,
@@ -503,7 +512,7 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
             }
             docs
         }
-        Some('{') => vec![parse_object_at(&b, &mut i)?],
+        Some('{') => vec![parse_object_at(&b, &mut i, "")?],
         _ => {
             return Err(Error::Query(
                 "expected a JSON object or array of objects".into(),
@@ -517,7 +526,7 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
     Ok(out)
 }
 
-fn parse_object_at(b: &[char], i: &mut usize) -> Result<Vec<(String, Value)>> {
+fn parse_object_at(b: &[char], i: &mut usize, list: &str) -> Result<Vec<(String, Value)>> {
     skip_ws(b, i);
     if b.get(*i) != Some(&'{') {
         return Err(Error::Query("expected a JSON object".into()));
@@ -541,7 +550,11 @@ fn parse_object_at(b: &[char], i: &mut usize) -> Result<Vec<(String, Value)>> {
             return Err(Error::Query("expected `:` in the JSON object".into()));
         }
         *i += 1;
-        let value = parse_value(b, i)?;
+        skip_ws(b, i);
+        let value = match key == list && b.get(*i) == Some(&'[') {
+            true => Value::List(parse_array(b, i)?),
+            false => parse_value(b, i)?,
+        };
         // A repeated key is not silently overwritten: which one wins depends
         // on the parser, and that is an invisible difference.
         if out.iter().any(|(k, _)| k == &key) {
@@ -655,6 +668,27 @@ mod tests {
         assert!(parse_object("[]").is_err());
         assert!(parse_documents("5").is_err());
         assert!(parse_object(r#"{"a": 1} x"#).is_err());
+    }
+
+    /// A query body's parameters are a list whose elements keep their types.
+    #[test]
+    fn a_listed_member_keeps_its_numbers() {
+        let body = r#"{"params": [123456789, 19.99], "v": [1, 2]}"#;
+        let o = parse_object_listing(body, "params").unwrap();
+        assert_eq!(
+            o[0].1,
+            Value::List(vec![Value::Int(123_456_789), Value::Float(19.99)])
+        );
+        // Another member's array of numbers is still a vector.
+        assert_eq!(o[1].1, Value::Vector(vec![1.0, 2.0]));
+        // A vector parameter is an array inside the list.
+        let o = parse_object_listing(r#"{"params": [[0.1, 0.2], 7]}"#, "params").unwrap();
+        assert_eq!(
+            o[0].1,
+            Value::List(vec![Value::Vector(vec![0.1, 0.2]), Value::Int(7)])
+        );
+        let o = parse_object_listing(r#"{"params": []}"#, "params").unwrap();
+        assert_eq!(o[0].1, Value::List(vec![]));
     }
 
     #[test]
