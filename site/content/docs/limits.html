@@ -94,10 +94,11 @@ and text indexes, the graph, and the writes since the open.</p>
     It takes longer and holds a ninth of the memory. A
     <code>checkpoint</code> is the same path with the dead records kept.</li>
   <li><b>Open cost is proportional to data size, not constant.</b> The records
-    are walked to build the offset index and the indexes are built from the
-    documents, mapped or not. 100 000 × 128 with the graph in the file takes
-    about 31 ms; a process that runs a single vector query is done no sooner
-    than with SQLite.</li>
+    are walked to build the offset index and the graph is restored, mapped or
+    not; the hash, text, ordered and sparse indexes are built from the
+    documents by the first query that reads each. 100 000 × 128 with the graph
+    in the file opens in about 23 ms, which a single vector query makes up
+    against SQLite's 30 ms scan.</li>
 </ul>
 
 <p>The vector arena is the largest item: one million 768-dimension vectors is
@@ -211,11 +212,12 @@ so a node that is down takes its tenants with it.</p>
     but very small collections fall to the serial path below 1024 vectors.</li>
   <li>The build is parallel within a batch, and because writing links is serial
     the speed-up is not linear in core count: about 1.9× on eight cores.</li>
-  <li><b>Ordered indexes are rebuilt on open and cost on write.</b>
-    <code>@sorted</code> keeps about 20 bytes a row for a number, plus the
-    text for a <code>text</code> field, and none of it is in the file: two
-    ordered indexes over a million rows added about 40 ms to an open, and took
-    a bulk load from 0.52 s to 0.88 s. A key that grows with the id, a
+  <li><b>Ordered indexes are rebuilt from the documents and cost on
+    write.</b> <code>@sorted</code> keeps about 20 bytes a row for a number,
+    plus the text for a <code>text</code> field, and none of it is in the
+    file: two ordered indexes over a million rows took about 40 ms to build,
+    which the first query reading each after an open pays, and took a bulk
+    load from 0.52 s to 0.88 s. A key that grows with the id, a
     creation time, is appended; a random one is inserted into a sorted run of
     at most 512 entries.</li>
   <li>File writes are buffered. If the process crashes before

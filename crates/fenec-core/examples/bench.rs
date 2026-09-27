@@ -245,7 +245,7 @@ fn main() {
     db2.load(&image).unwrap();
     let reload = t.elapsed();
     println!(
-        "image      {:.1} MB  snapshot {:.2?}  reopen {:.2?} (index rebuild included)",
+        "image      {:.1} MB  snapshot {:.2?}  reopen {:.2?} (the graph validated and restored)",
         image.len() as f64 / 1e6,
         snap,
         reload

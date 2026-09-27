@@ -509,8 +509,8 @@ impl TextIndex {
     /// at ~1.5x the bytes it needs -- 3.8 MB of the 13.0 MB SciFact index.
     /// That slack is the price of cheap appends and it is worth paying while
     /// documents are still arriving; it is not worth paying afterwards.
-    /// Called where the index is known to be complete: a rebuild on open, and
-    /// `create index`.
+    /// Called where the index is known to be complete: its build from the
+    /// documents, and `create index`.
     pub fn shrink_to_fit(&mut self) {
         self.heap = 0;
         for (term, list) in self.postings.iter_mut() {

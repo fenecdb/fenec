@@ -471,8 +471,9 @@ than gathering and sorting that many ids.</p>
   <p>The cost is paid on write and in memory: about 20 bytes a row for a
   number, plus the text for <code>text</code>, and an insert into a sorted
   run. Over a million rows two ordered indexes took a bulk load from 0.52 s
-  to 0.88 s, and the index is rebuilt from the documents on open, like the
-  hash and text indexes — it is never written to the file.</p>
+  to 0.88 s, and the index is built from the documents by the first query
+  that reads it after an open, like the hash and text indexes — it is never
+  written to the file.</p>
 </div>
 
 <h2 id="collation">Collation</h2>

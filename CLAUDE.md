@@ -588,8 +588,8 @@ walk is as it was (`cfg`).
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 136.3 KB
-brotli with all four, 104.4 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 137.1 KB
+brotli with all four, 104.9 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -748,7 +748,8 @@ that matches almost nothing costs 1.25x the scan rather than 2x in random reads.
 The structure is a sorted `Vec` of chunks of at most 512 entries, not a
 `BTreeSet`, which made the browser module 75 KB larger; `tests/sorted.rs` checks
 every filter, order and page against a twin collection without the index. It is
-derived data like the hash and text indexes: built on open, never in the file.
+derived data like the hash and text indexes: built when a statement first reads
+it after an open (below), never in the file.
 
 **`collate und` and `collate tr` are ICU's orders, a query's or a field's.**
 The weights are ICU's own for every assigned code point --
@@ -875,12 +876,28 @@ kind of its own (7), as a quantized graph is, so a binary that knows no
 FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
-builds an inverted index that is rebuilt from the documents on open — 27 µs per
-document against the HNSW graph's ~44 µs, and the rebuild pass already reads
-every document for the hash indexes. Nothing about it reaches the file, so
-there is no validation path and no stale-index case to handle. It is shrunk to
-fit where it is known complete (rebuild, `create index`); live ingest keeps
-`Vec` growth slack.
+builds an inverted index from the documents the first time a statement reads it
+after an open — 27 µs per document against the HNSW graph's ~44 µs. Nothing
+about it reaches the file, so there is no validation path and no stale-index
+case to handle. It is shrunk to fit where it is known complete (its build,
+`create index`); live ingest keeps `Vec` growth slack.
+
+**An open builds no hash, text, ordered or sparse index.** Each is a
+`Derived` -- a `OnceLock` of the index or of the error its build met -- which
+an open leaves empty and the first statement that reads it fills from the
+documents, under the read lock too, a second reader waiting for the first
+one's build (`Collection::hash`, `text`, `sorted_index`, `sparse_index`). A
+write skips an unbuilt one, since its build reads the documents as they stand
+then; a block undone after a read built one takes its writes back out as it
+does from any other. An ordered index over a collated field is built at the
+open still: in the browser a comparison meeting a script whose chunk it lacks
+has the load refused and run again with the chunk, and one built by a read
+would keep the order it had without it. `stats` and `memory_bytes` count
+what is built -- counted by building, every metrics scrape would build them
+all. With one `@hash` field, 100 000 x 128 opens in 21.9 ms against 31.0,
+and the browser module loads 20 000 x 128 with a hash, an ordered and a text
+index in 19.0 ms against 41.8; the first read of each pays its build. It
+cost the module 0.7 KB brotli, most of it a builder and a cell a kind.
 
 **`rerank` deliberately uses no index.** `match ... rerank` takes candidates
 from the inverted index and reorders them by exact distance over vectors read

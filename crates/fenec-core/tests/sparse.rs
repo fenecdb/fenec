@@ -272,6 +272,7 @@ fn an_index_built_after_the_fact_and_beside_the_database_agrees() {
             .unwrap()
             .sparse_index("s")
             .unwrap()
+            .unwrap()
             .len(),
         600
     );

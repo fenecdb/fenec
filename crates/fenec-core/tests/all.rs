@@ -9,6 +9,7 @@ mod blocks;
 mod changes;
 mod collate;
 mod crash;
+mod derived;
 mod explain;
 mod filtered;
 mod fuse;

@@ -34,7 +34,8 @@ fn sessions(index: &str) -> Database {
 }
 
 fn held(db: &Database) -> usize {
-    db.collection("s").unwrap().hashes["token"].memory_bytes()
+    let c = db.collection("s").unwrap();
+    c.hash("token").unwrap().unwrap().memory_bytes()
 }
 
 /// A `@hash` index is in the count: two databases that differ by the index
@@ -56,7 +57,10 @@ fn a_hash_index_is_counted() {
 #[test]
 fn a_bucket_goes_with_its_last_document() {
     let mut db = sessions("@hash");
-    let keys = |db: &Database| db.collection("s").unwrap().hashes["token"].len();
+    let keys = |db: &Database| {
+        let c = db.collection("s").unwrap();
+        c.hash("token").unwrap().unwrap().len()
+    };
     for round in 0..3 {
         for id in 1..=2000 {
             exec(
