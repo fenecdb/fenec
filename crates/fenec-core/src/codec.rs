@@ -108,6 +108,16 @@ pub fn put_uvarint(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
+/// Little-endian `f32`s, as a vector's are written: the store's, and those
+/// the browser module is handed beside a query's JSON.
+pub fn f32s(raw: &[u8]) -> Vec<f32> {
+    let mut v = Vec::with_capacity(raw.len() / 4);
+    for chunk in raw.as_chunks::<4>().0 {
+        v.push(f32::from_le_bytes(*chunk));
+    }
+    v
+}
+
 pub fn get_uvarint(buf: &[u8], pos: &mut usize) -> Result<u64> {
     let mut result: u64 = 0;
     let mut shift = 0;
@@ -250,12 +260,7 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
         }
         TAG_VECTOR => {
             let n = get_uvarint(buf, pos)? as usize;
-            let raw = take(buf, pos, n * 4)?;
-            let mut v = Vec::with_capacity(n);
-            for chunk in raw.as_chunks::<4>().0 {
-                v.push(f32::from_le_bytes(*chunk));
-            }
-            Ok(Value::Vector(v))
+            Ok(Value::Vector(f32s(take(buf, pos, n * 4)?)))
         }
         TAG_VECTOR_F16 => {
             let n = get_uvarint(buf, pos)? as usize;

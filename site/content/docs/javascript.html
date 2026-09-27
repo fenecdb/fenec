@@ -281,6 +281,13 @@ identifier rule and anything that does not fit errors out.</p>
 // get articles where title = $1     ← a value, not text
 </pre>
 
+<p>A parameter that is a vector — a <code>Float32Array</code>, or any array
+of finite numbers, which the module reads as a vector either way — goes into
+the module as its <code>f32</code>s beside the JSON rather than as text:
+200 768-dim vectors are put in 4.4 ms, against 21.9 written out as digits
+and read back. The vector stored is the same, <code>-0</code> as
+<code>0</code> as JSON writes it; over HTTP a parameter is JSON.</p>
+
 <h3>Independent of the transport</h3>
 
 <p><code>from()</code> builds a query on its own and <code>bind()</code> plugs
