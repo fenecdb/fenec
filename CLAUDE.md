@@ -948,7 +948,7 @@ FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
 builds an inverted index from the documents the first time a statement reads it
-after an open — 27 µs per document against the HNSW graph's ~44 µs. Nothing
+after an open — 16 µs per document against the HNSW graph's ~44 µs. Nothing
 about it reaches the file, so there is no validation path and no stale-index
 case to handle. It is shrunk to fit where it is known complete (its build,
 `create index`); live ingest keeps `Vec` growth slack.
