@@ -444,11 +444,12 @@ which an older binary does not know and rebuilds from -- it restored a record in
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
-leaves at most 10 000 vectors to link, 3.0 s with `near` at 1.53 ms p50
-meanwhile, where every vector waited 19.2 s in the same run with `near` at
-the exact scan's 10.32 ms; the ten records were 35.2 MB of a 370.3 MB file
-until the next checkpoint, and each held the read lock 15.0 ms p50, 27.1 ms
-at most (`make reopen-bench`).
+leaves at most 10 000 vectors to link, 2.6 s with `near` at 1.56 ms p50
+meanwhile, where every vector waited 19.1 s in the same run with `near` at
+the exact scan's 11.96 ms; the ten records were 33.8 MB of a 372.7 MB file
+until the next checkpoint, and each held the read lock 36 to 39 ms p50, 47
+to 72 at most -- laid out as varints, 22 and 37 to 41 (`make
+reopen-bench`).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
@@ -826,7 +827,7 @@ FnMut`: generic, it was compiled six times, 8 KB of the browser module.
 
 **The text index is derived data as well, but it is not persisted.** `@text`
 builds an inverted index from the documents the first time a statement reads it
-after an open — 16 µs per document against the HNSW graph's ~44 µs. Nothing
+after an open — 16 µs per document against the HNSW graph's ~34 µs. Nothing
 about it reaches the file, so there is no validation path and no stale-index
 case to handle. It is shrunk to fit where it is known complete (its build,
 `create index`); live ingest keeps `Vec` growth slack.

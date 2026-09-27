@@ -97,7 +97,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
       same data with the same index settings. Watch them run.</p>
 
     <div class="race">
-      <div class="lane fenec" data-ms="0.13" data-value="0.13" data-unit=" ms">
+      <div class="lane fenec" data-ms="0.091" data-value="0.091" data-unit=" ms">
         <div class="lane-name"><b>fenecdb</b>hnsw · 1×</div>
         <div class="lane-track">
           <div class="lane-fill"></div>
@@ -105,14 +105,14 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <div class="lane-time idle">—</div>
       </div>
       <div class="lane" data-ms="1.04" data-value="1.04" data-unit=" ms">
-        <div class="lane-name"><b>pgvector</b>hnsw · 8.2× slower</div>
+        <div class="lane-name"><b>pgvector</b>hnsw · 11.4× slower</div>
         <div class="lane-track">
           <div class="lane-fill"></div>
         </div>
         <div class="lane-time idle">—</div>
       </div>
       <div class="lane" data-ms="30.2" data-value="30.2" data-unit=" ms">
-        <div class="lane-name"><b>SQLite</b>full scan · 240× slower</div>
+        <div class="lane-name"><b>SQLite</b>full scan · 330× slower</div>
         <div class="lane-track">
           <div class="lane-fill"></div>
         </div>
@@ -216,10 +216,10 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         </thead>
         <tbody>
           <tr><td>data write, no index</td><td class="n"><b>936 k rows/s</b></td><td class="n">430 k/s</td><td class="n">66 k/s</td></tr>
-          <tr><td>index build</td><td class="n"><b>3.8 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">8.6 s HNSW</td></tr>
+          <tr><td>index build</td><td class="n"><b>3.4 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">8.6 s HNSW</td></tr>
           <tr><td>disk size</td><td class="n"><b>59.3 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
-          <tr><td>scalar filter, indexed</td><td class="n"><b>4.6 ms</b></td><td class="n">14.1 ms</td><td class="n">7.3 ms</td></tr>
-          <tr><td>vector top-10, exact</td><td class="n"><b>3.3 ms</b></td><td class="n">30.2 ms</td><td class="n">15.6 ms</td></tr>
+          <tr><td>scalar filter, indexed</td><td class="n"><b>1.25 ms</b></td><td class="n">14.1 ms</td><td class="n">7.3 ms</td></tr>
+          <tr><td>vector top-10, exact</td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td><td class="n">15.6 ms</td></tr>
           <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n">100%</td></tr>
           <tr><td>reopen</td><td class="n">9 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server stays open</td></tr>
         </tbody>
@@ -232,14 +232,14 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <p>SQLite reopens in 0.9 ms because it loads nothing and reads pages
           on demand. fenecdb pulls the vector arena into memory and validates
           the graph, which takes 9 ms. That is the same coin, other side: it
-          is why the queries are 3–240× faster. The break-even is one vector
+          is why the queries are 10–330× faster. The break-even is one vector
           query.</p>
       </div>
       <div>
         <h3>How to read the rest</h3>
         <p>SQLite's 0.03 s is a single-column B-tree, not an ANN index. The cost
           does not vanish, it moves to query time. fenecdb builds the HNSW
-          index in 3.8 s against pgvector's 8.6 s on the same cores. Most of
+          index in 3.4 s against pgvector's 8.6 s on the same cores. Most of
           PostgreSQL's disk figure is its HNSW index, which keeps a second copy
           of every vector; fenecdb's graph stores only the links.</p>
       </div>
