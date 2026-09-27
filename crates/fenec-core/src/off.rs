@@ -13,7 +13,8 @@
     dead_code,
     unused_variables,
     clippy::needless_lifetimes,
-    clippy::new_without_default
+    clippy::new_without_default,
+    clippy::ptr_arg
 )]
 
 use crate::collate::Collation;
@@ -120,7 +121,7 @@ impl VectorIndex {
     pub fn serialize_graph(&self) -> Vec<u8> {
         match self.never {}
     }
-    pub fn serialize_graph_kept(&self) -> Vec<u8> {
+    pub fn serialize_graph_into(&self, kept: bool, out: &mut Vec<u8>) {
         match self.never {}
     }
     /// A graph in the file is derived data: without the index to restore it

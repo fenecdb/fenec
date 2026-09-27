@@ -398,6 +398,12 @@ fn graph_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     get_uvarint(bytes, pos).ok()
 }
 
+/// The nodes whose lists a thread writes at a time into a graph record:
+/// small enough that a slow core takes few, the M1's efficiency cores as
+/// `spread` says, large enough that a part's bytes are worth a copy.
+#[cfg(not(target_family = "wasm"))]
+const LIST_PART: usize = 4096;
+
 /// The bytes a link takes in a flat graph record of `nodes` nodes.
 fn link_width(nodes: usize) -> usize {
     if nodes <= 1 << 16 {
@@ -427,7 +433,10 @@ fn put_links(out: &mut Vec<u8>, sorted: &[u64], lw: usize) {
     let Some((&first, rest)) = sorted.split_first() else {
         return;
     };
-    out.extend_from_slice(&first.to_le_bytes()[..lw]);
+    // Room for every link whole, eight bytes, before it is cut to its
+    // width (`put_le`).
+    out.reserve(9 + 8 * rest.len());
+    put_le(out, first, lw);
     if rest.is_empty() {
         return;
     }
@@ -441,9 +450,19 @@ fn put_links(out: &mut Vec<u8>, sorted: &[u64], lw: usize) {
     out.push(w as u8);
     let mut prev = first;
     for &x in rest {
-        out.extend_from_slice(&x.wrapping_sub(prev).to_le_bytes()[..w]);
+        put_le(out, x.wrapping_sub(prev), w);
         prev = x;
     }
+}
+
+/// `v`'s first `w` bytes, little-endian: all eight written, then cut. A
+/// copy of a width known only as the record is written was a call to
+/// `memcpy` a link: 110 000 nodes' record took 23.7 ms that way, 20.3 this.
+#[inline(always)]
+fn put_le(out: &mut Vec<u8>, v: u64, w: usize) {
+    let at = out.len();
+    out.extend_from_slice(&v.to_le_bytes());
+    out.truncate(at + w);
 }
 
 /// A node's flag in a graph record: linked and live, a tombstone, or live
@@ -3539,23 +3558,30 @@ impl VectorIndex {
         self.serialize(false)
     }
 
-    /// [`Self::serialize_graph`] for a record in the file's tail
-    /// ([`GRAPH_VERSION_KEPT`]).
-    pub fn serialize_graph_kept(&self) -> Vec<u8> {
-        self.serialize(true)
+    fn serialize(&self, kept: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.serialize_into(kept, &mut out);
+        out
     }
 
-    fn serialize(&self, kept: bool) -> Vec<u8> {
+    /// [`Self::serialize_graph`] appended to `out`, as the record it lands
+    /// in: an image's, or with `kept` one in the file's tail
+    /// ([`GRAPH_VERSION_KEPT`]), which a server writes under the read lock.
+    pub fn serialize_graph_into(&self, kept: bool, out: &mut Vec<u8>) {
+        self.serialize_into(kept, out)
+    }
+
+    fn serialize_into(&self, kept: bool, out: &mut Vec<u8>) {
         let n = self.doc_ids.len();
-        let mut out = Vec::with_capacity(64 + n * (12 + 4 * self.m0));
+        out.reserve(64 + n * (12 + 4 * self.m0));
         out.push(match kept {
             true => GRAPH_VERSION_FLAT_KEPT,
             false => GRAPH_VERSION_FLAT,
         });
-        self.write_head(&mut out, true);
-        put_uvarint(&mut out, n as u64);
-        put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
-        put_uvarint(&mut out, self.max_level as u64);
+        self.write_head(out, true);
+        put_uvarint(out, n as u64);
+        put_uvarint(out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
+        put_uvarint(out, self.max_level as u64);
         // A list's first link is as many bytes as the node count needs, its
         // steps as many as its widest, a document id 4 where every one fits:
         // links and ids written 4 and 8 whatever, a 100 000 x 128 graph took
@@ -3572,7 +3598,7 @@ impl VectorIndex {
             }
         }
         for &doc in &self.doc_ids {
-            out.extend_from_slice(&doc.to_le_bytes()[..dw]);
+            put_le(out, doc, dw);
         }
         for node in 0..n {
             out.push(match self.deleted[node] {
@@ -3585,33 +3611,89 @@ impl VectorIndex {
         for &k in &self.l0_len {
             out.extend_from_slice(&k.to_le_bytes());
         }
-        // A list is a set, written sorted, as the varint layout wrote it:
-        // as `u64`s, whose sort the ids take anyway -- a `u32` sort of its
-        // own was 2 KB of the browser module.
-        let mut sorted: Vec<u64> = Vec::with_capacity(self.m0);
-        let mut links = |out: &mut Vec<u8>, nbs: &[u32]| {
-            sorted.clear();
-            sorted.extend(nbs.iter().map(|&nb| nb as u64));
-            sorted.sort_unstable();
-            put_links(out, &sorted, lw);
-        };
-        for node in 0..n as u32 {
-            links(&mut out, self.neighbors(node, 0));
-        }
-        for node in 0..n as u32 {
-            for l in 1..=self.node_levels(node) {
-                let nbs = self.neighbors(node, l);
-                out.extend_from_slice(&(nbs.len() as u16).to_le_bytes());
-                links(&mut out, nbs);
-            }
-        }
+        self.put_all_lists(n, lw, out);
         // A tombstone still routes searches, but its document may be gone
         // or hold another vector by now: the vector it was linked with
         // travels with it.
         for node in (0..n as u32).filter(|&v| self.is_deleted(v)) {
-            self.data.write_stored(node, self.dim, &mut out);
+            self.data.write_stored(node, self.dim, out);
         }
-        out
+    }
+
+    /// The lists of `nodes`, each as [`put_links`] writes it: level 0's with
+    /// `level0`, the ones above otherwise, each behind its length. A list
+    /// is a set, written sorted, as the varint layout wrote it: as `u64`s,
+    /// whose sort the ids take anyway -- a `u32` sort of its own was 2 KB of
+    /// the browser module.
+    fn put_lists(
+        &self,
+        nodes: std::ops::Range<u32>,
+        level0: bool,
+        lw: usize,
+        sorted: &mut Vec<u64>,
+        out: &mut Vec<u8>,
+    ) {
+        let mut links = |out: &mut Vec<u8>, nbs: &[u32]| {
+            sorted.clear();
+            sorted.extend(nbs.iter().map(|&nb| nb as u64));
+            sorted.sort_unstable();
+            put_links(out, sorted, lw);
+        };
+        for node in nodes {
+            if level0 {
+                links(out, self.neighbors(node, 0));
+                continue;
+            }
+            for l in 1..=self.node_levels(node) {
+                let nbs = self.neighbors(node, l);
+                out.extend_from_slice(&(nbs.len() as u16).to_le_bytes());
+                links(out, nbs);
+            }
+        }
+    }
+
+    /// Every node's level-0 list, then every list above, in node order.
+    #[cfg(target_family = "wasm")]
+    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) {
+        let mut sorted = Vec::with_capacity(self.m0);
+        self.put_lists(0..n as u32, true, lw, &mut sorted, out);
+        self.put_lists(0..n as u32, false, lw, &mut sorted, out);
+    }
+
+    /// Every node's level-0 list, then every list above, in node order:
+    /// natively [`LIST_PART`] nodes' lists at a time on every core, each
+    /// part's bytes appended in order. A server writes a graph it keeps
+    /// under the read lock, which every write waits out, and the lists are
+    /// most of the record: 110 000 nodes' took 20.3 ms in turn, and take
+    /// 6.0 on an M1's eight cores.
+    #[cfg(not(target_family = "wasm"))]
+    fn put_all_lists(&self, n: usize, lw: usize, out: &mut Vec<u8>) {
+        let parts = n.div_ceil(LIST_PART);
+        let threads = Self::threads().min(parts);
+        if threads < 2 {
+            let mut sorted = Vec::with_capacity(self.m0);
+            self.put_lists(0..n as u32, true, lw, &mut sorted, out);
+            self.put_lists(0..n as u32, false, lw, &mut sorted, out);
+            return;
+        }
+        let mut states: Vec<Vec<u64>> = (0..threads).map(|_| Vec::with_capacity(self.m0)).collect();
+        let mut done: Vec<(Vec<u8>, Vec<u8>)> = vec![Default::default(); parts];
+        let written = spread(parts, &mut states, |sorted, p| {
+            let nodes = (p * LIST_PART) as u32..((p + 1) * LIST_PART).min(n) as u32;
+            let (mut level0, mut above) = (Vec::new(), Vec::new());
+            self.put_lists(nodes.clone(), true, lw, sorted, &mut level0);
+            self.put_lists(nodes, false, lw, sorted, &mut above);
+            (p, level0, above)
+        });
+        for (p, level0, above) in written {
+            done[p] = (level0, above);
+        }
+        for (level0, _) in &done {
+            out.extend_from_slice(level0);
+        }
+        for (_, above) in &done {
+            out.extend_from_slice(above);
+        }
     }
 
     /// What every layout of a graph record starts with after its version:
@@ -4593,6 +4675,36 @@ mod tests {
                 .collect();
             assert_eq!(ra, rb, "the parallel build is not deterministic");
         }
+    }
+
+    /// A graph record's lists written a part at a time on every core are
+    /// the lists written in turn, byte for byte.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn lists_written_in_parts_are_the_lists_written_in_turn() {
+        // Past two parts, the last cut short; the levels above come behind
+        // level 0's, each part's in node order.
+        let n = 2 * LIST_PART + 1_000;
+        let mut rng = Rng(29);
+        let items: Vec<(u64, Vec<f32>)> = (0..n as u64)
+            .map(|i| (i, (0..4).map(|_| rng.next_f32()).collect()))
+            .collect();
+        // Narrow lists and a narrow beam: the test runs unoptimised.
+        let spec = VectorIndexSpec {
+            m: 4,
+            ef_construction: 16,
+            ..spec()
+        };
+        let mut ix = VectorIndex::new(4, spec);
+        ix.insert_batch(&items);
+        let lw = link_width(n);
+        let mut parts = Vec::new();
+        ix.put_all_lists(n, lw, &mut parts);
+        let (mut turn, mut sorted) = (Vec::new(), Vec::new());
+        ix.put_lists(0..n as u32, true, lw, &mut sorted, &mut turn);
+        ix.put_lists(0..n as u32, false, lw, &mut sorted, &mut turn);
+        assert_eq!(parts.len(), turn.len());
+        assert!(parts == turn, "the lists written in parts differ");
     }
 
     /// The lists a batch joins are pruned in parallel, grouped by list, and

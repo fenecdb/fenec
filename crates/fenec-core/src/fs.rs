@@ -199,6 +199,13 @@ impl Sink for FileSink {
         }
         Ok(())
     }
+    /// Pending until the durability runs, however large: written here, a
+    /// kept graph's record waited out any fsync under way as well.
+    fn append_deferred(&mut self, bytes: &[u8]) -> Result<()> {
+        self.appended += bytes.len() as u64;
+        lock(&self.pending).extend_from_slice(bytes);
+        Ok(())
+    }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()> {
         self.rewrite_with(&mut |out| out.write(bytes))
     }
@@ -687,6 +694,37 @@ mod tests {
         sink.append(b" after").unwrap();
         sink.sync().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"IMAGE after");
+
+        drop(sink);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A record appended for its durability waits for it, however far past
+    /// the buffer it goes, and the durability puts it on disk in its place;
+    /// a plain append that far past is written there and then.
+    #[test]
+    fn a_deferred_append_waits_for_its_durability() {
+        let dir = std::env::temp_dir().join(format!("fenecdb-fs-defer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("defer.fenec");
+        let _ = std::fs::remove_file(&path);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        let len = |p: &Path| std::fs::metadata(p).unwrap().len() as usize;
+
+        sink.append(b"head ").unwrap();
+        let before = len(&path);
+        let big = vec![7u8; 2 * WRITE_BUF];
+        sink.append_deferred(&big).unwrap();
+        assert_eq!(len(&path), before);
+        let durable = sink.flush().unwrap().unwrap();
+        durable().unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(on_disk.ends_with(&big));
+        assert!(on_disk[..on_disk.len() - big.len()].ends_with(b"head "));
+
+        sink.append(&big).unwrap();
+        assert_eq!(len(&path), on_disk.len() + big.len());
 
         drop(sink);
         let _ = std::fs::remove_file(&path);

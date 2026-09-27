@@ -550,6 +550,14 @@ pub trait Sink: Send {
         let _ = seq;
         self.append(bytes)
     }
+    /// [`Self::append`] for a record whose durability ([`Self::flush`]) its
+    /// caller runs as soon as it lets its lock go -- a graph a server keeps
+    /// ([`Database::save_graphs`]): a file's sink leaves it to that
+    /// durability rather than writing what outgrew its buffer there and
+    /// then, which put megabytes into the file under the read lock.
+    fn append_deferred(&mut self, bytes: &[u8]) -> Result<()> {
+        self.append(bytes)
+    }
     fn rewrite(&mut self, bytes: &[u8]) -> Result<()>;
     /// [`Self::rewrite`] with the image written into the file as it is
     /// produced rather than built in memory first: a checkpoint of a 1 GB
@@ -2086,7 +2094,7 @@ impl Database {
                 }
                 let mut payload = Vec::new();
                 crate::codec::encode_str(&mut payload, field);
-                payload.extend_from_slice(&ix.serialize_graph());
+                ix.serialize_graph_into(false, &mut payload);
                 out.write(&record_head(REC_GRAPH, c.id, payload.len()))?;
                 out.write(&payload)?;
             }
@@ -2309,22 +2317,27 @@ impl Database {
                 if !graph_due(ix, self.appended.load(Relaxed), self.graph_saves) {
                     continue;
                 }
-                let mut payload = Vec::new();
-                crate::codec::encode_str(&mut payload, field);
-                payload.extend_from_slice(&ix.serialize_graph_kept());
-                let mut record = record_head(REC_GRAPH, c.id, payload.len());
-                record.extend_from_slice(&payload);
+                // Written where it goes out, its head into room left before
+                // it as a block's is: the graph copied into a payload and the
+                // payload into a record were two more copies of it under the
+                // read lock.
+                let mut buf = vec![0; HEAD_ROOM];
+                crate::codec::encode_str(&mut buf, field);
+                ix.serialize_graph_into(true, &mut buf);
+                let body = buf.len() - HEAD_ROOM;
+                let (h, hn) = head(REC_GRAPH, c.id, body);
+                buf[HEAD_ROOM - hn..HEAD_ROOM].copy_from_slice(&h[..hn]);
+                let record = &buf[HEAD_ROOM - hn..];
                 self.sink
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .append(&record)?;
+                    .append_deferred(record)?;
                 let end =
                     self.appended.fetch_add(record.len() as u64, Relaxed) + record.len() as u64;
                 let p = ix.persisted();
                 p.changes.store(ix.changes(), Relaxed);
                 p.at.store(end, Relaxed);
-                p.node_bytes
-                    .store((payload.len() / ix.len().max(1)) as u64, Relaxed);
+                p.node_bytes.store((body / ix.len().max(1)) as u64, Relaxed);
                 n += 1;
             }
         }

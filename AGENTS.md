@@ -447,9 +447,14 @@ counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
 leaves at most 10 000 vectors to link, 2.6 s with `near` at 1.56 ms p50
 meanwhile, where every vector waited 19.1 s in the same run with `near` at
 the exact scan's 11.96 ms; the ten records were 33.8 MB of a 372.7 MB file
-until the next checkpoint, and each held the read lock 36 to 39 ms p50, 47
-to 72 at most -- laid out as varints, 22 and 37 to 41 (`make
-reopen-bench`).
+until the next checkpoint. Every write waits out a record's read lock, so
+its lists go out a part of `LIST_PART` nodes at a time on every core
+(`put_all_lists`), each link as its eight bytes cut to its width rather
+than a `memcpy` of the width, and the file's sink leaves the record to the
+durability run once the lock is let go (`Sink::append_deferred`) rather
+than write its megabytes under it: a record held the lock 5.0 ms p50 and
+7.9 at most, against 18.3 and 33.3, the same bytes (`make reopen-bench`,
+in turns).
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
