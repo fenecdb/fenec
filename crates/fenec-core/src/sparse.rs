@@ -251,8 +251,8 @@ impl List {
 /// The inverted index over one `sparse<N>` field.
 ///
 /// Derived data, like the text index, and for the same reason not written
-/// to the file: it is rebuilt from the documents on open, in the pass that
-/// already reads every one of them for the other indexes.
+/// to the file: it is built from the documents by the first statement that
+/// reads it after an open.
 #[derive(Default)]
 #[cfg(feature = "sparse")]
 pub struct SparseIndex {
@@ -347,7 +347,7 @@ impl SparseIndex {
     }
 
     /// Gives back the growth slack of every list, where the index is known
-    /// complete: a rebuild on open, and `create index`.
+    /// complete: its build from the documents, and `create index`.
     pub fn shrink_to_fit(&mut self) {
         self.heap = 0;
         for list in self.lists.iter_mut() {

@@ -328,8 +328,9 @@ to 0.331 but stays under the dense vectors, and fusing it with BM25 there
 costs it: the two are both lexical, and the weaker one drags. The index holds
 968 928 postings for SciFact's 5 183 documents — 186.9 a document — in
 13.1 MB, built in 0.07 s; FiQA's 57 638 hold 8.8 million in 107 MB, built
-in 1.2 s. Like the text index it is derived from the documents and rebuilt
-on open, never written to the file.</p>
+in 1.2 s. Like the text index it is derived from the documents, built by
+the first query that reads it after an open, and never written to the
+file.</p>
 
 <div class="note trap">
   <p><b>A SPLADE query reaches most of the corpus.</b> Its 37 to 65

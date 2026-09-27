@@ -699,10 +699,6 @@ impl HashIndex {
         }
     }
 
-    fn clear(&mut self) {
-        *self = HashIndex::default();
-    }
-
     /// The table, the keys and the buckets as they sit in memory.
     pub fn memory_bytes(&self) -> usize {
         self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Vec<DocId>)>() + 1) + self.heap
@@ -801,6 +797,46 @@ impl<T> std::ops::Index<&str> for Fields<T> {
     }
 }
 
+/// A hash, text, ordered or sparse index as a collection holds it: built,
+/// or left for the documents to fill the first time a statement reads it.
+/// An open leaves them unbuilt -- building them was 9 of a 31 ms open at
+/// 100 000 x 128 for one `@hash` field, and a `@text` field costs 27 us a
+/// document -- and a process that never reads one never pays for it. A
+/// write skips an unbuilt index, since its build reads the documents as
+/// they stand then; a build that fails fails every read after it the same
+/// way, as the documents it could not read are still there.
+pub struct Derived<T>(std::sync::OnceLock<Result<T>>);
+
+impl<T> Derived<T> {
+    /// An index as it stands: a new collection's, or one just built.
+    fn new(ix: T) -> Self {
+        Derived(std::sync::OnceLock::from(Ok(ix)))
+    }
+
+    fn unbuilt() -> Self {
+        Derived(std::sync::OnceLock::new())
+    }
+
+    /// The index, if something has built it.
+    pub fn built(&self) -> Option<&T> {
+        self.0.get().and_then(|r| r.as_ref().ok())
+    }
+
+    /// The index, built by `build` if nothing has read it yet: under a
+    /// read lock too, a second reader waiting for the first one's build.
+    fn or_build(&self, build: impl FnOnce() -> Result<T>) -> Result<&T> {
+        match self.0.get_or_init(build) {
+            Ok(ix) => Ok(ix),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// The index for a write to keep up to date, none while it is unbuilt.
+    fn get_mut(&mut self) -> Option<&mut T> {
+        self.0.get_mut().and_then(|r| r.as_mut().ok())
+    }
+}
+
 pub struct Collection {
     pub id: u32,
     pub schema: Schema,
@@ -808,17 +844,17 @@ pub struct Collection {
     /// field name -> HNSW index
     pub vectors: Fields<VectorIndex>,
     /// field name -> hash index
-    pub hashes: Fields<HashIndex>,
+    pub hashes: Fields<Derived<HashIndex>>,
     /// field name -> inverted index
-    pub texts: Fields<TextIndex>,
+    pub texts: Fields<Derived<TextIndex>>,
     /// field name -> ordered index, in schema order. A `Vec` rather than a
     /// map: a collection has a handful of ordered fields, the map's code was
     /// 2.6 KB of the browser module, and a fixed order keeps the choice
     /// between two ranges the same from one run to the next.
-    pub sorted: Vec<(String, SortedIndex)>,
+    pub sorted: Vec<(String, Derived<SortedIndex>)>,
     /// field name -> inverted index over a sparse vector, in schema order,
     /// a `Vec` for the reason `sorted` is one.
-    pub sparse: Vec<(String, SparseIndex)>,
+    pub sparse: Vec<(String, Derived<SparseIndex>)>,
 }
 
 impl Collection {
@@ -847,19 +883,20 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    hashes.insert(f.name.clone(), HashIndex::default());
+                    hashes.insert(f.name.clone(), Derived::new(HashIndex::default()));
                 }
                 #[cfg(feature = "text")]
                 (IndexKind::Text(spec), DataType::Text) => {
-                    texts.insert(f.name.clone(), TextIndex::new(*spec));
+                    texts.insert(f.name.clone(), Derived::new(TextIndex::new(*spec)));
                 }
                 #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
-                    sorted.push((f.name.clone(), SortedIndex::new(ty, f.collate)));
+                    let ix = SortedIndex::new(ty, f.collate);
+                    sorted.push((f.name.clone(), Derived::new(ix)));
                 }
                 #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
-                    sparse.push((f.name.clone(), SparseIndex::new()));
+                    sparse.push((f.name.clone(), Derived::new(SparseIndex::new())));
                 }
                 _ => {}
             }
@@ -876,8 +913,9 @@ impl Collection {
         }
     }
 
-    /// Rebuilds the index structures from the schema's index definitions
-    /// (contents empty; filling them is `rebuild_indexes_with`'s job).
+    /// Rebuilds the index structures from the schema's index definitions:
+    /// the graphs empty, for `rebuild_indexes_with` to fill, and the others
+    /// unbuilt, for the documents to fill when something reads them.
     ///
     /// Inlined, as the other two functions [`Database::apply`] shares with the
     /// write path are: the browser module links no `apply`, and with a
@@ -900,38 +938,67 @@ impl Collection {
                     );
                 }
                 (IndexKind::Hash, _) => {
-                    self.hashes.insert(f.name.clone(), HashIndex::default());
+                    self.hashes.insert(f.name.clone(), Derived::unbuilt());
                 }
                 #[cfg(feature = "text")]
-                (IndexKind::Text(spec), DataType::Text) => {
-                    self.texts.insert(f.name.clone(), TextIndex::new(*spec));
+                (IndexKind::Text(_), DataType::Text) => {
+                    self.texts.insert(f.name.clone(), Derived::unbuilt());
                 }
                 #[cfg(feature = "sorted")]
                 (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
-                    self.sorted
-                        .push((f.name.clone(), SortedIndex::new(ty, f.collate)));
+                    self.sorted.push((f.name.clone(), Derived::unbuilt()));
                 }
                 #[cfg(feature = "sparse")]
                 (IndexKind::Inverted, DataType::Sparse(_)) => {
-                    self.sparse.push((f.name.clone(), SparseIndex::new()));
+                    self.sparse.push((f.name.clone(), Derived::unbuilt()));
                 }
                 _ => {}
             }
         }
     }
 
-    pub fn sparse_index(&self, field: &str) -> Option<&SparseIndex> {
-        self.sparse
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, ix)| ix)
+    /// The hash index on `field`, built from the documents if nothing has
+    /// read it since the open.
+    pub fn hash(&self, field: &str) -> Result<Option<&HashIndex>> {
+        let (Some(d), Some(pos)) = (self.hashes.get(field), self.schema.field_pos(field)) else {
+            return Ok(None);
+        };
+        d.or_build(|| hash_of(&self.store, pos)).map(Some)
     }
 
-    pub fn sorted_index(&self, field: &str) -> Option<&SortedIndex> {
-        self.sorted
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, ix)| ix)
+    /// The full-text index on `field`, built as [`Self::hash`] is.
+    pub fn text(&self, field: &str) -> Result<Option<&TextIndex>> {
+        let (Some(d), Some(pos)) = (self.texts.get(field), self.schema.field_pos(field)) else {
+            return Ok(None);
+        };
+        let IndexKind::Text(spec) = self.schema.fields[pos].index else {
+            return Ok(None);
+        };
+        d.or_build(|| text_of(&self.store, pos, spec)).map(Some)
+    }
+
+    /// The inverted index over the sparse vectors of `field`, built as
+    /// [`Self::hash`] is.
+    pub fn sparse_index(&self, field: &str) -> Result<Option<&SparseIndex>> {
+        let Some((_, d)) = self.sparse.iter().find(|(name, _)| name == field) else {
+            return Ok(None);
+        };
+        let Some(pos) = self.schema.field_pos(field) else {
+            return Ok(None);
+        };
+        d.or_build(|| sparse_of(&self.store, pos)).map(Some)
+    }
+
+    /// The ordered index on `field`, built as [`Self::hash`] is.
+    pub fn sorted_index(&self, field: &str) -> Result<Option<&SortedIndex>> {
+        let Some((_, d)) = self.sorted.iter().find(|(name, _)| name == field) else {
+            return Ok(None);
+        };
+        let Some(pos) = self.schema.field_pos(field) else {
+            return Ok(None);
+        };
+        d.or_build(|| sorted_of(&self.store, &self.schema.fields[pos], pos))
+            .map(Some)
     }
 
     /// Puts `doc` into the indexes, `old` the version it replaces. Inlined
@@ -953,21 +1020,25 @@ impl Collection {
     fn index_scalar(&mut self, doc: &Document, old: Option<&Document>) {
         let kept = |name: &str| old.is_some_and(|o| same(o.get(name), doc.get(name)));
         for (name, ix) in self.hashes.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.add(hash_key(v), doc.id);
             }
         }
         for (name, ix) in self.texts.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
                 ix.insert(doc.id, doc.get(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.insert(doc.id, e);
             }
@@ -1009,6 +1080,7 @@ impl Collection {
             }
         }
         for (name, ix) in self.hashes.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(&hash_key(v), doc.id);
             }
@@ -1016,16 +1088,19 @@ impl Collection {
         // Every caller reads the *stored* document before unindexing, so the
         // terms here are the ones that went in.
         for (name, ix) in self.texts.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Text(t)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, t);
             }
         }
         for (name, ix) in self.sorted.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
                 ix.remove(doc.id, doc.get(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
+            let Some(ix) = ix.get_mut() else { continue };
             if let Some(Value::Sparse(_, e)) = doc.get(name).filter(|_| !kept(name)) {
                 ix.remove(doc.id, e);
             }
@@ -1050,15 +1125,20 @@ impl Collection {
                     precision: v.precision(),
                 })
                 .collect(),
+            // The ones built: counted by building, every metrics scrape
+            // would build them all.
             text_indexes: self
                 .texts
                 .iter()
-                .map(|(k, t)| TextIndexStats {
-                    field: k.clone(),
-                    count: t.len(),
-                    terms: t.terms(),
-                    postings: t.postings_count(),
-                    bytes: t.memory_bytes(),
+                .filter_map(|(k, t)| {
+                    let t = t.built()?;
+                    Some(TextIndexStats {
+                        field: k.clone(),
+                        count: t.len(),
+                        terms: t.terms(),
+                        postings: t.postings_count(),
+                        bytes: t.memory_bytes(),
+                    })
                 })
                 .collect(),
         }
@@ -1330,7 +1410,7 @@ impl<'a> Probe<'a> {
         let Some(fd) = child.schema.field(field) else {
             return Err(Error::NotFound(format!("field `{name}.{field}`")));
         };
-        match child.hashes.get(field) {
+        match child.hash(field)? {
             Some(map) => Ok(Probe::Hash(map, &fd.ty)),
             None => Err(Error::Query(format!(
                 "`lookup` on `{name}.{field}` needs a hash index (declare it with @hash)"
@@ -1891,16 +1971,23 @@ impl Database {
                         .sum::<usize>()
                     + c.hashes
                         .values()
+                        .filter_map(Derived::built)
                         .map(HashIndex::memory_bytes)
                         .sum::<usize>()
-                    + c.texts.values().map(|ix| ix.memory_bytes()).sum::<usize>()
+                    + c.texts
+                        .values()
+                        .filter_map(Derived::built)
+                        .map(|ix| ix.memory_bytes())
+                        .sum::<usize>()
                     + c.sorted
                         .iter()
-                        .map(|(_, ix)| ix.memory_bytes())
+                        .filter_map(|(_, ix)| ix.built())
+                        .map(|ix| ix.memory_bytes())
                         .sum::<usize>()
                     + c.sparse
                         .iter()
-                        .map(|(_, ix)| ix.memory_bytes())
+                        .filter_map(|(_, ix)| ix.built())
+                        .map(|ix| ix.memory_bytes())
                         .sum::<usize>()
             })
             .sum()
@@ -2668,21 +2755,29 @@ impl Database {
                 // The document count is known, so the arena is sized in one go.
                 ix.reserve(ids.len());
             }
-            for m in c.hashes.values_mut() {
-                m.clear();
+            // The hash, text, ordered and sparse indexes are left for the
+            // documents to fill when a statement first reads each
+            // (`Derived`), but an ordered index over a collated field: in the
+            // browser a comparison meeting a script whose chunk it has not
+            // been handed notes it, and the load is refused and run again
+            // with the chunk (`collate::refuse`). Built by a read, the index
+            // would keep the order it had without the chunk.
+            for d in c.hashes.values_mut() {
+                *d = Derived::unbuilt();
             }
-            for t in c.texts.values_mut() {
-                t.clear();
+            for d in c.texts.values_mut() {
+                *d = Derived::unbuilt();
             }
-            for (_, ix) in c.sparse.iter_mut() {
-                ix.clear();
+            for (_, d) in c.sparse.iter_mut() {
+                *d = Derived::unbuilt();
             }
-            if fields.iter().all(|f| kept(f))
-                && c.hashes.is_empty()
-                && c.texts.is_empty()
-                && c.sorted.is_empty()
-                && c.sparse.is_empty()
-            {
+            let collated = |f: &str| c.schema.field(f).is_some_and(|f| f.collate.is_some());
+            for (f, d) in c.sorted.iter_mut() {
+                if !collated(f) {
+                    *d = Derived::unbuilt();
+                }
+            }
+            if fields.iter().all(|f| kept(f)) && !c.sorted.iter().any(|(f, _)| collated(f)) {
                 continue; // everything restored, no need to read the documents
             }
             // The documents are read one at a time, and of each only the
@@ -2695,31 +2790,18 @@ impl Database {
                 schema,
                 store,
                 vectors,
-                hashes,
-                texts,
                 sorted,
-                sparse,
                 ..
             } = c;
-            // Each index beside its field's position, the ordered and vector
-            // ones with the rows they are built from afterwards. Pushed in
-            // loops: collected, the four lists were 2.5 KB of the browser
-            // module.
-            let mut hash_ix = Vec::new();
-            for (f, m) in hashes.iter_mut() {
-                if let Some(p) = schema.field_pos(f) {
-                    hash_ix.push((p, m));
-                }
-            }
-            let mut text_ix = Vec::new();
-            for (f, t) in texts.iter_mut() {
-                if let Some(p) = schema.field_pos(f) {
-                    text_ix.push((p, t));
-                }
-            }
+            // Each index beside its field's position and the rows it is
+            // built from. Pushed in loops: collected, the lists were 2.5 KB
+            // of the browser module.
             let mut sorted_ix = Vec::new();
             for (f, ix) in sorted.iter_mut() {
-                if let Some(p) = schema.field_pos(f) {
+                if let Some(p) = schema
+                    .field_pos(f)
+                    .filter(|&p| schema.fields[p].collate.is_some())
+                {
                     sorted_ix.push((p, ix, Vec::new()));
                 }
             }
@@ -2729,21 +2811,12 @@ impl Database {
                     vector_ix.push((p, ix, Vec::new()));
                 }
             }
-            let mut sparse_ix = Vec::new();
-            for (f, ix) in sparse.iter_mut() {
-                if let Some(p) = schema.field_pos(f) {
-                    sparse_ix.push((p, ix));
-                }
-            }
             // In field order, as `read_fields` wants them; walked rather than
             // sorted, since a sort was 2 KB of the browser module.
             let mut positions = Vec::new();
             for p in 0..schema.fields.len() {
-                if hash_ix.iter().any(|(q, _)| *q == p)
-                    || text_ix.iter().any(|(q, _)| *q == p)
-                    || sorted_ix.iter().any(|(q, ..)| *q == p)
+                if sorted_ix.iter().any(|(q, ..)| *q == p)
                     || vector_ix.iter().any(|(q, ..)| *q == p)
-                    || sparse_ix.iter().any(|(q, _)| *q == p)
                 {
                     positions.push(p);
                 }
@@ -2755,14 +2828,6 @@ impl Database {
                 if !store.read_fields(id, &positions, &mut vals)? {
                     continue;
                 }
-                for (p, ix) in hash_ix.iter_mut() {
-                    ix.add(hash_key(&vals[slot(*p)]), id);
-                }
-                for (p, ix) in text_ix.iter_mut() {
-                    if let Value::Text(t) = &vals[slot(*p)] {
-                        ix.insert(id, t);
-                    }
-                }
                 for (p, _, rows) in sorted_ix.iter_mut() {
                     let v = std::mem::replace(&mut vals[slot(*p)], Value::Null);
                     rows.push((id, Some(v)));
@@ -2772,27 +2837,16 @@ impl Database {
                         rows.push((id, v));
                     }
                 }
-                for (p, ix) in sparse_ix.iter_mut() {
-                    if let Value::Sparse(_, e) = &vals[slot(*p)] {
-                        ix.insert(id, e);
-                    }
-                }
-            }
-            for (_, ix) in text_ix.iter_mut() {
-                ix.shrink_to_fit();
-            }
-            for (_, ix) in sparse_ix.iter_mut() {
-                ix.shrink_to_fit();
             }
             // Each ordered index is sorted once from its keys rather than
             // inserted row by row.
             #[cfg(feature = "sorted")]
             for (p, ix, rows) in sorted_ix.iter_mut() {
-                **ix = SortedIndex::build(
+                **ix = Derived::new(SortedIndex::build(
                     &schema.fields[*p].ty,
                     schema.fields[*p].collate,
                     &mut std::mem::take(rows).into_iter(),
-                );
+                ));
             }
             for (_, ix, rows) in vector_ix.iter_mut() {
                 match later {
@@ -3966,7 +4020,7 @@ impl Database {
                 }
                 continue;
             }
-            let Some(map) = c.hashes.get(field) else {
+            let Some(map) = c.hash(field)? else {
                 continue;
             };
             // The bucket key is produced on the write path from the value
@@ -4020,7 +4074,7 @@ impl Database {
                 }
                 continue;
             }
-            let Some(map) = c.hashes.get(field) else {
+            let Some(map) = c.hash(field)? else {
                 continue;
             };
             let Some(fd) = c.schema.field(field) else {
@@ -4081,7 +4135,7 @@ impl Database {
             let mut ranges = Vec::new();
             f.conjunct_ranges(params, &mut ranges);
             let n = c.store.len();
-            for (field, ix) in &c.sorted {
+            for (field, _) in &c.sorted {
                 if !ranges.iter().any(|r| r.0 == field) {
                     continue;
                 }
@@ -4089,6 +4143,9 @@ impl Database {
                     continue;
                 };
                 let Some((range, exact)) = sorted_range(fd, field, f, params) else {
+                    continue;
+                };
+                let Some(ix) = c.sorted_index(field)? else {
                     continue;
                 };
                 let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
@@ -4293,7 +4350,7 @@ impl Database {
         if collate.is_some_and(|c| Some(c) != own) {
             return Ok(None);
         }
-        let (Some(ix), Some(limit)) = (c.sorted_index(field), sel.limit) else {
+        let (Some(ix), Some(limit)) = (c.sorted_index(field)?, sel.limit) else {
             return Ok(None);
         };
         if ix.has_nan() {
@@ -4324,7 +4381,7 @@ impl Database {
                 if name == field {
                     continue;
                 }
-                let (Some(other), Some(fd)) = (c.sorted_index(name), c.schema.field(name)) else {
+                let (Some(other), Some(fd)) = (c.sorted_index(name)?, c.schema.field(name)) else {
                     continue;
                 };
                 if let Some((r, _)) = sorted_range(fd, name, f, params) {
@@ -4488,7 +4545,7 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         let field = &near.field;
-        let ix = c.sparse_index(field).ok_or_else(|| {
+        let ix = c.sparse_index(field)?.ok_or_else(|| {
             not_built_on(c, field, "inverted index").unwrap_or_else(|| {
                 Error::Query(format!(
                     "field `{field}` has no inverted index (declare it with @inverted)"
@@ -4634,7 +4691,7 @@ impl Database {
         params: &[Value],
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
-        let ix = c.texts.get(&m.field).ok_or_else(|| {
+        let ix = c.text(&m.field)?.ok_or_else(|| {
             not_built_on(c, &m.field, "full-text index").unwrap_or_else(|| {
                 Error::Query(format!(
                     "field `{}` has no full-text index (declare it with @text)",
@@ -4815,7 +4872,7 @@ impl Database {
         filter.conjunct_equalities(params, &mut eqs);
         let mut best: Option<&[DocId]> = None;
         for (field, val) in eqs {
-            let Some(map) = child.hashes.get(field) else {
+            let Ok(Some(map)) = child.hash(field) else {
                 continue;
             };
             let Some(fd) = child.schema.field(field) else {
@@ -5735,6 +5792,64 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
     Ok(())
 }
 
+/// The hash index of the field at `pos`, from the documents: what `create
+/// index` builds, and what the first read after an open does.
+fn hash_of(store: &Store, pos: usize) -> Result<HashIndex> {
+    let mut ix = HashIndex::default();
+    for id in store.ids() {
+        if let Some(v) = store.read_field(id, pos)? {
+            ix.add(hash_key(&v), id);
+        }
+    }
+    Ok(ix)
+}
+
+/// The full-text index of the field at `pos`, as [`hash_of`].
+fn text_of(store: &Store, pos: usize, spec: crate::schema::TextIndexSpec) -> Result<TextIndex> {
+    let mut ix = TextIndex::new(spec);
+    for id in store.ids() {
+        if let Some(Value::Text(t)) = store.read_field(id, pos)? {
+            ix.insert(id, &t);
+        }
+    }
+    ix.shrink_to_fit();
+    Ok(ix)
+}
+
+/// The ordered index of the field at `pos`, as [`hash_of`]: sorted once
+/// from its keys rather than inserted row by row.
+#[cfg(feature = "sorted")]
+fn sorted_of(store: &Store, field: &crate::schema::Field, pos: usize) -> Result<SortedIndex> {
+    let mut rows = Vec::with_capacity(store.len());
+    for id in store.ids() {
+        rows.push((id, store.read_field(id, pos)?));
+    }
+    Ok(SortedIndex::build(
+        &field.ty,
+        field.collate,
+        &mut rows.into_iter(),
+    ))
+}
+
+/// A build without ordered indexes holds none to build.
+#[cfg(not(feature = "sorted"))]
+fn sorted_of(_: &Store, _: &crate::schema::Field, _: usize) -> Result<SortedIndex> {
+    Err(not_built("the index", "sorted"))
+}
+
+/// The inverted index over the sparse vectors of the field at `pos`, as
+/// [`hash_of`].
+fn sparse_of(store: &Store, pos: usize) -> Result<SparseIndex> {
+    let mut ix = SparseIndex::new();
+    for id in store.ids() {
+        if let Some(Value::Sparse(_, e)) = store.read_field(id, pos)? {
+            ix.insert(id, &e);
+        }
+    }
+    ix.shrink_to_fit();
+    Ok(ix)
+}
+
 /// Builds the index the schema declares on the field at `pos` and fills it
 /// from the collection's documents: what `create index` does, and what a
 /// replica does with the primary's. Inlined for the reason
@@ -5752,48 +5867,22 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash => {
-            let mut ix = HashIndex::default();
-            for id in c.store.ids() {
-                if let Some(v) = c.store.read_field(id, pos)? {
-                    ix.add(hash_key(&v), id);
-                }
-            }
+            let ix = Derived::new(hash_of(&c.store, pos)?);
             c.hashes.insert(field, ix);
         }
         IndexKind::Text(spec) => {
-            let mut ix = TextIndex::new(spec);
-            for id in c.store.ids() {
-                if let Some(Value::Text(t)) = c.store.read_field(id, pos)? {
-                    ix.insert(id, &t);
-                }
-            }
-            ix.shrink_to_fit();
+            let ix = Derived::new(text_of(&c.store, pos, spec)?);
             c.texts.insert(field, ix);
         }
-        #[cfg(not(feature = "sorted"))]
-        IndexKind::Sorted => return Err(not_built("the index", "sorted")),
-        #[cfg(feature = "sorted")]
         IndexKind::Sorted => {
-            let ty = c.schema.fields[pos].ty.clone();
-            let mut rows = Vec::with_capacity(c.store.len());
-            for id in c.store.ids() {
-                rows.push((id, c.store.read_field(id, pos)?));
-            }
-            let coll = c.schema.fields[pos].collate;
-            let ix = SortedIndex::build(&ty, coll, &mut rows.into_iter());
+            let ix = Derived::new(sorted_of(&c.store, &c.schema.fields[pos], pos)?);
             match c.sorted.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
                 None => c.sorted.push((field, ix)),
             }
         }
         IndexKind::Inverted => {
-            let mut ix = SparseIndex::new();
-            for id in c.store.ids() {
-                if let Some(Value::Sparse(_, e)) = c.store.read_field(id, pos)? {
-                    ix.insert(id, &e);
-                }
-            }
-            ix.shrink_to_fit();
+            let ix = Derived::new(sparse_of(&c.store, pos)?);
             match c.sparse.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
                 None => c.sparse.push((field, ix)),

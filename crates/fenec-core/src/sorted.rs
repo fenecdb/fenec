@@ -8,8 +8,8 @@
 //! to the filtered `near` as its allowed set.
 //!
 //! It is derived data like the hash and text indexes: built from the
-//! documents on open and on `create index`, maintained on write, never in the
-//! file.
+//! documents by the first statement that reads it after an open and by
+//! `create index`, maintained on write, never in the file.
 //!
 //! Every answer has to be the one the scan gives, row for row. So a key
 //! orders exactly as `Value::cmp_value` orders the field's values, a literal

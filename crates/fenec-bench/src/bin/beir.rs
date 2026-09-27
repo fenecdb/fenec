@@ -233,7 +233,8 @@ fn main() {
         let t = Instant::now();
         db.execute(&fenec_ql::parse_one("create index on d (s) @inverted").unwrap())
             .unwrap();
-        let ix = db.collection("d").unwrap().sparse_index("s").unwrap();
+        let d = db.collection("d").unwrap();
+        let ix = d.sparse_index("s").unwrap().unwrap();
         eprintln!(
             "SPLADE: the inverted index in {:.2} s, {} postings over {} dimensions, {:.1} MB",
             t.elapsed().as_secs_f64(),

@@ -115,9 +115,9 @@ version's tables is refused: its ranks would mean something else.</p>
 
 <h2 id="features">A smaller module</h2>
 
-<pre data-lang="bash">make wasm                          # every index: 136 KB brotli
+<pre data-lang="bash">make wasm                          # every index: 137 KB brotli
 make wasm FEATURES="text sorted"   # no vector or sparse search: 118 KB
-make wasm FEATURES=none            # none of the four: 104 KB
+make wasm FEATURES=none            # none of the four: 105 KB
 </pre>
 
 <p>The module carries four indexes, and a page that uses fewer can load one

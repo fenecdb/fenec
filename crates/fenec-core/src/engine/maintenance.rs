@@ -372,7 +372,7 @@ impl Database {
                         ix.add(hash_key(&v), id);
                     }
                 }
-                c.hashes.insert(copy.field.clone(), ix);
+                c.hashes.insert(copy.field.clone(), Derived::new(ix));
             }
             Built::Text(mut ix) => {
                 for id in ids {
@@ -383,7 +383,7 @@ impl Database {
                         ix.insert(id, &t);
                     }
                 }
-                c.texts.insert(copy.field.clone(), ix);
+                c.texts.insert(copy.field.clone(), Derived::new(ix));
             }
             Built::Sorted(mut ix) => {
                 for id in ids {
@@ -392,7 +392,7 @@ impl Database {
                         ix.insert(id, Some(&v));
                     }
                 }
-                c.sorted.push((copy.field.clone(), ix));
+                c.sorted.push((copy.field.clone(), Derived::new(ix)));
             }
             Built::Sparse(mut ix) => {
                 for id in ids {
@@ -403,7 +403,7 @@ impl Database {
                         ix.insert(id, &e);
                     }
                 }
-                c.sparse.push((copy.field.clone(), ix));
+                c.sparse.push((copy.field.clone(), Derived::new(ix)));
             }
         }
         c.schema.fields[pos].index = copy.kind;
