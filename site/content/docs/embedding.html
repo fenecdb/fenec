@@ -68,7 +68,7 @@ memory.</p>
 <p>The same applies to the HNSW graph. It is derived data and is written only
 during <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code>,
 never on the write path. Without a graph in the file it is rebuilt on open:
-4.4 s at 100 000 × 128, against 46 ms with it. A crash does not cost the
+4.4 s at 100 000 × 128, against 44 ms with it. A crash does not cost the
 graph: the next open restores the one the last checkpoint wrote and applies
 the writes since — 0.12 s for 1 000 of them at 100 000 × 128, where the
 rebuild took 4.4 s. A process that has to answer before those are linked

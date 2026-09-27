@@ -385,6 +385,287 @@ fn graph_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     get_uvarint(bytes, pos).ok()
 }
 
+/// The bytes a link takes in a flat graph record of `nodes` nodes.
+fn link_width(nodes: usize) -> usize {
+    if nodes <= 1 << 16 {
+        2
+    } else if nodes <= 1 << 24 {
+        3
+    } else {
+        4
+    }
+}
+
+/// The bytes a document id takes in a flat graph record: 4 where every one
+/// fits.
+fn doc_width(docs: &[DocId]) -> usize {
+    match docs.iter().all(|&d| d <= u32::MAX as u64) {
+        true => 4,
+        false => 8,
+    }
+}
+
+/// Writes a sorted list of links as a flat graph record holds one: the
+/// first `lw` bytes whole, then -- past a lone one -- the width of the
+/// largest step between neighbours and every step in that many bytes. The
+/// steps of a 100 000-node graph's lists take two bytes, as its varint
+/// deltas did, and read without a branch a byte.
+fn put_links(out: &mut Vec<u8>, sorted: &[u64], lw: usize) {
+    let Some((&first, rest)) = sorted.split_first() else {
+        return;
+    };
+    out.extend_from_slice(&first.to_le_bytes()[..lw]);
+    if rest.is_empty() {
+        return;
+    }
+    let mut prev = first;
+    let mut widest = 0u64;
+    for &x in rest {
+        widest = widest.max(x.wrapping_sub(prev));
+        prev = x;
+    }
+    let w = (8 - widest.leading_zeros() as usize / 8).max(1);
+    out.push(w as u8);
+    let mut prev = first;
+    for &x in rest {
+        out.extend_from_slice(&x.wrapping_sub(prev).to_le_bytes()[..w]);
+        prev = x;
+    }
+}
+
+/// A node's flag in a graph record: linked and live, a tombstone, or live
+/// and waiting to be linked.
+const LIVE: u8 = 0;
+const DEAD: u8 = 1;
+const WAITING: u8 = 2;
+
+/// A graph record read into arrays, whichever layout it was in: what
+/// `build_restored` makes the index from.
+struct Read<'a> {
+    docs: Vec<DocId>,
+    /// [`LIVE`], [`DEAD`] or [`WAITING`], a node each.
+    flags: Vec<u8>,
+    l0_len: Vec<u16>,
+    /// The level-0 lists, `m0` a node.
+    l0: Vec<u32>,
+    upper: Vec<Vec<Vec<u32>>>,
+    /// A tombstone's vector as the arena stores it, in node order.
+    tombs: Vec<&'a [u8]>,
+}
+
+impl<'a> Read<'a> {
+    fn new(count: usize, m0: usize) -> Option<Read<'a>> {
+        Some(Read {
+            docs: Vec::with_capacity(count),
+            flags: Vec::with_capacity(count),
+            l0_len: Vec::with_capacity(count),
+            l0: vec![0; count.checked_mul(m0)?],
+            upper: Vec::with_capacity(count),
+            tombs: Vec::new(),
+        })
+    }
+
+    /// A node's flag as the record gives it, where a build that cannot hold
+    /// a node waiting (`waits` false) refuses one.
+    fn flag(byte: u8, waits: bool) -> Option<u8> {
+        match (byte, waits) {
+            (LIVE | DEAD, _) | (WAITING, true) => Some(byte),
+            _ => None,
+        }
+    }
+
+    /// The body of a graph record in the varint layout (versions 3 to 6),
+    /// past its head: a node at a time -- its document, flag and levels, a
+    /// tombstone's vector, each level's links as varint deltas.
+    fn varint(
+        bytes: &'a [u8],
+        count: usize,
+        m0: usize,
+        stored: usize,
+        waits: bool,
+        kept: bool,
+    ) -> Option<Read<'a>> {
+        let mut r = Read::new(count, m0)?;
+        let (mut pos, mut lvl) = (0usize, Vec::new());
+        for node in 0..count {
+            let doc = get_uvarint(bytes, &mut pos).ok()?;
+            let flag = match (*bytes.get(pos)?, waits) {
+                (LIVE, _) => LIVE,
+                (WAITING, true) => WAITING,
+                // Kept with a node waiting, which this build cannot hold.
+                (WAITING, false) if kept => return None,
+                (DEAD, true) | (_, false) => DEAD,
+                _ => return None,
+            };
+            pos += 1;
+            let levels = get_uvarint(bytes, &mut pos).ok()? as usize;
+            if levels == 0 {
+                return None;
+            }
+            r.docs.push(doc);
+            r.flags.push(flag);
+            if flag == DEAD {
+                r.tombs.push(bytes.get(pos..pos.checked_add(stored)?)?);
+                pos += stored;
+            }
+            let mut lists = Vec::with_capacity(levels - 1);
+            for l in 0..levels {
+                let k = get_uvarint(bytes, &mut pos).ok()? as usize;
+                if k > count || (l == 0 && k > m0) {
+                    return None; // a corrupt length, or past the arena's stride
+                }
+                lvl.clear();
+                let mut prev = 0u64;
+                for _ in 0..k {
+                    let nb = prev.checked_add(graph_varint(bytes, &mut pos)?)?;
+                    if nb as usize >= count {
+                        return None; // out-of-range link: the graph is corrupt
+                    }
+                    prev = nb;
+                    lvl.push(nb as u32);
+                }
+                match l {
+                    0 => {
+                        r.l0[node * m0..][..k].copy_from_slice(&lvl);
+                        r.l0_len.push(k as u16);
+                    }
+                    _ => lists.push(lvl.clone()),
+                }
+            }
+            r.upper.push(lists);
+        }
+        Some(r)
+    }
+
+    /// The body of a flat graph record ([`GRAPH_VERSION_FLAT`]), past its
+    /// head: the nodes' arrays, every level-0 list, the levels above, the
+    /// tombstones' vectors, every link checked to name a node.
+    fn flat(
+        bytes: &'a [u8],
+        count: usize,
+        m0: usize,
+        stored: usize,
+        waits: bool,
+    ) -> Option<Read<'a>> {
+        let mut r = Read::new(count, m0)?;
+        let mut at = Cursor { bytes, pos: 0 };
+        let widths = at.take(2)?;
+        let (lw, dw) = (widths[0] as usize, widths[1] as usize);
+        if !(link_width(count)..=4).contains(&lw) || !matches!(dw, 4 | 8) {
+            return None;
+        }
+        let docs = at.take(count.checked_mul(dw)?)?;
+        r.docs.extend(docs.chunks_exact(dw).map(|b| {
+            let mut w = [0u8; 8];
+            w[..dw].copy_from_slice(b);
+            u64::from_le_bytes(w)
+        }));
+        for &b in at.take(count)? {
+            r.flags.push(Read::flag(b, waits)?);
+        }
+        let levels = at.take(count)?;
+        for b in at.take(count.checked_mul(2)?)?.as_chunks::<2>().0 {
+            let k = u16::from_le_bytes(*b);
+            if k as usize > m0 {
+                return None; // level-0 degree exceeds the arena stride
+            }
+            r.l0_len.push(k);
+        }
+        for (stride, &k) in r.l0.chunks_exact_mut(m0).zip(&r.l0_len) {
+            at.links(lw, &mut stride[..k as usize], count)?;
+        }
+        for &lv in levels {
+            let mut lists = Vec::with_capacity(lv as usize);
+            for _ in 0..lv {
+                let k = at.number(2)? as usize;
+                if k > count {
+                    return None;
+                }
+                let mut list = vec![0u32; k];
+                at.links(lw, &mut list, count)?;
+                lists.push(list);
+            }
+            r.upper.push(lists);
+        }
+        for _ in r.flags.iter().filter(|&&f| f == DEAD) {
+            r.tombs.push(at.take(stored)?);
+        }
+        Some(r)
+    }
+}
+
+/// Where a flat graph record is being read.
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let part = self.bytes.get(self.pos..self.pos.checked_add(len)?)?;
+        self.pos += len;
+        Some(part)
+    }
+
+    /// A whole number of `w` bytes, little-endian.
+    fn number(&mut self, w: usize) -> Option<u64> {
+        let mut b = [0u8; 8];
+        b[..w].copy_from_slice(self.take(w)?);
+        Some(u64::from_le_bytes(b))
+    }
+
+    /// A list [`put_links`] wrote into `out`, every link checked to name
+    /// one of `count` nodes.
+    fn links(&mut self, lw: usize, out: &mut [u32], count: usize) -> Option<()> {
+        let Some((first, rest)) = out.split_first_mut() else {
+            return Some(());
+        };
+        let mut prev = self.number(lw)?;
+        *first = prev as u32;
+        if !rest.is_empty() {
+            let w = self.take(1)?[0] as usize;
+            if !(1..=4).contains(&w) {
+                return None;
+            }
+            let steps = self.take(rest.len().checked_mul(w)?)?;
+            prev = match (cfg!(target_family = "wasm"), w) {
+                // The browser, which a restore's links do not hold up, takes
+                // the one loop: the four were 0.9 KB of its module.
+                (true, _) => steps_any(steps, w, prev, rest),
+                (false, 1) => steps_into::<1>(steps, prev, rest),
+                (false, 2) => steps_into::<2>(steps, prev, rest),
+                (false, 3) => steps_into::<3>(steps, prev, rest),
+                _ => steps_into::<4>(steps, prev, rest),
+            };
+        }
+        // Ascending, so the last is the largest.
+        ((prev as usize) < count).then_some(())
+    }
+}
+
+/// [`steps_into`] with the width known only as it runs.
+fn steps_any(steps: &[u8], w: usize, mut prev: u64, out: &mut [u32]) -> u64 {
+    for (slot, b) in out.iter_mut().zip(steps.chunks_exact(w)) {
+        let mut x = [0u8; 8];
+        x[..w].copy_from_slice(b);
+        prev += u64::from_le_bytes(x);
+        *slot = prev as u32;
+    }
+    prev
+}
+
+/// Adds `W`-byte steps up from `prev` into `out`, returning the last: a sum
+/// in `u64`, so no list of `u32` steps overflows it.
+fn steps_into<const W: usize>(steps: &[u8], mut prev: u64, out: &mut [u32]) -> u64 {
+    for (slot, b) in out.iter_mut().zip(steps.as_chunks::<W>().0) {
+        let mut w = [0u8; 8];
+        w[..W].copy_from_slice(b);
+        prev += u64::from_le_bytes(w);
+        *slot = prev as u32;
+    }
+    prev
+}
+
 /// Whether a restore sums its vectors' norms eight at a time: natively.
 const BATCH_NORMS: bool = cfg!(not(target_family = "wasm"));
 
@@ -1685,10 +1966,19 @@ impl Rng {
 /// the documents as the whole file left them, and a vector rewritten after
 /// the record kept the links of the one before it. It does not know 6, and
 /// rebuilds.
+///
+/// 7 and 8 are 3 to 6 laid out flat -- the image's and the tail's -- with
+/// the quantization and a node's waiting flag always there: arrays of the
+/// nodes' documents, flags, levels and level-0 lengths, then every link a
+/// `u32`, where the others took a varint delta a link. Decoding them one at
+/// a time was a quarter of opening a 100 000 x 128 graph; laid out flat they
+/// are copied. A binary before 7 does not know it, and rebuilds.
 const GRAPH_VERSION: u8 = 3;
 const GRAPH_VERSION_QUANT: u8 = 4;
 const GRAPH_VERSION_UNLINKED: u8 = 5;
 const GRAPH_VERSION_KEPT: u8 = 6;
+const GRAPH_VERSION_FLAT: u8 = 7;
+const GRAPH_VERSION_FLAT_KEPT: u8 = 8;
 
 /// Whether a graph can hold nodes not linked yet: a server's open leaves
 /// them for a thread beside its queries (`fs::open_serving`). The browser
@@ -2533,12 +2823,6 @@ impl VectorIndex {
         self.alloc_links(doc, level)
     }
 
-    /// `alloc_node` for a vector in the arena's stored form.
-    fn alloc_node_stored(&mut self, doc: DocId, stored: &[u8], level: usize) -> u32 {
-        self.data.push_stored(stored);
-        self.alloc_links(doc, level)
-    }
-
     fn alloc_links(&mut self, doc: DocId, level: usize) -> u32 {
         self.changes += 1;
         let node = self.doc_ids.len() as u32;
@@ -3068,6 +3352,113 @@ impl VectorIndex {
     }
 
     fn serialize(&self, kept: bool) -> Vec<u8> {
+        let n = self.doc_ids.len();
+        let mut out = Vec::with_capacity(64 + n * (12 + 4 * self.m0));
+        out.push(match kept {
+            true => GRAPH_VERSION_FLAT_KEPT,
+            false => GRAPH_VERSION_FLAT,
+        });
+        self.write_head(&mut out, true);
+        put_uvarint(&mut out, n as u64);
+        put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
+        put_uvarint(&mut out, self.max_level as u64);
+        // A list's first link is as many bytes as the node count needs, its
+        // steps as many as its widest, a document id 4 where every one fits:
+        // links and ids written 4 and 8 whatever, a 100 000 x 128 graph took
+        // 12.4 MB against the varint deltas' 6.2, a file 5% larger.
+        let (lw, dw) = (link_width(n), doc_width(&self.doc_ids));
+        out.extend_from_slice(&[lw as u8, dw as u8]);
+        // The nodes still to be linked, flagged as such: written as nodes
+        // with no links they would come back unreachable.
+        let mut waiting = Vec::new();
+        if UNLINKED {
+            waiting.resize(n, false);
+            for &node in &self.pending {
+                waiting[node as usize] = !self.is_deleted(node);
+            }
+        }
+        for &doc in &self.doc_ids {
+            out.extend_from_slice(&doc.to_le_bytes()[..dw]);
+        }
+        for node in 0..n {
+            out.push(match self.deleted[node] {
+                true => 1,
+                false => 2 * waiting.get(node).copied().unwrap_or(false) as u8,
+            });
+        }
+        // A level is a byte: `random_level` stops short of 32.
+        out.extend(self.upper.iter().map(|u| u.len() as u8));
+        for &k in &self.l0_len {
+            out.extend_from_slice(&k.to_le_bytes());
+        }
+        // A list is a set, written sorted, as the varint layout wrote it:
+        // as `u64`s, whose sort the ids take anyway -- a `u32` sort of its
+        // own was 2 KB of the browser module.
+        let mut sorted: Vec<u64> = Vec::with_capacity(self.m0);
+        let mut links = |out: &mut Vec<u8>, nbs: &[u32]| {
+            sorted.clear();
+            sorted.extend(nbs.iter().map(|&nb| nb as u64));
+            sorted.sort_unstable();
+            put_links(out, &sorted, lw);
+        };
+        for node in 0..n as u32 {
+            links(&mut out, self.neighbors(node, 0));
+        }
+        for node in 0..n as u32 {
+            for l in 1..=self.node_levels(node) {
+                let nbs = self.neighbors(node, l);
+                out.extend_from_slice(&(nbs.len() as u16).to_le_bytes());
+                links(&mut out, nbs);
+            }
+        }
+        // A tombstone still routes searches, but its document may be gone
+        // or hold another vector by now: the vector it was linked with
+        // travels with it.
+        for node in (0..n as u32).filter(|&v| self.is_deleted(v)) {
+            self.data.write_stored(node, self.dim, &mut out);
+        }
+        out
+    }
+
+    /// What every layout of a graph record starts with after its version:
+    /// the dimension, metric, beams, precision and, where `quant` or the
+    /// version asks, the quantization with a bit index's centres.
+    fn write_head(&self, out: &mut Vec<u8>, quant_byte: bool) {
+        let quant = self.spec.quant;
+        put_uvarint(out, self.dim as u64);
+        out.push(match self.spec.metric {
+            Metric::Cosine => 0,
+            Metric::L2 => 1,
+            Metric::Dot => 2,
+        });
+        put_uvarint(out, self.spec.m as u64);
+        put_uvarint(out, self.spec.ef_construction as u64);
+        put_uvarint(out, self.spec.ef_search as u64);
+        out.push(match self.prec {
+            VecPrec::F32 => 0,
+            VecPrec::F16 => 1,
+        });
+        if quant_byte {
+            match quant {
+                Quant::Bit => out.push(BIT_CENTRED),
+                _ => out.push(quant.code()),
+            }
+        }
+        // The centres a bit index's codes are taken from: none while it
+        // holds its vectors whole.
+        if quant == Quant::Bit {
+            let at = match &self.data {
+                Arena::Bit(b) => &b.centres.at[..],
+                _ => &[],
+            };
+            put_uvarint(out, (at.len() / self.dim.max(1)) as u64);
+            at.iter()
+                .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
+        }
+    }
+
+    #[cfg(test)]
+    fn serialize_varint(&self, kept: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.doc_ids.len() * 96);
         let quant = self.spec.quant;
         // The nodes still to be linked, flagged as such: written as nodes
@@ -3090,36 +3481,10 @@ impl VectorIndex {
         } else {
             GRAPH_VERSION_QUANT
         });
-        put_uvarint(&mut out, self.dim as u64);
-        out.push(match self.spec.metric {
-            Metric::Cosine => 0,
-            Metric::L2 => 1,
-            Metric::Dot => 2,
-        });
-        put_uvarint(&mut out, self.spec.m as u64);
-        put_uvarint(&mut out, self.spec.ef_construction as u64);
-        put_uvarint(&mut out, self.spec.ef_search as u64);
-        out.push(match self.prec {
-            VecPrec::F32 => 0,
-            VecPrec::F16 => 1,
-        });
-        if kept || quant != Quant::None || !unlinked.is_empty() {
-            match quant {
-                Quant::Bit => out.push(BIT_CENTRED),
-                _ => out.push(quant.code()),
-            }
-        }
-        // The centres a bit index's codes are taken from: none while it
-        // holds its vectors whole.
-        if quant == Quant::Bit {
-            let at = match &self.data {
-                Arena::Bit(b) => &b.centres.at[..],
-                _ => &[],
-            };
-            put_uvarint(&mut out, (at.len() / self.dim.max(1)) as u64);
-            at.iter()
-                .for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
-        }
+        self.write_head(
+            &mut out,
+            kept || quant != Quant::None || !unlinked.is_empty(),
+        );
         put_uvarint(&mut out, self.doc_ids.len() as u64);
         put_uvarint(&mut out, self.entry.map(|e| e as u64 + 1).unwrap_or(0));
         put_uvarint(&mut out, self.max_level as u64);
@@ -3176,11 +3541,16 @@ impl VectorIndex {
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
         let version = *bytes.first()?;
+        let flat = matches!(version, GRAPH_VERSION_FLAT | GRAPH_VERSION_FLAT_KEPT);
         // A browser keeps no graph of its own in a tail, and rebuilds one a
         // server kept, as it does one with nodes waiting.
-        let kept = UNLINKED && version == GRAPH_VERSION_KEPT;
-        let waits = UNLINKED && (version == GRAPH_VERSION_UNLINKED || kept);
-        if !waits && !kept && version != GRAPH_VERSION && version != GRAPH_VERSION_QUANT {
+        let kept = UNLINKED && matches!(version, GRAPH_VERSION_KEPT | GRAPH_VERSION_FLAT_KEPT);
+        let waits = UNLINKED && (version == GRAPH_VERSION_UNLINKED || kept || flat);
+        let plain = matches!(
+            version,
+            GRAPH_VERSION | GRAPH_VERSION_QUANT | GRAPH_VERSION_FLAT
+        );
+        if !waits && !kept && !plain {
             return None;
         }
         pos += 1;
@@ -3247,106 +3617,71 @@ impl VectorIndex {
         if spec.quant == Quant::Bit && !centred && count >= BIT_TRAIN {
             return None;
         }
-
-        ix.reserve(count);
-        // Every level-0 list at once, zeroed by the allocator rather than a
-        // stride at a time as the nodes come.
-        ix.l0 = vec![0; count.checked_mul(ix.m0)?];
-        ix.max_level = max_level;
-        ix.entry = if entry_raw == 0 {
-            None
-        } else {
-            Some((entry_raw - 1) as u32)
-        };
-
-        let mut raw: Vec<f32> = Vec::with_capacity(dim);
-        let mut lvl: Vec<u32> = Vec::new();
-        // The documents' vectors, eight at a time, into the arena in node
-        // order: their norms are summed side by side ([`flat_sqs8`]). Not
-        // in the browser, whose image of 20 000 x 128 loaded 9% faster that
-        // way for 0.5 KB brotli more of the module.
-        let mut batch: Vec<f32> = Vec::new();
-        let unit = spec.metric == Metric::Cosine;
+        let entry = entry_raw.checked_sub(1).map(|e| e as u32);
         let stored = ix.data.stored_len(dim);
-        for node in 0..count {
-            let doc = get_uvarint(bytes, &mut pos).ok()?;
-            let (is_deleted, unlinked) = match (*bytes.get(pos)?, waits) {
-                (0, _) => (false, false),
-                (2, true) => (false, true),
-                // Kept with a node waiting, which this build cannot hold.
-                (2, false) if kept => return None,
-                (1, true) | (_, false) => (true, false),
-                _ => return None,
-            };
-            pos += 1;
-            let levels = get_uvarint(bytes, &mut pos).ok()? as usize;
-            if levels == 0 {
-                return None;
-            }
-            let n = if is_deleted {
-                let v = bytes.get(pos..pos + stored)?;
-                pos += stored;
-                if BATCH_NORMS {
-                    flush_units(&mut ix.data, &mut batch, dim, unit);
-                }
-                ix.alloc_node_stored(doc, v, levels - 1)
-            } else {
-                if !lookup(doc, &mut raw) || raw.len() != dim {
-                    return None;
-                }
-                if !BATCH_NORMS {
-                    ix.alloc_node(doc, &raw, levels - 1)
-                } else {
-                    batch.extend_from_slice(&raw);
-                    if batch.len() == 8 * dim {
-                        flush_units(&mut ix.data, &mut batch, dim, unit);
-                    }
-                    ix.alloc_links(doc, levels - 1)
-                }
-            };
-            debug_assert_eq!(n as usize, node);
-            if is_deleted {
-                ix.deleted[node] = true;
-                ix.deleted_count += 1;
-            } else {
-                ix.by_doc.insert(doc, node as u32);
-            }
-            if unlinked {
-                ix.pending.push(node as u32);
-            }
+        let body = &bytes[pos..];
+        let read = match flat {
+            true => Read::flat(body, count, ix.m0, stored, waits)?,
+            false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
+        };
+        ix.build_restored(read, entry, max_level, &mut lookup)
+    }
 
-            for l in 0..levels {
-                let k = get_uvarint(bytes, &mut pos).ok()? as usize;
-                if k > count {
-                    return None; // corrupt length
-                }
-                lvl.clear();
-                let mut prev = 0u64;
-                for _ in 0..k {
-                    let delta = graph_varint(bytes, &mut pos)?;
-                    let nb = prev.checked_add(delta)?;
-                    if nb as usize >= count {
-                        return None; // out-of-range link: the graph is corrupt
-                    }
-                    prev = nb;
-                    lvl.push(nb as u32);
-                }
-                if l == 0 && k > ix.m0 {
-                    return None; // level-0 degree exceeds the arena stride
-                }
-                ix.set_neighbors(node as u32, l, &lvl);
-            }
-        }
-
-        if BATCH_NORMS {
-            flush_units(&mut ix.data, &mut batch, dim, unit);
-        }
-        if ix.entry.map(|e| e as usize >= count).unwrap_or(false) {
+    /// The index a graph record describes, read into arrays by either
+    /// layout: the documents' vectors come in -- read and made unit ones,
+    /// eight at a time natively -- in node order, a tombstone's out of the
+    /// record, and the links as they were read.
+    fn build_restored(
+        mut self,
+        read: Read<'_>,
+        entry: Option<u32>,
+        max_level: usize,
+        lookup: &mut dyn FnMut(DocId, &mut Vec<f32>) -> bool,
+    ) -> Option<VectorIndex> {
+        let (count, dim) = (read.docs.len(), self.dim);
+        if entry.is_some_and(|e| e as usize >= count) {
             return None;
         }
+        let unit = self.spec.metric == Metric::Cosine;
+        let (mut raw, mut batch) = (Vec::with_capacity(dim), Vec::new());
+        let mut tombs = read.tombs.iter();
+        self.data.reserve(count, dim);
+        self.by_doc.reserve(count);
+        for (node, (&doc, &flag)) in read.docs.iter().zip(&read.flags).enumerate() {
+            if flag == WAITING {
+                self.pending.push(node as u32);
+            }
+            if flag == DEAD {
+                if BATCH_NORMS {
+                    flush_units(&mut self.data, &mut batch, dim, unit);
+                }
+                self.data.push_stored(tombs.next()?);
+                continue;
+            }
+            if !lookup(doc, &mut raw) || raw.len() != dim {
+                return None;
+            }
+            if BATCH_NORMS {
+                batch.extend_from_slice(&raw);
+                if batch.len() == 8 * dim {
+                    flush_units(&mut self.data, &mut batch, dim, unit);
+                }
+            } else {
+                self.data.push(&raw, unit);
+            }
+            self.by_doc.insert(doc, node as u32);
+        }
+        if BATCH_NORMS {
+            flush_units(&mut self.data, &mut batch, dim, unit);
+        }
+        self.deleted = read.flags.iter().map(|&f| f == DEAD).collect();
+        self.deleted_count = self.deleted.iter().filter(|&&d| d).count();
+        (self.doc_ids, self.l0, self.l0_len, self.upper) =
+            (read.docs, read.l0, read.l0_len, read.upper);
+        (self.entry, self.max_level) = (entry, max_level);
         // As its record has it: nothing to write again.
-        ix.changes = 0;
-        Some(ix)
+        self.changes = 0;
+        Some(self)
     }
 
     /// Exact (brute-force) search. Used on small collections and when
@@ -3704,6 +4039,100 @@ mod tests {
                 ix.data.write_stored(node, dim, &mut a);
                 back.data.write_stored(node, dim, &mut b);
                 assert_eq!(a, b, "{prec:?}, node {node}");
+            }
+        }
+    }
+
+    /// A graph written flat restores as the varint layout's record of it
+    /// did -- links, levels, tombstones and their vectors, nodes waiting to
+    /// be linked, every kind of arena -- and writes back the bytes it was
+    /// read from. A link naming no node, or a record cut short, is refused.
+    #[test]
+    fn a_flat_graph_record_restores_as_the_varint_one_did() {
+        let mut rng = Rng(41);
+        let cases = [
+            (Quant::None, VecPrec::F32, Metric::Cosine, 1500),
+            (Quant::None, VecPrec::F16, Metric::L2, 1500),
+            (Quant::Int8, VecPrec::F32, Metric::Cosine, 1500),
+            (Quant::Bit, VecPrec::F32, Metric::Cosine, 2200),
+        ];
+        for (quant, prec, metric, n) in cases {
+            let dim = 12;
+            let spec = VectorIndexSpec {
+                metric,
+                quant,
+                m: 6,
+                ef_construction: 24,
+                ..VectorIndexSpec::default()
+            };
+            let mut ix = VectorIndex::with_precision(dim, spec, prec);
+            let mut held = HashMap::new();
+            let vector =
+                |rng: &mut Rng| -> Vec<f32> { (0..dim).map(|_| rng.next_f32() - 0.5).collect() };
+            let items: Vec<(u64, Vec<f32>)> =
+                (0..n as u64).map(|i| (i, vector(&mut rng))).collect();
+            ix.insert_batch(&items);
+            held.extend(items);
+            // Tombstones: rewritten and deleted documents.
+            for i in (0..n as u64).step_by(97) {
+                let v = vector(&mut rng);
+                ix.insert(i, &v);
+                held.insert(i, v);
+            }
+            for i in (5..n as u64).step_by(131) {
+                ix.remove(i);
+                held.remove(&i);
+            }
+            // Nodes waiting to be linked.
+            let late: Vec<(u64, Vec<f32>)> = (n as u64..n as u64 + 30)
+                .map(|i| (i, vector(&mut rng)))
+                .collect();
+            ix.defer_batch(&late);
+            held.extend(late);
+            let lookup = |doc: u64, out: &mut Vec<f32>| {
+                out.clear();
+                out.extend_from_slice(held.get(&doc).map_or(&[][..], |v| &v[..]));
+                held.contains_key(&doc)
+            };
+            for kept in [false, true] {
+                let what = format!("{quant:?} {prec:?} {metric:?} kept {kept}");
+                let old = VectorIndex::restore_graph(&ix.serialize_varint(kept), dim, prec, lookup)
+                    .expect(&what);
+                let flat = ix.serialize(kept);
+                let new = VectorIndex::restore_graph(&flat, dim, prec, lookup).expect(&what);
+                assert!(
+                    new.serialize(kept) == flat,
+                    "{what}: written back otherwise"
+                );
+                assert!(
+                    new.serialize(kept) == old.serialize(kept),
+                    "{what}: restored otherwise"
+                );
+                assert_eq!(new.pending, old.pending, "{what}");
+                assert_eq!(new.by_doc, old.by_doc, "{what}");
+                assert_eq!(new.deleted_count, old.deleted_count, "{what}");
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                for node in 0..new.doc_ids.len() as u32 {
+                    a.clear();
+                    b.clear();
+                    new.data.write_stored(node, dim, &mut a);
+                    old.data.write_stored(node, dim, &mut b);
+                    assert!(a == b, "{what}: node {node}'s vector");
+                }
+                // The record cut short, and a link naming a node past the
+                // last.
+                let cut = &flat[..flat.len() - 1];
+                assert!(
+                    VectorIndex::restore_graph(cut, dim, prec, lookup).is_none(),
+                    "{what}: cut short"
+                );
+                let mut bad = new;
+                bad.l0[0] = bad.doc_ids.len() as u32;
+                let bad = bad.serialize(kept);
+                assert!(
+                    VectorIndex::restore_graph(&bad, dim, prec, lookup).is_none(),
+                    "{what}: bad link"
+                );
             }
         }
     }
@@ -4218,7 +4647,10 @@ mod tests {
                 ix.remove(i * 7);
             }
             let bytes = ix.serialize_graph();
-            assert_eq!(bytes[0], if quant == Quant::None { 3 } else { 4 });
+            assert_eq!(bytes[0], GRAPH_VERSION_FLAT);
+            // The varint layout wrote a quantized graph as 4, others as 3.
+            let old = ix.serialize_varint(false)[0];
+            assert_eq!(old, if quant == Quant::None { 3 } else { 4 });
             let fetch = |doc: DocId, out: &mut Vec<f32>| match docs.get(doc as usize) {
                 Some(v) => {
                     out.clear();
@@ -4456,7 +4888,8 @@ mod tests {
             // Deleted while waiting: a tombstone, no longer waiting.
             ix.remove(600);
             let bytes = ix.serialize_graph();
-            assert_eq!(bytes[0], 5, "{quant:?}");
+            assert_eq!(bytes[0], GRAPH_VERSION_FLAT, "{quant:?}");
+            assert_eq!(ix.serialize_varint(false)[0], 5, "{quant:?}");
             let back = VectorIndex::restore_graph(&bytes, dim, VecPrec::F32, fetch)
                 .expect("restore failed");
             assert_eq!(back.spec, spec);
@@ -4465,7 +4898,8 @@ mod tests {
                 assert_eq!(ranked(&back, q), ranked(&ix, q), "{quant:?}");
             }
             ix.link_pending(usize::MAX, &mut { fetch });
-            let linked = ix.serialize_graph();
+            // Linked, the varint layout left 5 for 3 or 4.
+            let linked = ix.serialize_varint(false);
             assert_eq!(linked[0], if quant == Quant::None { 3 } else { 4 });
         }
     }
