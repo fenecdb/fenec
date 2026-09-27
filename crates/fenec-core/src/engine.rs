@@ -1347,6 +1347,8 @@ struct Step<'a> {
     probe: Probe<'a>,
     /// Position of the key field in `parent`'s schema; `None` for `id`.
     parent_pos: Option<usize>,
+    /// The level's `where`, bound the first time a row is tested.
+    test: std::cell::OnceCell<Filter<'a>>,
 }
 
 impl Step<'_> {
@@ -1363,12 +1365,8 @@ impl Step<'_> {
         let Some(f) = &self.l.filter else {
             return Ok(true);
         };
-        let mut r = StoreRow {
-            store: &self.child.store,
-            schema: &self.child.schema,
-            id,
-        };
-        Ok(truthy(&eval(f, &mut r, ctx)?))
+        let test = self.test.get_or_init(|| Filter::new(self.child, f, ctx));
+        test.matches(id, ctx)
     }
 }
 
@@ -4155,6 +4153,7 @@ impl Database {
 
         let mut out = Vec::new();
         let mut tested = 0usize;
+        let test = Filter::new(c, f, &ctx);
         let scanned = match self.filter_candidates(c, f, params, want)? {
             // The filter is exactly what the index answered: no row needs a
             // second look.
@@ -4168,7 +4167,7 @@ impl Database {
                         break;
                     }
                     tested += 1;
-                    if row_matches(c, f, id, &ctx)? {
+                    if test.matches(id, &ctx)? {
                         out.push(id);
                     }
                 }
@@ -4181,7 +4180,7 @@ impl Database {
                         break;
                     }
                     tested += 1;
-                    if row_matches(c, f, id, &ctx)? {
+                    if test.matches(id, &ctx)? {
                         out.push(id);
                     }
                 }
@@ -4441,7 +4440,8 @@ impl Database {
             Some((rows, false)) => FilterProbe::new(rows),
             None => FilterProbe::new(c.store.ids()),
         };
-        let matches = |id: DocId| row_matches(c, f, id, ctx);
+        let test = Filter::new(c, f, ctx);
+        let matches = |id: DocId| test.matches(id, ctx);
         // `exact` is the verification path: it always scans everything.
         let cap = if near.exact { usize::MAX } else { budget + 1 };
         let total = probe.rows.len();
@@ -4634,15 +4634,16 @@ impl Database {
         // filter matching 1% still fills the page in 0.29 ms against 125.
         let budget = (c.store.len() / 8).max(want);
         let (mut walked, mut gave_up) = (0usize, false);
+        let test = sel.filter.as_ref().map(|f| Filter::new(c, f, ctx));
         ix.walk(!asc, range.as_ref(), |id| {
             if !bare {
-                if let Some(f) = &sel.filter {
+                if let Some(test) = &test {
                     walked += 1;
                     if walked > budget {
                         gave_up = true;
                         return Ok(false);
                     }
-                    if !row_matches(c, f, id, ctx)? {
+                    if !test.matches(id, ctx)? {
                         return Ok(true);
                     }
                 }
@@ -5056,6 +5057,7 @@ impl Database {
                 child,
                 probe,
                 parent_pos,
+                test: std::cell::OnceCell::new(),
             });
             above = child;
             cur = step.next.as_deref();
@@ -6531,14 +6533,215 @@ fn past_tombstones(
     Short::Exact
 }
 
-/// Whether the stored row `id` passes the filter.
-fn row_matches(c: &Collection, f: &Expr, id: DocId, ctx: &EvalCtx) -> Result<bool> {
-    let mut row = StoreRow {
-        store: &c.store,
-        schema: &c.schema,
-        id,
-    };
-    Ok(truthy(&eval(f, &mut row, ctx)?))
+/// A filter bound to the collection it tests rows of, once a query: each
+/// field it compares with a value by position, and the value worked out.
+/// A row is then decoded once for every field the filter reads
+/// (`Store::read_fields`), and tested without looking the field up by
+/// name or cloning the value, row after row. What it cannot bind -- a field
+/// it does not know, a parameter not given, a call, two fields compared --
+/// it evaluates as `eval` does, so every error comes where and as it came
+/// before: at the first row tested, and never over no rows.
+struct Filter<'q> {
+    c: &'q Collection,
+    root: Test<'q>,
+    /// The fields the filter reads, ascending, and for each field position
+    /// where its value lands among them.
+    positions: Vec<usize>,
+    index_of: Vec<usize>,
+    vals: std::cell::RefCell<Vec<Value>>,
+}
+
+/// Where a bound test reads its field: the document's id, or a field by
+/// its position in the schema.
+#[derive(Clone, Copy)]
+enum Slot {
+    Id,
+    At(usize),
+}
+
+enum Test<'q> {
+    And(Box<Test<'q>>, Box<Test<'q>>),
+    Or(Box<Test<'q>>, Box<Test<'q>>),
+    Not(Box<Test<'q>>),
+    IsNull(Slot),
+    /// The field against the value, the field on the left when `first`,
+    /// and ordered in the field's collation when both are text.
+    Cmp {
+        op: CmpOp,
+        slot: Slot,
+        value: Value,
+        first: bool,
+        coll: Option<Collation>,
+    },
+    In(Slot, Vec<Value>),
+    Like(Slot, Value),
+    Has(Slot, Value),
+    Eval(&'q Expr),
+}
+
+impl<'q> Filter<'q> {
+    fn new(c: &'q Collection, f: &'q Expr, ctx: &EvalCtx) -> Filter<'q> {
+        let mut positions = Vec::new();
+        let root = Filter::bind(c, f, ctx, &mut positions);
+        let mut index_of = vec![usize::MAX; c.schema.fields.len()];
+        for (i, &p) in positions.iter().enumerate() {
+            index_of[p] = i;
+        }
+        Filter {
+            c,
+            root,
+            positions,
+            index_of,
+            vals: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn bind(c: &Collection, e: &'q Expr, ctx: &EvalCtx, used: &mut Vec<usize>) -> Test<'q> {
+        let mut slot = |e: &Expr| match e {
+            Expr::Field(name) if name == "id" => Some(Slot::Id),
+            // Kept ascending as they come, a few at most: sorted after,
+            // `usize` was a sort of its own, 3 KB of the browser module.
+            Expr::Field(name) => c.schema.field_pos(name).map(|p| {
+                let at = used.iter().position(|&q| q >= p).unwrap_or(used.len());
+                if used.get(at) != Some(&p) {
+                    used.insert(at, p);
+                }
+                Slot::At(p)
+            }),
+            _ => None,
+        };
+        let value = |e: &Expr| match e {
+            Expr::Lit(v) => Some(v.clone()),
+            Expr::Param(i) => ctx.params.get(*i).cloned(),
+            _ => None,
+        };
+        let coll = |s: Slot| match s {
+            Slot::At(p) => c.schema.fields[p].collate,
+            Slot::Id => None,
+        };
+        match e {
+            Expr::And(a, b) => Test::And(
+                Box::new(Filter::bind(c, a, ctx, used)),
+                Box::new(Filter::bind(c, b, ctx, used)),
+            ),
+            Expr::Or(a, b) => Test::Or(
+                Box::new(Filter::bind(c, a, ctx, used)),
+                Box::new(Filter::bind(c, b, ctx, used)),
+            ),
+            Expr::Not(a) => Test::Not(Box::new(Filter::bind(c, a, ctx, used))),
+            Expr::IsNull(a) => match slot(a) {
+                Some(s) => Test::IsNull(s),
+                None => Test::Eval(e),
+            },
+            Expr::Cmp(op, a, b) => match (slot(a), value(b), value(a), slot(b)) {
+                (Some(s), Some(value), ..) => Test::Cmp {
+                    op: *op,
+                    slot: s,
+                    value,
+                    first: true,
+                    coll: coll(s),
+                },
+                (_, _, Some(value), Some(s)) => Test::Cmp {
+                    op: *op,
+                    slot: s,
+                    value,
+                    first: false,
+                    coll: coll(s),
+                },
+                _ => Test::Eval(e),
+            },
+            Expr::In(a, items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for it in items {
+                    match value(it) {
+                        Some(v) => values.push(v),
+                        None => return Test::Eval(e),
+                    }
+                }
+                match slot(a) {
+                    Some(s) => Test::In(s, values),
+                    None => Test::Eval(e),
+                }
+            }
+            Expr::Like(a, b) => match (slot(a), value(b)) {
+                (Some(s), Some(v)) => Test::Like(s, v),
+                _ => Test::Eval(e),
+            },
+            Expr::Has(a, b) => match (slot(a), value(b)) {
+                (Some(s), Some(v)) => Test::Has(s, v),
+                _ => Test::Eval(e),
+            },
+            _ => Test::Eval(e),
+        }
+    }
+
+    /// Whether the stored row `id` passes the filter; `ctx` is what the
+    /// filter was bound with, for what it evaluates as `eval` does.
+    fn matches(&self, id: DocId, ctx: &EvalCtx) -> Result<bool> {
+        let mut vals = self.vals.borrow_mut();
+        if !self.positions.is_empty()
+            && !self.c.store.read_fields(id, &self.positions, &mut vals)?
+        {
+            vals.clear();
+            vals.resize(self.positions.len(), Value::Null);
+        }
+        self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
+    }
+
+    fn test(
+        &self,
+        t: &Test,
+        id: DocId,
+        vals: &[Value],
+        idv: &Value,
+        ctx: &EvalCtx,
+    ) -> Result<bool> {
+        let get = |s: Slot| match s {
+            Slot::Id => idv,
+            Slot::At(p) => &vals[self.index_of[p]],
+        };
+        Ok(match t {
+            Test::And(a, b) => {
+                self.test(a, id, vals, idv, ctx)? && self.test(b, id, vals, idv, ctx)?
+            }
+            Test::Or(a, b) => {
+                self.test(a, id, vals, idv, ctx)? || self.test(b, id, vals, idv, ctx)?
+            }
+            Test::Not(a) => !self.test(a, id, vals, idv, ctx)?,
+            Test::IsNull(s) => get(*s).is_null(),
+            Test::Cmp {
+                op,
+                slot,
+                value,
+                first,
+                coll,
+            } => {
+                let f = get(*slot);
+                let (l, r) = if *first { (f, value) } else { (value, f) };
+                compare(*op, l, r, &|| *coll)
+            }
+            Test::In(s, values) => {
+                let f = get(*s);
+                values.iter().any(|v| v.cmp_value(f) == Ordering::Equal)
+            }
+            Test::Like(s, v) => match (get(*s).as_text(), v.as_text()) {
+                (Some(hay), Some(needle)) => like_match(hay, needle),
+                _ => false,
+            },
+            Test::Has(s, v) => match get(*s) {
+                Value::List(items) => items.iter().any(|i| i.cmp_value(v) == Ordering::Equal),
+                _ => false,
+            },
+            Test::Eval(e) => {
+                let mut row = StoreRow {
+                    store: &self.c.store,
+                    schema: &self.c.schema,
+                    id,
+                };
+                truthy(&eval(e, &mut row, ctx)?)
+            }
+        })
+    }
 }
 
 /// A filter evaluated over `rows` in blocks taken a stride apart, so that

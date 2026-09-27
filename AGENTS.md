@@ -674,6 +674,21 @@ only `offset + limit` rows in order -- unless it is one key over a `@sorted`
 field with a `limit`, which walks the index and stops at the page; with no
 `order`, the scan stops at `offset + limit` matches.
 
+**A filter is bound to its collection once a query.** A scan, the
+probe of a filtered `near`, an ordered walk and each `lookup` level test
+rows through `Filter` (`engine.rs`): each field compared with a value by
+its position, the value worked out once, and a row decoded in one pass for
+every field the filter reads (`Store::read_fields`). What it cannot bind --
+a field it does not know, a parameter not given, a call, two fields
+compared -- stays an `eval` node over the stored row, so every error comes
+where and as it came before: at the first row tested, and never over no
+rows. Both take their comparison from one `query::compare`. Looked up by
+name and cloned value by value, a scan of 20 000 rows with two comparisons
+and an order took 1.91 ms natively and 2.88 in the browser module; bound,
+1.07 and 1.70, and a count over an `in` and an `or` 2.24 -> 0.90 ms. The
+positions are kept sorted as they come: sorted after, `usize` was a sort of
+its own, 3 KB of the browser module.
+
 **`@sorted` must give the scan's answer, row for row.** Its keys order exactly
 as `Value::cmp_value` orders the field's values (ints and timestamps through a
 sign-bit flip, floats through order-preserving bits with `-0.0` folded onto

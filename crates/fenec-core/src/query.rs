@@ -305,7 +305,7 @@ pub struct EvalCtx<'a> {
 /// Folded, the two are searched as bytes as well: a needle of valid UTF-8
 /// can only match at a character's first byte, so the answer is `contains`',
 /// whose searcher slices the string where a slice can panic.
-fn like_match(hay: &str, needle: &str) -> bool {
+pub(crate) fn like_match(hay: &str, needle: &str) -> bool {
     if !(hay.is_ascii() && needle.is_ascii()) {
         let (h, n) = (crate::case::lower(hay), crate::case::lower(needle));
         let (h, n) = (h.as_bytes(), n.as_bytes());
@@ -354,38 +354,11 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
         Expr::IsNull(a) => Value::Bool(eval(a, row, ctx)?.is_null()),
         Expr::Cmp(op, a, b) => {
             let (l, r) = (eval(a, row, ctx)?, eval(b, row, ctx)?);
-            if l.is_null() || r.is_null() {
-                // NULL comparisons return false (except Eq/Ne)
-                return Ok(match op {
-                    CmpOp::Eq => Value::Bool(l.is_null() && r.is_null()),
-                    CmpOp::Ne => Value::Bool(l.is_null() != r.is_null()),
-                    _ => Value::Bool(false),
-                });
-            }
-            // Text against a field in a collation orders as the field does,
-            // so the scan and the field's `@sorted` index agree. Equality
-            // is the bytes' either way: the collation ties no two strings.
             let field = |e: &Expr| match e {
                 Expr::Field(name) => row.collation(name),
                 _ => None,
             };
-            let coll = match (op, &l, &r) {
-                (CmpOp::Eq | CmpOp::Ne, ..) => None,
-                (_, Value::Text(_), Value::Text(_)) => field(a).or_else(|| field(b)),
-                _ => None,
-            };
-            let ord = match (coll, &l, &r) {
-                (Some(c), Value::Text(x), Value::Text(y)) => c.compare(x, y),
-                _ => l.cmp_value(&r),
-            };
-            Value::Bool(match op {
-                CmpOp::Eq => ord == Ordering::Equal,
-                CmpOp::Ne => ord != Ordering::Equal,
-                CmpOp::Lt => ord == Ordering::Less,
-                CmpOp::Le => ord != Ordering::Greater,
-                CmpOp::Gt => ord == Ordering::Greater,
-                CmpOp::Ge => ord != Ordering::Less,
-            })
+            Value::Bool(compare(*op, &l, &r, &|| field(a).or_else(|| field(b))))
         }
         Expr::Like(a, b) => {
             let l = eval(a, row, ctx)?;
@@ -428,6 +401,43 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             ctx.registry.call(name, &vals)?
         }
     })
+}
+
+/// `l op r` as a filter takes it: a null equal only to a null and ordered
+/// against nothing. Text against a field in a collation orders as the field
+/// does (`coll`, asked only then), so the scan and the field's `@sorted`
+/// index agree; equality is the bytes' either way, as the collation ties
+/// no two strings.
+#[inline]
+pub(crate) fn compare(
+    op: CmpOp,
+    l: &Value,
+    r: &Value,
+    coll: &dyn Fn() -> Option<Collation>,
+) -> bool {
+    if l.is_null() || r.is_null() {
+        return match op {
+            CmpOp::Eq => l.is_null() && r.is_null(),
+            CmpOp::Ne => l.is_null() != r.is_null(),
+            _ => false,
+        };
+    }
+    let ord = match (op, l, r) {
+        (CmpOp::Eq | CmpOp::Ne, ..) => l.cmp_value(r),
+        (_, Value::Text(x), Value::Text(y)) => match coll() {
+            Some(c) => c.compare(x, y),
+            None => l.cmp_value(r),
+        },
+        _ => l.cmp_value(r),
+    };
+    match op {
+        CmpOp::Eq => ord == Ordering::Equal,
+        CmpOp::Ne => ord != Ordering::Equal,
+        CmpOp::Lt => ord == Ordering::Less,
+        CmpOp::Le => ord != Ordering::Greater,
+        CmpOp::Gt => ord == Ordering::Greater,
+        CmpOp::Ge => ord != Ordering::Less,
+    }
 }
 
 pub fn truthy(v: &Value) -> bool {
