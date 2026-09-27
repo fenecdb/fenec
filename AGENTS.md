@@ -375,7 +375,7 @@ Both layouts are read into the same arrays (`Read`) and the index is built
 from them in one place (`build_restored`);
 `a_flat_graph_record_restores_as_the_varint_one_did` holds 3 to 6 and 7 to
 8 to the same index, which a binary before 7 builds again. The browser
-module carries the reader -- 1.9 KB brotli -- to open a server's file
+module carries the reader -- 1.8 KB brotli -- to open a server's file
 without building its graphs again, and loads its own no faster for it.
 
 **A batch links in parallel, into the graph it would link in turn.**

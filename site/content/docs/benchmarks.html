@@ -330,7 +330,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1283 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1040 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>412 KB</b></td><td class="n"><b>136 KB</b></td><td class="n">163 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>411 KB</b></td><td class="n"><b>136 KB</b></td><td class="n">162 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">88 KB</td><td class="n">24 KB</td><td class="n">28 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -375,17 +375,17 @@ every pull request's CI run shows the same against the branch it goes into.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Code, 360.9 KB of the 411.5</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
+<thead><tr><th>Code, 360.6 KB of the 411.2</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
 <tbody>
-<tr><td><b>fenecdb's own</b></td><td class="n"><b>246.9</b></td><td class="n"><b>68.4%</b></td></tr>
-<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">86.0</td><td class="n">23.8%</td></tr>
+<tr><td><b>fenecdb's own</b></td><td class="n"><b>246.9</b></td><td class="n"><b>68.5%</b></td></tr>
+<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">86.0</td><td class="n">23.9%</td></tr>
 <tr><td>FenecQL's parser and lexer</td><td class="n">32.3</td><td class="n">9.0%</td></tr>
-<tr><td>the vector index</td><td class="n">31.3</td><td class="n">8.7%</td></tr>
+<tr><td>the vector index</td><td class="n">31.2</td><td class="n">8.7%</td></tr>
 <tr><td><code>@sorted</code></td><td class="n">14.2</td><td class="n">3.9%</td></tr>
-<tr><td>the rest</td><td class="n">83.1</td><td class="n">23.0%</td></tr>
-<tr><td><b>the standard library's</b></td><td class="n"><b>114.0</b></td><td class="n"><b>31.6%</b></td></tr>
-<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">30.6</td><td class="n">8.5%</td></tr>
-<tr><td>the sort</td><td class="n">26.1</td><td class="n">7.2%</td></tr>
+<tr><td>the rest</td><td class="n">83.2</td><td class="n">23.1%</td></tr>
+<tr><td><b>the standard library's</b></td><td class="n"><b>113.7</b></td><td class="n"><b>31.5%</b></td></tr>
+<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">30.3</td><td class="n">8.4%</td></tr>
+<tr><td>the sort</td><td class="n">26.1</td><td class="n">7.3%</td></tr>
 <tr><td><code>HashMap</code></td><td class="n">20.2</td><td class="n">5.6%</td></tr>
 <tr><td><code>core::fmt</code></td><td class="n">6.8</td><td class="n">1.9%</td></tr>
 <tr><td>the rest</td><td class="n">30.3</td><td class="n">8.4%</td></tr>
@@ -426,29 +426,29 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">411.6</td><td class="n">136.3</td><td class="n">162.5</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">384.8</td><td class="n">129.5</td><td class="n">153.6</td><td class="n">6.8</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">407.4</td><td class="n">135.0</td><td class="n">161.0</td><td class="n">1.2</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">395.0</td><td class="n">131.9</td><td class="n">156.8</td><td class="n">4.4</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">411.2</td><td class="n">136.3</td><td class="n">162.4</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">384.4</td><td class="n">129.5</td><td class="n">153.5</td><td class="n">6.8</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">407.1</td><td class="n">135.1</td><td class="n">160.9</td><td class="n">1.2</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">394.6</td><td class="n">131.8</td><td class="n">156.7</td><td class="n">4.5</td></tr>
 <tr><td><code>text sparse sorted</code></td><td class="n">356.9</td><td class="n">119.5</td><td class="n">141.9</td><td class="n">16.8</td></tr>
-<tr><td><code>vector text</code></td><td class="n">379.9</td><td class="n">127.9</td><td class="n">151.4</td><td class="n">8.3</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">367.6</td><td class="n">124.9</td><td class="n">147.6</td><td class="n">11.4</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">388.6</td><td class="n">130.0</td><td class="n">154.2</td><td class="n">6.3</td></tr>
+<tr><td><code>vector text</code></td><td class="n">379.6</td><td class="n">127.9</td><td class="n">151.4</td><td class="n">8.4</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">367.2</td><td class="n">124.8</td><td class="n">147.5</td><td class="n">11.5</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">388.2</td><td class="n">129.9</td><td class="n">154.1</td><td class="n">6.4</td></tr>
 <tr><td><code>text sparse</code></td><td class="n">329.3</td><td class="n">112.4</td><td class="n">132.7</td><td class="n">23.9</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">351.7</td><td class="n">118.0</td><td class="n">139.8</td><td class="n">18.2</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">351.7</td><td class="n">118.0</td><td class="n">139.8</td><td class="n">18.3</td></tr>
 <tr><td><code>sparse sorted</code></td><td class="n">337.9</td><td class="n">114.4</td><td class="n">135.4</td><td class="n">21.9</td></tr>
-<tr><td><code>vector</code></td><td class="n">361.1</td><td class="n">122.6</td><td class="n">144.9</td><td class="n">13.6</td></tr>
+<tr><td><code>vector</code></td><td class="n">360.8</td><td class="n">122.6</td><td class="n">144.8</td><td class="n">13.7</td></tr>
 <tr><td><code>text</code></td><td class="n">324.2</td><td class="n">110.5</td><td class="n">130.4</td><td class="n">25.8</td></tr>
-<tr><td><code>sparse</code></td><td class="n">310.4</td><td class="n">106.9</td><td class="n">125.8</td><td class="n">29.3</td></tr>
-<tr><td><code>sorted</code></td><td class="n">331.3</td><td class="n">111.9</td><td class="n">132.6</td><td class="n">24.3</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">303.7</td><td class="n">104.4</td><td class="n">122.9</td><td class="n">31.8</td></tr>
+<tr><td><code>sparse</code></td><td class="n">310.4</td><td class="n">106.9</td><td class="n">125.8</td><td class="n">29.4</td></tr>
+<tr><td><code>sorted</code></td><td class="n">331.3</td><td class="n">111.9</td><td class="n">132.6</td><td class="n">24.4</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">303.7</td><td class="n">104.4</td><td class="n">122.9</td><td class="n">31.9</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>Left out alone, the graph saves 14.4 KB brotli, the ordered index 6.9,
-the text index 4.4 and the sparse index 1.2, since the sort and the map it
+<p>Left out alone, the graph saves 16.8 KB brotli, the ordered index 6.8,
+the text index 4.5 and the sparse index 1.2, since the sort and the map it
 ranks through are the other indexes' too; built alone it adds 2.5. All four
-save 31.8 KB, 23% of the module. Making them optional cost the module with
+save 31.9 KB, 23% of the module. Making them optional cost the module with
 every index nothing: it came out the size it had been before any could be
 left out, to the byte.</p>
