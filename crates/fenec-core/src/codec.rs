@@ -423,6 +423,16 @@ pub fn encode_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
+/// The text at `pos`, a text's tag already read, into `s` in place of what
+/// it held.
+pub fn decode_text_into(buf: &[u8], pos: &mut usize, s: &mut String) -> Result<()> {
+    let n = get_uvarint(buf, pos)? as usize;
+    let raw = take(buf, pos, n)?;
+    s.clear();
+    s.push_str(std::str::from_utf8(raw).map_err(|_| Error::Corrupt("invalid utf8".into()))?);
+    Ok(())
+}
+
 pub fn decode_str(buf: &[u8], pos: &mut usize) -> Result<String> {
     let n = get_uvarint(buf, pos)? as usize;
     let raw = take(buf, pos, n)?;
