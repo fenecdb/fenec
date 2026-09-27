@@ -363,6 +363,21 @@ the one it restored. The browser loads a 20 000 x 128 image 13% faster from
 the rest; summing side by side gained it nothing there, and would have cost
 0.5 KB brotli.
 
+**A graph record is laid out flat.** Versions 7, an image's, and 8, a
+server's tail, hold the nodes' documents, flags, levels and level-0 lengths
+as arrays, then every list sorted, its first link in as many bytes as the
+node count needs and its steps in as many as its widest (`put_links`).
+Decoding a varint a link was a quarter of an open; written 4 bytes a link
+and 8 a document, a 100 000 x 128 graph took 12.4 MB against the varints'
+6.2, and a file 5% more. Laid out so, that file opens in 35.9 ms against
+43.5 at 58.97 MB against 58.49, and 100 000 x 768 in 63.6 against 67.5.
+Both layouts are read into the same arrays (`Read`) and the index is built
+from them in one place (`build_restored`);
+`a_flat_graph_record_restores_as_the_varint_one_did` holds 3 to 6 and 7 to
+8 to the same index, which a binary before 7 builds again. The browser
+module carries the reader -- 1.8 KB brotli -- to open a server's file
+without building its graphs again, and loads its own no faster for it.
+
 **A batch links in parallel, into the graph it would link in turn.**
 `insert_batch` finds a batch's neighbours on every core against the graph
 before it (`compute_candidates`); `link_batch` then sets each node's own
@@ -389,8 +404,8 @@ whose record the file has grown three times over since
 while the graph is written). The record holds the whole graph, so a bound
 on the linking alone would have a big graph written over and over for a
 little of it; waiting for the linking kept a crash from leaving the nodes
-waiting again. It is a graph record (kind 4) of version 6, which an older
-binary does not know and rebuilds from -- it restored a record in the tail
+waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat,
+which an older binary does not know and rebuilds from -- it restored a record in the tail
 against the documents the whole file left, and a vector rewritten after it
 kept the links of the one before -- and like the history it moves no
 counter and no replica is sent it (`Tee::append`). At 100 000 x 768 a crash
@@ -454,7 +469,7 @@ walk is as it was (`cfg`).
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 134.1 KB
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 136.3 KB
 brotli with all four, 104.4 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
@@ -519,8 +534,9 @@ the vectors' own signs the beam was 400, for 98.4% in 2.16 ms. How well bits est
 depends on the vectors: spread in every dimension, 89.7% at 100 and 97.5% at
 200. The code kernels are scalar on
 every target in `strip8!`'s order, so they need no SIMD twin to agree with the
-browser. A graph over codes is record version 4; every other graph stays 3,
-so no file is rebuilt for the feature.
+browser. A graph over codes was record version 4, every other graph 3, so
+no file was rebuilt for the feature; laid out flat (7), every record carries
+its quantization.
 
 **A bit code is a residual's signs, from a centre the index learned.** The
 vectors' own signs were the code before: most of a crowded cluster's signs

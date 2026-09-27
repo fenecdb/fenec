@@ -222,7 +222,7 @@ that succeeds would prove nothing.</p>
 <h3>The shutdown checkpoint</h3>
 
 <p>After the sync, if a vector index exists, a checkpoint is written: the HNSW
-graph lands in the file and the next open does not rebuild it — 46 ms instead
+graph lands in the file and the next open does not rebuild it — 44 ms instead
 of 4.4 s at 100 000 × 128. Vectors still waiting to be linked after a crash
 (below) are written as waiting, and linked after the next open.</p>
 
@@ -405,7 +405,7 @@ FENECPG_PASSWORD=secret docker compose up -d
     container limit to bring that forward.</li>
   <li><b>The restart cost depends on how it stopped.</b>
     <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
-    written, so the next open takes 46 ms. After <code>kill -9</code> or a
+    written, so the next open takes 44 ms. After <code>kill -9</code> or a
     cgroup OOM the graph of the last checkpoint is restored, and the vectors
     written since it go in unlinked: the server answers once the documents
     are read, and links them on a thread beside its queries,
