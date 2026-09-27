@@ -265,6 +265,113 @@ impl IdIndex {
     }
 }
 
+/// Document id -> a number above zero, for the indexes that keep one a
+/// document: the text index's lengths and the vector index's nodes, held
+/// one up. Dense where the ids are and sparse where they are not, as
+/// [`IdIndex`] is, under the same gap: a `HashMap` lookup was the largest
+/// cost of a BM25 merge, and filling one with 100 000 nodes 2.1 of a 16.7
+/// ms open. A sparse number the dense array grows over stays in the map --
+/// read there while its slot is empty, moved into the slot when its id is
+/// written again -- rather than be taken over as the id index takes its
+/// locations: that was 1 KB of the browser module.
+#[derive(Default, Debug, PartialEq)]
+#[cfg_attr(not(any(feature = "text", feature = "vector")), allow(dead_code))]
+pub(crate) struct DocMap {
+    /// `dense[i]` -> id `i + 1`; 0 is none.
+    dense: Vec<u32>,
+    sparse: HashMap<DocId, u32>,
+    count: usize,
+}
+
+#[cfg_attr(not(any(feature = "text", feature = "vector")), allow(dead_code))]
+impl DocMap {
+    /// On the `u64` side, as [`IdIndex::in_dense`].
+    #[inline]
+    fn in_dense(&self, id: DocId) -> bool {
+        id >= 1 && id <= self.dense.len() as u64
+    }
+
+    /// The number under `id`, 0 for none.
+    #[inline]
+    pub fn get(&self, id: DocId) -> u32 {
+        if self.in_dense(id) {
+            let n = self.dense[id as usize - 1];
+            if n != 0 || self.sparse.is_empty() {
+                return n;
+            }
+        }
+        self.sparse.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Puts `n`, above zero, under `id`, handing back the number it had.
+    pub fn insert(&mut self, id: DocId, n: u32) -> Option<u32> {
+        if !self.in_dense(id) && id >= 1 && id - self.dense.len() as u64 <= MAX_DENSE_GAP {
+            self.dense.resize(id as usize, 0);
+        }
+        let old = match self.in_dense(id) {
+            true => match std::mem::replace(&mut self.dense[id as usize - 1], n) {
+                0 => self.take_sparse(id),
+                old => old,
+            },
+            false => self.sparse.insert(id, n).unwrap_or(0),
+        };
+        if old != 0 {
+            return Some(old);
+        }
+        self.count += 1;
+        None
+    }
+
+    pub fn remove(&mut self, id: DocId) -> Option<u32> {
+        let old = match self.in_dense(id) {
+            true => match std::mem::replace(&mut self.dense[id as usize - 1], 0) {
+                0 => self.take_sparse(id),
+                old => old,
+            },
+            false => self.take_sparse(id),
+        };
+        if old == 0 {
+            return None;
+        }
+        self.count -= 1;
+        Some(old)
+    }
+
+    /// The sparse number under `id`, taken out; 0 for none.
+    fn take_sparse(&mut self, id: DocId) -> u32 {
+        match self.sparse.is_empty() {
+            true => 0,
+            false => self.sparse.remove(&id).unwrap_or(0),
+        }
+    }
+
+    #[cfg_attr(not(feature = "text"), allow(dead_code))]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[cfg_attr(not(feature = "text"), allow(dead_code))]
+    pub fn clear(&mut self) {
+        *self = DocMap::default();
+    }
+
+    #[cfg_attr(not(feature = "vector"), allow(dead_code))]
+    pub fn reserve(&mut self, n: usize) {
+        self.dense.reserve(n);
+    }
+
+    /// Allocated bytes, approximate for the `HashMap` as [`IdIndex::bytes`].
+    pub fn bytes(&self) -> usize {
+        self.dense.capacity() * 4 + self.sparse.capacity() * (std::mem::size_of::<DocId>() + 4 + 1)
+    }
+
+    #[cfg_attr(not(feature = "text"), allow(dead_code))]
+    pub fn shrink_to_fit(&mut self) {
+        self.dense.shrink_to_fit();
+        self.sparse.shrink_to_fit();
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct Segment {
     pub data: SegmentBytes,
@@ -1062,6 +1169,34 @@ mod tests {
         st2.replay(&st.image()).unwrap();
         assert_eq!(st2.len(), 100);
         assert_eq!(st2.ids(), st.ids());
+    }
+
+    /// A `DocMap` keeps a number the dense array grows over, as the id
+    /// index keeps a location: the text index's lengths were read from the
+    /// dense slot the array had grown over, 0, and a document scored as
+    /// empty.
+    #[test]
+    fn a_doc_map_keeps_what_the_dense_array_grows_over() {
+        let mut m = DocMap::default();
+        for (id, n) in [(10_000u64, 7u32), (5_000, 5), (4_000, 4), (8_000, 8)] {
+            assert_eq!(m.insert(id, n), None);
+        }
+        assert_eq!(m.len(), 4);
+        for (id, n) in [(4_000u64, 4u32), (5_000, 5), (8_000, 8), (10_000, 7)] {
+            assert_eq!(m.get(id), n, "{id}");
+        }
+        assert_eq!(m.insert(10_000, 9), Some(7));
+        assert_eq!(m.insert(11_000, 11), None);
+        assert_eq!(m.len(), 5);
+        assert_eq!(m.remove(5_000), Some(5));
+        assert_eq!(m.remove(5_000), None);
+        assert_eq!((m.get(5_000), m.get(10_000), m.len()), (0, 9, 4));
+        // Past the gap stays sparse, as does the id 0 when the array grows.
+        assert_eq!(m.insert(1 << 52, 3), None);
+        assert_eq!(m.insert(0, 1), None);
+        assert_eq!(m.insert(12_000, 12), None);
+        assert_eq!((m.get(1 << 52), m.get(0), m.get(12_000)), (3, 1, 12));
+        assert_eq!(m.len(), 7);
     }
 
     /// A sparse id the dense array later grows over has to move into it.

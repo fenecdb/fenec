@@ -14,11 +14,12 @@
 
 use crate::codec::{get_uvarint, put_uvarint};
 use crate::schema::{Metric, Quant, VectorIndexSpec};
+use crate::store::DocMap;
 use crate::value::{DocId, VecPrec};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -2555,7 +2556,8 @@ pub struct VectorIndex {
     /// The field's precision, which a quantized arena does not show.
     prec: VecPrec,
     doc_ids: Vec<DocId>,
-    by_doc: HashMap<DocId, u32>,
+    /// Each document's node, one up: 0 is none.
+    by_doc: DocMap,
 
     // --- neighbour lists ------------------------------------------------
     //
@@ -2623,7 +2625,7 @@ impl VectorIndex {
             data: Arena::new(prec, spec.quant),
             prec,
             doc_ids: Vec::new(),
-            by_doc: HashMap::new(),
+            by_doc: DocMap::default(),
             l0: Vec::new(),
             l0_len: Vec::new(),
             m0: spec.m * 2,
@@ -2721,7 +2723,7 @@ impl VectorIndex {
         use std::mem::size_of;
         let id = size_of::<DocId>();
         self.doc_ids.capacity() * id
-            + self.by_doc.capacity() * (id + 4 + 1)
+            + self.by_doc.bytes()
             + self.l0.capacity() * 4
             + self.l0_len.capacity() * 2
             + self.deleted.capacity()
@@ -2767,7 +2769,7 @@ impl VectorIndex {
         let Arena::I8(_, scales) = &self.data else {
             return f32::NEG_INFINITY;
         };
-        let Some(&node) = self.by_doc.get(&doc) else {
+        let Some(node) = self.node_of(doc) else {
             return f32::NEG_INFINITY;
         };
         // How far a unit of rounding moves the distance: the query, or
@@ -2981,14 +2983,14 @@ impl VectorIndex {
         }
         // The same document written again keeps its node when the vector is
         // the one it holds, and tombstones it otherwise.
-        if let Some(&old) = self.by_doc.get(&doc) {
+        if let Some(old) = self.node_of(doc) {
             if self.retire(old, raw) {
                 return;
             }
         }
         let level = self.random_level();
         let node = self.alloc_node(doc, raw, level);
-        self.by_doc.insert(doc, node);
+        self.by_doc.insert(doc, node + 1);
         let query = self.build_query(raw);
         self.link_node(node, level, None, query.as_deref());
     }
@@ -3174,14 +3176,14 @@ impl VectorIndex {
                 if v.len() != self.dim {
                     continue;
                 }
-                if let Some(&old) = self.by_doc.get(doc) {
+                if let Some(old) = self.node_of(*doc) {
                     if self.retire(old, v) {
                         continue;
                     }
                 }
                 let level = self.random_level();
                 let node = self.alloc_node(*doc, v, level);
-                self.by_doc.insert(*doc, node);
+                self.by_doc.insert(*doc, node + 1);
                 pending.push((node, level, self.build_query(v)));
             }
             if pending.is_empty() {
@@ -3223,14 +3225,14 @@ impl VectorIndex {
             if v.len() != self.dim {
                 continue;
             }
-            if let Some(&old) = self.by_doc.get(doc) {
+            if let Some(old) = self.node_of(*doc) {
                 if self.retire(old, v) {
                     continue;
                 }
             }
             let level = self.random_level();
             let node = self.alloc_node(*doc, v, level);
-            self.by_doc.insert(*doc, node);
+            self.by_doc.insert(*doc, node + 1);
             self.pending.push(node);
         }
     }
@@ -3391,14 +3393,20 @@ impl VectorIndex {
     }
 
     pub fn remove(&mut self, doc: DocId) {
-        if let Some(&node) = self.by_doc.get(&doc) {
+        if let Some(node) = self.node_of(doc) {
             if !self.deleted[node as usize] {
                 self.deleted[node as usize] = true;
                 self.deleted_count += 1;
                 self.changes += 1;
             }
-            self.by_doc.remove(&doc);
+            self.by_doc.remove(doc);
         }
+    }
+
+    /// The node holding `doc`'s vector.
+    #[inline]
+    fn node_of(&self, doc: DocId) -> Option<u32> {
+        self.by_doc.get(doc).checked_sub(1)
     }
 
     /// Changes to the graph since it was made or restored: nodes added,
@@ -3788,7 +3796,7 @@ impl VectorIndex {
             }
             // Two live nodes of one document would count as two of the
             // documents the engine holds this graph to.
-            if self.by_doc.insert(doc, node as u32).is_some() {
+            if self.by_doc.insert(doc, node as u32 + 1).is_some() {
                 return None;
             }
         }
@@ -3923,7 +3931,7 @@ impl VectorIndex {
         let q = self.query_for(query);
         let mut all: Vec<Cand> = ids
             .iter()
-            .filter_map(|doc| self.by_doc.get(doc).copied())
+            .filter_map(|doc| self.node_of(*doc))
             .filter(|n| !self.is_deleted(*n))
             .map(|n| Cand {
                 dist: self.dist_to(&q, n),
@@ -3999,6 +4007,7 @@ mod tests {
         }
     }
     use super::*;
+    use std::collections::HashMap;
 
     fn spec() -> VectorIndexSpec {
         VectorIndexSpec {
