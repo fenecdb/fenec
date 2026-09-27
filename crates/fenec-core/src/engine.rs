@@ -1367,7 +1367,6 @@ impl Step<'_> {
             store: &self.child.store,
             schema: &self.child.schema,
             id,
-            memo: Vec::new(),
         };
         Ok(truthy(&eval(f, &mut r, ctx)?))
     }
@@ -1568,13 +1567,16 @@ fn check_key_types(parent: &DataType, child: &DataType, l: &Lookup) -> Result<()
     )))
 }
 
-/// Lazy field access over the store. When the same field is asked for again
-/// the decoded value is reused.
+/// Lazy field access over the store: a field is read when the filter asks
+/// for it, and read again when asked again. Each value read was once kept
+/// in a list the row allocated, and handed out as a copy -- a string twice
+/// allocated -- which cost more than reading a field twice: a scan of
+/// 20 000 rows with a comparison and an order took 2.39 ms natively and
+/// 3.51 in the browser module, and takes 1.93 and 2.86 without.
 struct StoreRow<'a> {
     store: &'a Store,
     schema: &'a Schema,
     id: DocId,
-    memo: Vec<(usize, Value)>,
 }
 
 impl<'a> RowAccess for StoreRow<'a> {
@@ -1586,12 +1588,7 @@ impl<'a> RowAccess for StoreRow<'a> {
             .schema
             .field_pos(name)
             .ok_or_else(|| Error::NotFound(format!("field `{name}`")))?;
-        if let Some((_, v)) = self.memo.iter().find(|(p, _)| *p == pos) {
-            return Ok(v.clone());
-        }
-        let v = self.store.read_field(self.id, pos)?.unwrap_or(Value::Null);
-        self.memo.push((pos, v.clone()));
-        Ok(v)
+        Ok(self.store.read_field(self.id, pos)?.unwrap_or(Value::Null))
     }
     fn collation(&self, name: &str) -> Option<Collation> {
         self.schema.field(name).and_then(|f| f.collate)
@@ -1900,7 +1897,6 @@ impl Database {
                     store: &c.store,
                     schema: &c.schema,
                     id,
-                    memo: Vec::new(),
                 };
                 if !truthy(&eval(f, &mut row, &ctx)?) {
                     // Does not match the shape: for the subscriber it is gone.
@@ -6541,7 +6537,6 @@ fn row_matches(c: &Collection, f: &Expr, id: DocId, ctx: &EvalCtx) -> Result<boo
         store: &c.store,
         schema: &c.schema,
         id,
-        memo: Vec::new(),
     };
     Ok(truthy(&eval(f, &mut row, ctx)?))
 }
