@@ -669,7 +669,7 @@ impl Sink for NullSink {
 /// opened again.
 #[derive(Default)]
 pub struct HashIndex {
-    map: HashMap<Vec<u8>, Vec<DocId>>,
+    map: crate::maps::Map<Vec<u8>, Vec<DocId>>,
     heap: usize,
 }
 
@@ -816,7 +816,7 @@ impl<T> std::ops::Index<&str> for Fields<T> {
 /// A hash, text, ordered or sparse index as a collection holds it: built,
 /// or left for the documents to fill the first time a statement reads it.
 /// An open leaves them unbuilt -- building them was 9 of a 31 ms open at
-/// 100 000 x 128 for one `@hash` field, and a `@text` field costs 27 us a
+/// 100 000 x 128 for one `@hash` field, and a `@text` field costs 16 us a
 /// document -- and a process that never reads one never pays for it. A
 /// write skips an unbuilt index, since its build reads the documents as
 /// they stand then; a build that fails fails every read after it the same
@@ -5653,7 +5653,7 @@ impl Database {
         // A group's number under its key's encoding. The hash index's own map
         // type, holding one number: a map of another type was 1 KB of the
         // browser module.
-        let mut index: HashMap<Vec<u8>, Vec<DocId>> = HashMap::new();
+        let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
         let mut keys: Vec<Value> = Vec::new();
         let mut folds: Vec<Vec<Fold>> = Vec::new();
         if group.is_none() {

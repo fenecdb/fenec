@@ -25,12 +25,13 @@
 // tokenizer stays, for what else splits text.
 #![cfg_attr(not(feature = "text"), allow(dead_code, unused_imports))]
 
+use crate::maps::Map;
 use crate::schema::TextIndexSpec;
 #[cfg(feature = "text")]
 use crate::store::DocMap;
 use crate::value::DocId;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 /// Calls `f` with every term in `text`, lowercased and I-folded.
 ///
@@ -260,15 +261,28 @@ impl Postings {
     fn find(&self, doc: DocId) -> std::result::Result<usize, usize> {
         self.docs.binary_search(&doc)
     }
-    fn set(&mut self, doc: DocId, tf: u32) {
-        self.max_tf = self.max_tf.max(tf);
-        match self.find(doc) {
-            Ok(at) => self.tfs[at] = tf,
-            Err(at) => {
-                self.docs.insert(at, doc);
-                self.tfs.insert(at, tf);
+    /// One more of the term in `doc`: its entry counted up, or a new one of
+    /// 1 where the order puts it. A document's terms come one at a time, so
+    /// its entry is the last, but an older document's, updated, is not.
+    fn bump(&mut self, doc: DocId) {
+        let at = match self.docs.last() {
+            Some(&last) if last == doc => self.docs.len() - 1,
+            Some(&last) if last < doc => {
+                self.docs.push(doc);
+                self.tfs.push(0);
+                self.docs.len() - 1
             }
-        }
+            _ => match self.find(doc) {
+                Ok(at) => at,
+                Err(at) => {
+                    self.docs.insert(at, doc);
+                    self.tfs.insert(at, 0);
+                    at
+                }
+            },
+        };
+        self.tfs[at] += 1;
+        self.max_tf = self.max_tf.max(self.tfs[at]);
     }
     fn drop_doc(&mut self, doc: DocId) {
         if let Ok(at) = self.find(doc) {
@@ -289,16 +303,16 @@ impl Postings {
 ///
 /// Like the HNSW graph this is derived data -- it is built from the
 /// documents by the first statement that reads it after an open. Unlike the
-/// graph it is *not* persisted: building it measures 27 us per document
-/// (SciFact, 0.14 s for 5 183) against the graph's ~44 us. A second record
+/// graph it is *not* persisted: building it measures 16 us per document
+/// (SciFact, 85 ms for 5 183) against the graph's ~44 us. A second record
 /// kind, and the validation path that would have to come with it, was not
-/// worth ~3 s per 100 000 documents.
+/// worth ~2 s per 100 000 documents.
 #[cfg(feature = "text")]
 pub struct TextIndex {
     pub spec: TextIndexSpec,
     /// term -> postings, kept ascending by document id so `search` can merge
     /// them without sorting.
-    postings: HashMap<String, Postings>,
+    postings: Map<String, Postings>,
     /// document -> term count, for the length normalisation.
     /// Each document's number of terms: none is indexed without one, so
     /// 0 is none.
@@ -315,7 +329,7 @@ impl TextIndex {
     pub fn new(spec: TextIndexSpec) -> TextIndex {
         TextIndex {
             spec,
-            postings: HashMap::new(),
+            postings: Map::default(),
             lengths: DocMap::default(),
             total_terms: 0,
             heap: 0,
@@ -349,36 +363,31 @@ impl TextIndex {
         term.len() + 32 + p.bytes()
     }
 
+    /// Each of the document's terms goes straight into its list, a word at
+    /// a time. Counted first in a map of the document's own, with a `String`
+    /// for each term, SciFact's 5 183 documents took 160 ms to index against
+    /// 85, and 20 000 short texts 21.9 ms in the browser module against 8.0.
     pub fn insert(&mut self, doc: DocId, text: &str) {
-        let mut tf: HashMap<String, u32> = HashMap::new();
+        let spec = self.spec;
         let mut n = 0u32;
-        for_each_indexed_term(text, &self.spec, |t| {
+        for_each_indexed_term(text, &spec, |t| {
             n += 1;
-            match tf.get_mut(t) {
-                Some(c) => *c += 1,
+            match self.postings.get_mut(t) {
+                Some(p) => {
+                    let before = p.bytes();
+                    p.bump(doc);
+                    self.heap += p.bytes() - before;
+                }
                 None => {
-                    tf.insert(t.to_string(), 1);
+                    let mut p = Postings::default();
+                    p.bump(doc);
+                    self.heap += t.len() + 32 + p.bytes();
+                    self.postings.insert(t.to_string(), p);
                 }
             }
         });
         if n == 0 {
             return;
-        }
-        for (term, count) in tf {
-            let len = term.len();
-            // Ascending by document id. Ingest hands ids out in order, so the
-            // search lands at the end and this is a push; only an update to an
-            // older document pays for the shift.
-            let p = self.postings.entry(term).or_default();
-            // A list is empty only as it is made: the last document out
-            // takes it with it.
-            let before = if p.is_empty() {
-                0
-            } else {
-                len + 32 + p.bytes()
-            };
-            p.set(doc, count);
-            self.heap += len + 32 + p.bytes() - before;
         }
         if let Some(old) = self.lengths.insert(doc, n) {
             self.total_terms -= old as u64;
@@ -462,7 +471,7 @@ impl TextIndex {
         }
         // Repeated query terms fold into a weight. Scoring the same postings
         // list twice would give the same answer for twice the walk.
-        let mut qtf: HashMap<String, u32> = HashMap::new();
+        let mut qtf: Map<String, u32> = Map::default();
         for_each_indexed_term(query, &self.spec, |t| match qtf.get_mut(t) {
             Some(c) => *c += 1,
             None => {
@@ -683,7 +692,7 @@ impl TextIndex {
         if k == 0 || self.lengths.len() == 0 {
             return Vec::new();
         }
-        let mut qtf: HashMap<String, u32> = HashMap::new();
+        let mut qtf: Map<String, u32> = Map::default();
         for_each_indexed_term(query, &self.spec, |t| match qtf.get_mut(t) {
             Some(c) => *c += 1,
             None => {
