@@ -40,6 +40,28 @@ fn num_into(out: &mut String, f: f64) {
     }
 }
 
+/// `7.038531e-26`, the one `f32` whose shortest text an `f64` reader rounds
+/// to another: read as an `f64`, it lands exactly between it and the `f32`
+/// above, and a tie goes to the even one.
+const TIE: u32 = 0x15ae_43fd;
+
+/// An `f32` -- a vector's component, a row's score -- as the shortest text
+/// that reads back as it: `0.1`, where the `f64` it widens to wrote
+/// `0.10000000149011612`, as the pg wire and pgvector write a vector and a
+/// sparse vector's weights. A page of 200 768-dim vectors is 43% shorter.
+/// JavaScript reads it as an `f64` and a `Float32Array` rounds that again,
+/// which gives every `f32` back but [`TIE`], so that one keeps its `f64`'s
+/// text, which reads back exact (`every_f32_reads_back_through_an_f64`).
+fn num32_into(out: &mut String, x: f32) {
+    if !x.is_finite() {
+        out.push_str("null");
+    } else if x.abs().to_bits() == TIE {
+        crate::num::f64_into(out, x as f64);
+    } else {
+        crate::num::f32_into(out, x);
+    }
+}
+
 pub fn value_into(out: &mut String, v: &Value) {
     match v {
         Value::Null => out.push_str("null"),
@@ -66,7 +88,7 @@ pub fn value_into(out: &mut String, v: &Value) {
                 if i > 0 {
                     out.push(',');
                 }
-                num_into(out, *x as f64);
+                num32_into(out, *x);
             }
             out.push(']');
         }
@@ -158,7 +180,7 @@ pub fn row_object_into(
     }
     if let Some(s) = row.score {
         out.push_str(",\"_score\":");
-        num_into(out, s as f64);
+        num32_into(out, s);
     }
     // A row with no matches still gets the key, holding an empty array: a
     // missing one would read as "not asked for" rather than "nothing
@@ -641,5 +663,84 @@ mod tests {
         assert_eq!(p.len(), 3);
         assert_eq!(p[0], Value::Vector(vec![0.1, 0.2]));
         assert_eq!(p[2], Value::Int(7));
+    }
+
+    #[test]
+    fn a_vector_is_written_as_its_f32s() {
+        let tie = f32::from_bits(TIE);
+        let v = [0.1, 0.25, -1.5e-7, 1.0, -0.0, 16_777_217.0, 3e38, tie];
+        let want = v
+            .iter()
+            .map(|x| match *x == tie {
+                true => format!("{}", *x as f64),
+                false => format!("{x}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(to_string(&Value::Vector(v.to_vec())), format!("[{want}]"));
+        assert_eq!(
+            to_string(&Value::Vector(vec![0.1, -0.5])),
+            "[0.1,-0.5]",
+            "not the 0.10000000149011612 its f64 writes"
+        );
+        assert_eq!(
+            to_string(&Value::Vector(vec![f32::NAN, f32::INFINITY])),
+            "[null,null]"
+        );
+    }
+
+    /// What JavaScript makes of an `f32`'s text: the `f64` nearest it,
+    /// then the `f32` nearest that (`Float32Array`).
+    #[track_caller]
+    fn reads_back_through_an_f64(x: f32) {
+        let mut text = String::new();
+        num32_into(&mut text, x);
+        let back = text.parse::<f64>().unwrap() as f32;
+        assert_eq!(back.to_bits(), x.to_bits(), "{text}");
+    }
+
+    #[test]
+    fn f32s_read_back_through_an_f64() {
+        // Its shortest text alone does not.
+        let tie = f32::from_bits(TIE);
+        assert_eq!(tie, 7.038_531e-26);
+        let shortest = format!("{tie}").parse::<f64>().unwrap() as f32;
+        assert_eq!(shortest.to_bits(), TIE + 1);
+        reads_back_through_an_f64(tie);
+        reads_back_through_an_f64(-tie);
+        // One in 4 099, a spread over every exponent; the test below takes
+        // all of them.
+        for bits in (0..=u32::MAX).step_by(4099) {
+            let x = f32::from_bits(bits);
+            if x.is_finite() {
+                reads_back_through_an_f64(x);
+            }
+        }
+    }
+
+    /// Every `f32`, which is how [`TIE`] was found to be the only one: `cargo
+    /// test -p fenec-core --release --lib every_f32_reads -- --ignored`.
+    #[test]
+    #[ignore]
+    fn every_f32_reads_back_through_an_f64() {
+        let threads = std::thread::available_parallelism().map_or(8, |n| n.get()) as u64;
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                scope.spawn(move || {
+                    let span = (1u64 << 32) / threads;
+                    let end = if t == threads - 1 {
+                        1 << 32
+                    } else {
+                        (t + 1) * span
+                    };
+                    for bits in t * span..end {
+                        let x = f32::from_bits(bits as u32);
+                        if x.is_finite() {
+                            reads_back_through_an_f64(x);
+                        }
+                    }
+                });
+            }
+        });
     }
 }

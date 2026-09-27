@@ -323,7 +323,7 @@ const rows = await db.from('articles').select('title', 'year').rows();
 <tbody>
 <tr><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code></td><td><code>boolean</code> <code>number</code> <code>number</code> <code>string</code></td></tr>
 <tr><td><code>timestamp</code></td><td><code>Timestamp</code> — ISO text on read; a <code>Date</code> or number works on write</td></tr>
-<tr><td><code>vector&lt;N&gt;</code> / <code>bytes</code></td><td><code>Vector</code> / <code>Bytes</code> — <code>number[]</code> on read, <code>Float32Array</code> also accepted on write</td></tr>
+<tr><td><code>vector&lt;N&gt;</code> / <code>bytes</code></td><td><code>Vector</code> / <code>Bytes</code> — <code>number[]</code> on read, each component the shortest decimal that reads back as its <code>f32</code> (<code>0.1</code> as written, not <code>0.10000000149011612</code>); <code>Float32Array</code> also accepted on write</td></tr>
 <tr><td><code>[type]</code></td><td><code>type[]</code></td></tr>
 <tr><td>a field that is not required</td><td><code>| null</code> — an unwritten field reads as <code>null</code></td></tr>
 </tbody>
