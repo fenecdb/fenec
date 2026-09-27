@@ -313,7 +313,13 @@ skipped, it swallowed the next append, an acknowledged write lost on the open
 after. A record cut short inside the checkpoint image is refused as corrupt
 instead (an image is renamed in whole), and `fenec types` opens with
 `fs::open_read_only`, which writes nothing to a server's live file. The change counter record (kind 6) is at the front and fixed width;
-the id counter (kind 7) exists so `compact` cannot hand out a deleted id again;
+the id counter (kind 7) exists so `compact` cannot hand out a deleted id again,
+and in an image carries behind the counter the index of the data record right
+after it (`Store::image_index`) -- each live document's id, payload length and
+place, 4 bytes a document -- which a mapped open takes (`adopt_index`) rather
+than walking the frames' heads, a chain of cache misses: 100 000 x 128 opened
+in 8.4 ms against 14.4, and every reader of the record reads the counter
+alone;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
 appended records that are not writes; a block (kind 9) holds a record for
 each of its writes: a data record, or a create's, a drop's or an index's.

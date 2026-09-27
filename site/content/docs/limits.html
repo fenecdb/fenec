@@ -93,12 +93,14 @@ and text indexes, the graph, and the writes since the open.</p>
     copying nothing and rebuilding no index but a graph holding tombstones.
     It takes longer and holds a ninth of the memory. A
     <code>checkpoint</code> is the same path with the dead records kept.</li>
-  <li><b>Open cost is proportional to data size, not constant.</b> The records
-    are walked to build the offset index and the graph is restored, mapped or
-    not; the hash, text, ordered and sparse indexes are built from the
-    documents by the first query that reads each. 100 000 × 128 with the graph
-    in the file opens in about 15 ms, which a single vector query makes up
-    against SQLite's 30 ms scan.</li>
+  <li><b>Open cost is proportional to data size, not constant.</b> The graph
+    is restored, reading every vector, and the offset index is built: mapped,
+    from the index of its records the last checkpoint wrote, and walking the
+    records written since; read into memory, walking them all. The hash,
+    text, ordered and sparse indexes are built from the documents by the first
+    query that reads each. 100 000 × 128 with the graph in the file opens in
+    about 9 ms, which a single vector query makes up against SQLite's 30 ms
+    scan.</li>
 </ul>
 
 <p>The vector arena is the largest item: one million 768-dimension vectors is

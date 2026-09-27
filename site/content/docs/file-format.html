@@ -11,7 +11,8 @@ exception are worth knowing before you touch the reader.</p>
 <pre data-lang="text">"FENECDB\x01"
   [6][u64 counter][u64 body length]        change counter (optional)
   [1][collection-id][length][schema]       create collection
-  [7][collection-id][length][next-id]      id counter (optional)
+  [7][collection-id][length][next-id]      id counter (optional),
+                           [index]         an image's, and its data's index
   [5][collection-id][length][schema]       schema change (index)
   [2][collection-id][length]               drop collection (empty body)
   [3][collection-id][length][records]      data
@@ -195,6 +196,18 @@ out, a row a subscriber holds — to the wrong document. The record is per
 collection and comes right after the schema. Only <code>snapshot</code> writes
 it; the append path does not need it, because the tombstones are still there.
 Old files without the counter still load correctly.</p>
+
+<p>Behind the counter an image writes an index of the collection's data
+record, which comes right after it: the record's length, the bytes in it
+that are dead, and each live document's id, payload length and place, each
+written as its difference from the one before — four bytes a document for
+records of 590 bytes. A mapped open takes the offset index from it rather
+than walking the record's frames, whose heads each say where the next one
+starts: a chain of cache misses that was 5.5 ms of a 14.2 ms open at
+100 000 × 128, which opens in 8.4 ms with it. An index that does not fit the
+record — another length, ids out of order, a payload past its end — is
+passed over and the record walked. Every reader of the record, older ones
+included, reads the counter and nothing after it.</p>
 
 <h2>Crates and layout</h2>
 

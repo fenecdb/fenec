@@ -109,6 +109,38 @@ fn a_mapped_open_answers_as_a_read_one() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A mapped open takes each collection's image from the index its counter
+/// record carries (`Store::image_index`), where a read one walks the
+/// frames: the same documents, the same counts, the same next id -- after a
+/// checkpoint and after a compact, which frame the image each its own way.
+#[test]
+fn an_image_index_opens_what_the_walk_opens() {
+    for compact in [false, true] {
+        let path = tmp(&format!("index-{compact}"));
+        fill(&path);
+        if compact {
+            let mut db = open(&path).unwrap();
+            run(&mut db, "compact");
+        }
+        let counts = |db: &Database| {
+            db.stats()
+                .into_iter()
+                .map(|s| (s.name, s.documents, s.bytes, s.dead_bytes))
+                .collect::<Vec<_>>()
+        };
+        let mut read = open(&path).unwrap();
+        let mut mapped = open_mapped(&path).unwrap();
+        assert_eq!(counts(&mapped), counts(&read), "compact {compact}");
+        same(&read, &mapped);
+        for db in [&mut read, &mut mapped] {
+            run(db, "put other {x: 7}");
+        }
+        let last = "get other order id desc limit 1";
+        assert_eq!(answer(&read, last, &[]), answer(&mapped, last, &[]));
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 #[test]
 fn writes_checkpoints_and_compacts_on_a_mapped_database() {
     let path = tmp("writes");

@@ -26,12 +26,12 @@ make compare          # without it, that arm is skipped
 <tr><td>data write, no index</td><td class="n"><b>936 k rows/s</b></td><td class="n">430 k/s</td><td class="n">66 k/s</td></tr>
 <tr><td>index build</td><td class="n"><b>3.8 s</b> HNSW</td><td class="n">0.03 s, B-tree only</td><td class="n">8.6 s HNSW</td></tr>
 <tr><td>total</td><td class="n">4.0 s</td><td class="n"><b>0.30 s</b>, no ANN</td><td class="n">10.1 s</td></tr>
-<tr><td>disk size</td><td class="n"><b>58.4 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
+<tr><td>disk size</td><td class="n"><b>59.3 MB</b></td><td class="n">59.8 MB</td><td class="n">145.0 MB</td></tr>
 <tr><td>scalar filter, indexed</td><td class="n"><b>4.6 ms</b></td><td class="n">14.1 ms</td><td class="n">7.3 ms</td></tr>
 <tr><td>vector top-10, <b>exact</b></td><td class="n"><b>3.3 ms</b></td><td class="n">30.2 ms</td><td class="n">15.6 ms</td></tr>
 <tr><td>vector top-10, <b>approximate</b></td><td class="n"><b>0.13 ms</b></td><td class="n">none</td><td class="n">1.04 ms</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n"><b>100%</b></td></tr>
-<tr><td>reopen</td><td class="n">15 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server, always open</td></tr>
+<tr><td>reopen</td><td class="n">9 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server, always open</td></tr>
 <tr><td>empty query round trip</td><td class="n">0, embedded</td><td class="n">0, embedded</td><td class="n">0.41 ms</td></tr>
 </tbody>
 </table>
@@ -88,12 +88,12 @@ vector search takes 30.2 ms — 240× slower than fenecdb's ANN.</p>
 
 <p><b>The clearest loss is reopen.</b> SQLite opens in 0.9 ms because it
 loads nothing, reading pages as it needs them. fenecdb pulls the vector arena
-into memory and validates the graph: 15 ms. That is not a shortcoming but the
+into memory and validates the graph: 9 ms. That is not a shortcoming but the
 other side of the same coin — it is why queries are 3–240× faster. The measured
 break-even is <b>one vector query</b>: from the first, fenecdb is ahead on the
 total.</p>
 
-<p><b>fenecdb leads on disk as well</b>, 2.5× smaller than pgvector — though
+<p><b>fenecdb leads on disk as well</b>, 2.4× smaller than pgvector — though
 not for the reason this page used to give. Of pgvector's 145.0 MB, 83.2 MB is
 the HNSW index, which keeps its own copy of every vector so a search reads no
 heap tuple. The heap is 58.7 MB, as large as fenecdb's whole file with its
@@ -161,8 +161,8 @@ cargo run --release -p fenec-core --example bench
 <tr><td>ANN k=10</td><td class="n">p50 <b>0.087 ms</b> · p95 0.141 ms · p99 0.148 ms</td></tr>
 <tr><td>ANN with a filter</td><td class="n">p50 <b>0.173 ms</b>, candidate set n/4</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b> against an exact scan</td></tr>
-<tr><td>snapshot</td><td class="n">29 ms, producing 58.9 MB with the graph, +12%</td></tr>
-<tr><td>reopen</td><td class="n"><b>26 ms</b>, the graph validated and restored</td></tr>
+<tr><td>snapshot</td><td class="n">32 ms, producing 59.3 MB with the graph and the records' index, +13%</td></tr>
+<tr><td>reopen</td><td class="n"><b>29 ms</b>, the graph validated and restored</td></tr>
 </tbody>
 </table>
 </div>
@@ -170,7 +170,8 @@ cargo run --release -p fenec-core --example bench
 <p>Without a persisted graph, reopening the same data takes 4.4 seconds —
 the index is rebuilt from scratch, which would make a page refresh in the
 browser unusable. The graph record makes that roughly 80× faster and costs 12%
-more space in the image, 52.7 MB to 58.9 MB.</p>
+more space in the image, 52.7 MB to 58.9 MB; the index of the records, which a
+mapped open reads rather than walking them, is 0.4 MB more.</p>
 
 <h2>The ef and recall trade-off</h2>
 
@@ -292,7 +293,7 @@ href="concepts.html#sparse-vectors">How it works</a>).</p>
 <thead><tr><th>&nbsp;</th><th class="n">vector&lt;128&gt;</th><th class="n">vector&lt;128, f16&gt;</th></tr></thead>
 <tbody>
 <tr><td>vector arena</td><td class="n">51.2 MB</td><td class="n"><b>25.6 MB</b></td></tr>
-<tr><td>file image</td><td class="n">58.9 MB</td><td class="n"><b>33.3 MB</b></td></tr>
+<tr><td>file image</td><td class="n">59.3 MB</td><td class="n"><b>33.7 MB</b></td></tr>
 <tr><td>write, index included</td><td class="n"><b>3.9 s</b></td><td class="n">4.2 s</td></tr>
 <tr><td>ANN p50</td><td class="n"><b>0.087 ms</b></td><td class="n">0.095 ms</td></tr>
 <tr><td>recall@10</td><td class="n">100%</td><td class="n">100%</td></tr>
