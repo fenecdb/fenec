@@ -384,12 +384,12 @@ impl DocLengths {
 
 /// An inverted index with BM25 scoring.
 ///
-/// Like the HNSW graph this is derived data -- it is rebuilt from the
-/// documents on open. Unlike the graph it is *not* persisted: rebuilding
-/// measures 27 us per document (SciFact, 0.14 s for 5 183) against the
-/// graph's ~44 us, and the rebuild pass already reads every document to
-/// fill the hash indexes. A second record kind, and the validation path that
-/// would have to come with it, was not worth ~3 s per 100 000 documents.
+/// Like the HNSW graph this is derived data -- it is built from the
+/// documents by the first statement that reads it after an open. Unlike the
+/// graph it is *not* persisted: building it measures 27 us per document
+/// (SciFact, 0.14 s for 5 183) against the graph's ~44 us. A second record
+/// kind, and the validation path that would have to come with it, was not
+/// worth ~3 s per 100 000 documents.
 #[cfg(feature = "text")]
 pub struct TextIndex {
     pub spec: TextIndexSpec,

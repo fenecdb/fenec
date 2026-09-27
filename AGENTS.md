@@ -364,7 +364,14 @@ buffer kept: a checkpointed 100 000 x 128 file opened in 29.8 ms against
 `a_restored_arena_holds_the_vectors_it_had_bit_for_bit` holds the arena to
 the one it restored. The browser loads a 20 000 x 128 image 13% faster from
 the rest; summing side by side gained it nothing there, and would have cost
-0.5 KB brotli.
+0.5 KB brotli. Natively the arena is filled a share of `FILL_SHARE` nodes at
+a time by whichever thread is free, each writing its nodes' slots where they
+stand (`fill_restored`) rather than reading a vector, copying it into a
+batch and pushing it: 100 000 x 128 opens in 16.5 ms against 21.8, x 768 in
+42 against 61, any share from 256 to 4 096 nodes the same. The mapped
+file's pages it reads are most of what is left of that; `MADV_WILLNEED` took
+off 3%. The browser fills in turn: the shares were 1.3 KB brotli of its
+module for the same load.
 
 **A graph record is laid out flat.** Versions 7, an image's, and 8, a
 server's tail, hold the nodes' documents, flags, levels and level-0 lengths
