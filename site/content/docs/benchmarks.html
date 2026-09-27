@@ -120,11 +120,11 @@ operating system (<code>synchronous=NORMAL</code>).</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 417 / <b>478</b></td><td class="n">256 / 258 / 263</td></tr>
-<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 720 k</b> / 889 k / 619 k</td><td class="n">123 k / 123 k / 121 k</td></tr>
-<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>8 200 k</b>, p99 0.7 µs</td><td class="n">1 090 k, p99 17.7 µs</td></tr>
-<tr><td>… beside 4 writers</td><td class="n"><b>828 k</b>, p99 66 µs</td><td class="n">341 k, p99 81 µs</td></tr>
-<tr><td>… beside a transaction held open 20 ms</td><td class="n">272 k, waits up to 34 ms</td><td class="n"><b>1 180 k</b>, 0.2 ms at most</td></tr>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">253 / 492 / <b>537</b></td><td class="n">270 / 283 / 270</td></tr>
+<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 764 k</b> / 892 k / 625 k</td><td class="n">127 k / 126 k / 125 k</td></tr>
+<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>8 033 k</b>, p99 0.7 µs</td><td class="n">919 k, p99 19.4 µs</td></tr>
+<tr><td>… beside 4 writers</td><td class="n"><b>707 k</b>, p99 83 µs</td><td class="n">300 k, p99 84 µs</td></tr>
+<tr><td>… beside a transaction held open 20 ms</td><td class="n"><b>8 106 k</b>, 0.3 ms at most</td><td class="n">1 031 k, 0.7 ms at most</td></tr>
 </tbody>
 </table>
 </div>
@@ -135,14 +135,21 @@ none, so sixteen writers share their fsyncs; SQLite syncs a commit while it
 holds the write lock. Without an fsync, one fenecdb writer is fourteen times
 SQLite's, and handing the lock between sixteen costs a third of that.</p>
 
-<p><b>The clearest loss is a transaction held open.</b> One writer is how
-fenecdb isolates a transaction: from its first write to its
-<code>COMMIT</code> it holds the lock, reads included, so while a client
-pauses between two statements nothing else reads — here the reads fell to
-a thirtieth and one waited 34 ms. SQLite's WAL lets a reader read the last
-commit meanwhile. A statement on its own holds the lock for microseconds;
-it is a transaction spanning round trips that stalls a server, and
-<code>--idle-in-transaction-timeout</code> (10 s) bounds how long.</p>
+<p><b>A transaction held open does not stop the readers.</b> One writer is
+how fenecdb isolates a transaction: from its first write to its
+<code>COMMIT</code> no other session writes. Between its statements it lets
+go of the lock, though, and a reader that arrives puts the transaction's
+writes aside — the undo a rollback does, the writes kept for its next
+statement to write again — and reads what has landed. Here the reads went
+at the rate they go alone, and none waited more than 0.3 ms; held under the
+lock throughout, as it once was, the transaction cut them to a thirtieth
+and kept one waiting 34 ms. A transaction that changed a graph — a vector
+written or deleted — or the schema is not put aside, since undone and
+written again each of its nodes would be a tombstone and another node:
+readers wait for that one, where SQLite's WAL reads the last commit. A
+statement on its own holds the lock for microseconds, and
+<code>--idle-in-transaction-timeout</code> (10 s) bounds how long a
+transaction keeps the writers waiting.</p>
 
 <h2>Scale measurement</h2>
 
@@ -331,7 +338,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1283 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1040 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>414 KB</b></td><td class="n"><b>137 KB</b></td><td class="n">163 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>415 KB</b></td><td class="n"><b>137 KB</b></td><td class="n">164 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">88 KB</td><td class="n">24 KB</td><td class="n">28 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -376,20 +383,20 @@ every pull request's CI run shows the same against the branch it goes into.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Code, 363.0 KB of the 413.7</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
+<thead><tr><th>Code, 364.0 KB of the 414.9</th><th class="n">KB</th><th class="n">Share</th></tr></thead>
 <tbody>
-<tr><td><b>fenecdb's own</b></td><td class="n"><b>249.1</b></td><td class="n"><b>68.6%</b></td></tr>
-<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">88.3</td><td class="n">24.3%</td></tr>
+<tr><td><b>fenecdb's own</b></td><td class="n"><b>250.2</b></td><td class="n"><b>68.7%</b></td></tr>
+<tr><td>the engine, <code>fenec_core::engine</code></td><td class="n">88.9</td><td class="n">24.4%</td></tr>
 <tr><td>FenecQL's parser and lexer</td><td class="n">32.3</td><td class="n">8.9%</td></tr>
-<tr><td>the vector index</td><td class="n">31.2</td><td class="n">8.6%</td></tr>
-<tr><td><code>@sorted</code></td><td class="n">14.1</td><td class="n">3.9%</td></tr>
-<tr><td>the rest</td><td class="n">83.2</td><td class="n">22.9%</td></tr>
-<tr><td><b>the standard library's</b></td><td class="n"><b>113.9</b></td><td class="n"><b>31.4%</b></td></tr>
-<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">30.3</td><td class="n">8.3%</td></tr>
+<tr><td>the vector index</td><td class="n">31.3</td><td class="n">8.6%</td></tr>
+<tr><td><code>@sorted</code></td><td class="n">14.2</td><td class="n">3.9%</td></tr>
+<tr><td>the rest</td><td class="n">83.5</td><td class="n">22.9%</td></tr>
+<tr><td><b>the standard library's</b></td><td class="n"><b>113.8</b></td><td class="n"><b>31.3%</b></td></tr>
+<tr><td><code>Vec</code>, <code>String</code>, <code>Box</code></td><td class="n">30.2</td><td class="n">8.3%</td></tr>
 <tr><td>the sort</td><td class="n">26.1</td><td class="n">7.2%</td></tr>
 <tr><td><code>HashMap</code></td><td class="n">20.0</td><td class="n">5.5%</td></tr>
 <tr><td><code>core::fmt</code></td><td class="n">6.8</td><td class="n">1.9%</td></tr>
-<tr><td>the rest</td><td class="n">30.7</td><td class="n">8.5%</td></tr>
+<tr><td>the rest</td><td class="n">30.7</td><td class="n">8.4%</td></tr>
 </tbody>
 </table>
 </div>
@@ -427,29 +434,29 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">413.8</td><td class="n">137.1</td><td class="n">163.2</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">386.7</td><td class="n">130.2</td><td class="n">154.4</td><td class="n">6.9</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">409.4</td><td class="n">135.7</td><td class="n">161.7</td><td class="n">1.4</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">397.4</td><td class="n">132.7</td><td class="n">157.6</td><td class="n">4.4</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">359.5</td><td class="n">120.2</td><td class="n">142.8</td><td class="n">16.9</td></tr>
-<tr><td><code>vector text</code></td><td class="n">381.1</td><td class="n">128.2</td><td class="n">152.0</td><td class="n">8.9</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">369.5</td><td class="n">125.4</td><td class="n">148.4</td><td class="n">11.7</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">390.6</td><td class="n">130.7</td><td class="n">154.9</td><td class="n">6.4</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">331.5</td><td class="n">112.8</td><td class="n">133.6</td><td class="n">24.3</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">354.1</td><td class="n">118.5</td><td class="n">140.7</td><td class="n">18.6</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">340.7</td><td class="n">115.1</td><td class="n">136.2</td><td class="n">22.0</td></tr>
-<tr><td><code>vector</code></td><td class="n">362.5</td><td class="n">123.0</td><td class="n">145.3</td><td class="n">14.1</td></tr>
-<tr><td><code>text</code></td><td class="n">325.8</td><td class="n">111.2</td><td class="n">131.0</td><td class="n">25.9</td></tr>
-<tr><td><code>sparse</code></td><td class="n">312.7</td><td class="n">107.4</td><td class="n">126.7</td><td class="n">29.7</td></tr>
-<tr><td><code>sorted</code></td><td class="n">333.7</td><td class="n">112.7</td><td class="n">133.4</td><td class="n">24.4</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">305.4</td><td class="n">104.9</td><td class="n">123.5</td><td class="n">32.2</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">414.9</td><td class="n">137.5</td><td class="n">163.6</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">387.8</td><td class="n">130.6</td><td class="n">154.7</td><td class="n">6.9</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">410.5</td><td class="n">136.2</td><td class="n">162.0</td><td class="n">1.3</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">398.8</td><td class="n">133.3</td><td class="n">158.2</td><td class="n">4.2</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">360.3</td><td class="n">120.6</td><td class="n">143.1</td><td class="n">16.9</td></tr>
+<tr><td><code>vector text</code></td><td class="n">382.3</td><td class="n">128.7</td><td class="n">152.4</td><td class="n">8.8</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">370.9</td><td class="n">126.1</td><td class="n">148.9</td><td class="n">11.4</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">392.0</td><td class="n">131.2</td><td class="n">155.6</td><td class="n">6.3</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">332.4</td><td class="n">113.3</td><td class="n">134.0</td><td class="n">24.2</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">354.9</td><td class="n">119.0</td><td class="n">141.0</td><td class="n">18.5</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">341.5</td><td class="n">115.3</td><td class="n">136.6</td><td class="n">22.2</td></tr>
+<tr><td><code>vector</code></td><td class="n">363.9</td><td class="n">123.7</td><td class="n">145.9</td><td class="n">13.8</td></tr>
+<tr><td><code>text</code></td><td class="n">326.7</td><td class="n">111.5</td><td class="n">131.4</td><td class="n">26.0</td></tr>
+<tr><td><code>sparse</code></td><td class="n">313.5</td><td class="n">107.7</td><td class="n">127.0</td><td class="n">29.8</td></tr>
+<tr><td><code>sorted</code></td><td class="n">334.5</td><td class="n">113.0</td><td class="n">133.7</td><td class="n">24.5</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">306.2</td><td class="n">105.1</td><td class="n">123.8</td><td class="n">32.3</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Left out alone, the graph saves 16.9 KB brotli, the ordered index 6.9,
-the text index 4.4 and the sparse index 1.4, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.5. All four
-save 32.2 KB, 23% of the module. Making them optional cost the module with
+the text index 4.2 and the sparse index 1.3, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.6. All four
+save 32.3 KB, 23% of the module. Making them optional cost the module with
 every index nothing: it came out the size it had been before any could be
 left out, to the byte.</p>

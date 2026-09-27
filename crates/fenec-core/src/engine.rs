@@ -320,6 +320,17 @@ struct Block {
     marks: Vec<(u32, crate::store::Mark)>,
     /// Per write, what puts it back.
     was: Vec<Undo>,
+    /// Whether the writes are put back while the block waits for its next
+    /// statement ([`Database::park`]): the database holds what it held
+    /// before them, for readers, and the frames stay, for
+    /// [`Database::unpark`] to write them again.
+    parked: bool,
+    /// Every graph's nodes and tombstones when [`Database::begin`] opened
+    /// the block: a block that changed a graph is not parked.
+    graphs: usize,
+    /// Whether its owner left it open between two statements
+    /// ([`Database::leave_block`]): anyone else's write waits for it.
+    left: bool,
 }
 
 /// What puts one of a block's writes back ([`Database::rollback`]).
@@ -353,6 +364,8 @@ impl Block {
         self.notes.clear();
         self.marks.clear();
         self.was.clear();
+        self.parked = false;
+        self.left = false;
         self
     }
 
@@ -2890,6 +2903,13 @@ impl Database {
     /// have to rebuild the indexes.
     pub fn checkpoint(&mut self) -> Result<()> {
         self.refuse_if_failed()?;
+        // Its image would hold them: a block's writes land as its record,
+        // or not at all. A block parked for readers has them put back.
+        if !self.reads_landed() {
+            return Err(Error::Query(
+                "a block of writes is open: a checkpoint waits for it to end".into(),
+            ));
+        }
         // The sink is behind a lock, so the image can be written from `self`
         // while the sink takes it: both are shared borrows here.
         let mut placed = Vec::new();
@@ -3350,8 +3370,156 @@ impl Database {
         if self.block.is_some() {
             return Err(Error::Query("a block is open already".into()));
         }
+        let graphs = self.graphs();
         self.open_block();
+        if let Some(b) = &mut self.block {
+            b.graphs = graphs;
+        }
         self.begun += 1;
+        Ok(())
+    }
+
+    /// Every graph's nodes and tombstones: a write that changes a graph
+    /// adds one or both, and nothing in a block takes one away.
+    fn graphs(&self) -> usize {
+        let mut n = 0;
+        for c in self.collections.values() {
+            for ix in c.vectors.values() {
+                n += ix.len() + 2 * ix.dead();
+            }
+        }
+        n
+    }
+
+    /// Leaves the open block to its owner's next statement: a server lets
+    /// go of the write lock between a transaction's statements, and readers
+    /// read meanwhile ([`Self::park`]). Until [`Self::rejoin_block`], a
+    /// statement run through `&mut self` -- a write, a read of the block's
+    /// own writes, a block of its own -- and a `query` while the block is
+    /// not parked are refused, rather than joined into the block or shown
+    /// its writes: whoever else writes waits for it to end.
+    pub fn leave_block(&mut self) {
+        if let Some(b) = &mut self.block {
+            b.left = true;
+        }
+    }
+
+    /// Takes the block its owner left back for the owner's next statement
+    /// ([`Self::leave_block`]).
+    pub fn rejoin_block(&mut self) {
+        if let Some(b) = &mut self.block {
+            b.left = false;
+        }
+    }
+
+    /// Whether an open block waits for its owner's next statement: a write
+    /// that is not the owner's waits for it to end.
+    pub fn block_left(&self) -> bool {
+        self.block.as_ref().is_some_and(|b| b.left)
+    }
+
+    /// The refusal of a statement that is not the owner's while a block
+    /// waits for its owner ([`Self::leave_block`]).
+    fn refuse_if_left(&self) -> Result<()> {
+        match self.block_left() {
+            true => Err(Error::Query(
+                "a transaction another session holds is open: wait for it to end".into(),
+            )),
+            false => Ok(()),
+        }
+    }
+
+    /// Whether a reader may read the database as it stands: no block is
+    /// open, or the open one wrote nothing, or its writes are put back
+    /// ([`Self::park`]). Readers read what has landed and nothing else.
+    pub fn reads_landed(&self) -> bool {
+        self.block
+            .as_ref()
+            .is_none_or(|b| b.parked || b.heads.is_empty())
+    }
+
+    /// Puts back the open block's writes while it waits for its next
+    /// statement, keeping them, so that readers see the database as it was
+    /// before the block -- what has landed -- rather than wait for it to
+    /// end: the rollback's own undo, a write at a time, and its frames kept
+    /// for [`Self::unpark`] to write again. `false`, nothing done, for a
+    /// block that changed a graph -- put back, a node becomes a tombstone,
+    /// and written again another node -- or the schema; readers wait for
+    /// those to end, as they did for every block.
+    pub fn park(&mut self) -> bool {
+        if self.reads_landed() {
+            return true;
+        }
+        let graphs = self.graphs();
+        let Some(mut b) = self.block.take() else {
+            return true;
+        };
+        if b.graphs != graphs || b.heads.iter().any(|h| h.0 != REC_DATA) {
+            self.block = Some(b);
+            return false;
+        }
+        let marks = std::mem::take(&mut b.marks);
+        self.rewind(&marks, &mut b.was, 0);
+        b.parked = true;
+        self.block = Some(b);
+        true
+    }
+
+    /// Writes the parked block's writes again ([`Self::park`]), as its
+    /// statements wrote them -- each frame appended to its store, the
+    /// indexes kept up, each write remembered for a rollback -- and none of
+    /// its statements' hooks run twice. Every way the block goes on -- a
+    /// statement, a savepoint, its end -- does this first.
+    pub fn unpark(&mut self) -> Result<()> {
+        let Some(b) = self.block.as_mut().filter(|b| b.parked) else {
+            return Ok(());
+        };
+        b.parked = false;
+        let (frames, heads) = (std::mem::take(&mut b.frames), std::mem::take(&mut b.heads));
+        let mut start = HEAD_ROOM;
+        let mut done = Ok(());
+        for &(_, cid, end) in &heads {
+            if let Err(e) = self.redo(cid, &frames[start..end]) {
+                done = Err(e);
+                break;
+            }
+            start = end;
+        }
+        if let Some(b) = &mut self.block {
+            (b.frames, b.heads) = (frames, heads);
+        }
+        // Written in part, it would land in part.
+        if done.is_err() {
+            self.rollback();
+        }
+        done
+    }
+
+    /// One of a parked block's writes, written again: the write paths'
+    /// store and index upkeep, with no hook and nothing to the sink.
+    fn redo(&mut self, cid: u32, frame: &[u8]) -> Result<()> {
+        let cut = || Error::Corrupt("a parked write cut short".into());
+        let name = self.named(cid).ok_or_else(|| missing(cid))?;
+        let mut p = 1;
+        let op = *frame.first().ok_or_else(cut)?;
+        let id = get_uvarint(frame, &mut p)?;
+        let len = get_uvarint(frame, &mut p)? as usize;
+        let payload = frame.get(p..p + len).ok_or_else(cut)?;
+        let c = self.collections.get_mut(&name).unwrap();
+        let (mark, was) = (c.store.mark(), c.store.loc(id));
+        let old = c.store.read(&c.schema, id)?;
+        c.store.append(op, id, payload);
+        let new = match op {
+            OP_PUT => Some(c.store.read(&c.schema, id)?.ok_or_else(cut)?),
+            _ => None,
+        };
+        if let Some(old) = &old {
+            c.unindex_doc(old, new.as_ref());
+        }
+        if let Some(new) = &new {
+            c.index_doc(new, old.as_ref());
+        }
+        self.remember(cid, id, was, mark);
         Ok(())
     }
 
@@ -3365,6 +3533,9 @@ impl Database {
     /// refuses it, the block is put back, and the database takes no more
     /// writes (see `failed`).
     pub fn commit(&mut self) -> Result<()> {
+        // The browser parks no block: it has no reader beside its writer.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unpark()?;
         let Some(mut b) = self.block.take() else {
             return Ok(());
         };
@@ -3499,11 +3670,14 @@ impl Database {
     }
 
     /// Where the open block stands, for [`Self::rollback_to`] to take it
-    /// back there; with none open, the start of the next.
+    /// back there; with none open, the start of the next. Taken of a block
+    /// its owner goes on with, not of one parked for readers
+    /// ([`Self::park`]): the owner writes it again first.
     pub fn savepoint(&self) -> Savepoint {
         let Some(b) = &self.block else {
             return Savepoint::default();
         };
+        debug_assert!(!b.parked, "a savepoint of a parked block");
         Savepoint {
             block: self.begun,
             frames: b.frames.len(),
@@ -3529,6 +3703,8 @@ impl Database {
     /// stood. Refused for a savepoint of another block, or one reaching past
     /// where this one now ends.
     pub fn rollback_to(&mut self, sp: &Savepoint) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unpark()?;
         let Some(mut b) = self.block.take() else {
             if sp.block == 0 {
                 return Ok(());
@@ -3594,6 +3770,9 @@ impl Database {
         if let Some(i) = stmts.iter().position(|(s, _)| !s.is_read_only()) {
             self.may_start().map_err(|e| (i, e))?;
         }
+        self.refuse_if_left().map_err(|e| (0, e))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unpark().map_err(|e| (0, e))?;
         let outer = self.block.is_some();
         if !outer {
             self.open_block();
@@ -3646,6 +3825,15 @@ impl Database {
     /// at once under an `RwLock`; statements that need to write are rejected
     /// (the caller separates them first with [`Statement::is_read_only`]).
     pub fn query(&self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        // Another session's writes, not landed and not parked: a server
+        // parks the block, or waits for it, before it reads.
+        if self.block_left() && !self.reads_landed() {
+            return Err(Error::Query(
+                "a transaction another session holds is open and not put aside: \
+                 its writes are not to be read"
+                    .into(),
+            ));
+        }
         match stmt {
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
@@ -3667,6 +3855,11 @@ impl Database {
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
     pub fn execute_with(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        self.refuse_if_left()?;
+        // An open block's statement: its writes, put back for readers
+        // meanwhile, are written again first.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.unpark()?;
         // A write is a block of one: a `put` of many documents stopped half
         // way -- a hook's refusal, a crash -- left the ones before applied.
         // Its writes land as one record, which for a lone document is the
