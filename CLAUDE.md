@@ -408,7 +408,9 @@ after it (`Store::image_index`) -- each live document's id, payload length and
 place, 4 bytes a document -- which a mapped open takes (`adopt_index`) rather
 than walking the frames' heads, a chain of cache misses: 100 000 x 128 opened
 in 8.4 ms against 14.4, and every reader of the record reads the counter
-alone;
+alone. Read into memory, a load copies each frame as it stands into the
+segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
+of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
 appended records that are not writes; a block (kind 9) holds a record for
 each of its writes: a data record, or a create's, a drop's or an index's.
