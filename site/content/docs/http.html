@@ -105,6 +105,15 @@ the body.</p>
 out. Filters in the query string are <code>and</code>ed with the
 <code>where</code> in the body.</p>
 
+<p>A vector in an answer, and a <code>_score</code>, is its <code>f32</code>s
+written as the shortest decimals that read back as them — <code>0.1</code>
+as it was written, the text pgvector and the pg wire give — rather than the
+<code>0.10000000149011612</code> of the <code>f64</code> each widens to. A
+reader that takes a number as an <code>f64</code> and rounds it to
+<code>f32</code>, as a <code>Float32Array</code> does, gets every one back:
+the one <code>f32</code> an <code>f64</code> would round away,
+<code>7.038531e-26</code>, is written as its <code>f64</code>.</p>
+
 <p>A <code>"match"</code> makes it hybrid: BM25 over the collection's
 <code>@text</code> field ranks the same request, and the two rankings are
 fused by reciprocal rank (<a href="fenecql.html#hybrid">fuse</a>).

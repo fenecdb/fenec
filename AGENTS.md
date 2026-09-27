@@ -555,6 +555,22 @@ the module with the standard library's `to_lowercase`, `to_uppercase` and
 `split_at_checked`, case is `case`'s, and `~` searches the folded bytes;
 `make size-report WHY=slice_error_fail` finds a slice that brings it back.
 
+**A vector goes out as its `f32`s.** JSON writes a vector's components
+and a row's `_score` as the shortest text that reads back as the `f32`
+(`json::num32_into`), as the pg wire, pgvector and a sparse vector's
+weights do: `0.1`, where the `f64` each widens to wrote
+`0.10000000149011612`. JavaScript reads it as an `f64` and a
+`Float32Array` rounds that again, which gives every `f32` back but
+`7.038531e-26`: as an `f64` it lands exactly between itself and the `f32`
+above, and the tie goes to the even one, so it keeps its `f64`'s text
+(`json::TIE`; `every_f32_reads_back_through_an_f64` tries all 2^32). The
+digits of an `f32` from 2^-24 to 2^25 are exact 64-bit products
+(`num::shortest`), where Ryu's multipliers took 128-bit ones that wasm
+emulates (`__multi3`), and they go out in one `push_str` rather than a
+`char` at a time: a page of 200 768-dim vectors as JSON, 43% shorter, went
+27.7 -> 10.5 ms in the browser module, and a `near` answering ten 128-dim
+rows 0.373 -> 0.226 ms (`make wasm-speed`), for 37 bytes brotli.
+
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
 vector, `quant=bit` the signs of its distance from a centre (cosine only). A

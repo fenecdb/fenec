@@ -530,7 +530,12 @@ fn float_into(out: &mut String, bits: u64, mbits: u32, ebits: u32) {
     // `{}` never writes an exponent: the digits before the point, then the
     // rest, with zeros wherever the exponent reaches past them.
     let point = text.len() as i32 + exp;
-    let push = |out: &mut String, digits: &[u8]| digits.iter().for_each(|&b| out.push(b as char));
+    // Pushed a `char` at a time, encoding each was 8% of the time a page of
+    // vectors took to write, and checking the digits were UTF-8 another 6%.
+    let push = |out: &mut String, digits: &[u8]| {
+        // SAFETY: every byte is `b'0'` and a digit, ASCII.
+        out.push_str(unsafe { std::str::from_utf8_unchecked(digits) })
+    };
     if point <= 0 {
         out.push_str("0.");
         (point..0).for_each(|_| out.push('0'));
@@ -596,13 +601,22 @@ fn shortest(mantissa: u64, exponent: u32, mbits: u32, ebits: u32) -> (u64, i32) 
         let q = log10_pow5(-e2) - (-e2 > 1) as i32;
         e10 = q + e2;
         let i = -e2 - q;
-        let mul = pow5(i as u32);
-        let j = q - (pow5_bits(i) - BITS);
-        (vr, vp, vm) = (
-            mul_shift(mv, mul, j),
-            mul_shift(mp, mul, j),
-            mul_shift(mm, mul, j),
-        );
+        // `m × 5^i / 2^q`, which the multipliers only approximate -- closely
+        // enough that the quotients are exact. Where `mp × 5^i` fits in 64
+        // bits they are taken exactly instead: every f32 from 2^-24 to 2^25,
+        // an embedding's components, whose 128-bit products wasm emulates.
+        if i < STEP as i32 && 64 - mp.leading_zeros() as i32 + pow5_bits(i) <= 64 {
+            let p = SMALL[i as usize];
+            (vr, vp, vm) = ((mv * p) >> q, (mp * p) >> q, (mm * p) >> q);
+        } else {
+            let mul = pow5(i as u32);
+            let j = q - (pow5_bits(i) - BITS);
+            (vr, vp, vm) = (
+                mul_shift(mv, mul, j),
+                mul_shift(mp, mul, j),
+                mul_shift(mm, mul, j),
+            );
+        }
         if q <= 1 {
             if accept {
                 vm_zeros = mm_shift == 1;
