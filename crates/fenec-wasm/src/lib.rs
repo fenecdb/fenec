@@ -161,11 +161,13 @@ fn with_db<T>(handle: u32, f: impl FnOnce(&mut Database) -> T) -> Option<T> {
 
 // ------------------------------------------------------------- query
 
-/// Runs FenecQL. `params` is a JSON array (it may be empty).
+/// Runs FenecQL. `params` is a JSON array (it may be empty), and `vectors`
+/// the parameters that are vectors, handed over as `f32`s rather than as
+/// text (`with_vectors`); a client with none passes none.
 /// Returns: JSON (`{"kind":"rows"|"affected"|"ok"|"schemas"|"error", ...}`).
 ///
 /// # Safety
-/// `sql_ptr`/`params_ptr` must be valid and of the given length.
+/// `sql_ptr`/`params_ptr`/`vectors_ptr` must be valid and of the given length.
 #[no_mangle]
 pub unsafe extern "C" fn fenec_query(
     handle: u32,
@@ -173,16 +175,45 @@ pub unsafe extern "C" fn fenec_query(
     sql_len: usize,
     params_ptr: *const u8,
     params_len: usize,
+    vectors_ptr: *const u8,
+    vectors_len: usize,
 ) -> *mut u8 {
     let sql = str_from(sql_ptr, sql_len);
     let params_src = str_from(params_ptr, params_len);
+    let vectors = match vectors_ptr.is_null() || vectors_len == 0 {
+        true => &[][..],
+        false => std::slice::from_raw_parts(vectors_ptr, vectors_len),
+    };
 
-    let out = run(handle, &sql, &params_src);
+    let out = run(handle, &sql, &params_src, vectors);
     boxed(out.as_bytes())
 }
 
-fn run(handle: u32, sql: &str, params_src: &str) -> String {
-    let params = match json::parse_params(params_src) {
+/// The parameters with each vector handed over as `f32`s put in its place:
+/// for each, its place among the parameters and its length as two
+/// little-endian `u32`s, then its values, where the JSON holds `null`.
+/// Written out as text and read back, a page of 200 768-dim vectors spent
+/// most of its time on the numbers' digits, both sides of the call.
+fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Value>> {
+    while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
+        let at = u32::from_le_bytes([a0, a1, a2, a3]) as usize;
+        let n = u32::from_le_bytes([n0, n1, n2, n3]) as usize;
+        let body = n.checked_mul(4).and_then(|len| rest.split_at_checked(len));
+        let slot = params.get_mut(at).filter(|p| p.is_null());
+        let (Some((body, rest)), Some(slot)) = (body, slot) else {
+            break;
+        };
+        *slot = Value::Vector(fenec_core::codec::f32s(body));
+        bytes = rest;
+    }
+    match bytes.is_empty() {
+        true => Ok(params),
+        false => Err(Error::Query("malformed vector parameters".into())),
+    }
+}
+
+fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
+    let params = match json::parse_params(params_src).and_then(|p| with_vectors(p, vectors)) {
         Ok(p) => p,
         Err(e) => return json::error_to_string(&e),
     };
@@ -494,28 +525,63 @@ mod tests {
     #[test]
     fn query_through_abi() {
         let h = fenec_open();
-        let r = run(h, "create collection t (a int, e vector<2> @hnsw(l2))", "");
+        let r = run(
+            h,
+            "create collection t (a int, e vector<2> @hnsw(l2))",
+            "",
+            &[],
+        );
         assert!(r.contains("\"ok\""), "{r}");
-        let r = run(h, r#"put t {a: 1, e: [1.0, 0.0]}"#, "");
+        let r = run(h, r#"put t {a: 1, e: [1.0, 0.0]}"#, "", &[]);
         assert!(r.contains("\"affected\""), "{r}");
-        let r = run(h, "get t near e $1 limit 1", "[[1.0, 0.0]]");
+        let r = run(h, "get t near e $1 limit 1", "[[1.0, 0.0]]", &[]);
         assert!(r.contains("_score"), "{r}");
-        let r = run(h, "broken query", "");
+        let r = run(h, "broken query", "", &[]);
         assert!(r.contains("\"error\""), "{r}");
+        fenec_close(h);
+    }
+
+    /// A vector handed over as `f32`s lands where the JSON holds its `null`,
+    /// and a list that does not fit the parameters is refused whole.
+    #[test]
+    fn vectors_beside_the_json() {
+        let h = fenec_open();
+        run(h, "create collection t (a int, e vector<2>)", "", &[]);
+        let vector = |at: u32, n: u32, xs: &[f32]| {
+            let mut b = [at.to_le_bytes(), n.to_le_bytes()].concat();
+            xs.iter().for_each(|x| b.extend(x.to_le_bytes()));
+            b
+        };
+        let good = vector(1, 2, &[0.5, 0.25]);
+        let r = run(h, "put t {a: $1, e: $2}", "[7, null]", &good);
+        assert!(r.contains("\"affected\""), "{r}");
+        let r = run(h, "get t select a, e", "", &[]);
+        assert!(r.contains(r#"{"a":7,"e":[0.5,0.25]}"#), "{r}");
+        for bad in [
+            vector(0, 2, &[0.5, 0.25]),
+            vector(2, 2, &[0.5, 0.25]),
+            vector(1, 3, &[0.5, 0.25]),
+            vector(u32::MAX, u32::MAX, &[]),
+            [good.clone(), vec![1]].concat(),
+            good[..6].to_vec(),
+        ] {
+            let r = run(h, "put t {a: $1, e: $2}", "[7, null]", &bad);
+            assert!(r.contains("malformed vector parameters"), "{r}");
+        }
         fenec_close(h);
     }
 
     #[test]
     fn changes_through_abi() {
         let h = fenec_open();
-        run(h, "create collection t (a int)", "");
+        run(h, "create collection t (a int)", "", &[]);
         let at = fenec_changes(h, 0.0);
         let seq_only = read(at);
         assert!(seq_only.contains("\"collections\":[\"t\"]"), "{seq_only}");
 
         // Shrink the ring and overflow it to check that the horizon rises.
         fenec_set_change_capacity(h, 1);
-        run(h, "put t [{a: 1}, {a: 2}]", "");
+        run(h, "put t [{a: 1}, {a: 2}]", "", &[]);
         let out = read(fenec_changes(h, 0.0));
         assert!(out.contains("\"collections\":null"), "{out}");
         fenec_close(h);

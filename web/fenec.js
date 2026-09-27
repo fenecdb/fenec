@@ -126,9 +126,9 @@ export class Fenec {
     return out;
   }
 
-  /** Copies a string into WASM memory. */
-  #write(str) {
-    const bytes = enc.encode(str);
+  /** Copies a string, or bytes, into WASM memory. */
+  #write(data) {
+    const bytes = typeof data === 'string' ? enc.encode(data) : data;
     const ptr = this.#wasm.fenec_alloc(bytes.length || 1);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
     return [ptr, bytes.length];
@@ -141,14 +141,17 @@ export class Fenec {
    * @returns {{kind:string, ...}} `{columns, rows}` for row results
    */
   run(sql, params = []) {
+    const [json, vectors] = vectorsApart(params);
     const [sp, sl] = this.#write(sql);
-    const [pp, pl] = this.#write(JSON.stringify(params));
+    const [pp, pl] = this.#write(JSON.stringify(json));
+    const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
     let out;
     try {
-      out = this.#readString(this.#wasm.fenec_query(this.#handle, sp, sl, pp, pl));
+      out = this.#readString(this.#wasm.fenec_query(this.#handle, sp, sl, pp, pl, vp, vl));
     } finally {
       this.#wasm.fenec_free(sp, sl || 1);
       this.#wasm.fenec_free(pp, pl || 1);
+      if (vectors) this.#wasm.fenec_free(vp, vl || 1);
     }
     // Before the answer, and before an error too: a statement that failed
     // may follow ones in the same text that wrote.
@@ -559,6 +562,49 @@ function normalize(v, what = 'value') {
   if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
   if (Array.isArray(v)) return v.map((x) => normalize(x, what));
   throw new FenecError(`an object cannot be used as a fenecdb value (${what})`);
+}
+
+// Whether this machine's typed arrays are little-endian, as the module
+// reads the vectors `vectorsApart` hands it. Every browser's are.
+const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+/**
+ * The parameters that are vectors, apart from the rest, as `f32`s: a
+ * typed array or an array of finite numbers, which the module reads as a
+ * vector either way. Each goes over as its place among the parameters and
+ * its length, then its values, and the JSON holds `null` where it goes.
+ * Written out as text and read back, a page of 200 768-dim vectors spent
+ * most of its time on the digits, both sides of the call. A `-0` goes over
+ * as `0`, as JSON writes it, so either way stores the same vector.
+ */
+function vectorsApart(params) {
+  const found = [];
+  let size = 0;
+  params.forEach((p, i) => {
+    const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
+    if (!LITTLE || !list || list.length === 0) return;
+    for (let k = 0; k < list.length; k++) {
+      if (typeof list[k] !== 'number' || !Number.isFinite(list[k])) return;
+    }
+    found.push(i);
+    size += 8 + 4 * list.length;
+  });
+  if (found.length === 0) return [params, null];
+  const bytes = new Uint8Array(size);
+  const words = new Uint32Array(bytes.buffer);
+  const floats = new Float32Array(bytes.buffer);
+  const json = params.slice();
+  let at = 0;
+  for (const i of found) {
+    const n = params[i].length;
+    words[at] = i;
+    words[at + 1] = n;
+    floats.set(params[i], at + 2);
+    for (let k = at + 2; k < at + 2 + n; k++) if (floats[k] === 0) floats[k] = 0;
+    json[i] = null;
+    at += 2 + n;
+  }
+  return [json, bytes];
 }
 
 function isSpec(v) {
