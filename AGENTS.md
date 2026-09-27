@@ -103,12 +103,12 @@ holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
 image, then the writes since as chunks, from the journal `fenec_journal` starts
 and `fenec_drain` empties (off until asked for -- a page that never drains would
-hold every write). One row persists in 0.21 ms over 32 MB in Chrome, against 97
+hold every write). One row persists in 0.18 ms over 32 MB in Chrome, against 92
 ms for the image. `openFile` (a dedicated worker) keeps the same bytes as a file
 of the origin private file system -- the file `fenec-pg` keeps, so each opens
 the other's -- and `run` appends each statement's writes and flushes before it
-answers: 0.60 ms a row, statement included, and it opens in 22 ms against
-IndexedDB's 46 (`make file-bench`; Safari 1.42 ms both ways). A new image
+answers: 0.56 ms a row, statement included, and it opens in 20 ms against
+IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
 (`compact`, or appended writes past half the image and 64 KB) goes into
 `<name>~` and is flushed before the file is written over, so a crash leaves
 one of the two whole; `openFile` takes the copy when its image is whole.
@@ -504,8 +504,8 @@ walk is as it was (`cfg`).
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 138.0 KB
-brotli with all four, 105.7 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 138.1 KB
+brotli with all four, 106.1 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

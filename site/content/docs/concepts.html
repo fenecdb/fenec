@@ -392,8 +392,8 @@ and out of IndexedDB the way a file holds it: an image, and the writes since
 as chunks after it. The first <code>persist</code> stores the image; every
 later one stores only what was written since the last, from a journal the
 wasm side keeps once asked to. In Chrome 153, over a 32 MB database,
-persisting one new row takes 0.21 ms where the image took 97 ms; in Safari
-26.1, 1.42 ms and 349 ms. Once the chunks outgrow half the image, a new
+persisting one new row takes 0.18 ms where the image took 92 ms; in Safari
+26.1, 0.98 ms and 418 ms. Once the chunks outgrow half the image, a new
 image replaces them, and <code>compact</code> replaces them too.
 <code>restore</code> reads the image and its chunks back as one file, so the
 graph restored from the image takes the chunks' writes rather than being
@@ -404,7 +404,7 @@ origin private file system instead, which is the file itself: the bytes
 <code>fenec-pg</code> keeps, so <code>fenec</code> opens a page's file and a
 page loads a server's. The same journal feeds it, a statement at a time:
 <code>run</code> appends the writes and flushes the file before it answers,
-0.60 ms a row in Chrome and 1.42 ms in Safari, statement included, and the
+0.56 ms a row in Chrome and 0.36 ms in Safari, statement included, and the
 file opens again in half the time the chunks are restored in. A new image
 is written beside the file and flushed before it is written over it, so a
 crash leaves one of the two whole.</p>
