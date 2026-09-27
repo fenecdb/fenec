@@ -818,7 +818,7 @@ pub fn seed_select(sub: &Subscription) -> Select {
 /// in the browser can hand the same text to wasm and to this endpoint alike
 /// -- one piece of query code, two transports.
 pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
-    let obj = json::parse_object(body)?;
+    let obj = json::parse_object_listing(body, "params")?;
     let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
     let sql = match get("query").or_else(|| get("sql")) {
         Some(Value::Text(s)) => s.clone(),
@@ -827,12 +827,11 @@ pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
     };
     // What the request is counted as, rather than its JSON (`statements`).
     crate::statements::text(&sql);
+    // A list whose elements keep their types, as the browser module reads
+    // its parameters: a vector parameter is an array inside it, `[[..]]`.
     let params = match get("params") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::List(items)) => items.clone(),
-        // An all-numeric array is parsed as a vector on the JSON side; it is
-        // unpacked back into a parameter list (a single vector parameter is `[[..]]`).
-        Some(Value::Vector(v)) => v.iter().map(|f| Value::Float(*f as f64)).collect(),
         Some(other) => vec![other.clone()],
     };
     let stmt = fenec_ql::parse_one(&sql).map_err(|e| Error::Query(e.to_string()))?;

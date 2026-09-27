@@ -767,6 +767,33 @@ fn raw_fenecql_endpoint() {
     assert_eq!(q(r#"{"query":"get articles get articles"}"#).status, 400);
 }
 
+/// Parameters keep their numbers: read as a vector, `[123456789, 19.99]`
+/// handed the query the `f32`s 123456792 and 19.989999771118164, and a row
+/// holding the numbers themselves was not found. The browser module read
+/// them right; the same query now answers the same over HTTP.
+#[test]
+fn numeric_params_keep_their_values() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    for body in [
+        r#"{"query":"create collection prices (n int, price float)"}"#,
+        r#"{"query":"put prices {n: 123456789, price: 19.99}"}"#,
+    ] {
+        let r = q(body);
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+    let r = q(
+        r#"{"query":"get prices select n, price where n = $1 and price = $2","params":[123456789, 19.99]}"#,
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.trim(), r#"[{"n":123456789,"price":19.99}]"#);
+    // A write through them stores them as they are.
+    let r = q(r#"{"query":"put prices {n: $1, price: $2}","params":[987654321, 0.1]}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(r#"{"query":"get prices select n, price where n = 987654321"}"#);
+    assert_eq!(r.body.trim(), r#"[{"n":987654321,"price":0.1}]"#);
+}
+
 /// `explain` through `POST /query`: the plan is rows like any read's, one
 /// object a step, and it is a read, so a read-only server answers it.
 #[test]
