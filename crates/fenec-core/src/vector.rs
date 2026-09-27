@@ -19,8 +19,9 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // -------------------------------------------------------------- metrics
 
@@ -701,6 +702,139 @@ fn unit_scale(sq: f32) -> f32 {
     } else {
         1.0
     }
+}
+
+/// A document's vector for a restore, into the buffer handed it: `false`
+/// when it holds none. Shared by the threads that fill the arena.
+type Lookup<'a> = dyn Fn(DocId, &mut Vec<f32>) -> bool + Sync + 'a;
+
+/// Nodes a share of a restored arena holds, which a thread fills at a time.
+const FILL_SHARE: usize = 1024;
+
+/// A share of a restored arena's slots, not yet written.
+enum Part<'a> {
+    F32(&'a mut [MaybeUninit<f32>]),
+    F16(&'a mut [MaybeUninit<u16>]),
+}
+
+impl Part<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Part::F32(s) => s.len(),
+            Part::F16(s) => s.len(),
+        }
+    }
+
+    /// Node `k`'s slots from `raw` times `inv`, as [`Arena::push_scaled`]
+    /// pushes them.
+    fn put_scaled(&mut self, k: usize, dim: usize, raw: &[f32], inv: f32) {
+        match self {
+            Part::F32(s) => {
+                let slots = &mut s[k * dim..(k + 1) * dim];
+                match inv != 1.0 {
+                    true => slots.iter_mut().zip(raw).for_each(|(o, x)| {
+                        o.write(x * inv);
+                    }),
+                    false => slots.iter_mut().zip(raw).for_each(|(o, x)| {
+                        o.write(*x);
+                    }),
+                }
+            }
+            Part::F16(s) => s[k * dim..(k + 1) * dim]
+                .iter_mut()
+                .zip(raw)
+                .for_each(|(o, x)| {
+                    o.write(crate::codec::f16_from_f32(x * inv));
+                }),
+        }
+    }
+
+    /// Node `k`'s slots from a tombstone's vector as its record holds it,
+    /// as [`Arena::push_stored`] reads it: `false` for another length.
+    fn put_stored(&mut self, k: usize, dim: usize, bytes: &[u8]) -> bool {
+        match self {
+            Part::F32(s) => {
+                let (words, rest) = bytes.as_chunks::<4>();
+                if words.len() != dim || !rest.is_empty() {
+                    return false;
+                }
+                for (o, w) in s[k * dim..(k + 1) * dim].iter_mut().zip(words) {
+                    o.write(f32::from_le_bytes(*w));
+                }
+            }
+            Part::F16(s) => {
+                let (words, rest) = bytes.as_chunks::<2>();
+                if words.len() != dim || !rest.is_empty() {
+                    return false;
+                }
+                for (o, w) in s[k * dim..(k + 1) * dim].iter_mut().zip(words) {
+                    o.write(u16::from_le_bytes(*w));
+                }
+            }
+        }
+        true
+    }
+
+    /// The first `n` of `raws`, read for the nodes `held`, scaled into
+    /// their slots: made unit ones for cosine with the norms summed eight
+    /// side by side where the target sums them so ([`flat_sqs8`]).
+    fn put_units(&mut self, held: &[usize], raws: &[Vec<f32>; 8], dim: usize, unit: bool) {
+        let n = held.len();
+        let mut inv = [1.0f32; 8];
+        if unit && n == 8 && BATCH_NORMS {
+            let sq = flat_sqs8(std::array::from_fn(|j| &raws[j][..]));
+            inv = sq.map(unit_scale);
+        } else if unit {
+            for j in 0..n {
+                inv[j] = unit_scale(flat_sq(&raws[j]));
+            }
+        }
+        for j in 0..n {
+            self.put_scaled(held[j], dim, &raws[j], inv[j]);
+        }
+    }
+}
+
+/// Fills one share of a restored arena, its first node the graph's `from`
+/// and its first tombstone the record's `tomb`th: see
+/// [`VectorIndex::fill_restored`]. `false` where a document holds no vector
+/// of the index's length, or a tombstone's is cut short.
+fn fill_share(
+    part: &mut Part<'_>,
+    (from, mut tomb): (usize, usize),
+    read: &Read<'_>,
+    raws: &mut [Vec<f32>; 8],
+    (dim, unit): (usize, bool),
+    lookup: &Lookup<'_>,
+) -> bool {
+    // The share's nodes read and waiting for their norms, a slot of `raws`
+    // each.
+    let mut held = [0usize; 8];
+    let mut n = 0;
+    for k in 0..part.len() / dim {
+        let node = from + k;
+        if read.flags[node] == DEAD {
+            let Some(stored) = read.tombs.get(tomb) else {
+                return false;
+            };
+            tomb += 1;
+            if !part.put_stored(k, dim, stored) {
+                return false;
+            }
+            continue;
+        }
+        if !lookup(read.docs[node], &mut raws[n]) || raws[n].len() != dim {
+            return false;
+        }
+        held[n] = k;
+        n += 1;
+        if n == 8 || !BATCH_NORMS {
+            part.put_units(&held[..n], raws, dim, unit);
+            n = 0;
+        }
+    }
+    part.put_units(&held[..n], raws, dim, unit);
+    true
 }
 
 /// f16 -> f32, branchless. In the hot loop the subnormal branch of
@@ -3537,7 +3671,7 @@ impl VectorIndex {
         bytes: &[u8],
         expect_dim: usize,
         expect_prec: VecPrec,
-        mut lookup: impl FnMut(DocId, &mut Vec<f32>) -> bool,
+        lookup: impl Fn(DocId, &mut Vec<f32>) -> bool + Sync,
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
         let version = *bytes.first()?;
@@ -3624,7 +3758,7 @@ impl VectorIndex {
             true => Read::flat(body, count, ix.m0, stored, waits)?,
             false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
         };
-        ix.build_restored(read, entry, max_level, &mut lookup)
+        ix.build_restored(read, entry, max_level, &lookup)
     }
 
     /// The index a graph record describes, read into arrays by either
@@ -3636,30 +3770,128 @@ impl VectorIndex {
         read: Read<'_>,
         entry: Option<u32>,
         max_level: usize,
-        lookup: &mut dyn FnMut(DocId, &mut Vec<f32>) -> bool,
+        lookup: &Lookup<'_>,
     ) -> Option<VectorIndex> {
-        let (count, dim) = (read.docs.len(), self.dim);
+        let count = read.docs.len();
         if entry.is_some_and(|e| e as usize >= count) {
             return None;
         }
-        let unit = self.spec.metric == Metric::Cosine;
-        let (mut raw, mut batch) = (Vec::with_capacity(dim), Vec::new());
-        let mut tombs = read.tombs.iter();
-        self.data.reserve(count, dim);
         self.by_doc.reserve(count);
+        let mut dead = 0;
         for (node, (&doc, &flag)) in read.docs.iter().zip(&read.flags).enumerate() {
+            if flag == DEAD {
+                dead += 1;
+                continue;
+            }
             if flag == WAITING {
                 self.pending.push(node as u32);
             }
+            // Two live nodes of one document would count as two of the
+            // documents the engine holds this graph to.
+            if self.by_doc.insert(doc, node as u32).is_some() {
+                return None;
+            }
+        }
+        if dead > read.tombs.len() || !self.fill_restored(&read, lookup) {
+            return None;
+        }
+        self.deleted = read.flags.iter().map(|&f| f == DEAD).collect();
+        self.deleted_count = dead;
+        (self.doc_ids, self.l0, self.l0_len, self.upper) =
+            (read.docs, read.l0, read.l0_len, read.upper);
+        (self.entry, self.max_level) = (entry, max_level);
+        // As its record has it: nothing to write again.
+        self.changes = 0;
+        Some(self)
+    }
+
+    /// Fills a restored graph's arena: a tombstone's vector as its record
+    /// holds it, a live node's read from its document and made a unit one
+    /// for cosine, as `insert` made it -- `false` where a document holds no
+    /// vector of the index's length. A float arena is filled a share of
+    /// [`FILL_SHARE`] nodes at a time by whichever thread is free, each
+    /// writing its nodes' slots where they stand: read and scaled one
+    /// vector at a time, copied into a batch and then into the arena, it
+    /// was 7.6 of a 22 ms open at 100 000 x 128. A code arena is filled in
+    /// turn, as a code can depend on the ones before it.
+    fn fill_restored(&mut self, read: &Read<'_>, lookup: &Lookup<'_>) -> bool {
+        let (count, dim) = (read.docs.len(), self.dim);
+        let unit = self.spec.metric == Metric::Cosine;
+        // The browser has one thread, and the shares would only add to
+        // its module: 1.3 KB brotli, for the same 18 ms load.
+        let one = cfg!(target_family = "wasm");
+        let Some(len) = count.checked_mul(dim).filter(|_| dim > 0 && !one) else {
+            return self.fill_in_turn(read, lookup, unit);
+        };
+        let share = FILL_SHARE * dim;
+        let parts: Vec<Mutex<Part<'_>>> = match &mut self.data {
+            Arena::F32(d) => {
+                d.reserve_exact(len);
+                d.spare_capacity_mut()[..len]
+                    .chunks_mut(share)
+                    .map(|c| Mutex::new(Part::F32(c)))
+                    .collect()
+            }
+            Arena::F16(d) => {
+                d.reserve_exact(len);
+                d.spare_capacity_mut()[..len]
+                    .chunks_mut(share)
+                    .map(|c| Mutex::new(Part::F16(c)))
+                    .collect()
+            }
+            _ => return self.fill_in_turn(read, lookup, unit),
+        };
+        // Where each share's tombstones start among the record's.
+        let mut tombs = Vec::with_capacity(parts.len());
+        let mut before = 0;
+        for flags in read.flags.chunks(FILL_SHARE) {
+            tombs.push(before);
+            before += flags.iter().filter(|&&f| f == DEAD).count();
+        }
+        let mut raws: Vec<[Vec<f32>; 8]> = (0..Self::threads().min(parts.len()))
+            .map(|_| Default::default())
+            .collect();
+        let filled = spread(parts.len(), &mut raws, |raws, i| {
+            let mut part = parts[i].lock().unwrap_or_else(|e| e.into_inner());
+            let at = (i * FILL_SHARE, tombs[i]);
+            fill_share(&mut part, at, read, raws, (dim, unit), lookup)
+        });
+        drop(parts);
+        if filled.len() != tombs.len() || filled.contains(&false) {
+            return false;
+        }
+        // SAFETY: every share wrote each of its nodes' `dim` slots -- a
+        // tombstone's from the record, a live node's from its document --
+        // or said it had not, which returned above.
+        unsafe {
+            match &mut self.data {
+                Arena::F32(d) => d.set_len(len),
+                Arena::F16(d) => d.set_len(len),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// [`Self::fill_restored`] a node after another, on this thread.
+    fn fill_in_turn(&mut self, read: &Read<'_>, lookup: &Lookup<'_>, unit: bool) -> bool {
+        let dim = self.dim;
+        let (mut raw, mut batch) = (Vec::with_capacity(dim), Vec::new());
+        let mut tombs = read.tombs.iter();
+        self.data.reserve(read.docs.len(), dim);
+        for (&doc, &flag) in read.docs.iter().zip(&read.flags) {
             if flag == DEAD {
                 if BATCH_NORMS {
                     flush_units(&mut self.data, &mut batch, dim, unit);
                 }
-                self.data.push_stored(tombs.next()?);
+                let Some(stored) = tombs.next() else {
+                    return false;
+                };
+                self.data.push_stored(stored);
                 continue;
             }
             if !lookup(doc, &mut raw) || raw.len() != dim {
-                return None;
+                return false;
             }
             if BATCH_NORMS {
                 batch.extend_from_slice(&raw);
@@ -3669,23 +3901,11 @@ impl VectorIndex {
             } else {
                 self.data.push(&raw, unit);
             }
-            // Two live nodes of one document would count as two of the
-            // documents the engine holds this graph to.
-            if self.by_doc.insert(doc, node as u32).is_some() {
-                return None;
-            }
         }
         if BATCH_NORMS {
             flush_units(&mut self.data, &mut batch, dim, unit);
         }
-        self.deleted = read.flags.iter().map(|&f| f == DEAD).collect();
-        self.deleted_count = self.deleted.iter().filter(|&&d| d).count();
-        (self.doc_ids, self.l0, self.l0_len, self.upper) =
-            (read.docs, read.l0, read.l0_len, read.upper);
-        (self.entry, self.max_level) = (entry, max_level);
-        // As its record has it: nothing to write again.
-        self.changes = 0;
-        Some(self)
+        true
     }
 
     /// Exact (brute-force) search. Used on small collections and when
@@ -3997,9 +4217,10 @@ mod tests {
         }
     }
 
-    /// A restore normalises the documents' vectors eight at a time: the arena
-    /// it ends with holds the bits the one it restored held, over tombstones
-    /// between them and a last batch short of eight.
+    /// A restore normalises the documents' vectors eight at a time, a share
+    /// of nodes to a thread: the arena it ends with holds the bits the one it
+    /// restored held, over tombstones between them and on either side of a
+    /// share's edge, and a last batch short of eight.
     #[test]
     fn a_restored_arena_holds_the_vectors_it_had_bit_for_bit() {
         let mut rng = Rng(29);
@@ -4012,19 +4233,22 @@ mod tests {
             };
             let mut ix = VectorIndex::with_precision(dim, spec, prec);
             let mut held = HashMap::new();
-            for i in 0..45u64 {
-                let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() * 3.0 - 1.5).collect();
-                ix.insert(i, &v);
-                held.insert(i, v);
-            }
+            // Three shares of the fill, the last of 45 nodes.
+            let edge = FILL_SHARE as u64;
+            let items: Vec<(u64, Vec<f32>)> = (0..2 * edge + 45)
+                .map(|i| (i, (0..dim).map(|_| rng.next_f32() * 3.0 - 1.5).collect()))
+                .collect();
+            ix.insert_batch(&items);
+            held.extend(items);
             // Written again with another vector, and deleted: tombstones
-            // carrying their own vectors among the live nodes.
-            for i in [3u64, 11, 12, 30] {
+            // carrying their own vectors among the live nodes, on either
+            // side of a share's edge too.
+            for i in [3u64, 11, 12, 30, edge - 1, edge, 2 * edge + 7] {
                 let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
                 ix.insert(i, &v);
                 held.insert(i, v);
             }
-            for i in [7u64, 20] {
+            for i in [7u64, 20, edge + 1] {
                 ix.remove(i);
                 held.remove(&i);
             }
@@ -4129,6 +4353,17 @@ mod tests {
                 assert!(
                     VectorIndex::restore_graph(cut, dim, prec, lookup).is_none(),
                     "{what}: cut short"
+                );
+                // A document of the second share without its vector: the
+                // shares that did fill are let go, none of their slots read.
+                let gone = (FILL_SHARE..new.doc_ids.len())
+                    .find(|&n| !new.is_deleted(n as u32))
+                    .map(|n| new.doc_ids[n])
+                    .expect("a live node past the first share");
+                let without = |doc: u64, out: &mut Vec<f32>| doc != gone && lookup(doc, out);
+                assert!(
+                    VectorIndex::restore_graph(&flat, dim, prec, without).is_none(),
+                    "{what}: a vector gone"
                 );
                 // Two live nodes of one document: as many nodes as
                 // documents, and one of them left out of the graph.

@@ -148,7 +148,7 @@ pub struct Config {
     /// default; this flag removes that protection.
     pub insecure: bool,
     /// Rewrite the file image on shutdown. The HNSW graph lands in the file
-    /// and the next open does not rebuild it (100k x 128: 4.4 s -> 23 ms).
+    /// and the next open does not rebuild it (100k x 128: 4.4 s -> 17 ms).
     /// It is meaningless without a file (in-memory).
     pub checkpoint_on_exit: bool,
     /// Ceiling on concurrent connections (0 = unlimited). Every connection is
