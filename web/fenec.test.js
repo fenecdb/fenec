@@ -1114,6 +1114,34 @@ test('lookup chain end to end on wasm', { skip: wasm ? false : 'no web/fenec.was
   ]);
 });
 
+// A parameter that is a vector goes into the module as its f32s beside the
+// JSON, and has to store what the JSON did: the same f32s, `-0` as `0`, and
+// a number that is not finite still written as JSON, where it is `null`.
+test('vectors handed over as f32s store what JSON stored', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const [f32s, text] = [await Fenec.open(wasm), await Fenec.open(wasm)];
+  for (const db of [f32s, text]) db.run('create collection t (n int, v vector<4> @hnsw(l2))');
+  const vectors = [
+    [0.1, -0, 1e-7, 3],
+    Float32Array.of(0.5, -0, 2.5e-30, 7),
+    new Float64Array([1 / 3, 2 / 3, 1e10, -1e-20]),
+    Int32Array.of(1, -2, 3, 16777217),
+  ];
+  vectors.forEach((v, n) => {
+    f32s.run('put t {n: $1, v: $2}', [n, v]);
+    text.run(`put t {n: ${n}, v: [${Array.from(v, (x) => JSON.stringify(x)).join(', ')}]}`);
+  });
+  await f32s.from('t').insert({ n: 9, v: Float32Array.of(-0.25, 0, 1, 2) });
+  text.run('put t {n: 9, v: [-0.25, 0, 1, 2]}');
+  assert.deepEqual(f32s.snapshot(), text.snapshot());
+  // A query's vector is a parameter too.
+  const q = 'get t near v $1 exact limit 3';
+  assert.deepEqual(f32s.rows(q, [Float32Array.of(1, 0, 0, 0)]), text.rows(q, [[1, 0, 0, 0]]));
+  // Not finite: JSON as before, where it is `null`, which no vector holds.
+  assert.throws(() => f32s.run('put t {n: 10, v: $1}', [[1, NaN, 2, 3]]));
+  assert.equal(f32s.rows('get t where n = 10').length, 0);
+});
+
 // The distance kernels sum in one fixed order -- eight running sums, reduced
 // pairwise -- and the SIMD build must keep it: a graph built in the browser
 // is then the graph built natively. This is that order written out with

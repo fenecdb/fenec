@@ -700,6 +700,16 @@ into `char`s first, 23.7; read where the page left it rather than copied
 (`str_from`), 21.9. 10 000 128-dim vectors went in with their graph in
 1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
 
+**A vector parameter goes into the module as `f32`s.** `web/fenec.js`'s
+`run` takes each parameter that is a typed array or an array of finite
+numbers -- which the module reads as a vector either way -- out of the
+JSON, where it leaves `null`, and hands it over beside it: its place, its
+length and its values (`vectorsApart`; `fenec_query`'s last two
+arguments, `with_vectors`). A `-0` goes over as `0`, as JSON writes it,
+so the file is the same either way (`web/fenec.test.js`). 200 768-dim
+vectors went in in 21.9 ms as JSON and take 4.4, and `make wasm-speed`
+builds 10 000 128-dim ones with their graph in 1 165 ms against 1 307.
+
 **A quantized index holds codes, and `near` orders by the documents'
 vectors.** `@hnsw(..., quant=int8)` keeps a byte a component over a scale a
 vector, `quant=bit` the signs of its distance from a centre (cosine only). A
