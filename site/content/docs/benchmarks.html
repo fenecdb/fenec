@@ -338,7 +338,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1283 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1040 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>416 KB</b></td><td class="n"><b>138 KB</b></td><td class="n">164 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>420 KB</b></td><td class="n"><b>139 KB</b></td><td class="n">166 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">90 KB</td><td class="n">25 KB</td><td class="n">29 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -347,7 +347,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>163 KB brotli</b> for both together. A binary you execute and an image
+<b>164 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
