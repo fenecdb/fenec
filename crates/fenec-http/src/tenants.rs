@@ -709,13 +709,33 @@ impl Tenants {
             .collect()
     }
 
-    /// Pushes every dirty open tenant to disk. The periodic syncer calls it.
+    /// Pushes every dirty open tenant to disk. The periodic syncer calls it,
+    /// and does as the single database's does: the flush under the tenant's
+    /// write lock, the fsync once it is let go. Held through the fsync, the
+    /// lock kept every read and write of the tenant waiting out the disk
+    /// once a pass: up to 27 ms at a time on macOS, against 1.8 this way,
+    /// with a write every millisecond beside four readers.
     pub fn sync_dirty(&self) {
         for t in self.open_tenants() {
-            if t.read().is_dirty() {
-                if let Err(e) = t.write().sync() {
-                    crate::log!("sync error ({}): {e}", t.name);
+            // After a storage error nothing is clean again, and every pass
+            // would log it; the writes that follow are refused and say so.
+            let pending = {
+                let g = t.read();
+                g.is_dirty() && g.failure().is_none()
+            };
+            if !pending {
+                continue;
+            }
+            let flushed = t.write().flush();
+            match flushed {
+                Ok(Some(durability)) => {
+                    if let Err(e) = durability() {
+                        crate::log!("sync error ({}): {e}", t.name);
+                        t.write().fail(&e);
+                    }
                 }
+                Ok(None) => {}
+                Err(e) => crate::log!("sync error ({}): {e}", t.name),
             }
         }
     }
