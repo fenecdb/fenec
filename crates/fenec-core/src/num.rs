@@ -180,8 +180,66 @@ fn convert(neg: bool, int: &[u8], frac: &[u8], exp: i32) -> f64 {
             }
         }
     }
+    // Seventeen digits, as JavaScript writes most floats and every `f32`
+    // it widens, are past the 53 bits Clinger's path takes and went the
+    // decimal way below: 40% of the time a page of vectors took to read.
+    if !truncated && (1..STEP as i32).contains(&-e10) {
+        return sign(neg, divided(mant, (-e10) as usize));
+    }
 
     sign(neg, Decimal::new(int, frac, exp).into_f64())
+}
+
+/// `w / 10^n`, correctly rounded, where `5^n` fits in 64 bits: `w × 2^s`
+/// divided by `5^n` to a quotient of 55 bits or more, and its remainder,
+/// are the value's bits past the 53 kept and whether any below them is set.
+fn divided(w: u64, n: usize) -> f64 {
+    let d = SMALL[n];
+    let bits = |x: u64| 64 - x.leading_zeros() as i32;
+    let s = (55 + bits(d) - bits(w)).max(0);
+    let num = (w as u128) << s;
+    let (q, r) = div128((num >> 64) as u64, num as u64, d);
+    let cut = bits(q) - 53;
+    let mant = q >> cut;
+    let half = 1u64 << (cut - 1);
+    let rest = q & (2 * half - 1);
+    // To the nearest, and from an exact half to the even one.
+    let up = rest > half || (rest == half && (r != 0 || mant & 1 == 1));
+    assemble(mant + up as u64, cut - s - n as i32)
+}
+
+/// `(hi × 2^64 + lo) / d` and its remainder, where the quotient fits in 64
+/// bits (`hi < d`): long division in two 32-bit digits, each guessed from
+/// the divisor's top half and brought down at most twice (Knuth's algorithm
+/// D, as Hacker's Delight writes it for 128 by 64). Divided as a `u128`, it
+/// took the compiler's own 128-bit division into the browser module, 1.4 KB
+/// of it; wasm divides 64 bits itself.
+fn div128(hi: u64, lo: u64, d: u64) -> (u64, u64) {
+    const B: u64 = 1 << 32;
+    let k = d.leading_zeros();
+    let d = d << k;
+    let (d1, d0) = (d >> 32, d & (B - 1));
+    let top = match k {
+        0 => hi,
+        _ => hi << k | lo >> (64 - k),
+    };
+    let lo = lo << k;
+    let digit = |top: u64, next: u64| {
+        let (mut q, mut rem) = (top / d1, top % d1);
+        while q >= B || q * d0 > (rem << 32 | next) {
+            q -= 1;
+            rem += d1;
+            if rem >= B {
+                break;
+            }
+        }
+        q
+    };
+    let q1 = digit(top, lo >> 32);
+    let mid = (top << 32 | lo >> 32).wrapping_sub(q1.wrapping_mul(d));
+    let q0 = digit(mid, lo & (B - 1));
+    let rem = (mid << 32 | lo & (B - 1)).wrapping_sub(q0.wrapping_mul(d));
+    (q1 << 32 | q0, rem >> k)
 }
 
 fn sign(neg: bool, v: f64) -> f64 {
@@ -922,6 +980,75 @@ mod tests {
                 s.push_str(&e.to_string());
             }
             same(&s);
+        }
+    }
+
+    #[test]
+    fn a_division_of_128_bits_by_64_is_exact() {
+        let check = |hi: u64, lo: u64, d: u64| {
+            let num = (hi as u128) << 64 | lo as u128;
+            let want = ((num / d as u128) as u64, (num % d as u128) as u64);
+            assert_eq!(div128(hi, lo, d), want, "{hi:#x}:{lo:#x} / {d:#x}");
+        };
+        let mut rng = Rng(0xd1d0_d1d0_5eed_0128);
+        for _ in 0..SAMPLES {
+            // Every size of divisor, and a dividend whose quotient fits.
+            let d = (rng.next() >> (rng.next() % 64)).max(1);
+            check(rng.next() % d, rng.next(), d);
+            check(d - 1, u64::MAX, d);
+            check(0, rng.next(), d);
+        }
+        for d in [
+            1,
+            2,
+            3,
+            5,
+            1 << 32,
+            (1 << 32) - 1,
+            (1 << 32) + 1,
+            u64::MAX,
+            1 << 63,
+        ] {
+            check(d - 1, u64::MAX, d);
+            check(d - 1, 0, d);
+            check(0, 0, d);
+        }
+    }
+
+    /// Up to 19 digits over 10^1 to 10^25, the quotient path: as many as
+    /// JavaScript writes, and past the 53 bits Clinger's path takes.
+    #[test]
+    fn nineteen_digits_divide_exactly() {
+        let mut rng = Rng(0x5eed_1e55_d1ce_f00d);
+        for _ in 0..SAMPLES {
+            let w = rng.next() % 10u64.pow(1 + (rng.next() % 19) as u32);
+            let n = 1 + rng.next() % 25;
+            same(&format!("{w}e-{n}"));
+            same(&format!("-{w}e-{n}"));
+        }
+        // What an `f32` widens to, as JavaScript hands it over.
+        for _ in 0..SAMPLES {
+            let x = f32::from_bits(rng.next() as u32);
+            if x.is_finite() {
+                same(&format!("{}", x as f64));
+            }
+        }
+        // Exactly between two `f64`s, which goes to the even one, and a hair
+        // either side of it.
+        for text in [
+            "9007199254740992.5",
+            "9007199254740993.5",
+            "9007199254740992.50000001",
+            "9007199254740992.49999999",
+            "18014398509481985e0",
+            "1801439850948198.5",
+            "4503599627370496.25",
+            "4503599627370496.75",
+            "9999999999999999999e-1",
+            "1e-25",
+            "1234567890123456789e-25",
+        ] {
+            same(text);
         }
     }
 
