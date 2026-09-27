@@ -687,7 +687,14 @@ name and cloned value by value, a scan of 20 000 rows with two comparisons
 and an order took 1.91 ms natively and 2.88 in the browser module; bound,
 1.07 and 1.70, and a count over an `in` and an `or` 2.24 -> 0.90 ms. The
 positions are kept sorted as they come: sorted after, `usize` was a sort of
-its own, 3 KB of the browser module.
+its own, 3 KB of the browser module. A row's text lands in the text its
+slot held (`Store::read_fields`), a malloc and a free a row less: a count
+by text equality 1.49 -> 0.96 ms natively, 1.86 -> 1.42 in the browser;
+resized rather than truncated, the row cost numeric filters 7 to 13%.
+Reading an `order`'s keys with the filter's own pass, rather than finding
+each matched row again (`order_ids`), took 6 to 9% off an ordered scan
+natively but made the unordered ones 4 to 6% slower in the browser and the
+module 1.9 KB larger, so it is not in.
 
 **`@sorted` must give the scan's answer, row for row.** Its keys order exactly
 as `Value::cmp_value` orders the field's values (ints and timestamps through a
