@@ -274,7 +274,10 @@ the lock is released, and `FileSink` writes the bytes there as well (a `write`
 under the lock waited out concurrent fsyncs on macOS). A durability whose bytes
 an earlier fsync already covered runs none, which is the group commit: 268 ->
 1 156 durable writes/s over eight clients. A failed one is reported back with
-`Database::fail` so the engine stops taking writes.
+`Database::fail` so the engine stops taking writes. The syncer of `--sync
+<ms>` flushes the same way, a database's and each of a node's tenants'
+(`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
+every read and write of one waited up to 27 ms a pass on macOS.
 
 **Replication ships only what is on disk, numbered by the change counter.**
 A primary (`--replication-token`) writes through a `Tee`
