@@ -42,6 +42,7 @@ pub mod admin;
 pub mod api;
 pub mod archive;
 pub mod crypto;
+pub mod held;
 pub mod http;
 pub mod lease;
 pub mod link;
@@ -709,7 +710,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // collection` arriving in between leaves the two stages inconsistent.
     if wants_write(req) {
         metrics::wrote();
-        let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = held::write_unheld(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -741,7 +742,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Err(e) => error_response(&e),
         }
     } else {
-        let guard = db.read().unwrap_or_else(|e| e.into_inner());
+        let guard = held::read_landed(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -790,9 +791,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
     }
     let result = if stmt.is_read_only() {
-        db.read()
-            .unwrap_or_else(|e| e.into_inner())
-            .query(&stmt, &params)
+        held::read_landed(db).query(&stmt, &params)
     } else if let Some(built) = Database::maintain(db, &stmt) {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
@@ -809,7 +808,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         built
     } else {
-        let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = held::write_unheld(db);
         let r = access::within(who, || guard.execute_with(&stmt, &params));
         let durability = match r {
             Ok(_) => match flush_for(cfg, &mut guard) {
@@ -877,7 +876,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         metrics::wrote();
     }
 
-    let mut guard = db.write().unwrap_or_else(|e| e.into_inner());
+    let mut guard = held::write_unheld(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
     if block {
         if let Err(e) = guard.begin() {

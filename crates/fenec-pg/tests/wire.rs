@@ -1325,8 +1325,8 @@ fn answers_within(c: &mut Client, ms: u64) -> bool {
 }
 
 /// `COMMIT` lands a transaction's writes and `ROLLBACK` puts them back. In
-/// between another session waits rather than read them: they may yet be
-/// put back.
+/// between another session reads what has landed, and does not wait for
+/// the transaction: not its writes, which may yet be put back.
 #[test]
 fn a_transaction_lands_at_commit_or_not_at_all() {
     let h = trust_server();
@@ -1351,15 +1351,20 @@ fn a_transaction_lands_at_commit_or_not_at_all() {
     );
     other.send("get t count");
     assert!(
-        !answers_within(&mut other, 300),
-        "a read went past an open transaction"
+        answers_within(&mut other, 300),
+        "a read waited for an open transaction"
     );
+    let r = other.until_ready();
+    assert_eq!(
+        find(&r, b'D').unwrap().cells(),
+        [Some("0".to_string())],
+        "a read saw an open transaction's writes"
+    );
+    assert_eq!(names(&mut c), ["a", "b"], "the transaction lost its writes");
 
     let r = c.simple("ROLLBACK");
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "ROLLBACK");
     assert_eq!(status(&r), b'I');
-    let r = other.until_ready();
-    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("0".to_string())]);
     assert!(names(&mut c).is_empty());
 
     c.simple("BEGIN");
@@ -1378,6 +1383,29 @@ fn a_transaction_lands_at_commit_or_not_at_all() {
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
     assert_eq!(status(&r), b'I');
     assert_eq!(names(&mut other), ["c", "d"]);
+}
+
+/// A transaction that changed a graph -- a vector written -- is not put
+/// aside for readers: put back and written again, each of its nodes would
+/// be a tombstone and another node. A read beside it waits for it to end,
+/// as every read waited for every transaction.
+#[test]
+fn a_read_waits_for_a_transaction_that_changed_a_graph() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection v (name text, e vector<2> @hnsw(cosine))");
+    c.simple("put v {name: \"landed\", e: [1, 0]}");
+    c.simple("BEGIN");
+    c.simple("put v {name: \"open\", e: [0, 1]}");
+    other.send("get v count");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a read went past a transaction that changed a graph"
+    );
+    c.simple("COMMIT");
+    let r = other.until_ready();
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("2".to_string())]);
 }
 
 /// Until its first write a transaction reads what others commit, statement
@@ -1650,22 +1678,18 @@ fn a_savepoint_puts_back_only_what_came_after_it() {
     assert_eq!(status(&r), b'T');
     // RELEASE kept the writes of the savepoints it forgot: `g` stays.
     assert_eq!(names(&mut c), ["a", "f", "g"]);
-    other.send("get t count");
-    assert!(
-        !answers_within(&mut other, 300),
-        "a read went past an open transaction"
-    );
+    // Another session reads what landed meanwhile: nothing of it.
+    assert!(names(&mut other).is_empty());
     let r = c.simple("COMMIT");
     assert_eq!(find(&r, b'C').unwrap().tag_text(), "COMMIT");
     assert_eq!(status(&r), b'I');
-    let r = other.until_ready();
-    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("3".to_string())]);
     assert_eq!(names(&mut other), ["a", "f", "g"]);
 }
 
 /// A transaction that failed is taken back to a savepoint before the
-/// failure and goes on, as PostgreSQL's is: its block and its lock are kept
-/// meanwhile, since the writes before the savepoint are still to land.
+/// failure and goes on, as PostgreSQL's is: its block is kept meanwhile,
+/// since the writes before the savepoint are still to land, and another
+/// session reads beside it what has landed.
 #[test]
 fn a_failed_transaction_is_taken_back_to_a_savepoint() {
     let h = trust_server();
@@ -1684,10 +1708,9 @@ fn a_failed_transaction_is_taken_back_to_a_savepoint() {
         let r = c.simple(q);
         assert_eq!(find(&r, b'E').unwrap().sqlstate().unwrap(), "25P02", "{q}");
     }
-    other.send("get t count");
     assert!(
-        !answers_within(&mut other, 300),
-        "the failed transaction let go of what its savepoint keeps"
+        names(&mut other).is_empty(),
+        "a read saw the failed transaction's writes"
     );
     // A savepoint it does not have leaves it failed.
     let r = c.simple("ROLLBACK TO nosuch");
@@ -1699,8 +1722,6 @@ fn a_failed_transaction_is_taken_back_to_a_savepoint() {
     assert_eq!(names(&mut c), ["a"]);
     c.simple("put t {name: \"d\"}");
     c.simple("COMMIT");
-    let r = other.until_ready();
-    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("2".to_string())]);
     assert_eq!(names(&mut other), ["a", "d"]);
 
     // Failed again with nothing to go back to, it takes only its end, and
@@ -1943,9 +1964,10 @@ fn commit_and_chain_begins_the_next_transaction() {
     assert_eq!(names(&mut c), ["a"]);
 }
 
-/// A transaction that has written holds the database: one whose client
-/// goes silent is put back after `idle_in_transaction`, and its session
-/// closed with the reason; one whose client goes away is put back at once.
+/// A transaction that has written holds the database against every other
+/// write: one whose client goes silent is put back after
+/// `idle_in_transaction`, and its session closed with the reason; one whose
+/// client goes away is put back at once. Reads go on beside it meanwhile.
 #[test]
 fn an_idle_or_abandoned_transaction_is_put_back() {
     let h = start(
@@ -1961,8 +1983,15 @@ fn an_idle_or_abandoned_transaction_is_put_back() {
     c.simple("put t {name: \"idle\"}");
     let started = Instant::now();
     let mut other = Client::connect(h.port, "fenec", None).unwrap();
-    assert!(names(&mut other).is_empty(), "the idle transaction landed");
+    assert!(names(&mut other).is_empty(), "a read saw the idle write");
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "a read waited for the idle transaction"
+    );
+    // A write waits for it, until it is put back.
+    other.simple("put t {name: \"other\"}");
     assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(names(&mut other), ["other"], "the idle transaction landed");
     let m = c.read_msg().expect("the server closed without saying why");
     assert_eq!(m.tag, b'E');
     assert_eq!(m.sqlstate().as_deref(), Some("25P03"), "{:?}", m.message());
@@ -1971,8 +2000,10 @@ fn an_idle_or_abandoned_transaction_is_put_back() {
     gone.simple("BEGIN");
     gone.simple("put t {name: \"gone\"}");
     drop(gone);
-    assert!(
-        names(&mut other).is_empty(),
+    other.simple("put t {name: \"after\"}");
+    assert_eq!(
+        names(&mut other),
+        ["other", "after"],
         "the abandoned transaction landed"
     );
 }

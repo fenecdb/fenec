@@ -417,7 +417,7 @@ impl Tenants {
         // promoted where it stands, as `fenec-pg --promote` promotes a file.
         // It could not be before: it opened refusing writes, and nothing on
         // the running node could make it take them.
-        let mut g = t.write();
+        let mut g = crate::held::write_unheld(&t.db);
         if !g.history().following {
             return Err(Refused(409, format!("tenant `{name}` is not a replica")));
         }
@@ -762,7 +762,9 @@ impl Tenants {
     /// write, so the receiving node opens it without rebuilding anything.
     pub fn export(&self, name: &str) -> std::result::Result<Vec<u8>, Refused> {
         let t = self.get(name)?;
-        let image = t.read().snapshot();
+        // Once the transaction open on it has ended: its commit lands in
+        // the export, not in the file the move leaves behind.
+        let image = crate::held::read_quiet(&t.db).snapshot();
         Ok(image)
     }
 

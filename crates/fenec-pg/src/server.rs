@@ -547,6 +547,12 @@ fn shutdown(db: &RwLock<Database>, checkpoint: bool) -> ! {
         f();
     }
     let mut g = write_lock(db);
+    // A transaction still open between its statements is put back: its
+    // writes never landed, and a checkpoint takes none over an open block.
+    if g.in_block() {
+        g.rejoin_block();
+        g.rollback();
+    }
     let dirty = g.is_dirty();
     if dirty {
         if let Err(e) = g.sync() {
@@ -601,9 +607,9 @@ fn write_lock(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
 enum Guard<'a> {
     Read(RwLockReadGuard<'a, Database>),
     Write(RwLockWriteGuard<'a, Database>),
-    /// The lock the session holds between messages, and the block open
-    /// under it, which its statements join ([`Hold`]).
-    Held(&'a mut Database),
+    /// A statement of the block the session holds open ([`Hold`]), which
+    /// it joins.
+    Turn(Turn<'a>),
 }
 
 impl Guard<'_> {
@@ -611,7 +617,7 @@ impl Guard<'_> {
         match self {
             Guard::Read(g) => g,
             Guard::Write(g) => g,
-            Guard::Held(d) => d,
+            Guard::Turn(t) => t,
         }
     }
 
@@ -619,23 +625,23 @@ impl Guard<'_> {
         match self {
             Guard::Read(g) => g.query(stmt, params),
             Guard::Write(g) => g.execute_with(stmt, params),
-            Guard::Held(d) => d.execute_with(stmt, params),
+            Guard::Turn(t) => t.execute_with(stmt, params),
         }
     }
 
     /// A block over the write lock ([`Database::begin`]); a read needs none,
-    /// and a held lock's block is the transaction's.
+    /// and a held block's statement is the transaction's.
     fn begin(&mut self) -> fenec_core::error::Result<()> {
         match self {
             Guard::Write(g) => g.begin(),
-            Guard::Read(_) | Guard::Held(_) => Ok(()),
+            Guard::Read(_) | Guard::Turn(_) => Ok(()),
         }
     }
 
     fn commit(&mut self) -> fenec_core::error::Result<()> {
         match self {
             Guard::Write(g) => g.commit(),
-            Guard::Read(_) | Guard::Held(_) => Ok(()),
+            Guard::Read(_) | Guard::Turn(_) => Ok(()),
         }
     }
 
@@ -720,21 +726,49 @@ fn sqlstate(e: &Error) -> &'static str {
 /// Takes the lock in a *cancellable* way. A `CancelRequest` arriving while
 /// waiting behind a long query is seen in this loop; otherwise a
 /// cancellation would only take effect after the query finished.
+///
+/// A transaction another session holds open between its statements is not
+/// the lock's to wait for: a read goes on over what has landed, the
+/// block's writes put back while it waits ([`Database::park`]), and a
+/// write waits for the transaction to end -- as it waited for the lock the
+/// session held throughout, when it did.
 fn acquire<'a>(db: &'a RwLock<Database>, write: bool, be: &Backend) -> Option<Guard<'a>> {
+    wait_for(be, || {
+        if write {
+            let g = match db.try_write() {
+                Ok(g) => g,
+                Err(TryLockError::Poisoned(g)) => g.into_inner(),
+                Err(TryLockError::WouldBlock) => return None,
+            };
+            return (!g.block_left()).then_some(Guard::Write(g));
+        }
+        let g = match db.try_read() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(g)) => g.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        if g.reads_landed() {
+            return Some(Guard::Read(g));
+        }
+        drop(g);
+        // Parked, the next try reads; one that cannot be parked is waited
+        // for.
+        match db.try_write() {
+            Ok(mut w) => w.park(),
+            Err(TryLockError::Poisoned(w)) => w.into_inner().park(),
+            Err(TryLockError::WouldBlock) => false,
+        };
+        None
+    })
+}
+
+/// Tries `take` until it gives, as cancellably as any lock: `None` for a
+/// cancellation or a shutdown.
+fn wait_for<T>(be: &Backend, mut take: impl FnMut() -> Option<T>) -> Option<T> {
     let mut tries = 0u32;
     loop {
-        if write {
-            match db.try_write() {
-                Ok(g) => return Some(Guard::Write(g)),
-                Err(TryLockError::Poisoned(g)) => return Some(Guard::Write(g.into_inner())),
-                Err(TryLockError::WouldBlock) => {}
-            }
-        } else {
-            match db.try_read() {
-                Ok(g) => return Some(Guard::Read(g)),
-                Err(TryLockError::Poisoned(g)) => return Some(Guard::Read(g.into_inner())),
-                Err(TryLockError::WouldBlock) => {}
-            }
+        if let Some(t) = take() {
+            return Some(t);
         }
         if be.take_cancel() {
             return None;
@@ -755,32 +789,83 @@ fn acquire<'a>(db: &'a RwLock<Database>, write: bool, be: &Backend) -> Option<Gu
     }
 }
 
+/// The write lock the session takes for a statement of the block it holds
+/// open ([`Hold`]): the block taken back for the statement
+/// ([`Database::rejoin_block`]) and left again as the lock goes
+/// ([`Database::leave_block`]), for readers to read beside it and writers
+/// to wait for it.
+struct Turn<'a>(RwLockWriteGuard<'a, Database>);
+
+impl<'a> Turn<'a> {
+    /// As cancellably as any lock.
+    fn take(db: &'a RwLock<Database>, be: &Backend) -> Option<Turn<'a>> {
+        wait_for(be, || match db.try_write() {
+            Ok(g) => Some(Turn::of(g)),
+            Err(TryLockError::Poisoned(g)) => Some(Turn::of(g.into_inner())),
+            Err(TryLockError::WouldBlock) => None,
+        })
+    }
+
+    /// For what cannot be refused: a block landed or put back.
+    fn wait(db: &'a RwLock<Database>) -> Turn<'a> {
+        Turn::of(write_lock(db))
+    }
+
+    fn of(mut g: RwLockWriteGuard<'a, Database>) -> Turn<'a> {
+        g.rejoin_block();
+        Turn(g)
+    }
+}
+
+impl std::ops::Deref for Turn<'_> {
+    type Target = Database;
+    fn deref(&self) -> &Database {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Turn<'_> {
+    fn deref_mut(&mut self) -> &mut Database {
+        &mut self.0
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.0.leave_block();
+    }
+}
+
 // ------------------------------------------------------------- held locks
 
-/// The write lock a session holds between its messages, and the block open
-/// under it: from a transaction's first write to its end, or from a
-/// pipeline's first write to its `Sync`. Every other session waits on it
-/// meanwhile. The block's writes are in the database already, and nobody
-/// else may read them before they land -- nor write after them, since a
-/// block is put back by cutting each store back to where it stood.
+/// The block a session holds open between its messages: from a
+/// transaction's first write to its end, or from a pipeline's first write
+/// to its `Sync`. The session takes the write lock for each of its
+/// statements alone ([`Turn`]) and leaves the block open between them
+/// ([`Database::leave_block`]). Every other session's write waits for it
+/// meanwhile -- nobody may write after the block's writes, since a block is
+/// put back by cutting each store back to where it stood -- and every read
+/// goes on, over what has landed ([`Database::park`]): held under the write
+/// lock throughout, a transaction open 20 ms kept readers waiting up to
+/// 34 ms.
 struct Hold<'c> {
     db: &'c Arc<RwLock<Database>>,
-    guard: RwLockWriteGuard<'c, Database>,
     /// The tenant, kept from an idle close while its database is held.
-    /// After `guard`, so it goes after the lock: a last reference let go
-    /// of flushes the database, under that lock.
     tenant: Held,
     /// Taken for a pipeline outside a transaction: it lands at the `Sync`.
     implicit: bool,
+    /// Landed, or put back as it failed to: nothing left to put back.
+    ended: bool,
 }
 
 impl Drop for Hold<'_> {
     /// Let go of any other way than by landing -- a failed statement, the
-    /// client gone, a timeout, a shutdown, a panic -- the block is put back
-    /// first: the next holder of the lock would find it open, and write
-    /// into it.
+    /// client gone, a timeout, a shutdown, a panic -- the block is put back:
+    /// whoever writes next would find it open, and wait for it forever.
     fn drop(&mut self) {
-        self.guard.rollback();
+        if !self.ended {
+            Turn::wait(self.db).rollback();
+        }
     }
 }
 
@@ -808,24 +893,31 @@ impl<'c> Lock<'c> {
         }
     }
 
-    /// Runs `f` over the database: the one held, or `db` under a read lock
-    /// -- which the session could never take over one it holds.
+    /// Runs `f` over the database: the one held, with the block's writes
+    /// in it, or `db` as it has landed.
     fn read<R>(&self, db: &RwLock<Database>, f: impl FnOnce(&Database) -> R) -> R {
         match &self.hold {
-            Some(h) => f(&h.guard),
-            None => f(&read_lock(db)),
+            Some(h) => {
+                let mut t = Turn::wait(h.db);
+                // A block that cannot be written again is put back by it,
+                // and `f` reads what has landed.
+                let _ = t.unpark();
+                f(&t)
+            }
+            None => f(&fenec_http::held::read_landed(db)),
         }
     }
 
     /// Takes the write lock over `db`, as cancellably as any lock, and opens
-    /// a block under it to hold between messages.
+    /// a block under it to hold between messages: the lock is the first
+    /// statement's turn.
     fn take(
         &mut self,
         db: &Arc<RwLock<Database>>,
         tenant: &Held,
         be: &Backend,
         implicit: bool,
-    ) -> std::result::Result<(), (&'static str, String)> {
+    ) -> std::result::Result<Turn<'c>, (&'static str, String)> {
         let cell: &'c OnceCell<_> = self.found;
         let found = cell.get_or_init(|| Arc::clone(db));
         debug_assert!(Arc::ptr_eq(found, db), "a pass holds one database");
@@ -840,11 +932,11 @@ impl<'c> Lock<'c> {
         guard.begin().map_err(|e| (sqlstate(&e), e.to_string()))?;
         self.hold = Some(Hold {
             db: found,
-            guard,
             tenant: tenant.clone(),
             implicit,
+            ended: false,
         });
-        Ok(())
+        Ok(Turn::of(guard))
     }
 
     /// Lands the held block and lets go of the lock. Under `always` its
@@ -854,9 +946,12 @@ impl<'c> Lock<'c> {
         let Some(mut h) = self.hold.take() else {
             return Ok(None);
         };
-        h.guard.commit()?;
+        let mut t = Turn::wait(h.db);
+        // Landed, or put back by the engine as it failed to.
+        h.ended = true;
+        t.commit()?;
         match cfg.sync {
-            SyncPolicy::Always => h.guard.flush(),
+            SyncPolicy::Always => t.flush(),
             _ => Ok(None),
         }
     }
@@ -884,8 +979,8 @@ enum Waited {
     Shutdown,
 }
 
-/// Waits for the client's next message while the session holds the write
-/// lock. Every other session waits on the lock meanwhile, so the wait is
+/// Waits for the client's next message while the session holds a block
+/// open. Every other session's writes wait for it meanwhile, so the wait is
 /// bounded by `limit`, and looks up every `HOLD_POLL` for a shutdown.
 fn hold_wait(r: &mut BufReader<TcpStream>, limit: Option<Duration>) -> io::Result<Waited> {
     let deadline = limit.map(|l| Instant::now() + l);
@@ -1924,7 +2019,11 @@ fn describe(
         // When the collection does not exist yet we cannot know the shape;
         // rather than erroring we say NoData and let Execute speak.
         Some(Statement::Select(sel)) => match &lock.hold {
-            Some(h) => select_columns(&h.guard, sel),
+            Some(h) => {
+                let mut t = Turn::take(h.db, be)?;
+                let _ = t.unpark();
+                select_columns(&t, sel)
+            }
             None => {
                 // Reading the schema needs a shared lock; a cancellation
                 // arriving while waiting behind a long write has to be seen
@@ -2140,7 +2239,16 @@ impl TxState {
                     return None;
                 }
                 let at = match &lock.hold {
-                    Some(h) => h.guard.savepoint(),
+                    Some(h) => {
+                        let mut t = Turn::wait(h.db);
+                        match t.unpark() {
+                            Ok(()) => t.savepoint(),
+                            Err(e) => {
+                                out.error(sqlstate(&e), &e.to_string());
+                                return None;
+                            }
+                        }
+                    }
                     None => fenec_core::engine::Savepoint::default(),
                 };
                 self.savepoints.push(Point { name, at });
@@ -2176,7 +2284,7 @@ impl TxState {
                     // others commit again.
                     lock.hold = None;
                 } else if let Some(h) = &mut lock.hold {
-                    if let Err(e) = h.guard.rollback_to(&p.at) {
+                    if let Err(e) = Turn::wait(h.db).rollback_to(&p.at) {
                         out.error(sqlstate(&e), &e.to_string());
                         return None;
                     }
@@ -2428,15 +2536,32 @@ fn run_locked(
     } else {
         pipeline && needs_write
     };
+    let mut first = None;
     if takes && !compact && lock.hold.is_none() {
-        if let Err((code, msg)) = lock.take(db, tenant, be, !tx.open) {
-            out.error(code, &msg);
-            return None;
+        match lock.take(db, tenant, be, !tx.open) {
+            Ok(turn) => first = Some(turn),
+            Err((code, msg)) => {
+                out.error(code, &msg);
+                return None;
+            }
         }
     }
     let held = lock.hold.is_some();
-    let mut guard = match &mut lock.hold {
-        Some(h) => Guard::Held(&mut h.guard),
+    let turn = match (first, &lock.hold) {
+        (Some(t), _) => Some(Some(t)),
+        (None, Some(h)) => Some(Turn::take(h.db, be)),
+        (None, None) => None,
+    };
+    let mut guard = match turn {
+        Some(Some(t)) => Guard::Turn(t),
+        Some(None) if SHUTDOWN.load(Ordering::Relaxed) => {
+            out.error("57P01", "the server is shutting down");
+            return None;
+        }
+        Some(None) => {
+            out.error("57014", "the query was cancelled");
+            return None;
+        }
         None => match acquire(db, needs_write, be) {
             Some(g) => g,
             // `acquire` returns `None` both on cancellation and on shutdown;

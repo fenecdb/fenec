@@ -10,6 +10,7 @@ default-run = "fenec-bench"
 
 [dependencies]
 fenec-core = { path = "../fenec-core" }
+fenec-http = { path = "../fenec-http" }
 fenec-ql = { path = "../fenec-ql" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.

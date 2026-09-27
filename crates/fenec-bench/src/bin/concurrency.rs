@@ -15,12 +15,14 @@
 //!     SQLite's reach the operating system (`synchronous=NORMAL`);
 //!   * a read by id, alone and beside four writers, p50 and p99;
 //!   * a read by id beside a writer that holds a transaction open 20 ms at a
-//!     time, as a client between two statements does: fenecdb's readers wait
-//!     for it, SQLite's read the last commit (WAL). p50, p99 and the longest.
+//!     time, as a client between two statements does: fenecdb's readers
+//!     read what has landed, the transaction's block parked while it waits
+//!     for its next statement, SQLite's the last commit (WAL). p50, p99 and
+//!     the longest.
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
-//! `RwLock`, as `fenec-pg` does.
+//! `RwLock`, taken as `fenec-pg` takes it (`fenec_http::held`).
 
 use fenec_core::prelude::*;
 use rusqlite::{params, Connection};
@@ -119,7 +121,7 @@ fn fenec_readers(db: &Arc<RwLock<Database>>, beside: impl FnOnce(&AtomicBool) + 
                     while !stop.load(Ordering::Relaxed) {
                         let id = (next(&mut seed) % ROWS as u64) as i64 + 1;
                         let t = Instant::now();
-                        let out = db.read().unwrap().query(&get, &[Value::Int(id)]);
+                        let out = fenec_http::held::read_landed(&db).query(&get, &[Value::Int(id)]);
                         times.push(t.elapsed().as_secs_f64() * 1e3);
                         out.unwrap();
                     }
@@ -284,18 +286,24 @@ fn main() {
     row("  beside 4 writers, no fsync", reads(&mut f), reads(&mut s));
 
     // A transaction held open 20 ms at a time, as a client between its
-    // statements holds one: two writes, the pause between them.
+    // statements holds one: two writes, the pause between them, and the
+    // write lock taken for each statement alone, the block left open
+    // between them, as `fenec-pg` takes it.
     let hold = Duration::from_millis(20);
     let mut f = fenec_readers(&db, |stop| {
         let put = stmt("put t {k: $1, n: $2}");
         let end = Instant::now() + RUN;
         let mut n = 0i64;
         while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-            let mut g = db.write().unwrap();
+            let mut g = fenec_http::held::write_unheld(&db);
             g.begin().unwrap();
             g.execute_with(&put, &[Value::Text("held".into()), Value::Int(n)])
                 .unwrap();
+            g.leave_block();
+            drop(g);
             std::thread::sleep(hold);
+            let mut g = db.write().unwrap();
+            g.rejoin_block();
             g.execute_with(&put, &[Value::Text("held".into()), Value::Int(n + 1)])
                 .unwrap();
             g.commit().unwrap();

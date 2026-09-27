@@ -327,9 +327,11 @@ so a node that is down takes its tenants with it.</p>
   <li><b>No TLS.</b> The password is protected by SCRAM but the data flows in
     the clear. Non-loopback plus unauthenticated listening is refused without
     <code>--insecure</code>.</li>
-  <li><b>A transaction holds the database.</b> There is one writer: from its
-    first write to its end every other session waits on it, reads included,
-    and one whose client goes silent is put back after
+  <li><b>A transaction holds the database against writes.</b> There is one
+    writer: from its first write to its end every other session's writes wait
+    on it, while reads go on beside it over what has landed — but for a
+    transaction that changed a graph or the schema, which reads wait for too
+    — and one whose client goes silent is put back after
     <code>--idle-in-transaction-timeout</code>. A <code>compact</code>
     cannot join a transaction — before its first write it runs on its own,
     after one it is refused — and there is no two-phase commit (<a

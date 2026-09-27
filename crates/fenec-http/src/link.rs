@@ -42,7 +42,9 @@ pub fn beside(what: &str, db: &Arc<RwLock<Database>>) {
                 let Some(db) = weak.upgrade() else {
                     return;
                 };
-                let mut g = db.write().unwrap_or_else(|e| e.into_inner());
+                // An open transaction's writes are waited for: the linking
+                // is no statement of its block.
+                let mut g = crate::held::write_unheld(&db);
                 // The pace is the linking's alone, not the wait for the lock.
                 let t = Instant::now();
                 let left = g.link_pending(nodes);
@@ -113,7 +115,10 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
 /// Appends what of `db`'s graphs is due, and pushes it to disk once the
 /// lock is let go.
 fn save(what: &str, db: &RwLock<Database>) {
-    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    // The graphs as they stand for what has landed: a graph record in the
+    // file holding an open block's nodes would name documents that may
+    // never be.
+    let g = crate::held::read_landed(db);
     if !g.graphs_due() {
         return;
     }

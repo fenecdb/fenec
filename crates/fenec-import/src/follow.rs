@@ -414,7 +414,7 @@ fn ensure_copy(
     follow: &Follow,
     report: &mut dyn FnMut(Event),
 ) -> Result<()> {
-    let mut g = write(db);
+    let mut g = write_unheld(db);
     let exists = g.collection(&opts.into).is_ok();
     let marker = read_marker(&g, &opts.into)?;
     if let Some(m) = &marker {
@@ -532,6 +532,27 @@ fn pause(wait: Duration, stop: &AtomicBool) {
 
 fn write(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
     db.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The write lock for the follower's own writes, once no transaction a pg
+/// session keeps open between its statements is waiting for its next one
+/// (`Database::leave_block`): a write into it is refused, and an error the
+/// follower cannot wait out ends the server. The mirror falls behind by as
+/// long as the transaction is open.
+fn write_unheld(db: &RwLock<Database>) -> RwLockWriteGuard<'_, Database> {
+    let mut waited = 0u32;
+    loop {
+        let g = write(db);
+        if !g.block_left() {
+            return g;
+        }
+        drop(g);
+        waited += 1;
+        match waited < 64 {
+            true => std::thread::yield_now(),
+            false => std::thread::sleep(Duration::from_micros(200)),
+        }
+    }
 }
 
 /// Puts what was applied on disk, the fsync outside the lock -- as the HTTP
@@ -1193,7 +1214,7 @@ impl<'a> Mirror<'a> {
         }
         let ops = std::mem::take(&mut self.ops);
         let collection = &self.opts.into;
-        let mut g = write(db);
+        let mut g = write_unheld(db);
         let mut i = 0;
         while i < ops.len() {
             let stmt = match &ops[i] {

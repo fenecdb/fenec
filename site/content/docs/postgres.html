@@ -68,9 +68,13 @@ one each: under <code>--sync always</code> a write in a transaction of a
 hundred costs 90 µs against 3.97 ms on its own, and a lone statement costs
 what it did (<code>make tx-bench</code>).</p>
 
-<p>There is one writer, so a transaction takes the write lock at its first
-write and holds it until it ends: its writes are in the database already, and
-nothing else may read them before they land, or write after them. Until its
+<p>There is one writer, so a transaction holds the database against every
+other write from its first write until it ends: nothing may write after its
+writes. It takes the write lock for each of its statements alone, and between
+them other sessions read what has landed: a reader puts the transaction's
+writes aside while it waits for its next statement, and they are written
+again when it comes. A transaction that changed a graph — a vector written or
+deleted — or the schema is not put aside, and readers wait for it. Until its
 first write it reads what others have committed, statement by statement —
 PostgreSQL's <i>read committed</i> — and holds nobody up.
 <code>BEGIN ISOLATION LEVEL SERIALIZABLE</code>, or <code>REPEATABLE
@@ -79,9 +83,10 @@ read changes before it ends; <code>BEGIN READ ONLY</code> refuses a write
 with <code>25006</code>.</p>
 
 <div class="note trap">
-  <p><b>A transaction that has written holds every other session,</b> reads
-  included. Keep it short, and have the client send <code>COMMIT</code> rather
-  than work between statements. One whose client stays silent for
+  <p><b>A transaction that has written holds every other session's
+  writes,</b> and the reads beside one that changed a graph. Keep it short,
+  and have the client send <code>COMMIT</code> rather than work between
+  statements. One whose client stays silent for
   <code>--idle-in-transaction-timeout</code> seconds — 10 by default, 0 for
   never — is put back and its session closed with <code>25P03</code>, as
   PostgreSQL's <code>idle_in_transaction_session_timeout</code> closes

@@ -156,19 +156,33 @@ walking the new file's record heads read the whole of it back, 1.8 to 2.3 s
 of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
 image, written elsewhere, is walked.
 
-**Single writer.** Reads take a shared lock (`Database::query`), writes the
-exclusive one (`execute_with`). A pg transaction is a block held open
-(`fenec-pg/src/server.rs`, `Hold`): it takes the write lock at its first
-write -- its first statement under `SERIALIZABLE` -- and holds it across
-messages until `COMMIT` lands the block or `ROLLBACK`, a failed statement
-(`25P02` after it, as PostgreSQL), the client's going or
-`--idle-in-transaction-timeout` (`25P03`, 10 s) puts it back. One writer is
-the isolation: nothing reads a block's writes before they land because
-nothing else runs, reads included, which is the cost. A `Hold` puts its
-block back when dropped, however the session ends: the next holder would
-find it open and write into it. The guard borrows a database found once a
-pass of the session loop (a `OnceCell` a pass), so a tenant's is found
-afresh for the next transaction. A pipeline of the extended protocol is one
+**Single writer, and readers beside it.** Reads take a shared lock
+(`Database::query`), writes the exclusive one (`execute_with`). A pg
+transaction is a block held open (`fenec-pg/src/server.rs`, `Hold`) from
+its first write -- its first statement under `SERIALIZABLE` -- until
+`COMMIT` lands it or `ROLLBACK`, a failed statement (`25P02` after it, as
+PostgreSQL), the client's going or `--idle-in-transaction-timeout` (`25P03`,
+10 s) puts it back. The session takes the write lock for each of its
+statements alone (`Turn`) and leaves the block open between them
+(`Database::leave_block`): every other write waits for the transaction to
+end, which is the isolation -- nobody writes after a block's writes, since
+a block is put back by cutting each store back to where it stood -- and a
+read goes on. A reader that finds a left block's writes in the database
+parks it (`Database::park`): the rollback's own undo, a write at a time,
+the frames kept, and the owner's next statement writes them again first
+(`unpark`, the write paths' upkeep with no hook and nothing to the sink),
+so readers read what has landed and nothing else, exactly. A block that
+changed a graph -- undone, a node becomes a tombstone, and written again
+another node -- or the schema is not parked, and readers wait for it as
+they did for every block. The engine refuses a statement run through
+`&mut self` into another session's left block, and a `query` of one not
+parked, rather than join it or show its writes; `fenec_http::held` is how
+every path in the servers takes the database -- `read_landed`,
+`write_unheld`, and `read_quiet` for a tenant's export, which waits for
+the transaction to end so that its commit lands before the move. A `Hold`
+puts its block back when dropped, however the session ends. The hold
+keeps a database found once a pass of the session loop (a `OnceCell` a
+pass), so a tenant's is found afresh for the next transaction. A pipeline of the extended protocol is one
 block up to its `Sync` when a write in it has more of the pipeline after
 it; the last statement before a `Sync` runs as one on its own. A create,
 a drop and a create index are writes of the block, put back with it; a
@@ -197,11 +211,12 @@ statement what it did (`make tx-bench`). A savepoint costs its round trips:
 a put in one of its own, released, 58.3 us against 20.7 under `--sync 250`,
 and a `ROLLBACK TO` over 100 writes 30.9 us. What one writer costs readers
 is measured against SQLite in one process (`make concurrency-bench`): four
-threads read 8.2M rows/s by id alone, 828k beside four writers, and 272k
-beside a transaction held open 20 ms at a time, a read waiting up to 34 ms
--- where SQLite's WAL reads the last commit meanwhile, 1.18M/s and 0.2 ms
-at most. Durable writes gain from the fsync outside the lock: 252 -> 478
-writes/s from 1 to 16 writers, SQLite's 256 -> 263. Two processes opening the same file corrupts it,
+threads read 8.0M rows/s by id alone, 707k beside four writers, and 8.1M
+beside a transaction held open 20 ms at a time, the longest read 0.3 ms --
+held under the write lock throughout, the transaction let them read 272k
+and kept one waiting 34 ms; SQLite's WAL reads the last commit meanwhile,
+1.03M/s and 0.7 ms at most. Durable writes gain from the fsync outside the
+lock: 253 -> 537 writes/s from 1 to 16 writers, SQLite's 270 -> 270. Two processes opening the same file corrupts it,
 which is why `fenec-http` is a second listener inside `fenec-pg`, never
 its own binary.
 
@@ -605,8 +620,8 @@ walk is as it was (`cfg`).
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 137.1 KB
-brotli with all four, 104.9 with none, and `make wasm-sizes` measures the
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 137.5 KB
+brotli with all four, 105.1 with none, and `make wasm-sizes` measures the
 sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the

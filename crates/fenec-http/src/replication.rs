@@ -782,7 +782,9 @@ fn stream(out: &mut TcpStream, db: &Arc<RwLock<Database>>, repl: &Replication, r
     // at one moment, under the read lock: a write in between would leave
     // the image or the cursor one record off.
     let (seq, lineage, epoch, image) = {
-        let g = db.read().unwrap_or_else(|e| e.into_inner());
+        // An image of what has landed: an open block's writes reach the
+        // replica as the record it lands as, or never.
+        let g = crate::held::read_landed(db);
         let now = g.change_seq();
         let epoch = feed.epoch();
         let go_on = !force && g.history().continues(history, since, now) && feed.serves(since);
@@ -1177,7 +1179,7 @@ impl Follower {
             // Loaded before the lock is taken: reads go on meanwhile.
             let mut fresh = Database::new();
             fresh.load(&bytes).map_err(io::Error::other)?;
-            let mut g = self.db.write().unwrap_or_else(|e| e.into_inner());
+            let mut g = crate::held::write_unheld(&self.db);
             g.adopt(fresh, &bytes).map_err(io::Error::other)?;
             g.follow(lineage).map_err(io::Error::other)?;
             if let Some(feed) = &self.feed {
@@ -1187,7 +1189,7 @@ impl Follower {
             lock(&self.state).images += 1;
             *force_image = false;
         } else {
-            let mut g = self.db.write().unwrap_or_else(|e| e.into_inner());
+            let mut g = crate::held::write_unheld(&self.db);
             if g.change_seq() != since {
                 return Err(io::Error::other("the replica moved while it connected"));
             }
@@ -1204,7 +1206,7 @@ impl Follower {
         loop {
             match stream.receive()? {
                 Message::Writes { first, records, .. } => {
-                    let mut g = self.db.write().unwrap_or_else(|e| e.into_inner());
+                    let mut g = crate::held::write_unheld(&self.db);
                     if first != g.change_seq() + 1 {
                         *force_image = true;
                         return Err(io::Error::other(format!(
@@ -1273,7 +1275,7 @@ impl Follower {
     /// `id`, forked where the replica stands. Returns that change and `id`.
     pub fn promote(&self, id: u64) -> fenec_core::error::Result<(u64, u64)> {
         self.halt();
-        let mut g = self.db.write().unwrap_or_else(|e| e.into_inner());
+        let mut g = crate::held::write_unheld(&self.db);
         g.fork(id)?;
         g.sync()?;
         Ok((g.change_seq(), id))
