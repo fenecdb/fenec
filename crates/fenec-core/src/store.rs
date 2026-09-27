@@ -737,8 +737,8 @@ impl Store {
     /// Decodes the fields at `positions` -- ascending -- into `out`, in one
     /// pass over the document that skips the others: an aggregate reads two
     /// or three fields of every row, and a `read_field` each would skip the
-    /// fields before them once per field. `false` when there is no such
-    /// document.
+    /// fields before them once per field. A text lands in the text `out`
+    /// held there, if it did. `false` when there is no such document.
     pub fn read_fields(
         &self,
         id: DocId,
@@ -749,15 +749,25 @@ impl Store {
             return Ok(false);
         };
         let buf = self.payload(loc)?;
-        out.clear();
+        out.truncate(positions.len());
         let mut pos = 0usize;
         let mut at = 0usize;
-        for &want in positions {
+        for (i, &want) in positions.iter().enumerate() {
             while at < want {
                 skip_value(buf, &mut pos)?;
                 at += 1;
             }
-            out.push(decode_value(buf, &mut pos)?);
+            // A text into the text the slot held: a scan reads a field of
+            // every row into the same slot, and a text decoded anew was a
+            // malloc and a free a row. Anything else decoded as it was.
+            match (buf.get(pos), out.get_mut(i)) {
+                (Some(&crate::codec::TAG_TEXT), Some(Value::Text(s))) => {
+                    pos += 1;
+                    crate::codec::decode_text_into(buf, &mut pos, s)?;
+                }
+                (_, Some(slot)) => *slot = decode_value(buf, &mut pos)?,
+                (_, None) => out.push(decode_value(buf, &mut pos)?),
+            }
             at += 1;
         }
         Ok(true)
