@@ -161,8 +161,8 @@ cargo run --release -p fenec-core --example bench
 <tr><td>ANN k=10</td><td class="n">p50 <b>0.087 ms</b> · p95 0.141 ms · p99 0.148 ms</td></tr>
 <tr><td>ANN with a filter</td><td class="n">p50 <b>0.173 ms</b>, candidate set n/4</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b> against an exact scan</td></tr>
-<tr><td>snapshot</td><td class="n">32 ms, producing 59.3 MB with the graph and the records' index, +13%</td></tr>
-<tr><td>reopen</td><td class="n"><b>29 ms</b>, the graph validated and restored</td></tr>
+<tr><td>snapshot</td><td class="n">29 ms, producing 59.3 MB with the graph and the records' index, +13%</td></tr>
+<tr><td>reopen</td><td class="n"><b>10 ms</b>, read into memory, the graph validated and restored</td></tr>
 </tbody>
 </table>
 </div>
