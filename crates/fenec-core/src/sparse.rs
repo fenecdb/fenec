@@ -256,9 +256,9 @@ impl List {
 #[derive(Default)]
 #[cfg(feature = "sparse")]
 pub struct SparseIndex {
-    /// Dimension -> where its list is in `lists`: the map the vector index
-    /// keeps from a document to its node, reused. A map of its own for this
-    /// key was 3.1 KB of the browser module.
+    /// Dimension -> where its list is in `lists`: the map a `DocMap` keeps
+    /// its sparse ids in, reused. A map of its own for this key was 3.1 KB
+    /// of the browser module.
     at: HashMap<DocId, u32>,
     /// A dimension's list stays when its last document goes, its memory
     /// given back; the dimension is likely to come again.

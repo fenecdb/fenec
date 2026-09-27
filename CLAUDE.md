@@ -464,7 +464,9 @@ batch and pushing it: 100 000 x 128 opens in 16.5 ms against 21.8, x 768 in
 42 against 61, any share from 256 to 4 096 nodes the same. The mapped
 file's pages it reads are most of what is left of that; `MADV_WILLNEED` took
 off 3%. The browser fills in turn: the shares were 1.3 KB brotli of its
-module for the same load.
+module for the same load. Each document's node is a `DocMap` (`store.rs`),
+a dense array where the ids are, as the store's id index, which the text
+index's lengths share: filled as a `HashMap` it was 2.1 of a 16.7 ms open.
 
 **A graph record is laid out flat.** Versions 7, an image's, and 8, a
 server's tail, hold the nodes' documents, flags, levels and level-0 lengths
@@ -923,8 +925,8 @@ for `near`; FiQA 0.366 against 0.232 and 0.366 -- the one path near the top
 of both. The depth is the knob that matters: up to 61 a side a document both
 searches found outranks every document only one found, and at 100 a side
 both scores fall (0.688, 0.359). It is built from what the engine already
-had -- both searches, the vector index's `HashMap<DocId, u32>`, the text
-index's `best_first` sort -- because in types of its own it was 11 KB of the
+had -- both searches, the `HashMap<DocId, u32>` a `DocMap` keeps sparse ids
+in, the text index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
@@ -948,8 +950,8 @@ summed, 0.60 against 0.10 on SciFact; bounds per block of a list's postings
 an exhaustive walk, and `tests/sparse.rs` holds `near` to `near ... exact` row
 for row. Only a document sharing a dimension with the query is ranked. Like
 the text index it is derived and never persisted. It sorts through the
-engine's one `(DocId, f32)` sort and maps dimensions through the vector
-index's `HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
+engine's one `(DocId, f32)` sort and maps dimensions through `DocMap`'s
+`HashMap<DocId, u32>` -- its own were 12 KB of the browser module; the
 feature costs 16.2 KB, 4.3 KB brotli. SPLADE++ (`beir/splade.mjs`) scores
 nDCG@10 0.693 on SciFact against `match`'s 0.662, and 0.331 on FiQA against
 0.232 (the dense vectors 0.366), at 0.68 ms p50 over 57 638 documents: its

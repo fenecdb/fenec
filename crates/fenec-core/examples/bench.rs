@@ -240,10 +240,18 @@ fn main() {
     let t = Instant::now();
     let image = db.snapshot();
     let snap = t.elapsed();
-    let t = Instant::now();
-    let mut db2 = Database::new();
-    db2.load(&image).unwrap();
-    let reload = t.elapsed();
+    // The median of five loads: one alone moved between 30 and 50 ms from
+    // run to run, with the heap the build above left.
+    let mut loads: Vec<_> = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            let mut db2 = Database::new();
+            db2.load(&image).unwrap();
+            t.elapsed()
+        })
+        .collect();
+    loads.sort();
+    let reload = loads[2];
     println!(
         "image      {:.1} MB  snapshot {:.2?}  reopen {:.2?} (the graph validated and restored)",
         image.len() as f64 / 1e6,

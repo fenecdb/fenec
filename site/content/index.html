@@ -221,7 +221,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
           <tr><td>scalar filter, indexed</td><td class="n"><b>4.6 ms</b></td><td class="n">14.1 ms</td><td class="n">7.3 ms</td></tr>
           <tr><td>vector top-10, exact</td><td class="n"><b>3.3 ms</b></td><td class="n">30.2 ms</td><td class="n">15.6 ms</td></tr>
           <tr><td>recall@10</td><td class="n"><b>100%</b></td><td class="n">—</td><td class="n">100%</td></tr>
-          <tr><td>reopen</td><td class="n">17 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server stays open</td></tr>
+          <tr><td>reopen</td><td class="n">15 ms</td><td class="n"><b>0.9 ms</b></td><td class="n">server stays open</td></tr>
         </tbody>
       </table>
     </div>
@@ -231,7 +231,7 @@ description: Minimal, vector-native embedded database. Written in Rust, compiles
         <h3>Where it loses</h3>
         <p>SQLite reopens in 0.9 ms because it loads nothing and reads pages
           on demand. fenecdb pulls the vector arena into memory and validates
-          the graph, which takes 17 ms. That is the same coin, other side: it
+          the graph, which takes 15 ms. That is the same coin, other side: it
           is why the queries are 3–240× faster. The break-even is one vector
           query.</p>
       </div>

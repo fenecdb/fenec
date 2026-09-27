@@ -26,6 +26,8 @@
 #![cfg_attr(not(feature = "text"), allow(dead_code, unused_imports))]
 
 use crate::schema::TextIndexSpec;
+#[cfg(feature = "text")]
+use crate::store::DocMap;
 use crate::value::DocId;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -283,105 +285,6 @@ impl Postings {
     }
 }
 
-/// Document lengths, dense where the ids are and sparse where they are not.
-///
-/// Scoring reads this once per candidate document, and on a corpus with
-/// common query terms that is most of the collection -- 50 000 of FiQA's
-/// 57 638 for the average query. A `HashMap` lookup there is the single
-/// largest cost in the merge. The store's `IdIndex` already answers the same
-/// shape of question the same way, so this follows it, gap ceiling included.
-#[derive(Default)]
-struct DocLengths {
-    /// `dense[i]` is the length of document `i + 1`; 0 means absent, which is
-    /// unambiguous because a document with no terms is never indexed.
-    dense: Vec<u32>,
-    sparse: HashMap<DocId, u32>,
-    count: usize,
-}
-
-/// The largest gap still worth extending the dense array for. The store uses
-/// the same number for the same reason.
-const MAX_DENSE_GAP: u64 = 4096;
-
-impl DocLengths {
-    /// The comparison stays on the `u64` side: on wasm32 `usize` is 32 bits
-    /// and `id as usize` truncates silently. The store hit exactly that.
-    #[inline]
-    fn in_dense(&self, id: DocId) -> bool {
-        id >= 1 && id <= self.dense.len() as u64
-    }
-
-    #[inline]
-    fn get(&self, id: DocId) -> u32 {
-        if self.in_dense(id) {
-            return self.dense[id as usize - 1];
-        }
-        self.sparse.get(&id).copied().unwrap_or(0)
-    }
-
-    /// Returns the length this document had before, if it had one.
-    fn insert(&mut self, id: DocId, len: u32) -> Option<u32> {
-        let slot = if self.in_dense(id) {
-            &mut self.dense[id as usize - 1]
-        } else if id >= 1 && id - self.dense.len() as u64 <= MAX_DENSE_GAP {
-            self.dense.resize(id as usize, 0);
-            &mut self.dense[id as usize - 1]
-        } else {
-            let old = self.sparse.insert(id, len);
-            if old.is_none() {
-                self.count += 1;
-            }
-            return old;
-        };
-        let old = *slot;
-        *slot = len;
-        if old == 0 {
-            self.count += 1;
-            None
-        } else {
-            Some(old)
-        }
-    }
-
-    fn remove(&mut self, id: DocId) -> Option<u32> {
-        let old = if self.in_dense(id) {
-            let slot = &mut self.dense[id as usize - 1];
-            let old = *slot;
-            *slot = 0;
-            if old == 0 {
-                None
-            } else {
-                Some(old)
-            }
-        } else {
-            self.sparse.remove(&id)
-        };
-        if old.is_some() {
-            self.count -= 1;
-        }
-        old
-    }
-
-    fn len(&self) -> usize {
-        self.count
-    }
-
-    fn clear(&mut self) {
-        self.dense.clear();
-        self.sparse.clear();
-        self.count = 0;
-    }
-
-    fn bytes(&self) -> usize {
-        self.dense.capacity() * 4 + self.sparse.capacity() * (std::mem::size_of::<DocId>() + 4 + 1)
-    }
-
-    fn shrink_to_fit(&mut self) {
-        self.dense.shrink_to_fit();
-        self.sparse.shrink_to_fit();
-    }
-}
-
 /// An inverted index with BM25 scoring.
 ///
 /// Like the HNSW graph this is derived data -- it is built from the
@@ -397,7 +300,9 @@ pub struct TextIndex {
     /// them without sorting.
     postings: HashMap<String, Postings>,
     /// document -> term count, for the length normalisation.
-    lengths: DocLengths,
+    /// Each document's number of terms: none is indexed without one, so
+    /// 0 is none.
+    lengths: DocMap,
     total_terms: u64,
     /// What the dictionary and the postings hold, as `memory_bytes` counts
     /// it, kept as they change: summed over every term it cost 0.42 ms at
@@ -411,7 +316,7 @@ impl TextIndex {
         TextIndex {
             spec,
             postings: HashMap::new(),
-            lengths: DocLengths::default(),
+            lengths: DocMap::default(),
             total_terms: 0,
             heap: 0,
         }
