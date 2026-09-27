@@ -493,8 +493,11 @@ fn graph_due(ix: &VectorIndex, appended: u64, (changes, growth): (u64, u64)) -> 
 }
 
 /// Takes a data record's frames into a collection's store: the record's
-/// offset in the file, its bytes, and what to tell of each document's id.
-type Replay<'a> = dyn FnMut(&mut Store, usize, &[u8], &mut dyn FnMut(DocId)) -> Result<usize> + 'a;
+/// offset in the file, its bytes, the index of its frames the image wrote
+/// before it ([`Store::image_index`]), and what to tell of each document's
+/// id.
+type Replay<'a> =
+    dyn FnMut(&mut Store, usize, &[u8], Option<&[u8]>, &mut dyn FnMut(DocId)) -> Result<usize> + 'a;
 
 /// Where an image is written: the file being rewritten, or a buffer. The
 /// counter header's body length is only known once the body is out, so it is
@@ -2040,18 +2043,23 @@ impl Database {
             out.write(&record_head(REC_CREATE, c.id, sc.len()))?;
             out.write(&sc)?;
 
-            // The counter comes right after the schema: the collection has to
-            // exist, and its data can only carry the counter forward.
-            let mut counter = Vec::with_capacity(9);
-            put_uvarint(&mut counter, c.store.next_id());
-            out.write(&record_head(REC_NEXTID, c.id, counter.len()))?;
-            out.write(&counter)?;
-
             let compact = compacting.iter().any(|n| n == name);
             let bytes = match compact {
                 true => c.store.live_len(),
                 false => c.store.image_len(),
             };
+            // The counter comes right after the schema: the collection has to
+            // exist, and its data can only carry the counter forward. Behind
+            // it, the index of the data record's frames an open takes rather
+            // than walking them; the browser's module keeps no writer of it.
+            let mut counter = Vec::with_capacity(9);
+            put_uvarint(&mut counter, c.store.next_id());
+            #[cfg(not(target_arch = "wasm32"))]
+            if bytes > 0 {
+                c.store.image_index(compact, &mut counter);
+            }
+            out.write(&record_head(REC_NEXTID, c.id, counter.len()))?;
+            out.write(&counter)?;
             if bytes > 0 {
                 out.write(&record_head(REC_DATA, c.id, bytes))?;
                 // The browser maps no file, and its module keeps no list.
@@ -2190,9 +2198,15 @@ impl Database {
     /// In the browser `base` is always `None`: its `Base` is a type of no
     /// value, and the arm that maps folds away.
     fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
-        self.load_records(bytes, &mut |store, chunk_at, chunk, note| match base {
-            Some(b) => store.replay_mapped(b, chunk_at as u64, chunk.len() as u64, note),
-            None => store.replay_noting(chunk, note),
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        self.load_records(bytes, &mut |store, chunk_at, chunk, index, note| {
+            let (at, len) = (chunk_at as u64, chunk.len() as u64);
+            match base {
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(b) if index.is_some_and(|ix| store.adopt_index(b, at, len, ix)) => Ok(0),
+                Some(b) => store.replay_mapped(b, at, len, note),
+                None => store.replay_noting(chunk, note),
+            }
         })
     }
 
@@ -2370,15 +2384,22 @@ impl Database {
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         let mut whole = bytes.len();
         let mut walk = Walk::new(bytes, pos);
+        // The index of a data record's frames an image writes after the
+        // collection's id counter, for the record right after it alone.
+        let mut frames: Option<(u32, &[u8])> = None;
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
+            let index = frames
+                .take()
+                .filter(|(cid, _)| r.kind == REC_DATA && *cid == r.cid && !tail)
+                .map(|(_, ix)| ix);
             match r.kind {
                 REC_CREATE | REC_DROP | REC_ALTER => {
                     seq_seen += tail as u64;
                     self.load_schema(r.kind, r.cid, r.body, &mut by_id, &mut restored)?;
                 }
                 REC_DATA => {
-                    let frames = self.load_data(
+                    let written = self.load_data(
                         r.cid,
                         bytes,
                         r.body_at,
@@ -2386,10 +2407,11 @@ impl Database {
                         &by_id,
                         &restored,
                         &mut touched,
+                        index,
                         replay,
                     )?;
                     if tail {
-                        seq_seen += frames;
+                        seq_seen += written;
                     }
                 }
                 REC_BLOCK => {
@@ -2410,6 +2432,7 @@ impl Database {
                             &by_id,
                             &restored,
                             &mut touched,
+                            None,
                             replay,
                         )?;
                         Ok(())
@@ -2420,11 +2443,15 @@ impl Database {
                 }
                 REC_NEXTID => {
                     // Not a write but the counter itself: it does not move `seq`.
-                    let next = get_uvarint(r.body, &mut 0)?;
+                    let mut p = 0;
+                    let next = get_uvarint(r.body, &mut p)?;
                     if let Some(name) = by_id.get(&r.cid) {
                         if let Some(c) = self.collections.get_mut(name) {
                             c.store.raise_next_id(next);
                         }
+                    }
+                    if let Some(index) = r.body.get(p..).filter(|ix| !ix.is_empty()) {
+                        frames = Some((r.cid, index));
                     }
                 }
                 REC_GRAPH => {
@@ -2594,6 +2621,7 @@ impl Database {
         by_id: &HashMap<u32, String>,
         restored: &[(String, String, usize)],
         touched: &mut Vec<(String, Vec<DocId>)>,
+        index: Option<&[u8]>,
         replay: &mut Replay<'_>,
     ) -> Result<u64> {
         let name = by_id
@@ -2611,9 +2639,9 @@ impl Database {
                 }
             };
             let ids = &mut touched[i].1;
-            replay(&mut c.store, at, chunk, &mut |id| ids.push(id))?
+            replay(&mut c.store, at, chunk, None, &mut |id| ids.push(id))?
         } else {
-            replay(&mut c.store, at, chunk, &mut |_| {})?
+            replay(&mut c.store, at, chunk, index, &mut |_| {})?
         };
         Ok(frames as u64)
     }

@@ -59,6 +59,34 @@ impl Loc {
 /// The bit of [`Loc::seg`] that marks a payload in the mapped file.
 const MAPPED: u32 = 1 << 31;
 
+/// Where a location lands in an image of its store's frames as they stand,
+/// given where each stretch and segment starts in it
+/// ([`Store::image_starts`]).
+fn image_place(l: Loc, stretches: &[(u64, u64)], segments: &[u64]) -> u64 {
+    match l.seg & MAPPED != 0 {
+        true => {
+            let from = ((l.seg & !MAPPED) as u64) << 32 | l.off as u64;
+            let k = stretches.partition_point(|s| s.0 <= from) - 1;
+            stretches[k].1 + (from - stretches[k].0)
+        }
+        false => segments[l.seg as usize] + l.off as u64,
+    }
+}
+
+/// Where the payload of a put of `len` bytes to `id` starts, framed right
+/// after `end`: past the frame's head, its op and two varints.
+#[cfg(not(target_arch = "wasm32"))]
+fn after(end: u64, id: DocId, len: u64) -> u64 {
+    let varint = |v: u64| (64 - (v | 1).leading_zeros() as u64).div_ceil(7);
+    end + 1 + varint(id) + varint(len)
+}
+
+/// The first byte of an image's index of a data record, after the id
+/// counter in the counter record before it ([`Store::image_index`]). A
+/// binary that does not know it reads the counter alone, as every reader
+/// of the record did.
+pub const FRAMES_MARK: u8 = 1;
+
 /// The bytes a store reads records from without having copied them: a file
 /// the operating system maps in on native targets (`fs::open_mapped`). The
 /// browser has no such thing: there it is a type of no value (`off.rs`), as
@@ -903,10 +931,21 @@ impl Store {
     // In the browser, where `Base` is a type of no value, the body is
     // unreachable, which is the point.
     #[allow(unreachable_code)]
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     pub fn relocate_image(&mut self, base: &Base, at: u64) {
-        // Where each stretch started, and where it starts now.
+        let (stretches, segments, len) = self.image_starts();
+        self.index
+            .relocate(|_, l| Loc::mapped(at + image_place(l, &stretches, &segments), l.len));
+        self.base = Some((base.clone(), vec![(at, len)]));
+        self.segments = vec![Segment::default()];
+    }
+
+    /// Where each stretch of the mapped file -- by where it was in the file
+    /// -- and each segment starts in an image of the store's frames as they
+    /// stand ([`Self::write_image`]), and the image's length.
+    fn image_starts(&self) -> (Vec<(u64, u64)>, Vec<u64>, u64) {
         let mut stretches: Vec<(u64, u64)> = Vec::new();
-        let mut to = at;
+        let mut to = 0;
         if let Some((_, old)) = &self.base {
             for &(from, len) in old {
                 stretches.push((from, to));
@@ -918,19 +957,109 @@ impl Store {
             segments.push(to);
             to += s.data.len() as u64;
         }
-        self.index.relocate(|_, l| {
-            let moved = match l.seg & MAPPED != 0 {
-                true => {
-                    let from = ((l.seg & !MAPPED) as u64) << 32 | l.off as u64;
-                    let k = stretches.partition_point(|s| s.0 <= from) - 1;
-                    stretches[k].1 + (from - stretches[k].0)
-                }
-                false => segments[l.seg as usize] + l.off as u64,
+        (stretches, segments, to)
+    }
+
+    /// Appends to `out` an index of the data record an image writes of this
+    /// store -- its frames as they stand, or with `live` the live ones
+    /// framed afresh in id order ([`Self::write_live`]): the record's
+    /// length, the bytes in it that are dead, and for each live document in
+    /// id order its id less the one before, its payload's length, and where
+    /// the payload starts less where it would if its frame followed the one
+    /// before ([`after`]) -- nothing, as a record is written, and a byte a
+    /// document for an image of 590-byte records where the offset itself
+    /// took two. An open takes the locations from it ([`Self::adopt_index`])
+    /// rather than walking the frames' heads, each of which says where the
+    /// next one is: a chain of cache misses, 5.5 of a 14.2 ms open at
+    /// 100 000 x 128.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn image_index(&self, live: bool, out: &mut Vec<u8>) {
+        let (stretches, segments, len) = self.image_starts();
+        let (len, dead) = match live {
+            true => (self.live_len() as u64, 0),
+            false => (len, self.dead_bytes as u64),
+        };
+        out.push(FRAMES_MARK);
+        put_uvarint(out, len);
+        put_uvarint(out, dead);
+        put_uvarint(out, self.index.len() as u64);
+        let mut head = Vec::with_capacity(16);
+        let (mut id_was, mut pos_was, mut to) = (0, 0, 0);
+        for id in self.index.iter() {
+            let Some(l) = self.index.get(id) else {
+                continue;
             };
-            Loc::mapped(moved, l.len)
-        });
-        self.base = Some((base.clone(), vec![(at, to - at)]));
-        self.segments = vec![Segment::default()];
+            let pos = match live {
+                true => {
+                    head.clear();
+                    head.push(OP_PUT);
+                    put_uvarint(&mut head, id);
+                    put_uvarint(&mut head, l.len as u64);
+                    to += head.len() as u64;
+                    let pos = to;
+                    to += l.len as u64;
+                    pos
+                }
+                false => image_place(l, &stretches, &segments),
+            };
+            put_uvarint(out, id - id_was);
+            put_uvarint(out, l.len as u64);
+            let expected = after(pos_was, id, l.len as u64);
+            put_uvarint(out, crate::codec::zigzag(pos as i64 - expected as i64));
+            (id_was, pos_was) = (id, pos + l.len as u64);
+        }
+    }
+
+    /// Takes a data record's frames from its image's index
+    /// ([`Self::image_index`]) rather than walking their heads, the record
+    /// `len` bytes at `at` of the mapped file: `false`, the store untouched,
+    /// where the index does not describe that record -- a store holding
+    /// records already, another length, ids not ascending, a payload past
+    /// the record's end, bytes left over -- and the caller walks it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn adopt_index(&mut self, base: &Base, at: u64, len: u64, index: &[u8]) -> bool {
+        if !self.index.is_empty() || self.base.is_some() || self.total_bytes != 0 {
+            return false;
+        }
+        let mut p = 1;
+        let mut next = || get_uvarint(index, &mut p).ok();
+        let (Some(whole), Some(dead), Some(count)) = (next(), next(), next()) else {
+            return false;
+        };
+        if index.first() != Some(&FRAMES_MARK) || whole != len || dead > len {
+            return false;
+        }
+        let mut fresh = IdIndex::default();
+        // A frame is three bytes at the least: a count past that is not
+        // this record's, and is not reserved for.
+        fresh.reserve(count.min(len / 3) as usize);
+        let (mut id, mut end) = (0u64, 0u64);
+        for _ in 0..count {
+            let (Some(step), Some(n), Some(off)) = (next(), next(), next()) else {
+                return false;
+            };
+            id = match id.checked_add(step) {
+                Some(i) if step > 0 && n <= u32::MAX as u64 => i,
+                _ => return false,
+            };
+            let pos = (after(end, id, n) as i64).checked_add(crate::codec::unzigzag(off));
+            end = match pos {
+                Some(p) if p > 0 && (p as u64).checked_add(n).is_some_and(|e| e <= len) => {
+                    p as u64 + n
+                }
+                _ => return false,
+            };
+            fresh.insert(id, Loc::mapped(at + end - n, n as u32));
+        }
+        if p != index.len() {
+            return false;
+        }
+        self.index = fresh;
+        self.total_bytes = len as usize;
+        self.dead_bytes = dead as usize;
+        self.next_id = self.next_id.max(id + 1);
+        self.base = Some((base.clone(), vec![(at, len)]));
+        true
     }
 
     /// [`Self::relocate_image`] for the image [`Self::write_live`] wrote: the
@@ -1169,6 +1298,91 @@ mod tests {
         st2.replay(&st.image()).unwrap();
         assert_eq!(st2.len(), 100);
         assert_eq!(st2.ids(), st.ids());
+    }
+
+    /// An image's index of a data record gives the store walking the record
+    /// would: the same ids at the same places, the same counts. And an index
+    /// that does not describe the record leaves the store as it was, for
+    /// the walk.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_image_index_gives_the_store_its_walk_gives() {
+        let sc = schema();
+        let doc = |i: i64| Document {
+            id: 0,
+            fields: vec![
+                ("a".into(), Value::Text("v".repeat(i as usize % 300))),
+                ("b".into(), Value::Int(i)),
+            ],
+        };
+        let mut st = Store::new();
+        for id in 1..=400u64 {
+            st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(id as i64)));
+        }
+        // Rewritten, deleted, and ids past the dense array's gap.
+        for id in (1..=400u64).step_by(7) {
+            st.append(OP_PUT, id, &Store::encode_doc(&sc, &doc(-(id as i64))));
+        }
+        for id in (3..=400u64).step_by(11) {
+            st.append(OP_DEL, id, &[]);
+        }
+        st.append(OP_PUT, 1 << 40, &Store::encode_doc(&sc, &doc(5)));
+        for live in [false, true] {
+            let mut image = Vec::new();
+            match live {
+                true => st.write_live(&mut image).unwrap(),
+                false => st.write_image(&mut image).unwrap(),
+            }
+            let mut index = Vec::new();
+            st.image_index(live, &mut index);
+            // Four bytes before the record, as a file has its head.
+            let at = 4u64;
+            let mut file = vec![0u8; at as usize];
+            file.extend_from_slice(&image);
+            let base: Base = std::sync::Arc::new(file);
+            let len = image.len() as u64;
+            let mut walked = Store::new();
+            walked.replay_mapped(&base, at, len, &mut |_| {}).unwrap();
+            let mut taken = Store::new();
+            assert!(taken.adopt_index(&base, at, len, &index), "live {live}");
+            assert_eq!(taken.ids(), walked.ids(), "live {live}");
+            for id in walked.ids() {
+                assert_eq!(
+                    taken.read_field(id, 1).unwrap(),
+                    walked.read_field(id, 1).unwrap()
+                );
+            }
+            let counts = |s: &Store| (s.len(), s.total_bytes(), s.dead_bytes(), s.next_id());
+            assert_eq!(counts(&taken), counts(&walked), "live {live}");
+            // Another length, cut short, a byte more, an id twice, a payload
+            // past the end: refused, the store left empty. A payload moved
+            // within the record is not seen, as a frame's head that says
+            // another length is not by the walk.
+            let hand = |entries: &[(u64, u64, u64)]| {
+                let mut ix = vec![FRAMES_MARK];
+                for v in [len, 0, entries.len() as u64] {
+                    put_uvarint(&mut ix, v);
+                }
+                for &(step, n, off) in entries {
+                    for v in [step, n, off] {
+                        put_uvarint(&mut ix, v);
+                    }
+                }
+                ix
+            };
+            let (twice, past) = (hand(&[(5, 1, 0), (0, 1, 0)]), hand(&[(1, len, 0)]));
+            for (bad, what) in [
+                (&index[..], len + 1),
+                (&index[..index.len() - 1], len),
+                (&[&index[..], &[0]].concat()[..], len),
+                (&twice[..], len),
+                (&past[..], len),
+            ] {
+                let mut refused = Store::new();
+                assert!(!refused.adopt_index(&base, at, what, bad), "live {live}");
+                assert_eq!(counts(&refused), (0, 0, 0, 1), "live {live}");
+            }
+        }
     }
 
     /// A `DocMap` keeps a number the dense array grows over, as the id

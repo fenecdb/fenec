@@ -49,7 +49,7 @@ usage: fenec-pg [options]
       --no-checkpoint       do not write a checkpoint on shutdown. The
                             default is to write one: the HNSW graph lands in
                             the file and the next open does not rebuild it
-                            (4.4 s -> 15 ms at 100k x 128). It lengthens
+                            (4.4 s -> 9 ms at 100k x 128). It lengthens
                             shutdown and peaks memory at ~3x the file
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
                             default: 100. Every connection is a thread

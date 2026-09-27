@@ -755,14 +755,19 @@ impl Beside {
         for p in &self.parts {
             side.write(&record_head(REC_CREATE, p.cid, p.schema.len()))?;
             side.write(&p.schema)?;
-            let mut counter = Vec::with_capacity(9);
-            put_uvarint(&mut counter, p.next_id);
-            side.write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
-            side.write(&counter)?;
             let bytes = match p.compact {
                 true => p.store.live_len(),
                 false => p.store.image_len(),
             };
+            // As `Database::image_into` writes it, the frames' index behind
+            // the counter.
+            let mut counter = Vec::with_capacity(9);
+            put_uvarint(&mut counter, p.next_id);
+            if bytes > 0 {
+                p.store.image_index(p.compact, &mut counter);
+            }
+            side.write(&record_head(REC_NEXTID, p.cid, counter.len()))?;
+            side.write(&counter)?;
             if bytes > 0 {
                 side.write(&record_head(REC_DATA, p.cid, bytes))?;
                 placed.push(Some(side.at()));
