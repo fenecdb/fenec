@@ -293,7 +293,15 @@ fn a_node_cut_off_stops_writing_before_its_tenants_are_promoted_elsewhere() {
     until(nodes[0].port, path, "get notes select title", "after");
     let (direct, body) = query(nodes[0].port, path, r#"put notes {title: "stale"}"#);
     assert_ne!(direct, 200, "the old primary's copy took a write: {body}");
-    assert_eq!(placed(port, "acme").1.as_deref(), Some("n1"));
+    // The router records the replica once n1 has answered that it follows
+    // (`attach`), and n1 may hold the row before that answer is back: the
+    // record is waited for as the row was. Read at once, it failed on a
+    // loaded CI runner.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while placed(port, "acme").1.as_deref() != Some("n1") {
+        assert!(Instant::now() < deadline, "{:?}", placed(port, "acme"));
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
