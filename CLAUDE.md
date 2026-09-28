@@ -238,8 +238,8 @@ CopyFail is answered at once and puts every row back, and the session loop
 drops what the client still streams, as PostgreSQL does. The COPY counts
 as one statement however many puts it made (`run_copy`). Text and CSV
 only: binary -- asyncpg's `copy_records_to_table`, pgx's `CopyFrom` -- is
-refused, `0A000`. 100 000 rows x 128: 17.2k rows/s with the graph kept and
-113k without, against 5.3k and 106k a put a row (`make load-bench`).
+refused, `0A000`. 100 000 rows x 128: 18.2k rows/s with the graph kept and
+184k without, against 5.4k and 160k a put a row (`make load-bench`).
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -738,6 +738,15 @@ with the JSON reader walking the text's bytes rather than collecting it
 into `char`s first, 23.7; read where the page left it rather than copied
 (`str_from`), 21.9. 10 000 128-dim vectors went in with their graph in
 1 281 ms against 1 706 (`make wasm-speed`), for 368 bytes brotli.
+Natively an array of numbers alone is read straight into a vector's `f32`s,
+each number in the one pass that finds its end where Clinger's path takes
+it (`json::clinger`) and handed to the readers above otherwise: read a
+`Value` at a time, each number's text found and then read twice over, a
+128-dim vector took 5.26 us, now 2.05, and 100 000 128-dim rows without an
+index go in at 220k rows/s over HTTP against 123k, 184k by COPY against
+110k, and 160k by `executemany` against 105k (`make load-bench`). A page's
+vectors come into the browser module as `f32`s already, and the reader
+stays out of it: there it was 474 bytes brotli for nothing.
 
 **A vector parameter goes into the module as `f32`s.** `web/fenec.js`'s
 `run` takes each parameter that is a typed array or an array of finite
