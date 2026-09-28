@@ -237,13 +237,18 @@ fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     assert_eq!(status, 403, "{body}");
 
     // Stopped and started again over its file, it asks for what it
-    // missed rather than for an image.
+    // missed rather than for an image. The file is looked at before the
+    // follower starts: read after, the follower had often fetched the
+    // writes it missed already.
     r.follower.as_ref().unwrap().halt();
     let at = seq(&r);
     write_some(&p, 50, 10);
     drop(r);
-    let r = replica(&d.join("r.fenec"), p.port);
-    assert_eq!(seq(&r), at);
+    let file = d.join("r.fenec");
+    let (db, _) = replication::open(file.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    assert_eq!(db.change_seq(), at);
+    drop(db);
+    let r = replica(&file, p.port);
     caught_up(&r, &p);
     assert_eq!(r.follower.as_ref().unwrap().images(), 0);
     assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
