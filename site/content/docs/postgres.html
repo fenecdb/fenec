@@ -462,9 +462,11 @@ constraints and indexes.</p>
 <p>Over a thousand collections of ten fields, psql's <code>\d</code> answers
 in 11 ms and JDBC's column lookup for every table in 122 ms. Joins find their
 rows by key where the query names an equality; trying every pair took the
-same column lookup 18.1 s. A query outside what the catalog reads — a
-<code>WITH</code>, a right or full join — is answered empty, as every catalog
-query was before, so a client never stalls on one.</p>
+same column lookup 18.1 s. A <code>WITH</code> is read, and a recursive one
+runs until a step adds no row, as PostgreSQL runs it — asyncpg looks up a
+type it has no codec for with one — for 1 000 steps at most. A query outside
+what the catalog reads, a right or full join, is answered empty, as every
+catalog query was before, so a client never stalls on one.</p>
 
 <p>A catalog query's parameter is the type the query casts it to —
 <code>$1::oid[]</code>, the array of type OIDs asyncpg looks up, arrives as

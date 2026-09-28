@@ -23,9 +23,10 @@ pub mod regex;
 pub mod sql;
 
 use fenec_core::prelude::*;
-use sql::{Expr, Item, JoinKind, Query, Select, Source, TypeName, Unsupported};
+use sql::{Cte, Expr, Item, JoinKind, Query, Select, Source, TypeName, Unsupported};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 type Out<T> = std::result::Result<T, Unsupported>;
 
@@ -487,6 +488,7 @@ fn pg_stat_statements(alias: &str, s: &Snapshot) -> Rel {
 
 /// A relation a query reads: the catalog table, a subquery's result or a
 /// function's rows.
+#[derive(Clone)]
 struct Rel {
     alias: String,
     columns: Vec<(String, i32)>,
@@ -1394,6 +1396,8 @@ fn index_def(tb: &Table, i: &Index) -> String {
 struct Ctx<'a> {
     snap: &'a Snapshot,
     params: &'a [V],
+    /// What each `WITH` around the query named, the innermost last.
+    ctes: Vec<Rc<Rel>>,
 }
 
 /// One joined row: which row of each relation, `None` where a left join
@@ -1604,6 +1608,9 @@ fn render(v: &V) -> Option<String> {
 /// to -- what PostgreSQL writes for `c.oid::regclass`.
 fn render_named(v: &V, s: &Snapshot) -> Option<String> {
     match v {
+        // No relation, type or schema, as PostgreSQL writes one: asyncpg
+        // reads a type's element as `elemtype::regtype::text`.
+        V::Reg(_, 0) => Some("-".to_string()),
         V::Reg(Reg::Class, oid) => Some(s.relation_name(*oid).unwrap_or_else(|| oid.to_string())),
         V::Reg(Reg::Type, oid) => Some(format_type(*oid, -1).unwrap_or_else(|| oid.to_string())),
         V::Reg(Reg::Namespace, oid) => {
@@ -1833,8 +1840,9 @@ fn eval(e: &Expr, scope: &Scope, ctx: &Ctx) -> Out<V> {
             args,
             star,
             distinct,
+            order,
         } if AGGREGATES.contains(&name.as_str()) => {
-            aggregate(name, args, *star, *distinct, scope, ctx)?
+            aggregate(name, args, *star, *distinct, order, scope, ctx)?
         }
         Expr::Call { name, args, .. } => {
             let mut vals = Vec::with_capacity(args.len());
@@ -2078,17 +2086,20 @@ fn binary(op: &str, x: &V, y: &V, s: &Snapshot) -> V {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate(
     name: &str,
     args: &[Expr],
     star: bool,
     distinct: bool,
+    order: &[sql::Order],
     scope: &Scope,
     ctx: &Ctx,
 ) -> Out<V> {
     let single = [scope.row.to_vec()];
     let rows: &[Vec<Option<usize>>] = scope.group.unwrap_or(&single);
-    let mut values = Vec::with_capacity(rows.len());
+    // Each value with its keys when the aggregate orders them.
+    let mut keyed = Vec::with_capacity(rows.len());
     for row in rows {
         let s = Scope {
             rels: scope.rels,
@@ -2097,11 +2108,20 @@ fn aggregate(
             slots: scope.slots,
             outer: scope.outer,
         };
-        values.push(match args.first() {
+        let value = match args.first() {
             Some(a) if !star => eval(a, &s, ctx)?,
             _ => V::Int(1),
-        });
+        };
+        let mut keys = Vec::with_capacity(order.len());
+        for o in order {
+            keys.push(eval(&o.expr, &s, ctx)?);
+        }
+        keyed.push((vec![value], keys));
     }
+    if !order.is_empty() {
+        sort(&mut keyed, order, ctx.snap);
+    }
+    let mut values: Vec<V> = keyed.into_iter().filter_map(|(mut v, _)| v.pop()).collect();
     if name != "count" || !star {
         values.retain(|v| *v != V::Null);
     }
@@ -2420,6 +2440,19 @@ const SET_RETURNING: [&str; 3] = ["_pg_expandarray", "unnest", "generate_series"
 
 fn source(src: &Source, outer: Option<&Scope>, ctx: &Ctx) -> Out<Rel> {
     Ok(match src {
+        // A name a `WITH` around it gave, the innermost first.
+        Source::Table {
+            schema: None,
+            name,
+            alias,
+        } if ctx.ctes.iter().any(|r| r.alias == *name) => {
+            let r = ctx.ctes.iter().rev().find(|r| r.alias == *name).unwrap();
+            Rel {
+                alias: alias.clone().unwrap_or_else(|| name.clone()),
+                columns: r.columns.clone(),
+                rows: r.rows.clone(),
+            }
+        }
         Source::Table {
             schema,
             name,
@@ -2921,11 +2954,13 @@ fn lift(e: &Expr, out: &mut Vec<Lifted>) -> Expr {
             args,
             star,
             distinct,
+            order,
         } => Expr::Call {
             name: name.clone(),
             args: args.iter().map(|a| lift(a, out)).collect(),
             star: *star,
             distinct: *distinct,
+            order: order.clone(),
         },
         Expr::Field(inner, f) => Expr::Field(boxed(inner, out), f.clone()),
         Expr::Cast(inner, ty) => Expr::Cast(boxed(inner, out), ty.clone()),
@@ -3232,7 +3267,103 @@ fn sort(rows: &mut [(Vec<V>, Vec<V>)], order: &[sql::Order], s: &Snapshot) {
     });
 }
 
+/// Steps a recursive `WITH` takes at most before it is refused: a type's
+/// elements and bases are a few levels deep, and a query that never stops
+/// would hold its session for good.
+const MAX_STEPS: usize = 1_000;
+
 fn run(q: &Query, outer: Option<&Scope>, ctx: &Ctx) -> Out<Output> {
+    if q.with.is_empty() {
+        return run_body(q, outer, ctx);
+    }
+    let mut ctes = ctx.ctes.clone();
+    for cte in &q.with {
+        let inner = Ctx {
+            snap: ctx.snap,
+            params: ctx.params,
+            ctes: ctes.clone(),
+        };
+        ctes.push(Rc::new(with_rel(cte, q.recursive, outer, &inner)?));
+    }
+    run_body(
+        q,
+        outer,
+        &Ctx {
+            snap: ctx.snap,
+            params: ctx.params,
+            ctes,
+        },
+    )
+}
+
+/// A `WITH` name's rows: its query's; or, recursive and reading itself, its
+/// first select's, then each `UNION`'s over the rows the step before added,
+/// until a step adds none -- as PostgreSQL evaluates one.
+fn with_rel(cte: &Cte, recursive: bool, outer: Option<&Scope>, ctx: &Ctx) -> Out<Rel> {
+    let named = |mut columns: Vec<(String, i32)>| {
+        for (c, name) in columns.iter_mut().zip(&cte.columns) {
+            c.0 = name.clone();
+        }
+        columns
+    };
+    let reads_itself = |sel: &Select| {
+        sel.from.iter().any(|f| {
+            std::iter::once(&f.first)
+                .chain(f.joins.iter().map(|j| &j.source))
+                .any(|s| matches!(s, Source::Table { schema: None, name, .. } if *name == cte.name))
+        })
+    };
+    let q = &cte.query;
+    if !recursive || !q.unions.iter().any(|(_, sel)| reads_itself(sel)) {
+        let out = run(q, outer, ctx)?;
+        return Ok(Rel {
+            alias: cte.name.clone(),
+            columns: named(out.columns),
+            rows: out.rows,
+        });
+    }
+    let (first, _) = select(&q.first, &[], outer, ctx)?;
+    let columns = named(first.columns);
+    let distinct = q.unions.iter().any(|(all, _)| !all);
+    let mut all = first.rows.clone();
+    let mut last = first.rows;
+    let mut steps = 0;
+    while !last.is_empty() {
+        steps += 1;
+        if steps > MAX_STEPS {
+            return Err(Unsupported(format!(
+                "a recursive WITH past {MAX_STEPS} steps"
+            )));
+        }
+        let mut ctes = ctx.ctes.clone();
+        ctes.push(Rc::new(Rel {
+            alias: cte.name.clone(),
+            columns: columns.clone(),
+            rows: std::mem::take(&mut last),
+        }));
+        let inner = Ctx {
+            snap: ctx.snap,
+            params: ctx.params,
+            ctes,
+        };
+        for (_, sel) in &q.unions {
+            let (out, _) = select(sel, &[], outer, &inner)?;
+            for row in out.rows {
+                if !distinct || !(all.contains(&row) || last.contains(&row)) {
+                    last.push(row);
+                }
+            }
+        }
+        all.extend(last.iter().cloned());
+    }
+    Ok(Rel {
+        alias: cte.name.clone(),
+        columns,
+        rows: all,
+    })
+}
+
+fn run_body(q: &Query, outer: Option<&Scope>, ctx: &Ctx) -> Out<Output> {
     let mut rows: Vec<(Vec<V>, Vec<V>)>;
     let columns;
     if q.unions.is_empty() {
@@ -3324,7 +3455,7 @@ pub struct Answer {
 /// table, `information_schema`, or a catalog function.
 pub fn is_catalog(lower: &str) -> bool {
     let lower = lower.trim_start_matches('(').trim_start();
-    if !lower.starts_with("select") {
+    if !lower.starts_with("select") && !lower.starts_with("with") {
         return false;
     }
     [
@@ -3383,6 +3514,7 @@ pub fn answer(sql: &str, params: &[Value], snap: &Snapshot) -> Out<Answer> {
     let ctx = Ctx {
         snap,
         params: &params,
+        ctes: Vec::new(),
     };
     let out = run(&query, None, &ctx)?;
     Ok(Answer {
