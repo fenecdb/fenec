@@ -2349,7 +2349,8 @@ fn the_catalog_describes_the_collections() {
     );
 
     // A query the catalog cannot read still answers, empty, as before.
-    let r = c.simple("WITH x AS (SELECT 1) SELECT * FROM pg_catalog.pg_class, x");
+    let r = c
+        .simple("SELECT * FROM pg_catalog.pg_class c RIGHT JOIN pg_catalog.pg_namespace n ON true");
     assert!(find(&r, b'E').is_none(), "{r:?}");
     assert!(rows(&r).is_empty());
 }
