@@ -225,8 +225,9 @@ beir:
 python-test:
 	integrations/python/run-tests.sh
 
-## psycopg and SQLAlchemy over the pg wire -- nested transactions as
-## savepoints -- from a python:3.13 container (Docker)
+## PostgreSQL drivers over the pg wire, pgvector's library for each: psycopg,
+## asyncpg and SQLAlchemy from a python:3.13 container (Docker), pgx,
+## node-postgres and tokio-postgres with the Go, Node and Rust on the machine
 drivers-test:
 	integrations/drivers/run-tests.sh
 

@@ -172,7 +172,9 @@ jobs:
         run: make python-test
 
       # psycopg's nested transactions and SQLAlchemy's begin_nested, which
-      # are savepoints, over the pg wire of a fenec-pg on the runner.
+      # are savepoints, asyncpg, pgx, node-postgres and tokio-postgres, and
+      # pgvector's library for each, over the pg wire of a fenec-pg on the
+      # runner.
       - name: PostgreSQL drivers
         run: make drivers-test
 

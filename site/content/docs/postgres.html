@@ -53,7 +53,8 @@ and <code>--idle-close</code>, and the router in front of it are on
 <p>A driver is held to its own flows against a real <code>fenec-pg</code> —
 <code>make drivers-test</code>, and CI on every change: the queries it sends
 on its own, the formats it reads rows and sends parameters in, its
-transactions and its COPY.</p>
+transactions and its COPY — and with it pgvector's library for it
+(<a href="#pgvector">pgvector's clients</a>).</p>
 
 <div class="tbl">
 <table>
@@ -446,6 +447,9 @@ pgvector:</p>
 </tbody>
 </table>
 </div>
+
+<p>Each is held to these flows beside its driver
+(<a href="#drivers">Drivers</a>).</p>
 
 <p>In binary a vector costs no text to write or parse: through tokio-postgres
 a page of 1 000 768-dimension vectors reads in 5.5 ms, against 31.4 ms as
