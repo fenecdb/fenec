@@ -2089,6 +2089,46 @@ impl PartialOrd for Cand {
     }
 }
 
+/// The nodes an exact search measures at a time on a thread of its own
+/// ([`VectorIndex::nearest_of`]), and the fewest it spreads over the cores.
+#[cfg(not(target_family = "wasm"))]
+const MEASURE_SHARE: usize = 8192;
+#[cfg(not(target_family = "wasm"))]
+const MEASURE_APART: usize = 4 * MEASURE_SHARE;
+
+/// Up to this many nearest are kept as they are measured, the rest let go
+/// at a comparison; more are sorted whole, as a page past it is rare and
+/// keeping them would move as many on each insert.
+const NEAREST_KEPT: usize = 128;
+
+/// The first `k` of `all` as a stable sort by distance leaves them: ties
+/// in the order they came. Sorting every one of 250 000 to keep ten was a
+/// quarter of an exact search over them.
+fn nearest(all: impl IntoIterator<Item = Cand>, k: usize) -> Vec<Cand> {
+    if k == 0 {
+        return Vec::new();
+    }
+    if k > NEAREST_KEPT {
+        let mut all: Vec<Cand> = all.into_iter().collect();
+        all.sort();
+        all.truncate(k);
+        return all;
+    }
+    let mut best: Vec<Cand> = Vec::with_capacity(k + 1);
+    for c in all {
+        if best.len() == k {
+            // No nearer than the last kept: a stable sort leaves it after.
+            if c.dist.total_cmp(&best[k - 1].dist) != Ordering::Less {
+                continue;
+            }
+            best.pop();
+        }
+        let at = best.partition_point(|b| b.dist.total_cmp(&c.dist) != Ordering::Greater);
+        best.insert(at, c);
+    }
+    best
+}
+
 /// Min-heap that keeps the nearest on top (by hand instead of Reverse).
 #[derive(Copy, Clone, PartialEq)]
 struct MinCand(Cand);
@@ -2749,9 +2789,41 @@ impl VectorIndex {
         self.data.vec_at(node, self.dim)
     }
 
+    /// One node measured: `measure` where it does not measure four at once.
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     #[inline]
     fn dist_to(&self, query: &[f32], node: u32) -> f32 {
         self.data.dist_to(self.spec.metric, query, node, self.dim)
+    }
+
+    /// The `k` nearest of `nodes` to `q`, as [`nearest`] keeps them. Where
+    /// there are enough, natively a share of [`MEASURE_SHARE`] at a time on
+    /// every core, each share's nearest kept and all of those kept again in
+    /// the shares' order: the rows a walk in turn keeps, ties in the same
+    /// order, since a row among the nearest `k` of all is among its share's.
+    /// An exact search is a read of every vector it measures, and on one
+    /// core a filter's quarter of 1 000 000 x 128 took 20.8 ms.
+    #[cfg(not(target_family = "wasm"))]
+    fn nearest_of(&self, q: &[f32], nodes: &[u32], k: usize) -> Vec<Cand> {
+        let shares = nodes.len().div_ceil(MEASURE_SHARE);
+        let threads = Self::threads().min(shares);
+        if threads < 2 || nodes.len() < MEASURE_APART {
+            return nearest(self.measure(q, nodes.iter().copied()), k);
+        }
+        let mut states = vec![(); threads];
+        let mut kept = spread(shares, &mut states, |_, s| {
+            let end = ((s + 1) * MEASURE_SHARE).min(nodes.len());
+            let share = &nodes[s * MEASURE_SHARE..end];
+            (s, nearest(self.measure(q, share.iter().copied()), k))
+        });
+        kept.sort_unstable_by_key(|(s, _)| *s);
+        nearest(kept.into_iter().flat_map(|(_, c)| c), k)
+    }
+
+    /// The `k` nearest of `nodes` to `q`: no threads in the browser.
+    #[cfg(target_family = "wasm")]
+    fn nearest_of(&self, q: &[f32], nodes: &[u32], k: usize) -> Vec<Cand> {
+        nearest(self.measure(q, nodes.iter().copied()), k)
     }
 
     /// Each of `nodes` measured against `q`, four at a time on aarch64
@@ -4063,18 +4135,13 @@ impl VectorIndex {
             return Vec::new();
         }
         let q = self.query_for(query);
-        let mut all: Vec<Cand> = ids
+        let nodes: Vec<u32> = ids
             .iter()
             .filter_map(|doc| self.node_of(*doc))
             .filter(|n| !self.is_deleted(*n))
-            .map(|n| Cand {
-                dist: self.dist_to(&q, n),
-                node: n,
-            })
             .collect();
-        all.sort();
-        all.truncate(k);
-        all.into_iter()
+        self.nearest_of(&q, &nodes, k)
+            .into_iter()
             .map(|c| {
                 (
                     self.doc_ids[c.node as usize],
@@ -4099,13 +4166,14 @@ impl VectorIndex {
         F: Fn(DocId) -> bool,
     {
         let q = self.query_for(query);
-        let nodes = (0..self.doc_ids.len() as u32)
+        // The test runs here, in turn: `accept` may read the documents
+        // through a filter that is not the threads' to share.
+        let nodes: Vec<u32> = (0..self.doc_ids.len() as u32)
             .filter(|n| !self.is_deleted(*n))
-            .filter(|n| accept(self.doc_ids[*n as usize]));
-        let mut all = self.measure(&q, nodes);
-        all.sort();
-        all.truncate(k);
-        all.into_iter()
+            .filter(|n| accept(self.doc_ids[*n as usize]))
+            .collect();
+        self.nearest_of(&q, &nodes, k)
+            .into_iter()
             .map(|c| {
                 (
                     self.doc_ids[c.node as usize],
@@ -4674,6 +4742,69 @@ mod tests {
                 .map(|x| x.0)
                 .collect();
             assert_eq!(ra, rb, "the parallel build is not deterministic");
+        }
+    }
+
+    /// The nearest `k` kept as they come are the first `k` a stable sort
+    /// leaves -- ties in the order they came -- both below the count kept
+    /// that way and above it.
+    #[test]
+    fn nearest_keeps_what_a_stable_sort_keeps() {
+        let mut rng = Rng(31);
+        for n in [0usize, 1, 7, 200, 1000] {
+            // Few distances, so most of them tie.
+            let all: Vec<Cand> = (0..n as u32)
+                .map(|node| Cand {
+                    dist: (rng.next_f32() * 8.0).floor(),
+                    node,
+                })
+                .collect();
+            for k in [0, 1, 5, NEAREST_KEPT, NEAREST_KEPT + 1, 300] {
+                let mut sorted = all.clone();
+                sorted.sort();
+                sorted.truncate(k);
+                let kept = nearest(all.clone(), k);
+                let pairs = |v: &[Cand]| {
+                    v.iter()
+                        .map(|c| (c.dist.to_bits(), c.node))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(pairs(&kept), pairs(&sorted), "n {n}, k {k}");
+            }
+        }
+    }
+
+    /// An exact search spread over the cores in shares keeps the rows, and
+    /// the order of their ties, one walk over the nodes keeps: the vectors
+    /// repeat, so equal distances fall on both sides of a share's edge.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn the_shares_keep_what_one_walk_keeps() {
+        let n = MEASURE_APART + 3 * MEASURE_SHARE + 17;
+        let mut rng = Rng(37);
+        let few: Vec<Vec<f32>> = (0..24)
+            .map(|_| (0..4).map(|_| rng.next_f32() - 0.5).collect())
+            .collect();
+        let items: Vec<(u64, Vec<f32>)> = (0..n as u64)
+            .map(|i| (i, few[(i * 7 % 24) as usize].clone()))
+            .collect();
+        let mut ix = VectorIndex::new(4, spec());
+        // Measured, never walked: no graph is needed.
+        ix.defer_batch(&items);
+        let q = ix.query_for(&[0.1, -0.2, 0.3, 0.05]);
+        let every: Vec<u32> = (0..n as u32).collect();
+        let odd: Vec<u32> = (0..n as u32).filter(|x| x % 3 != 1).rev().collect();
+        for nodes in [&every, &odd] {
+            for k in [1, 10, NEAREST_KEPT + 5] {
+                let spread = ix.nearest_of(&q, nodes, k);
+                let walked = nearest(ix.measure(&q, nodes.iter().copied()), k);
+                let pairs = |v: &[Cand]| {
+                    v.iter()
+                        .map(|c| (c.dist.to_bits(), c.node))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(pairs(&spread), pairs(&walked), "k {k}");
+            }
         }
     }
 
