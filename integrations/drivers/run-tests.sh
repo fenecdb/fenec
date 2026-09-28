@@ -1,8 +1,8 @@
 #!/bin/sh
-# PostgreSQL drivers against a real fenec-pg's pg wire: psycopg and
-# SQLAlchemy from a python:3.13 container, as integrations/python runs the
-# stores, then pgx with the Go and node-postgres with the Node on the
-# machine. What a driver sends on its own -- a savepoint for a nested
+# PostgreSQL drivers against a real fenec-pg's pg wire: psycopg, asyncpg
+# and SQLAlchemy from a python:3.13 container, as integrations/python runs
+# the stores, then pgx with the Go, node-postgres with the Node and
+# tokio-postgres with the Rust on the machine. What a driver sends on its own -- a savepoint for a nested
 # transaction, the queries a dialect opens a connection with, the rows of a
 # COPY, the binary format it asks rows in -- is what the server is held to
 # here. Under CI a missing toolchain fails the run rather than skip it.
@@ -33,7 +33,7 @@ done
 docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway \
     -e FENEC_PG="host=host.docker.internal port=$port user=fenec password=$password dbname=fenec" \
     python:3.13-slim sh -c \
-    "cp -r /src /work && cd /work &&
+    "mkdir /work && cp /src/*.py /src/requirements.txt /work && cd /work &&
      pip install -q --root-user-action=ignore --disable-pip-version-check -r requirements.txt &&
      python -m pytest -q -p no:cacheprovider $*"
 
@@ -52,3 +52,6 @@ if command -v node >/dev/null 2>&1; then
 else
     missing node "node-postgres's tests"
 fi
+(cd "$here/rust" &&
+    FENEC_PG="host=127.0.0.1 port=$port user=fenec password=$password dbname=fenec" \
+    "$cargo" test -q)

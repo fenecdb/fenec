@@ -2992,3 +2992,107 @@ fn results_go_in_the_binary_format_asked_for() {
     assert_eq!(find(&r, b'T').unwrap().formats(), [0]);
     assert_eq!(find(&r, b'D').unwrap().cells(), [Some("-2".to_string())]);
 }
+
+// ------------------------------------------------------ parameter types
+
+impl Client {
+    /// Parse `sql` naming `declared` for its parameters, and Describe it:
+    /// the ParameterDescription's types.
+    fn parameter_types(&mut self, sql: &str, declared: &[i32]) -> Vec<i32> {
+        let mut out = Vec::new();
+        let mut p = Vec::new();
+        cstr(&mut p, "typed");
+        cstr(&mut p, sql);
+        p.extend_from_slice(&(declared.len() as i16).to_be_bytes());
+        for d in declared {
+            p.extend_from_slice(&d.to_be_bytes());
+        }
+        out.extend_from_slice(&framed(b'P', &p));
+        let mut d = vec![b'S'];
+        cstr(&mut d, "typed");
+        out.extend_from_slice(&framed(b'D', &d));
+        out.extend_from_slice(&framed(b'S', &[]));
+        self.s.write_all(&out).unwrap();
+        find(&self.until_ready(), b't').unwrap().param_oids()
+    }
+
+    /// Bind the statement `typed` with `params` each in binary, and run it.
+    fn run_binary(&mut self, params: &[Vec<u8>]) -> Vec<Msg> {
+        let mut out = Vec::new();
+        let mut bind = Vec::new();
+        cstr(&mut bind, "");
+        cstr(&mut bind, "typed");
+        bind.extend_from_slice(&1i16.to_be_bytes());
+        bind.extend_from_slice(&1i16.to_be_bytes());
+        bind.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for v in params {
+            bind.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            bind.extend_from_slice(v);
+        }
+        bind.extend_from_slice(&0i16.to_be_bytes());
+        out.extend_from_slice(&framed(b'B', &bind));
+        let mut e = Vec::new();
+        cstr(&mut e, "");
+        e.extend_from_slice(&0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'E', &e));
+        out.extend_from_slice(&framed(b'S', &[]));
+        self.s.write_all(&out).unwrap();
+        self.until_ready()
+    }
+}
+
+/// `Describe` names each parameter's type where its place names one -- the
+/// field it is given for or compared with -- and text elsewhere, never the
+/// unspecified OID 0 that sent tokio-postgres into a lookup it never came
+/// back from. A driver told the types sends values in binary, and they are
+/// read by them.
+#[test]
+fn parameters_take_the_types_their_places_name() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection t (name text, n int, score float, ok bool, at timestamp, e vector<2>)",
+    );
+    assert_eq!(
+        c.parameter_types(
+            "put t {name: $1, n: $2, score: $3, ok: $4, at: $5, e: $6}",
+            &[]
+        ),
+        [25, 20, 701, 16, 1184, 25]
+    );
+    assert_eq!(
+        c.parameter_types("get t where n > $1 and id = $2", &[]),
+        [20, 20]
+    );
+    // What a client names is the type.
+    assert_eq!(
+        c.parameter_types("get t where n > $1 and name = $2", &[23]),
+        [23, 25]
+    );
+    assert_eq!(c.parameter_types("get t where $1 = $2", &[]), [25, 25]);
+
+    c.parameter_types("put t {name: $1, n: $2, score: $3, ok: $4, at: $5}", &[]);
+    let r = c.run_binary(&[
+        b"b".to_vec(),
+        7i64.to_be_bytes().to_vec(),
+        0.25f64.to_be_bytes().to_vec(),
+        vec![1],
+        // A million microseconds past 2000-01-01.
+        1_000_000i64.to_be_bytes().to_vec(),
+    ]);
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    assert_eq!(
+        rows_of(&mut c, "get t select name, n, score, ok, at"),
+        cells(&[&[
+            Some("b"),
+            Some("7"),
+            Some("0.25"),
+            Some("t"),
+            Some("2000-01-01 00:00:01+00")
+        ]])
+    );
+}
