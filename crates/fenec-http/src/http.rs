@@ -10,7 +10,7 @@
 //! `Transfer-Encoding: chunked` (411), body over the ceiling (413), header
 //! block over the ceiling (431).
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, IoSlice, Read, Write};
 use std::net::TcpStream;
 
 /// Ceiling of the header block. A large ceiling would let a single
@@ -312,30 +312,64 @@ impl Response {
         self
     }
 
+    /// The head and the body in one `writev`. Written apart on a socket
+    /// that sends at once (`TCP_NODELAY`), the head went in a packet of its
+    /// own and each answer cost two sends, which took the time of all the
+    /// rest of a row by id; and `format!` built the head for another eighth.
     pub fn write(
         &self,
         out: &mut impl Write,
         keep_alive: bool,
         head_only: bool,
     ) -> std::io::Result<()> {
-        let mut head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n",
-            self.status,
-            reason(self.status),
-            self.content_type,
-            self.body.len(),
-            if keep_alive { "keep-alive" } else { "close" },
-        );
+        let mut head = String::with_capacity(160);
+        head.push_str("HTTP/1.1 ");
+        push_number(&mut head, self.status as u64);
+        head.push(' ');
+        head.push_str(reason(self.status));
+        head.push_str("\r\nContent-Type: ");
+        head.push_str(self.content_type);
+        head.push_str("\r\nContent-Length: ");
+        push_number(&mut head, self.body.len() as u64);
+        head.push_str("\r\nConnection: ");
+        head.push_str(if keep_alive { "keep-alive" } else { "close" });
+        head.push_str("\r\n");
         for (k, v) in &self.extra {
-            head.push_str(&format!("{k}: {v}\r\n"));
+            head.push_str(k);
+            head.push_str(": ");
+            head.push_str(v);
+            head.push_str("\r\n");
         }
         head.push_str("\r\n");
-        out.write_all(head.as_bytes())?;
-        if !head_only {
-            out.write_all(&self.body)?;
+        let body: &[u8] = if head_only { &[] } else { &self.body };
+        let mut parts = [IoSlice::new(head.as_bytes()), IoSlice::new(body)];
+        let mut parts = &mut parts[..];
+        while !parts.is_empty() {
+            match out.write_vectored(parts) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => IoSlice::advance_slices(&mut parts, n),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
         }
         out.flush()
     }
+}
+
+/// `n` in decimal, onto `out`.
+fn push_number(out: &mut String, mut n: u64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Digits alone: ASCII.
+    out.push_str(std::str::from_utf8(&digits[at..]).unwrap_or_default());
 }
 
 pub fn reason(status: u16) -> &'static str {

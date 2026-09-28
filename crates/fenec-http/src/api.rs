@@ -16,7 +16,7 @@
 //! DELETE /<name>?<filter>
 //! DELETE /<name>/all
 //! POST   /<name>/near            body: {"field":..,"vector":[..],"limit":..}
-//! POST   /query                  govde: {"query":"<FenecQL>","params":[..]}
+//! POST   /query                  body: {"query":"<FenecQL>","params":[..]}
 //! ```
 //!
 //! **Why is a vector a POST?** A 768-dimensional embedding does not fit in a
@@ -28,6 +28,7 @@
 use crate::http::{Method, Request, Response};
 use fenec_core::json;
 use fenec_core::prelude::*;
+use std::sync::Arc;
 
 /// Query keys that are read as clauses rather than as filters. A field with
 /// the same name cannot be filtered over HTTP (the FenecQL and `fenec-pg` paths
@@ -817,7 +818,7 @@ pub fn seed_select(sub: &Subscription) -> Select {
 /// (no DDL, no `or` groups). Raw input lifts that wall: so the query builder
 /// in the browser can hand the same text to wasm and to this endpoint alike
 /// -- one piece of query code, two transports.
-pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
+pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
     let obj = json::parse_object_listing(body, "params")?;
     let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
     let sql = match get("query").or_else(|| get("sql")) {
@@ -834,8 +835,58 @@ pub fn parse_query(body: &str) -> Result<(Statement, Vec<Value>)> {
         Some(Value::List(items)) => items.clone(),
         Some(other) => vec![other.clone()],
     };
-    let stmt = fenec_ql::parse_one(&sql).map_err(|e| Error::Query(e.to_string()))?;
-    Ok((stmt, params))
+    Ok((parsed(&sql)?, params))
+}
+
+/// Shards of the statements parsed, by their text's hash: a client sends
+/// one text again and again with other parameters, and parsing it was half
+/// of what `POST /query` cost for a row by id. A shard a mutex, so the
+/// connections' threads do not queue on one; full, a shard forgets every
+/// statement it held, and a text of literals, never sent twice, costs a
+/// lookup and an insert.
+const PARSED_SHARDS: usize = 16;
+const PARSED_PER_SHARD: usize = 64;
+/// A text longer than this is parsed each time: that long, it holds its
+/// literals -- a vector's alone is kilobytes -- and would fill a shard with
+/// statements no one asks for again.
+const PARSED_LONGEST: usize = 1024;
+
+type Parsed = std::sync::Mutex<Option<std::collections::HashMap<u64, (Box<str>, Arc<Statement>)>>>;
+static PARSED: [Parsed; PARSED_SHARDS] = [const { std::sync::Mutex::new(None) }; PARSED_SHARDS];
+
+/// `text` parsed as one statement, from the shards when it was before. A
+/// parse reads the text alone, so the statement is the same one each time.
+fn parsed(text: &str) -> Result<Arc<Statement>> {
+    let parse = || {
+        fenec_ql::parse_one(text)
+            .map(Arc::new)
+            .map_err(|e| Error::Query(e.to_string()))
+    };
+    if text.len() > PARSED_LONGEST {
+        return parse();
+    }
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    let shard = &PARSED[(hash % PARSED_SHARDS as u64) as usize];
+    let found = shard
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&hash))
+        .filter(|(t, _)| &**t == text)
+        .map(|(_, s)| Arc::clone(s));
+    if let Some(stmt) = found {
+        return Ok(stmt);
+    }
+    let stmt = parse()?;
+    let mut shard = shard.lock().unwrap_or_else(|e| e.into_inner());
+    let map = shard.get_or_insert_with(Default::default);
+    if map.len() >= PARSED_PER_SHARD {
+        map.clear();
+    }
+    map.insert(hash, (text.into(), Arc::clone(&stmt)));
+    Ok(stmt)
 }
 
 /// The body of `POST /batch`: **one per line**, each a `POST /query` body
@@ -867,9 +918,9 @@ pub fn parse_batch(body: &str) -> Result<Vec<(Statement, Vec<Value>)>> {
         if line.trim().is_empty() {
             continue;
         }
-        out.push(
-            parse_query(line).map_err(|e| Error::Query(format!("batch line {}: {e}", i + 1)))?,
-        );
+        let (stmt, params) =
+            parse_query(line).map_err(|e| Error::Query(format!("batch line {}: {e}", i + 1)))?;
+        out.push((Arc::unwrap_or_clone(stmt), params));
     }
     if out.is_empty() {
         return Err(Error::Query("empty batch".into()));

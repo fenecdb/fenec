@@ -1036,11 +1036,18 @@ fn send(
 #[derive(Default, Clone)]
 struct Prepared {
     sql: String,
+    /// The text read as FenecQL once, at `Parse`: a driver prepares a
+    /// statement to bind and run it again and again, and read at each
+    /// `Execute` the parser was a quarter of what the server did for a row
+    /// by id. `None` for a text `compat` answers or one that does not
+    /// parse, which `Execute` takes as it always did.
+    parsed: Option<Arc<Vec<Statement>>>,
 }
 
 #[derive(Default, Clone)]
 struct Portal {
     sql: String,
+    parsed: Option<Arc<Vec<Statement>>>,
     stmt_name: String,
     params: Vec<Value>,
 }
@@ -1350,6 +1357,7 @@ fn session(
                                 &mut tx,
                                 &mut lock,
                                 &sql,
+                                None,
                                 &[],
                                 &mut out,
                                 false,
@@ -1376,6 +1384,7 @@ fn session(
                                     &mut tx,
                                     &mut lock,
                                     piece,
+                                    None,
                                     &[],
                                     &mut out,
                                     false,
@@ -1408,16 +1417,21 @@ fn session(
                     let name = take_cstr(&m.body, &mut pos);
                     let sql = take_cstr(&m.body, &mut pos);
                     described_stmts.remove(&name);
-                    prepared.insert(name, Prepared { sql });
+                    let text = sql.trim();
+                    let parsed = compat::handle(text, &cfg, &|| false)
+                        .is_none()
+                        .then(|| parse(text).ok().map(Arc::new))
+                        .flatten();
+                    prepared.insert(name, Prepared { sql, parsed });
                     out.parse_complete();
                 }
                 b'B' => {
                     let mut pos = 0;
                     let portal = take_cstr(&m.body, &mut pos);
                     let stmt = take_cstr(&m.body, &mut pos);
-                    let sql = prepared
+                    let (sql, parsed) = prepared
                         .get(&stmt)
-                        .map(|p| p.sql.clone())
+                        .map(|p| (p.sql.clone(), p.parsed.clone()))
                         .unwrap_or_default();
 
                     // parameter format codes
@@ -1446,6 +1460,7 @@ fn session(
                         portal,
                         Portal {
                             sql,
+                            parsed,
                             stmt_name: stmt,
                             params: values,
                         },
@@ -1458,12 +1473,16 @@ fn session(
                     let kind = m.body.first().copied().unwrap_or(b'S');
                     pos += 1;
                     let name = take_cstr(&m.body, &mut pos);
-                    let sql = if kind == b'S' {
-                        prepared.get(&name).map(|p| p.sql.clone())
+                    let (sql, parsed) = if kind == b'S' {
+                        prepared
+                            .get(&name)
+                            .map(|p| (p.sql.clone(), p.parsed.clone()))
                     } else {
-                        portals.get(&name).map(|p| p.sql.clone())
-                    };
-                    let sql = sql.unwrap_or_default();
+                        portals
+                            .get(&name)
+                            .map(|p| (p.sql.clone(), p.parsed.clone()))
+                    }
+                    .unwrap_or_default();
                     // An error here is answered as Execute answers one: the
                     // client's Sync brings the ReadyForQuery. Sent here as well,
                     // it made two for one Sync, and libpq read every answer after
@@ -1480,7 +1499,14 @@ fn session(
                     };
                     let _gate = held.as_ref().map(|t| t.enter());
                     be.busy.store(true, Ordering::SeqCst);
-                    let shape = describe(&db, &cfg, &sql, &be, &lock);
+                    let shape = describe(
+                        &db,
+                        &cfg,
+                        &sql,
+                        parsed.as_deref().map(Vec::as_slice),
+                        &be,
+                        &lock,
+                    );
                     be.busy.store(false, Ordering::SeqCst);
                     be.canceled.store(false, Ordering::SeqCst);
                     let shape = match shape {
@@ -1509,7 +1535,11 @@ fn session(
                 b'E' => {
                     let mut pos = 0;
                     let portal = take_cstr(&m.body, &mut pos);
-                    let p = portals.get(&portal).cloned().unwrap_or_default();
+                    // Borrowed, not cloned: its text, its name and every
+                    // parameter -- a vector's components too -- were copied
+                    // at each Execute.
+                    let none = Portal::default();
+                    let p = portals.get(&portal).unwrap_or(&none);
                     // If RowDescription was already sent with Describe we do not
                     // repeat it (the protocol says so); when Describe was skipped
                     // it is sent anyway, so the client is not left without column
@@ -1537,8 +1567,19 @@ fn session(
                     be.busy.store(true, Ordering::SeqCst);
                     be.canceled.store(false, Ordering::SeqCst);
                     execute_into(
-                        &db, &held, frozen, &cfg, &be, &mut tx, &mut lock, &p.sql, &p.params,
-                        &mut out, already, pipeline,
+                        &db,
+                        &held,
+                        frozen,
+                        &cfg,
+                        &be,
+                        &mut tx,
+                        &mut lock,
+                        &p.sql,
+                        p.parsed.as_deref().map(Vec::as_slice),
+                        &p.params,
+                        &mut out,
+                        already,
+                        pipeline,
                     );
                     be.busy.store(false, Ordering::SeqCst);
                     be.canceled.store(false, Ordering::SeqCst);
@@ -1965,6 +2006,7 @@ fn describe(
     db: &RwLock<Database>,
     cfg: &Config,
     sql: &str,
+    parsed: Option<&[Statement]>,
     be: &Backend,
     lock: &Lock<'_>,
 ) -> Option<Shape> {
@@ -1975,8 +2017,13 @@ fn describe(
             columns: None,
         });
     }
-    // Compatibility-layer queries are pure and fixed; the shape is read from there.
-    if let Some(shim) = compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)) {
+    // Compatibility-layer queries are pure and fixed; the shape is read from
+    // there. A statement parsed when it was prepared is none of them.
+    let shim = match parsed {
+        Some(_) => None,
+        None => compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)),
+    };
+    if let Some(shim) = shim {
         return Some(match shim {
             compat::Shim::Rows { columns, .. } => Shape {
                 params: Vec::new(),
@@ -1999,16 +2046,23 @@ fn describe(
             },
         });
     }
-    let stmts = match parse(trimmed) {
-        Ok(s) => s,
-        // A syntax error is reported during Execute; we do not branch
-        // Describe off with a second error message.
-        Err(_) => {
-            return Some(Shape {
-                params: Vec::new(),
-                columns: None,
-            })
-        }
+    let read;
+    let stmts: &[Statement] = match parsed {
+        Some(s) => s,
+        None => match parse(trimmed) {
+            Ok(s) => {
+                read = s;
+                &read
+            }
+            // A syntax error is reported during Execute; we do not branch
+            // Describe off with a second error message.
+            Err(_) => {
+                return Some(Shape {
+                    params: Vec::new(),
+                    columns: None,
+                })
+            }
+        },
     };
     let nparams = stmts.iter().map(|s| s.max_param()).max().unwrap_or(0);
     // Types are not resolved: seeing `unspecified`, the client sends the
@@ -2323,6 +2377,7 @@ fn execute_into(
     tx: &mut TxState,
     lock: &mut Lock<'_>,
     sql: &str,
+    parsed: Option<&[Statement]>,
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
@@ -2339,6 +2394,7 @@ fn execute_into(
         tx,
         lock,
         sql,
+        parsed,
         params,
         out,
         row_desc_sent,
@@ -2406,6 +2462,7 @@ fn run_locked(
     tx: &mut TxState,
     lock: &mut Lock<'_>,
     sql: &str,
+    parsed: Option<&[Statement]>,
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
@@ -2437,8 +2494,13 @@ fn run_locked(
         };
     }
 
-    // The standard queries PostgreSQL clients send at startup
-    if let Some(shim) = compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)) {
+    // The standard queries PostgreSQL clients send at startup. A statement
+    // parsed when it was prepared is none of them.
+    let shim = match parsed {
+        Some(_) => None,
+        None => compat::handle(trimmed, cfg, &|| lock.read(db, |d| d.history().following)),
+    };
+    if let Some(shim) = shim {
         match shim {
             compat::Shim::Catalog => {
                 let answer = catalog_answer(db, lock, cfg, trimmed, params);
@@ -2469,12 +2531,19 @@ fn run_locked(
         return None;
     }
 
-    let stmts = match parse(trimmed) {
-        Ok(s) => s,
-        Err(e) => {
-            out.error("42601", &e.to_string());
-            return None;
-        }
+    let read;
+    let stmts: &[Statement] = match parsed {
+        Some(s) => s,
+        None => match parse(trimmed) {
+            Ok(s) => {
+                read = s;
+                &read
+            }
+            Err(e) => {
+                out.error("42601", &e.to_string());
+                return None;
+            }
+        },
     };
     if tx.open {
         tx.ran = true;
@@ -2498,7 +2567,7 @@ fn run_locked(
     // on, and the write lock is taken only to put the result in place (see
     // `Database::maintain`). In a transaction a `create index` is one of
     // its writes, and is put back with them.
-    if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts.as_slice() {
+    if let [stmt @ (Statement::CreateIndex { .. } | Statement::Compact(_))] = stmts {
         let alone = !tx.open && !pipeline && lock.hold.is_none();
         if alone || matches!(stmt, Statement::Compact(_)) {
             if frozen {

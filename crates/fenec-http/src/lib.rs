@@ -773,9 +773,14 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
-    let stmt = match scoped(who, stmt) {
-        Ok(s) => s,
-        Err(e) => return error_response(&e),
+    // The statement parsed is shared (`api::parse_query`): a scope is ANDed
+    // into a copy of it.
+    let stmt = match who.scope() {
+        None => stmt,
+        Some(_) => match scoped(who, Arc::unwrap_or_clone(stmt)) {
+            Ok(s) => Arc::new(s),
+            Err(e) => return error_response(&e),
+        },
     };
     if cfg.read_only && !stmt.is_read_only() {
         return Response::error(403, "the server is in read-only mode");
