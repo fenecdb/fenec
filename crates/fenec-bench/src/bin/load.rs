@@ -13,6 +13,8 @@
 //!   * pg wire, extended protocol: in a transaction, `put docs {category:
 //!     $1, score: $2, embed: $3}` bound once a row and run, a Sync every
 //!     1 000 rows -- as a driver's `executemany` pipelines them;
+//!   * pg wire, `COPY docs (..) FROM STDIN`: the rows as text, through the
+//!     `postgres` crate's `copy_in`, as it is sent to PostgreSQL below;
 //!   * HTTP: `POST /docs` with a JSON array of 1 000 rows;
 //!   * HTTP: `POST /batch` with 1 000 lines, each a `POST /query` body.
 //!
@@ -160,6 +162,13 @@ fn pg_extended(addr: &str, name: &str, rows: &[Row]) -> String {
     rate(t)
 }
 
+fn pg_copy(addr: &str, name: &str, rows: &[Row]) -> String {
+    let (host, port) = addr.split_once(':').unwrap();
+    let url = format!("host={host} port={port} user=fenec dbname=fenec");
+    let mut c = Client::connect(&url, NoTls).unwrap();
+    postgres_copy(&mut c, name, rows)
+}
+
 fn http_array(addr: &str, name: &str, rows: &[Row]) -> String {
     let mut c = wire::Http::connect(addr);
     let path = format!("/{name}");
@@ -282,13 +291,14 @@ fn main() {
         name
     };
     type Way<'a> = (&'a str, &'a dyn Fn(&str, &[Row]) -> String);
-    let ways: [Way; 4] = [
+    let ways: [Way; 5] = [
         ("pg wire, simple: put of 1 000", &|name, rows| {
             pg_simple(&pg_addr, name, rows)
         }),
         ("pg wire, extended, a transaction", &|name, rows| {
             pg_extended(&pg_addr, name, rows)
         }),
+        ("pg wire, COPY", &|name, rows| pg_copy(&pg_addr, name, rows)),
         ("HTTP, POST /docs, an array", &|name, rows| {
             http_array(&http_addr, name, rows)
         }),

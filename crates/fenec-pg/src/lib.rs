@@ -31,6 +31,7 @@ pub use fenec_catalog as catalog;
 /// the server runs the importer's `--follow` (`fenec-pg --follow`).
 pub use fenec_wire::{client, proto};
 pub mod compat;
+pub mod copy;
 pub mod mirror;
 /// SHA-256, HMAC, PBKDF2 and base64 now live in `fenec-http`, which checks
 /// JWTs with them; SCRAM uses them from there.

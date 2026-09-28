@@ -2416,3 +2416,418 @@ fn sparse_vectors_travel_in_pgvectors_text_form() {
         Some("inverted")
     );
 }
+
+// ------------------------------------------------------------------ COPY
+
+impl Client {
+    /// `COPY ... FROM STDIN`: the query, each chunk a CopyData, then a
+    /// CopyDone -- or a CopyFail saying `fail` -- and every answer up to
+    /// the ReadyForQuery, the CopyInResponse first when there was one.
+    fn copy(&mut self, sql: &str, chunks: &[&[u8]], fail: Option<&str>) -> Vec<Msg> {
+        self.send(sql);
+        let first = self.read_msg().unwrap();
+        if first.tag != b'G' {
+            let done = first.tag == b'Z';
+            let mut msgs = vec![first];
+            if !done {
+                msgs.extend(self.until_ready());
+            }
+            return msgs;
+        }
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(&framed(b'd', c));
+        }
+        match fail {
+            None => out.extend_from_slice(&framed(b'c', &[])),
+            Some(why) => {
+                let mut b = Vec::new();
+                cstr(&mut b, why);
+                out.extend_from_slice(&framed(b'f', &b));
+            }
+        }
+        self.s.write_all(&out).unwrap();
+        let mut msgs = vec![first];
+        msgs.extend(self.until_ready());
+        msgs
+    }
+}
+
+/// The CommandComplete's tag, or the error's code and message.
+fn outcome(msgs: &[Msg]) -> String {
+    match find(msgs, b'E') {
+        Some(e) => format!(
+            "{} {}",
+            e.sqlstate().unwrap_or_default(),
+            e.message().unwrap_or_default()
+        ),
+        None => find(msgs, b'C').map(|m| m.tag_text()).unwrap_or_default(),
+    }
+}
+
+fn rows_of(c: &mut Client, sql: &str) -> Vec<Vec<Option<String>>> {
+    c.simple(sql)
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect()
+}
+
+fn cells(rows: &[&[Option<&str>]]) -> Vec<Vec<Option<String>>> {
+    rows.iter()
+        .map(|r| r.iter().map(|c| c.map(str::to_string)).collect())
+        .collect()
+}
+
+/// psql's `\copy` and psycopg's `copy`: text rows cut anywhere across the
+/// CopyData messages, `\N` for NULL and backslash escapes, each cell read
+/// as its field's type, a vector as pgvector writes one.
+#[test]
+fn copy_loads_text_rows_as_their_fields() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection docs (name text, n int, score float, ok bool, \
+         tags [text], e vector<2> @hnsw(cosine))",
+    );
+    let r = c.copy(
+        "COPY docs (name, n, score, ok, tags, e) FROM STDIN",
+        &[
+            b"first\t1\t0.5\tt\t{a,b}\t[1,0]\nsec",
+            b"ond\\tline\t2\t\\N\tfalse\t{}\t[0,1]\n",
+            b"third\t3\t-2.25\tno\t{\"x y\",NULL}\t{0.5, 0.5}\n\\.\n",
+        ],
+        None,
+    );
+    let g = &r[0];
+    assert_eq!(g.tag, b'G', "{}", outcome(&r));
+    assert_eq!(g.body[0], 0, "the rows are text");
+    assert_eq!(i16::from_be_bytes([g.body[1], g.body[2]]), 6);
+    assert_eq!(outcome(&r), "COPY 3");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(
+        rows_of(&mut c, "get docs select id, name, n, score, ok, tags"),
+        cells(&[
+            &[
+                Some("1"),
+                Some("first"),
+                Some("1"),
+                Some("0.5"),
+                Some("t"),
+                Some("{\"a\",\"b\"}")
+            ],
+            &[
+                Some("2"),
+                Some("second\tline"),
+                Some("2"),
+                None,
+                Some("f"),
+                Some("{}")
+            ],
+            &[
+                Some("3"),
+                Some("third"),
+                Some("3"),
+                Some("-2.25"),
+                Some("f"),
+                Some("{\"x y\",NULL}")
+            ],
+        ])
+    );
+    // The vectors went into the graph.
+    assert_eq!(
+        rows_of(&mut c, "get docs select name near e [0, 1] limit 1"),
+        cells(&[&[Some("second\tline"), Some("1")]])
+    );
+
+    // With no column list the columns are `id` and every field, as the
+    // catalog lists them; a NULL id is handed out, a given one kept.
+    c.simple("create collection t (name text, n int)");
+    let r = c.copy(
+        "copy t from stdin;",
+        &[b"10\tten\t10\n\\N\televen\t\\N\n"],
+        None,
+    );
+    assert_eq!(outcome(&r), "COPY 2");
+    assert_eq!(
+        rows_of(&mut c, "get t select id, name, n"),
+        cells(&[
+            &[Some("10"), Some("ten"), Some("10")],
+            &[Some("11"), Some("eleven"), None],
+        ])
+    );
+}
+
+/// CSV as PostgreSQL reads it: a header line passed over, quoted fields
+/// holding the delimiter, a doubled quote and a newline, and an unquoted
+/// empty field NULL where a quoted one is an empty string.
+#[test]
+fn copy_loads_csv_rows() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text, note text)");
+    let r = c.copy(
+        "COPY t (name, note) FROM STDIN WITH (FORMAT csv, HEADER true)",
+        &[
+            b"name,note\n\"a, b\",\"said \"\"hi\"\"\"\n\"two\nlines\",",
+            b"\n,\"\"\n",
+        ],
+        None,
+    );
+    assert_eq!(outcome(&r), "COPY 3");
+    assert_eq!(
+        rows_of(&mut c, "get t select name, note"),
+        cells(&[
+            &[Some("a, b"), Some("said \"hi\"")],
+            &[Some("two\nlines"), None],
+            &[None, Some("")],
+        ])
+    );
+    // psql's older spelling, and a last row with no newline after it.
+    let r = c.copy(
+        "COPY t (name, note) FROM STDIN WITH CSV DELIMITER AS ';'",
+        &[b"x;1\ny;2"],
+        None,
+    );
+    assert_eq!(outcome(&r), "COPY 2");
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("5")]]));
+}
+
+/// A COPY is one command: a bad row, or the client's CopyFail, puts back
+/// every row -- those of the puts it made before, which held the database
+/// as a transaction holds it, too. The error is answered at once, what the
+/// client still streams is dropped, and the session goes on.
+#[test]
+fn a_copy_that_fails_leaves_nothing() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text, n int)");
+    // Past the first put, which takes the block and holds it.
+    let rows: String = (0..10_050).map(|i| format!("r{i}\t{i}\n")).collect();
+    let r = c.copy(
+        "COPY t (name, n) FROM STDIN",
+        &[rows.as_bytes(), b"bad\tnot a number\n", b"after\t1\n"],
+        None,
+    );
+    assert_eq!(
+        outcome(&r),
+        "22P02 COPY t, line 10051, column n: invalid input syntax for type bigint: \"not a number\""
+    );
+    assert_eq!(status(&r), b'I');
+    assert_eq!(rows_of(&mut other, "get t count"), cells(&[&[Some("0")]]));
+    // The CopyDone the client sent after it was dropped, not answered.
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("0")]]));
+
+    let r = c.copy(
+        "COPY t (name, n) FROM STDIN",
+        &[rows.as_bytes()],
+        Some("the file went away"),
+    );
+    assert_eq!(
+        outcome(&r),
+        "57014 COPY from stdin failed: the file went away"
+    );
+    // A row of too few or too many cells.
+    let r = c.copy("COPY t (name, n) FROM STDIN", &[b"a\t1\nb\n"], None);
+    assert_eq!(
+        outcome(&r),
+        "22P04 COPY t, line 2: missing data for column \"n\""
+    );
+    let r = c.copy("COPY t (name) FROM STDIN", &[b"a\t1\n"], None);
+    assert_eq!(
+        outcome(&r),
+        "22P04 COPY t, line 1: extra data after last expected column"
+    );
+    // Nothing was left held: another session writes.
+    let r = other.simple("put t {name: \"landed\", n: 1}");
+    assert_eq!(outcome(&r), "INSERT 0 1");
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("1")]]));
+
+    // Past the first put, the rows all land at the CopyDone.
+    let r = c.copy("COPY t (name, n) FROM STDIN", &[rows.as_bytes()], None);
+    assert_eq!(outcome(&r), "COPY 10050");
+    assert_eq!(
+        rows_of(&mut other, "get t count"),
+        cells(&[&[Some("10051")]])
+    );
+}
+
+/// What a COPY cannot do is refused before the client sends a row, with
+/// what to do instead.
+#[test]
+fn copy_refuses_what_it_cannot_do() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    for (sql, code) in [
+        ("COPY nope FROM STDIN", "42P01"),
+        ("COPY t (name, nope) FROM STDIN", "42703"),
+        ("COPY t TO STDOUT", "0A000"),
+        ("COPY t FROM '/etc/passwd'", "0A000"),
+        ("COPY t FROM STDIN (FORMAT binary)", "0A000"),
+        ("COPY t FROM STDIN; put t {name: \"x\"}", "0A000"),
+    ] {
+        let r = c.copy(sql, &[], None);
+        assert_eq!(r[0].tag, b'E', "{sql}");
+        assert_eq!(r[0].sqlstate().as_deref(), Some(code), "{sql}");
+        assert_eq!(status(&r), b'I');
+    }
+    // Its rows follow the query that asks for them: after another
+    // statement it is refused.
+    let r = c.simple("BEGIN; COPY t FROM STDIN");
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().as_deref(), Some("0A000"));
+    assert_eq!(status(&r), b'I');
+
+    c.simple("BEGIN READ ONLY");
+    let r = c.copy("COPY t FROM STDIN", &[], None);
+    assert_eq!(r[0].sqlstate().as_deref(), Some("25006"));
+    c.simple("ROLLBACK");
+    assert!(names(&mut c).is_empty());
+}
+
+impl Client {
+    /// A COPY run as tokio-postgres runs one: Parse, Bind, Execute and a
+    /// Sync, the rows once the CopyInResponse is in, then a CopyDone and
+    /// another Sync. Every answer up to the ReadyForQuery that ends it.
+    fn copy_extended(&mut self, sql: &str, chunks: &[&[u8]]) -> Vec<Msg> {
+        let mut out = Client::step(sql);
+        out.extend_from_slice(&framed(b'S', &[]));
+        self.s.write_all(&out).unwrap();
+        let mut msgs = Vec::new();
+        loop {
+            let m = self.read_msg().unwrap();
+            let (copying, ready) = (m.tag == b'G', m.tag == b'Z');
+            msgs.push(m);
+            if ready {
+                return msgs;
+            }
+            if copying {
+                break;
+            }
+        }
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(&framed(b'd', c));
+        }
+        out.extend_from_slice(&framed(b'c', &[]));
+        out.extend_from_slice(&framed(b'S', &[]));
+        self.s.write_all(&out).unwrap();
+        msgs.extend(self.until_ready());
+        msgs
+    }
+}
+
+/// A COPY run through Execute, as tokio-postgres runs one: the Sync it
+/// sends behind the Execute means nothing during the COPY, and the one
+/// after the CopyDone ends it. An error skips the rest to that Sync.
+#[test]
+fn copy_runs_through_execute_as_tokio_postgres_sends_it() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text, n int)");
+    let rows: String = (0..10_050).map(|i| format!("r{i}\t{i}\n")).collect();
+    let r = c.copy_extended("COPY t (name, n) FROM STDIN", &[rows.as_bytes()]);
+    assert_eq!(tags(&r), ['1', '2', 'G', 'C'], "{}", outcome(&r));
+    assert_eq!(outcome(&r), "COPY 10050");
+    assert_eq!(status(&r), b'I');
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("10050")]]));
+
+    let r = c.copy_extended(
+        "COPY t (name, n) FROM STDIN",
+        &[rows.as_bytes(), b"bad\tx\n", b"after\t1\n"],
+    );
+    assert_eq!(tags(&r), ['1', '2', 'G', 'E']);
+    assert_eq!(find(&r, b'E').unwrap().sqlstate().as_deref(), Some("22P02"));
+    assert_eq!(status(&r), b'I');
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("10050")]]));
+
+    // Refused before a row, the Sync behind the Execute ends it.
+    let r = c.copy_extended("COPY nope FROM STDIN", &[]);
+    assert_eq!(tags(&r), ['1', '2', 'E']);
+    assert_eq!(status(&r), b'I');
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("10050")]]));
+}
+
+/// In a transaction a COPY's rows are its writes: put back with it, or
+/// landed at its COMMIT; and a COPY in a failed transaction is refused.
+#[test]
+fn a_copy_in_a_transaction_is_its_writes() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+
+    c.simple("BEGIN");
+    let r = c.copy("COPY t (name) FROM STDIN", &[b"a\nb\n"], None);
+    assert_eq!(outcome(&r), "COPY 2");
+    assert_eq!(status(&r), b'T');
+    assert_eq!(names(&mut c), ["a", "b"]);
+    c.simple("ROLLBACK");
+    assert!(names(&mut c).is_empty());
+
+    c.simple("BEGIN");
+    c.simple("put t {name: \"first\"}");
+    c.copy("COPY t (name) FROM STDIN", &[b"c\n"], None);
+    other.send("put t {name: \"late\"}");
+    assert!(
+        !answers_within(&mut other, 300),
+        "a write went past a transaction's COPY"
+    );
+    c.simple("COMMIT");
+    other.until_ready();
+    assert_eq!(names(&mut c), ["first", "c", "late"]);
+
+    // A failed COPY fails its transaction, and so does anything after it.
+    c.simple("BEGIN");
+    let r = c.copy("COPY t (name) FROM STDIN", &[b"x\ty\n"], None);
+    assert_eq!(
+        r.iter()
+            .find(|m| m.tag == b'E')
+            .unwrap()
+            .sqlstate()
+            .as_deref(),
+        Some("22P04")
+    );
+    assert_eq!(status(&r), b'E');
+    let r = c.copy("COPY t (name) FROM STDIN", &[b"z\n"], None);
+    assert_eq!(r[0].sqlstate().as_deref(), Some("25P02"));
+    c.simple("ROLLBACK");
+    assert_eq!(names(&mut c), ["first", "c", "late"]);
+}
+
+/// A COPY holding the database -- past its first put -- is bounded as a
+/// transaction is: a client that stops sending for longer than
+/// `idle_in_transaction` has its rows put back and its session closed.
+#[test]
+fn a_copy_that_stalls_holding_the_database_is_put_back() {
+    let h = start(
+        Config {
+            idle_in_transaction: Some(Duration::from_millis(300)),
+            ..Config::default()
+        },
+        bare_db(),
+    );
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let mut other = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    c.send("COPY t (name) FROM STDIN");
+    assert_eq!(c.read_msg().unwrap().tag, b'G');
+    let rows: String = (0..10_001).map(|i| format!("r{i}\n")).collect();
+    c.s.write_all(&framed(b'd', rows.as_bytes())).unwrap();
+    let e = c.read_msg().unwrap();
+    assert_eq!(e.sqlstate().as_deref(), Some("25P03"), "{:?}", e.message());
+    assert!(c.read_msg().is_err(), "the connection is closed");
+    assert_eq!(rows_of(&mut other, "get t count"), cells(&[&[Some("0")]]));
+
+    // Stopped inside a message, as well.
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.send("COPY t (name) FROM STDIN");
+    assert_eq!(c.read_msg().unwrap().tag, b'G');
+    let mut cut = framed(b'd', rows.as_bytes());
+    cut.extend_from_slice(&framed(b'd', b"a\nb\n")[..7]);
+    c.s.write_all(&cut).unwrap();
+    let e = c.read_msg().unwrap();
+    assert_eq!(e.sqlstate().as_deref(), Some("25P03"), "{:?}", e.message());
+    assert_eq!(rows_of(&mut other, "get t count"), cells(&[&[Some("0")]]));
+}

@@ -1,6 +1,6 @@
 <!--
 title: PostgreSQL server — fenecdb
-description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation, the catalog tools read, and running it in a container.
+description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation, COPY, the catalog tools read, and running it in a container.
 -->
 
 <h1>PostgreSQL server</h1>
@@ -309,6 +309,52 @@ psycopg 3, reading answers it did not expect, fails with <i>cannot exit
 pipeline mode while busy</i>. What ran <i>before</i> the error in the
 pipeline is put back as well: a pipeline is one block up to its
 <code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
+
+<h2 id="copy">Loading rows: COPY</h2>
+
+<p><code>COPY docs [(col, ...)] FROM STDIN</code> loads rows the way a
+PostgreSQL client loads a table: psql's <code>\copy</code>, psycopg's
+<code>cursor.copy</code>, JDBC's <code>CopyManager</code> and the
+<code>postgres</code> crate's <code>copy_in</code> all work, in the text format
+or in CSV with its options (<code>HEADER</code>, <code>DELIMITER</code>,
+<code>NULL</code>, <code>QUOTE</code>, <code>ESCAPE</code>).</p>
+
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
+  -c "\copy docs (title, year, embed) from 'docs.csv' with (format csv, header)"
+# COPY 30000</pre>
+
+<p>Without a column list the columns are <code>id</code> and then every field
+in the order the schema declares them, as <code>\d</code> lists them; a
+<code>NULL</code> or missing <code>id</code> is handed out as a
+<code>put</code>'s would be. Each cell is read as its field's type: a vector
+as pgvector writes one, <code>[1,2,3]</code>, or as an array,
+<code>{1,2,3}</code>; a list as an array, <code>{a,b}</code>, or JSON; a
+sparse vector as <code>{1:0.5}/30522</code>; <code>bytes</code> as
+<code>\x</code> and hexadecimal digits; a timestamp in any form a
+<code>put</code> takes.</p>
+
+<p>A COPY is one command, as in PostgreSQL. Its rows go in as puts of 10 000
+— each links its vectors on every core — into one block, so a bad row, a
+cancel or the client's <code>CopyFail</code> puts back every row, and in a
+transaction the rows are the transaction's writes. Past its first put the
+COPY holds the database as a transaction does, and a client that stops
+sending for longer than <code>--idle-in-transaction-timeout</code> has its
+rows put back. An error names the line and the column
+(<code>COPY docs, line 3, column year: invalid input syntax for type
+bigint: "n/a"</code>, <code>22P02</code>; a row of too few or too many cells,
+<code>22P04</code>) and is sent at once; what the client still streams is
+dropped.</p>
+
+<p>Refused with <code>0A000</code>, before a row is sent: <code>COPY ...
+TO</code> (read the rows with a query), a file or a program on the server's
+side (<code>\copy</code> sends the file from the client), the
+<code>binary</code> format — which asyncpg's
+<code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> send, so
+there use the text format — and a COPY among other statements in one query.
+100 000 rows of a text, an int and a 128-dim vector load at 17 200 rows/s with
+the HNSW graph kept as they land and 113 000 without, against 5 300 and 106 000
+sent a <code>put</code> a row, as a driver's <code>executemany</code> sends
+them (<code>make load-bench</code>).</p>
 
 <h2 id="catalog">The catalog</h2>
 

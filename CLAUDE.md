@@ -26,7 +26,7 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
-make drivers-test  # psycopg + SQLAlchemy over the pg wire: nested transactions (Docker)
+make drivers-test  # psycopg + SQLAlchemy over the pg wire: nested transactions, COPY (Docker)
 make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -221,6 +221,23 @@ and kept one waiting 34 ms; SQLite's WAL reads the last commit meanwhile,
 lock: 253 -> 537 writes/s from 1 to 16 writers, SQLite's 270 -> 270. Two processes opening the same file corrupts it,
 which is why `fenec-http` is a second listener inside `fenec-pg`, never
 its own binary.
+
+**`COPY FROM STDIN` is one block, put 10 000 rows at a time**
+(`fenec-pg/src/copy.rs`, `server::copy_in`). psql's `\copy`, psycopg's
+`copy` and JDBC's `CopyManager` send it as a simple query, tokio-postgres
+through Execute with a Sync behind it, which means nothing until the
+CopyDone -- PostgreSQL ignores a Sync during a COPY as well. The rows go in
+as puts of 10 000, or of 32 MB of text, each linking its vectors on every
+core: the first with more to come takes the block and holds the lock
+between messages as a transaction does, its waits for the client bounded as
+a transaction's; a simple query's block lands at the CopyDone, an
+Execute's at its Sync. An error, a bad row, a cancel or the client's
+CopyFail is answered at once and puts every row back, and the session loop
+drops what the client still streams, as PostgreSQL does. The COPY counts
+as one statement however many puts it made (`run_copy`). Text and CSV
+only: binary -- asyncpg's `copy_records_to_table`, pgx's `CopyFrom` -- is
+refused, `0A000`. 100 000 rows x 128: 17.2k rows/s with the graph kept and
+113k without, against 5.3k and 106k a put a row (`make load-bench`).
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -1187,7 +1204,7 @@ wire to what psycopg and SQLAlchemy send (`integrations/drivers`: a nested
 transaction is a savepoint to both) -- `make python-test` runs LangChain's
 standard suite and the tests LlamaIndex's integrations run from a
 `python:3.13` container against a fenec-pg started here, `make
-drivers-test` the drivers' nested transactions the same way, `make
+drivers-test` the drivers' nested transactions and psycopg's COPY the same way, `make
 react-test` runs the hook against a real replica, and CI runs all three
 (`integrations`). CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):

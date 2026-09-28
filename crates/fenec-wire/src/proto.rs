@@ -191,6 +191,18 @@ impl Writer {
         self.rows
     }
 
+    /// CopyInResponse: the client streams CopyData until CopyDone, each of
+    /// its `columns` in text.
+    pub fn copy_in_response(&mut self, columns: usize) {
+        self.msg(b'G', |b| {
+            b.push(0);
+            b.extend_from_slice(&(columns as i16).to_be_bytes());
+            for _ in 0..columns {
+                b.extend_from_slice(&0i16.to_be_bytes());
+            }
+        });
+    }
+
     pub fn empty_query(&mut self) {
         self.msg(b'I', |_| {});
     }
