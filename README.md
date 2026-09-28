@@ -112,7 +112,7 @@ const db = await Fenec.open('./fenec.wasm');
 ```
 
 421 KB of WebAssembly — 164 KB brotli (`-q 11`) over the wire, client included — no
-wasm-bindgen, no build step. The module alone is 139 KB of that, and 107 KB built
+wasm-bindgen, no build step. The module alone is 140 KB of that, and 107 KB built
 without the four indexes for a page that uses none of them (`make wasm FEATURES=none`,
 or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
