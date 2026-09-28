@@ -334,10 +334,17 @@ pipeline is put back as well: a pipeline is one block up to its
 
 <p><code>COPY docs [(col, ...)] FROM STDIN</code> loads rows the way a
 PostgreSQL client loads a table: psql's <code>\copy</code>, psycopg's
-<code>cursor.copy</code>, JDBC's <code>CopyManager</code> and the
-<code>postgres</code> crate's <code>copy_in</code> all work, in the text format
-or in CSV with its options (<code>HEADER</code>, <code>DELIMITER</code>,
-<code>NULL</code>, <code>QUOTE</code>, <code>ESCAPE</code>).</p>
+<code>cursor.copy</code>, JDBC's <code>CopyManager</code>, the
+<code>postgres</code> crate's <code>copy_in</code>, asyncpg's
+<code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> all work,
+in the text format, in CSV with its options (<code>HEADER</code>,
+<code>DELIMITER</code>, <code>NULL</code>, <code>QUOTE</code>,
+<code>ESCAPE</code>), and in PostgreSQL's binary format, each cell as its
+column's type sends it. asyncpg and pgx learn those types first by asking
+for <code>SELECT</code> the columns <code>FROM</code> the collection, which
+is read as the <code>get</code> it is — as is any plain <code>SELECT</code>
+of columns, or <code>*</code>, from one collection, with a
+<code>LIMIT</code> or none.</p>
 
 <pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
   -c "\copy docs (title, year, embed) from 'docs.csv' with (format csv, header)"
@@ -367,10 +374,8 @@ dropped.</p>
 
 <p>Refused with <code>0A000</code>, before a row is sent: <code>COPY ...
 TO</code> (read the rows with a query), a file or a program on the server's
-side (<code>\copy</code> sends the file from the client), the
-<code>binary</code> format — which asyncpg's
-<code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> send, so
-there use the text format — and a COPY among other statements in one query.
+side (<code>\copy</code> sends the file from the client), and a COPY among
+other statements in one query.
 100 000 rows of a text, an int and a 128-dim vector load at 17 600 rows/s with
 the HNSW graph kept as they land and 171 000 without, against 17 200 and
 152 000 sent a <code>put</code> a row in a transaction, as a driver's

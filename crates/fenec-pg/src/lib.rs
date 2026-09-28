@@ -40,6 +40,7 @@ pub mod params;
 pub use fenec_http::crypto;
 pub mod scram;
 pub mod server;
+pub mod sql;
 
 pub use server::{to_pg_text, Config, Server};
 

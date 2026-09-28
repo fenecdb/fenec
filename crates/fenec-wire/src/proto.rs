@@ -203,13 +203,13 @@ impl Writer {
     }
 
     /// CopyInResponse: the client streams CopyData until CopyDone, each of
-    /// its `columns` in text.
-    pub fn copy_in_response(&mut self, columns: usize) {
+    /// its `columns` in text, or every one in binary.
+    pub fn copy_in_response(&mut self, columns: usize, binary: bool) {
         self.msg(b'G', |b| {
-            b.push(0);
+            b.push(binary as u8);
             b.extend_from_slice(&(columns as i16).to_be_bytes());
             for _ in 0..columns {
-                b.extend_from_slice(&0i16.to_be_bytes());
+                b.extend_from_slice(&(binary as i16).to_be_bytes());
             }
         });
     }

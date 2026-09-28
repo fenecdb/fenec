@@ -95,3 +95,27 @@ func TestBatchesAndTransactionsLandWhole(t *testing.T) {
 		t.Fatalf("%v %v", got, err)
 	}
 }
+
+func TestCopyFromGoesInBinary(t *testing.T) {
+	c, coll := connect(t)
+	ctx := context.Background()
+	at := time.Date(2026, 9, 28, 12, 30, 0, 0, time.UTC)
+	rows := make([][]any, 1000)
+	for i := range rows {
+		rows[i] = []any{fmt.Sprintf("r%d", i), int64(i), float64(i) / 4, i%2 == 0, at}
+	}
+	n, err := c.CopyFrom(ctx, pgx.Identifier{coll}, []string{"name", "n", "score", "ok", "at"}, pgx.CopyFromRows(rows))
+	if err != nil || n != 1000 {
+		t.Fatalf("%v %v", n, err)
+	}
+	var (
+		name  string
+		score float64
+		ok    bool
+		when  time.Time
+	)
+	err = c.QueryRow(ctx, "get "+coll+" select name, score, ok, at where n = $1", 7).Scan(&name, &score, &ok, &when)
+	if err != nil || name != "r7" || score != 1.75 || ok || !when.Equal(at) {
+		t.Fatalf("%v %v %v %v %v", name, score, ok, when, err)
+	}
+}

@@ -77,3 +77,17 @@ def test_copy_to_table_in_text():
         assert await c.fetchval(f"get {t} count") == 2
 
     run(test)
+
+
+def test_copy_records_to_table_in_binary():
+    async def test(c, t):
+        at = datetime(2026, 9, 28, 12, 30, tzinfo=timezone.utc)
+        records = [(f"r{i}", i, i / 4, i % 2 == 0, at) for i in range(1000)]
+        res = await c.copy_records_to_table(
+            t, records=records, columns=["name", "n", "score", "ok", "at"]
+        )
+        assert res == "COPY 1000"
+        row = await c.fetchrow(f"get {t} select name, n, score, ok, at where n = $1", 7)
+        assert tuple(row) == ("r7", 7, 1.75, False, at)
+
+    run(test)
