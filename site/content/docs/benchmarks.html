@@ -194,6 +194,61 @@ machine on the same Mac, where its empty query alone takes 0.134 ms. The
 network, not the engine, is most of that difference, and the bench prints
 the empty query beside the rest so that it reads that way.</p>
 
+<h2 id="loading">Loading rows</h2>
+
+<p>What loading 100 000 rows of a text, an int and a 128-dim vector costs,
+each way a client can send them, into an empty collection: with the
+vector's HNSW graph kept as the rows land, and with no vector index.
+<code>fenec-pg</code> on loopback, 1 000 rows a request — a
+<code>put</code> of 1 000 over the simple protocol; a row a statement over
+the extended protocol in a transaction, a Sync every 1 000, as a driver's
+<code>executemany</code> pipelines them; <code>COPY ... FROM STDIN</code> in
+the text format; <code>POST /docs</code> with a JSON array; a
+<code>POST /batch</code> of single puts. PostgreSQL with pgvector is sent
+the same rows by <code>COPY</code> and by <code>INSERT</code>s of 1 000,
+with <code>synchronous_commit = off</code>, as fenec-pg's writes reach the
+disk within <code>--sync 250</code>. Median of three runs on an M1.</p>
+
+<pre data-lang="bash">make pgvector-up      # optional: PostgreSQL's arm, skipped without it
+make load-bench
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">HNSW kept, rows/s</th><th class="n">no vector index</th></tr></thead>
+<tbody>
+<tr><td>in process, <code>put</code> of 1 000</td><td class="n">20 100</td><td class="n">947 000</td></tr>
+<tr><td>pg wire, <code>COPY</code></td><td class="n"><b>17 600</b></td><td class="n">171 000</td></tr>
+<tr><td>pg wire, a row a statement, in a transaction</td><td class="n">17 200</td><td class="n">152 000</td></tr>
+<tr><td>pg wire, simple <code>put</code> of 1 000</td><td class="n">17 000</td><td class="n">105 000</td></tr>
+<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">17 000</td><td class="n"><b>198 000</b></td></tr>
+<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">16 500</td><td class="n">154 000</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>COPY</code></td><td class="n">434</td><td class="n">62 000</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>INSERT</code> of 1 000</td><td class="n">424</td><td class="n">37 700</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><b>With the graph kept, the graph is the cost.</b> Every way lands
+within a fifth of linking the vectors in process. A transaction's, a
+pipeline's, a <code>/batch</code>'s and a <code>COPY</code>'s vectors are
+linked together, 512 at a time on every core, whether they came a row a
+statement or 10 000 a put, so a driver's <code>executemany</code> goes as
+fast as a <code>COPY</code>: linked a row at a time, as they were before,
+the same rows went in at 5 400 rows/s. PostgreSQL's HNSW index takes each
+row on its own, on one core.</p>
+
+<p><b>Without it, the vectors' text is.</b> Each row's vector is 128
+numbers written out, read straight into its <code>f32</code>s wherever it
+comes from — a JSON array, a pg parameter, a <code>COPY</code> cell — in
+one pass that finds each number's end: through a JSON value a number, the
+same rows went in over HTTP at 123 000 rows/s. The simple protocol reads
+them as FenecQL literals, with the rest of the statement's text, and is the
+slowest of the ways, still 1.7× PostgreSQL's <code>COPY</code>. In process
+the rows arrive parsed, which is what the rest can at most reach.
+PostgreSQL answers from inside Docker's virtual machine on the same Mac,
+whose network carries every byte.</p>
+
 <h2>Scale measurement</h2>
 
 <p>Apple M-series, single thread, <code>--release</code>. 100 000 documents ×

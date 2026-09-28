@@ -239,9 +239,10 @@ CopyFail is answered at once and puts every row back, and the session loop
 drops what the client still streams, as PostgreSQL does. The COPY counts
 as one statement however many puts it made (`run_copy`). Text and CSV
 only: binary -- asyncpg's `copy_records_to_table`, pgx's `CopyFrom` -- is
-refused, `0A000`. 100 000 rows x 128: 18.2k rows/s with the graph kept and
-184k without, against 16.9k and 160k a put a row in a transaction (`make
-load-bench`).
+refused, `0A000`. 100 000 rows x 128: 17.6k rows/s with the graph kept and
+171k without, against 17.2k and 152k a put a row in a transaction, and
+PostgreSQL's own COPY 434 and 62k (`make load-bench`, the median of three;
+`site/content/docs/benchmarks.html#loading` has every way).
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
