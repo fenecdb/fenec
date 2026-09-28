@@ -2665,7 +2665,7 @@ fn copy_refuses_what_it_cannot_do() {
         ("COPY t (name, nope) FROM STDIN", "42703"),
         ("COPY t TO STDOUT", "0A000"),
         ("COPY t FROM '/etc/passwd'", "0A000"),
-        ("COPY t FROM STDIN (FORMAT binary)", "0A000"),
+        ("COPY t FROM STDIN (FORMAT binary, HEADER)", "42601"),
         ("COPY t FROM STDIN; put t {name: \"x\"}", "0A000"),
     ] {
         let r = c.copy(sql, &[], None);
