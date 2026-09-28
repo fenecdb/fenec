@@ -2942,8 +2942,16 @@ fn results_go_in_the_binary_format_asked_for() {
             // A million microseconds past 2000-01-01.
             Some(1_000_000i64.to_be_bytes().to_vec()),
             Some(b"hi".to_vec()),
-            // A vector goes as its text, which its column's type is.
-            Some(b"[1,0.5]".to_vec()),
+            // A vector as pgvector's `vector_send` writes it: the
+            // dimension, a zero, then each component's f32.
+            Some(
+                [
+                    &[0, 2, 0, 0][..],
+                    &1f32.to_be_bytes(),
+                    &0.5f32.to_be_bytes()
+                ]
+                .concat()
+            ),
         ]
     );
     let r = c.with_formats("get t select name, n, at where name = $1", &["b"], &[1]);
@@ -3059,7 +3067,7 @@ fn parameters_take_the_types_their_places_name() {
             "put t {name: $1, n: $2, score: $3, ok: $4, at: $5, e: $6}",
             &[]
         ),
-        [25, 20, 701, 16, 1184, 25]
+        [25, 20, 701, 16, 1184, 16_400]
     );
     assert_eq!(
         c.parameter_types("get t where n > $1 and id = $2", &[]),
@@ -3096,6 +3104,95 @@ fn parameters_take_the_types_their_places_name() {
             Some("2000-01-01 00:00:01+00")
         ]])
     );
+}
+
+/// A vector, a `vector<N, f16>` and a sparse vector are pgvector's
+/// `vector`, `halfvec` and `sparsevec`, by the oids the catalog names them
+/// with -- which pgvector's clients look up by name to register their
+/// codecs -- and go both ways in pgvector's binary formats.
+#[test]
+fn vectors_go_as_pgvectors_types() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection t (name text, e vector<2> @hnsw(cosine), h vector<2, f16>, s sparse<5> @inverted)",
+    );
+    let r = c.with_formats("get t select e, h, s", &[], &[]);
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        [
+            ("e".to_string(), 16_400),
+            ("h".to_string(), 16_401),
+            ("s".to_string(), 16_402)
+        ]
+    );
+    assert_eq!(
+        rows_of(
+            &mut c,
+            "SELECT to_regtype('vector')::oid, to_regtype('halfvec')::oid, to_regtype('sparsevec')::oid"
+        ),
+        cells(&[&[Some("16400"), Some("16401"), Some("16402")]])
+    );
+
+    // In as pgvector's clients send them: the dimension and a zero, then
+    // each component -- an f32, or a binary16 -- and for a sparse vector
+    // the dimension, the count, a zero, the indices from 0, the weights.
+    assert_eq!(
+        c.parameter_types("put t {name: $1, e: $2, h: $3, s: $4}", &[]),
+        [25, 16_400, 16_401, 16_402]
+    );
+    let e = [
+        &[0, 2, 0, 0][..],
+        &1f32.to_be_bytes(),
+        &0.5f32.to_be_bytes(),
+    ]
+    .concat();
+    let half = vec![0, 2, 0, 0, 0x3c, 0, 0x38, 0];
+    let sparse = [
+        &5i32.to_be_bytes()[..],
+        &2i32.to_be_bytes(),
+        &[0; 4],
+        &2i32.to_be_bytes(),
+        &4i32.to_be_bytes(),
+        &1f32.to_be_bytes(),
+        &0.5f32.to_be_bytes(),
+    ]
+    .concat();
+    let r = c.run_binary(&[b"a".to_vec(), e.clone(), half.clone(), sparse.clone()]);
+    assert_eq!(outcome(&r), "INSERT 0 1");
+    assert_eq!(
+        rows_of(&mut c, "get t select e, h, s"),
+        cells(&[&[Some("[1,0.5]"), Some("[1,0.5]"), Some("{3:1,5:0.5}/5")]])
+    );
+    // Out the same bytes.
+    let r = c.with_formats("get t select e, h, s", &[], &[1]);
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [Some(e.clone()), Some(half), Some(sparse.clone())]
+    );
+
+    // A query vector is its field's type.
+    for (q, v) in [("near e $1", e.clone()), ("near s $1", sparse)] {
+        let sql = format!("get t select name {q} limit 1");
+        let oid = if q.ends_with("e $1") { 16_400 } else { 16_402 };
+        assert_eq!(c.parameter_types(&sql, &[]), [oid]);
+        let r = c.run_binary(&[v]);
+        assert_eq!(find(&r, b'D').unwrap().cells()[0].as_deref(), Some("a"));
+    }
+
+    // Refused as pgvector refuses it, and the session goes on.
+    c.parameter_types("put t {e: $1}", &[]);
+    let nan = [
+        &[0, 2, 0, 0][..],
+        &f32::NAN.to_be_bytes(),
+        &1f32.to_be_bytes(),
+    ]
+    .concat();
+    assert_eq!(
+        outcome(&c.run_binary(&[nan])),
+        "22000 bind parameter $1: NaN not allowed in vector"
+    );
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("1")]]));
 }
 
 // ------------------------------------------------------------ binary COPY
@@ -3150,7 +3247,17 @@ fn a_binary_copy_reads_its_cells_by_their_columns_types() {
             Some(0.5f64.to_be_bytes().to_vec()),
             Some(vec![1]),
             Some(1_000_000i64.to_be_bytes().to_vec()),
-            Some(b"[1,0.5]".to_vec()),
+            // pgvector's `vector_send`, or the text a vector went as
+            // before it had a binary format.
+            Some(match n % 2 {
+                0 => [
+                    &[0, 2, 0, 0][..],
+                    &1f32.to_be_bytes(),
+                    &0.5f32.to_be_bytes(),
+                ]
+                .concat(),
+                _ => b"[1,0.5]".to_vec(),
+            }),
         ]
     };
     let mut rows: Vec<_> = (0..20).map(|i| row(&format!("r{i}"), i)).collect();
@@ -3166,15 +3273,28 @@ fn a_binary_copy_reads_its_cells_by_their_columns_types() {
     assert_eq!(r[0].body[0], 1, "the COPY is binary");
     assert_eq!(outcome(&r), "COPY 21");
     assert_eq!(
-        rows_of(&mut c, "get t select name, n, score, ok, at, e where n = 3"),
-        cells(&[&[
-            Some("r3"),
-            Some("3"),
-            Some("0.5"),
-            Some("t"),
-            Some("2000-01-01 00:00:01+00"),
-            Some("[1,0.5]")
-        ]])
+        rows_of(
+            &mut c,
+            "get t select name, n, score, ok, at, e where n = 3 or n = 4"
+        ),
+        cells(&[
+            &[
+                Some("r3"),
+                Some("3"),
+                Some("0.5"),
+                Some("t"),
+                Some("2000-01-01 00:00:01+00"),
+                Some("[1,0.5]")
+            ],
+            &[
+                Some("r4"),
+                Some("4"),
+                Some("0.5"),
+                Some("t"),
+                Some("2000-01-01 00:00:01+00"),
+                Some("[1,0.5]")
+            ]
+        ])
     );
     assert_eq!(
         rows_of(&mut c, "get t select n where name = \"nulls\""),

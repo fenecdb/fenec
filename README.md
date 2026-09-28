@@ -121,6 +121,9 @@ tokio-postgres, node-postgres and JDBC
 ([drivers](https://fenecdb.com/docs/postgres#drivers)), and the catalog they
 look around in: `\d`, JDBC's `DatabaseMetaData` and
 DBeaver's navigator see the collections, their fields and their indexes.
+A vector is pgvector's `vector`, `halfvec` or `sparsevec`, so pgvector's
+client libraries for Python, Go, Node and Rust work unchanged
+([pgvector's clients](https://fenecdb.com/docs/postgres#pgvector)).
 `COPY ... FROM STDIN` loads rows as psql's `\copy` and psycopg's `copy` send
 them, in text, CSV or binary ([COPY](https://fenecdb.com/docs/postgres#copy)).
 

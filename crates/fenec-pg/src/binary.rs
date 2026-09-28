@@ -6,7 +6,12 @@
 //! the next message and misread every answer after it.
 
 use crate::proto::*;
+use fenec_core::codec::{f16_from_f32, f32_from_f16};
 use fenec_core::prelude::Value;
+
+pub use crate::catalog::{
+    HALFVEC as OID_HALFVEC, SPARSEVEC as OID_SPARSEVEC, VECTOR as OID_VECTOR,
+};
 
 pub const OID_CHAR: i32 = 18;
 pub const OID_NAME: i32 = 19;
@@ -42,11 +47,14 @@ fn refused(oid: i32) -> String {
 }
 
 /// `v` as a column of type `oid` sends it in the binary format, `None` for
-/// NULL. A type whose text is its binary form -- `text`, and a vector, a
-/// list or a sparse vector, which travel as text -- is sent as its text.
+/// NULL. A type whose text is its binary form -- `text`, and a list, which
+/// travels as text -- is sent as its text; a vector as pgvector sends one.
 pub fn value(oid: i32, v: &Value) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(match (oid, v) {
         (_, Value::Null) => return Ok(None),
+        (OID_VECTOR, Value::Vector(x)) => dense(x, false)?,
+        (OID_HALFVEC, Value::Vector(x)) => dense(x, true)?,
+        (OID_SPARSEVEC, Value::Sparse(dim, entries)) => sparse(*dim, entries),
         (OID_INT8, Value::Int(i)) => i.to_be_bytes().to_vec(),
         (OID_FLOAT8, Value::Float(f)) => f.to_be_bytes().to_vec(),
         (OID_FLOAT8, Value::Int(i)) => (*i as f64).to_be_bytes().to_vec(),
@@ -114,6 +122,107 @@ pub fn text(oid: i32, s: &str) -> Result<Vec<u8>, String> {
     })
 }
 
+/// pgvector's `vector_send`: the dimension and a word it leaves 0, 16 bits
+/// each, then each component's `f32` -- `halfvec_send` each one's binary16,
+/// which a `vector<N, f16>` gives back exactly, since it holds nothing
+/// else.
+fn dense(x: &[f32], half: bool) -> Result<Vec<u8>, String> {
+    let dim = u16::try_from(x.len()).map_err(|_| {
+        format!(
+            "a vector of {} dimensions has no binary format: ask for this column in text",
+            x.len()
+        )
+    })?;
+    let mut out = Vec::with_capacity(4 + x.len() * if half { 2 } else { 4 });
+    out.extend_from_slice(&dim.to_be_bytes());
+    out.extend_from_slice(&[0, 0]);
+    for f in x {
+        match half {
+            true => out.extend_from_slice(&f16_from_f32(*f).to_be_bytes()),
+            false => out.extend_from_slice(&f.to_be_bytes()),
+        }
+    }
+    Ok(out)
+}
+
+/// pgvector's `sparsevec_send`: the dimension, the count of entries and a
+/// word it leaves 0, 32 bits each, then every index -- from 0, as fenecdb
+/// counts them too -- and every weight.
+fn sparse(dim: u32, entries: &[(u32, f32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + entries.len() * 8);
+    for w in [dim, entries.len() as u32, 0] {
+        out.extend_from_slice(&w.to_be_bytes());
+    }
+    for (i, _) in entries {
+        out.extend_from_slice(&i.to_be_bytes());
+    }
+    for (_, w) in entries {
+        out.extend_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
+/// A vector of type `oid` -- `vector`, `halfvec` or `sparsevec` -- as
+/// pgvector's receive functions read it: `None` where `raw` is not in that
+/// format. The text a vector went as before it had one never is: text
+/// holds no zero byte, and the format's word after the dimension (after
+/// the count of entries, for a sparse vector) is 0. A component that is not
+/// finite is refused, as pgvector refuses it; a sparse vector is checked
+/// and put in order where every sparse vector is (`sparse::normalise`).
+pub fn vector(raw: &[u8], oid: i32) -> Option<Result<Value, (&'static str, String)>> {
+    match oid {
+        OID_VECTOR | OID_HALFVEC => {
+            let half = oid == OID_HALFVEC;
+            let dim = u16::from_be_bytes([*raw.first()?, *raw.get(1)?]) as usize;
+            let width = if half { 2 } else { 4 };
+            if raw.get(2..4)? != [0, 0] || raw.len() != 4 + dim * width {
+                return None;
+            }
+            let x: Vec<f32> = match half {
+                true => raw[4..]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| f32_from_f16(u16::from_be_bytes(*c)))
+                    .collect(),
+                false => raw[4..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_be_bytes(*c))
+                    .collect(),
+            };
+            if let Some(f) = x.iter().find(|f| !f.is_finite()) {
+                let what = if f.is_nan() { "NaN" } else { "infinite value" };
+                let ty = if half { "halfvec" } else { "vector" };
+                return Some(Err(("22000", format!("{what} not allowed in {ty}"))));
+            }
+            Some(Ok(Value::Vector(x)))
+        }
+        OID_SPARSEVEC => {
+            let word = |at: usize| {
+                raw.get(at..at + 4)?
+                    .first_chunk()
+                    .map(|w| u32::from_be_bytes(*w))
+            };
+            let (dim, nnz) = (word(0)?, word(4)? as usize);
+            if word(8)? != 0 || Some(raw.len()) != nnz.checked_mul(8)?.checked_add(12) {
+                return None;
+            }
+            let (indices, weights) = raw[12..].split_at(nnz * 4);
+            let entries = indices
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(weights.as_chunks::<4>().0)
+                .map(|(i, w)| (u32::from_be_bytes(*i), f32::from_be_bytes(*w)))
+                .collect();
+            Some(Ok(Value::Sparse(dim, entries)))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +241,29 @@ mod tests {
             1_000_000i64.to_be_bytes()
         );
         assert_eq!(v(OID_TEXT, Value::Vector(vec![1.0, 0.5])), b"[1,0.5]");
+        // pgvector's `vector_send`, `halfvec_send` and `sparsevec_send`,
+        // which its receive functions -- and `vector` -- read back.
+        let x = Value::Vector(vec![1.5, -2.0]);
+        let sent = v(OID_VECTOR, x.clone());
+        assert_eq!(
+            sent,
+            [
+                &[0, 2, 0, 0][..],
+                &1.5f32.to_be_bytes(),
+                &(-2f32).to_be_bytes()
+            ]
+            .concat()
+        );
+        assert_eq!(vector(&sent, OID_VECTOR), Some(Ok(x.clone())));
+        let half = v(OID_HALFVEC, x.clone());
+        assert_eq!(half, [0, 2, 0, 0, 0x3e, 0, 0xc0, 0]);
+        assert_eq!(vector(&half, OID_HALFVEC), Some(Ok(x)));
+        let sp = Value::Sparse(5, vec![(1, 0.5), (3, 0.25)]);
+        let sent = v(OID_SPARSEVEC, sp.clone());
+        assert_eq!(sent[..12], [0, 0, 0, 5, 0, 0, 0, 2, 0, 0, 0, 0]);
+        assert_eq!(vector(&sent, OID_SPARSEVEC), Some(Ok(sp)));
+        // The format counts dimensions in 16 bits.
+        assert!(value(OID_VECTOR, &Value::Vector(vec![0.0; 70_000])).is_err());
         assert_eq!(value(OID_INT8, &Value::Null).unwrap(), None);
         // A field holding what its schema does not name goes as the column
         // reads it, or is refused.

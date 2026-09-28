@@ -1803,6 +1803,7 @@ fn session(
                     // parameter values
                     let nparams = be_i16(&m.body, &mut pos);
                     let mut values = Vec::new();
+                    let mut refused = None;
                     for i in 0..nparams {
                         let len = be_i32(&m.body, &mut pos);
                         if len < 0 {
@@ -1814,7 +1815,22 @@ fn session(
                         let binary =
                             fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
                         let oid = types.get(i as usize).copied().unwrap_or(0);
-                        values.push(params::decode(raw, binary, oid));
+                        match params::decode(raw, binary, oid) {
+                            Ok(v) => values.push(v),
+                            Err((code, why)) => {
+                                refused = Some((code, format!("bind parameter ${}: {why}", i + 1)));
+                                break;
+                            }
+                        }
+                    }
+                    // Refused as PostgreSQL refuses a value its type's
+                    // receive function will not read: the portal is not
+                    // made, and a transaction fails.
+                    if let Some((code, msg)) = refused {
+                        let errors = out.errors();
+                        out.error(code, &msg);
+                        tx.settle(&mut lock, errors, &out);
+                        continue;
                     }
                     // result format codes
                     let nres = be_i16(&m.body, &mut pos);
@@ -2202,6 +2218,10 @@ pub(crate) fn decode_param(raw: &[u8], binary: bool) -> Value {
     }
 }
 
+/// The type a field's column and parameter are described as: the one the
+/// catalog shows it as, but a list, which goes as its text. A vector is
+/// pgvector's -- sent as `text` before, it was a string to pgvector's own
+/// clients, which register their codecs by the type's name.
 pub(crate) fn pg_oid(ty: &DataType) -> i32 {
     match ty {
         DataType::Bool => OID_BOOL,
@@ -2209,8 +2229,10 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
         DataType::Float => OID_FLOAT8,
         DataType::Bytes => OID_BYTEA,
         DataType::Timestamp => OID_TIMESTAMPTZ,
-        // vectors and lists travel as text (pgvector notation)
-        _ => OID_TEXT,
+        DataType::Vector(_, VecPrec::F32) => binary::OID_VECTOR,
+        DataType::Vector(_, VecPrec::F16) => binary::OID_HALFVEC,
+        DataType::Sparse(_) => binary::OID_SPARSEVEC,
+        DataType::Text | DataType::List(_) => OID_TEXT,
     }
 }
 

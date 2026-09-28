@@ -1,9 +1,10 @@
 //! tokio-postgres over fenec-pg's pg wire: typed parameters, typed rows in
-//! the binary format, and a COPY through Execute.
+//! the binary format, a COPY through Execute, and pgvector-rust's types.
 
 use futures_util::SinkExt;
+use pgvector::{HalfVector, SparseVector, Vector};
 use tokio_postgres::binary_copy::BinaryCopyInWriter;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{Client, NoTls};
 
 /// A connection, and a collection of the test's own: `test` in its name,
@@ -36,7 +37,7 @@ async fn typed_parameters_and_rows() {
     let n = c
         .execute(
             &format!("put {t} {{name: $1, n: $2, score: $3, ok: $4, e: $5}}"),
-            &[&"a", &7i64, &0.25f64, &true, &"[1,0.5]"],
+            &[&"a", &7i64, &0.25f64, &true, &Vector::from(vec![1.0, 0.5])],
         )
         .await
         .unwrap();
@@ -52,7 +53,7 @@ async fn typed_parameters_and_rows() {
     assert_eq!(row.get::<_, i64>(1), 7);
     assert_eq!(row.get::<_, f64>(2), 0.25);
     assert!(row.get::<_, bool>(3));
-    assert_eq!(row.get::<_, String>(4), "[1,0.5]");
+    assert_eq!(row.get::<_, Vector>(4).to_vec(), [1.0, 0.5]);
     let count: i64 = c
         .query_one(&format!("get {t} count"), &[])
         .await
@@ -97,9 +98,94 @@ async fn a_binary_copy_writes_typed_rows() {
     }
     assert_eq!(writer.finish().await.unwrap(), 100);
     let row = c
-        .query_one(&format!("get {t} select name, score where n = $1"), &[&7i64])
+        .query_one(
+            &format!("get {t} select name, score where n = $1"),
+            &[&7i64],
+        )
         .await
         .unwrap();
     assert_eq!(row.get::<_, String>(0), "r7");
     assert_eq!(row.get::<_, f64>(1), 1.75);
+}
+
+/// pgvector-rust's `Vector`, `HalfVector` and `SparseVector`, which name
+/// the types they go as, in and out in pgvector's binary formats -- and its
+/// bulk load, the type found by name in the catalog.
+#[tokio::test(flavor = "current_thread")]
+async fn pgvectors_types_go_both_ways() {
+    let Some((c, t)) = connect("pgvector").await else {
+        return;
+    };
+    c.simple_query(&format!(
+        "create collection {t}_all (name text, e vector<3> @hnsw(cosine), h vector<3, f16>, s sparse<5> @inverted)"
+    ))
+    .await
+    .unwrap();
+    let t = format!("{t}_all");
+    let e = Vector::from(vec![1.0, 2.0, 3.0]);
+    let h = HalfVector::from_f32_slice(&[1.5, 2.0, 3.0]);
+    let s = SparseVector::from_dense(&[1.0, 0.0, 0.0, 0.5, 0.0]);
+    c.execute(
+        &format!("put {t} {{name: $1, e: $2, h: $3, s: $4}}"),
+        &[&"a", &e, &h, &s],
+    )
+    .await
+    .unwrap();
+    let row = c
+        .query_one(&format!("get {t} select e, h, s where name = $1"), &[&"a"])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, Vector>(0), e);
+    assert_eq!(row.get::<_, HalfVector>(1), h);
+    assert_eq!(row.get::<_, SparseVector>(2), s);
+    let hit = c
+        .query_one(&format!("get {t} select name near e $1 limit 1"), &[&e])
+        .await
+        .unwrap();
+    assert_eq!(hit.get::<_, String>(0), "a");
+    let query = SparseVector::from_dense(&[1.0, 0.0, 0.0, 0.0, 0.0]);
+    let hit = c
+        .query_one(&format!("get {t} select name near s $1 limit 1"), &[&query])
+        .await
+        .unwrap();
+    assert_eq!(hit.get::<_, String>(0), "a");
+
+    // pgvector-rust's bulk load: the type by name, then a binary COPY.
+    let found = c
+        .query_one(
+            "SELECT pg_type.oid, nspname AS schema FROM pg_type \
+             INNER JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace \
+             WHERE typname = $1",
+            &[&"vector"],
+        )
+        .await
+        .unwrap();
+    let vector = Type::new(
+        "vector".into(),
+        found.get("oid"),
+        Kind::Simple,
+        found.get("schema"),
+    );
+    let sink = c
+        .copy_in(&format!(
+            "COPY {t} (name, e) FROM STDIN WITH (FORMAT BINARY)"
+        ))
+        .await
+        .unwrap();
+    let writer = BinaryCopyInWriter::new(sink, &[Type::TEXT, vector]);
+    futures_util::pin_mut!(writer);
+    for i in 0..100 {
+        let v = Vector::from(vec![1.0, i as f32, 2.0]);
+        writer
+            .as_mut()
+            .write(&[&format!("c{i}"), &v])
+            .await
+            .unwrap();
+    }
+    assert_eq!(writer.finish().await.unwrap(), 100);
+    let row = c
+        .query_one(&format!("get {t} select e where name = $1"), &[&"c7"])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, Vector>(0).to_vec(), [1.0, 7.0, 2.0]);
 }

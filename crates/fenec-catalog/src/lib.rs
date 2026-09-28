@@ -67,10 +67,20 @@ const BIT_ARRAY: i32 = 1561;
 const REGCLASS: i32 = 2205;
 const REGTYPE: i32 = 2206;
 const REGNAMESPACE: i32 = 4089;
-/// Types of fenecdb's own, where pgvector would have put its.
-const VECTOR: i32 = 16_400;
-const HALFVEC: i32 = 16_401;
-const SPARSEVEC: i32 = 16_402;
+/// Types of fenecdb's own, where pgvector would have put its -- the oids a
+/// vector, a `vector<N, f16>` and a sparse vector go over the wire as too.
+pub const VECTOR: i32 = 16_400;
+pub const HALFVEC: i32 = 16_401;
+pub const SPARSEVEC: i32 = 16_402;
+
+/// Whether `oid` is one of pgvector's types, which live in `public` as
+/// `CREATE EXTENSION vector` puts them there: asyncpg's `set_type_codec`
+/// looks a type up in the schema it is given, `public` by default, and
+/// found `sparsevec` in `pg_catalog`, so pgvector-python registered no
+/// codec for it.
+fn pgvector(oid: i32) -> bool {
+    matches!(oid, VECTOR | HALFVEC | SPARSEVEC)
+}
 
 const PG_CATALOG: i64 = 11;
 const PUBLIC: i64 = 2200;
@@ -201,6 +211,7 @@ struct Index {
 
 /// The schemas the catalog is made from, taken under the read lock and
 /// then held without it while the query runs.
+#[derive(Default)]
 pub struct Snapshot {
     database: String,
     version: String,
@@ -822,6 +833,22 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
                 })
                 .collect(),
         ),
+        // No range type, but its columns: tokio-postgres reads a type's
+        // `rngsubtype` through a join with it as an oid, and refused the
+        // row that described the column as text.
+        "pg_range" => rel(
+            alias,
+            &[
+                ("rngtypid", OID),
+                ("rngsubtype", OID),
+                ("rngmultitypid", OID),
+                ("rngcollation", OID),
+                ("rngsubopc", OID),
+                ("rngcanonical", REGPROC),
+                ("rngsubdiff", REGPROC),
+            ],
+            Vec::new(),
+        ),
         _ => Rel {
             alias: alias.to_string(),
             columns: Vec::new(),
@@ -1061,11 +1088,10 @@ fn pg_type_table(alias: &str) -> Rel {
     let rows = TYPES
         .iter()
         .map(|(oid, name, len, cat, elem, array, coll)| {
-            let ours = *oid == VECTOR || *oid == HALFVEC;
             vec![
                 V::Int(*oid as i64),
                 t(*name),
-                V::Int(if ours { PUBLIC } else { PG_CATALOG }),
+                V::Int(if pgvector(*oid) { PUBLIC } else { PG_CATALOG }),
                 V::Int(ROLE),
                 V::Int(*len),
                 V::Bool(*len > 0 && *len <= 8),
@@ -1293,7 +1319,7 @@ fn information_schema(name: &str, alias: &str, s: &Snapshot) -> Rel {
                         t(if required { "NO" } else { "YES" }),
                         t(data_type),
                         db(),
-                        t(if oid == VECTOR || oid == HALFVEC {
+                        t(if pgvector(oid) {
                             "public"
                         } else {
                             "pg_catalog"
@@ -1453,10 +1479,14 @@ fn column(scope: &Scope, qual: Option<&str>, name: &str) -> V {
 
 /// The type a column is declared with, for the row description.
 fn column_type(rels: &[Rel], qual: Option<&str>, name: &str) -> i32 {
+    declared(rels, qual, name).unwrap_or(TEXT)
+}
+
+/// The type of the column `qual.name` of `rels`, when one of them has it.
+fn declared(rels: &[Rel], qual: Option<&str>, name: &str) -> Option<i32> {
     rels.iter()
         .filter(|r| qual.is_none_or(|q| q == r.alias))
         .find_map(|r| r.columns.iter().find(|(c, _)| c == name).map(|(_, t)| *t))
-        .unwrap_or(TEXT)
 }
 
 fn truth(v: &V) -> Option<bool> {
@@ -3480,18 +3510,124 @@ pub fn params(sql: &str) -> Option<usize> {
 }
 
 /// Each parameter's type as the query casts it -- `$1::oid[]`, the array
-/// of type OIDs asyncpg looks up; `$1::text`, the name pgx looks up -- and
-/// `text` where it is not cast; `None` when it is not a query this module
-/// reads.
+/// of type OIDs asyncpg looks up; `$1::text`, the name pgx looks up -- or
+/// else as the column it is compared with has it, as PostgreSQL types the
+/// `$1` of `t.oid = $1` an oid: tokio-postgres looks a type it does not
+/// know up that way, and binds the oid only to a parameter described as
+/// one. `text` where neither names a type; `None` when it is not a query
+/// this module reads.
 pub fn param_types(sql: &str) -> Option<Vec<i32>> {
-    let (_, n, casts) = sql::Parser::new(sql).ok()?.typed().ok()?;
-    let mut types = vec![TEXT; n];
+    let (query, n, casts) = sql::Parser::new(sql).ok()?.typed().ok()?;
+    let mut types = vec![None; n];
     for (i, ty) in &casts {
         if let Some(t) = types.get_mut(i.wrapping_sub(1)) {
-            *t = cast_type(ty);
+            *t = Some(cast_type(ty));
         }
     }
-    Some(types)
+    // The tables' columns are the same over any database: an empty one
+    // names them.
+    compared(&query, &[], &Snapshot::default(), &mut types);
+    Some(types.into_iter().map(|t| t.unwrap_or(TEXT)).collect())
+}
+
+/// Each parameter of `q` compared with a column of a table it reads -- or
+/// of `outer`, a query around it -- takes the column's type, where no cast
+/// named one.
+fn compared(q: &Query, outer: &[Rel], blank: &Snapshot, types: &mut [Option<i32>]) {
+    for cte in &q.with {
+        compared(&cte.query, outer, blank, types);
+    }
+    for sel in std::iter::once(&q.first).chain(q.unions.iter().map(|(_, s)| s)) {
+        let mut rels = outer.to_vec();
+        for f in &sel.from {
+            for src in std::iter::once(&f.first).chain(f.joins.iter().map(|j| &j.source)) {
+                match src {
+                    Source::Table {
+                        schema,
+                        name,
+                        alias,
+                    } => rels.push(catalog_table(
+                        schema.as_deref(),
+                        name,
+                        alias.as_deref().unwrap_or(name),
+                        blank,
+                    )),
+                    Source::Query { query, .. } => compared(query, outer, blank, types),
+                    Source::Function { .. } => {}
+                }
+            }
+        }
+        let ons = sel.from.iter().flat_map(|f| f.joins.iter());
+        for e in sel
+            .filter
+            .iter()
+            .chain(&sel.having)
+            .chain(ons.filter_map(|j| j.on.as_ref()))
+        {
+            hint(e, &rels, blank, types);
+        }
+    }
+}
+
+/// [`compared`] over one expression.
+fn hint(e: &Expr, rels: &[Rel], blank: &Snapshot, types: &mut [Option<i32>]) {
+    let mut take = |p: &Expr, c: &Expr| {
+        if let (Expr::Param(k), Expr::Column(q, name)) = (p, c) {
+            if let Some(slot) = types.get_mut(k.wrapping_sub(1)) {
+                if slot.is_none() {
+                    *slot = declared(rels, q.as_deref(), name);
+                }
+            }
+        }
+    };
+    match e {
+        Expr::Binary(op, a, b) => {
+            if matches!(*op, "=" | "<>" | "<" | ">" | "<=" | ">=") {
+                take(a, b);
+                take(b, a);
+            }
+            hint(a, rels, blank, types);
+            hint(b, rels, blank, types);
+        }
+        Expr::InList(x, items, _) => {
+            items.iter().for_each(|i| take(i, x));
+            hint(x, rels, blank, types);
+            items.iter().for_each(|i| hint(i, rels, blank, types));
+        }
+        Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Like(a, b, ..)
+        | Expr::Index(a, b)
+        | Expr::Quantified(_, a, b, _) => {
+            hint(a, rels, blank, types);
+            hint(b, rels, blank, types);
+        }
+        Expr::Not(a) | Expr::IsNull(a, _) | Expr::Cast(a, _) | Expr::Unary(_, a) => {
+            hint(a, rels, blank, types)
+        }
+        Expr::Case {
+            operand,
+            arms,
+            otherwise,
+        } => {
+            for e in operand.iter().chain(otherwise).map(|b| b.as_ref()) {
+                hint(e, rels, blank, types);
+            }
+            for (a, b) in arms {
+                hint(a, rels, blank, types);
+                hint(b, rels, blank, types);
+            }
+        }
+        Expr::Call { args, .. } => args.iter().for_each(|a| hint(a, rels, blank, types)),
+        Expr::InQuery(x, q, _) => {
+            hint(x, rels, blank, types);
+            compared(q, rels, blank, types);
+        }
+        Expr::Subquery(q) | Expr::Exists(q) | Expr::ArrayQuery(q) => {
+            compared(q, rels, blank, types)
+        }
+        _ => {}
+    }
 }
 
 /// Runs a catalog query over `snap`. `Err` means the query is outside what
