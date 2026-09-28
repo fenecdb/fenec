@@ -26,7 +26,7 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
-make drivers-test  # psycopg, SQLAlchemy (Docker), pgx and node-postgres over the pg wire
+make drivers-test  # psycopg, asyncpg, SQLAlchemy (Docker), pgx, node-postgres, tokio-postgres over the pg wire
 make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -1240,8 +1240,8 @@ transaction is a savepoint to both) -- `make python-test` runs LangChain's
 standard suite and the tests LlamaIndex's integrations run from a
 `python:3.13` container against a fenec-pg started here, `make
 drivers-test` the drivers' nested transactions and psycopg's COPY the same way,
-and pgx's rows in the binary format and node-postgres's with the Go and
-Node on the machine, `make
+asyncpg's typed parameters and rows, and pgx's, node-postgres's and
+tokio-postgres's with the Go, Node and Rust on the machine, `make
 react-test` runs the hook against a real replica, and CI runs all three
 (`integrations`). CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):

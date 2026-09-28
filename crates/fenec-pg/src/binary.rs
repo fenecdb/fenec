@@ -19,7 +19,7 @@ pub const OID_BPCHAR: i32 = 1042;
 pub const OID_VARCHAR: i32 = 1043;
 
 /// PostgreSQL's timestamps count microseconds from 2000-01-01 UTC.
-const EPOCH_2000_MS: i64 = 946_684_800_000;
+pub(crate) const EPOCH_2000_MS: i64 = 946_684_800_000;
 
 /// Whether the `i`th column is asked for in the binary format: no code is
 /// every column in text, one is every column in it, and more are one a

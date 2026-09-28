@@ -301,9 +301,15 @@ wrong secret key, is ignored.</p>
 <p><code>Describe</code> is answered without running the query: the parameter
 count comes from the largest <code>$n</code> in the statement, and the columns
 and type OIDs from the schema — with <code>near</code> or <code>match</code>,
-<code>_score</code> is reported too. Parameter types are left unspecified; the client sends text and
-the server infers. <code>RowDescription</code> goes exactly once, on
-<code>Execute</code> when <code>Describe</code> is skipped.</p>
+<code>_score</code> is reported too. A parameter's type is the one its place
+names — the field it is given for or compared with, <code>id</code>'s, the
+text of a <code>match</code>, a vector's text for <code>near</code> — and
+<code>text</code> where nothing names one; a type the client names in
+<code>Parse</code> is kept. A driver told the types sends its values as
+them, tokio-postgres and asyncpg in binary, and they are read by them; one
+sent as text is read as a pg text parameter always was.
+<code>RowDescription</code> goes exactly once, on <code>Execute</code> when
+<code>Describe</code> is skipped.</p>
 
 <p>A column goes in the binary format when <code>Bind</code> asks for it —
 as tokio-postgres and asyncpg ask for every column, and pgx for every type

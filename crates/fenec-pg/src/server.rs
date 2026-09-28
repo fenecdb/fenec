@@ -26,6 +26,7 @@ use crate::binary;
 use crate::catalog;
 use crate::compat;
 use crate::copy;
+use crate::params;
 use crate::proto::*;
 use crate::scram;
 use fenec_core::json;
@@ -1341,6 +1342,12 @@ struct Prepared {
     /// by id. `None` for a text `compat` answers or one that does not
     /// parse, which `Execute` takes as it always did.
     parsed: Option<Arc<Vec<Statement>>>,
+    /// The parameter types `Parse` named, 0 for one it left to the server.
+    declared: Vec<i32>,
+    /// Every parameter's type, as `Describe` reported them: what Bind
+    /// reads a binary value by. Empty until then, and the `declared` ones
+    /// are read by.
+    types: Vec<i32>,
 }
 
 #[derive(Default, Clone)]
@@ -1758,16 +1765,32 @@ fn session(
                         .is_none()
                         .then(|| parse(text).ok().map(Arc::new))
                         .flatten();
-                    prepared.insert(name, Prepared { sql, parsed });
+                    let n = be_i16(&m.body, &mut pos).max(0);
+                    let declared = (0..n).map(|_| be_i32(&m.body, &mut pos)).collect();
+                    prepared.insert(
+                        name,
+                        Prepared {
+                            sql,
+                            parsed,
+                            declared,
+                            types: Vec::new(),
+                        },
+                    );
                     out.parse_complete();
                 }
                 b'B' => {
                     let mut pos = 0;
                     let portal = take_cstr(&m.body, &mut pos);
                     let stmt = take_cstr(&m.body, &mut pos);
-                    let (sql, parsed) = prepared
+                    let (sql, parsed, types) = prepared
                         .get(&stmt)
-                        .map(|p| (p.sql.clone(), p.parsed.clone()))
+                        .map(|p| {
+                            let types = match p.types.is_empty() {
+                                true => p.declared.clone(),
+                                false => p.types.clone(),
+                            };
+                            (p.sql.clone(), p.parsed.clone(), types)
+                        })
                         .unwrap_or_default();
 
                     // parameter format codes
@@ -1789,7 +1812,8 @@ fn session(
                         pos += len as usize;
                         let binary =
                             fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
-                        values.push(decode_param(raw, binary));
+                        let oid = types.get(i as usize).copied().unwrap_or(0);
+                        values.push(params::decode(raw, binary, oid));
                     }
                     // result format codes
                     let nres = be_i16(&m.body, &mut pos);
@@ -1815,14 +1839,24 @@ fn session(
                     let name = take_cstr(&m.body, &mut pos);
                     // A statement's columns are described in text; a
                     // portal's in the formats its Bind asked for.
-                    let (sql, parsed, formats) = if kind == b'S' {
-                        prepared
-                            .get(&name)
-                            .map(|p| (p.sql.clone(), p.parsed.clone(), Vec::new()))
+                    let (sql, parsed, formats, declared) = if kind == b'S' {
+                        prepared.get(&name).map(|p| {
+                            (
+                                p.sql.clone(),
+                                p.parsed.clone(),
+                                Vec::new(),
+                                p.declared.clone(),
+                            )
+                        })
                     } else {
-                        portals
-                            .get(&name)
-                            .map(|p| (p.sql.clone(), p.parsed.clone(), p.formats.clone()))
+                        portals.get(&name).map(|p| {
+                            (
+                                p.sql.clone(),
+                                p.parsed.clone(),
+                                p.formats.clone(),
+                                Vec::new(),
+                            )
+                        })
                     }
                     .unwrap_or_default();
                     // An error here is answered as Execute answers one: the
@@ -1846,6 +1880,7 @@ fn session(
                         &cfg,
                         &sql,
                         parsed.as_deref().map(Vec::as_slice),
+                        &declared,
                         &be,
                         &lock,
                     );
@@ -1861,6 +1896,9 @@ fn session(
                     };
                     if kind == b'S' {
                         out.parameter_description(&shape.params);
+                        if let Some(p) = prepared.get_mut(&name) {
+                            p.types = shape.params.clone();
+                        }
                     }
                     match &shape.columns {
                         Some(cols) => {
@@ -2135,7 +2173,7 @@ fn parse_float_param(t: &str) -> Option<f64> {
 
 /// Converts a PG parameter into a fenecdb value. A `[0.1,0.2]` arriving in
 /// text format is recognised as an embedding (the same notation as pgvector).
-fn decode_param(raw: &[u8], binary: bool) -> Value {
+pub(crate) fn decode_param(raw: &[u8], binary: bool) -> Value {
     if binary {
         return match raw.len() {
             8 => Value::Int(i64::from_be_bytes(raw.try_into().unwrap())),
@@ -2163,7 +2201,7 @@ fn decode_param(raw: &[u8], binary: bool) -> Value {
     }
 }
 
-fn pg_oid(ty: &DataType) -> i32 {
+pub(crate) fn pg_oid(ty: &DataType) -> i32 {
     match ty {
         DataType::Bool => OID_BOOL,
         DataType::Int => OID_INT8,
@@ -2430,9 +2468,19 @@ fn describe(
     cfg: &Config,
     sql: &str,
     parsed: Option<&[Statement]>,
+    declared: &[i32],
     be: &Backend,
     lock: &Lock<'_>,
 ) -> Option<Shape> {
+    // A type the client named is the type; the rest are the server's.
+    let named = |mut params: Vec<i32>| {
+        for (i, t) in params.iter_mut().enumerate() {
+            if let Some(&d) = declared.get(i).filter(|d| **d != 0) {
+                *t = d;
+            }
+        }
+        params
+    };
     let trimmed = sql.trim();
     if trimmed.is_empty() {
         return Some(Shape {
@@ -2458,7 +2506,7 @@ fn describe(
                 let n = catalog::params(trimmed).unwrap_or(0);
                 let answer = catalog_answer(db, lock, cfg, trimmed, &vec![Value::Null; n]);
                 Shape {
-                    params: vec![OID_UNSPECIFIED; n],
+                    params: named(vec![OID_TEXT; n]),
                     columns: Some(answer.columns),
                 }
             }
@@ -2488,34 +2536,43 @@ fn describe(
         },
     };
     let nparams = stmts.iter().map(|s| s.max_param()).max().unwrap_or(0);
-    // Types are not resolved: seeing `unspecified`, the client sends the
-    // value as text and `decode_param` infers it.
-    let params = vec![OID_UNSPECIFIED; nparams];
-
+    // The parameters' types and a select's columns come from the schemas.
+    // When the collection does not exist yet we cannot know the shape;
+    // rather than erroring we say NoData and let Execute speak.
+    let of = |d: &Database| {
+        let columns = match stmts.last() {
+            Some(Statement::Select(sel)) => select_columns(d, sel),
+            _ => None,
+        };
+        (params::types(d, stmts), columns)
+    };
+    let schemas = nparams > 0 || matches!(stmts.last(), Some(Statement::Select(_)));
+    let (params, columns) = match (schemas, &lock.hold) {
+        (false, _) => (Vec::new(), None),
+        (true, Some(h)) => {
+            let mut t = Turn::take(h.db, be)?;
+            let _ = t.unpark();
+            of(&t)
+        }
+        (true, None) => {
+            // Reading the schema needs a shared lock; a cancellation
+            // arriving while waiting behind a long write has to be seen
+            // here too.
+            let guard = acquire(db, false, be)?;
+            of(guard.db())
+        }
+    };
     let columns = match stmts.last() {
-        // When the collection does not exist yet we cannot know the shape;
-        // rather than erroring we say NoData and let Execute speak.
-        Some(Statement::Select(sel)) => match &lock.hold {
-            Some(h) => {
-                let mut t = Turn::take(h.db, be)?;
-                let _ = t.unpark();
-                select_columns(&t, sel)
-            }
-            None => {
-                // Reading the schema needs a shared lock; a cancellation
-                // arriving while waiting behind a long write has to be seen
-                // here too.
-                let guard = acquire(db, false, be)?;
-                select_columns(guard.db(), sel)
-            }
-        },
         Some(Statement::ListCollections) | Some(Statement::Describe(_)) => Some(schema_columns()),
         Some(Statement::Explain(_)) => {
             Some(vec![(fenec_core::query::PLAN_COLUMN.to_string(), OID_TEXT)])
         }
-        _ => None,
+        _ => columns,
     };
-    Some(Shape { params, columns })
+    Some(Shape {
+        params: named(params),
+        columns,
+    })
 }
 
 // ---------------------------------------------------------------- execution
