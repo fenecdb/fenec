@@ -838,13 +838,27 @@ pub fn document(t: &Target, row: Row, line: u64) -> Result<Doc, Refusal> {
 }
 
 /// A binary cell as `ty` holds it: sent as the type the field's column is
-/// described as ([`crate::server::pg_oid`]), a text type as its text.
+/// described as ([`crate::server::pg_oid`]), a text type as its text. A
+/// vector not in pgvector's binary format is read as the text it was sent
+/// as before it had one, which holds no zero byte.
 fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
     let oid = crate::server::pg_oid(ty);
-    if oid == crate::proto::OID_TEXT {
+    let text = |b: &[u8]| {
         let s =
             std::str::from_utf8(b).map_err(|_| "invalid byte sequence for encoding \"UTF8\"")?;
-        return value(s, ty);
+        value(s, ty)
+    };
+    if oid == crate::proto::OID_TEXT {
+        return text(b);
+    }
+    if let Some(v) = crate::binary::vector(b, oid) {
+        return v.map_err(|(_, why)| why);
+    }
+    if matches!(ty, DataType::Vector(..) | DataType::Sparse(_)) {
+        return match b.contains(&0) {
+            true => Err("not a vector in its binary format".into()),
+            false => text(b),
+        };
     }
     let want = match oid {
         crate::proto::OID_BOOL => 1,
@@ -854,7 +868,7 @@ fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
     if b.len() != want {
         return Err(format!("{} bytes where its type sends {want}", b.len()));
     }
-    Ok(crate::params::decode(b, true, oid))
+    crate::params::decode(b, true, oid).map_err(|(_, why)| why)
 }
 
 /// Bytes as `\x` and hexadecimal digits, for an error to show them.

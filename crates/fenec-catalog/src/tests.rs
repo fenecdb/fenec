@@ -502,20 +502,48 @@ fn pgvector_clients_find_its_types() {
         text(&run_sql(&s, tokio, &[Value::Int(16400)])),
         [["vector", "b", "0", "-", "0", "public", "0"]]
     );
+    let a = run_sql(&s, tokio, &[Value::Int(16400)]);
+    let types: Vec<i32> = a.columns.iter().map(|c| c.1).collect();
+    assert_eq!(types, [NAME, CHAR, OID, OID, OID, NAME, OID]);
+    // Its `$1` is the oid it is compared with: tokio-postgres binds an
+    // `Oid` only to a parameter described as one, and refused the lookup
+    // described as text.
+    assert_eq!(param_types(tokio), Some(vec![OID]));
+    let composite = "SELECT attname, atttypid FROM pg_catalog.pg_attribute                      WHERE attrelid = $1 AND NOT attisdropped AND attnum > 0 ORDER BY attnum";
+    assert_eq!(param_types(composite), Some(vec![OID]));
+    // Either side, a name, a list; a cast still says; a subquery's
+    // columns and an outer query's reach in; what nothing types is text.
+    assert_eq!(
+        param_types(
+            "SELECT c.oid FROM pg_class c WHERE $1 = c.relname AND c.relkind IN ($2, $3) \
+             AND c.relnamespace = $4::int8 AND $5 = $6 \
+             AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum = $7)"
+        ),
+        Some(vec![NAME, CHAR, CHAR, INT8, TEXT, TEXT, INT2])
+    );
 
     // asyncpg's `set_type_codec`, and pgvector-node's `registerTypes`.
     let by_name = "SELECT t.oid, t.typelem AS elemtype, t.typtype AS kind \
                    FROM pg_catalog.pg_type AS t \
                    INNER JOIN pg_catalog.pg_namespace AS ns ON (ns.oid = t.typnamespace) \
                    WHERE t.typname = $1 AND ns.nspname = $2";
-    assert_eq!(
-        text(&run_sql(
-            &s,
-            by_name,
-            &[Value::Text("vector".into()), Value::Text("public".into())]
-        )),
-        [["16400", "0", "b"]]
-    );
+    // Each in `public`, where pgvector-python's `register_vector` asks for
+    // it: `sparsevec` in `pg_catalog` had no codec registered.
+    for (name, oid) in [
+        ("vector", "16400"),
+        ("halfvec", "16401"),
+        ("sparsevec", "16402"),
+    ] {
+        assert_eq!(
+            text(&run_sql(
+                &s,
+                by_name,
+                &[Value::Text(name.into()), Value::Text("public".into())]
+            )),
+            [[oid, "0", "b"]],
+            "{name}"
+        );
+    }
     let node = "SELECT typname, oid FROM pg_type WHERE typname IN ($1, $2, $3)";
     let names = ["vector", "halfvec", "sparsevec"].map(|n| Value::Text(n.into()));
     assert_eq!(text(&run_sql(&s, node, &names)).len(), 3);

@@ -16,10 +16,11 @@ psql -h 127.0.0.1 -p 5433 -U fenec
 </pre>
 
 <p>fenecdb does not speak SQL. It does work with the connection tooling of the
-PostgreSQL ecosystem: vectors use the same text representation as pgvector
-(<code>[1,2,3]</code>), sparse vectors that of its <code>sparsevec</code>
-(<code>{1:0.5,3:0.25}/30522</code>, indices from 1), and errors map to
-SQLSTATE codes
+PostgreSQL ecosystem: vectors are pgvector's types, in its text representation
+(<code>[1,2,3]</code>, and <code>{1:0.5,3:0.25}/30522</code> for a sparse
+vector, indices from 1) and in its binary format where a driver asks for it,
+so <a href="#pgvector">pgvector's client libraries</a> work unchanged; errors
+map to SQLSTATE codes
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>, and <code>25006</code> for a write sent to a replica).</p>
 
@@ -335,8 +336,9 @@ count comes from the largest <code>$n</code> in the statement, and the columns
 and type OIDs from the schema — with <code>near</code> or <code>match</code>,
 <code>_score</code> is reported too. A parameter's type is the one its place
 names — the field it is given for or compared with, <code>id</code>'s, the
-text of a <code>match</code>, a vector's text for <code>near</code> — and
-<code>text</code> where nothing names one; a type the client names in
+field's type for the vector of a <code>near</code> or a <code>rerank</code>,
+the text of a <code>match</code> — and <code>text</code> where nothing names
+one; a type the client names in
 <code>Parse</code> is kept. A driver told the types sends its values as
 them, tokio-postgres and asyncpg in binary, and they are read by them; one
 sent as text is read as a pg text parameter always was.
@@ -347,7 +349,7 @@ sent as text is read as a pg text parameter always was.
 as tokio-postgres and asyncpg ask for every column, and pgx for every type
 it knows: <code>bigint</code>, <code>double precision</code>,
 <code>boolean</code>, <code>bytea</code> and <code>timestamptz</code> as their
-types send them, and a text, a vector, a list and a sparse vector, which
+types send them, a vector as pgvector sends one, and a text and a list, which
 travel as text, as their text. The catalog's columns do the same, but for an
 array, which is refused in binary (<code>0A000</code>) rather than sent in a
 form the client would misread.</p>
@@ -407,16 +409,54 @@ dropped.</p>
 <p>Refused with <code>0A000</code>, before a row is sent: <code>COPY ...
 TO</code> (read the rows with a query), a file or a program on the server's
 side (<code>\copy</code> sends the file from the client), and a COPY among
-other statements in one query. In binary an int, a float and a timestamp
-are read without parsing text: pgx's <code>CopyFrom</code> of the same
-100 000 rows, a vector each written as text, loads at 247 000 rows/s
-without an index.
+other statements in one query. In binary an int, a float, a timestamp and
+a vector are read without parsing text: pgx's <code>CopyFrom</code> of the
+same 100 000 rows loads at 600 000 rows/s without an index with
+pgvector-go's <code>Vector</code>, and at 243 000 with each vector written
+as text.
 100 000 rows of a text, an int and a 128-dim vector load at 17 600 rows/s with
 the HNSW graph kept as they land and 171 000 without, against 17 200 and
 152 000 sent a <code>put</code> a row in a transaction, as a driver's
 <code>executemany</code> sends them, and 434 and 62 000 into PostgreSQL with
 pgvector by its own <code>COPY</code>
 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
+
+<h2 id="pgvector">pgvector's clients</h2>
+
+<p>A vector field is pgvector's <code>vector</code>, a <code>vector&lt;N,
+f16&gt;</code> its <code>halfvec</code> and a sparse vector its
+<code>sparsevec</code>: the catalog names them so, in <code>public</code>
+where <code>CREATE EXTENSION vector</code> puts them, and a column and a
+parameter are described with their OIDs. pgvector's client libraries find the
+types by name and register their codecs, and read and write vectors in
+pgvector's binary format — the dimension, then each component's
+<code>float4</code> or <code>float2</code>, and for a sparse vector its
+indices from 0 and its weights — as they do against PostgreSQL with
+pgvector:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>library</th><th>registered with</th><th>what goes</th></tr></thead>
+<tbody>
+<tr><td>pgvector-python, psycopg 3</td><td><code>register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, a binary <code>COPY</code> with <code>set_types</code></td></tr>
+<tr><td>pgvector-python, asyncpg</td><td><code>await register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, <code>copy_records_to_table</code></td></tr>
+<tr><td>pgvector-go, pgx</td><td><code>pgxvec.RegisterTypes</code></td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, batches, <code>CopyFrom</code></td></tr>
+<tr><td>pgvector-node, node-postgres</td><td><code>registerTypes(client)</code></td><td>a vector read as an array, written with <code>toSql</code></td></tr>
+<tr><td>pgvector-rust, tokio-postgres</td><td>none: the types are named</td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, a <code>BinaryCopyInWriter</code> of the type found by name</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>In binary a vector costs no text to write or parse: through tokio-postgres
+a page of 1 000 768-dimension vectors reads in 5.5 ms, against 31.4 ms as
+text. A client with no codec for the type reads a vector as its text, as
+before — psycopg, asyncpg, pgx and node-postgres give a string — and sends
+one as text. tokio-postgres does not: like any type it has no Rust type for,
+it refuses a <code>&amp;str</code> for a <code>vector</code> parameter and a
+<code>String</code> for a <code>vector</code> column, as it does against
+pgvector, so it takes pgvector-rust's types. A vector holding a NaN or an
+infinity is refused (<code>22000</code>), as pgvector refuses it; a list
+field still goes as its text.</p>
 
 <h2 id="catalog">The catalog</h2>
 
@@ -470,8 +510,10 @@ catalog query was before, so a client never stalls on one.</p>
 
 <p>A catalog query's parameter is the type the query casts it to —
 <code>$1::oid[]</code>, the array of type OIDs asyncpg looks up, arrives as
-the binary array it is told, <code>$1::text</code> as text — and text where it
-is not cast. pgvector's clients find its types as they find them in
+the binary array it is told, <code>$1::text</code> as text — or else the type
+of the column it is compared with, as PostgreSQL infers the <code>$1</code>
+of <code>t.oid = $1</code> an <code>oid</code>, and text where neither names
+one. pgvector's clients find its types as they find them in
 PostgreSQL: psycopg's <code>TypeInfo</code> by <code>to_regtype</code>, which
 pgvector-python's <code>register_vector</code> calls for <code>vector</code>,
 <code>halfvec</code>, <code>sparsevec</code> and the <code>bit</code> every

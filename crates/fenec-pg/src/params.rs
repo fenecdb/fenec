@@ -8,7 +8,8 @@
 //! and asyncpg in binary -- and Bind reads it by the same type.
 
 use crate::binary::{
-    EPOCH_2000_MS, OID_BPCHAR, OID_FLOAT4, OID_INT2, OID_INT4, OID_NAME, OID_OID, OID_VARCHAR,
+    self, EPOCH_2000_MS, OID_BPCHAR, OID_FLOAT4, OID_HALFVEC, OID_INT2, OID_INT4, OID_NAME,
+    OID_OID, OID_SPARSEVEC, OID_VARCHAR, OID_VECTOR,
 };
 use crate::proto::*;
 use crate::server::{decode_param, pg_oid};
@@ -23,9 +24,9 @@ const OID_UNKNOWN: i32 = 705;
 
 /// The type each `$n` of `stmts` takes where its place names one: compared
 /// with a field or given as one -- the field's type, and `id`'s -- the
-/// vector of a `near` or a `rerank`, the text of a `match`. Text
-/// everywhere else, which every driver sends and a pg text parameter is
-/// read as.
+/// vector of a `near` or a `rerank`, its field's, the text of a `match`.
+/// Text everywhere else, which every driver sends and a pg text parameter
+/// is read as.
 pub fn types(db: &Database, stmts: &[Statement]) -> Vec<i32> {
     let n = stmts.iter().map(|s| s.max_param()).max().unwrap_or(0);
     let mut out = vec![None; n];
@@ -135,15 +136,17 @@ fn statement(db: &Database, s: &Statement, out: &mut [Option<i32>]) {
             if let Some(f) = &sel.filter {
                 filter(sc, f, out);
             }
-            // A vector and a sparse vector travel as their text.
+            // A query vector is of its field's type, as PostgreSQL types
+            // the `$1` of `embedding <-> $1`: pgvector's clients send it in
+            // that type's binary format.
             if let Some(n) = &sel.near {
-                set(out, &n.vector, OID_TEXT);
+                set(out, &n.vector, field(sc, &n.field).unwrap_or(OID_TEXT));
             }
             if let Some(m) = &sel.matcher {
                 set(out, &m.query, OID_TEXT);
             }
             if let Some(r) = &sel.rerank {
-                set(out, &r.vector, OID_TEXT);
+                set(out, &r.vector, field(sc, &r.field).unwrap_or(OID_TEXT));
             }
             if let Some(l) = &sel.lookup {
                 for step in l.chain() {
@@ -159,13 +162,26 @@ fn statement(db: &Database, s: &Statement, out: &mut [Option<i32>]) {
 
 /// A parameter's bytes as a value: in text as a pg text parameter has
 /// always been read -- a number, a vector's `[..]`, a boolean or text --
-/// and in binary as its type `oid` sends it.
-pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Value {
+/// and in binary as its type `oid` sends it. Only a vector is refused, as
+/// pgvector refuses one: the rest are read by their length where they are
+/// not as their type sends them, as a binary parameter always was.
+pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Result<Value, (&'static str, String)> {
     if !binary {
-        return decode_param(raw, false);
+        return Ok(decode_param(raw, false));
     }
     if let Some(elem) = element_of(oid) {
-        return array(raw, elem).unwrap_or_else(|| decode_param(raw, true));
+        return Ok(array(raw, elem).unwrap_or_else(|| decode_param(raw, true)));
+    }
+    if matches!(oid, OID_VECTOR | OID_HALFVEC | OID_SPARSEVEC) {
+        return match binary::vector(raw, oid) {
+            Some(v) => v,
+            // The text a vector went as before it had a binary format.
+            None if !raw.contains(&0) => Ok(decode_param(raw, false)),
+            None => Err((
+                "22P03",
+                format!("{} bytes are not a vector in its binary format", raw.len()),
+            )),
+        };
     }
     let bytes = |n: usize| -> Option<[u8; 8]> {
         let mut b = [0u8; 8];
@@ -199,7 +215,7 @@ pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Value {
         };
     // A type the client did not send as it was told: read as a binary
     // parameter always was, by its length.
-    v.unwrap_or_else(|| decode_param(raw, true))
+    Ok(v.unwrap_or_else(|| decode_param(raw, true)))
 }
 
 /// An array type's element type.
@@ -247,7 +263,7 @@ fn array(raw: &[u8], elem: i32) -> Option<Value> {
         }
         let cell = raw.get(at..at + len as usize)?;
         at += len as usize;
-        out.push(decode(cell, true, elem));
+        out.push(decode(cell, true, elem).ok()?);
     }
     (at == raw.len()).then_some(Value::List(out))
 }
@@ -264,7 +280,7 @@ mod tests {
     fn a_parameter_takes_the_type_its_place_names() {
         let mut db = Database::new();
         for q in [
-            "create collection t (name text, n int, score float, ok bool, at timestamp, raw bytes, tags [text], e vector<2> @hnsw(cosine))",
+            "create collection t (name text, n int, score float, ok bool, at timestamp, raw bytes, tags [text], e vector<2> @hnsw(cosine), h vector<2, f16>, s sparse<5> @inverted)",
             "create collection kids (parent int, age int)",
         ] {
             db.execute(&stmts(q)[0]).unwrap();
@@ -279,15 +295,26 @@ mod tests {
                 OID_BOOL,
                 OID_TIMESTAMPTZ,
                 OID_BYTEA,
-                OID_TEXT,
+                OID_VECTOR,
                 OID_INT8
             ]
+        );
+        assert_eq!(
+            of("put t {h: $1, s: $2, tags: $3}"),
+            [OID_HALFVEC, OID_SPARSEVEC, OID_TEXT]
         );
         assert_eq!(
             of("get t where n > $1 and $2 = score or name ~ $3 or tags has $4 or id in [$5, $6]"),
             [OID_INT8, OID_FLOAT8, OID_TEXT, OID_TEXT, OID_INT8, OID_INT8]
         );
-        assert_eq!(of("get t near e $1 limit 5"), [OID_TEXT]);
+        // A query vector is its field's: pgvector types `embedding <-> $1`
+        // so, and its clients send the vector in that type's format.
+        assert_eq!(of("get t near e $1 limit 5"), [OID_VECTOR]);
+        assert_eq!(of("get t near s $1 limit 5"), [OID_SPARSEVEC]);
+        assert_eq!(
+            of("get t match name $1 rerank h $2 limit 5"),
+            [OID_TEXT, OID_HALFVEC]
+        );
         assert_eq!(
             of("set t {ok: $1} where at < $2"),
             [OID_BOOL, OID_TIMESTAMPTZ]
@@ -304,6 +331,7 @@ mod tests {
 
     #[test]
     fn a_binary_parameter_is_read_as_its_type_sends_it() {
+        let decode = |raw: &[u8], binary, oid| decode(raw, binary, oid).unwrap();
         assert_eq!(decode(&7i64.to_be_bytes(), true, OID_INT8), Value::Int(7));
         assert_eq!(
             decode(&(-3i32).to_be_bytes(), true, OID_INT4),
@@ -348,5 +376,73 @@ mod tests {
         // In text, as ever; and a length the type does not have, as before.
         assert_eq!(decode(b"7", false, OID_INT8), Value::Int(7));
         assert_eq!(decode(&[0, 0, 0, 9], true, OID_INT8), Value::Int(9));
+    }
+
+    #[test]
+    fn a_vector_parameter_is_read_as_pgvector_sends_it() {
+        let words = |w: &[&[u8]]| w.concat();
+        // `vector_send`: the dimension, 0, then each f32.
+        let v = words(&[
+            &2u16.to_be_bytes(),
+            &[0, 0],
+            &1.5f32.to_be_bytes(),
+            &(-2f32).to_be_bytes(),
+        ]);
+        assert_eq!(
+            decode(&v, true, OID_VECTOR),
+            Ok(Value::Vector(vec![1.5, -2.0]))
+        );
+        // `halfvec_send`: each component's binary16.
+        let h = words(&[
+            &2u16.to_be_bytes(),
+            &[0, 0],
+            &0x3e00u16.to_be_bytes(),
+            &0xc000u16.to_be_bytes(),
+        ]);
+        assert_eq!(
+            decode(&h, true, OID_HALFVEC),
+            Ok(Value::Vector(vec![1.5, -2.0]))
+        );
+        // `sparsevec_send`: dimension, count, 0, the indices from 0, the weights.
+        let s = words(&[
+            &5u32.to_be_bytes(),
+            &2u32.to_be_bytes(),
+            &[0; 4],
+            &1u32.to_be_bytes(),
+            &3u32.to_be_bytes(),
+            &0.5f32.to_be_bytes(),
+            &0.25f32.to_be_bytes(),
+        ]);
+        assert_eq!(
+            decode(&s, true, OID_SPARSEVEC),
+            Ok(Value::Sparse(5, vec![(1, 0.5), (3, 0.25)]))
+        );
+        // Refused as pgvector refuses them.
+        let nan = words(&[&1u16.to_be_bytes(), &[0, 0], &f32::NAN.to_be_bytes()]);
+        assert_eq!(
+            decode(&nan, true, OID_VECTOR),
+            Err(("22000", "NaN not allowed in vector".to_string()))
+        );
+        let inf = words(&[&1u16.to_be_bytes(), &[0, 0], &0x7c00u16.to_be_bytes()]);
+        assert_eq!(
+            decode(&inf, true, OID_HALFVEC),
+            Err(("22000", "infinite value not allowed in halfvec".to_string()))
+        );
+        // The text a vector went as before it had a binary format is read
+        // as it was; bytes that are neither are refused.
+        assert_eq!(
+            decode(b"[1,2]", true, OID_VECTOR),
+            Ok(Value::Vector(vec![1.0, 2.0]))
+        );
+        assert_eq!(
+            decode(b"{2:1}/3", true, OID_SPARSEVEC),
+            Ok(Value::Text("{2:1}/3".into()))
+        );
+        assert_eq!(decode(&v[..7], true, OID_VECTOR).unwrap_err().0, "22P03");
+        // In text, a vector reads as it always has.
+        assert_eq!(
+            decode(b"[1,2]", false, OID_VECTOR),
+            Ok(Value::Vector(vec![1.0, 2.0]))
+        );
     }
 }

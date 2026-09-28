@@ -252,15 +252,24 @@ types' `typsend`, a text type as its text, an array refused), which
 tokio-postgres and asyncpg ask for every column and pgx for every type it
 knows -- sent as text, a `bigint` was one byte where they read eight. A
 parameter's type is the one its place names (`params.rs`: the field it is
-given for or compared with, `id`'s, a `match`'s or a `near`'s text), text
-where nothing names one, and never the unspecified OID 0, which sent
+given for or compared with, `id`'s, a `near`'s field's, a `match`'s text),
+text where nothing names one, and never the unspecified OID 0, which sent
 tokio-postgres into a type lookup that recursed until its stack ran out and
 asyncpg into an introspection query of its own; Bind reads a binary value by
-it. A plain `SELECT` of columns from one collection is the `get` it is
+it. A vector is pgvector's type -- `vector`, `halfvec` for a `vector<N,
+f16>`, `sparsevec`, 16400 to 16402 as the catalog names them (`pg_oid`) --
+in pgvector's binary formats both ways (`binary::vector`): described as
+`text`, it was a string to pgvector's clients, which register their codecs
+by the type's name. A vector not in the format is read as the text it went
+as before, which holds no zero byte where the format's second word is 0,
+and one holding a NaN or an infinity is refused (`22000`), as pgvector
+refuses it. A page of 1 000 768-dim vectors reads in 5.5 ms against 31.4 as
+text (tokio-postgres, the rows not decoded). A list still goes as its text.
+A plain `SELECT` of columns from one collection is the `get` it is
 (`sql.rs`), which asyncpg and pgx ask before a binary COPY. A new field type
 needs its binary form in both. `make drivers-test` holds psycopg,
-SQLAlchemy, asyncpg, pgx, tokio-postgres and node-postgres to their own
-flows.
+SQLAlchemy, asyncpg, pgx, tokio-postgres (with pgvector-rust's types) and
+node-postgres to their own flows.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -1109,7 +1118,8 @@ browser module; this way it is 2.
 sparse vector is held as its non-zero entries, `(index, weight)` ascending
 with indices from 0, and travels everywhere in pgvector's text form,
 `{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, pg text, a FenecQL
-literal -- so a pgvector client and `fenec import` carry the same vector.
+literal -- or in its binary form where a pg driver asks for it, so a
+pgvector client and `fenec import` carry the same vector.
 Every way in goes through `sparse::normalise` (order, an index given twice
 refused, zeros dropped), and the index relies on it. `@inverted` is the text
 index's shape with weights where the counts were; `near` by dot product sums
@@ -1186,8 +1196,13 @@ select and then each `UNION` over the rows the step before added, until a
 step adds none, 1 000 steps at most (`with_rel`): asyncpg looks up a type it
 has no codec for with one, `WITH RECURSIVE` over a derived table and again
 in a scalar subquery. A parameter is the type the query casts it to (`param_types`: asyncpg's
-`$1::oid[]` arrives as the binary array it is told), and `to_regtype` and
-`bit` are there because pgvector's clients look types up by them. It is
+`$1::oid[]` arrives as the binary array it is told), or else the type of
+the column it is compared with: tokio-postgres looks a type up by `t.oid =
+$1` and binds the oid only to a parameter described as one. `to_regtype`,
+`bit`, `pg_range`'s columns and pgvector's types in `public` are there
+because pgvector's clients look types up by them -- asyncpg's
+`set_type_codec` in the schema it is given, where `sparsevec` in
+`pg_catalog` was not found. It is
 a crate of its own so that it can be built for size (`opt-level = "z"`): at
 opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
 queries 1.2-1.5x slower. The CLI and the browser module link none of it.
