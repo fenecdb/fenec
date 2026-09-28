@@ -353,6 +353,14 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
         }
         b'"' => Ok(Value::Text(parse_string(s, i)?)),
         b'[' => {
+            // Numbers alone are a vector, read straight into its `f32`s --
+            // natively: a page's vectors come into the browser module as
+            // `f32`s already (`vectorsApart`), and there the reader was 474
+            // bytes brotli for nothing.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(v) = numbers(s, i) {
+                return Ok(Value::Vector(v));
+            }
             let items = parse_array(s, i)?;
             // If every item is a number, read it as a vector (embedding transfer)
             if !items.is_empty()
@@ -374,20 +382,7 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
             ))
         }
         b'-' | b'0'..=b'9' => {
-            let start = *i;
-            if c == b'-' {
-                *i += 1;
-            }
-            let mut is_float = false;
-            while let Some(&d) = b.get(*i) {
-                match d {
-                    b'0'..=b'9' | b'+' | b'-' => {}
-                    b'.' | b'e' | b'E' => is_float = true,
-                    _ => break,
-                }
-                *i += 1;
-            }
-            let text = s.get(start..*i).unwrap_or("");
+            let (text, is_float) = number_at(s, i);
             if is_float {
                 crate::num::parse_f64(text)
                     .map(Value::Float)
@@ -403,6 +398,154 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
             Err(Error::Query(format!("unexpected JSON character `{other}`")))
         }
     }
+}
+
+/// The number at `i`, which starts with `-` or a digit: its text, and
+/// whether it is written as a float.
+fn number_at<'s>(s: &'s str, i: &mut usize) -> (&'s str, bool) {
+    let b = s.as_bytes();
+    let start = *i;
+    if b.get(*i) == Some(&b'-') {
+        *i += 1;
+    }
+    let mut is_float = false;
+    while let Some(&d) = b.get(*i) {
+        match d {
+            b'0'..=b'9' | b'+' | b'-' => {}
+            b'.' | b'e' | b'E' => is_float = true,
+            _ => break,
+        }
+        *i += 1;
+    }
+    (s.get(start..*i).unwrap_or(""), is_float)
+}
+
+/// The array at `i` when it holds numbers alone, each the `f32` the vector
+/// shortcut makes of it -- an integer through `i64` and `f64`, as its
+/// `Value::Int` went -- and `i` past it. `None`, `i` where it was, for
+/// anything else, which the general path reads, or refuses, as it did.
+/// Read a `Value` at a time and converted, each number's text found and
+/// then read twice over, a 128-dim vector took 5.26 us and a 768-dim one
+/// 30.1; read here, 2.05 and 11.1, and a COPY of 128-dim rows without an
+/// index went 120k -> 196k rows/s.
+#[cfg(not(target_arch = "wasm32"))]
+fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
+    let b = s.as_bytes();
+    let mut j = *i + 1;
+    let mut out = Vec::new();
+    // A space is looked for only where a byte could start one: a call a
+    // side was an eighth of a vector's reading.
+    let space = |j: &mut usize| {
+        if b.get(*j).is_some_and(|&c| c <= b' ' || c >= 0x80) {
+            skip_ws(s, j);
+        }
+    };
+    loop {
+        space(&mut j);
+        if !matches!(b.get(j), Some(b'-' | b'0'..=b'9')) {
+            return None;
+        }
+        let x = match clinger(b, &mut j) {
+            Some(x) => x,
+            None => {
+                let (text, is_float) = number_at(s, &mut j);
+                match is_float {
+                    true => crate::num::parse_f64(text)?,
+                    false => text.parse::<i64>().ok()? as f64,
+                }
+            }
+        };
+        out.push(x as f32);
+        space(&mut j);
+        match b.get(j) {
+            Some(b',') => j += 1,
+            Some(b']') => {
+                *i = j + 1;
+                return Some(out);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The number at `j` as the general path reads it -- a float through
+/// `num::parse_f64`, an integer through `i64` -- when it reads in the one
+/// pass that finds its end: `-`, digits, a fraction, an exponent, and up to
+/// 19 significant digits of no more than 2^53 over a power of ten an `f64`
+/// holds exactly, which Clinger's path rounds with one multiply or divide,
+/// as `parse_f64` does. That is every component of a vector's text but the
+/// widest. `None`, and `j` where it was, for anything else.
+#[cfg(not(target_arch = "wasm32"))]
+fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
+    let mut k = *j;
+    let neg = b.get(k) == Some(&b'-');
+    k += neg as usize;
+    // Leading zeros are not significant, and add nothing to `m`.
+    let (mut m, mut sig, mut e10) = (0u64, 0u32, 0i32);
+    let mut digits = |k: &mut usize, frac: bool| {
+        let start = *k;
+        while let Some(&d @ b'0'..=b'9') = b.get(*k) {
+            sig += (m != 0 || d != b'0') as u32;
+            m = m.wrapping_mul(10).wrapping_add((d - b'0') as u64);
+            e10 -= frac as i32;
+            *k += 1;
+        }
+        *k > start
+    };
+    if !digits(&mut k, false) {
+        return None;
+    }
+    let mut float = false;
+    if b.get(k) == Some(&b'.') {
+        k += 1;
+        if !digits(&mut k, true) {
+            return None;
+        }
+        float = true;
+    }
+    if let Some(b'e' | b'E') = b.get(k) {
+        k += 1;
+        let eneg = b.get(k) == Some(&b'-');
+        k += matches!(b.get(k), Some(b'-' | b'+')) as usize;
+        let start = k;
+        let mut e = 0i32;
+        while let Some(&d @ b'0'..=b'9') = b.get(k) {
+            e = e * 10 + (d - b'0') as i32;
+            k += 1;
+            if k - start > 3 {
+                return None;
+            }
+        }
+        if k == start {
+            return None;
+        }
+        e10 += if eneg { -e } else { e };
+        float = true;
+    }
+    // Past 19 digits `m` may have wrapped; and where the general path's
+    // scan would go on, it is the one to read what follows.
+    if sig > 19
+        || matches!(
+            b.get(k),
+            Some(b'0'..=b'9' | b'+' | b'-' | b'.' | b'e' | b'E')
+        )
+    {
+        return None;
+    }
+    let x = if m == 0 {
+        0.0
+    } else if m > 1 << 53 {
+        return None;
+    } else if (0..=22).contains(&e10) {
+        m as f64 * crate::num::POW10[e10 as usize]
+    } else if (-22..0).contains(&e10) {
+        m as f64 / crate::num::POW10[-e10 as usize]
+    } else {
+        return None;
+    };
+    *j = k;
+    // An integer is an `i64`, which has no -0.
+    Some(if neg && (float || m != 0) { -x } else { x })
 }
 
 /// Parses an array starting at `[` element by element; it does *not* apply
@@ -633,6 +776,149 @@ pub fn parse_params(src: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An array as the general path reads it, a value at a time: a vector
+    /// when every item is a number, as `parse_value` read every array
+    /// before the one-pass reader.
+    fn a_value_at_a_time(s: &str) -> Result<Value> {
+        let mut i = 0;
+        skip_ws(s, &mut i);
+        let items = parse_array(s, &mut i)?;
+        skip_ws(s, &mut i);
+        if i != s.len() {
+            return Err(Error::Query("trailing characters after JSON".into()));
+        }
+        Ok(
+            match !items.is_empty()
+                && items
+                    .iter()
+                    .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+            {
+                true => Value::Vector(items.iter().map(|v| v.as_f64().unwrap() as f32).collect()),
+                false => Value::List(items),
+            },
+        )
+    }
+
+    fn bits(v: &Result<Value>) -> Option<Vec<u32>> {
+        match v {
+            Ok(Value::Vector(v)) => Some(v.iter().map(|x| x.to_bits()).collect()),
+            _ => None,
+        }
+    }
+
+    /// The vector shortcut reads its numbers in one pass where Clinger's
+    /// path takes them, and every vector -- every refusal, every list -- is
+    /// the one read a value at a time, to the bit: -0 and -0.0, 19 digits
+    /// and 20, exponents near and past 22, integers past 2^53 and `i64`,
+    /// and the runs of `[0-9.eE+-]` that are no number at all.
+    #[test]
+    fn a_vector_read_in_one_pass_is_the_one_read_a_value_at_a_time() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let digits = |next: &mut dyn FnMut(u64) -> u64, n: u64| -> String {
+            (0..n).map(|_| char::from(b'0' + next(10) as u8)).collect()
+        };
+        let fixed = [
+            "0",
+            "-0",
+            "0.0",
+            "-0.0",
+            "00",
+            "-01.5",
+            "1.",
+            "1.e5",
+            "1e",
+            "1e+",
+            "1e-",
+            "1.2.3",
+            "1-2",
+            "--1",
+            "1e5e5",
+            "9007199254740992",
+            "9007199254740993",
+            "-9007199254740993",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "99999999999999999999",
+            "1e22",
+            "1e23",
+            "1.5e22",
+            "1e-22",
+            "1e-23",
+            "1E+05",
+            "4e0400",
+            "0.1",
+            "0.30000000000000004",
+            "1234567890123456789",
+            "12345678901234567890",
+            "0.0000000000000000000001234",
+            "1e-400",
+            "1e400",
+            "-1e-400",
+            "7.038531e-26",
+        ];
+        let mut texts: Vec<String> = fixed.iter().map(|t| format!("[{t}]")).collect();
+        texts.push(format!("[{}]", fixed.join(", ")));
+        for _ in 0..40_000 {
+            let n = 1 + next(12);
+            let items: Vec<String> = (0..n)
+                .map(|_| {
+                    let mut t = String::new();
+                    if next(3) == 0 {
+                        t.push('-');
+                    }
+                    let zeros = next(4);
+                    t.push_str(&"0".repeat(zeros as usize));
+                    let int = next(22);
+                    t.push_str(&digits(&mut next, int));
+                    if t.is_empty() || t == "-" {
+                        t.push('0');
+                    }
+                    if next(3) > 0 {
+                        t.push('.');
+                        let frac = 1 + next(22);
+                        t.push_str(&digits(&mut next, frac));
+                    }
+                    if next(4) == 0 {
+                        t.push(['e', 'E'][next(2) as usize]);
+                        match next(3) {
+                            0 => t.push('-'),
+                            1 => t.push('+'),
+                            _ => {}
+                        }
+                        let e = 1 + next(3);
+                        t.push_str(&digits(&mut next, e));
+                    }
+                    if next(200) == 0 {
+                        t.push(['.', 'e', '-', '+', '1'][next(5) as usize]);
+                    }
+                    t
+                })
+                .collect();
+            let sep = [",", ", ", " ,\n"][next(3) as usize];
+            texts.push(format!("[{}]", items.join(sep)));
+        }
+        let (mut vectors, mut refused) = (0, 0);
+        for t in &texts {
+            let (one, each) = (parse(t), a_value_at_a_time(t));
+            assert_eq!(bits(&one), bits(&each), "{t}");
+            assert_eq!(one.is_err(), each.is_err(), "{t}");
+            if !matches!(one, Ok(Value::Vector(_))) {
+                assert_eq!(format!("{one:?}"), format!("{each:?}"), "{t}");
+            }
+            vectors += bits(&one).is_some() as u32;
+            refused += one.is_err() as u32;
+        }
+        // Both kinds were tried, many times over.
+        assert!(vectors > 30_000 && refused > 100, "{vectors} {refused}");
+    }
 
     #[test]
     fn roundtrip() {

@@ -351,8 +351,8 @@ side (<code>\copy</code> sends the file from the client), the
 <code>binary</code> format — which asyncpg's
 <code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> send, so
 there use the text format — and a COPY among other statements in one query.
-100 000 rows of a text, an int and a 128-dim vector load at 17 200 rows/s with
-the HNSW graph kept as they land and 113 000 without, against 5 300 and 106 000
+100 000 rows of a text, an int and a 128-dim vector load at 18 200 rows/s with
+the HNSW graph kept as they land and 184 000 without, against 5 400 and 160 000
 sent a <code>put</code> a row, as a driver's <code>executemany</code> sends
 them (<code>make load-bench</code>).</p>
 
