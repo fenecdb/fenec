@@ -1031,7 +1031,11 @@ indexes are indexes with their own access methods (`hash`, `btree` for
 equality: over a thousand collections nested loops took JDBC's column lookup
 18.1 s, keyed 122 ms. What the subset cannot read, and catalog tables it does
 not build, answer empty -- the old behaviour -- so a tool never stalls. A
-parameter is the type the query casts it to (`param_types`: asyncpg's
+`WITH` is read, and a recursive one runs as PostgreSQL runs it, its first
+select and then each `UNION` over the rows the step before added, until a
+step adds none, 1 000 steps at most (`with_rel`): asyncpg looks up a type it
+has no codec for with one, `WITH RECURSIVE` over a derived table and again
+in a scalar subquery. A parameter is the type the query casts it to (`param_types`: asyncpg's
 `$1::oid[]` arrives as the binary array it is told), and `to_regtype` and
 `bit` are there because pgvector's clients look types up by them. It is
 a crate of its own so that it can be built for size (`opt-level = "z"`): at

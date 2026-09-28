@@ -159,12 +159,14 @@ pub enum Expr {
     Param(usize),
     /// `qualifier.name`, or `name` alone.
     Column(Option<String>, String),
-    /// `name(args)`, schema dropped; `star` for `count(*)`.
+    /// `name(args)`, schema dropped; `star` for `count(*)`; `order` for an
+    /// aggregate's `ORDER BY`: `array_agg(a ORDER BY b)`.
     Call {
         name: String,
         args: Vec<Expr>,
         star: bool,
         distinct: bool,
+        order: Vec<Order>,
     },
     /// `CASE [operand] WHEN .. THEN .. [ELSE ..] END`.
     Case {
@@ -278,8 +280,21 @@ pub struct Order {
     pub desc: bool,
 }
 
+/// One name a `WITH` gives: `name [(columns)] AS (query)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    pub name: String,
+    /// What the query's columns are called in it, when named.
+    pub columns: Vec<String>,
+    pub query: Box<Query>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    /// `WITH [RECURSIVE]`: what the query reads by name besides the catalog,
+    /// and whether one of them may read itself.
+    pub with: Vec<Cte>,
+    pub recursive: bool,
     /// The first select, then each one `UNION`ed on and whether with `ALL`.
     pub first: Select,
     pub unions: Vec<(bool, Select)>,
@@ -399,6 +414,35 @@ impl Parser {
     }
 
     pub fn query(&mut self) -> Parsed<Query> {
+        let (mut with, mut recursive) = (Vec::new(), false);
+        if self.eat_word("with") {
+            recursive = self.eat_word("recursive");
+            loop {
+                let name = self.name()?;
+                let mut columns = Vec::new();
+                if self.eat_op("(") {
+                    loop {
+                        columns.push(self.name()?);
+                        if self.eat_op(")") {
+                            break;
+                        }
+                        self.expect_op(",")?;
+                    }
+                }
+                self.expect_word("as")?;
+                self.expect_op("(")?;
+                let query = self.query()?;
+                self.expect_op(")")?;
+                with.push(Cte {
+                    name,
+                    columns,
+                    query: Box::new(query),
+                });
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+        }
         // A parenthesised query as the whole: `(SELECT ...) UNION ...`.
         let first = self.select_core()?;
         let mut unions = Vec::new();
@@ -441,6 +485,8 @@ impl Parser {
             }
         }
         Ok(Query {
+            with,
+            recursive,
             first,
             unions,
             order,
@@ -652,6 +698,44 @@ impl Parser {
         }
     }
 
+    /// A call's arguments up to its `)`, and an aggregate's `ORDER BY`
+    /// before it.
+    fn call_args(&mut self) -> Parsed<(Vec<Expr>, Vec<Order>)> {
+        let mut args = Vec::new();
+        if self.eat_op(")") {
+            return Ok((args, Vec::new()));
+        }
+        loop {
+            args.push(self.expr()?);
+            if self.eat_op(")") {
+                return Ok((args, Vec::new()));
+            }
+            if self.eat_word("order") {
+                self.expect_word("by")?;
+                let mut order = Vec::new();
+                loop {
+                    let expr = self.expr()?;
+                    let desc = self.eat_word("desc");
+                    if !desc {
+                        self.eat_word("asc");
+                    }
+                    order.push(Order { expr, desc });
+                    if !self.eat_op(",") {
+                        break;
+                    }
+                }
+                self.expect_op(")")?;
+                return Ok((args, order));
+            }
+            self.expect_op(",")?;
+        }
+    }
+
+    /// Whether a query starts here: a `SELECT`, or the `WITH` before one.
+    fn at_query(&self) -> bool {
+        self.is_word("select") || self.is_word("with")
+    }
+
     pub fn expr(&mut self) -> Parsed<Expr> {
         self.or()
     }
@@ -713,7 +797,7 @@ impl Parser {
         let negated = self.eat_word("not");
         if self.eat_word("in") {
             self.expect_op("(")?;
-            if self.is_word("select") {
+            if self.at_query() {
                 let q = self.query()?;
                 self.expect_op(")")?;
                 return Ok(Expr::InQuery(Box::new(left), Box::new(q), negated));
@@ -776,7 +860,7 @@ impl Parser {
             let all = self.is_word("all");
             self.at += 1;
             self.expect_op("(")?;
-            let right = if self.is_word("select") {
+            let right = if self.at_query() {
                 Expr::ArrayQuery(Box::new(self.query()?))
             } else {
                 self.expr()?
@@ -910,7 +994,7 @@ impl Parser {
                 Ok(Expr::Param(n))
             }
             Tok::Op("(") => {
-                if self.is_word("select") {
+                if self.at_query() {
                     let q = self.query()?;
                     self.expect_op(")")?;
                     return Ok(Expr::Subquery(Box::new(q)));
@@ -975,6 +1059,7 @@ impl Parser {
                         args,
                         star: false,
                         distinct: false,
+                        order: Vec::new(),
                     })
                 }
                 "exists" => {
@@ -1010,6 +1095,7 @@ impl Parser {
                         args: Vec::new(),
                         star: false,
                         distinct: false,
+                        order: Vec::new(),
                     })
                 }
                 // A typed literal: `regclass 'docs'`, `name 'x'`.
@@ -1048,10 +1134,11 @@ impl Parser {
                     args: Vec::new(),
                     star: true,
                     distinct: false,
+                    order: Vec::new(),
                 });
             }
             let distinct = self.eat_word("distinct");
-            let args = self.args()?;
+            let (args, order) = self.call_args()?;
             if self.eat_word("over") {
                 return self.window(name);
             }
@@ -1060,6 +1147,7 @@ impl Parser {
                 args,
                 star: false,
                 distinct,
+                order,
             });
         }
         let name = parts.pop().unwrap_or_default();

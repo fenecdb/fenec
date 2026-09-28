@@ -387,11 +387,24 @@ fn jdbc_primary_keys() {
 fn queries_outside_the_subset_are_refused() {
     let s = snapshot();
     for q in [
-        "with x as (select 1) select * from x",
         "select * from pg_class c right join pg_namespace n on true",
+        // A recursion that never stops is refused rather than run for good.
+        "with recursive n(i) as (select 1 union all select i from n) select * from n",
     ] {
         assert!(answer(q, &[], &s).is_err(), "{q}");
     }
+    // A `WITH`, and one that reads itself until it adds nothing.
+    let a = run_sql(&s, "with x(v) as (select 1) select v from x", &[]);
+    assert_eq!(text(&a), [["1"]]);
+    let a = run_sql(
+        &s,
+        "with recursive n(i) as (select 1 union all select i + 1 from n where i < 4)          select i from n order by i desc",
+        &[],
+    );
+    assert_eq!(text(&a), [["4"], ["3"], ["2"], ["1"]]);
+    assert!(is_catalog(
+        "with x as (select oid from pg_type) select * from x"
+    ));
     assert!(is_catalog("select * from pg_catalog.pg_class"));
     assert!(is_catalog("select relname from pg_class"));
     assert!(!is_catalog("select title from docs where n > 1"));
@@ -516,4 +529,47 @@ fn pgvector_clients_find_its_types() {
         text(&run_sql(&s, many, &[oids])),
         [["sparsevec"], ["vector"]]
     );
+}
+
+/// asyncpg's own introspection, as asyncpg 0.31 sends it for a type OID it
+/// has no codec for -- a `vector` column's, when the client registered
+/// none: a recursive CTE over a derived table, with a recursive CTE of its
+/// own in a scalar subquery.
+#[test]
+fn asyncpg_introspects_a_type_it_does_not_know() {
+    let s = snapshot();
+    let q = include_str!("asyncpg_introspect.sql");
+    assert!(is_catalog(&q.to_lowercase()));
+    assert_eq!(param_types(q), Some(vec![OID_ARRAY]));
+    let a = run_sql(&s, q, &[Value::List(vec![Value::Int(VECTOR as i64)])]);
+    let names: Vec<&str> = a.columns.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "oid",
+            "ns",
+            "name",
+            "kind",
+            "basetype",
+            "elemtype",
+            "elemdelim",
+            "range_subtype",
+            "attrtypoids",
+            "attrnames",
+            "depth",
+            "basetype_name",
+            "elemtype_name",
+            "range_subtype_name"
+        ]
+    );
+    assert_eq!(
+        text(&a),
+        [["16400", "public", "vector", "b", "-", "0", "-", "-", "-", "-", "0", "-", "-", "-"]]
+    );
+    // An array type brings its element type after it, a level deeper.
+    let a = run_sql(&s, q, &[Value::List(vec![Value::Int(TEXT_ARRAY as i64)])]);
+    let rows = text(&a);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0][2], "text");
+    assert_eq!(rows[1][2], "_text");
 }
