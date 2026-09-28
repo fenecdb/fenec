@@ -210,6 +210,7 @@ cargo run --release -p fenec-core --example bench
 <tr><td>storage</td><td class="n">52.7 MB · 527 bytes/document · 7 segments · no page cache</td></tr>
 <tr><td>ANN k=10</td><td class="n">p50 <b>0.070 ms</b> · p95 0.086 ms · p99 0.097 ms</td></tr>
 <tr><td>ANN with a filter</td><td class="n">p50 <b>0.141 ms</b>, candidate set n/4</td></tr>
+<tr><td>ANN with a filter no row near the query matches</td><td class="n">p50 <b>1.15 ms</b>, the n/4 measured on every core</td></tr>
 <tr><td>recall@10</td><td class="n"><b>100%</b> against an exact scan</td></tr>
 <tr><td>snapshot</td><td class="n">29 ms, producing 59.3 MB with the graph and the records' index, +13%</td></tr>
 <tr><td>reopen</td><td class="n"><b>10 ms</b>, read into memory, the graph validated and restored</td></tr>
@@ -222,6 +223,43 @@ the index is rebuilt from scratch, which would make a page refresh in the
 browser unusable. The graph record makes that roughly 340× faster and costs 12%
 more space in the image, 52.7 MB to 58.9 MB; the index of the records, which a
 mapped open reads rather than walking them, is 0.4 MB more.</p>
+
+<p>A filter that no row near the query matches leaves the walk with nothing
+to keep, and the search then measures every row the filter does match: the
+answer is exact, and the set is read on every core, the nearest ten kept as
+they are measured.</p>
+
+<h3 id="million">At a million</h3>
+
+<p>The same measurement at 1 000 000 × 128, one run, and the full vectors of
+<code>make quant-bench QUANT_ROWS=1000000</code> at 1 000 000 × 768, stored as
+<code>f16</code> and spread along 32 directions, as embeddings are:</p>
+
+<pre data-lang="bash">cargo run --release -p fenec-core --example bench -- 1000000 128
+cargo run --release -p fenec-core --example quant -- 1000000 768 none --rank 32
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">1 000 000 × 128</th><th class="n">1 000 000 × 768, f16</th></tr></thead>
+<tbody>
+<tr><td>write, HNSW indexing included</td><td class="n">105 s, 9 509 documents/s</td><td class="n">446 s</td></tr>
+<tr><td>memory</td><td class="n">527 MB of documents</td><td class="n">3.4 GB heap, 1.5 GB of it the arena</td></tr>
+<tr><td>ANN k=10, p50</td><td class="n">0.203 ms</td><td class="n">0.64 ms at ef 100, 0.97 at 200</td></tr>
+<tr><td>recall@10</td><td class="n">93.0% at ef 100</td><td class="n">97.4% at ef 100, 98.4% at 200</td></tr>
+<tr><td>ANN with a filter, n/4</td><td class="n">1.19 ms</td><td class="n">—</td></tr>
+<tr><td>… no row near the query matching</td><td class="n">6.97 ms</td><td class="n">—</td></tr>
+<tr><td>snapshot, reopen</td><td class="n">196 ms, 128 ms</td><td class="n">—</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A build grows faster than the data. Each vector's walk reads more of a graph
+that no longer fits in the caches: a node cost 0.27 ms of the cores at 100 000
+and 0.63 at a million, with about six of the eight kept busy. <code>bench</code>
+spreads each vector in every dimension, which no embedding does, and at a
+million its recall at the default beam falls to 93%; the 768-dim vectors spread
+along 32 directions keep 97.4%, and a beam of 200 buys another point.</p>
 
 <h2>The ef and recall trade-off</h2>
 
