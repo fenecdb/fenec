@@ -5,8 +5,9 @@ description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authenti
 
 <h1>PostgreSQL server</h1>
 <p class="kicker"><code>fenec-pg</code> speaks the PostgreSQL v3 wire protocol,
-so psql, psycopg, node-postgres, JDBC and pgbouncer all connect. What is
-compatible is the transport, not the language.</p>
+so psql, psycopg, asyncpg, pgx, tokio-postgres, node-postgres, JDBC and
+pgbouncer all connect. What is compatible is the transport, not the
+language.</p>
 
 <pre data-lang="bash">fenec-pg --listen 127.0.0.1:5433 --file data.fenec
 
@@ -45,6 +46,37 @@ packet is the tenant, so <code>psql postgres://host:5433/acme</code> is a
 session on <code>acme.fenec</code>. That mode, its <code>--admin-token</code>
 and <code>--idle-close</code>, and the router in front of it are on
 <a href="/docs/sharding">Tenants and sharding</a>.</p>
+
+<h2 id="drivers">Drivers</h2>
+
+<p>A driver is held to its own flows against a real <code>fenec-pg</code> —
+<code>make drivers-test</code>, and CI on every change: the queries it sends
+on its own, the formats it reads rows and sends parameters in, its
+transactions and its COPY.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>driver</th><th>what is held</th></tr></thead>
+<tbody>
+<tr><td>psycopg 3</td><td>nested transactions as savepoints, pipeline mode, <code>cursor.copy</code> in text and CSV</td></tr>
+<tr><td>SQLAlchemy 2</td><td><code>begin_nested</code>, the queries its dialect opens a connection with</td></tr>
+<tr><td>asyncpg</td><td>every row and parameter in binary, prepared statements, <code>executemany</code>, transactions, <code>copy_records_to_table</code> (binary) and <code>copy_to_table</code></td></tr>
+<tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary)</td></tr>
+<tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>)</td></tr>
+<tr><td>node-postgres</td><td>rows and parameters in text</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>psql's <code>\copy</code> and <code>\d</code>, JDBC's
+<code>DatabaseMetaData</code> and <code>CopyManager</code> and DBeaver's
+navigator are held by the catalog's and COPY's own tests. Two limits are the
+drivers': node-postgres has no binary mode — with <code>binary: true</code>
+it reads a binary cell as UTF-8, from PostgreSQL too — and pgx's
+<code>QueryExecModeSimpleProtocol</code> writes every parameter into the text
+as a quoted literal, so <code>n = '2'</code> compares an int field with the
+text <code>2</code>, which FenecQL does not resolve to the field's type as
+PostgreSQL resolves an untyped literal: use pgx's default mode.</p>
 
 <h2>Sessions</h2>
 
@@ -375,7 +407,10 @@ dropped.</p>
 <p>Refused with <code>0A000</code>, before a row is sent: <code>COPY ...
 TO</code> (read the rows with a query), a file or a program on the server's
 side (<code>\copy</code> sends the file from the client), and a COPY among
-other statements in one query.
+other statements in one query. In binary an int, a float and a timestamp
+are read without parsing text: pgx's <code>CopyFrom</code> of the same
+100 000 rows, a vector each written as text, loads at 247 000 rows/s
+without an index.
 100 000 rows of a text, an int and a 128-dim vector load at 17 600 rows/s with
 the HNSW graph kept as they land and 171 000 without, against 17 200 and
 152 000 sent a <code>put</code> a row in a transaction, as a driver's
