@@ -868,7 +868,7 @@ fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
     if b.len() != want {
         return Err(format!("{} bytes where its type sends {want}", b.len()));
     }
-    crate::params::decode(b, true, oid).map_err(|(_, why)| why)
+    crate::params::decode(b, true, oid, None).map_err(|(_, why)| why)
 }
 
 /// Bytes as `\x` and hexadecimal digits, for an error to show them.

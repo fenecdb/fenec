@@ -3106,6 +3106,43 @@ fn parameters_take_the_types_their_places_name() {
     );
 }
 
+/// A value sent as text is read as the field its place names -- as
+/// psycopg and node-postgres send a string, no type named and no
+/// `Describe` of the statement before its Bind. Read by its look, `"t"` was
+/// a boolean and `"42"` a number, which the text field refused.
+#[test]
+fn a_text_parameter_is_read_as_its_places_field() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text, n int, raw bytes, tags [text])");
+    for name in ["t", "42", "1.5", "[1,2]"] {
+        let r = c.with_formats(
+            "put t {name: $1, n: $2, raw: $3, tags: $4}",
+            &[name, "7", "\\x00ff", "{a,b}"],
+            &[],
+        );
+        assert_eq!(outcome(&r), "INSERT 0 1", "{name}");
+    }
+    assert_eq!(
+        rows_of(&mut c, "get t select name order name"),
+        cells(&[
+            &[Some("1.5")],
+            &[Some("42")],
+            &[Some("[1,2]")],
+            &[Some("t")]
+        ])
+    );
+    let r = c.with_formats("get t select n, raw, tags where name = $1", &["42"], &[]);
+    assert_eq!(
+        find(&r, b'D').unwrap().cells(),
+        [
+            Some("7".to_string()),
+            Some("\\x00ff".to_string()),
+            Some(r#"{"a","b"}"#.to_string())
+        ]
+    );
+}
+
 /// A vector, a `vector<N, f16>` and a sparse vector are pgvector's
 /// `vector`, `halfvec` and `sparsevec`, by the oids the catalog names them
 /// with -- which pgvector's clients look up by name to register their

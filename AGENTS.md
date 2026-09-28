@@ -240,7 +240,14 @@ given for or compared with, `id`'s, a `near`'s field's, a `match`'s text),
 text where nothing names one, and never the unspecified OID 0, which sent
 tokio-postgres into a type lookup that recursed until its stack ran out and
 asyncpg into an introspection query of its own; Bind reads a binary value by
-it. A vector is pgvector's type -- `vector`, `halfvec` for a `vector<N,
+it. A value sent as text is read as the field its place names
+(`params::places`), as COPY reads a cell of it, and by its look -- a
+number, a boolean, a vector, text -- only where no field is named, or it
+is no value of the field's: by its look alone, `"t"` was a boolean and
+`"42"` a number, which a text field refused. psycopg and node-postgres
+name no type for a string and send `Parse` to `Execute` in one go, so a
+statement no `Describe` asked about has its places found at its first
+Bind, under the read lock. A vector is pgvector's type -- `vector`, `halfvec` for a `vector<N,
 f16>`, `sparsevec`, 16400 to 16402 as the catalog names them (`pg_oid`) --
 in pgvector's binary formats both ways (`binary::vector`): described as
 `text`, it was a string to pgvector's clients, which register their codecs

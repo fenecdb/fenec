@@ -1349,6 +1349,10 @@ struct Prepared {
     /// reads a binary value by. Empty until then, and the `declared` ones
     /// are read by.
     types: Vec<i32>,
+    /// The field type each parameter's place names, which Bind reads a
+    /// text value as ([`params::places`]): found by `Describe`, or by the
+    /// first Bind of a statement no `Describe` asked about.
+    places: Option<Vec<Option<DataType>>>,
 }
 
 #[derive(Default, Clone)]
@@ -1775,6 +1779,7 @@ fn session(
                             parsed,
                             declared,
                             types: Vec::new(),
+                            places: None,
                         },
                     );
                     out.parse_complete();
@@ -1783,14 +1788,14 @@ fn session(
                     let mut pos = 0;
                     let portal = take_cstr(&m.body, &mut pos);
                     let stmt = take_cstr(&m.body, &mut pos);
-                    let (sql, parsed, types) = prepared
+                    let (sql, parsed, types, places) = prepared
                         .get(&stmt)
                         .map(|p| {
                             let types = match p.types.is_empty() {
                                 true => p.declared.clone(),
                                 false => p.types.clone(),
                             };
-                            (p.sql.clone(), p.parsed.clone(), types)
+                            (p.sql.clone(), p.parsed.clone(), types, p.places.clone())
                         })
                         .unwrap_or_default();
 
@@ -1802,6 +1807,26 @@ fn session(
                     }
                     // parameter values
                     let nparams = be_i16(&m.body, &mut pos);
+                    // A value sent as text is read as the field its place
+                    // names. A statement no `Describe` asked about --
+                    // psycopg and node-postgres send `Parse` to `Execute` in
+                    // one go -- has its places found at its first Bind.
+                    let texts = (0..nparams as usize)
+                        .any(|i| fmts.get(i).or(fmts.first()).copied().unwrap_or(0) != 1);
+                    let places = match (places, &parsed) {
+                        (None, Some(stmts)) if texts => {
+                            be.busy.store(true, Ordering::SeqCst);
+                            let found = places_of(&source, &tenant, &lock, &be, stmts);
+                            be.busy.store(false, Ordering::SeqCst);
+                            be.canceled.store(false, Ordering::SeqCst);
+                            if let (Some(p), Some(prep)) = (&found, prepared.get_mut(&stmt)) {
+                                prep.places = Some(p.clone());
+                            }
+                            found
+                        }
+                        (places, _) => places,
+                    }
+                    .unwrap_or_default();
                     let mut values = Vec::new();
                     let mut refused = None;
                     for i in 0..nparams {
@@ -1815,7 +1840,12 @@ fn session(
                         let binary =
                             fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
                         let oid = types.get(i as usize).copied().unwrap_or(0);
-                        match params::decode(raw, binary, oid) {
+                        match params::decode(
+                            raw,
+                            binary,
+                            oid,
+                            places.get(i as usize).and_then(Option::as_ref),
+                        ) {
                             Ok(v) => values.push(v),
                             Err((code, why)) => {
                                 refused = Some((code, format!("bind parameter ${}: {why}", i + 1)));
@@ -1915,6 +1945,7 @@ fn session(
                         out.parameter_description(&shape.params);
                         if let Some(p) = prepared.get_mut(&name) {
                             p.types = shape.params.clone();
+                            p.places = Some(shape.places.clone());
                         }
                     }
                     match &shape.columns {
@@ -2296,6 +2327,29 @@ pub fn to_pg_text(v: &Value) -> Option<String> {
     })
 }
 
+/// The field type each parameter of `stmts` stands in the place of, read
+/// under the lock as [`describe`] reads the schemas; `None` where the
+/// database cannot be had or the wait is cancelled, and each value is read
+/// by its look then, as it always was.
+fn places_of(
+    source: &Source,
+    tenant: &str,
+    lock: &Lock<'_>,
+    be: &Backend,
+    stmts: &[Statement],
+) -> Option<Vec<Option<DataType>>> {
+    let (db, held) = lock.open(source, tenant).ok()?;
+    let _gate = held.as_ref().map(|t| t.enter());
+    Some(match &lock.hold {
+        Some(h) => {
+            let mut t = Turn::take(h.db, be)?;
+            let _ = t.unpark();
+            params::places(&t, stmts)
+        }
+        None => params::places(acquire(&db, false, be)?.db(), stmts),
+    })
+}
+
 /// The fixed columns of `collections` / `describe` output.
 fn schema_columns() -> Vec<(String, i32)> {
     vec![
@@ -2445,6 +2499,8 @@ fn binary_row(
 /// The `Describe` response: expected parameters and (when there are rows) the row format.
 struct Shape {
     params: Vec<i32>,
+    /// The field type each parameter's place names ([`params::places`]).
+    places: Vec<Option<DataType>>,
     /// `None` -> `NoData`
     columns: Option<Vec<(String, i32)>>,
 }
@@ -2517,6 +2573,7 @@ fn describe(
     if trimmed.is_empty() {
         return Some(Shape {
             params: Vec::new(),
+            places: Vec::new(),
             columns: None,
         });
     }
@@ -2530,6 +2587,7 @@ fn describe(
         return Some(match shim {
             compat::Shim::Rows { columns, .. } => Shape {
                 params: Vec::new(),
+                places: Vec::new(),
                 columns: Some(columns.into_iter().map(|c| (c, OID_TEXT)).collect()),
             },
             // A catalog query's columns do not depend on its parameters: it
@@ -2542,12 +2600,14 @@ fn describe(
                     catalog_answer(db, lock, cfg, trimmed, &vec![Value::Null; types.len()]);
                 Shape {
                     params: named(types),
+                    places: Vec::new(),
                     columns: Some(answer.columns),
                 }
             }
             // A refusal is reported by Execute, the way a syntax error is.
             compat::Shim::Tag(_) | compat::Shim::Tx(_) | compat::Shim::Refuse { .. } => Shape {
                 params: Vec::new(),
+                places: Vec::new(),
                 columns: None,
             },
         });
@@ -2565,6 +2625,7 @@ fn describe(
             Err(_) => {
                 return Some(Shape {
                     params: Vec::new(),
+                    places: Vec::new(),
                     columns: None,
                 })
             }
@@ -2579,10 +2640,10 @@ fn describe(
             Some(Statement::Select(sel)) => select_columns(d, sel),
             _ => None,
         };
-        (params::types(d, stmts), columns)
+        (params::places(d, stmts), columns)
     };
     let schemas = nparams > 0 || matches!(stmts.last(), Some(Statement::Select(_)));
-    let (params, columns) = match (schemas, &lock.hold) {
+    let (places, columns) = match (schemas, &lock.hold) {
         (false, _) => (Vec::new(), None),
         (true, Some(h)) => {
             let mut t = Turn::take(h.db, be)?;
@@ -2604,8 +2665,13 @@ fn describe(
         }
         _ => columns,
     };
+    let params = places
+        .iter()
+        .map(|t| t.as_ref().map_or(OID_TEXT, pg_oid))
+        .collect();
     Some(Shape {
         params: named(params),
+        places,
         columns,
     })
 }

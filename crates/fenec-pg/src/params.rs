@@ -28,38 +28,48 @@ const OID_UNKNOWN: i32 = 705;
 /// Text everywhere else, which every driver sends and a pg text parameter
 /// is read as.
 pub fn types(db: &Database, stmts: &[Statement]) -> Vec<i32> {
+    places(db, stmts)
+        .iter()
+        .map(|t| t.as_ref().map_or(OID_TEXT, pg_oid))
+        .collect()
+}
+
+/// The field type each `$n` of `stmts` stands in the place of, `None` where
+/// its place names none: what [`types`] describes, and what a value sent as
+/// text is read as ([`decode`]).
+pub fn places(db: &Database, stmts: &[Statement]) -> Vec<Option<DataType>> {
     let n = stmts.iter().map(|s| s.max_param()).max().unwrap_or(0);
     let mut out = vec![None; n];
     for s in stmts {
         statement(db, s, &mut out);
     }
-    out.into_iter().map(|t| t.unwrap_or(OID_TEXT)).collect()
+    out
 }
 
 /// The type `e` takes, when it is a parameter whose type is not taken yet.
-fn set(out: &mut [Option<i32>], e: &Expr, oid: i32) {
+fn set(out: &mut [Option<DataType>], e: &Expr, ty: DataType) {
     if let Expr::Param(i) = e {
         if let Some(slot) = out.get_mut(*i) {
-            slot.get_or_insert(oid);
+            slot.get_or_insert(ty);
         }
     }
 }
 
-/// A field's type as a parameter given for it goes.
-fn field(schema: Option<&Schema>, name: &str) -> Option<i32> {
+/// A field's type, `id`'s among them.
+fn field(schema: Option<&Schema>, name: &str) -> Option<DataType> {
     if name == "id" {
-        return Some(OID_INT8);
+        return Some(DataType::Int);
     }
-    schema?.field(name).map(|f| pg_oid(&f.ty))
+    schema?.field(name).map(|f| f.ty.clone())
 }
 
-fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<i32>]) {
+fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<DataType>]) {
     match e {
         Expr::Cmp(_, a, b) => {
             for (f, p) in [(a, b), (b, a)] {
                 if let Expr::Field(name) = f.as_ref() {
-                    if let Some(oid) = field(schema, name) {
-                        set(out, p, oid);
+                    if let Some(ty) = field(schema, name) {
+                        set(out, p, ty);
                     }
                 }
             }
@@ -67,17 +77,15 @@ fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<i32>]) {
             filter(schema, b, out);
         }
         Expr::Like(a, b) => {
-            set(out, b, OID_TEXT);
+            set(out, b, DataType::Text);
             filter(schema, a, out);
             filter(schema, b, out);
         }
         // `tags has $1`: an element of the list.
         Expr::Has(a, b) => {
             if let Expr::Field(name) = a.as_ref() {
-                if let Some(DataType::List(inner)) =
-                    schema.and_then(|s| s.field(name)).map(|f| &f.ty)
-                {
-                    set(out, b, pg_oid(inner));
+                if let Some(DataType::List(inner)) = field(schema, name) {
+                    set(out, b, *inner);
                 }
             }
             filter(schema, a, out);
@@ -85,8 +93,8 @@ fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<i32>]) {
         }
         Expr::In(a, items) => {
             if let Expr::Field(name) = a.as_ref() {
-                if let Some(oid) = field(schema, name) {
-                    items.iter().for_each(|i| set(out, i, oid));
+                if let Some(ty) = field(schema, name) {
+                    items.iter().for_each(|i| set(out, i, ty.clone()));
                 }
             }
             filter(schema, a, out);
@@ -102,12 +110,12 @@ fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<i32>]) {
     }
 }
 
-fn statement(db: &Database, s: &Statement, out: &mut [Option<i32>]) {
+fn statement(db: &Database, s: &Statement, out: &mut [Option<DataType>]) {
     let schema = |c: &str| db.collection(c).ok().map(|c| &c.schema);
-    let pairs = |sc: Option<&Schema>, pairs: &[(String, Expr)], out: &mut [Option<i32>]| {
+    let pairs = |sc: Option<&Schema>, pairs: &[(String, Expr)], out: &mut [Option<DataType>]| {
         for (name, e) in pairs {
-            if let Some(oid) = field(sc, name) {
-                set(out, e, oid);
+            if let Some(ty) = field(sc, name) {
+                set(out, e, ty);
             }
         }
     };
@@ -140,13 +148,17 @@ fn statement(db: &Database, s: &Statement, out: &mut [Option<i32>]) {
             // the `$1` of `embedding <-> $1`: pgvector's clients send it in
             // that type's binary format.
             if let Some(n) = &sel.near {
-                set(out, &n.vector, field(sc, &n.field).unwrap_or(OID_TEXT));
+                if let Some(ty) = field(sc, &n.field) {
+                    set(out, &n.vector, ty);
+                }
             }
             if let Some(m) = &sel.matcher {
-                set(out, &m.query, OID_TEXT);
+                set(out, &m.query, DataType::Text);
             }
             if let Some(r) = &sel.rerank {
-                set(out, &r.vector, field(sc, &r.field).unwrap_or(OID_TEXT));
+                if let Some(ty) = field(sc, &r.field) {
+                    set(out, &r.vector, ty);
+                }
             }
             if let Some(l) = &sel.lookup {
                 for step in l.chain() {
@@ -160,14 +172,31 @@ fn statement(db: &Database, s: &Statement, out: &mut [Option<i32>]) {
     }
 }
 
-/// A parameter's bytes as a value: in text as a pg text parameter has
-/// always been read -- a number, a vector's `[..]`, a boolean or text --
-/// and in binary as its type `oid` sends it. Only a vector is refused, as
-/// pgvector refuses one: the rest are read by their length where they are
-/// not as their type sends them, as a binary parameter always was.
-pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Result<Value, (&'static str, String)> {
+/// A parameter's bytes as a value: in binary as its type `oid` sends it,
+/// and in text as a value of the field its place names (`place`, from
+/// [`places`]), read as COPY reads a cell of that field -- a text field's
+/// as the text it is. Where no place names one, or the text is no value of
+/// it, it is read as a pg text parameter always was, by its look: a
+/// number, a vector's `[..]`, a boolean or text. Read that way alone, `"t"`
+/// was a boolean and `"42"` a number, which a text field refused, from
+/// psycopg and node-postgres, which name no type for a string, and from
+/// pgx and JDBC, which name one the server never read by. A timestamp is
+/// left to its look, which reads epoch milliseconds as the number they
+/// are. Only a vector is refused, as pgvector refuses one: the rest are
+/// read by their length where they are not as their type sends them, as a
+/// binary parameter always was.
+pub fn decode(
+    raw: &[u8],
+    binary: bool,
+    oid: i32,
+    place: Option<&DataType>,
+) -> Result<Value, (&'static str, String)> {
     if !binary {
-        return Ok(decode_param(raw, false));
+        let typed = place
+            .filter(|t| **t != DataType::Timestamp)
+            .zip(std::str::from_utf8(raw).ok())
+            .and_then(|(t, s)| crate::copy::value(s, t).ok());
+        return Ok(typed.unwrap_or_else(|| decode_param(raw, false)));
     }
     if let Some(elem) = element_of(oid) {
         return Ok(array(raw, elem).unwrap_or_else(|| decode_param(raw, true)));
@@ -263,7 +292,7 @@ fn array(raw: &[u8], elem: i32) -> Option<Value> {
         }
         let cell = raw.get(at..at + len as usize)?;
         at += len as usize;
-        out.push(decode(cell, true, elem).ok()?);
+        out.push(decode(cell, true, elem, None).ok()?);
     }
     (at == raw.len()).then_some(Value::List(out))
 }
@@ -331,7 +360,7 @@ mod tests {
 
     #[test]
     fn a_binary_parameter_is_read_as_its_type_sends_it() {
-        let decode = |raw: &[u8], binary, oid| decode(raw, binary, oid).unwrap();
+        let decode = |raw: &[u8], binary, oid| decode(raw, binary, oid, None).unwrap();
         assert_eq!(decode(&7i64.to_be_bytes(), true, OID_INT8), Value::Int(7));
         assert_eq!(
             decode(&(-3i32).to_be_bytes(), true, OID_INT4),
@@ -380,6 +409,7 @@ mod tests {
 
     #[test]
     fn a_vector_parameter_is_read_as_pgvector_sends_it() {
+        let decode = |raw: &[u8], binary, oid| decode(raw, binary, oid, None);
         let words = |w: &[&[u8]]| w.concat();
         // `vector_send`: the dimension, 0, then each f32.
         let v = words(&[
@@ -444,5 +474,44 @@ mod tests {
             decode(b"[1,2]", false, OID_VECTOR),
             Ok(Value::Vector(vec![1.0, 2.0]))
         );
+    }
+
+    #[test]
+    fn a_text_parameter_is_read_as_its_places_field() {
+        let read = |raw: &str, place: Option<DataType>| {
+            decode(raw.as_bytes(), false, 0, place.as_ref()).unwrap()
+        };
+        // A text field's value is the text it is: read by its look, these
+        // were a boolean, a number and a vector, which the field refused.
+        for t in ["t", "42", "1.5", "[1,2]"] {
+            assert_eq!(read(t, Some(DataType::Text)), Value::Text(t.into()));
+        }
+        assert_eq!(read("42", Some(DataType::Int)), Value::Int(42));
+        assert_eq!(read("42", Some(DataType::Float)), Value::Float(42.0));
+        assert_eq!(read("1", Some(DataType::Bool)), Value::Bool(true));
+        assert_eq!(
+            read("\\x00ff", Some(DataType::Bytes)),
+            Value::Bytes(vec![0, 255])
+        );
+        // node-postgres sends a JavaScript array as a PostgreSQL one.
+        assert_eq!(
+            read("{1,2}", Some(DataType::Vector(2, Default::default()))),
+            Value::List(vec![Value::Float(1.0), Value::Float(2.0)])
+        );
+        assert_eq!(
+            read(
+                r#"["a","b"]"#,
+                Some(DataType::List(Box::new(DataType::Text)))
+            ),
+            Value::List(vec![Value::Text("a".into()), Value::Text("b".into())])
+        );
+        // Epoch milliseconds stay the number they are, and text no value of
+        // the field's type, or with no place, is read by its look.
+        assert_eq!(
+            read("1700000000000", Some(DataType::Timestamp)),
+            Value::Int(1_700_000_000_000)
+        );
+        assert_eq!(read("abc", Some(DataType::Int)), Value::Text("abc".into()));
+        assert_eq!(read("t", None), Value::Bool(true));
     }
 }
