@@ -803,6 +803,14 @@ carries on from where it stopped) when the result lands under the limit —
 otherwise a filter correlated with the vector eliminates every candidate and
 returns empty. The probe decides when rows are read, never the answer:
 `tests/filtered.rs` checks it against the plan with the whole set found first.
+That fallback, a set under the budget and `exact` read every vector they
+measure, so natively they measure a share of 8 192 at a time on every core,
+each share's nearest kept and all of those kept again in the shares' order
+-- the rows, and the order of their ties, one walk in turn keeps
+(`nearest_of`) -- and keep the nearest `k` as they come rather than sort
+every one (`nearest`). At 1 000 000 x 128 a filter matching a quarter of the
+rows, none of them near the query, took 20.8 ms and takes 5.1; `exact`
+31.6 and 12.2, which is reading 512 MB.
 
 **Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
 `@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set
