@@ -41,6 +41,7 @@ make replica-bench       # replica lag per sync policy, catch-up, what a failove
 make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100, in a savepoint
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside a held transaction
 make requests-bench      # a request over the pg wire and HTTP: one client's round trip, eight's rate, against PostgreSQL
+make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
