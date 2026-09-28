@@ -30,6 +30,7 @@ pub use fenec_catalog as catalog;
 /// `fenec-wire`'s, which the importer depends on in place of this crate:
 /// the server runs the importer's `--follow` (`fenec-pg --follow`).
 pub use fenec_wire::{client, proto};
+pub mod binary;
 pub mod compat;
 pub mod copy;
 pub mod mirror;

@@ -305,6 +305,15 @@ and type OIDs from the schema — with <code>near</code> or <code>match</code>,
 the server infers. <code>RowDescription</code> goes exactly once, on
 <code>Execute</code> when <code>Describe</code> is skipped.</p>
 
+<p>A column goes in the binary format when <code>Bind</code> asks for it —
+as tokio-postgres and asyncpg ask for every column, and pgx for every type
+it knows: <code>bigint</code>, <code>double precision</code>,
+<code>boolean</code>, <code>bytea</code> and <code>timestamptz</code> as their
+types send them, and a text, a vector, a list and a sparse vector, which
+travel as text, as their text. The catalog's columns do the same, but for an
+array, which is refused in binary (<code>0A000</code>) rather than sent in a
+form the client would misread.</p>
+
 <p>An error drops every message after it up to the next <code>Sync</code>,
 as PostgreSQL does, and is sent at once rather than at the
 <code>Sync</code>. A pipelining client — libpq's pipeline mode, pgx's
