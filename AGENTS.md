@@ -35,6 +35,7 @@ make mirror-bench  # fenec-pg --follow: commit to a subscriber, a server killed 
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
 make tx-bench      # a pg transaction: a lone write per sync policy, a write in one of 100, in a savepoint
 make requests-bench # a request over the pg wire and HTTP: one client's round trip, eight's rate, against PostgreSQL
+make load-bench     # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench # reads and writes during create index / compact
 make open-bench # opening a 1 GB file, read into memory or mapped
 make quant-bench # quant=int8|bit against full vectors: memory, recall, latency

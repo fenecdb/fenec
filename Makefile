@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -184,6 +184,14 @@ concurrency-bench:
 requests-bench:
 	$(CARGO) build --release -p fenec-pg
 	$(CARGO) run --release -p fenec-bench --bin requests
+
+## What loading 100 000 rows costs each way a client can send them: in
+## process, the pg wire's simple and extended protocols, HTTP's array and
+## /batch, with the vector index kept and without; PostgreSQL's COPY and
+## INSERT beside them (`make pgvector-up` first, skipped without it).
+load-bench:
+	$(CARGO) build --release -p fenec-pg
+	$(CARGO) run --release -p fenec-bench --bin load
 
 ## When size comes first: no import, abort instead of panic unwinding.
 small:

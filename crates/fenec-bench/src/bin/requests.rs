@@ -19,11 +19,12 @@
 //! Its writes commit with `synchronous_commit = off`, as fenec-pg's reach
 //! the disk within `--sync 250`.
 
+#[path = "../wire.rs"]
+mod wire;
+
 use postgres::{Client, NoTls, SimpleQueryMessage};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -260,146 +261,47 @@ fn pg_client(url: &str) -> Client {
     client
 }
 
-/// fenec-pg over the pg wire, written by hand, text both ways and each
-/// case's statement parsed once -- as psycopg asks. The `postgres` crate
-/// binds and reads in binary, and looks up in `pg_type` any type it does
-/// not know: fenec-pg sends a parameter it has not typed as OID 0, and the
-/// crate's statement for the lookup has its own parameter come back as 0,
-/// which it looks up the same way until the stack runs out.
-struct Wire {
-    w: TcpStream,
-    r: BufReader<TcpStream>,
+/// fenec-pg over the pg wire ([`wire::Wire`]), each case's statement
+/// parsed once when `extended`.
+struct Pgw {
+    c: wire::Wire,
     extended: bool,
-    out: Vec<u8>,
-    body: Vec<u8>,
 }
 
-impl Wire {
-    fn new(addr: &str, extended: bool) -> Wire {
-        let w = TcpStream::connect(addr).unwrap();
-        w.set_nodelay(true).unwrap();
-        let r = BufReader::new(w.try_clone().unwrap());
-        let mut c = Wire {
-            w,
-            r,
-            extended,
-            out: Vec::new(),
-            body: Vec::new(),
-        };
-        // The startup packet: its length, protocol 3.0, the user, the
-        // database.
-        let mut startup = 196_608i32.to_be_bytes().to_vec();
-        for s in ["user", "fenec", "database", "fenec", ""] {
-            cstr(&mut startup, s);
-        }
-        let mut packet = ((startup.len() + 4) as i32).to_be_bytes().to_vec();
-        packet.extend_from_slice(&startup);
-        c.w.write_all(&packet).unwrap();
-        c.until_ready();
+impl Pgw {
+    fn new(addr: &str, extended: bool) -> Pgw {
+        let mut c = wire::Wire::connect(addr);
         if extended {
             for (i, (case, _)) in CASES.iter().enumerate() {
-                c.msg(b'P', |b| {
-                    cstr(b, &format!("s{i}"));
-                    cstr(b, Fenec.text(*case));
-                    b.extend_from_slice(&0i16.to_be_bytes());
-                });
-            }
-            c.msg(b'S', |_| {});
-            c.send();
-            c.until_ready();
-        }
-        c
-    }
-
-    fn msg(&mut self, tag: u8, body: impl FnOnce(&mut Vec<u8>)) {
-        self.out.push(tag);
-        let at = self.out.len();
-        self.out.extend_from_slice(&[0; 4]);
-        body(&mut self.out);
-        let len = (self.out.len() - at) as i32;
-        self.out[at..at + 4].copy_from_slice(&len.to_be_bytes());
-    }
-
-    fn send(&mut self) {
-        self.w.write_all(&self.out).unwrap();
-        self.out.clear();
-    }
-
-    /// Reads up to the ReadyForQuery; an ErrorResponse is the bench's end.
-    fn until_ready(&mut self) {
-        loop {
-            let mut head = [0u8; 5];
-            self.r.read_exact(&mut head).unwrap();
-            let len = i32::from_be_bytes(head[1..5].try_into().unwrap()) as usize - 4;
-            self.body.resize(len, 0);
-            self.r.read_exact(&mut self.body).unwrap();
-            match head[0] {
-                b'E' => panic!("{}", String::from_utf8_lossy(&self.body)),
-                b'Z' => return,
-                _ => {}
+                c.prepare(&format!("s{i}"), Fenec.text(*case));
             }
         }
+        Pgw { c, extended }
     }
 }
 
-fn cstr(b: &mut Vec<u8>, s: &str) {
-    b.extend_from_slice(s.as_bytes());
-    b.push(0);
-}
-
-impl Asker for Wire {
+impl Asker for Pgw {
     fn ask(&mut self, case: Case, p: &[Param]) {
-        if self.extended {
-            let i = CASES.iter().position(|(c, _)| *c == case).unwrap();
-            self.msg(b'B', |b| {
-                cstr(b, "");
-                cstr(b, &format!("s{i}"));
-                // No format codes: every parameter, and every column, text.
-                b.extend_from_slice(&0i16.to_be_bytes());
-                b.extend_from_slice(&(p.len() as i16).to_be_bytes());
-                for x in p {
-                    let v = match x {
-                        Param::Int(n) => n.to_string(),
-                        Param::Text(s) => s.clone(),
-                    };
-                    b.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                    b.extend_from_slice(v.as_bytes());
-                }
-                b.extend_from_slice(&0i16.to_be_bytes());
-            });
-            self.msg(b'E', |b| {
-                cstr(b, "");
-                b.extend_from_slice(&0i32.to_be_bytes());
-            });
-            self.msg(b'S', |_| {});
-        } else {
-            let text = Fenec.inline(case, p);
-            self.msg(b'Q', |b| cstr(b, &text));
+        if !self.extended {
+            self.c.simple(&Fenec.inline(case, p));
+            return;
         }
-        self.send();
-        self.until_ready();
+        let i = CASES.iter().position(|(c, _)| *c == case).unwrap();
+        let values: Vec<String> = p
+            .iter()
+            .map(|x| match x {
+                Param::Int(n) => n.to_string(),
+                Param::Text(s) => s.clone(),
+            })
+            .collect();
+        let values: Vec<&str> = values.iter().map(String::as_str).collect();
+        self.c.bind_execute(&format!("s{i}"), &values);
+        self.c.sync();
     }
 }
 
 /// `POST /query`, the parameters beside the text, one connection kept alive.
-struct Http {
-    w: TcpStream,
-    r: BufReader<TcpStream>,
-    body: Vec<u8>,
-}
-
-impl Http {
-    fn new(addr: &str) -> Http {
-        let w = TcpStream::connect(addr).unwrap();
-        w.set_nodelay(true).unwrap();
-        let r = BufReader::new(w.try_clone().unwrap());
-        Http {
-            w,
-            r,
-            body: Vec::new(),
-        }
-    }
-}
+struct Http(wire::Http);
 
 impl Asker for Http {
     fn ask(&mut self, case: Case, p: &[Param]) {
@@ -417,38 +319,7 @@ impl Asker for Http {
             Fenec.text(case),
             params.join(",")
         );
-        let head = format!(
-            "POST /query HTTP/1.1\r\nHost: bench\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            json.len()
-        );
-        self.w.write_all(head.as_bytes()).unwrap();
-        self.w.write_all(json.as_bytes()).unwrap();
-        let mut len = 0usize;
-        let mut line = String::new();
-        let mut status = String::new();
-        loop {
-            line.clear();
-            self.r.read_line(&mut line).unwrap();
-            if status.is_empty() {
-                status = line.clone();
-            }
-            let l = line.trim_end();
-            if l.is_empty() {
-                break;
-            }
-            if let Some(v) = l
-                .strip_prefix("Content-Length: ")
-                .or_else(|| l.strip_prefix("content-length: "))
-            {
-                len = v.parse().unwrap();
-            }
-        }
-        assert!(
-            status.contains(" 200 ") || status.contains(" 201 "),
-            "{status}"
-        );
-        self.body.resize(len, 0);
-        self.r.read_exact(&mut self.body).unwrap();
+        self.0.post("/query", "application/json", json.as_bytes());
     }
 }
 
@@ -501,14 +372,6 @@ fn at_once(make: &(dyn Fn() -> Box<dyn Asker> + Sync), case: Case, queries: &[St
 
 // ------------------------------------------------------------- set up
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn fenec_file(path: &Path, vecs: &[Vec<f32>]) {
     let _ = std::fs::remove_file(path);
     let mut db = fenec_core::fs::open(path).unwrap();
@@ -545,39 +408,6 @@ fn fenec_file(path: &Path, vecs: &[Vec<f32>]) {
         .unwrap();
     }
     db.checkpoint().unwrap();
-}
-
-struct Server(Child);
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn start_fenec(file: &Path, pg: u16, http: u16) -> Server {
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/fenec-pg");
-    let child = Command::new(&bin)
-        .args([
-            "--listen",
-            &format!("127.0.0.1:{pg}"),
-            "--http",
-            &format!("127.0.0.1:{http}"),
-        ])
-        .args(["--file", file.to_str().unwrap(), "--no-checkpoint"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| panic!("{}: {e} -- make requests-bench builds it", bin.display()));
-    let server = Server(child);
-    let until = Instant::now() + Duration::from_secs(30);
-    while TcpStream::connect(("127.0.0.1", http)).is_err()
-        || TcpStream::connect(("127.0.0.1", pg)).is_err()
-    {
-        assert!(Instant::now() < until, "fenec-pg did not start");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    server
 }
 
 fn pg_setup(url: &str, vecs: &[Vec<f32>]) -> bool {
@@ -624,8 +454,8 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("requests.fenec");
     fenec_file(&file, &vecs);
-    let (pg_port, http_port) = (free_port(), free_port());
-    let _server = start_fenec(&file, pg_port, http_port);
+    let (pg_port, http_port) = (wire::free_port(), wire::free_port());
+    let _server = wire::start_fenec(&file, pg_port, http_port, "requests-bench");
     let fenec_url = format!("host=127.0.0.1 port={pg_port} user=fenec dbname=fenec");
     let http_addr = format!("127.0.0.1:{http_port}");
     let fenec_wire = format!("127.0.0.1:{pg_port}");
@@ -674,9 +504,9 @@ fn main() {
                         (1, true) => Box::new(Simple {
                             client: pg_client(&u),
                         }),
-                        (0, false) => Box::new(Wire::new(&wire, true)),
-                        (1, false) => Box::new(Wire::new(&wire, false)),
-                        _ => Box::new(Http::new(&addr)),
+                        (0, false) => Box::new(Pgw::new(&wire, true)),
+                        (1, false) => Box::new(Pgw::new(&wire, false)),
+                        _ => Box::new(Http(wire::Http::connect(&addr))),
                     }
                 };
                 let mut one = make();
