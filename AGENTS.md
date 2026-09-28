@@ -491,6 +491,20 @@ cores finishing last while the rest waited, so the work goes out an item
 at a time. The browser has one thread and links in turn (`link_node`),
 through the same pruning (`GraphView::pruned`).
 
+**The upper layers are walked with a beam.** A search and a node joining
+the graph walk each layer above level 0 with a beam of four (`UPPER_BEAM`,
+`descend_beam`) and start level 0 from all four, where the greedy descent
+took one node at a time. Over a million 128-dim vectors in 64 clusters it
+left 20 of 1 000 queries in another cluster, and level 0 has too few links
+across clusters for any beam to cross back: 12 found none of their ten,
+and recall stopped at 97.4% from a beam of 200 up to 800. With the beam,
+92.5, 99.1 and 99.8% at 40, 100 and 200 against 89.9, 96.4 and 97.4 --
+pgvector's at the same m and ef_construction 93.0, 97.4 and 97.8 -- for a build
+3 to 7% longer and a search as fast (`make scale-bench`). Both ways are
+needed: in the search alone it gave 98.2% at 100, in the build alone a
+graph the greedy search lost 32 queries in. The browser module grew 150
+bytes brotli.
+
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a pg transaction or pipeline, a `/batch`, a
 COPY -- is its statements' batch: a `put` in it leaves its vectors waiting
