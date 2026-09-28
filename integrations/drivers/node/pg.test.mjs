@@ -20,3 +20,21 @@ test('parameters go in and typed rows come back', { skip: !url && 'FENEC_PG_URL 
   const count = await c.query(`get ${coll} count`);
   assert.deepEqual(count.rows, [{ count: '1' }]);
 });
+
+test('a string is the text it is, for a text field', { skip: !url && 'FENEC_PG_URL is not set' }, async (t) => {
+  // node-postgres names no type for a parameter and asks for no Describe
+  // before its Bind: fenec-pg reads each value as the field its place
+  // names, where by its look "t" was a boolean and "42" a number.
+  const c = new pg.Client({ connectionString: url });
+  await c.connect();
+  t.after(() => c.end());
+  const coll = `ns_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  await c.query(`create collection ${coll} (name text, n int)`);
+  for (const [i, name] of ['t', '42', 'false'].entries()) {
+    await c.query(`put ${coll} {name: $1, n: $2}`, [name, i]);
+  }
+  const r = await c.query(`get ${coll} select name order name`);
+  assert.deepEqual(r.rows.map((x) => x.name), ['42', 'false', 't']);
+  const hit = await c.query(`get ${coll} select n where name = $1`, ['42']);
+  assert.deepEqual(hit.rows, [{ n: '1' }]);
+});

@@ -341,8 +341,13 @@ field's type for the vector of a <code>near</code> or a <code>rerank</code>,
 the text of a <code>match</code> — and <code>text</code> where nothing names
 one; a type the client names in
 <code>Parse</code> is kept. A driver told the types sends its values as
-them, tokio-postgres and asyncpg in binary, and they are read by them; one
-sent as text is read as a pg text parameter always was.
+them, tokio-postgres and asyncpg in binary, and they are read by them. A
+value sent as text is read as the field its place names, as COPY reads a
+cell of it — a text field's as the text it is, so <code>"t"</code> and
+<code>"42"</code> stay text — and by its look where no field is named:
+psycopg and node-postgres name no type for a string and ask for no
+<code>Describe</code>, and the places are found at the statement's first
+<code>Bind</code>.
 <code>RowDescription</code> goes exactly once, on <code>Execute</code> when
 <code>Describe</code> is skipped.</p>
 
