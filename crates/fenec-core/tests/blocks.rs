@@ -731,3 +731,151 @@ fn a_savepoint_at_the_start_puts_back_every_write_and_keeps_the_block() {
     );
     db.rollback();
 }
+
+// ------------------------------------------------ a block's vectors, linked
+
+/// The `i`th of a run of 16-dim vectors spread around eight centres.
+fn v16(i: usize) -> Value {
+    let mut x = (i as u64 / 8).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    Value::Vector(
+        (0..16)
+            .map(|d| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let centre = if d % 8 == i % 8 { 1.0 } else { 0.0 };
+                centre + (x >> 40) as f32 / (1u64 << 24) as f32 * 0.4
+            })
+            .collect(),
+    )
+}
+
+/// The `n`s `near` answers for the `i`th vector, the graph's or the exact.
+fn nearest(db: &Database, i: usize, exact: bool) -> Vec<u64> {
+    let sql = match exact {
+        true => "get docs select n near v $1 exact limit 10",
+        false => "get docs select n near v $1 limit 10",
+    };
+    db.query(&stmt(sql), &[v16(i)])
+        .unwrap()
+        .rows()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|r| match r.values[0] {
+            Value::Int(n) => n as u64,
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+/// A collection of 3 000 vectors linked a `put` at a time, as lone
+/// statements link them.
+fn linked(quant: &str) -> Database {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        &format!("create collection docs (n int, v vector<16> @hnsw(cosine{quant}))"),
+        &[],
+    );
+    for i in 0..3_000 {
+        exec(
+            &mut db,
+            "put docs {n: $1, v: $2}",
+            &[Value::Int(i as i64), v16(i)],
+        );
+    }
+    db
+}
+
+/// A block's `put`s leave their vectors waiting, and they are linked 512
+/// at a time on every core and as the block lands. A `near` in the block
+/// finds the waiting ones, and one after it is the graph's as a `put` at
+/// a time left it: its recall, over plain vectors and over codes.
+#[test]
+fn a_blocks_puts_link_their_vectors_together() {
+    for quant in ["", ", quant=int8", ", quant=bit"] {
+        let mut db = linked(quant);
+        db.begin().unwrap();
+        for i in 3_000..4_300 {
+            exec(
+                &mut db,
+                "put docs {n: $1, v: $2}",
+                &[Value::Int(i as i64), v16(i)],
+            );
+        }
+        assert_eq!(db.unlinked(), 4_300 - 3_000 - 2 * 512, "{quant}");
+        // Waiting, each is found as its own nearest.
+        for i in [3_000, 4_000, 4_299] {
+            assert_eq!(nearest(&db, i, false)[0], i as u64, "{quant}");
+        }
+        db.commit().unwrap();
+        assert_eq!(db.unlinked(), 0, "{quant}");
+        let found: usize = (0..4_300)
+            .step_by(43)
+            .map(|i| {
+                let exact = nearest(&db, i, true);
+                nearest(&db, i, false)
+                    .iter()
+                    .filter(|n| exact.contains(n))
+                    .count()
+            })
+            .sum();
+        let recall = found as f64 / (100 * 10) as f64;
+        assert!(recall > 0.9, "{quant}: recall {recall}");
+    }
+}
+
+/// A block put back takes the vectors it left waiting with it, and one
+/// taken back to a savepoint the ones after it: none is left waiting that
+/// no document holds, and the graph answers as it did.
+#[test]
+fn a_block_put_back_leaves_no_vector_waiting() {
+    let mut db = linked("");
+    let before: Vec<Vec<u64>> = (0..3_000)
+        .step_by(97)
+        .map(|i| nearest(&db, i, false))
+        .collect();
+    db.begin().unwrap();
+    for i in 3_000..3_700 {
+        exec(
+            &mut db,
+            "put docs {n: $1, v: $2}",
+            &[Value::Int(i as i64), v16(i)],
+        );
+    }
+    // Written again, a waiting vector is a tombstone among the waiting.
+    exec(&mut db, "set docs {v: $1} where n = 3690", &[v16(1)]);
+    assert!(db.unlinked() > 0);
+    db.rollback();
+    assert_eq!(db.unlinked(), 0);
+    let after: Vec<Vec<u64>> = (0..3_000)
+        .step_by(97)
+        .map(|i| nearest(&db, i, false))
+        .collect();
+    assert_eq!(after, before);
+
+    db.begin().unwrap();
+    for i in 5_000..5_100 {
+        exec(
+            &mut db,
+            "put docs {n: $1, v: $2}",
+            &[Value::Int(i as i64), v16(i)],
+        );
+    }
+    let sp = db.savepoint();
+    for i in 5_100..5_200 {
+        exec(
+            &mut db,
+            "put docs {n: $1, v: $2}",
+            &[Value::Int(i as i64), v16(i)],
+        );
+    }
+    assert_eq!(db.unlinked(), 200);
+    db.rollback_to(&sp).unwrap();
+    assert_eq!(db.unlinked(), 100);
+    db.commit().unwrap();
+    assert_eq!(db.unlinked(), 0);
+    assert_eq!(nearest(&db, 5_050, false)[0], 5_050);
+    assert!(!nearest(&db, 5_150, true).contains(&5_150));
+}

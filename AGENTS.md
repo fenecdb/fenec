@@ -224,7 +224,8 @@ drops what the client still streams, as PostgreSQL does. The COPY counts
 as one statement however many puts it made (`run_copy`). Text and CSV
 only: binary -- asyncpg's `copy_records_to_table`, pgx's `CopyFrom` -- is
 refused, `0A000`. 100 000 rows x 128: 18.2k rows/s with the graph kept and
-184k without, against 5.4k and 160k a put a row (`make load-bench`).
+184k without, against 16.9k and 160k a put a row in a transaction (`make
+load-bench`).
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -453,6 +454,21 @@ linked at the open. A share of the work a thread left the M1's efficiency
 cores finishing last while the rest waited, so the work goes out an item
 at a time. The browser has one thread and links in turn (`link_node`),
 through the same pruning (`GraphView::pruned`).
+
+**A block's `put`s link their vectors together.** A block
+`Database::begin` opened -- a pg transaction or pipeline, a `/batch`, a
+COPY -- is its statements' batch: a `put` in it leaves its vectors waiting
+(`defer_batch`, `Block::waiting`), and they are linked on every core 512
+at a time a field (`LINK_AT`, `link_waiting`), the rest as the block lands,
+before its record is written, so that a block put back after all is put
+back as any other. A search in the block measures the waiting ones
+exactly, as it does a server's backlog, and a rollback or a `ROLLBACK TO`
+drops those its undo made tombstones (`forget_waiting`) -- the newest of
+the waiting, since nothing else leaves one while a block is open. A lone
+statement links as it did. Linked a row at a time, as a driver's
+`executemany` and a `/batch` of single puts send them, 100 000 128-dim rows
+went in at 5.4k rows/s with the graph kept, 5.3k over HTTP; linked
+together, at 16.9k and 16.0k, as a COPY loads them (`make load-bench`).
 
 **A server keeps its graphs in its file.** It checkpoints only on its way
 down, so a crash after a long run left every vector written since the start

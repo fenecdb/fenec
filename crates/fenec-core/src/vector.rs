@@ -3360,10 +3360,13 @@ impl VectorIndex {
     /// the nearest of these together. What a server opens a file with --
     /// the writes after its last checkpoint -- when linking them first
     /// kept its port closed: 56.6 s at 100 000 x 768 never checkpointed.
-    pub fn defer_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
+    /// Returns how many nodes it left waiting.
+    pub fn defer_batch(&mut self, items: &[(DocId, Vec<f32>)]) -> usize {
         if !UNLINKED {
-            return self.insert_batch(items);
+            self.insert_batch(items);
+            return 0;
         }
+        let before = self.pending.len();
         for (doc, v) in items {
             if v.len() != self.dim {
                 continue;
@@ -3378,6 +3381,20 @@ impl VectorIndex {
             self.by_doc.insert(*doc, node + 1);
             self.pending.push(node);
         }
+        self.pending.len() - before
+    }
+
+    /// Drops the newest of the waiting nodes, up to `max` of them, for as
+    /// long as they are tombstones: what a block that left them waiting
+    /// leaves when it is put back, which no link will ever need. Returns
+    /// how many it dropped.
+    pub fn forget_waiting(&mut self, max: usize) -> usize {
+        let mut n = 0;
+        while n < max && self.pending.last().is_some_and(|&x| self.is_deleted(x)) {
+            self.pending.pop();
+            n += 1;
+        }
+        n
     }
 
     /// Links up to `max` of the nodes [`Self::defer_batch`] left out of the
