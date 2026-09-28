@@ -19,6 +19,10 @@ pub type Refusal = (&'static str, String);
 pub enum Format {
     /// Tab-delimited by default, `\N` for NULL, backslash escapes.
     Text { delimiter: u8, null: String },
+    /// PostgreSQL's own: a `PGCOPY` header, then each row as its cells'
+    /// lengths and bytes in their types' binary formats -- what asyncpg's
+    /// `copy_records_to_table` and pgx's `CopyFrom` send.
+    Binary,
     /// `,` by default, fields quoted with `quote`, which `escape` escapes
     /// inside one; NULL is an unquoted `null`, empty by default.
     Csv {
@@ -73,7 +77,7 @@ pub fn parse(sql: &str) -> Option<Result<Spec, Refusal>> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     /// An unquoted word, lowered as PostgreSQL folds it.
     Word(String),
     /// A `"quoted"` name, as written.
@@ -83,7 +87,7 @@ enum Tok {
     Punct(char),
 }
 
-fn tokens(sql: &str) -> Vec<Tok> {
+pub(crate) fn tokens(sql: &str) -> Vec<Tok> {
     let mut out = Vec::new();
     let mut it = sql.char_indices().peekable();
     while let Some((_, c)) = it.next() {
@@ -235,7 +239,8 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
         }
     }
     let (mut csv, mut delimiter, mut null, mut quote, mut escape, mut header) =
-        (false, None, None, b'"', None, false);
+        (false, None, None, None, None, false);
+    let mut binary = false;
     if t.first() == Some(&Tok::Punct('(')) {
         if t.last() != Some(&Tok::Punct(')')) {
             return Err(syntax("the option list is not closed"));
@@ -249,11 +254,7 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
                 "format" => match value {
                     Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "csv" => csv = true,
                     Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "text" => csv = false,
-                    Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "binary" => {
-                        return Err(unsupported(
-                            "COPY's binary format is not supported: send text or csv",
-                        ))
-                    }
+                    Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "binary" => binary = true,
                     _ => return Err(syntax("FORMAT is text or csv")),
                 },
                 "delimiter" => delimiter = Some(one_byte(value, "delimiter")?),
@@ -266,7 +267,7 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
                         .map_or(Some(true), |v| boolean(Some(v)))
                         .unwrap_or(true)
                 }
-                "quote" => quote = one_byte(value, "quote")?,
+                "quote" => quote = Some(one_byte(value, "quote")?),
                 "escape" => escape = Some(one_byte(value, "escape")?),
                 // Asks for what a load here does anyway, or names the
                 // encoding a UTF-8 text is in.
@@ -296,11 +297,7 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
             match w.as_str() {
                 "csv" => csv = true,
                 "header" => header = true,
-                "binary" => {
-                    return Err(unsupported(
-                        "COPY's binary format is not supported: send text or csv",
-                    ))
-                }
+                "binary" => binary = true,
                 "delimiter" => {
                     i = as_(i + 1);
                     delimiter = Some(one_byte(t.get(i), "delimiter")?);
@@ -314,7 +311,7 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
                 }
                 "quote" => {
                     i = as_(i + 1);
-                    quote = one_byte(t.get(i), "quote")?;
+                    quote = Some(one_byte(t.get(i), "quote")?);
                 }
                 "escape" => {
                     i = as_(i + 1);
@@ -329,6 +326,23 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
             i += 1;
         }
     }
+    if binary {
+        // What shapes the text of a row has none in binary, as PostgreSQL
+        // refuses it.
+        let given = [
+            ("DELIMITER", delimiter.is_some()),
+            ("NULL", null.is_some()),
+            ("QUOTE", quote.is_some()),
+            ("ESCAPE", escape.is_some()),
+            ("HEADER", header),
+            ("CSV", csv),
+        ];
+        return match given.iter().find(|(_, set)| *set) {
+            Some((what, _)) => Err(syntax(&format!("cannot specify {what} in BINARY mode"))),
+            None => Ok(Format::Binary),
+        };
+    }
+    let quote = quote.unwrap_or(b'"');
     Ok(if csv {
         Format::Csv {
             delimiter: delimiter.unwrap_or(b','),
@@ -356,7 +370,7 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
 pub struct Reader {
     format: Format,
     buf: Vec<u8>,
-    /// The header line to pass over, in CSV.
+    /// The header to pass over: CSV's line, binary's signature.
     header: bool,
     /// Past `\.`: whatever follows is not data.
     ended: bool,
@@ -364,14 +378,22 @@ pub struct Reader {
     pub line: u64,
 }
 
-pub type Row = Vec<Option<String>>;
+/// A cell: text, as the text format and CSV hold one, or the bytes binary
+/// holds, in its column type's binary format.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+pub type Row = Vec<Option<Cell>>;
 
 /// A row and the line it ended on, for an error to say where.
 pub type Numbered = (u64, Row);
 
 impl Reader {
     pub fn new(format: Format) -> Reader {
-        let header = matches!(format, Format::Csv { header: true, .. });
+        let header = matches!(format, Format::Csv { header: true, .. } | Format::Binary);
         Reader {
             format,
             buf: Vec::new(),
@@ -387,6 +409,9 @@ impl Reader {
             return Ok(());
         }
         self.buf.extend_from_slice(data);
+        if self.format == Format::Binary {
+            return self.binary(rows);
+        }
         // Taken out while its records are read, and what is left of it --
         // a row the next message ends -- put back.
         let buf = std::mem::take(&mut self.buf);
@@ -412,6 +437,11 @@ impl Reader {
         if self.ended || self.buf.is_empty() {
             return Ok(());
         }
+        // A binary stream may end without its trailer, between two rows as
+        // PostgreSQL takes it; inside one, or its header, it is cut short.
+        if self.format == Format::Binary {
+            return Err(self.bad("unexpected EOF in COPY data"));
+        }
         if let Format::Csv { quote, escape, .. } = &self.format {
             if open_quote(&self.buf, *quote, *escape) {
                 return Err(self.bad("unterminated CSV quoted field"));
@@ -427,7 +457,9 @@ impl Reader {
     /// buffer holds all of it. A CSV newline inside quotes is data.
     fn record_len(&self, rest: &[u8]) -> Option<usize> {
         match &self.format {
-            Format::Text { .. } => rest.iter().position(|&b| b == b'\n').map(|p| p + 1),
+            Format::Text { .. } | Format::Binary => {
+                rest.iter().position(|&b| b == b'\n').map(|p| p + 1)
+            }
             Format::Csv { quote, escape, .. } => {
                 let mut inside = false;
                 let mut i = 0;
@@ -462,6 +494,81 @@ impl Reader {
         }
     }
 
+    /// The rows the buffer holds whole in the binary format, onto `rows`:
+    /// past the header, each row its cells' count, then each cell's length
+    /// -- -1 for NULL -- and bytes; a count of -1 is the trailer.
+    fn binary(&mut self, rows: &mut Vec<Numbered>) -> Result<(), Refusal> {
+        const SIGNATURE: &[u8] = b"PGCOPY\n\xff\r\n\0";
+        let buf = std::mem::take(&mut self.buf);
+        let i16_at = |at: usize| {
+            buf.get(at..at + 2)
+                .map(|b| i16::from_be_bytes([b[0], b[1]]))
+        };
+        let i32_at = |at: usize| {
+            buf.get(at..at + 4)
+                .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        let mut at = 0;
+        if self.header {
+            let (Some(flags), Some(ext)) = (i32_at(11), i32_at(15)) else {
+                self.buf = buf;
+                return Ok(());
+            };
+            if &buf[..11] != SIGNATURE {
+                return Err(self.bad("COPY file signature not recognized"));
+            }
+            // Bit 16 says every row carries an OID first, which no
+            // collection has.
+            if flags & (1 << 16) != 0 {
+                return Err(self.bad("COPY rows with OIDs are not supported"));
+            }
+            let end = 19 + ext.max(0) as usize;
+            if buf.len() < end {
+                self.buf = buf;
+                return Ok(());
+            }
+            self.header = false;
+            at = end;
+        }
+        while let Some(count) = i16_at(at) {
+            if count == -1 {
+                self.ended = true;
+                return Ok(());
+            }
+            if count < 0 {
+                return Err(self.bad("invalid COPY row field count"));
+            }
+            let mut p = at + 2;
+            let mut row = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let Some(len) = i32_at(p) else { break };
+                p += 4;
+                if len == -1 {
+                    row.push(None);
+                    continue;
+                }
+                let Some(cell) = buf.get(p..p + len.max(0) as usize).filter(|_| len >= 0) else {
+                    if len < -1 {
+                        return Err(self.bad("invalid COPY field length"));
+                    }
+                    break;
+                };
+                row.push(Some(Cell::Binary(cell.to_vec())));
+                p += len as usize;
+            }
+            // Cut short: the rest comes in the next message.
+            if row.len() < count as usize {
+                break;
+            }
+            self.line += 1;
+            rows.push((self.line, row));
+            at = p;
+        }
+        self.buf = buf;
+        self.buf.drain(..at);
+        Ok(())
+    }
+
     /// One record: its row onto `rows`; `true` at the end marker.
     fn take(&mut self, record: &[u8], rows: &mut Vec<Numbered>) -> Result<bool, Refusal> {
         self.line += 1;
@@ -479,7 +586,7 @@ impl Reader {
                     if cell == null.as_bytes() {
                         return Ok(None);
                     }
-                    utf8(unescape(cell)).map(Some)
+                    utf8(unescape(cell)).map(|s| Some(Cell::Text(s)))
                 })
                 .collect::<Result<Row, _>>(),
             Format::Csv {
@@ -489,6 +596,7 @@ impl Reader {
                 escape,
                 ..
             } => csv_cells(record, *delimiter, null, *quote, *escape),
+            Format::Binary => unreachable!("binary rows are read by `binary`"),
         };
         rows.push((self.line, row.map_err(|e| self.bad(&e))?));
         Ok(false)
@@ -624,11 +732,11 @@ fn csv_cells(
 }
 
 /// An unquoted cell that is the NULL string is NULL; a quoted one never.
-fn csv_cell(cell: Vec<u8>, quoted: bool, null: &str) -> Result<Option<String>, String> {
+fn csv_cell(cell: Vec<u8>, quoted: bool, null: &str) -> Result<Option<Cell>, String> {
     if !quoted && cell == null.as_bytes() {
         return Ok(None);
     }
-    utf8(cell).map(Some)
+    utf8(cell).map(|s| Some(Cell::Text(s)))
 }
 
 // ----------------------------------------------------------------- cells
@@ -709,22 +817,53 @@ pub fn document(t: &Target, row: Row, line: u64) -> Result<Doc, Refusal> {
     }
     let mut doc = Vec::with_capacity(row.len());
     for ((name, ty), cell) in t.columns.iter().zip(row) {
+        let bad = |why: String, s: &str| {
+            (
+                "22P02",
+                format!(
+                    "COPY {}, line {line}, column {name}: {why}: \"{s}\"",
+                    t.collection
+                ),
+            )
+        };
         let value = match cell {
             None if name == "id" => continue,
             None => Value::Null,
-            Some(s) => value(&s, ty).map_err(|why| {
-                (
-                    "22P02",
-                    format!(
-                        "COPY {}, line {line}, column {name}: {why}: \"{s}\"",
-                        t.collection
-                    ),
-                )
-            })?,
+            Some(Cell::Text(s)) => value(&s, ty).map_err(|why| bad(why, &s))?,
+            Some(Cell::Binary(b)) => binary(&b, ty).map_err(|why| bad(why, &hex(&b)))?,
         };
         doc.push((name.clone(), Expr::Lit(value)));
     }
     Ok(doc)
+}
+
+/// A binary cell as `ty` holds it: sent as the type the field's column is
+/// described as ([`crate::server::pg_oid`]), a text type as its text.
+fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
+    let oid = crate::server::pg_oid(ty);
+    if oid == crate::proto::OID_TEXT {
+        let s =
+            std::str::from_utf8(b).map_err(|_| "invalid byte sequence for encoding \"UTF8\"")?;
+        return value(s, ty);
+    }
+    let want = match oid {
+        crate::proto::OID_BOOL => 1,
+        crate::proto::OID_BYTEA => b.len(),
+        _ => 8,
+    };
+    if b.len() != want {
+        return Err(format!("{} bytes where its type sends {want}", b.len()));
+    }
+    Ok(crate::params::decode(b, true, oid))
+}
+
+/// Bytes as `\x` and hexadecimal digits, for an error to show them.
+fn hex(b: &[u8]) -> String {
+    let mut s = String::from("\\x");
+    for x in b.iter().take(32) {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
 }
 
 /// A cell's text as `ty` holds it. A timestamp and a sparse vector go on as
@@ -900,14 +1039,23 @@ mod tests {
                 header: true
             }
         );
+        // What asyncpg and pgx send.
+        assert_eq!(
+            spec("COPY \"t\"(\"a\", \"b\") FROM STDIN (FORMAT binary)").format,
+            Format::Binary
+        );
+        assert_eq!(
+            spec("copy \"t\" ( \"a\", \"b\" ) from stdin binary;").format,
+            Format::Binary
+        );
         assert!(parse("get docs").is_none());
         assert!(parse("copying things").is_none());
         for (sql, code) in [
             ("COPY t TO STDOUT", "0A000"),
             ("COPY t FROM '/etc/passwd'", "0A000"),
             ("COPY t FROM PROGRAM 'ls'", "0A000"),
-            ("COPY t FROM STDIN (FORMAT binary)", "0A000"),
-            ("COPY t FROM STDIN WITH BINARY", "0A000"),
+            ("COPY t FROM STDIN (FORMAT binary, DELIMITER ',')", "42601"),
+            ("COPY t FROM STDIN WITH BINARY CSV", "42601"),
             ("COPY t FROM STDIN (HEADER)", "0A000"),
             ("COPY t FROM STDIN (DELIMITER ';;')", "0A000"),
             ("COPY (select 1) TO STDOUT", "0A000"),
@@ -948,8 +1096,90 @@ mod tests {
 
     fn cells(rows: &[Numbered]) -> Vec<Vec<Option<&str>>> {
         rows.iter()
-            .map(|(_, r)| r.iter().map(|c| c.as_deref()).collect())
+            .map(|(_, r)| {
+                r.iter()
+                    .map(|c| match c {
+                        Some(Cell::Text(s)) => Some(s.as_str()),
+                        Some(Cell::Binary(_)) => Some("<binary>"),
+                        None => None,
+                    })
+                    .collect()
+            })
             .collect()
+    }
+
+    /// A binary COPY stream: the header, then each row's cells.
+    fn pgcopy(rows: &[&[Option<&[u8]>]], trailer: bool) -> Vec<u8> {
+        let mut out = b"PGCOPY\n\xff\r\n\0".to_vec();
+        out.extend_from_slice(&0i32.to_be_bytes());
+        out.extend_from_slice(&4i32.to_be_bytes());
+        out.extend_from_slice(b"ext!");
+        for r in rows {
+            out.extend_from_slice(&(r.len() as i16).to_be_bytes());
+            for c in r.iter() {
+                match c {
+                    None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+                    Some(b) => {
+                        out.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                        out.extend_from_slice(b);
+                    }
+                }
+            }
+        }
+        if trailer {
+            out.extend_from_slice(&(-1i16).to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn binary_rows_across_messages_and_their_cells() {
+        let n = 7i64.to_be_bytes();
+        let stream = pgcopy(&[&[Some(b"a"), Some(&n)], &[None, Some(&n)]], true);
+        // Cut at every byte, a row, the header and a cell's length included.
+        for cut in 1..stream.len() {
+            let (a, b) = stream.split_at(cut);
+            let rows = read(Format::Binary, &[a, b]).unwrap();
+            assert_eq!(rows.len(), 2, "cut at {cut}");
+            assert_eq!(rows[0].1[0], Some(Cell::Binary(b"a".to_vec())));
+            assert_eq!(rows[1].1[0], None);
+        }
+        // A stream may end at a row's end without its trailer; not inside one.
+        let open = pgcopy(&[&[Some(b"a")]], false);
+        assert_eq!(read(Format::Binary, &[&open]).unwrap().len(), 1);
+        assert_eq!(
+            read(Format::Binary, &[&open[..open.len() - 1]])
+                .unwrap_err()
+                .0,
+            "22P04"
+        );
+        assert_eq!(
+            read(Format::Binary, &[b"PGCOPY-nope--------"])
+                .unwrap_err()
+                .0,
+            "22P04"
+        );
+
+        let t = Target {
+            collection: "t".into(),
+            columns: vec![
+                ("name".into(), DataType::Text),
+                ("n".into(), DataType::Int),
+                (
+                    "e".into(),
+                    DataType::Vector(2, fenec_core::value::VecPrec::F32),
+                ),
+            ],
+        };
+        let row = vec![
+            Some(Cell::Binary(b"a".to_vec())),
+            Some(Cell::Binary(n.to_vec())),
+            Some(Cell::Binary(b"[1,0.5]".to_vec())),
+        ];
+        let doc = document(&t, row, 1).unwrap();
+        assert_eq!(doc[1].1, Expr::Lit(Value::Int(7)));
+        let short = vec![None, Some(Cell::Binary(vec![0, 7])), None];
+        assert_eq!(document(&t, short, 3).unwrap_err().0, "22P02");
     }
 
     #[test]

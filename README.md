@@ -120,7 +120,7 @@ or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 the catalog they look around in: `\d`, JDBC's `DatabaseMetaData` and
 DBeaver's navigator see the collections, their fields and their indexes.
 `COPY ... FROM STDIN` loads rows as psql's `\copy` and psycopg's `copy` send
-them, in text or CSV ([COPY](https://fenecdb.com/docs/postgres#copy)).
+them, in text, CSV or binary ([COPY](https://fenecdb.com/docs/postgres#copy)).
 
 ```bash
 make pg PGPASS=secret HTTP=127.0.0.1:8080

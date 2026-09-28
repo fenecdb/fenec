@@ -2665,7 +2665,7 @@ fn copy_refuses_what_it_cannot_do() {
         ("COPY t (name, nope) FROM STDIN", "42703"),
         ("COPY t TO STDOUT", "0A000"),
         ("COPY t FROM '/etc/passwd'", "0A000"),
-        ("COPY t FROM STDIN (FORMAT binary)", "0A000"),
+        ("COPY t FROM STDIN (FORMAT binary, HEADER)", "42601"),
         ("COPY t FROM STDIN; put t {name: \"x\"}", "0A000"),
     ] {
         let r = c.copy(sql, &[], None);
@@ -3095,4 +3095,114 @@ fn parameters_take_the_types_their_places_name() {
             Some("2000-01-01 00:00:01+00")
         ]])
     );
+}
+
+// ------------------------------------------------------------ binary COPY
+
+/// A binary COPY stream: PostgreSQL's header, then each row's cells in
+/// their types' binary formats, and the trailer.
+fn pgcopy(rows: &[Vec<Option<Vec<u8>>>]) -> Vec<u8> {
+    let mut out = b"PGCOPY\n\xff\r\n\0".to_vec();
+    out.extend_from_slice(&0i32.to_be_bytes());
+    out.extend_from_slice(&0i32.to_be_bytes());
+    for r in rows {
+        out.extend_from_slice(&(r.len() as i16).to_be_bytes());
+        for c in r {
+            match c {
+                None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(b) => {
+                    out.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                    out.extend_from_slice(b);
+                }
+            }
+        }
+    }
+    out.extend_from_slice(&(-1i16).to_be_bytes());
+    out
+}
+
+/// asyncpg's `copy_records_to_table` and pgx's `CopyFrom` ask `SELECT the
+/// columns FROM the table` for its types, then COPY in binary: the select
+/// is described as the `get` it is, and the rows are read by those types,
+/// a row cut anywhere across the CopyData messages.
+#[test]
+fn a_binary_copy_reads_its_cells_by_their_columns_types() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection t (name text, n int, score float, ok bool, at timestamp, e vector<2>)",
+    );
+    let r = c.with_formats(r#"SELECT "name", "n", "score" FROM "t" LIMIT 1"#, &[], &[]);
+    assert_eq!(
+        find(&r, b'T').unwrap().columns(),
+        [
+            ("name".to_string(), 25),
+            ("n".to_string(), 20),
+            ("score".to_string(), 701)
+        ]
+    );
+
+    let row = |name: &str, n: i64| {
+        vec![
+            Some(name.as_bytes().to_vec()),
+            Some(n.to_be_bytes().to_vec()),
+            Some(0.5f64.to_be_bytes().to_vec()),
+            Some(vec![1]),
+            Some(1_000_000i64.to_be_bytes().to_vec()),
+            Some(b"[1,0.5]".to_vec()),
+        ]
+    };
+    let mut rows: Vec<_> = (0..20).map(|i| row(&format!("r{i}"), i)).collect();
+    rows.push(vec![Some(b"nulls".to_vec()), None, None, None, None, None]);
+    let stream = pgcopy(&rows);
+    let (a, b) = stream.split_at(37);
+    let r = c.copy(
+        r#"COPY "t" ("name", "n", "score", "ok", "at", "e") FROM STDIN (FORMAT binary)"#,
+        &[a, b],
+        None,
+    );
+    assert_eq!(r[0].tag, b'G');
+    assert_eq!(r[0].body[0], 1, "the COPY is binary");
+    assert_eq!(outcome(&r), "COPY 21");
+    assert_eq!(
+        rows_of(&mut c, "get t select name, n, score, ok, at, e where n = 3"),
+        cells(&[&[
+            Some("r3"),
+            Some("3"),
+            Some("0.5"),
+            Some("t"),
+            Some("2000-01-01 00:00:01+00"),
+            Some("[1,0.5]")
+        ]])
+    );
+    assert_eq!(
+        rows_of(&mut c, "get t select n where name = \"nulls\""),
+        cells(&[&[None]])
+    );
+
+    // A cell of the wrong width, and a stream that is not PGCOPY.
+    let bad = pgcopy(&[vec![Some(b"x".to_vec()), Some(vec![0, 7])]]);
+    let r = c.copy(
+        r#"COPY t (name, n) FROM STDIN (FORMAT binary)"#,
+        &[&bad],
+        None,
+    );
+    assert_eq!(
+        r.iter()
+            .find(|m| m.tag == b'E')
+            .unwrap()
+            .sqlstate()
+            .as_deref(),
+        Some("22P02")
+    );
+    let r = c.copy("COPY t (name) FROM STDIN BINARY", &[b"nope"], None);
+    assert_eq!(
+        r.iter()
+            .find(|m| m.tag == b'E')
+            .unwrap()
+            .sqlstate()
+            .as_deref(),
+        Some("22P04")
+    );
+    assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("21")]]));
 }

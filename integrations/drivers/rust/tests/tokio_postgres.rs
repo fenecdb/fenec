@@ -2,6 +2,8 @@
 //! the binary format, and a COPY through Execute.
 
 use futures_util::SinkExt;
+use tokio_postgres::binary_copy::BinaryCopyInWriter;
+use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
 
 /// A connection, and a collection of the test's own: `test` in its name,
@@ -73,4 +75,31 @@ async fn copy_in_goes_through_execute() {
         .await
         .unwrap();
     assert_eq!(sink.finish().await.unwrap(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_binary_copy_writes_typed_rows() {
+    let Some((c, t)) = connect("binary").await else {
+        return;
+    };
+    let sink = c
+        .copy_in(&format!("COPY {t} (name, n, score) FROM STDIN BINARY"))
+        .await
+        .unwrap();
+    let writer = BinaryCopyInWriter::new(sink, &[Type::TEXT, Type::INT8, Type::FLOAT8]);
+    futures_util::pin_mut!(writer);
+    for i in 0..100i64 {
+        writer
+            .as_mut()
+            .write(&[&format!("r{i}"), &i, &(i as f64 / 4.0)])
+            .await
+            .unwrap();
+    }
+    assert_eq!(writer.finish().await.unwrap(), 100);
+    let row = c
+        .query_one(&format!("get {t} select name, score where n = $1"), &[&7i64])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "r7");
+    assert_eq!(row.get::<_, f64>(1), 1.75);
 }

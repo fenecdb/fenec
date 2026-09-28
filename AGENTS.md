@@ -221,9 +221,11 @@ a transaction's; a simple query's block lands at the CopyDone, an
 Execute's at its Sync. An error, a bad row, a cancel or the client's
 CopyFail is answered at once and puts every row back, and the session loop
 drops what the client still streams, as PostgreSQL does. The COPY counts
-as one statement however many puts it made (`run_copy`). Text and CSV
-only: binary -- asyncpg's `copy_records_to_table`, pgx's `CopyFrom` -- is
-refused, `0A000`. 100 000 rows x 128: 17.6k rows/s with the graph kept and
+as one statement however many puts it made (`run_copy`). Text, CSV and
+PostgreSQL's binary format, each binary cell read by the type its column
+is described as (`copy::binary`): asyncpg's `copy_records_to_table` and
+pgx's `CopyFrom` ask `SELECT the columns FROM the table` for the types
+first, which `sql::select` reads as the `get` it is. 100 000 rows x 128: 17.6k rows/s with the graph kept and
 171k without, against 17.2k and 152k a put a row in a transaction, and
 PostgreSQL's own COPY 434 and 62k (`make load-bench`, the median of three;
 `site/content/docs/benchmarks.html#loading` has every way).

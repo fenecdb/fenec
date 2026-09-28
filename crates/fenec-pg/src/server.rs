@@ -29,6 +29,7 @@ use crate::copy;
 use crate::params;
 use crate::proto::*;
 use crate::scram;
+use crate::sql;
 use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_core::query::projection_columns;
@@ -1083,7 +1084,7 @@ fn copy_in(
             return Ok((Copied::On, 0));
         }
     };
-    out.copy_in_response(target.columns.len());
+    out.copy_in_response(target.columns.len(), spec.format == copy::Format::Binary);
     send(out, w, lock.hold.is_some(), cfg, bounded)?;
 
     let mut reader = copy::Reader::new(spec.format);
@@ -1707,7 +1708,7 @@ fn session(
                             }
                             compat::handle(p, &cfg, &|| false)
                                 .is_none()
-                                .then(|| parse(p).err())
+                                .then(|| read(p).err())
                                 .flatten()
                                 .map(|e| ("42601", e.to_string()))
                         }) {
@@ -1763,7 +1764,7 @@ fn session(
                     let text = sql.trim();
                     let parsed = compat::handle(text, &cfg, &|| false)
                         .is_none()
-                        .then(|| parse(text).ok().map(Arc::new))
+                        .then(|| read(text).ok().map(Arc::new))
                         .flatten();
                     let n = be_i16(&m.body, &mut pos).max(0);
                     let declared = (0..n).map(|_| be_i32(&m.body, &mut pos)).collect();
@@ -2356,6 +2357,15 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
     Some(cols)
 }
 
+/// `text` read as FenecQL, or as the plain `SELECT` of columns from one
+/// collection it may be ([`sql::select`]); FenecQL's error otherwise.
+fn read(text: &str) -> fenec_core::error::Result<Vec<Statement>> {
+    parse(text).or_else(|e| match sql::select(text) {
+        Some(q) => parse(&q),
+        None => Err(e),
+    })
+}
+
 /// A row whose cells are text -- the catalog's -- with the columns
 /// `formats` asks for in binary sent in their type's binary format.
 fn text_row(
@@ -2517,13 +2527,13 @@ fn describe(
             },
         });
     }
-    let read;
+    let owned;
     let stmts: &[Statement] = match parsed {
         Some(s) => s,
-        None => match parse(trimmed) {
+        None => match read(trimmed) {
             Ok(s) => {
-                read = s;
-                &read
+                owned = s;
+                &owned
             }
             // A syntax error is reported during Execute; we do not branch
             // Describe off with a second error message.
@@ -3032,13 +3042,13 @@ fn run_locked(
         return None;
     }
 
-    let read;
+    let owned;
     let stmts: &[Statement] = match parsed {
         Some(s) => s,
-        None => match parse(trimmed) {
+        None => match read(trimmed) {
             Ok(s) => {
-                read = s;
-                &read
+                owned = s;
+                &owned
             }
             Err(e) => {
                 out.error("42601", &e.to_string());
