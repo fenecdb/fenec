@@ -246,6 +246,22 @@ first, which `sql::select` reads as the `get` it is. 100 000 rows x 128: 17.6k r
 PostgreSQL's own COPY 434 and 62k (`make load-bench`, the median of three;
 `site/content/docs/benchmarks.html#loading` has every way).
 
+**A driver reads rows and sends parameters in the formats it asks for.**
+A column goes in binary where Bind's result codes ask (`binary.rs`: the
+types' `typsend`, a text type as its text, an array refused), which
+tokio-postgres and asyncpg ask for every column and pgx for every type it
+knows -- sent as text, a `bigint` was one byte where they read eight. A
+parameter's type is the one its place names (`params.rs`: the field it is
+given for or compared with, `id`'s, a `match`'s or a `near`'s text), text
+where nothing names one, and never the unspecified OID 0, which sent
+tokio-postgres into a type lookup that recursed until its stack ran out and
+asyncpg into an introspection query of its own; Bind reads a binary value by
+it. A plain `SELECT` of columns from one collection is the `get` it is
+(`sql.rs`), which asyncpg and pgx ask before a binary COPY. A new field type
+needs its binary form in both. `make drivers-test` holds psycopg,
+SQLAlchemy, asyncpg, pgx, tokio-postgres and node-postgres to their own
+flows.
+
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
 `commit` and `rollback` hold one open): `wal` and `note` hold its frames and
