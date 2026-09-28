@@ -213,4 +213,7 @@ keeps, and an entry found in the thread's shard: 0.34 µs for a read of 87
 bytes, 0.56 µs with eight threads counting at once — a sixth of the 2.2 µs
 parsing it takes. It grows with the text: 5.6 µs for a <code>near</code> with
 768 components written into it, whose parse takes 85
-(<code>make statements-bench</code>).</p>
+(<code>make statements-bench</code>). A shape is made only as far as the
+1 000 bytes kept of it, so two statements alike that far are one line: shaped
+whole, a <code>put</code> of 1 000 rows of 128-dim vectors spent 1.7 ms of
+its 12.6 there.</p>
