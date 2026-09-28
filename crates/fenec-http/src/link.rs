@@ -117,8 +117,15 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
 fn save(what: &str, db: &RwLock<Database>) {
     // The graphs as they stand for what has landed: a graph record in the
     // file holding an open block's nodes would name documents that may
-    // never be.
-    let g = crate::held::read_landed(db);
+    // never be. A database with a block open is looked at again at the next
+    // look, neither parked -- its writes put back, to be written again at
+    // the block's next statement -- nor waited for: a block that changed a
+    // graph cannot be parked, and a COPY of 100 000 128-dim vectors with
+    // the graph kept held the keeper 3.0 to 4.3 s, and every other
+    // database it keeps with it.
+    let Some(g) = crate::held::read_landed_now(db) else {
+        return;
+    };
     if !g.graphs_due() {
         return;
     }
