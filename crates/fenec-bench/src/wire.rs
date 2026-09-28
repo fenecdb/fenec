@@ -195,6 +195,13 @@ pub fn free_port() -> u16 {
 
 /// fenec-pg, killed when dropped.
 pub struct Server(Child);
+impl Server {
+    /// Its process id, to read its resident set by.
+    #[allow(dead_code)]
+    pub fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.0.kill();
