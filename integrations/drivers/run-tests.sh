@@ -2,8 +2,8 @@
 # PostgreSQL drivers against a real fenec-pg's pg wire: psycopg and
 # SQLAlchemy, from a python:3.13 container, as integrations/python runs the
 # stores. What a driver sends on its own -- a savepoint for a nested
-# transaction, the queries a dialect opens a connection with -- is what the
-# server is held to here.
+# transaction, the queries a dialect opens a connection with, the rows of a
+# COPY -- is what the server is held to here.
 #
 #   integrations/drivers/run-tests.sh [pytest arguments]
 set -eu

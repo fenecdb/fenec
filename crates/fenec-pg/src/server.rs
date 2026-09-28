@@ -24,6 +24,7 @@
 
 use crate::catalog;
 use crate::compat;
+use crate::copy;
 use crate::proto::*;
 use crate::scram;
 use fenec_core::json;
@@ -971,6 +972,302 @@ fn land_pipeline(lock: &mut Lock<'_>, cfg: &Config, out: &mut Writer) {
     }
 }
 
+/// Whether the session goes on after a COPY, or its connection is over.
+#[derive(PartialEq)]
+enum Copied {
+    On,
+    Close,
+}
+
+/// A COPY puts its rows this many at a time, or once the rows since the
+/// last put came in [`COPY_BYTES`] of text: a put links its vectors on
+/// every core. A put a row, as a driver's `executemany` sends them, loads
+/// 100 000 128-dim rows at 5.3k rows/s with the graph kept, a COPY at
+/// 17.2k (`make load-bench`).
+const COPY_ROWS: usize = 10_000;
+const COPY_BYTES: usize = 32 << 20;
+
+/// A COPY, cancellable while it runs and counted as the one statement it
+/// is, however many puts it made.
+#[allow(clippy::too_many_arguments)]
+fn run_copy(
+    copying: std::result::Result<copy::Spec, copy::Refusal>,
+    sql: &str,
+    db: &Arc<RwLock<Database>>,
+    held: &Held,
+    cfg: &Config,
+    be: &Backend,
+    tx: &mut TxState,
+    lock: &mut Lock<'_>,
+    r: &mut BufReader<TcpStream>,
+    w: &mut BufWriter<TcpStream>,
+    out: &mut Writer,
+    bounded: &mut bool,
+    lands: bool,
+) -> io::Result<Copied> {
+    let (started, errors) = (Instant::now(), out.errors());
+    be.busy.store(true, Ordering::SeqCst);
+    be.canceled.store(false, Ordering::SeqCst);
+    let copied = match copying {
+        Err((code, msg)) => {
+            out.error(code, &msg);
+            Ok((Copied::On, 0))
+        }
+        Ok(spec) => copy_in(
+            spec, sql, db, held, cfg, be, tx, lock, r, w, out, bounded, lands,
+        ),
+    };
+    be.busy.store(false, Ordering::SeqCst);
+    be.canceled.store(false, Ordering::SeqCst);
+    let (copied, n) = copied?;
+    // A COPY that held the block read under its bound.
+    r.get_ref().set_read_timeout(cfg.idle_timeout).ok();
+    counted(sql, 0, started.elapsed(), out.errors() > errors, n);
+    Ok(copied)
+}
+
+/// `COPY <collection> FROM STDIN`: the rows the client streams, put
+/// [`COPY_ROWS`] at a time and all of them one block -- the transaction's,
+/// or the COPY's own -- so an error, a bad row, a cancel or the client's
+/// CopyFail puts back every row, as PostgreSQL's COPY is one command. Each
+/// put's answer is taken back and one `COPY n` given. Once a put holds the
+/// block, the lock is held between messages as a transaction's is, and
+/// each wait for the client is bounded as its is. `lands`: a simple
+/// query's COPY lands its block at the CopyDone; an Execute's is its
+/// pipeline's, which lands at the Sync. An error is answered at once, as
+/// PostgreSQL answers it: the session's loop drops what the client still
+/// streams. Returns the rows copied.
+#[allow(clippy::too_many_arguments)]
+fn copy_in(
+    spec: copy::Spec,
+    sql: &str,
+    db: &Arc<RwLock<Database>>,
+    held: &Held,
+    cfg: &Config,
+    be: &Backend,
+    tx: &mut TxState,
+    lock: &mut Lock<'_>,
+    r: &mut BufReader<TcpStream>,
+    w: &mut BufWriter<TcpStream>,
+    out: &mut Writer,
+    bounded: &mut bool,
+    lands: bool,
+) -> io::Result<(Copied, u64)> {
+    let errors = out.errors();
+    // What would refuse every put is said before the client sends a row.
+    let refused = if tx.failed {
+        Some((
+            "25P02",
+            "current transaction is aborted, commands ignored until end of transaction block",
+        ))
+    } else if tx.open && tx.mode.read_only {
+        Some((
+            "25006",
+            "cannot execute COPY FROM in a read-only transaction",
+        ))
+    } else if held.as_ref().is_some_and(|t| t.is_frozen()) {
+        Some(("57P03", "the tenant is being moved; retry shortly"))
+    } else {
+        None
+    };
+    if let Some((code, msg)) = refused {
+        out.error(code, msg);
+        return Ok((Copied::On, 0));
+    }
+    let target = match lock.read(db, |d| copy::target(d, &spec)) {
+        Ok(t) => t,
+        Err((code, msg)) => {
+            out.error(code, &msg);
+            return Ok((Copied::On, 0));
+        }
+    };
+    out.copy_in_response(target.columns.len());
+    send(out, w, lock.hold.is_some(), cfg, bounded)?;
+
+    let mut reader = copy::Reader::new(spec.format);
+    let mut rows = Vec::new();
+    let mut docs = Vec::new();
+    let (mut done, mut bytes) = (0u64, 0usize);
+    // Holding the block, every read from the client is bounded as a
+    // transaction's wait for its next statement is -- the rest of a message
+    // cut short too, which a bound on its first byte alone let hold the
+    // database for as long as the client liked -- and a message already in
+    // the buffer is read with no wait: the two timeouts set around each
+    // wait were a system call each, 2% of a COPY without an index (119k ->
+    // 121k rows/s).
+    let limit = cfg.idle_in_transaction.or(cfg.idle_timeout);
+    let idle = |holding: bool| match holding && cfg.idle_in_transaction.is_some() {
+        true => (
+            "25P03",
+            "the COPY sat idle holding the database: it was put back, \
+             and the connection is closing",
+        ),
+        false => ("57P05", "the session went idle, closing the connection"),
+    };
+    let mut read_bound = false;
+    let (code, msg) = loop {
+        if lock.hold.is_some() {
+            if r.buffer().is_empty() {
+                read_bound = false;
+                let (code, msg) = match hold_wait(r, limit)? {
+                    Waited::Ready => ("", ""),
+                    Waited::Gone => return Ok((Copied::Close, 0)),
+                    Waited::Shutdown => (
+                        "57P01",
+                        "the server is shutting down: the COPY was put back",
+                    ),
+                    Waited::Idle => idle(true),
+                };
+                if !code.is_empty() {
+                    lock.hold = None;
+                    out.error(code, msg);
+                    let _ = send(out, w, false, cfg, bounded);
+                    return Ok((Copied::Close, 0));
+                }
+            }
+            if !read_bound {
+                r.get_ref().set_read_timeout(limit).ok();
+                read_bound = true;
+            }
+        }
+        let m = match read_message_max(r, cfg.max_message) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok((Copied::Close, 0)),
+            Err(e) => {
+                let (code, msg) = match e.kind() {
+                    _ if is_timeout(&e) => {
+                        let (code, msg) = idle(lock.hold.is_some());
+                        (code, msg.to_string())
+                    }
+                    io::ErrorKind::InvalidData => ("54000", e.to_string()),
+                    _ => return Err(e),
+                };
+                lock.hold = None;
+                out.error(code, &msg);
+                let _ = out.flush_to(w);
+                return Ok((Copied::Close, 0));
+            }
+        };
+        match m.tag {
+            b'd' => {
+                if be.take_cancel() {
+                    break ("57014", "the query was cancelled".to_string());
+                }
+                bytes += m.body.len();
+                let read = reader
+                    .feed(&m.body, &mut rows)
+                    .and_then(|()| copy::documents(&target, &mut rows, &mut docs));
+                if let Err(e) = read {
+                    break e;
+                }
+                if docs.len() >= COPY_ROWS || bytes >= COPY_BYTES {
+                    done += docs.len() as u64;
+                    bytes = 0;
+                    if !copy_put(
+                        &target, &mut docs, true, sql, db, held, cfg, be, tx, lock, out,
+                    ) {
+                        return Ok((Copied::On, 0));
+                    }
+                }
+            }
+            // A Flush or a Sync means nothing during a COPY: a driver that
+            // runs it through Execute sends its Sync right behind it, as
+            // tokio-postgres does, and another after the CopyDone.
+            b'H' | b'S' => {}
+            b'c' => {
+                let read = reader
+                    .finish(&mut rows)
+                    .and_then(|()| copy::documents(&target, &mut rows, &mut docs));
+                if let Err(e) = read {
+                    break e;
+                }
+                done += docs.len() as u64;
+                if !copy_put(
+                    &target, &mut docs, false, sql, db, held, cfg, be, tx, lock, out,
+                ) {
+                    return Ok((Copied::On, 0));
+                }
+                // The COPY's own block lands before it is answered.
+                if lands && lock.hold.as_ref().is_some_and(|h| h.implicit) {
+                    land_pipeline(lock, cfg, out);
+                }
+                if out.errors() > errors {
+                    return Ok((Copied::On, 0));
+                }
+                out.command_complete(&format!("COPY {done}"));
+                return Ok((Copied::On, done));
+            }
+            b'f' => {
+                let why = take_cstr(&m.body, &mut 0);
+                break ("57014", format!("COPY from stdin failed: {why}"));
+            }
+            other => {
+                break (
+                    "08P01",
+                    format!("unexpected message type 0x{other:02X} during COPY from stdin"),
+                )
+            }
+        }
+    };
+    out.error(code, &msg);
+    Ok((Copied::On, 0))
+}
+
+/// A put of a COPY's rows so far, as a statement of its block -- which the
+/// first put with `more` of them to come takes and holds, as a pipeline's
+/// write does. `false` once it wrote its error.
+#[allow(clippy::too_many_arguments)]
+fn copy_put(
+    target: &copy::Target,
+    docs: &mut Vec<copy::Doc>,
+    more: bool,
+    sql: &str,
+    db: &Arc<RwLock<Database>>,
+    held: &Held,
+    cfg: &Config,
+    be: &Backend,
+    tx: &mut TxState,
+    lock: &mut Lock<'_>,
+    out: &mut Writer,
+) -> bool {
+    if docs.is_empty() {
+        return true;
+    }
+    let stmt = [Statement::Put {
+        collection: target.collection.clone(),
+        docs: std::mem::take(docs),
+    }];
+    // Held against a move for the put alone, as a transaction's statements
+    // are: never across a wait for the client.
+    let _gate = held.as_ref().map(|t| t.enter());
+    let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
+    let (mark, errors) = (out.mark(), out.errors());
+    let wait = run_locked(
+        db,
+        held,
+        frozen,
+        cfg,
+        be,
+        tx,
+        lock,
+        sql,
+        Some(&stmt),
+        &[],
+        out,
+        false,
+        more,
+    );
+    if let Some((durability, answer)) = wait {
+        durable_or_refused(db, durability, answer, out);
+    }
+    if out.errors() > errors {
+        return false;
+    }
+    // The COPY answers once, for every row.
+    out.rewind(mark);
+    true
+}
+
 /// How a wait for the client ended while the session held the lock.
 enum Waited {
     Ready,
@@ -1320,13 +1617,35 @@ fn session(
                             continue;
                         }
                     };
-                    // Held against a move for the length of the statement, as a
-                    // request is held on the HTTP path -- and let go before the
-                    // answer is written. The socket has no write timeout: a
-                    // client that stopped reading a large answer held the tenant
-                    // through the write, a freeze waited on it, and every
-                    // request for the tenant queued behind the freeze.
-                    {
+                    // A COPY's rows follow it, so it runs apart, its puts held
+                    // against a move one at a time (`copy_in`).
+                    if let Some(copying) = copy::parse(&sql) {
+                        let copied = run_copy(
+                            copying,
+                            &sql,
+                            &db,
+                            &held,
+                            &cfg,
+                            &be,
+                            &mut tx,
+                            &mut lock,
+                            &mut r,
+                            &mut w,
+                            &mut out,
+                            &mut bounded,
+                            true,
+                        )?;
+                        if copied == Copied::Close {
+                            return Ok(());
+                        }
+                    } else {
+                        // Held against a move for the length of the statement,
+                        // as a request is held on the HTTP path -- and let go
+                        // before the answer is written. The socket has no write
+                        // timeout: a client that stopped reading a large answer
+                        // held the tenant through the write, a freeze waited on
+                        // it, and every request for the tenant queued behind the
+                        // freeze.
                         let _gate = held.as_ref().map(|t| t.enter());
                         let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
                         be.busy.store(true, Ordering::SeqCst);
@@ -1363,15 +1682,19 @@ fn session(
                                 false,
                                 false,
                             );
-                        } else if let Some(e) = pieces.iter().find_map(|p| {
+                        } else if let Some((code, e)) = pieces.iter().find_map(|p| {
+                            if copy::parse(p).is_some() {
+                                return Some(("0A000", copy::ALONE.to_string()));
+                            }
                             compat::handle(p, &cfg, &|| false)
                                 .is_none()
                                 .then(|| parse(p).err())
                                 .flatten()
+                                .map(|e| ("42601", e.to_string()))
                         }) {
                             // PostgreSQL reads the whole text before it runs
                             // any of it: a statement it cannot read runs none.
-                            out.error("42601", &e.to_string());
+                            out.error(code, &e);
                         } else {
                             for (i, piece) in pieces.iter().enumerate() {
                                 let before = out.errors();
@@ -1562,27 +1885,52 @@ fn session(
                     // statement before the Sync -- most often the only one --
                     // runs as a statement on its own does.
                     let pipeline = r.buffer().first() != Some(&b'S');
-                    let _gate = held.as_ref().map(|t| t.enter());
-                    let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
-                    be.busy.store(true, Ordering::SeqCst);
-                    be.canceled.store(false, Ordering::SeqCst);
-                    execute_into(
-                        &db,
-                        &held,
-                        frozen,
-                        &cfg,
-                        &be,
-                        &mut tx,
-                        &mut lock,
-                        &p.sql,
-                        p.parsed.as_deref().map(Vec::as_slice),
-                        &p.params,
-                        &mut out,
-                        already,
-                        pipeline,
-                    );
-                    be.busy.store(false, Ordering::SeqCst);
-                    be.canceled.store(false, Ordering::SeqCst);
+                    let copying = match &p.parsed {
+                        Some(_) => None,
+                        None => copy::parse(&p.sql),
+                    };
+                    if let Some(copying) = copying {
+                        let copied = run_copy(
+                            copying,
+                            &p.sql,
+                            &db,
+                            &held,
+                            &cfg,
+                            &be,
+                            &mut tx,
+                            &mut lock,
+                            &mut r,
+                            &mut w,
+                            &mut out,
+                            &mut bounded,
+                            false,
+                        )?;
+                        if copied == Copied::Close {
+                            return Ok(());
+                        }
+                    } else {
+                        let _gate = held.as_ref().map(|t| t.enter());
+                        let frozen = held.as_ref().is_some_and(|t| t.is_frozen());
+                        be.busy.store(true, Ordering::SeqCst);
+                        be.canceled.store(false, Ordering::SeqCst);
+                        execute_into(
+                            &db,
+                            &held,
+                            frozen,
+                            &cfg,
+                            &be,
+                            &mut tx,
+                            &mut lock,
+                            &p.sql,
+                            p.parsed.as_deref().map(Vec::as_slice),
+                            &p.params,
+                            &mut out,
+                            already,
+                            pipeline,
+                        );
+                        be.busy.store(false, Ordering::SeqCst);
+                        be.canceled.store(false, Ordering::SeqCst);
+                    }
                     tx.settle(&mut lock, errors, &out);
                 }
                 b'C' => {
@@ -1612,6 +1960,9 @@ fn session(
                 }
                 // A transaction left open is put back as the lock is let go.
                 b'X' => return Ok(()),
+                // What a client still streams into a COPY answered with its
+                // error, dropped as PostgreSQL drops it.
+                b'd' | b'c' | b'f' => {}
                 other => {
                     let errors = out.errors();
                     out.error("0A000", &format!("unsupported message `{}`", other as char));
@@ -2403,12 +2754,24 @@ fn execute_into(
     if let Some((durability, answer)) = wait {
         durable_or_refused(db, durability, answer, out);
     }
-    let (took, failed) = (started.elapsed(), out.errors() > errors);
-    fenec_http::metrics::record(Transport::Pg, took, failed, || match params.len() {
+    counted(
+        sql,
+        params.len(),
+        started.elapsed(),
+        out.errors() > errors,
+        out.rows() - rows,
+    );
+}
+
+/// Counts a statement for `/_metrics` and `pg_stat_statements`: its time
+/// from arrival to answer, whether it failed, and the rows it returned or
+/// changed.
+fn counted(sql: &str, params: usize, took: Duration, failed: bool, rows: u64) {
+    fenec_http::metrics::record(Transport::Pg, took, failed, || match params {
         0 => sql.to_string(),
         n => format!("{sql} ({n} parameters)"),
     });
-    fenec_http::statements::rows(out.rows() - rows);
+    fenec_http::statements::rows(rows);
     SCOPE.with(|s| fenec_http::statements::record(s.borrow().as_deref(), sql, took, failed));
 }
 
