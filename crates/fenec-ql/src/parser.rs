@@ -159,6 +159,29 @@ impl Parser {
         }
     }
 
+    /// At a `[`: the numbers up to the `]` that closes it as `f32`s, and the
+    /// tokens stepped past, when there are any and each is followed by a
+    /// `,` or that `]`; `None`, and nothing stepped past, otherwise.
+    fn numbers_in_brackets(&mut self) -> Option<Vec<f32>> {
+        let mut j = self.i + 1;
+        let mut v = Vec::new();
+        loop {
+            v.push(match self.toks.get(j)?.tok {
+                Tok::Int(n) => n as f32,
+                Tok::Float(f) => f as f32,
+                _ => return None,
+            });
+            match self.toks.get(j + 1)?.tok {
+                Tok::Comma => j += 2,
+                Tok::RBracket => {
+                    self.i = j + 2;
+                    return Some(v);
+                }
+                _ => return None,
+            }
+        }
+    }
+
     fn ident(&mut self) -> Result<String> {
         match self.next() {
             Tok::Ident(s) => Ok(s),
@@ -1103,6 +1126,13 @@ impl Parser {
                 Ok(e)
             }
             Tok::LBracket => {
+                // A vector written out, numbers alone between the brackets,
+                // is read into its `f32`s at once, as the loop below would
+                // make it: each number through `expr` was most of what a
+                // query holding one took to parse.
+                if let Some(v) = self.numbers_in_brackets() {
+                    return Ok(Expr::Lit(Value::Vector(v)));
+                }
                 self.next();
                 let mut items = Vec::new();
                 loop {

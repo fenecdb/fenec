@@ -1009,7 +1009,16 @@ answer. One client asking a row by id, over 10 000 x 128 (`make
 requests-bench`): the extended protocol 48.0k -> 52.0k requests a second,
 HTTP 40.4k -> 47.1k, and HTTP 14 to 20% more with eight clients; the
 parser was a quarter of what the pg wire did for one and half of what
-HTTP did.
+HTTP did. Where a text is parsed, FenecQL's lexer walks its bytes, reading
+a character whole only outside ASCII and a number where it stands, and a
+list of numbers alone becomes its vector without an expression each
+(`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
+and takes 6.2, a row by id 1.1 and takes 0.9, and the simple protocol's
+`near` went 10.5k -> 11.6k requests a second. The text is sliced with
+`get`: an index that can panic brought 2.7 KB brotli of a `char`'s
+formatting back into the browser module, which is 1 KB smaller instead.
+`the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
+errors to the old lexer's over 40 000 generated texts.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
