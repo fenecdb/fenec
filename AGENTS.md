@@ -34,6 +34,7 @@ make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgve
 make mirror-bench  # fenec-pg --follow: commit to a subscriber, a server killed and started again
 make replica-bench # replica lag per sync policy, catch-up, what a failover loses
 make tx-bench      # a pg transaction: a lone write per sync policy, a write in one of 100, in a savepoint
+make requests-bench # a request over the pg wire and HTTP: one client's round trip, eight's rate, against PostgreSQL
 make maintenance-bench # reads and writes during create index / compact
 make open-bench # opening a 1 GB file, read into memory or mapped
 make quant-bench # quant=int8|bit against full vectors: memory, recall, latency
@@ -991,6 +992,24 @@ names it). They need what reads the data without a JWT's scope, or the admin
 token -- a shape names every collection -- and a tenant node keeps each
 tenant's apart (`statements::View`): its own under `/t/<tenant>/` and over
 its connection, every tenant's, named, to the admin alone.
+
+**A statement is parsed once where the protocol lets it be.** A driver
+prepares a statement (`Parse`) to bind and run it again and again, so
+fenec-pg reads its text as FenecQL there and keeps it with the statement
+(`Prepared::parsed`); `Describe` and `Execute` take it, and a text `compat`
+answers, or one that does not parse, is taken at `Execute` as before.
+`POST /query` has no statements to prepare, so `api::parse_query` keeps
+what it parsed by the text's hash, 16 shards of at most 64, a shard
+emptied when full and a text over 1 KB, which holds its literals, never
+kept; a JWT's scope is ANDed into a copy (`Arc::unwrap_or_clone`), never
+into the shared one. An HTTP answer goes out in one `writev`, its head
+written without `format!`: head and body apart put the head in a packet
+of its own on a socket that sends at once, and cost a second send each
+answer. One client asking a row by id, over 10 000 x 128 (`make
+requests-bench`): the extended protocol 48.0k -> 52.0k requests a second,
+HTTP 40.4k -> 47.1k, and HTTP 14 to 20% more with eight clients; the
+parser was a quarter of what the pg wire did for one and half of what
+HTTP did.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
