@@ -3206,3 +3206,39 @@ fn a_binary_copy_reads_its_cells_by_their_columns_types() {
     );
     assert_eq!(rows_of(&mut c, "get t count"), cells(&[&[Some("21")]]));
 }
+
+/// A catalog query's parameter is the type the query casts it to -- asyncpg
+/// looks types up by `$1::oid[]`, which it sends as the binary array it is
+/// told -- and pgvector's clients find its types by `to_regtype`.
+#[test]
+fn a_catalog_query_types_its_parameters_by_their_casts() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let q = "SELECT t.typname FROM pg_type t WHERE t.oid = any($1::oid[]) ORDER BY t.typname";
+    assert_eq!(c.parameter_types(q, &[]), [1028]);
+    let mut array = Vec::new();
+    for w in [1i32, 0, 26, 2, 1, 4, 16_400, 4, 16_402] {
+        array.extend_from_slice(&w.to_be_bytes());
+    }
+    c.parameter_types(q, &[]);
+    let r = c.run_binary(&[array]);
+    let names: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            vec![Some("sparsevec".to_string())],
+            vec![Some("vector".to_string())]
+        ]
+    );
+    assert_eq!(
+        rows_of(
+            &mut c,
+            "SELECT to_regtype('vector')::oid, to_regtype('halfvec')::oid"
+        ),
+        cells(&[&[Some("16400"), Some("16401")]])
+    );
+}

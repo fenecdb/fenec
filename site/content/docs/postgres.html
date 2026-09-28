@@ -466,6 +466,17 @@ same column lookup 18.1 s. A query outside what the catalog reads — a
 <code>WITH</code>, a right or full join — is answered empty, as every catalog
 query was before, so a client never stalls on one.</p>
 
+<p>A catalog query's parameter is the type the query casts it to —
+<code>$1::oid[]</code>, the array of type OIDs asyncpg looks up, arrives as
+the binary array it is told, <code>$1::text</code> as text — and text where it
+is not cast. pgvector's clients find its types as they find them in
+PostgreSQL: psycopg's <code>TypeInfo</code> by <code>to_regtype</code>, which
+pgvector-python's <code>register_vector</code> calls for <code>vector</code>,
+<code>halfvec</code>, <code>sparsevec</code> and the <code>bit</code> every
+PostgreSQL has; pgvector-go by <code>to_regtype('vector')::oid</code>; pgx's
+<code>LoadType</code> by <code>$1::text::regtype::oid</code>; and
+tokio-postgres by its lookup of an OID it does not know.</p>
+
 <h2>Both directions</h2>
 
 <p>The same protocol code runs the other way round. <code>fenec import</code>

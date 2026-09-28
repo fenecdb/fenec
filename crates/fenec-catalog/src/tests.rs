@@ -440,3 +440,80 @@ ORDER BY a.attnum;",
         ]
     );
 }
+
+/// How pgvector's clients and the drivers under them find a type: each
+/// library's own query, as it sends it.
+#[test]
+fn pgvector_clients_find_its_types() {
+    let s = snapshot();
+    // psycopg's `TypeInfo.fetch`, which pgvector-python's `register_vector`
+    // calls: its parameter is text, and the row names the type.
+    let psycopg = "SELECT\n    typname AS name, oid, typarray AS array_oid,\n    oid::regtype::text AS regtype, typdelim AS delimiter\nFROM pg_type t\nWHERE t.oid = to_regtype($1)\nORDER BY t.oid\n";
+    assert!(is_catalog(&psycopg.to_lowercase()));
+    assert_eq!(param_types(psycopg), Some(vec![TEXT]));
+    let a = run_sql(&s, psycopg, &[Value::Text("vector".into())]);
+    assert_eq!(text(&a), [["vector", "16400", "0", "vector", ","]]);
+    assert!(run_sql(&s, psycopg, &[Value::Text("nope".into())])
+        .rows
+        .is_empty());
+    // `register_vector` looks up `bit` as well, which every PostgreSQL has.
+    assert_eq!(
+        text(&run_sql(&s, psycopg, &[Value::Text("bit".into())])),
+        [["bit", "1560", "1561", "bit", ","]]
+    );
+
+    // pgvector-go's `RegisterTypes`.
+    let pgx = "SELECT to_regtype('vector')::oid, to_regtype('halfvec')::oid, to_regtype('sparsevec')::oid";
+    assert!(is_catalog(&pgx.to_lowercase()));
+    assert_eq!(text(&run_sql(&s, pgx, &[])), [["16400", "16401", "16402"]]);
+
+    // pgx's `LoadType`, then the type's kind.
+    let load = "select $1::text::regtype::oid;";
+    assert!(is_catalog(load));
+    assert_eq!(param_types(load), Some(vec![TEXT]));
+    assert_eq!(
+        text(&run_sql(&s, load, &[Value::Text("vector".into())])),
+        [["16400"]]
+    );
+    let kind = "select typtype::text, typbasetype from pg_type where oid=$1";
+    assert_eq!(text(&run_sql(&s, kind, &[Value::Int(16400)])), [["b", "0"]]);
+
+    // tokio-postgres's type lookup for an OID it does not know, which
+    // pgvector-rust's `Vector` needs named.
+    let tokio = "SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid \
+                 FROM pg_catalog.pg_type t \
+                 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid \
+                 INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid \
+                 WHERE t.oid = $1";
+    assert_eq!(
+        text(&run_sql(&s, tokio, &[Value::Int(16400)])),
+        [["vector", "b", "0", "-", "0", "public", "0"]]
+    );
+
+    // asyncpg's `set_type_codec`, and pgvector-node's `registerTypes`.
+    let by_name = "SELECT t.oid, t.typelem AS elemtype, t.typtype AS kind \
+                   FROM pg_catalog.pg_type AS t \
+                   INNER JOIN pg_catalog.pg_namespace AS ns ON (ns.oid = t.typnamespace) \
+                   WHERE t.typname = $1 AND ns.nspname = $2";
+    assert_eq!(
+        text(&run_sql(
+            &s,
+            by_name,
+            &[Value::Text("vector".into()), Value::Text("public".into())]
+        )),
+        [["16400", "0", "b"]]
+    );
+    let node = "SELECT typname, oid FROM pg_type WHERE typname IN ($1, $2, $3)";
+    let names = ["vector", "halfvec", "sparsevec"].map(|n| Value::Text(n.into()));
+    assert_eq!(text(&run_sql(&s, node, &names)).len(), 3);
+
+    // An array parameter: `$1::oid[]`, as asyncpg names the types it looks
+    // up.
+    let many = "SELECT t.typname FROM pg_type t WHERE t.oid = any($1::oid[]) ORDER BY t.typname";
+    assert_eq!(param_types(many), Some(vec![OID_ARRAY]));
+    let oids = Value::List(vec![Value::Int(16400), Value::Int(16402)]);
+    assert_eq!(
+        text(&run_sql(&s, many, &[oids])),
+        [["sparsevec"], ["vector"]]
+    );
+}

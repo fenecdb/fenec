@@ -164,6 +164,9 @@ pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Value {
     if !binary {
         return decode_param(raw, false);
     }
+    if let Some(elem) = element_of(oid) {
+        return array(raw, elem).unwrap_or_else(|| decode_param(raw, true));
+    }
     let bytes = |n: usize| -> Option<[u8; 8]> {
         let mut b = [0u8; 8];
         (raw.len() == n).then(|| {
@@ -197,6 +200,56 @@ pub fn decode(raw: &[u8], binary: bool, oid: i32) -> Value {
     // A type the client did not send as it was told: read as a binary
     // parameter always was, by its length.
     v.unwrap_or_else(|| decode_param(raw, true))
+}
+
+/// An array type's element type.
+fn element_of(oid: i32) -> Option<i32> {
+    Some(match oid {
+        1000 => OID_BOOL,
+        1001 => OID_BYTEA,
+        1003 => OID_NAME,
+        1005 => OID_INT2,
+        1007 => OID_INT4,
+        1009 => OID_TEXT,
+        1015 => OID_VARCHAR,
+        1016 => OID_INT8,
+        1021 => OID_FLOAT4,
+        1022 => OID_FLOAT8,
+        1028 => OID_OID,
+        1185 => OID_TIMESTAMPTZ,
+        _ => return None,
+    })
+}
+
+/// A one-dimensional array in the binary format -- its dimensions, a flag
+/// for NULLs, its element type, its length and lower bound, then each
+/// element's length and bytes -- as the list of its elements, each read as
+/// its type sends it: asyncpg's `$1::oid[]`.
+fn array(raw: &[u8], elem: i32) -> Option<Value> {
+    let i32_at = |at: usize| {
+        raw.get(at..at + 4)
+            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    match i32_at(0)? {
+        0 => return Some(Value::List(Vec::new())),
+        1 => {}
+        _ => return None,
+    }
+    let n = i32_at(12)?;
+    let mut at = 20;
+    let mut out = Vec::with_capacity(n.max(0) as usize);
+    for _ in 0..n {
+        let len = i32_at(at)?;
+        at += 4;
+        if len < 0 {
+            out.push(Value::Null);
+            continue;
+        }
+        let cell = raw.get(at..at + len as usize)?;
+        at += len as usize;
+        out.push(decode(cell, true, elem));
+    }
+    (at == raw.len()).then_some(Value::List(out))
 }
 
 #[cfg(test)]
@@ -283,6 +336,15 @@ mod tests {
             Value::Vector(vec![1.0, 2.0])
         );
         assert_eq!(decode(b"hi", true, OID_TEXT), Value::Text("hi".into()));
+        // An array: asyncpg's `$1::oid[]`.
+        let mut oids = Vec::new();
+        for w in [1i32, 0, OID_OID, 2, 1, 4, 16_400, 4, 16_402] {
+            oids.extend_from_slice(&w.to_be_bytes());
+        }
+        assert_eq!(
+            decode(&oids, true, 1028),
+            Value::List(vec![Value::Int(16_400), Value::Int(16_402)])
+        );
         // In text, as ever; and a length the type does not have, as before.
         assert_eq!(decode(b"7", false, OID_INT8), Value::Int(7));
         assert_eq!(decode(&[0, 0, 0, 9], true, OID_INT8), Value::Int(9));

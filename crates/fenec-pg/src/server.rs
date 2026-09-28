@@ -2513,10 +2513,13 @@ fn describe(
             // A catalog query's columns do not depend on its parameters: it
             // is run with every one null to learn them.
             compat::Shim::Catalog => {
-                let n = catalog::params(trimmed).unwrap_or(0);
-                let answer = catalog_answer(db, lock, cfg, trimmed, &vec![Value::Null; n]);
+                // A parameter is the type the query casts it to: asyncpg
+                // sends `$1::oid[]` as the array it is told.
+                let types = catalog::param_types(trimmed).unwrap_or_default();
+                let answer =
+                    catalog_answer(db, lock, cfg, trimmed, &vec![Value::Null; types.len()]);
                 Shape {
-                    params: named(vec![OID_TEXT; n]),
+                    params: named(types),
                     columns: Some(answer.columns),
                 }
             }

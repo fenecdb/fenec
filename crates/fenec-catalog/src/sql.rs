@@ -290,11 +290,17 @@ pub struct Query {
 
 // ------------------------------------------------------------------- parser
 
+/// Each `$n` cast where it stands, and the type ([`Parser::casts`]).
+pub type Casts = Vec<(usize, TypeName)>;
+
 pub struct Parser {
     toks: Vec<Tok>,
     at: usize,
     /// The highest `$n` seen: how many parameters the statement takes.
     pub params: usize,
+    /// Each `$n` cast where it stands -- `$1::oid[]`, `$1::text` -- and the
+    /// type: a parameter's type as `Describe` names it.
+    pub casts: Casts,
 }
 
 /// Words that end an expression or a select item where they stand, so none
@@ -311,6 +317,7 @@ impl Parser {
             toks: lex(src)?,
             at: 0,
             params: 0,
+            casts: Vec::new(),
         })
     }
 
@@ -377,13 +384,18 @@ impl Parser {
     }
 
     /// The whole input as one query, a trailing `;` allowed.
-    pub fn statement(mut self) -> Parsed<(Query, usize)> {
+    pub fn statement(self) -> Parsed<(Query, usize)> {
+        self.typed().map(|(q, n, _)| (q, n))
+    }
+
+    /// [`Self::statement`], and each parameter's cast ([`Self::casts`]).
+    pub fn typed(mut self) -> Parsed<(Query, usize, Casts)> {
         let q = self.query()?;
         self.eat_op(";");
         if *self.peek() != Tok::End {
             return no(format!("text after the query: {:?}", self.peek()));
         }
-        Ok((q, self.params))
+        Ok((q, self.params, self.casts))
     }
 
     pub fn query(&mut self) -> Parsed<Query> {
@@ -834,7 +846,11 @@ impl Parser {
         let mut e = self.primary()?;
         loop {
             if self.eat_op("::") {
-                e = Expr::Cast(Box::new(e), self.type_name()?);
+                let ty = self.type_name()?;
+                if let Expr::Param(n) = e {
+                    self.casts.push((n, ty.clone()));
+                }
+                e = Expr::Cast(Box::new(e), ty);
             } else if self.eat_op("[") {
                 let i = self.expr()?;
                 self.expect_op("]")?;
