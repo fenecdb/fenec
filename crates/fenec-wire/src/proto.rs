@@ -148,30 +148,41 @@ impl Writer {
         self.msg(b'Z', |b| b.push(status));
     }
 
-    pub fn row_description(&mut self, cols: &[(String, i32)]) {
+    /// The columns, each in the format Bind's result codes ask for it in:
+    /// none is every column in text (0), one every column in it, more one
+    /// a column.
+    pub fn row_description(&mut self, cols: &[(String, i32)], formats: &[i16]) {
         self.msg(b'T', |b| {
             b.extend_from_slice(&(cols.len() as i16).to_be_bytes());
-            for (name, oid) in cols {
+            for (i, (name, oid)) in cols.iter().enumerate() {
+                let format = match formats {
+                    [] => 0,
+                    [one] => *one,
+                    many => many.get(i).copied().unwrap_or(0),
+                };
                 put_cstr(b, name);
                 b.extend_from_slice(&0i32.to_be_bytes()); // table oid
                 b.extend_from_slice(&0i16.to_be_bytes()); // column number
                 b.extend_from_slice(&oid.to_be_bytes());
                 b.extend_from_slice(&(-1i16).to_be_bytes()); // type length
                 b.extend_from_slice(&(-1i32).to_be_bytes()); // type modifier
-                b.extend_from_slice(&0i16.to_be_bytes()); // text format
+                b.extend_from_slice(&format.to_be_bytes());
             }
         });
     }
 
-    pub fn data_row(&mut self, cells: &[Option<String>]) {
+    /// A row, each cell as the bytes it goes in -- text or binary -- or
+    /// NULL.
+    pub fn data_row<T: AsRef<[u8]>>(&mut self, cells: &[Option<T>]) {
         self.msg(b'D', |b| {
             b.extend_from_slice(&(cells.len() as i16).to_be_bytes());
             for c in cells {
                 match c {
                     None => b.extend_from_slice(&(-1i32).to_be_bytes()),
                     Some(s) => {
+                        let s = s.as_ref();
                         b.extend_from_slice(&(s.len() as i32).to_be_bytes());
-                        b.extend_from_slice(s.as_bytes());
+                        b.extend_from_slice(s);
                     }
                 }
             }

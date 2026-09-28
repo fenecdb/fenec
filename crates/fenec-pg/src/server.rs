@@ -22,6 +22,7 @@
 //!   `ROLLBACK` puts it back ([`Hold`]). A pipeline of the extended protocol
 //!   is one block the same way, up to its `Sync`.
 
+use crate::binary;
 use crate::catalog;
 use crate::compat;
 use crate::copy;
@@ -1255,6 +1256,7 @@ fn copy_put(
         &[],
         out,
         false,
+        &[],
         more,
     );
     if let Some((durability, answer)) = wait {
@@ -1347,6 +1349,8 @@ struct Portal {
     parsed: Option<Arc<Vec<Statement>>>,
     stmt_name: String,
     params: Vec<Value>,
+    /// Bind's result format codes: which columns go in binary.
+    formats: Vec<i16>,
 }
 
 fn session(
@@ -1687,6 +1691,7 @@ fn session(
                                 &[],
                                 &mut out,
                                 false,
+                                &[],
                                 false,
                             );
                         } else if let Some((code, e)) = pieces.iter().find_map(|p| {
@@ -1718,6 +1723,7 @@ fn session(
                                     &[],
                                     &mut out,
                                     false,
+                                    &[],
                                     i + 1 < pieces.len(),
                                 );
                                 if out.errors() > before {
@@ -1785,6 +1791,9 @@ fn session(
                             fmts.get(i as usize).or(fmts.first()).copied().unwrap_or(0) == 1;
                         values.push(decode_param(raw, binary));
                     }
+                    // result format codes
+                    let nres = be_i16(&m.body, &mut pos);
+                    let formats = (0..nres).map(|_| be_i16(&m.body, &mut pos)).collect();
                     described_portals.remove(&portal);
                     portals.insert(
                         portal,
@@ -1793,6 +1802,7 @@ fn session(
                             parsed,
                             stmt_name: stmt,
                             params: values,
+                            formats,
                         },
                     );
                     out.bind_complete();
@@ -1803,14 +1813,16 @@ fn session(
                     let kind = m.body.first().copied().unwrap_or(b'S');
                     pos += 1;
                     let name = take_cstr(&m.body, &mut pos);
-                    let (sql, parsed) = if kind == b'S' {
+                    // A statement's columns are described in text; a
+                    // portal's in the formats its Bind asked for.
+                    let (sql, parsed, formats) = if kind == b'S' {
                         prepared
                             .get(&name)
-                            .map(|p| (p.sql.clone(), p.parsed.clone()))
+                            .map(|p| (p.sql.clone(), p.parsed.clone(), Vec::new()))
                     } else {
                         portals
                             .get(&name)
-                            .map(|p| (p.sql.clone(), p.parsed.clone()))
+                            .map(|p| (p.sql.clone(), p.parsed.clone(), p.formats.clone()))
                     }
                     .unwrap_or_default();
                     // An error here is answered as Execute answers one: the
@@ -1852,7 +1864,7 @@ fn session(
                     }
                     match &shape.columns {
                         Some(cols) => {
-                            out.row_description(cols);
+                            out.row_description(cols, &formats);
                             if kind == b'S' {
                                 described_stmts.insert(name);
                             } else {
@@ -1933,6 +1945,7 @@ fn session(
                             &p.params,
                             &mut out,
                             already,
+                            &p.formats,
                             pipeline,
                         );
                         be.busy.store(false, Ordering::SeqCst);
@@ -2303,6 +2316,58 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
         cols.push(("_score".to_string(), OID_FLOAT8));
     }
     Some(cols)
+}
+
+/// A row whose cells are text -- the catalog's -- with the columns
+/// `formats` asks for in binary sent in their type's binary format.
+fn text_row(
+    out: &mut Writer,
+    cols: &[(String, i32)],
+    row: &[Option<String>],
+    formats: &[i16],
+) -> std::result::Result<(), String> {
+    if !binary::any_binary(formats) {
+        out.data_row(row);
+        return Ok(());
+    }
+    let cells = row
+        .iter()
+        .enumerate()
+        .map(|(i, c)| match c {
+            Some(s) if binary::binary_at(formats, i) => {
+                binary::text(cols.get(i).map_or(OID_TEXT, |c| c.1), s).map(Some)
+            }
+            Some(s) => Ok(Some(s.clone().into_bytes())),
+            None => Ok(None),
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    out.data_row(&cells);
+    Ok(())
+}
+
+/// A row of values, and its `_score` column when it has one, each column
+/// in the format `formats` asks for.
+fn binary_row(
+    cols: &[(String, i32)],
+    values: &[Value],
+    score: Option<Option<f32>>,
+    formats: &[i16],
+) -> std::result::Result<Vec<Option<Vec<u8>>>, String> {
+    let mut cells = Vec::with_capacity(values.len() + score.is_some() as usize);
+    for (i, v) in values.iter().enumerate() {
+        cells.push(match binary::binary_at(formats, i) {
+            true => binary::value(cols.get(i).map_or(OID_TEXT, |c| c.1), v)?,
+            false => to_pg_text(v).map(String::into_bytes),
+        });
+    }
+    if let Some(score) = score {
+        let binary = binary::binary_at(formats, values.len());
+        cells.push(score.map(|s| match binary {
+            true => (s as f64).to_be_bytes().to_vec(),
+            false => format!("{s}").into_bytes(),
+        }));
+    }
+    Ok(cells)
 }
 
 // ------------------------------------------------------------------ Describe
@@ -2739,6 +2804,7 @@ fn execute_into(
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
+    formats: &[i16],
     pipeline: bool,
 ) {
     let started = Instant::now();
@@ -2756,6 +2822,7 @@ fn execute_into(
         params,
         out,
         row_desc_sent,
+        formats,
         pipeline,
     );
     if let Some((durability, answer)) = wait {
@@ -2836,6 +2903,7 @@ fn run_locked(
     params: &[Value],
     out: &mut Writer,
     row_desc_sent: bool,
+    formats: &[i16],
     pipeline: bool,
 ) -> Option<(Durability, Option<usize>)> {
     let trimmed = sql.trim();
@@ -2875,21 +2943,27 @@ fn run_locked(
             compat::Shim::Catalog => {
                 let answer = catalog_answer(db, lock, cfg, trimmed, params);
                 if !row_desc_sent {
-                    out.row_description(&answer.columns);
+                    out.row_description(&answer.columns, formats);
                 }
+                let at = out.mark();
                 for row in &answer.rows {
-                    out.data_row(row);
+                    if let Err(e) = text_row(out, &answer.columns, row, formats) {
+                        out.rewind(at);
+                        out.error("0A000", &e);
+                        return None;
+                    }
                 }
                 out.command_complete(&format!("SELECT {}", answer.rows.len()));
             }
             compat::Shim::Rows { columns, rows, tag } => {
+                let cols: Vec<(String, i32)> =
+                    columns.iter().map(|c| (c.clone(), OID_TEXT)).collect();
                 if !row_desc_sent {
-                    let cols: Vec<(String, i32)> =
-                        columns.iter().map(|c| (c.clone(), OID_TEXT)).collect();
-                    out.row_description(&cols);
+                    out.row_description(&cols, formats);
                 }
                 for row in &rows {
                     let cells: Vec<Option<String>> = row.iter().map(|c| Some(c.clone())).collect();
+                    // Text is sent as its bytes in either format.
                     out.data_row(&cells);
                 }
                 out.command_complete(&format!("{tag} {}", rows.len()));
@@ -3104,16 +3178,29 @@ fn run_locked(
                                 .collect::<Vec<_>>()
                         });
                         if !row_desc_sent {
-                            out.row_description(&cols);
+                            out.row_description(&cols, formats);
                         }
                         let with_score = cols.last().map(|(n, _)| n == "_score").unwrap_or(false);
+                        let binary = binary::any_binary(formats);
                         for row in &rs.rows {
-                            let mut cells: Vec<Option<String>> =
-                                row.values.iter().map(to_pg_text).collect();
-                            if with_score {
-                                cells.push(row.score.map(|s| format!("{s}")));
+                            if !binary {
+                                let mut cells: Vec<Option<String>> =
+                                    row.values.iter().map(to_pg_text).collect();
+                                if with_score {
+                                    cells.push(row.score.map(|s| format!("{s}")));
+                                }
+                                out.data_row(&cells);
+                                continue;
                             }
-                            out.data_row(&cells);
+                            let score = with_score.then_some(row.score);
+                            match binary_row(&cols, &row.values, score, formats) {
+                                Ok(cells) => out.data_row(&cells),
+                                Err(e) => {
+                                    out.rewind(answer);
+                                    out.error("0A000", &e);
+                                    return durability.map(|d| (d, None));
+                                }
+                            }
                         }
                         // PostgreSQL tags a plan `EXPLAIN`; psql prints the rows either way.
                         match stmt {
@@ -3141,7 +3228,7 @@ fn run_locked(
                     }
                     Response::Schemas(schemas) => {
                         if !row_desc_sent {
-                            out.row_description(&schema_columns());
+                            out.row_description(&schema_columns(), formats);
                         }
                         let mut n = 0;
                         for s in &schemas {

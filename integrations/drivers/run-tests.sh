@@ -1,9 +1,11 @@
 #!/bin/sh
 # PostgreSQL drivers against a real fenec-pg's pg wire: psycopg and
-# SQLAlchemy, from a python:3.13 container, as integrations/python runs the
-# stores. What a driver sends on its own -- a savepoint for a nested
+# SQLAlchemy from a python:3.13 container, as integrations/python runs the
+# stores, then pgx with the Go and node-postgres with the Node on the
+# machine. What a driver sends on its own -- a savepoint for a nested
 # transaction, the queries a dialect opens a connection with, the rows of a
-# COPY -- is what the server is held to here.
+# COPY, the binary format it asks rows in -- is what the server is held to
+# here. Under CI a missing toolchain fails the run rather than skip it.
 #
 #   integrations/drivers/run-tests.sh [pytest arguments]
 set -eu
@@ -34,3 +36,19 @@ docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway 
     "cp -r /src /work && cd /work &&
      pip install -q --root-user-action=ignore --disable-pip-version-check -r requirements.txt &&
      python -m pytest -q -p no:cacheprovider $*"
+
+url="postgres://fenec:$password@127.0.0.1:$port/fenec"
+missing() {
+    echo "$1 not found -- $2 skipped"
+    [ -z "${CI:-}" ]
+}
+if command -v go >/dev/null 2>&1; then
+    (cd "$here/go" && FENEC_PG_URL="$url" go test -count=1 ./...)
+else
+    missing go "pgx's tests"
+fi
+if command -v node >/dev/null 2>&1; then
+    (cd "$here/node" && npm ci --no-audit --no-fund --silent && FENEC_PG_URL="$url" node --test)
+else
+    missing node "node-postgres's tests"
+fi

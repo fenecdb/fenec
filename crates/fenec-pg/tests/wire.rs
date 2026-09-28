@@ -2831,3 +2831,164 @@ fn a_copy_that_stalls_holding_the_database_is_put_back() {
     assert_eq!(e.sqlstate().as_deref(), Some("25P03"), "{:?}", e.message());
     assert_eq!(rows_of(&mut other, "get t count"), cells(&[&[Some("0")]]));
 }
+
+// ------------------------------------------------------ the binary format
+
+impl Msg {
+    /// A DataRow's cells as the bytes they came in.
+    fn raw_cells(&self) -> Vec<Option<Vec<u8>>> {
+        let n = i16::from_be_bytes([self.body[0], self.body[1]]) as usize;
+        let mut pos = 2;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let len = i32::from_be_bytes(self.body[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+            if len < 0 {
+                out.push(None);
+                continue;
+            }
+            out.push(Some(self.body[pos..pos + len as usize].to_vec()));
+            pos += len as usize;
+        }
+        out
+    }
+    /// A RowDescription's format codes, a column each.
+    fn formats(&self) -> Vec<i16> {
+        let n = i16::from_be_bytes([self.body[0], self.body[1]]) as usize;
+        let mut pos = 2;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            while self.body[pos] != 0 {
+                pos += 1;
+            }
+            pos += 1 + 16;
+            out.push(i16::from_be_bytes([self.body[pos], self.body[pos + 1]]));
+            pos += 2;
+        }
+        out
+    }
+}
+
+impl Client {
+    /// Parse, Bind with `formats` as its result format codes, Describe of
+    /// the portal, Execute and Sync.
+    fn with_formats(&mut self, sql: &str, params: &[&str], formats: &[i16]) -> Vec<Msg> {
+        let mut out = Vec::new();
+        let mut p = Vec::new();
+        cstr(&mut p, "");
+        cstr(&mut p, sql);
+        p.extend_from_slice(&0i16.to_be_bytes());
+        out.extend_from_slice(&framed(b'P', &p));
+        let mut bind = Vec::new();
+        cstr(&mut bind, "");
+        cstr(&mut bind, "");
+        bind.extend_from_slice(&0i16.to_be_bytes());
+        bind.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for v in params {
+            bind.extend_from_slice(&(v.len() as i32).to_be_bytes());
+            bind.extend_from_slice(v.as_bytes());
+        }
+        bind.extend_from_slice(&(formats.len() as i16).to_be_bytes());
+        for f in formats {
+            bind.extend_from_slice(&f.to_be_bytes());
+        }
+        out.extend_from_slice(&framed(b'B', &bind));
+        let mut d = vec![b'P'];
+        cstr(&mut d, "");
+        out.extend_from_slice(&framed(b'D', &d));
+        let mut e = Vec::new();
+        cstr(&mut e, "");
+        e.extend_from_slice(&0i32.to_be_bytes());
+        out.extend_from_slice(&framed(b'E', &e));
+        out.extend_from_slice(&framed(b'S', &[]));
+        self.s.write_all(&out).unwrap();
+        self.until_ready()
+    }
+}
+
+/// A column asked for in binary goes as its type's `typsend` writes it --
+/// as tokio-postgres and asyncpg ask for every one, and pgx for every type
+/// it knows -- and the portal's RowDescription says which went how.
+#[test]
+fn results_go_in_the_binary_format_asked_for() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection t (name text, n int, score float, ok bool, at timestamp, raw bytes, e vector<2> @hnsw(cosine))",
+    );
+    c.simple(
+        r#"put t {name: "a", n: -2, score: 0.5, ok: true, at: "2000-01-01T00:00:01Z", raw: "hi", e: [1, 0.5]}"#,
+    );
+    c.simple(r#"put t {name: "b"}"#);
+    let r = c.with_formats(
+        "get t select name, n, score, ok, at, raw, e where name = $1",
+        &["a"],
+        &[1],
+    );
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    assert_eq!(find(&r, b'T').unwrap().formats(), [1; 7]);
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [
+            Some(b"a".to_vec()),
+            Some((-2i64).to_be_bytes().to_vec()),
+            Some(0.5f64.to_be_bytes().to_vec()),
+            Some(vec![1]),
+            // A million microseconds past 2000-01-01.
+            Some(1_000_000i64.to_be_bytes().to_vec()),
+            Some(b"hi".to_vec()),
+            // A vector goes as its text, which its column's type is.
+            Some(b"[1,0.5]".to_vec()),
+        ]
+    );
+    let r = c.with_formats("get t select name, n, at where name = $1", &["b"], &[1]);
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [Some(b"b".to_vec()), None, None]
+    );
+
+    // A code a column, a count, a score.
+    let r = c.with_formats("get t count", &[], &[1]);
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [Some(2i64.to_be_bytes().to_vec())]
+    );
+    let r = c.with_formats(
+        "get t select name, n near e [1, 0.5] limit 1",
+        &[],
+        &[0, 1, 1],
+    );
+    assert_eq!(find(&r, b'T').unwrap().formats(), [0, 1, 1]);
+    let cells = find(&r, b'D').unwrap().raw_cells();
+    assert_eq!(cells[0], Some(b"a".to_vec()));
+    assert_eq!(cells[1], Some((-2i64).to_be_bytes().to_vec()));
+    let score = f64::from_be_bytes(cells[2].clone().unwrap().try_into().unwrap());
+    assert!((score - 1.0).abs() < 1e-6, "{score}");
+
+    // The catalog's answers too: an int4, an oid and a name.
+    let r = c.with_formats(
+        "SELECT a.attnum, c.oid, c.relname FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid \
+         WHERE c.relname = 't' AND a.attname = 'n'",
+        &[],
+        &[1],
+    );
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    let cells = find(&r, b'D').unwrap().raw_cells();
+    assert_eq!(cells[0].as_ref().unwrap().len(), 2, "attnum is an int2");
+    assert_eq!(cells[1].as_ref().unwrap().len(), 4, "an oid is four bytes");
+    assert_eq!(cells[2], Some(b"t".to_vec()));
+
+    // Asked for in text, as before.
+    let r = c.with_formats("get t select n", &[], &[]);
+    assert_eq!(find(&r, b'T').unwrap().formats(), [0]);
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("-2".to_string())]);
+}
