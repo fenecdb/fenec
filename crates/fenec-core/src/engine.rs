@@ -331,7 +331,31 @@ struct Block {
     /// Whether its owner left it open between two statements
     /// ([`Database::leave_block`]): anyone else's write waits for it.
     left: bool,
+    /// Whether [`Database::begin`] opened it -- a transaction, a pipeline,
+    /// a batch -- rather than a lone statement: its statements are a batch
+    /// together, so a `put` in it leaves its vectors waiting, and they are
+    /// linked [`LINK_AT`] at a time on every core and at its end.
+    defers: bool,
+    /// Per collection and vector field, the nodes the block's `put`s left
+    /// waiting since they were last linked: the newest of the field's
+    /// waiting nodes, since nothing else leaves one while a block is open.
+    waiting: Vec<(u32, String, usize)>,
 }
+
+/// The nodes a block's `put`s leave waiting before they are linked, a
+/// field at a time: a batch as wide as the widest the graph links at once
+/// (`MAX_BATCH`), whose candidates are found on every core. Linked as each
+/// statement wrote them, a row at a time as a driver's `executemany` and a
+/// `/batch` of single puts send them, 100 000 128-dim rows went in at
+/// 5.4k rows/s with the graph kept over the pg wire and 5.3k over HTTP;
+/// linked together, at 16.9k and 16.0k, as a COPY loads them (`make
+/// load-bench`).
+const LINK_AT: usize = 512;
+
+/// Whether a block's `put`s leave their vectors waiting: natively. The
+/// browser links a vector as it is written, on its one thread, and the
+/// waiting was 843 bytes brotli of its module for nothing.
+const DEFERS: bool = !cfg!(target_arch = "wasm32");
 
 /// What puts one of a block's writes back ([`Database::rollback`]).
 enum Undo {
@@ -366,6 +390,8 @@ impl Block {
         self.was.clear();
         self.parked = false;
         self.left = false;
+        self.defers = false;
+        self.waiting.clear();
         self
     }
 
@@ -861,6 +887,16 @@ impl<T> Derived<T> {
     }
 }
 
+/// The documents' vectors in the field `name`, with their ids.
+fn vectors_of(docs: &[Document], name: &str) -> Vec<(DocId, Vec<f32>)> {
+    docs.iter()
+        .filter_map(|d| match d.get(name) {
+            Some(Value::Vector(v)) => Some((d.id, v.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 pub struct Collection {
     pub id: u32,
     pub schema: Schema,
@@ -1076,15 +1112,32 @@ impl Collection {
     #[inline(always)]
     fn index_vectors_batch(&mut self, docs: &[Document]) {
         for (name, ix) in self.vectors.iter_mut() {
-            let items: Vec<(DocId, Vec<f32>)> = docs
-                .iter()
-                .filter_map(|d| match d.get(name) {
-                    Some(Value::Vector(v)) => Some((d.id, v.clone())),
-                    _ => None,
-                })
-                .collect();
+            let items = vectors_of(docs, name);
             if !items.is_empty() {
                 ix.insert_batch(&items);
+            }
+        }
+    }
+
+    /// [`Self::index_vectors_batch`] for a `put` in a block that defers:
+    /// every vector left waiting, and counted into `waiting` for
+    /// [`Database::link_waiting`] to link.
+    fn defer_vectors_batch(&mut self, docs: &[Document], waiting: &mut Vec<(u32, String, usize)>) {
+        for (name, ix) in self.vectors.iter_mut() {
+            let items = vectors_of(docs, name);
+            let n = match items.is_empty() {
+                true => 0,
+                false => ix.defer_batch(&items),
+            };
+            if n == 0 {
+                continue;
+            }
+            match waiting
+                .iter_mut()
+                .find(|(c, f, _)| *c == self.id && f == name)
+            {
+                Some(w) => w.2 += n,
+                None => waiting.push((self.id, name.clone(), n)),
             }
         }
     }
@@ -2269,6 +2322,52 @@ impl Database {
         left
     }
 
+    /// Links the vectors the open block's `put`s left waiting, in each field
+    /// where they number `at_least` or more: [`LINK_AT`] after a `put`, and
+    /// all of them as the block lands.
+    fn link_waiting(&mut self, at_least: usize) {
+        let Some(b) = self.block.as_mut() else {
+            return;
+        };
+        for (cid, field, n) in b.waiting.iter_mut() {
+            if *n == 0 || *n < at_least {
+                continue;
+            }
+            let waiting = std::mem::take(n);
+            let Some(c) = self.collections.values_mut().find(|c| c.id == *cid) else {
+                continue;
+            };
+            let Collection {
+                schema,
+                store,
+                vectors,
+                ..
+            } = c;
+            if let Some(ix) = vectors.get_mut(field) {
+                let pos = schema.field_pos(field);
+                ix.link_pending(waiting, &mut |doc, out| {
+                    pos.is_some_and(|p| store.read_vector_into(doc, p, out).unwrap_or(false))
+                });
+            }
+        }
+    }
+
+    /// Drops the nodes a block's `put`s left waiting that its undo made
+    /// tombstones, from the newest back, as far as `waiting` counts them.
+    fn forget_waiting(&mut self, waiting: &mut [(u32, String, usize)]) {
+        for (cid, field, n) in waiting.iter_mut() {
+            if *n == 0 {
+                continue;
+            }
+            let ix = self
+                .collections
+                .values_mut()
+                .find(|c| c.id == *cid)
+                .and_then(|c| c.vectors.get_mut(field));
+            *n -= ix.map_or(*n, |ix| ix.forget_waiting(*n));
+        }
+    }
+
     /// Whether [`Self::save_graphs`] would append a graph.
     pub fn graphs_due(&self) -> bool {
         let appended = self.appended.load(Relaxed);
@@ -2898,7 +2997,9 @@ impl Database {
             }
             for (_, ix, rows) in vector_ix.iter_mut() {
                 match later {
-                    true => ix.defer_batch(rows),
+                    true => {
+                        ix.defer_batch(rows);
+                    }
                     false => ix.insert_batch(rows),
                 }
             }
@@ -3381,6 +3482,7 @@ impl Database {
         self.open_block();
         if let Some(b) = &mut self.block {
             b.graphs = graphs;
+            b.defers = true;
         }
         self.begun += 1;
         Ok(())
@@ -3543,6 +3645,11 @@ impl Database {
         // The browser parks no block: it has no reader beside its writer.
         #[cfg(not(target_arch = "wasm32"))]
         self.unpark()?;
+        // Linked before it lands, so that a block put back after all -- a
+        // lapsed lease, a refused append -- is put back as any other.
+        if DEFERS {
+            self.link_waiting(1);
+        }
         let Some(mut b) = self.block.take() else {
             return Ok(());
         };
@@ -3595,6 +3702,10 @@ impl Database {
     fn undo(&mut self, mut b: Block) {
         let marks = std::mem::take(&mut b.marks);
         self.rewind(&marks, &mut b.was, 0);
+        if DEFERS {
+            let mut waiting = std::mem::take(&mut b.waiting);
+            self.forget_waiting(&mut waiting);
+        }
         self.spare = b;
     }
 
@@ -3739,6 +3850,12 @@ impl Database {
             })
             .collect();
         self.rewind(&marks, &mut b.was, sp.was);
+        // The nodes its `put`s after the savepoint left waiting are
+        // tombstones now, and the newest waiting; the ones before it wait
+        // on, and the count with them.
+        if DEFERS {
+            self.forget_waiting(&mut b.waiting);
+        }
         // A collection keeps its mark while a write to it before the
         // savepoint stays -- one dropped by then too, which a rollback after
         // this one brings back.
@@ -4120,9 +4237,16 @@ impl Database {
             written.push(doc);
             n += 1;
         }
-        // Vectors are indexed in a batch: construction can parallelise.
+        // Vectors are indexed in a batch: construction can parallelise. In
+        // a block that defers, the block's statements are one batch.
         let c = self.collections.get_mut(collection).unwrap();
-        c.index_vectors_batch(&written);
+        match self.block.as_mut().filter(|b| DEFERS && b.defers) {
+            Some(b) => {
+                c.defer_vectors_batch(&written, &mut b.waiting);
+                self.link_waiting(LINK_AT);
+            }
+            None => c.index_vectors_batch(&written),
+        }
         Ok(Response::Affected(n))
     }
 

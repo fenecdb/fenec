@@ -93,7 +93,10 @@ impl VectorIndex {
     pub fn insert_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
         match self.never {}
     }
-    pub fn defer_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
+    pub fn defer_batch(&mut self, items: &[(DocId, Vec<f32>)]) -> usize {
+        match self.never {}
+    }
+    pub fn forget_waiting(&mut self, max: usize) -> usize {
         match self.never {}
     }
     pub fn link_pending(

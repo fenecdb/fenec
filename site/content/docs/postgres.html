@@ -66,7 +66,11 @@ is woken once for all of it.</p>
 <p>A transaction lands with one fsync where its statements alone would take
 one each: under <code>--sync always</code> a write in a transaction of a
 hundred costs 90 µs against 3.97 ms on its own, and a lone statement costs
-what it did (<code>make tx-bench</code>).</p>
+what it did (<code>make tx-bench</code>). Its vectors are linked into the
+graph together as well, 512 at a time on every core and the rest at
+<code>COMMIT</code>: a driver's <code>executemany</code> of 100 000 rows of
+128-dim vectors goes in at 16 900 rows/s with the HNSW graph kept, where
+linked a row at a time it went in at 5 400.</p>
 
 <p>There is one writer, so a transaction holds the database against every
 other write from its first write until it ends: nothing may write after its
@@ -352,9 +356,9 @@ side (<code>\copy</code> sends the file from the client), the
 <code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> send, so
 there use the text format — and a COPY among other statements in one query.
 100 000 rows of a text, an int and a 128-dim vector load at 18 200 rows/s with
-the HNSW graph kept as they land and 184 000 without, against 5 400 and 160 000
-sent a <code>put</code> a row, as a driver's <code>executemany</code> sends
-them (<code>make load-bench</code>).</p>
+the HNSW graph kept as they land and 184 000 without, against 16 900 and
+160 000 sent a <code>put</code> a row in a transaction, as a driver's
+<code>executemany</code> sends them (<code>make load-bench</code>).</p>
 
 <h2 id="catalog">The catalog</h2>
 
