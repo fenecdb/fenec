@@ -2,7 +2,8 @@
 # PostgreSQL drivers against a real fenec-pg's pg wire: psycopg, asyncpg
 # and SQLAlchemy from a python:3.13 container, as integrations/python runs
 # the stores, then pgx with the Go, node-postgres with the Node and
-# tokio-postgres with the Rust on the machine. What a driver sends on its own -- a savepoint for a nested
+# tokio-postgres with the Rust on the machine -- each with pgvector's
+# library for it. What a driver sends on its own -- a savepoint for a nested
 # transaction, the queries a dialect opens a connection with, the rows of a
 # COPY, the binary format it asks rows in -- is what the server is held to
 # here. Under CI a missing toolchain fails the run rather than skip it.
