@@ -34,6 +34,14 @@ pub fn read_landed(db: &RwLock<Database>) -> RwLockReadGuard<'_, Database> {
     }
 }
 
+/// [`read_landed`] for what can look again later: the database when it
+/// reads as it has landed as it stands -- no block open, or the open one
+/// parked already -- and `None` rather than park one or wait for it.
+pub fn read_landed_now(db: &RwLock<Database>) -> Option<RwLockReadGuard<'_, Database>> {
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    g.reads_landed().then_some(g)
+}
+
 /// The database to write into, for a write that is not an open block's
 /// own: a block left open between a transaction's statements is waited for
 /// to end.
@@ -72,5 +80,36 @@ pub fn pause(waited: &mut u32) {
     match *waited < 64 {
         true => std::thread::yield_now(),
         false => std::thread::sleep(Duration::from_micros(200)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(db: &mut Database, q: &str) {
+        db.execute(&fenec_ql::parse_one(q).unwrap()).unwrap();
+    }
+
+    /// A look that can come again later takes an open block as it finds it:
+    /// neither parked, its writes put back, nor waited for.
+    #[test]
+    fn a_look_now_neither_parks_an_open_block_nor_waits_for_it() {
+        let db = RwLock::new(Database::new());
+        {
+            let mut g = db.write().unwrap();
+            run(&mut g, "create collection t (name text)");
+            g.begin().unwrap();
+            run(&mut g, r#"put t {name: "open"}"#);
+            g.leave_block();
+        }
+        assert!(read_landed_now(&db).is_none());
+        assert!(
+            !db.read().unwrap().reads_landed(),
+            "the look parked the block"
+        );
+        // A reader that has to read now parks it, and a look finds it so.
+        drop(read_landed(&db));
+        assert!(read_landed_now(&db).is_some());
     }
 }

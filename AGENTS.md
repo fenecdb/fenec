@@ -164,8 +164,10 @@ they did for every block. The engine refuses a statement run through
 `&mut self` into another session's left block, and a `query` of one not
 parked, rather than join it or show its writes; `fenec_http::held` is how
 every path in the servers takes the database -- `read_landed`,
-`write_unheld`, and `read_quiet` for a tenant's export, which waits for
-the transaction to end so that its commit lands before the move. A `Hold`
+`write_unheld`, `read_landed_now` for the graph keeper, which passes over
+a block rather than park it or wait for it, and `read_quiet` for a
+tenant's export, which waits for the transaction to end so that its
+commit lands before the move. A `Hold`
 puts its block back when dropped, however the session ends. The hold
 keeps a database found once a pass of the session loop (a `OnceCell` a
 pass), so a tenant's is found afresh for the next transaction. A pipeline of the extended protocol is one
@@ -458,7 +460,10 @@ serves every 5 s, and appends to the tail each graph that changed in 10 000
 nodes since it last reached the file, has none waiting to be linked, and
 whose record the file has grown three times over since
 (`Database::save_graphs`, under the read lock, which keeps the writes out
-while the graph is written). The record holds the whole graph, so a bound
+while the graph is written). A database with a block open is passed over
+until the next look: a block that changed a graph cannot be parked, and a
+COPY of 100 000 128-dim vectors with the graph kept held the keeper 3.0 to
+4.3 s, and every other database it keeps with it. The record holds the whole graph, so a bound
 on the linking alone would have a big graph written over and over for a
 little of it; waiting for the linking kept a crash from leaving the nodes
 waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat,
