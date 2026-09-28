@@ -1180,7 +1180,10 @@ indexes are indexes with their own access methods (`hash`, `btree` for
 `@sorted`, `hnsw`, `bm25`). Joins find rows by key where the query names an
 equality: over a thousand collections nested loops took JDBC's column lookup
 18.1 s, keyed 122 ms. What the subset cannot read, and catalog tables it does
-not build, answer empty -- the old behaviour -- so a tool never stalls. It is
+not build, answer empty -- the old behaviour -- so a tool never stalls. A
+parameter is the type the query casts it to (`param_types`: asyncpg's
+`$1::oid[]` arrives as the binary array it is told), and `to_regtype` and
+`bit` are there because pgvector's clients look types up by them. It is
 a crate of its own so that it can be built for size (`opt-level = "z"`): at
 opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
 queries 1.2-1.5x slower. The CLI and the browser module link none of it.

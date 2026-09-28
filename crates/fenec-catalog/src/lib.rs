@@ -59,6 +59,10 @@ const ACL_ARRAY: i32 = 1034;
 const VARCHAR: i32 = 1043;
 const TIMESTAMPTZ: i32 = 1184;
 const TIMESTAMPTZ_ARRAY: i32 = 1185;
+/// `bit`, which no field is, but which pgvector-python's `register_vector`
+/// takes for granted, as every PostgreSQL has it.
+const BIT: i32 = 1560;
+const BIT_ARRAY: i32 = 1561;
 const REGCLASS: i32 = 2205;
 const REGTYPE: i32 = 2206;
 const REGNAMESPACE: i32 = 4089;
@@ -319,7 +323,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
 }
 
 /// `pg_type`'s rows: (oid, name, length, category, element, array, collation).
-const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 31] = [
+const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 33] = [
     (BOOL, "bool", 1, "B", 0, BOOL_ARRAY, 0),
     (BYTEA, "bytea", -1, "U", 0, BYTEA_ARRAY, 0),
     (CHAR, "char", 1, "Z", 0, 1002, 0),
@@ -356,6 +360,8 @@ const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 31] = [
         0,
     ),
     (REGCLASS, "regclass", 4, "N", 0, 2210, 0),
+    (BIT, "bit", -1, "V", 0, BIT_ARRAY, 0),
+    (BIT_ARRAY, "_bit", -1, "A", BIT, 0, 0),
     (VECTOR, "vector", -1, "U", 0, 0, 0),
     (HALFVEC, "halfvec", -1, "U", 0, 0, 0),
     (SPARSEVEC, "sparsevec", -1, "U", 0, 0, 0),
@@ -382,6 +388,7 @@ fn format_type(oid: i64, typmod: i64) -> Option<String> {
             REGTYPE => "regtype",
             INT2VECTOR => "int2vector",
             OIDVECTOR => "oidvector",
+            BIT => "bit",
             _ => return None,
         })
     };
@@ -2282,6 +2289,12 @@ fn call(name: &str, args: Vec<V>, ctx: &Ctx) -> Out<V> {
                 .map_or(V::Null, |o| V::Reg(Reg::Class, o)),
             None => V::Null,
         },
+        // How pgvector's clients find its types: psycopg's `TypeInfo`,
+        // pgvector-go's `RegisterTypes`.
+        "to_regtype" => match render(&arg(0)) {
+            Some(n) => type_by_name(&n).map_or(V::Null, |o| V::Reg(Reg::Type, o)),
+            None => V::Null,
+        },
         "pg_relation_size" | "pg_table_size" | "pg_total_relation_size" => {
             let oid = int(0);
             s.tables
@@ -2849,6 +2862,7 @@ fn expr_type(e: &Expr, rels: &[Rel]) -> i32 {
             | "user"
             | "pg_encoding_to_char" => NAME,
             "to_regclass" => REGCLASS,
+            "to_regtype" => REGTYPE,
             "current_schemas" => NAME_ARRAY,
             _ => TEXT,
         },
@@ -3321,6 +3335,8 @@ pub fn is_catalog(lower: &str) -> bool {
         ", pg_",
         "current_setting(",
         "set_config(",
+        "to_regtype(",
+        "::regtype",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -3332,21 +3348,38 @@ pub fn params(sql: &str) -> Option<usize> {
     sql::parse(sql).ok().map(|(_, n)| n)
 }
 
+/// Each parameter's type as the query casts it -- `$1::oid[]`, the array
+/// of type OIDs asyncpg looks up; `$1::text`, the name pgx looks up -- and
+/// `text` where it is not cast; `None` when it is not a query this module
+/// reads.
+pub fn param_types(sql: &str) -> Option<Vec<i32>> {
+    let (_, n, casts) = sql::Parser::new(sql).ok()?.typed().ok()?;
+    let mut types = vec![TEXT; n];
+    for (i, ty) in &casts {
+        if let Some(t) = types.get_mut(i.wrapping_sub(1)) {
+            *t = cast_type(ty);
+        }
+    }
+    Some(types)
+}
+
 /// Runs a catalog query over `snap`. `Err` means the query is outside what
 /// this module reads; the caller answers it the old way, empty.
 pub fn answer(sql: &str, params: &[Value], snap: &Snapshot) -> Out<Answer> {
     let (query, _) = sql::parse(sql)?;
-    let params: Vec<V> = params
-        .iter()
-        .map(|p| match p {
+    fn param(p: &Value) -> V {
+        match p {
             Value::Null => V::Null,
             Value::Bool(b) => V::Bool(*b),
             Value::Int(i) | Value::Timestamp(i) => V::Int(*i),
             Value::Float(f) => V::Float(*f),
             Value::Text(s) => V::Text(s.clone()),
+            // An array parameter: asyncpg's `$1::oid[]`.
+            Value::List(items) => V::Array(items.iter().map(param).collect()),
             other => V::Text(format!("{other:?}")),
-        })
-        .collect();
+        }
+    }
+    let params: Vec<V> = params.iter().map(param).collect();
     let ctx = Ctx {
         snap,
         params: &params,
