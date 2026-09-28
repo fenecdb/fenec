@@ -2129,6 +2129,19 @@ fn nearest(all: impl IntoIterator<Item = Cand>, k: usize) -> Vec<Cand> {
     best
 }
 
+/// The beam the upper layers are walked with, by a search and by a node
+/// joining the graph, where one node at a time was the greedy descent. Over
+/// a million 128-dim vectors in 64 clusters the greedy descent left 20 of
+/// 1 000 queries in another cluster than their own, and 12 found none of
+/// their ten at any beam below, 97.4% recall from a beam of 200 up to 800:
+/// the level-0 walk does not cross between clusters it has no link across.
+/// A beam of 4 left none there, and took recall at beams of 40, 100 and 200
+/// from 89.9, 96.4 and 97.4% to 92.5, 99.1 and 99.8% -- pgvector's, the
+/// same settings over two builds, 93.0 to 93.5, 97.4 to 97.8 and 97.8 to
+/// 98.2% -- for a build 3 to 7% longer and a search as fast. Only in the search, it gave 98.2% at 100; only in the
+/// build, a graph the greedy search lost 32 queries in.
+const UPPER_BEAM: usize = 4;
+
 /// Min-heap that keeps the nearest on top (by hand instead of Reverse).
 #[derive(Copy, Clone, PartialEq)]
 struct MinCand(Cand);
@@ -2341,27 +2354,25 @@ impl<'a> GraphView<'a> {
         }
     }
 
-    /// Greedy descent through the upper layers.
-    fn descend(&self, q: &[f32], from: u32, from_level: usize, to_level: usize) -> u32 {
-        let mut cur = from;
-        let mut cur_dist = self.dist_to(q, cur);
-        let mut lc = from_level;
-        while lc > to_level {
-            let mut improved = true;
-            while improved {
-                improved = false;
-                for &nb in self.neighbors(cur, lc) {
-                    let d = self.dist_to(q, nb);
-                    if d < cur_dist {
-                        cur_dist = d;
-                        cur = nb;
-                        improved = true;
-                    }
-                }
-            }
-            lc -= 1;
+    /// The upper layers walked with a beam of [`UPPER_BEAM`]: the nodes to
+    /// start `to_level` from, nearest first.
+    fn descend_beam(
+        &self,
+        sc: &mut Scratch,
+        q: &[f32],
+        from: u32,
+        from_level: usize,
+        to_level: usize,
+    ) -> Vec<u32> {
+        let mut ep = vec![from];
+        for l in (to_level + 1..=from_level).rev() {
+            ep = self
+                .search_layer(sc, q, &ep, UPPER_BEAM, l)
+                .into_iter()
+                .map(|c| c.node)
+                .collect();
         }
-        cur
+        ep
     }
 
     /// ef-wide beam search on one layer. The result ascends by distance.
@@ -2624,18 +2635,18 @@ impl<'a> GraphView<'a> {
             Some(q) => Cow::Borrowed(q),
             None => self.vec_at(node),
         };
-        let cur = if self.max_level > level {
-            self.descend(&v, entry, self.max_level, level)
+        let start = if self.max_level > level {
+            self.descend_beam(sc, &v, entry, self.max_level, level)
         } else {
-            entry
+            vec![entry]
         };
         let mut out = Vec::new();
-        let mut ep = vec![cur];
+        let mut ep = start.clone();
         for l in (0..=level.min(self.max_level)).rev() {
             let cands = self.search_layer(sc, &v, &ep, ef_construction, l);
             let selected = self.select_heuristic(&cands, m, node);
             ep = if selected.is_empty() {
-                vec![cur]
+                start.clone()
             } else {
                 selected.clone()
             };
@@ -3015,9 +3026,13 @@ impl VectorIndex {
         }
     }
 
-    /// Greedy descent through the upper layers. The algorithm is on [`GraphView`].
-    fn descend(&self, q: &[f32], from: u32, from_level: usize, to_level: usize) -> u32 {
-        self.view().descend(q, from, from_level, to_level)
+    /// [`GraphView::descend_beam`], with this thread's buffer.
+    fn descend_beam(&self, q: &[f32], from: u32, from_level: usize, to_level: usize) -> Vec<u32> {
+        let view = self.view();
+        SCRATCH.with(|cell| {
+            let mut sc = cell.borrow_mut();
+            view.descend_beam(&mut sc, q, from, from_level, to_level)
+        })
     }
 
     /// Beam search: borrows the buffer belonging to this thread.
@@ -3478,18 +3493,18 @@ impl VectorIndex {
                     None => self.vec_at(node).into_owned(),
                 };
                 let start_level = self.max_level;
-                let cur = if start_level > level {
-                    self.descend(&v, entry, start_level, level)
+                let start = if start_level > level {
+                    self.descend_beam(&v, entry, start_level, level)
                 } else {
-                    entry
+                    vec![entry]
                 };
                 let mut out = Vec::new();
-                let mut ep = vec![cur];
+                let mut ep = start.clone();
                 for l in (0..=level.min(self.max_level)).rev() {
                     let cands = self.search_layer(&v, &ep, self.spec.ef_construction, l);
                     let selected = self.select_heuristic(&cands, self.spec.m, node);
                     ep = if selected.is_empty() {
-                        vec![cur]
+                        start.clone()
                     } else {
                         selected.clone()
                     };
@@ -3601,8 +3616,8 @@ impl VectorIndex {
 
         let mut found = match self.entry {
             Some(entry) => {
-                let cur = self.descend(&q, entry, self.max_level, 0);
-                self.search_layer(&q, &[cur], ef, 0)
+                let start = self.descend_beam(&q, entry, self.max_level, 0);
+                self.search_layer(&q, &start, ef, 0)
             }
             None => Vec::new(),
         };
