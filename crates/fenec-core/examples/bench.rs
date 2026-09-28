@@ -100,6 +100,8 @@ fn main() {
         .map(|_| (0..dim).map(|_| rng.gauss()).collect())
         .collect();
     let mut queries: Vec<Vec<f32>> = Vec::new();
+    // Each query's own category, which the rows around it share.
+    let mut query_category: Vec<usize> = Vec::new();
     let t0 = Instant::now();
     let batch = 2_000;
     let mut written = 0usize;
@@ -114,6 +116,7 @@ fn main() {
             };
             if i % (n / 100).max(1) == 0 && queries.len() < 100 {
                 queries.push(v.clone());
+                query_category.push(i % 4);
             }
             docs.push(vec![
                 (
@@ -177,35 +180,46 @@ fn main() {
     );
 
     // ---- filtered ANN
-    let mut flat = Vec::new();
-    for q in queries.iter().take(20) {
-        let sel = Select {
-            collection: "bench".into(),
-            project: Some(vec!["id".into()]),
-            filter: Some(Expr::Cmp(
-                CmpOp::Eq,
-                Box::new(Expr::Field("category".into())),
-                Box::new(Expr::Lit(Value::Text("a".into()))),
-            )),
-            near: Some(Near {
-                field: "embed".into(),
-                vector: Expr::Lit(Value::Vector(q.clone())),
-                ef: Some(200),
-                exact: false,
-            }),
-            limit: Some(10),
-            ..Default::default()
-        };
-        let t = Instant::now();
-        db.execute(&Statement::Select(sel)).unwrap();
-        flat.push(t.elapsed().as_secs_f64() * 1000.0);
+    // A cluster's rows are all of one category, the query's own: a filter
+    // on it keeps the rows the walk finds around the query, and one on the
+    // next category keeps none of them, so the search falls back to
+    // measuring the whole quarter that matches -- which the first line
+    // never reaches.
+    for (shift, what) in [
+        (0, "ann+filter, the query's category (n/4)"),
+        (1, "ann+filter, another category (n/4)"),
+    ] {
+        let mut flat = Vec::new();
+        for (q, own) in queries.iter().zip(&query_category).take(20) {
+            let category = categories[(own + shift) % 4];
+            let sel = Select {
+                collection: "bench".into(),
+                project: Some(vec!["id".into()]),
+                filter: Some(Expr::Cmp(
+                    CmpOp::Eq,
+                    Box::new(Expr::Field("category".into())),
+                    Box::new(Expr::Lit(Value::Text(category.into()))),
+                )),
+                near: Some(Near {
+                    field: "embed".into(),
+                    vector: Expr::Lit(Value::Vector(q.clone())),
+                    ef: Some(200),
+                    exact: false,
+                }),
+                limit: Some(10),
+                ..Default::default()
+            };
+            let t = Instant::now();
+            db.execute(&Statement::Select(sel)).unwrap();
+            flat.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        flat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "{what}  p50 {:.3} ms  p95 {:.3} ms",
+            pct(&flat, 0.50),
+            pct(&flat, 0.95)
+        );
     }
-    flat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    println!(
-        "ann+filter category='a' (n/4)  p50 {:.3} ms  p95 {:.3} ms",
-        pct(&flat, 0.50),
-        pct(&flat, 0.95)
-    );
 
     // ---- recall
     let mut hits = 0usize;
