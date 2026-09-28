@@ -18,7 +18,7 @@
 //! The PostgreSQL arm needs a running pgvector:
 //! ```text
 //! docker run -d --name fenecbench-pg -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
-//!   -p 55432:5432 --shm-size=1g pgvector/pgvector:pg17 \
+//!   -p 55432:5432 --shm-size=2g pgvector/pgvector:pg17 \
 //!   -c shared_buffers=1GB -c maintenance_work_mem=1GB -c max_parallel_workers_per_gather=0
 //! ```
 //! If it is unreachable, that arm is skipped. Because PostgreSQL is

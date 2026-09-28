@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -264,10 +264,13 @@ mirror-bench:
 	$(CARGO) build --release -p fenec-pg
 	$(CARGO) run --release -p fenec-pg --example mirror -- 10000
 
+## --shm-size: a parallel HNSW build holds its graph in dynamic shared
+## memory, up to maintenance_work_mem, which scale-bench sets to 1 800 MB so
+## that its graphs build in memory
 pgvector-up:
 	docker run -d --name fenecbench-pg --rm \
 	  -e POSTGRES_PASSWORD=fenec -e POSTGRES_DB=fenecbench \
-	  -p 55432:5432 --shm-size=1g pgvector/pgvector:pg17 \
+	  -p 55432:5432 --shm-size=2g pgvector/pgvector:pg17 \
 	  -c shared_buffers=1GB -c maintenance_work_mem=1GB \
 	  -c max_parallel_workers_per_gather=0 -c wal_level=logical
 	@echo "waiting for it to become ready..."
@@ -342,6 +345,17 @@ QUANT_ROWS ?= 100000
 quant-bench:
 	$(CARGO) build --release -p fenec-core --example quant
 	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32 --filter 3000; done
+
+## fenec-pg against PostgreSQL + pgvector at scale, both over the pg wire
+## (make pgvector-up first): the load and the index, memory, disk, recall@10
+## and latency at beams of 40, 100 and 200, and eight clients' throughput.
+## SCALE_ROWS x SCALE_DIM, a million 128-dim vectors unless given;
+## SCALE_ARGS=--after builds fenec-pg's index once the rows are in.
+SCALE_ROWS ?= 1000000
+SCALE_DIM ?= 128
+scale-bench:
+	$(CARGO) build --release -p fenec-pg -p fenec-bench --bin fenec-pg --bin scale
+	./target/release/scale $(SCALE_ROWS) $(SCALE_DIM) $(SCALE_ARGS)
 
 ## Memory footprint (for calibrating --max-memory)
 memory:
