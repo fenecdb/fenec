@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p fenec-bench --bin scale -- [N] [DIM] [--rank R] [--queries Q]
-//!     [--clients C] [--only fenec|pg] [--after]
+//!     [--clients C] [--only fenec|pg] [--after] [--efs 40,100,200]
 //! ```
 //!
 //! N vectors of DIM dimensions -- the generator `quant` uses, 64 centres
@@ -23,7 +23,7 @@
 //!
 //! Both indexes take m = 16 and ef_construction = 64, pgvector's defaults.
 //! Each server is then asked Q held-out queries at beams of 40, 100 and 200
-//! (`ef`, `hnsw.ef_search`) by one client, once to warm and once measured,
+//! (`ef`, `hnsw.ef_search`; `--efs` names others) by one client, once to warm and once measured,
 //! for recall@10 against the exact ten -- found once, by brute force over
 //! the vectors -- and latency; and at a beam of 100 by C clients (8) for
 //! 10 s, for throughput. PostgreSQL answers from inside Docker's virtual
@@ -43,7 +43,6 @@ use postgres::{Client, NoTls};
 use std::time::{Duration, Instant};
 
 const PG: &str = "host=127.0.0.1 port=55432 user=postgres password=fenec dbname=fenecbench";
-const EFS: [usize; 3] = [40, 100, 200];
 const M: usize = 16;
 const EF_CONSTRUCTION: usize = 64;
 const COPY_ROWS: usize = 50_000;
@@ -271,6 +270,8 @@ struct Workload<'a> {
     queries: &'a [Vec<f32>],
     truth: &'a [Vec<i64>],
     clients: usize,
+    /// The beams searched with.
+    efs: &'a [usize],
 }
 
 /// What one server measured.
@@ -299,6 +300,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
         queries,
         truth,
         clients,
+        efs,
     } = *w;
     let mut c = server.connect();
     let index = format!("@hnsw(cosine, m={M}, ef_construction={EF_CONSTRUCTION})");
@@ -397,7 +399,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
     let round_trip = pct(&mut rtt, 0.5);
 
     let mut searches = Vec::new();
-    for ef in EFS {
+    for &ef in efs {
         let (prelude, sql) = server.query(ef);
         if let Some(p) = &prelude {
             c.batch_execute(p).unwrap();
@@ -408,20 +410,25 @@ fn run(server: &Server, w: &Workload) -> Measured {
             c.query(&stmt, &[q]).unwrap();
         }
         let mut hits = 0usize;
+        // Queries that found none of their ten: a region of the graph the
+        // walk never reached, which no beam makes up for.
+        let mut lost = 0usize;
         let mut lat = Vec::with_capacity(qs.len());
         for (q, exact) in qs.iter().zip(truth) {
             let t = Instant::now();
             let rows = c.query(&stmt, &[q]).unwrap();
             lat.push(t.elapsed().as_secs_f64() * 1e3);
-            hits += rows
+            let found = rows
                 .iter()
                 .filter(|r| exact.contains(&r.get::<_, i64>(0)))
                 .count();
+            hits += found;
+            lost += (found == 0) as usize;
         }
         let recall = hits as f64 / (10 * qs.len()) as f64;
         let (p50, p99) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99));
         eprintln!(
-            "  ef {ef}: recall {:.1}%, p50 {p50:.3} ms, p99 {p99:.3} ms",
+            "  ef {ef}: recall {:.1}%, p50 {p50:.3} ms, p99 {p99:.3} ms, {lost} queries found none",
             recall * 100.0
         );
         searches.push((ef, recall, p50, p99));
@@ -498,6 +505,9 @@ fn main() {
     let clients: usize = flag("--clients").map_or(8, |a| a.parse().unwrap());
     let only = flag("--only");
     let after = args.iter().any(|a| a == "--after");
+    let efs: Vec<usize> = flag("--efs").map_or(vec![40, 100, 200], |a| {
+        a.split(',').map(|x| x.parse().unwrap()).collect()
+    });
 
     let data = Data::new(dim, rank);
     let queries: Vec<Vec<f32>> = (0..nq as u64)
@@ -518,6 +528,7 @@ fn main() {
         queries: &queries,
         truth: &truth,
         clients,
+        efs: &efs,
     };
     let mut results: Vec<(&str, Measured)> = Vec::new();
     if only.as_deref() != Some("pg") {
@@ -587,7 +598,7 @@ fn main() {
     row("empty round trip p50", &|r| {
         format!("{:.3} ms", r.round_trip)
     });
-    for (i, ef) in EFS.iter().enumerate() {
+    for (i, ef) in efs.iter().enumerate() {
         row(&format!("ef {ef}: recall@10"), &|r| {
             format!("{:.1}%", r.searches[i].1 * 100.0)
         });
