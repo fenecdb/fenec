@@ -187,7 +187,8 @@ PREPARED` is refused rather than read as the `COMMIT` it begins with, and
 `ROLLBACK TRANSACTION TO s` was once read as a `ROLLBACK`. A simple
 query's text holding transaction control, or anything else `compat`
 answers, runs a statement at a time (`compat::statements` splits it,
-quotes and comments kept whole) through the pipeline's path: the
+quotes and comments kept whole; a text with no `;` is not walked for
+one, which a `put` of 1 000 128-dim rows spent 1.8 ms of its 12.6 on) through the pipeline's path: the
 statements outside a transaction take its implicit hold, which a `BEGIN`
 makes the transaction's, a `COMMIT` lands and the text's end lands, and
 the first error ends the text -- as PostgreSQL's implicit block. Read
@@ -1026,7 +1027,10 @@ statement is also counted by its text with each literal and parameter as
 JSON would all have been one shape. The counts are shards a thread each
 behind a mutex only a reader of the whole also takes, 5 000 shapes at most,
 the least called forgotten: 0.34 us for a statement of 87 bytes, against the
-2.2 us its parse takes (`make statements-bench`). Over the pg wire they are
+2.2 us its parse takes (`make statements-bench`). A shape is made only as
+far as the 1 000 bytes an entry keeps of it, which is as far as two can be
+told apart where they are shown: shaped whole, a `put` of 1 000 128-dim
+rows spent 1.7 ms of its 12.6 there. Over the pg wire they are
 `pg_stat_statements` (a `fenec-catalog` table, filled only for a query that
 names it). They need what reads the data without a JWT's scope, or the admin
 token -- a shape names every collection -- and a tenant node keeps each
