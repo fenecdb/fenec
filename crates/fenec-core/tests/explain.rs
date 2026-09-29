@@ -302,15 +302,52 @@ fn every_near_path_names_itself() {
             "near: the ANN came up short, the probe finished",
         ],
     );
-    // An index hands over the whole set; past the budget the ANN tests it.
+    // An index names a set past the budget that fewer than the page of the
+    // beam would pass: the set is searched exactly at once, where the walk
+    // would have come up short first.
     check(
         &db,
         "get a where title = \"t7\" near e $1 ef 1 limit 3",
         &q,
         &[
+            "filter: an index names 40 rows of 2000, fewer than a beam of 300 would measure to pass the page",
             "filter: the hash index on title, 40 rows, which is the answer",
-            "near: ANN over e, the set as a test",
+            "near: the 40 rows searched exactly",
         ],
+    );
+    // One a beam passes the page of at less than the set would cost: the ANN
+    // tests its candidates, the set never gathered -- the beam widened where
+    // it would pass fewer than twice the page.
+    let titles: Vec<String> = (0..25).map(|i| format!("\"t{i}\"")).collect();
+    check(
+        &db,
+        &format!(
+            "get a where title in [{}] near e $1 ef 20 limit 3",
+            titles.join(", ")
+        ),
+        &q,
+        &[
+            "filter: an index names 1000 rows, more than the ANN budget of 320; walked with a beam of 20",
+            "near: ANN over e, ef 20, ",
+            "candidates tested, 3 kept",
+        ],
+    );
+    check(
+        &db,
+        &format!(
+            "get a where title in [{}] near e $1 ef 4 limit 3",
+            titles.join(", ")
+        ),
+        &q,
+        &["walked with a beam of 12", "near: ANN over e, ef 12, "],
+    );
+    // An ordered index hands over the whole set; past the budget the ANN
+    // tests it.
+    check(
+        &db,
+        "get a where year >= 2020 near e $1 ef 1 limit 3",
+        &q,
+        &["which is the answer", "near: ANN over e, the set as a test"],
     );
     check(
         &db,

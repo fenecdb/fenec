@@ -4572,13 +4572,72 @@ impl Database {
     ) -> Result<Vec<(DocId, f32)>> {
         let ix = sp.ix;
         let budget = ix.probe_budget(near.ef);
+        let test = Filter::new(c, f, ctx);
+        let matches = |id: DocId| test.matches(id, ctx);
+        // A set an index names and sizes past the budget -- a hash bucket, a
+        // union of them -- decides the plan without being gathered: 250 000
+        // ids of a quarter's bucket, copied, sorted and looked up each, were
+        // most of the 0.77 ms a filter keeping a quarter of a million rows
+        // took, against 0.18 unfiltered. The walk's beam is widened until
+        // about twice the page passes the filter: at the page exactly, 43%
+        // of the walks at a beam of 40 came up short and searched the
+        // quarter's 250 000 rows exactly. Where that beam would measure as
+        // many vectors as the set holds, the set is searched exactly at
+        // once, as the walk would have ended doing.
+        if !near.exact {
+            if let Some(size) = self.indexed_size(c, f, params)? {
+                if size > budget {
+                    let beam = near.ef.unwrap_or(ix.spec.ef_search).max(want);
+                    let rows = c.store.len().max(1);
+                    let wide = want
+                        .saturating_mul(2)
+                        .saturating_mul(rows)
+                        .div_ceil(size)
+                        .max(beam);
+                    if ix.probe_budget(Some(wide)) < size {
+                        plan(|| {
+                            format!(
+                                "filter: an index names {size} rows, more than the ANN budget \
+                                 of {budget}; walked with a beam of {wide}"
+                            )
+                        });
+                        let field = &near.field;
+                        return self.filtered_walk(
+                            c,
+                            sp,
+                            f,
+                            qv,
+                            want,
+                            field,
+                            Some(wide),
+                            params,
+                            &matches,
+                            None,
+                        );
+                    }
+                    plan(|| {
+                        format!(
+                            "filter: an index names {size} rows of {rows}, fewer than a beam of \
+                             {wide} would measure to pass the page"
+                        )
+                    });
+                    let mut probe = match self.filter_candidates(c, f, params, usize::MAX)? {
+                        Some((rows, true)) => FilterProbe::done(rows),
+                        Some((rows, false)) => FilterProbe::new(rows),
+                        None => FilterProbe::new(c.store.ids()),
+                    };
+                    probe.run(usize::MAX, matches)?;
+                    let ids = probe.into_sorted();
+                    plan(|| format!("near: the {} rows searched exactly", ids.len()));
+                    return sp.search_ids(qv, want, near.ef, &ids);
+                }
+            }
+        }
         let mut probe = match self.filter_candidates(c, f, params, usize::MAX)? {
             Some((rows, true)) => FilterProbe::done(rows),
             Some((rows, false)) => FilterProbe::new(rows),
             None => FilterProbe::new(c.store.ids()),
         };
-        let test = Filter::new(c, f, ctx);
-        let matches = |id: DocId| test.matches(id, ctx);
         // `exact` is the verification path: it always scans everything.
         let cap = if near.exact { usize::MAX } else { budget + 1 };
         let total = probe.rows.len();
@@ -4639,18 +4698,47 @@ impl Database {
                 }
             });
         }
-        // More rows match than the budget: the ANN, testing each candidate in
-        // distance order as `search` would test membership -- over codes
-        // only those still able to make the page (`Space::order`).
+        self.filtered_walk(
+            c,
+            sp,
+            f,
+            qv,
+            want,
+            &near.field,
+            near.ef,
+            params,
+            &matches,
+            Some(probe),
+        )
+    }
+
+    /// More rows match than the budget: the ANN, testing each candidate in
+    /// distance order as `search` would test membership -- over codes only
+    /// those still able to make the page (`Space::order`). `probe` is what
+    /// has been found of the set, `None` for none of it yet.
+    #[allow(clippy::too_many_arguments)]
+    fn filtered_walk(
+        &self,
+        c: &Collection,
+        sp: &Space,
+        f: &Expr,
+        qv: &[f32],
+        want: usize,
+        field: &str,
+        ef: Option<usize>,
+        params: &[Value],
+        matches: &dyn Fn(DocId) -> Result<bool>,
+        probe: Option<FilterProbe>,
+    ) -> Result<Vec<(DocId, f32)>> {
         let mut tested = 0;
-        let hits = sp.search(qv, want, near.ef, &mut |id| {
+        let hits = sp.search(qv, want, ef, &mut |id| {
             tested += 1;
             Ok(c.store.contains(id) && matches(id)?)
         })?;
         plan(|| {
             format!(
                 "near: ANN over {field}, {}, {tested} candidates tested, {} kept",
-                beam(ix, near, want),
+                beam(sp.ix, ef, want),
                 hits.len()
             )
         });
@@ -4659,6 +4747,14 @@ impl Database {
         // result comes up short the rest of the set is found and searched
         // exactly, as it always was.
         if hits.len() < want {
+            let mut probe = match probe {
+                Some(p) => p,
+                None => match self.filter_candidates(c, f, params, usize::MAX)? {
+                    Some((rows, true)) => FilterProbe::done(rows),
+                    Some((rows, false)) => FilterProbe::new(rows),
+                    None => FilterProbe::new(c.store.ids()),
+                },
+            };
             probe.run(usize::MAX, matches)?;
             let ids = probe.into_sorted();
             if hits.len() < want.min(ids.len()) {
@@ -4668,10 +4764,60 @@ impl Database {
                         ids.len()
                     )
                 });
-                return sp.search_ids(qv, want, near.ef, &ids);
+                return sp.search_ids(qv, want, ef, &ids);
             }
         }
         Ok(hits)
+    }
+
+    /// How many rows the narrowest set an index names for `f` holds -- a
+    /// hash bucket for an equality, the buckets of an `in`, the ids named
+    /// -- counted without gathering it, as [`Self::filter_candidates`]
+    /// would choose it; `None` where no index names one. A bucket may still
+    /// hold a row deleted in a block not landed, so it is a bound.
+    fn indexed_size(&self, c: &Collection, f: &Expr, params: &[Value]) -> Result<Option<usize>> {
+        let mut best: Option<usize> = None;
+        let mut take = |n: usize| best = Some(best.map_or(n, |b| b.min(n)));
+        let mut eqs = Vec::new();
+        f.conjunct_equalities(params, &mut eqs);
+        for (field, val) in eqs {
+            if field == "id" {
+                take(1);
+                continue;
+            }
+            let (Some(map), Some(fd)) = (c.hash(field)?, c.schema.field(field)) else {
+                continue;
+            };
+            if let Ok(key) = val.clone().coerce(&fd.ty) {
+                take(map.get(&hash_key(&key)).map_or(0, |b| b.len()));
+            }
+        }
+        let mut ins = Vec::new();
+        f.conjunct_in_sets(params, &mut ins);
+        for (field, vals) in ins {
+            if field == "id" {
+                take(vals.len());
+                continue;
+            }
+            let (Some(map), Some(fd)) = (c.hash(field)?, c.schema.field(field)) else {
+                continue;
+            };
+            let mut sum = 0;
+            let mut whole = true;
+            for v in vals {
+                match v.clone().coerce(&fd.ty) {
+                    Ok(key) => sum += map.get(&hash_key(&key)).map_or(0, |b| b.len()),
+                    Err(_) => {
+                        whole = false;
+                        break;
+                    }
+                }
+            }
+            if whole {
+                take(sum);
+            }
+        }
+        Ok(best)
     }
 
     /// `order <field> limit N` answered by walking an ordered index and
@@ -4861,7 +5007,7 @@ impl Database {
                 if near.exact {
                     plan(|| format!("near: exact scan over every vector in {}", near.field));
                 } else {
-                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near, want)));
+                    plan(|| format!("near: ANN over {}, {}", near.field, beam(ix, near.ef, want)));
                 }
                 let (mut ef, mut exact, mut widened) = (near.ef, near.exact, false);
                 loop {
@@ -6618,8 +6764,8 @@ impl<'a> Space<'a> {
 /// The ANN's beam as `explain` states it: the `ef` in force, and the page
 /// when that is wider, since the walk keeps at least as many candidates as
 /// it has to return.
-fn beam(ix: &VectorIndex, near: &Near, want: usize) -> String {
-    let ef = near.ef.unwrap_or(ix.spec.ef_search);
+fn beam(ix: &VectorIndex, ef: Option<usize>, want: usize) -> String {
+    let ef = ef.unwrap_or(ix.spec.ef_search);
     if want > ef {
         format!("ef {ef}, widened to the {want} rows asked for")
     } else {

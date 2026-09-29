@@ -909,7 +909,21 @@ each share's nearest kept and all of those kept again in the shares' order
 (`nearest_of`) -- and keep the nearest `k` as they come rather than sort
 every one (`nearest`). At 1 000 000 x 128 a filter matching a quarter of the
 rows, none of them near the query, took 20.8 ms and takes 5.1; `exact`
-31.6 and 12.2, which is reading 512 MB.
+31.6 and 12.2, which is reading 512 MB. A scan asks for the vectors two
+groups ahead of those it measures (`dists_to::<true>`), each a wait on
+memory otherwise: 10 000 of a million 128-dim vectors in 0.41 ms against
+0.82. A set an index names -- a hash bucket, the buckets of an `in` -- is
+sized before it is gathered (`indexed_size`): past the budget the walk runs
+with the filter as a row test, its beam widened until about twice the page
+passes the filter, and where that beam would measure as many vectors as
+the set holds the set is searched exactly at once, as the walk would have
+ended doing. Gathered, a quarter's 250 000 ids -- copied, sorted, each
+looked up -- were most of the 0.71 ms a filter keeping 25% of a million
+128-dim rows took at a beam of 100, against 0.15 unfiltered, and at a beam
+of 40, which a quarter passes about the page of, 43% of the walks came up
+short and searched the 250 000 exactly (p99 8.9 ms); now 0.16 and 0.15 ms,
+and a filter keeping 1% 0.69 against 1.22 (`make scale-bench`). The
+browser module grew 2.9 KB, 1.0 KB brotli.
 
 **Only an `and` chain reaches an index** -- equality (`=` or `in [..]`) over a
 `@hash` field or over `id`, and comparisons over a `@sorted` field. `in` is a set
