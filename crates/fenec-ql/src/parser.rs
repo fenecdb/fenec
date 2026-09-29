@@ -20,7 +20,7 @@
 //! collections | describe <name> | compact [<name>]
 //! ```
 
-use crate::lexer::{tokenize, Tok, Token};
+use crate::lexer::{tokenize_vectors as tokenize, Tok, Token};
 use fenec_core::collate::Collation;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
@@ -1118,6 +1118,13 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
+        // Taken rather than cloned, as `next` would.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Tok::Vector(v) = &mut self.toks[self.i].tok {
+            let v = std::mem::take(v);
+            self.i += 1;
+            return Ok(Expr::Lit(Value::Vector(v)));
+        }
         match self.peek().clone() {
             Tok::LParen => {
                 self.next();
@@ -1228,6 +1235,109 @@ impl Parser {
                 Ok(Expr::Field(name))
             }
             other => self.err(format!("expected a value, found {}", other.describe())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the parser made of a text before the lexer read a list of
+    /// numbers as one token.
+    fn parse_plain(src: &str) -> Result<Vec<Statement>> {
+        let mut p = Parser {
+            toks: crate::lexer::tokenize(src)?,
+            i: 0,
+            depth: 0,
+        };
+        let mut out = Vec::new();
+        while !p.at_eof() {
+            out.push(p.statement()?);
+        }
+        Ok(out)
+    }
+
+    /// A list of numbers read at once parses to the statement its tokens
+    /// one by one did, and a text one refused the other refuses: over
+    /// numbers of every shape the lexer reads, and some it does not, in
+    /// every place a list goes.
+    #[test]
+    fn a_list_read_as_a_vector_parses_as_its_tokens_did() {
+        let items = [
+            "0",
+            "-0",
+            "7",
+            "-123",
+            "0.5",
+            "-0.0",
+            "1e5",
+            "1E-3",
+            "2.5e+2",
+            "-4.25E1",
+            "9007199254740993",
+            "-9007199254740993",
+            "9223372036854775807",
+            "99999999999999999999",
+            "3.14159265358979323846264338",
+            "1e",
+            "1.5e1234",
+            "1e-400",
+            ".5",
+            "1.",
+            "1_000",
+            "0.1_5",
+            "\"a\"",
+            "$1",
+            "[1]",
+            "[]",
+            "-",
+            "- 1",
+            "1e05",
+            "0.000001",
+            "123456789.123456789",
+            "-- c\n1",
+            "1 # c\n",
+        ];
+        let seps = [", ", ",", " , ", ",\n", "\t,\t"];
+        let mut x = 0x2545f4914f6cdd1du64;
+        let mut rnd = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let n = rnd(6);
+            // Mostly numbers, as a vector is written.
+            let mut list = String::from(["[", "[ ", "[\n"][rnd(3)]);
+            for k in 0..n {
+                if k > 0 {
+                    list.push_str(seps[rnd(seps.len())]);
+                }
+                let it = match rnd(4) {
+                    0 => items[rnd(items.len())],
+                    _ => items[rnd(10)],
+                };
+                list.push_str(it);
+            }
+            if rnd(8) == 0 {
+                list.push(',');
+            }
+            list.push_str(["]", " ]", "\n]"][rnd(3)]);
+            let text = match rnd(6) {
+                0 => format!("put t {{v: {list}}}"),
+                1 => format!("get t where x in {list}"),
+                2 => format!("get t where x IN {list} and y = 1"),
+                3 => format!("get t near v {list} limit 3"),
+                4 => format!("put t [{{v: {list}}}, {{w: {list}}}]"),
+                _ => format!("get t where x has {list}"),
+            };
+            match (parse(&text), parse_plain(&text)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{text}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!("{text}: {a:?} against {b:?}"),
+            }
         }
     }
 }
