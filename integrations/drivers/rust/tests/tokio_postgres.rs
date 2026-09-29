@@ -189,3 +189,34 @@ async fn pgvectors_types_go_both_ways() {
         .unwrap();
     assert_eq!(row.get::<_, Vector>(0).to_vec(), [1.0, 7.0, 2.0]);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn lists_are_arrays() {
+    let Some((c, name)) = connect("lists").await else {
+        return;
+    };
+    let t = format!("{name}_arrays");
+    c.simple_query(&format!(
+        "create collection {t} (name text, tags [text], ns [int], fs [float])"
+    ))
+    .await
+    .unwrap();
+    let tags = vec!["plain", "a \"q\"", "b\\s", "x,y", "", "NULL"];
+    c.execute(
+        &format!("put {t} {{name: $1, tags: $2, ns: $3, fs: $4}}"),
+        &[&"a", &tags, &vec![1i64, -2, 3], &vec![0.5f64, 1.25]],
+    )
+    .await
+    .unwrap();
+    let row = c
+        .query_one(
+            &format!("get {t} select tags, ns, fs where name = $1"),
+            &[&"a"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.columns()[0].type_(), &Type::TEXT_ARRAY);
+    assert_eq!(row.get::<_, Vec<String>>(0), tags);
+    assert_eq!(row.get::<_, Vec<i64>>(1), vec![1, -2, 3]);
+    assert_eq!(row.get::<_, Vec<f64>>(2), vec![0.5, 1.25]);
+}

@@ -119,3 +119,34 @@ func TestCopyFromGoesInBinary(t *testing.T) {
 		t.Fatalf("%v %v %v %v %v", name, score, ok, when, err)
 	}
 }
+
+// A list field is an array: pgx scans it into a slice and binds one to it,
+// both in the binary format.
+func TestListsAreArrays(t *testing.T) {
+	c, _ := connect(t)
+	ctx := context.Background()
+	coll := fmt.Sprintf("ga_%d", time.Now().UnixNano())
+	if _, err := c.Exec(ctx, "create collection "+coll+" (name text, tags [text], ns [int], fs [float])"); err != nil {
+		t.Fatal(err)
+	}
+	tags := []string{"plain", `a "q"`, `b\s`, "x,y", "", "NULL"}
+	if _, err := c.Exec(ctx, "put "+coll+" {name: $1, tags: $2, ns: $3, fs: $4}",
+		"a", tags, []int64{1, -2, 3}, []float64{0.5, 1.25}); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		gotTags []string
+		ns      []int64
+		fs      []float64
+	)
+	err := c.QueryRow(ctx, "get "+coll+" select tags, ns, fs where name = $1", "a").Scan(&gotTags, &ns, &fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(gotTags) != fmt.Sprint(tags) || fmt.Sprint(ns) != "[1 -2 3]" || fmt.Sprint(fs) != "[0.5 1.25]" {
+		t.Fatalf("got %q %v %v", gotTags, ns, fs)
+	}
+	if len(gotTags) != len(tags) {
+		t.Fatalf("got %d tags", len(gotTags))
+	}
+}
