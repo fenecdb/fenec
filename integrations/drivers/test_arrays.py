@@ -54,6 +54,14 @@ def test_asyncpg_reads_and_binds_lists():
             row = await c.fetchrow(f"get {t} select tags, ns where name = $1", "a")
             assert list(row["tags"]) == TAGS
             assert list(row["ns"]) == [7, None, 9]
+            # A binary COPY: asyncpg asks the columns' types first and
+            # sends each list as array_send writes it.
+            res = await c.copy_records_to_table(
+                t, records=[(f"c{i}", TAGS, [i, -i]) for i in range(100)], columns=["name", "tags", "ns"]
+            )
+            assert res == "COPY 100"
+            row = await c.fetchrow(f"get {t} select tags, ns where name = $1", "c7")
+            assert (list(row["tags"]), list(row["ns"])) == (TAGS, [7, -7])
         finally:
             await c.close()
 

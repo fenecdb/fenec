@@ -79,8 +79,9 @@ fn refused(oid: i32) -> String {
 }
 
 /// `v` as a column of type `oid` sends it in the binary format, `None` for
-/// NULL. A type whose text is its binary form -- `text`, and a list, which
-/// travels as text -- is sent as its text; a vector as pgvector sends one.
+/// NULL. A type whose text is its binary form -- `text`, and a list of
+/// lists or of vectors, which has no array -- is sent as its text; a list
+/// as its element's array, a vector as pgvector sends one.
 pub fn value(oid: i32, v: &Value) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(match (oid, v) {
         (_, Value::Null) => return Ok(None),
