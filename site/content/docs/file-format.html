@@ -19,6 +19,8 @@ exception are worth knowing before you touch the reader.</p>
   [4][collection-id][length][field][graph] HNSW graph (optional)
   [8][0][length][history]                  replication history (optional)
   [9][0][length][records]                  a block of several records
+  [10][0][length][records]                 a block's spill, before it lands
+  [11][0][length][spills][records]         a block that spilled, landing
 </pre>
 
 <p>Records inside a data block are <code>[op][doc-id][length][fields]</code>,
@@ -171,6 +173,22 @@ record: a block of five writes is numbered by its last, and whatever counts
 records by their numbers — a replica, an archive — counts them that way. A
 restore to a change inside a block stops before it, since the database never
 stood there.</p>
+
+<h2>A large block spills before it lands</h2>
+
+<p>Held back until it lands, a block's frames were in memory twice — in the
+record being built and in the stores — so a <code>COPY</code> of 250 000
+768-dim rows in one command peaked 1.57 GB over what it left. Once a block's
+frames amount to 16 MB, a server appends them as record kind 10, a spill,
+whose body is a block record's, and the stores read those documents from the
+file from then on. The block lands as record kind 11, which names its spills
+by where their bodies are in the file and how long they are, and holds its
+writes since the last. A load applies a spill only where a land names it:
+one that a rollback, a lapsed lease or a crash left is dead in the file, and
+the ones a file ends with are cut off, as a record cut short is. The land
+never travels: a replica and an archive are sent the block as the one kind 9
+record it would have been. A binary from before spills refuses kinds 10 and
+11 as unknown.</p>
 
 <h2>The history record is not a write</h2>
 

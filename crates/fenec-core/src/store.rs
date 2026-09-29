@@ -435,9 +435,63 @@ pub struct Mark {
     /// filled it sealed it and opened another.
     len: usize,
     sealed: bool,
+    /// The stretches of the mapped file the store read from: a block that
+    /// spilled into the file took its frames in from there
+    /// ([`Store::hand_over`]), and put back, it lets them go.
+    stretches: usize,
     next_id: DocId,
     dead_bytes: usize,
     total_bytes: usize,
+}
+
+impl Mark {
+    /// Where the store stood before a block that has since spilled its
+    /// frames into the file, which the store took them in from with the
+    /// records before them: the first `stretches` stretches, and nothing in
+    /// memory.
+    pub fn spilled(self, stretches: usize) -> Mark {
+        Mark {
+            segments: 1,
+            len: 0,
+            sealed: false,
+            stretches,
+            ..self
+        }
+    }
+}
+
+/// Where the frames a store held in memory went when it took them in from
+/// the file ([`Store::hand_over`]): a place in the segments it let go of,
+/// by where its segment started in them all, moved into the run that held
+/// it. What a block that spilled remembers of where a document was before
+/// it wrote one, to point it back there.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Moved {
+    starts: Vec<u64>,
+    runs: Vec<(u64, u64)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Moved {
+    /// `l`'s place in the file, where it was in memory; as it is otherwise.
+    pub fn loc(&self, l: Loc) -> Loc {
+        if l.seg & MAPPED != 0 || l.is_empty() {
+            return l;
+        }
+        let Some(&start) = self.starts.get(l.seg as usize) else {
+            return l;
+        };
+        let at = start + l.off as u64;
+        // The run holding it: they tile the segments, in order.
+        let mut from = 0;
+        for &(len, run_at) in &self.runs {
+            if at < from + len {
+                return Loc::mapped(run_at + (at - from), l.len);
+            }
+            from += len;
+        }
+        l
+    }
 }
 
 /// Cloned, a store is what it held at that moment: the records in the
@@ -542,6 +596,7 @@ impl Store {
             segments: self.segments.len(),
             len: last.map_or(0, |s| s.data.len()),
             sealed: last.is_some_and(|s| s.sealed),
+            stretches: self.base.as_ref().map_or(0, |(_, s)| s.len()),
             next_id: self.next_id,
             dead_bytes: self.dead_bytes,
             total_bytes: self.total_bytes,
@@ -565,10 +620,14 @@ impl Store {
 
     /// Takes the store back to `mark`, dropping every record appended since
     /// -- a block of writes that did not land, each id it wrote pointed
-    /// back first ([`Self::point`]). The records dropped are all in memory:
-    /// a block appends to the segments, never to a mapped file, so the
-    /// segments are cut back where they stood.
+    /// back first ([`Self::point`]). A block appends to the segments, so
+    /// they are cut back where they stood; one that spilled into the file
+    /// had the store take those frames in from there, and the stretches are
+    /// cut back as well ([`Mark::spilled`]).
     pub fn rewind(&mut self, mark: Mark) {
+        if let Some((_, stretches)) = &mut self.base {
+            stretches.truncate(mark.stretches);
+        }
         self.segments.truncate(mark.segments.max(1));
         if let Some(last) = self.segments.last_mut() {
             if last.data.len() > mark.len {
@@ -1152,28 +1211,66 @@ impl Store {
     /// Either way the store reads from `base`, the same file mapped further.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn hand_over(&mut self, base: &Base, landed: &[(u64, u64)]) -> bool {
+        self.hand_over_keeping(base, landed, 0).is_some()
+    }
+
+    /// [`Self::hand_over`], saying where the segments' frames went
+    /// ([`Moved`]) and how many stretches the store held once it took the
+    /// first `keep` runs in -- a block's spill hands over the records that
+    /// landed before the block with its own frames, and a rollback keeps
+    /// the ones before it ([`Mark::spilled`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hand_over_keeping(
+        &mut self,
+        base: &Base,
+        landed: &[(u64, u64)],
+        keep: usize,
+    ) -> Option<(Moved, usize)> {
         let moved = self.landed_places(landed);
         if let Some((b, _)) = &mut self.base {
             *b = base.clone();
         }
-        let Some(moved) = moved else {
-            return false;
-        };
+        let moved = moved?;
+        let mut starts = Vec::with_capacity(self.segments.len());
+        let mut to = 0;
+        for s in &self.segments {
+            starts.push(to);
+            to += s.data.len() as u64;
+        }
+        let kept = self.base.as_ref().map_or(0, |(_, s)| s.len());
         if landed.is_empty() {
-            return true;
+            let runs = Vec::new();
+            return Some((Moved { starts, runs }, kept));
         }
         for (id, loc) in moved {
             self.index.insert(id, loc);
         }
         let (_, stretches) = self.base.get_or_insert_with(|| (base.clone(), Vec::new()));
-        for &(len, at) in landed.iter().filter(|l| l.0 > 0) {
-            match stretches.last_mut() {
-                Some(last) if last.0 + last.1 == at => last.1 += len,
-                _ => stretches.push((at, len)),
+        let mut kept = stretches.len();
+        for (k, &(len, at)) in landed.iter().enumerate() {
+            if len > 0 {
+                // Never across `keep`: a rollback cuts the stretches there.
+                match stretches.last_mut() {
+                    Some(last) if last.0 + last.1 == at && k != keep => last.1 += len,
+                    _ => stretches.push((at, len)),
+                }
+            }
+            if k + 1 == keep {
+                kept = stretches.len();
             }
         }
         self.segments = vec![Segment::default()];
-        true
+        let runs = landed.to_vec();
+        Some((Moved { starts, runs }, kept))
+    }
+
+    /// Whether runs of these lengths account for every frame the segments
+    /// hold, in order: what [`Self::hand_over`] asks before anything moves,
+    /// asked before the records are written.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn would_hand_over(&self, lens: &[u64]) -> bool {
+        let runs: Vec<(u64, u64)> = lens.iter().map(|&l| (l, 0)).collect();
+        self.landed_places(&runs).is_some()
     }
 
     /// Where in the file each document the segments hold its version of

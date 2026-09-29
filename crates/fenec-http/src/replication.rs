@@ -387,6 +387,21 @@ impl Sink for Tee {
         self.feed.push(seq, bytes);
         Ok(())
     }
+    /// The land into the file, which holds the spills; the block to the
+    /// feed as the one block record it would have been, which a replica
+    /// applies whole -- a land it could not, holding no spill.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn land(
+        &mut self,
+        seq: u64,
+        spilled: &[&[u8]],
+        record: &[u8],
+    ) -> fenec_core::error::Result<()> {
+        let block = fenec_core::engine::landed_block(spilled, record)?;
+        self.file.land(seq, spilled, record)?;
+        self.feed.push(seq, &block);
+        Ok(())
+    }
     fn rewrite(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         // The image holds every write, and is fsynced before it replaces
         // the file.
