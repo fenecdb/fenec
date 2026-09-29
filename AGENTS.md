@@ -528,7 +528,13 @@ TOAST, and PostgreSQL planned one process for them), reads its index into
 its buffers and searches a filter with `iterative_scan`; the container
 needs 2 GB of shared memory for that build (`pgvector-up`). At a million
 128-dim vectors fenec-pg loads and indexes in 47.2 s against 117.8, on
-612 MB of disk against 1 432, answers at a beam of 100 with 99.1% recall in
+612 MB of disk against 1 432, holding 721 MB against 1 132 -- on Linux for
+both: the engine's count, which is the anonymous memory the same load held
+in a container, against the container's anonymous memory and the shared
+memory of its buffers, read from its cgroup in a container started afresh
+(`pg_memory`: the buffers keep what an earlier run left); the pages of
+their files each keeps besides are counted apart -- answers at a beam of
+100 with 99.1% recall in
 0.147 ms against 98.3% in 2.35, a filter keeping 1% in 0.63 ms against
 13.5, and eight clients at 17 001 queries/s against 2 097
 (`site/content/docs/benchmarks.html#scale`). The laptop this was measured

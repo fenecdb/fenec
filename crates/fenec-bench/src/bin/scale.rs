@@ -35,14 +35,18 @@
 //! at a beam of 100 by C clients (8) for
 //! 10 s, for throughput. PostgreSQL answers from inside Docker's virtual
 //! machine, whose network carries every byte, and fenec-pg on the host, so
-//! the round trip of an empty query is measured for each. Memory is
-//! fenec-pg's resident set and the container's use, and the space on disk
-//! fenec-pg's file and the table with its index. fenec-pg's resident set
-//! counts the pages of its mapped file it touched, which are clean and the
-//! kernel gives back under pressure, so it is broken down as well: its
-//! physical footprint, the dirty and compressed pages it cannot give back
-//! (`vmmap -summary`, macOS), the mapped file's resident pages, and what
-//! the engine counts it holds (`fenec_memory_bytes`).
+//! the round trip of an empty query is measured for each. The space on
+//! disk is fenec-pg's file and the table with its index. Memory is what
+//! each server holds of its own, which the kernel cannot take back without
+//! swapping it out -- fenec-pg's physical footprint, the dirty and
+//! compressed pages of `vmmap -summary` (macOS; Linux's anonymous resident
+//! pages and swap), and the container's anonymous memory and the shared
+//! memory PostgreSQL's buffers are -- and beside it the pages of their files
+//! each keeps in memory, clean, which the kernel takes back under pressure:
+//! fenec-pg's mapped file's, and the container's page cache. Then what
+//! fenec-pg's engine counts it holds (`fenec_memory_bytes`), and each
+//! resident set as its tools count it: fenec-pg's, the pages of its file
+//! it touched included, and what `docker stats` counts of the container.
 
 #[path = "../wire.rs"]
 #[allow(dead_code)]
@@ -254,9 +258,22 @@ fn vmmap_size(s: &str) -> Option<u64> {
     Some((n * m as f64) as u64)
 }
 
-/// fenec-pg's physical footprint and its mapped file's resident pages, as
-/// `vmmap -summary` gives them; `None` where there is no `vmmap`.
+/// What fenec-pg holds of its own -- the dirty and compressed pages it
+/// cannot give back, macOS's physical footprint (`vmmap -summary`), or
+/// Linux's anonymous resident pages and swap -- and its mapped file's
+/// resident pages.
 fn footprint(pid: u32) -> Option<(u64, u64)> {
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        let kb = |key: &str| -> u64 {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                .unwrap_or(0)
+                * 1024
+        };
+        return Some((kb("RssAnon:") + kb("VmSwap:"), kb("RssFile:")));
+    }
     let out = std::process::Command::new("vmmap")
         .args(["-summary", &pid.to_string()])
         .output()
@@ -274,6 +291,25 @@ fn footprint(pid: u32) -> Option<(u64, u64)> {
         .and_then(vmmap_size)
         .unwrap_or(0);
     Some((phys, mapped))
+}
+
+/// What PostgreSQL's container holds of its own -- its processes'
+/// anonymous memory and the shared memory its buffers are, which it cannot
+/// give back -- and the page cache of its files, from the container's
+/// cgroup (`memory.stat`: `file` counts shared memory as well).
+fn pg_memory() -> Option<(u64, u64)> {
+    let out = std::process::Command::new("docker")
+        .args(["exec", "fenecbench-pg", "cat", "/sys/fs/cgroup/memory.stat"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let get = |key: &str| -> Option<u64> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+            .and_then(|v| v.trim().parse().ok())
+    };
+    let (anon, shmem, file) = (get("anon")?, get("shmem")?, get("file")?);
+    Some((anon + shmem, file.saturating_sub(shmem)))
 }
 
 /// One of fenec-pg's `/_metrics` without labels, `fenec_memory_bytes`
@@ -432,9 +468,11 @@ struct Measured {
     memory: u64,
     disk: u64,
     round_trip: f64,
-    /// fenec-pg's physical footprint, its mapped file's resident pages and
-    /// what its engine counts it holds, bytes; none for PostgreSQL.
-    breakdown: Option<(u64, u64, u64)>,
+    /// What the server holds of its own, and the pages of its files it
+    /// keeps in memory besides, which the kernel takes back under pressure
+    /// ([`footprint`], [`pg_memory`]); and what fenec-pg's engine counts it
+    /// holds. Bytes.
+    breakdown: Option<(u64, u64, Option<u64>)>,
     /// fenec-pg killed and started again over its file, its documents in
     /// the file rather than written since the open: the seconds until
     /// every vector was linked, and the resident set, footprint, mapped
@@ -659,14 +697,11 @@ fn run(server: &Server, w: &Workload) -> Measured {
         load,
         build,
         memory: server.memory(),
-        breakdown: server.fenec.as_ref().and_then(|(s, _)| {
-            let (phys, mapped) = footprint(s.pid())?;
-            Some((
-                phys,
-                mapped,
-                metric(server.http, "fenec_memory_bytes").unwrap_or(0),
-            ))
-        }),
+        breakdown: match &server.fenec {
+            Some((s, _)) => footprint(s.pid())
+                .map(|(held, mapped)| (held, mapped, metric(server.http, "fenec_memory_bytes"))),
+            None => pg_memory().map(|(held, cache)| (held, cache, None)),
+        },
         reopened: None,
         compacted: None,
         disk: server.disk(&mut c),
@@ -830,17 +865,15 @@ fn main() {
             n as f64 / (r.load + r.build)
         )
     });
-    row("memory, resident", &|r| {
-        format!("{:.0} MB", r.memory as f64 / 1e6)
+    let mb = |b: Option<u64>| b.map_or("--".to_string(), |b| format!("{:.0} MB", b as f64 / 1e6));
+    row("memory the server holds", &|r| mb(r.breakdown.map(|b| b.0)));
+    row("  its files' pages besides", &|r| {
+        mb(r.breakdown.map(|b| b.1))
     });
-    let part = |r: &Measured, k: usize| {
-        r.breakdown.map_or("--".to_string(), |b| {
-            format!("{:.0} MB", [b.0, b.1, b.2][k] as f64 / 1e6)
-        })
-    };
-    row("  physical footprint", &|r| part(r, 0));
-    row("  the mapped file's resident pages", &|r| part(r, 1));
-    row("  the engine's count", &|r| part(r, 2));
+    row("  what fenec-pg's engine counts", &|r| {
+        mb(r.breakdown.and_then(|b| b.2))
+    });
+    row("resident, as counted", &|r| mb(Some(r.memory)));
     if let Some((_, r)) = results.iter().find(|(_, r)| r.compacted.is_some()) {
         let (secs, rss, phys, mapped, engine) = r.compacted.unwrap();
         println!(
