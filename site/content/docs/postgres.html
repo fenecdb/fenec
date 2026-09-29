@@ -355,10 +355,24 @@ psycopg and node-postgres name no type for a string and ask for no
 as tokio-postgres and asyncpg ask for every column, and pgx for every type
 it knows: <code>bigint</code>, <code>double precision</code>,
 <code>boolean</code>, <code>bytea</code> and <code>timestamptz</code> as their
-types send them, a vector as pgvector sends one, and a text and a list, which
-travel as text, as their text. The catalog's columns do the same, but for an
-array, which is refused in binary (<code>0A000</code>) rather than sent in a
-form the client would misread.</p>
+types send them, a vector as pgvector sends one, and a text as its text.</p>
+
+<p>A list is PostgreSQL's array of its element's type — <code>[text]</code>
+is <code>text[]</code>, <code>[int]</code> <code>bigint[]</code>,
+<code>[float]</code> <code>double precision[]</code>, and
+<code>boolean[]</code>, <code>bytea[]</code> and <code>timestamptz[]</code>
+the same way — in <code>array_out</code>'s text, an element quoted where it
+is empty, says <code>NULL</code> or holds a brace, a comma, a quote, a
+backslash or a space, and in <code>array_send</code>'s binary form where a
+client asks for it; a parameter in its place is described as the array, and
+taken in either form. So psycopg and asyncpg read a list field as a Python
+list, pgx scans it into a slice, node-postgres into an array and
+tokio-postgres into a <code>Vec</code>, and each binds its own as a list —
+described as <code>text</code>, it was the string <code>{a,b}</code> to all
+of them. A list of lists or of vectors, which PostgreSQL has no array for,
+still goes as <code>text</code>. The catalog's columns go in binary as well,
+but for an array, which is refused (<code>0A000</code>) rather than sent in
+a form the client would misread.</p>
 
 <p>An error drops every message after it up to the next <code>Sync</code>,
 as PostgreSQL does, and is sent at once rather than at the
@@ -464,8 +478,7 @@ one as text. tokio-postgres does not: like any type it has no Rust type for,
 it refuses a <code>&amp;str</code> for a <code>vector</code> parameter and a
 <code>String</code> for a <code>vector</code> column, as it does against
 pgvector, so it takes pgvector-rust's types. A vector holding a NaN or an
-infinity is refused (<code>22000</code>), as pgvector refuses it; a list
-field still goes as its text.</p>
+infinity is refused (<code>22000</code>), as pgvector refuses it.</p>
 
 <h2 id="catalog">The catalog</h2>
 

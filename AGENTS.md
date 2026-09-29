@@ -275,7 +275,12 @@ by the type's name. A vector not in the format is read as the text it went
 as before, which holds no zero byte where the format's second word is 0,
 and one holding a NaN or an infinity is refused (`22000`), as pgvector
 refuses it. A page of 1 000 768-dim vectors reads in 5.5 ms against 31.4 as
-text (tokio-postgres, the rows not decoded). A list still goes as its text.
+text (tokio-postgres, the rows not decoded). A list is PostgreSQL's
+array of its element's type (`binary::array_of`: `[text]` is `text[]`,
+`[int]` `bigint[]`), in `array_out`'s text and `array_send`'s binary form,
+and a parameter in its place is described so: as `text`, every driver read
+`{a,b}` as a string. A list of lists or of vectors has no array and stays
+text.
 A plain `SELECT` of columns from one collection is the `get` it is
 (`sql.rs`), which asyncpg and pgx ask before a binary COPY. A new field type
 needs its binary form in both. `make drivers-test` holds psycopg,
