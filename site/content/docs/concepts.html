@@ -36,9 +36,10 @@ of the locking cost all follow from that one structure.</p>
 memory: <code>fs::open</code> maps it where the target maps files, and a
 document is decoded from the pages the operating system brings in — and can
 drop again. What the process holds is what it derived from the documents: the
-offset index, the hash, ordered and text indexes, the graph, and the writes
-since the open. One file of 1 GB, 2.3 million rows with a hash and an ordered
-index (<code>make open-bench</code>):</p>
+offset index, the hash, ordered and text indexes, the graph, and the
+documents written since the open until they amount to 16 MB. One file of 1
+GB, 2.3 million rows with a hash and an ordered index (<code>make
+open-bench</code>):</p>
 
 <div class="tbl">
 <table>
@@ -71,6 +72,20 @@ are the same ones, and every index is keyed by id. On a server it runs beside
 the database: the new file is written with no lock held, and the writers wait
 only while the documents written meanwhile are added to it — 24 ms at most
 over a 1.1 GB file, where writing it under the lock held them 1.22 s.</p>
+
+<p>What is written after the open reaches the file as each block lands — a
+transaction, a <code>COPY</code>, a statement — and the stores hold those
+documents in memory only until they amount to 16 MB: then they read them
+from the file, where the records put them, and let the memory go. Held until a restart before, 250 000 768-dim rows loaded into a
+server were held twice, in the file and in memory: the engine counted 1 592
+MB after the load, 820 now and 818 for the same file started again. Nothing
+of the file is read or written for it — where each record went is noted as
+it lands, and the file is mapped with room past its end, which the appends
+grow into — and the pause is 1 ms for 16 MB of 768-dim documents, 2 ms of
+128-dim ones. Whether the memory goes back to the system is the allocator's
+call: Linux's give a large block back when it is freed, so the process holds
+what the engine counts, while macOS's keeps hundreds of megabytes of them in
+a cache of its own.</p>
 
 <p><code>fenec-pg --no-mmap</code> reads the file into memory instead — a
 replicated one, and every tenant of a <code>--dir</code> node, as well — over

@@ -448,7 +448,9 @@ pub struct Store {
     segments: Vec<Segment>,
     /// Records that stayed in a mapped file rather than being copied into a
     /// segment: the file as it stood when opened, and the stretches of it
-    /// that are this collection's, in order -- what `image` writes back.
+    /// that are this collection's, in order -- the ones it held then, and
+    /// those of the records written since that the store took in from it
+    /// ([`Self::hand_over`]) -- what `image` writes back.
     base: Option<(Base, Vec<(u64, u64)>)>,
     index: IdIndex,
     next_id: DocId,
@@ -1134,6 +1136,97 @@ impl Store {
         self.segments = vec![Segment::default()];
     }
 
+    /// Takes the records the segments hold in from the file, and lets the
+    /// segments go: the file holds each run of this store's frames a record
+    /// appended since it was last read or rewritten, `(length, place)` in
+    /// `landed`, in the order they were appended. Held until a restart or a
+    /// compact, the documents written since the open were 787 MB of 250 000
+    /// 768-dim ones, beside the 768 MB of their vectors the graph holds. The
+    /// file holds the same bytes, so a document reads the same from it;
+    /// `base` maps it as far as it now goes.
+    ///
+    /// `landed` has to account for every frame the segments hold, in order,
+    /// or nothing moves and `false` comes back: frames no record of the file
+    /// holds -- a compact's, built in memory -- stay where they are, and so
+    /// do the ones after them, whose place in an image comes after theirs.
+    /// Either way the store reads from `base`, the same file mapped further.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn hand_over(&mut self, base: &Base, landed: &[(u64, u64)]) -> bool {
+        let moved = self.landed_places(landed);
+        if let Some((b, _)) = &mut self.base {
+            *b = base.clone();
+        }
+        let Some(moved) = moved else {
+            return false;
+        };
+        if landed.is_empty() {
+            return true;
+        }
+        for (id, loc) in moved {
+            self.index.insert(id, loc);
+        }
+        let (_, stretches) = self.base.get_or_insert_with(|| (base.clone(), Vec::new()));
+        for &(len, at) in landed.iter().filter(|l| l.0 > 0) {
+            match stretches.last_mut() {
+                Some(last) if last.0 + last.1 == at => last.1 += len,
+                _ => stretches.push((at, len)),
+            }
+        }
+        self.segments = vec![Segment::default()];
+        true
+    }
+
+    /// Where in the file each document the segments hold its version of
+    /// goes, by [`Self::hand_over`]'s `landed`; `None` where the runs do not
+    /// account for the segments frame for frame. Nothing moves here: a run
+    /// that fails half way leaves the store as it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn landed_places(&self, landed: &[(u64, u64)]) -> Option<Vec<(DocId, Loc)>> {
+        let held: u64 = self.segments.iter().map(|s| s.data.len() as u64).sum();
+        if landed.iter().map(|l| l.0).sum::<u64>() != held {
+            return None;
+        }
+        let mut moved = Vec::new();
+        let (mut s, mut o) = (0usize, 0usize);
+        for &(len, at) in landed {
+            let (mut left, mut at) = (len as usize, at);
+            while left > 0 {
+                // A run a seal split goes on at the start of the next
+                // segment: a frame is never split, `append` seals first.
+                while s < self.segments.len() && o == self.segments[s].data.len() {
+                    (s, o) = (s + 1, 0);
+                }
+                let seg = self.segments.get(s)?;
+                let n = left.min(seg.data.len() - o);
+                let run = &seg.data[o..o + n];
+                let mut p = 0;
+                while p < n {
+                    let op = run[p];
+                    p += 1;
+                    let id = get_uvarint(run, &mut p).ok()?;
+                    let plen = get_uvarint(run, &mut p).ok()? as usize;
+                    if p + plen > n {
+                        return None;
+                    }
+                    // The version the store reads is this one: a later
+                    // write of the id points elsewhere, and a delete
+                    // nowhere.
+                    let was = Loc {
+                        seg: s as u32,
+                        off: (o + p) as u32,
+                        len: plen as u32,
+                    };
+                    if op == OP_PUT && self.index.get(id) == Some(was) {
+                        moved.push((id, Loc::mapped(at + p as u64, plen as u32)));
+                    }
+                    p += plen;
+                }
+                (o, left, at) = (o + n, left - n, at + n as u64);
+            }
+        }
+        Some(moved)
+    }
+
     /// A store the rewrite wrote no data record for: nothing live, and no
     /// hold on the file it read from.
     pub fn let_go(&mut self) {
@@ -1514,6 +1607,64 @@ mod tests {
         let ids = st.ids();
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "not sorted");
         assert_eq!(ids.len(), 504);
+    }
+
+    /// A store takes its frames in from a file that holds them only where
+    /// the runs account for every one, in order, and reads the same after:
+    /// a run short of a frame, or one that ends inside one, moves nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_handover_moves_nothing_the_runs_do_not_account_for() {
+        let sc = schema();
+        let doc = |i: i64, pad: usize| Document {
+            id: 0,
+            fields: vec![
+                ("a".into(), Value::Text(format!("v{i}{}", "x".repeat(pad)))),
+                ("b".into(), Value::Int(i)),
+            ],
+        };
+        let mut st = Store::new();
+        // Past a segment, so a run goes on in the next one.
+        let mut frames = Vec::new();
+        for i in 1..=2200u64 {
+            frames.extend(st.append(OP_PUT, i, &Store::encode_doc(&sc, &doc(i as i64, 4000))));
+        }
+        frames.extend(st.append(OP_PUT, 7, &Store::encode_doc(&sc, &doc(-7, 3))));
+        frames.extend(st.append(OP_DEL, 8, &[]));
+        assert!(st.segment_count() > 1);
+        let read = |st: &Store| -> Vec<Option<Value>> {
+            (1..=2200).map(|id| st.read_field(id, 0).unwrap()).collect()
+        };
+        let (before, image) = (read(&st), st.image());
+
+        // The file: something else first, then the frames, as records
+        // appended after an open hold them.
+        let mut file = vec![0u8; 100];
+        file.extend_from_slice(&frames);
+        let base: Base = std::sync::Arc::new(file);
+        let whole = frames.len() as u64;
+        let last = Store::frame(OP_DEL, 8, &[]).len() as u64;
+        for runs in [
+            vec![(whole - last, 100)],
+            vec![(whole - 1, 100), (1, 100 + whole - 1)],
+            vec![(10, 100), (whole - 10, 110)],
+        ] {
+            assert!(!st.hand_over(&base, &runs), "{runs:?}");
+            assert_eq!(read(&st), before);
+            assert!(st.heap_bytes() as u64 >= whole);
+        }
+        // Two runs, split where a record would end.
+        let split = Store::frame(OP_PUT, 1, &Store::encode_doc(&sc, &doc(1, 4000))).len() as u64;
+        assert!(st.hand_over(&base, &[(split, 100), (whole - split, 100 + split)]));
+        assert_eq!(st.heap_bytes(), 0);
+        assert_eq!(read(&st), before);
+        assert_eq!(
+            st.read_field(7, 0).unwrap(),
+            Some(Value::Text("v-7xxx".into()))
+        );
+        assert!(!st.contains(8));
+        // Written back as it stood.
+        assert_eq!(st.image(), image);
     }
 
     #[test]

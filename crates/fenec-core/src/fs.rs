@@ -39,6 +39,12 @@ pub struct FileSink {
     /// bytes leave it, so they reach the file in the order they came.
     disk: Arc<Mutex<Disk>>,
     path: PathBuf,
+    /// The file mapped with room past its end, which a mapped database's
+    /// stores read from and take the records appended since in from
+    /// ([`Sink::written_through`]). Let go of when a rewrite puts another
+    /// file in its place.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    mapping: Option<Arc<Mapping>>,
 }
 
 struct Disk {
@@ -66,6 +72,18 @@ impl Disk {
         }
         let bytes = std::mem::take(&mut *lock(pending));
         if let Err(e) = self.file.write_all(&bytes) {
+            self.failed = Some(e.into());
+            return Err(self.failed.clone().unwrap());
+        }
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Writes whatever is pending and then `bytes`, which do not go through
+    /// the buffer.
+    fn write_through(&mut self, pending: &Mutex<Vec<u8>>, bytes: &[u8]) -> Result<()> {
+        self.write_pending(pending)?;
+        if let Err(e) = self.file.write_all(bytes) {
             self.failed = Some(e.into());
             return Err(self.failed.clone().unwrap());
         }
@@ -166,6 +184,8 @@ impl FileSink {
                 failed: None,
             })),
             path,
+            #[cfg(all(unix, target_pointer_width = "64"))]
+            mapping: None,
         }
     }
 
@@ -189,6 +209,13 @@ impl FileSink {
 impl Sink for FileSink {
     fn append(&mut self, bytes: &[u8]) -> Result<()> {
         self.appended += bytes.len() as u64;
+        // A record the buffer could not hold is written where it lies, as
+        // the buffer would have been once it held it: copied in first, a
+        // block of 50 000 768-dim rows was 154 MB more of heap for the
+        // time of the write, which macOS's allocator then kept.
+        if bytes.len() >= WRITE_BUF {
+            return lock(&self.disk).write_through(&self.pending, bytes);
+        }
         let full = {
             let mut pending = lock(&self.pending);
             pending.extend_from_slice(bytes);
@@ -243,6 +270,10 @@ impl Sink for FileSink {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
+        #[cfg(all(unix, target_pointer_width = "64"))]
+        {
+            self.mapping = None;
+        }
         self.swap_in(&mut disk, &tmp)
     }
 
@@ -257,22 +288,44 @@ impl Sink for FileSink {
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
+        #[cfg(all(unix, target_pointer_width = "64"))]
+        {
+            self.mapping = None;
+        }
         self.swap_in(&mut disk, side)
     }
-    /// The file as it stands, mapped read-only: what a mapped database
-    /// points its stores at after a rewrite. The mapping it had covers the
-    /// file the rename replaced, which is unlinked and goes when the last
-    /// location pointing into it does.
+    /// The file as it stands, mapped read-only, with room past its end:
+    /// what a mapped database points its stores at after a rewrite. The
+    /// mapping it had covers the file the rename replaced, which is
+    /// unlinked and goes when the last location pointing into it does.
     #[cfg(all(unix, target_pointer_width = "64"))]
-    fn remapped(&self) -> Option<crate::store::Base> {
+    fn remapped(&mut self) -> Option<crate::store::Base> {
         let disk = lock(&self.disk);
         let len = disk.file.metadata().ok()?.len() as usize;
         if len == 0 {
             return None;
         }
-        Mapping::of(&disk.file, len)
-            .ok()
-            .map(|m| Arc::new(m) as crate::store::Base)
+        let m = Arc::new(Mapping::with_room(&disk.file, len).ok()?);
+        self.mapping = Some(m.clone());
+        Some(m)
+    }
+
+    /// Writes what is pending -- under the database's lock, where the
+    /// appends leave it to the durability, but only once a handover is due
+    /// -- and hands back the file mapped as far as it now goes: the mapping
+    /// the stores read from, grown over the appends, or where they outgrew
+    /// its room a new one.
+    #[cfg(all(unix, target_pointer_width = "64"))]
+    fn written_through(&mut self) -> Result<Option<crate::store::Base>> {
+        let mut disk = lock(&self.disk);
+        disk.write_pending(&self.pending)?;
+        let len = disk.file.metadata()?.len() as usize;
+        if let Some(m) = self.mapping.as_ref().filter(|m| m.cover(len)) {
+            return Ok(Some(m.clone()));
+        }
+        let m = Arc::new(Mapping::with_room(&disk.file, len)?);
+        self.mapping = Some(m.clone());
+        Ok(Some(m))
     }
 
     /// Pushes the whole file to disk, the bytes an earlier process wrote
@@ -350,11 +403,29 @@ impl Drop for FileSink {
 /// append past the mapped length, and a rewrite (`compact`, `checkpoint`)
 /// renames a new file over it, so the mapping keeps the old one's pages
 /// until it is dropped.
+///
+/// A database's own file is mapped with room past its end (`with_room`),
+/// which the appends grow into: the pages a write adds to the file are the
+/// mapping's once the write is made, on Linux and on macOS alike, so the
+/// records written since the open are taken in where they lie
+/// ([`Database::hand_over`]) rather than through a new mapping, whose pages
+/// every reader would fault in again -- and the old one's torn down under
+/// the write lock.
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub struct Mapping {
     ptr: *mut u8,
-    len: usize,
+    /// What is mapped: the file's length when it was, and the room.
+    reserved: usize,
+    /// How much of it the file holds, as far as a reader looks.
+    len: std::sync::atomic::AtomicUsize,
 }
+
+/// The room a database's file is mapped with past its end: the file's own
+/// length, and a gigabyte at the least. It is address space alone, of which
+/// a 64-bit process has terabytes, and it is taken again, twice the file's
+/// length, only when the file outgrows it.
+#[cfg(all(unix, target_pointer_width = "64"))]
+const ROOM: usize = 1 << 30;
 
 // The pages are read-only and shared by nothing but readers.
 #[cfg(all(unix, target_pointer_width = "64"))]
@@ -373,13 +444,24 @@ impl Mapping {
     /// The first `len` bytes of `file`. A mapping cannot be empty; a file
     /// always holds at least the magic by then.
     fn of(file: &File, len: usize) -> Result<Mapping> {
+        Mapping::reserving(file, len, len)
+    }
+
+    /// [`Self::of`], with room past the file's end for what is appended to
+    /// it ([`ROOM`]); the file alone where the system will not map that
+    /// much -- an address space limit -- and a handover then maps it anew.
+    fn with_room(file: &File, len: usize) -> Result<Mapping> {
+        Mapping::reserving(file, len, len + len.max(ROOM)).or_else(|_| Mapping::of(file, len))
+    }
+
+    fn reserving(file: &File, len: usize, reserved: usize) -> Result<Mapping> {
         use std::os::fd::AsRawFd;
         const PROT_READ: i32 = 1;
         const MAP_SHARED: i32 = 1;
         let ptr = unsafe {
             mmap(
                 std::ptr::null_mut(),
-                len,
+                reserved,
                 PROT_READ,
                 MAP_SHARED,
                 file.as_raw_fd(),
@@ -389,21 +471,39 @@ impl Mapping {
         if ptr as isize == -1 {
             return Err(std::io::Error::last_os_error().into());
         }
-        Ok(Mapping { ptr, len })
+        Ok(Mapping {
+            ptr,
+            reserved,
+            len: std::sync::atomic::AtomicUsize::new(len),
+        })
+    }
+
+    /// Takes the file as `len` bytes long, where the mapping reaches that
+    /// far. A reader never looks past what the file holds: a page past its
+    /// end is the process's end (`SIGBUS`).
+    fn cover(&self, len: usize) -> bool {
+        if len > self.reserved {
+            return false;
+        }
+        // Grown under the database's write lock, which is what orders it
+        // before the reads of what it covers.
+        self.len.store(len, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 }
 
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl AsRef<[u8]> for Mapping {
     fn as_ref(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        let len = self.len.load(std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::slice::from_raw_parts(self.ptr, len) }
     }
 }
 
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl Drop for Mapping {
     fn drop(&mut self) {
-        unsafe { munmap(self.ptr, self.len) };
+        unsafe { munmap(self.ptr, self.reserved) };
     }
 }
 
@@ -579,9 +679,10 @@ fn open_in_memory_into(
 /// [`open_in_memory`], with the documents left in the file: it is mapped
 /// rather than read, and a document is decoded from its pages. What the
 /// process holds is what is derived from the documents -- the offset index,
-/// the hash, ordered and text indexes, the graph -- and the writes made
-/// since the open. A rewrite (`checkpoint`, `compact`) writes the new file
-/// and the stores are pointed at it, so the old one is let go of.
+/// the hash, ordered and text indexes, the graph -- and the documents
+/// written since the open until they are handed over to the file
+/// ([`Database::hand_over`]). A rewrite (`checkpoint`, `compact`) writes the
+/// new file and the stores are pointed at it, so the old one is let go of.
 ///
 /// This is what [`open`] does where the target maps files, which is every
 /// one fenecdb serves from.
@@ -598,14 +699,15 @@ fn open_mapped_into(
 ) -> Result<Database> {
     let (mut file, path) = FileSink::create(path)?;
     let len = file.seek(SeekFrom::End(0))? as usize;
-    let mapping = Mapping::of(&file, len)?;
+    let mapping = Arc::new(Mapping::with_room(&file, len)?);
     let mut sink = FileSink::over(file, path);
+    sink.mapping = Some(mapping.clone());
     // A new file is loaded this way too -- it holds the magic by now -- so
     // the database is a mapped one from the start, and its first rewrite
     // points the stores at the file it wrote. Left out, a new file, a new
     // tenant and a replica taking its first image kept everything in
     // memory until the process restarted.
-    let whole = db.load_mapped(Arc::new(mapping))?;
+    let whole = db.load_mapped(mapping)?;
     if whole < len {
         // The pages past the cut stay mapped and are never read: no record
         // points there.

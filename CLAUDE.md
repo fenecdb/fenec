@@ -136,8 +136,9 @@ memory are the same format, so a read decodes straight over the bytes --
 there is no eviction policy, no dirty pages and no cache of fenecdb's own.
 `fs::open` maps the file where the target maps files (unix, 64-bit), so the
 documents stay in it and the process holds what it derived from them: the
-offset index, the hash, ordered and text indexes, the graph, and the writes
-since the open. A 1 GB file of 2.3 million rows with a hash and an ordered
+offset index, the hash, ordered and text indexes, the graph, and the
+documents written since the open until it hands them over to the file
+(below). A 1 GB file of 2.3 million rows with a hash and an ordered
 index holds 188 MB that way against 1 095 read into memory, and its
 `compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
 machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
@@ -158,6 +159,38 @@ new places out from its own (`Store::relocate_image`, `relocate_live`):
 walking the new file's record heads read the whole of it back, 1.8 to 2.3 s
 of a 1 GB checkpoint under the write lock, against 19 ms. Only an adopted
 image, written elsewhere, is walked.
+
+**A mapped database hands what it writes over to its file.** A block's
+record goes into the file as it lands, and the stores held its documents in
+their segments besides, until a restart or a compact: 250 000 768-dim rows
+loaded into a server, the engine counted 1 592 MB against 818 for the same
+file started again. Once the documents since the last handover amount to
+`HANDOVER_AT` (16 MB) or 65 536 records, `Database::hand_over` has the sink
+write what is pending (`Sink::written_through`) and each store point the
+documents it holds at their places in the file and let its segments go
+(`Store::hand_over`): 820 MB after that load. Where each record went is
+noted as it lands (`handover::Landed`: a data record's body, each of a
+block record's), so nothing of the file is read, and a store takes its runs
+in only when they account for every frame its segments hold, in order --
+frames a compact built in memory stay, and with them the ones after. Nothing
+is handed over while a block is open, whose writes are in no record yet.
+The file is the same byte for byte, and so is the image a checkpoint writes
+from it (`tests/handover.rs`). The write lock is held 1 ms for 16 MB of
+768-dim documents and 2 ms of 128-dim ones; 3.9 and 8.5 at 64 MB. The file
+is mapped with room past its end (`Mapping::with_room`: its length again, a
+gigabyte at the least, address space alone) and the mapping grows over the
+appends, which Linux and macOS both show through a mapping made before them,
+so readers keep the pages they touched; only a file outgrowing it is mapped
+anew. Whether the heap goes back to the system is the allocator's call:
+musl's and glibc's unmap a large block when it is freed, so the process
+holds what the engine counts (250 000 x 768 with no graph: 6 MB of
+anonymous memory against 777), while macOS's keeps hundreds of megabytes of
+freed large blocks in a cache of its own, which its footprint counts (998
+to 1 288 MB after the 250 000 x 768 load; 823 with `MallocSpaceEfficient=1`).
+So a large block's buffers are let go of as it lands (`Database::spare`),
+where a COPY of 50 000 768-dim rows kept its 154 MB of frames until the next
+write, and a record the sink's buffer cannot hold is written where it lies
+rather than copied into it.
 
 **Single writer, and readers beside it.** Reads take a shared lock
 (`Database::query`), writes the exclusive one (`execute_with`). A pg

@@ -80,7 +80,9 @@ right.</p>
 file is mapped (<a href="concepts.html#the-file-is-mapped">The file is
 mapped</a>), so a document is read from the pages the operating system holds
 and can drop; what the process holds is the offset index, the hash, ordered
-and text indexes, the graph, and the writes since the open.</p>
+and text indexes, the graph, and the documents written since the open until
+they amount to 16 MB and are handed over to the file — a transaction's, or a
+<code>COPY</code>'s, once it lands.</p>
 
 <ul>
   <li><b>What a file costs to hold.</b> A 1 GB file of 2.3 million rows with

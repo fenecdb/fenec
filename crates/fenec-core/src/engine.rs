@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod handover;
 mod maintenance;
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
@@ -376,12 +378,8 @@ impl Block {
     /// block, and allocated anew each time -- five buffers, and the record
     /// a copy of the frames -- they took a lone `put` from 832 ns to 985.
     /// Kept, a put takes 841 against the 829 it took before blocks, a `del`
-    /// 648 against 634. A large block's are let go of, since a node holds
-    /// one of these for every database it has open.
+    /// 648 against 634. A large block's are not kept ([`Database::spare`]).
     fn cleared(mut self) -> Block {
-        if self.frames.capacity() > 1 << 16 || self.was.capacity() > 1 << 10 {
-            self = Block::default();
-        }
         self.frames.clear();
         self.frames.extend_from_slice(&[0; HEAD_ROOM]);
         self.heads.clear();
@@ -602,8 +600,16 @@ pub trait Sink: Send {
     /// it just wrote is the one it reads -- and the old one, unlinked by the
     /// rename, is let go of. `None` for every sink but a file's.
     #[cfg(not(target_arch = "wasm32"))]
-    fn remapped(&self) -> Option<crate::store::Base> {
+    fn remapped(&mut self) -> Option<crate::store::Base> {
         None
+    }
+    /// Writes every record appended so far into the file and hands back the
+    /// file mapped as far as it goes: where a mapped database's stores take
+    /// the records written since the open in from, rather than hold them
+    /// ([`Database::hand_over`]). `Ok(None)` for every sink but a file's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_through(&mut self) -> Result<Option<crate::store::Base>> {
+        Ok(None)
     }
     /// Where a rewrite beside the database writes the file that will take
     /// this one's place ([`Self::adopt`]): a `compact` on a server, written
@@ -1752,6 +1758,16 @@ pub struct Database {
     /// When a graph is due a record of its own: [`GRAPH_SAVE_CHANGES`] and
     /// [`GRAPH_SAVE_GROWTH`] unless [`Database::set_graph_saves`] says.
     graph_saves: (u64, u64),
+    /// Where the records appended since the file was read or rewritten hold
+    /// each collection's frames, and how many bytes they are: what
+    /// [`Database::hand_over`] points the stores at, once they amount to
+    /// `handover_at`.
+    #[cfg(not(target_arch = "wasm32"))]
+    landed: Vec<handover::Landed>,
+    #[cfg(not(target_arch = "wasm32"))]
+    landed_bytes: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    handover_at: u64,
     /// Whether a rewrite beside the database is writing its side file: one
     /// at a time, since the file has one name. Only where a file is mapped,
     /// the one place a rewrite writes beside it.
@@ -1774,6 +1790,15 @@ pub const GRAPH_SAVE_GROWTH: u64 = 3;
 /// What a node takes in a graph record, before one was written: measured
 /// at 100 000 x 768, m 16.
 const GRAPH_NODE_BYTES: u64 = 72;
+
+/// A mapped database hands the documents written since its file was opened
+/// over to the file once they amount to this many bytes
+/// ([`Database::hand_over`]): what its segments hold at the most, beside
+/// the block being written. A handover holds the write lock for as long as
+/// its documents take, 1 ms for 16 MB of 768-dim ones and 2 ms of 128-dim
+/// ones, where 64 MB held it 3.9 and 8.5 ms: the same work in shorter
+/// pauses, and a quarter of the memory.
+pub const HANDOVER_AT: u64 = 16 << 20;
 
 impl Default for Database {
     fn default() -> Self {
@@ -1807,6 +1832,12 @@ impl Database {
             defer_links: false,
             appended: std::sync::atomic::AtomicU64::new(0),
             graph_saves: (GRAPH_SAVE_CHANGES, GRAPH_SAVE_GROWTH),
+            #[cfg(not(target_arch = "wasm32"))]
+            landed: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            landed_bytes: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            handover_at: HANDOVER_AT,
             #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
         }
@@ -2061,7 +2092,17 @@ impl Database {
                         .map(|ix| ix.memory_bytes())
                         .sum::<usize>()
             })
-            .sum()
+            .sum::<usize>()
+            + self.noted_bytes()
+    }
+
+    /// What the notes of where the records since the open went take
+    /// ([`Self::hand_over`]); none in the browser, which keeps none.
+    fn noted_bytes(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.landed_bytes_held();
+        #[cfg(target_arch = "wasm32")]
+        0
     }
 
     // ---------------------------------------------------------- persistence
@@ -2650,6 +2691,8 @@ impl Database {
         // documents.
         self.rebuild_indexes_with(&restored, &touched)?;
         *self.appended.get_mut() = whole as u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.forget_landed();
         self.defer_links = false;
         Ok(whole)
     }
@@ -3048,6 +3091,8 @@ impl Database {
             return;
         }
         *self.appended.get_mut() = len;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.forget_landed();
         for c in self.collections.values() {
             for ix in c.vectors.values() {
                 let p = ix.persisted();
@@ -3198,6 +3243,8 @@ impl Database {
         // A record that failed leaves the ones before it applied, and their
         // vectors are indexed all the same.
         self.index_batch(&mut batch);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hand_over_when_due();
         let after = self.changes.seq();
         if after != before {
             if let Some(w) = &self.watcher {
@@ -3251,6 +3298,18 @@ impl Database {
             let seq = self.changes.seq() + notes.len() as u64;
             let r = self.sink_mut().record(seq, &bytes[start..pos]);
             self.storage(r)?;
+            // The frames went into the stores as the primary wrote them,
+            // and the record into the file as it came.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.mapped {
+                let at = *self.appended.get_mut();
+                handover::note_record(
+                    &mut self.landed,
+                    &mut self.landed_bytes,
+                    at,
+                    &bytes[start..pos],
+                );
+            }
             *self.appended.get_mut() += (pos - start) as u64;
             self.dirty = true;
             for (cid, id) in notes.drain(..) {
@@ -3409,6 +3468,8 @@ impl Database {
         let r = self.sink_mut().rewrite(image);
         self.storage(r)?;
         *self.appended.get_mut() = image.len() as u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.forget_landed();
         let cap = self.changes.capacity();
         self.collections = fresh.collections;
         self.order = fresh.order;
@@ -3654,7 +3715,7 @@ impl Database {
             return Ok(());
         };
         if b.heads.is_empty() {
-            self.spare = b;
+            self.spare(b);
             return Ok(());
         }
         // The lease may have lapsed since the block's first write was let
@@ -3665,9 +3726,18 @@ impl Database {
             return Err(e);
         }
         let seq = self.changes.seq() + b.heads.len() as u64;
+        #[cfg(not(target_arch = "wasm32"))]
+        let at = *self.appended.get_mut();
         let (r, len) = {
             let record = b.record();
-            (self.sink_mut().record(seq, &record), record.len())
+            let r = self.sink_mut().record(seq, &record);
+            // Where its frames are in the file, for the handover: the
+            // stores hold them as the record does.
+            #[cfg(not(target_arch = "wasm32"))]
+            if r.is_ok() && self.mapped {
+                handover::note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
+            }
+            (r, record.len())
         };
         if let Err(e) = self.storage(r) {
             self.undo(b);
@@ -3681,10 +3751,12 @@ impl Database {
         // Now, not at the next block's start: a collection the block dropped
         // is held here until then.
         b.was.clear();
-        self.spare = b;
+        self.spare(b);
         if let Some(w) = &self.watcher {
             w.notify(self.changes.seq());
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hand_over_when_due();
         Ok(())
     }
 
@@ -3706,7 +3778,18 @@ impl Database {
             let mut waiting = std::mem::take(&mut b.waiting);
             self.forget_waiting(&mut waiting);
         }
-        self.spare = b;
+        self.spare(b);
+    }
+
+    /// Keeps a block's buffers for the next one, a large block's let go of
+    /// now: a node holds one of these for every database it has open, and
+    /// let go of only as the next block began, a COPY of 50 000 768-dim rows
+    /// held its 154 MB of frames for as long as nothing else was written.
+    fn spare(&mut self, b: Block) {
+        self.spare = match b.frames.capacity() > 1 << 16 || b.was.capacity() > 1 << 10 {
+            true => Block::default(),
+            false => b,
+        };
     }
 
     /// Puts back the writes `undo` holds past its first `to`, the last

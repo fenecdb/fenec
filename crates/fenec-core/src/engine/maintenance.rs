@@ -710,7 +710,10 @@ impl Database {
         }
         // Each document written meanwhile takes the state it has now, over
         // the one the image holds, in a data record after it: inside the
-        // image, where the counter's header says it stands.
+        // image, where the counter's header says it stands. The stores hold
+        // those frames alone in memory, and hand them over as the ones of a
+        // record appended later ([`Database::hand_over`]).
+        let (mut landed, mut landed_bytes) = (Vec::new(), 0);
         for (p, t) in b.parts.iter_mut().zip(tails) {
             let live = &self.collections[&p.name];
             let mut ids = t.unwrap().ids;
@@ -726,6 +729,8 @@ impl Database {
             }
             if !frames.is_empty() {
                 b.side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
+                let at = b.side.at();
+                super::handover::note(&mut landed, &mut landed_bytes, p.cid, frames.len(), at);
                 b.side.write(&frames)?;
             }
             // An id handed out and deleted meanwhile left no record; it must
@@ -750,6 +755,8 @@ impl Database {
         self.storage(r)?;
         b.side.adopted();
         *self.appended.get_mut() = len;
+        self.landed = landed;
+        self.landed_bytes = landed_bytes;
         for p in b.parts {
             let c = self.collections.get_mut(&p.name).unwrap();
             c.store = p.store;
