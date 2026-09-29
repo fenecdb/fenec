@@ -251,7 +251,7 @@ pub fn decode(
 /// for NULLs, its element type, its length and lower bound, then each
 /// element's length and bytes -- as the list of its elements, each read as
 /// its type sends it: asyncpg's `$1::oid[]`.
-fn array(raw: &[u8], elem: i32) -> Option<Value> {
+pub(crate) fn array(raw: &[u8], elem: i32) -> Option<Value> {
     let i32_at = |at: usize| {
         raw.get(at..at + 4)
             .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))

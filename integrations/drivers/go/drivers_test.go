@@ -149,4 +149,17 @@ func TestListsAreArrays(t *testing.T) {
 	if len(gotTags) != len(tags) {
 		t.Fatalf("got %d tags", len(gotTags))
 	}
+	// CopyFrom asks the columns' types and sends each list as an array.
+	rows := make([][]any, 100)
+	for i := range rows {
+		rows[i] = []any{fmt.Sprintf("c%d", i), tags, []int64{int64(i), int64(-i)}}
+	}
+	n, err := c.CopyFrom(ctx, pgx.Identifier{coll}, []string{"name", "tags", "ns"}, pgx.CopyFromRows(rows))
+	if err != nil || n != 100 {
+		t.Fatalf("%v %v", n, err)
+	}
+	err = c.QueryRow(ctx, "get "+coll+" select tags, ns where name = $1", "c7").Scan(&gotTags, &ns)
+	if err != nil || fmt.Sprint(gotTags) != fmt.Sprint(tags) || fmt.Sprint(ns) != "[7 -7]" {
+		t.Fatalf("got %q %v %v", gotTags, ns, err)
+	}
 }

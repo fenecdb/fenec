@@ -860,6 +860,12 @@ fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
             false => text(b),
         };
     }
+    // A list column is described as its element's array, and a driver
+    // sends such a cell as `array_send` writes it.
+    if let Some(elem) = crate::binary::element_of(oid) {
+        return crate::params::array(b, elem)
+            .ok_or_else(|| "not an array in its binary format".into());
+    }
     let want = match oid {
         crate::proto::OID_BOOL => 1,
         crate::proto::OID_BYTEA => b.len(),
@@ -1194,6 +1200,32 @@ mod tests {
         assert_eq!(doc[1].1, Expr::Lit(Value::Int(7)));
         let short = vec![None, Some(Cell::Binary(vec![0, 7])), None];
         assert_eq!(document(&t, short, 3).unwrap_err().0, "22P02");
+    }
+
+    #[test]
+    fn a_binary_list_cell_is_its_array() {
+        // A list column is described as its element's array, so asyncpg's
+        // copy_records_to_table and pgx's CopyFrom send it as array_send
+        // writes one: read as a scalar, it was refused as 8 bytes short.
+        let sent = |oid, items: Vec<Value>| {
+            crate::binary::value(oid, &Value::List(items))
+                .unwrap()
+                .unwrap()
+        };
+        let tags = DataType::List(Box::new(DataType::Text));
+        let ns = DataType::List(Box::new(DataType::Int));
+        let both = vec![Value::Text("a b".into()), Value::Null];
+        assert_eq!(
+            binary(&sent(1009, both.clone()), &tags),
+            Ok(Value::List(both))
+        );
+        let seven = vec![Value::Int(7), Value::Int(-2)];
+        assert_eq!(
+            binary(&sent(1016, seven.clone()), &ns),
+            Ok(Value::List(seven))
+        );
+        assert_eq!(binary(&sent(1016, vec![]), &ns), Ok(Value::List(vec![])));
+        assert!(binary(b"{1,2}", &ns).is_err());
     }
 
     #[test]
