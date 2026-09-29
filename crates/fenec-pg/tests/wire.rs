@@ -2515,7 +2515,7 @@ fn copy_loads_text_rows_as_their_fields() {
                 Some("1"),
                 Some("0.5"),
                 Some("t"),
-                Some("{\"a\",\"b\"}")
+                Some("{a,b}")
             ],
             &[
                 Some("2"),
@@ -2854,6 +2854,24 @@ impl Msg {
         out
     }
     /// A RowDescription's format codes, a column each.
+    /// A RowDescription's columns' type OIDs.
+    fn type_oids(&self) -> Vec<i32> {
+        let n = i16::from_be_bytes([self.body[0], self.body[1]]) as usize;
+        let mut pos = 2;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            while self.body[pos] != 0 {
+                pos += 1;
+            }
+            pos += 1 + 6;
+            out.push(i32::from_be_bytes(
+                self.body[pos..pos + 4].try_into().unwrap(),
+            ));
+            pos += 12;
+        }
+        out
+    }
+
     fn formats(&self) -> Vec<i16> {
         let n = i16::from_be_bytes([self.body[0], self.body[1]]) as usize;
         let mut pos = 2;
@@ -3138,7 +3156,7 @@ fn a_text_parameter_is_read_as_its_places_field() {
         [
             Some("7".to_string()),
             Some("\\x00ff".to_string()),
-            Some(r#"{"a","b"}"#.to_string())
+            Some("{a,b}".to_string())
         ]
     );
 }
@@ -3399,4 +3417,120 @@ fn a_catalog_query_types_its_parameters_by_their_casts() {
         ),
         cells(&[&[Some("16400"), Some("16401")]])
     );
+}
+
+/// `array_send` of one dimension over `elem`: each element's bytes, `None`
+/// a NULL.
+fn array_bytes(elem: i32, items: &[Option<Vec<u8>>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let nulls = items.iter().any(Option::is_none) as i32;
+    for w in [1, nulls, elem, items.len() as i32, 1] {
+        out.extend_from_slice(&w.to_be_bytes());
+    }
+    for it in items {
+        match it {
+            Some(b) => {
+                out.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                out.extend_from_slice(b);
+            }
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    out
+}
+
+/// A list of one scalar type is PostgreSQL's array of it, both ways: its
+/// column is described as the array type, its text is what `array_out`
+/// writes, its binary what `array_send` does, a parameter in its place is
+/// described as the array and read from one -- which a driver reads and
+/// binds as a list of its own, where it had a string. A list of lists has
+/// no such type, and goes as text.
+#[test]
+fn lists_go_as_postgresqls_arrays() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection t (name text, tags [text], ns [int], fs [float], oks [bool], ats [timestamp], raws [bytes], nested [[int]])",
+    );
+    c.simple(
+        r#"put t {name: "a", tags: ["plain", "a \"q\"", "b\\s", "x,y", ""], ns: [1, -2], fs: [0.5], oks: [true, false], ats: ["2000-01-01T00:00:01Z"], raws: ["hi"], nested: [[1, 2], [3]]}"#,
+    );
+    let r = c.simple("get t select tags, ns, fs, oks, ats, raws, nested");
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    assert_eq!(
+        find(&r, b'T').unwrap().type_oids(),
+        [1009, 1016, 1022, 1000, 1185, 1001, 25]
+    );
+    assert_eq!(
+        find(&r, b'D').unwrap().cells(),
+        [
+            Some(r#"{plain,"a \"q\"","b\\s","x,y",""}"#.to_string()),
+            Some("{1,-2}".to_string()),
+            Some("{0.5}".to_string()),
+            Some("{t,f}".to_string()),
+            Some(r#"{"2000-01-01 00:00:01+00"}"#.to_string()),
+            Some(r#"{"\\x6869"}"#.to_string()),
+            Some("{{1,2},{3}}".to_string()),
+        ]
+    );
+
+    let r = c.with_formats(
+        "get t select ns, tags, oks, fs, ats, raws where name = $1",
+        &["a"],
+        &[1],
+    );
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    let int8 = |i: i64| Some(i.to_be_bytes().to_vec());
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [
+            Some(array_bytes(20, &[int8(1), int8(-2)])),
+            Some(array_bytes(
+                25,
+                &[
+                    Some(b"plain".to_vec()),
+                    Some(b"a \"q\"".to_vec()),
+                    Some(b"b\\s".to_vec()),
+                    Some(b"x,y".to_vec()),
+                    Some(Vec::new()),
+                ]
+            )),
+            Some(array_bytes(16, &[Some(vec![1]), Some(vec![0])])),
+            Some(array_bytes(701, &[Some(0.5f64.to_be_bytes().to_vec())])),
+            Some(array_bytes(1184, &[int8(1_000_000)])),
+            Some(array_bytes(17, &[Some(b"hi".to_vec())])),
+        ]
+    );
+
+    // A parameter in a list's place is its array, and read from one: a text
+    // element as the text it is, `"42"` no number.
+    assert_eq!(
+        c.parameter_types("put t {name: $1, ns: $2, tags: $3}", &[]),
+        [25, 1016, 1009]
+    );
+    let r = c.run_binary(&[
+        b"b".to_vec(),
+        array_bytes(20, &[int8(7), None, int8(9)]),
+        array_bytes(25, &[Some(b"42".to_vec()), Some(b"z".to_vec())]),
+    ]);
+    assert!(
+        find(&r, b'E').is_none(),
+        "{:?}",
+        find(&r, b'E').map(|m| m.message())
+    );
+    let r = c.simple(r#"get t select ns, tags where name = "b""#);
+    assert_eq!(
+        find(&r, b'D').unwrap().cells(),
+        [Some("{7,NULL,9}".to_string()), Some("{42,z}".to_string())]
+    );
+    let r = c.simple(r#"get t select name where tags has "42""#);
+    assert_eq!(find(&r, b'D').unwrap().cells(), [Some("b".to_string())]);
 }

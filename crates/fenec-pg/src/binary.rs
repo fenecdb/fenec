@@ -42,6 +42,38 @@ pub fn any_binary(formats: &[i16]) -> bool {
     formats.contains(&1)
 }
 
+/// An array type's element type.
+pub fn element_of(oid: i32) -> Option<i32> {
+    Some(match oid {
+        1000 => OID_BOOL,
+        1001 => OID_BYTEA,
+        1003 => OID_NAME,
+        1005 => OID_INT2,
+        1007 => OID_INT4,
+        1009 => OID_TEXT,
+        1015 => OID_VARCHAR,
+        1016 => OID_INT8,
+        1021 => OID_FLOAT4,
+        1022 => OID_FLOAT8,
+        1028 => OID_OID,
+        1185 => OID_TIMESTAMPTZ,
+        _ => return None,
+    })
+}
+
+/// The array type a list of `elem`s is sent as, one of the element types a
+/// fenecdb list holds.
+pub fn array_of(elem: i32) -> i32 {
+    match elem {
+        OID_BOOL => 1000,
+        OID_BYTEA => 1001,
+        OID_INT8 => 1016,
+        OID_FLOAT8 => 1022,
+        OID_TIMESTAMPTZ => 1185,
+        _ => 1009,
+    }
+}
+
 fn refused(oid: i32) -> String {
     format!("the binary format of type {oid} is not supported: ask for this column in text")
 }
@@ -52,6 +84,9 @@ fn refused(oid: i32) -> String {
 pub fn value(oid: i32, v: &Value) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(match (oid, v) {
         (_, Value::Null) => return Ok(None),
+        (oid, Value::List(items)) if element_of(oid).is_some() => {
+            array(element_of(oid).unwrap_or(OID_TEXT), items)?
+        }
         (OID_VECTOR, Value::Vector(x)) => dense(x, false)?,
         (OID_HALFVEC, Value::Vector(x)) => dense(x, true)?,
         (OID_SPARSEVEC, Value::Sparse(dim, entries)) => sparse(*dim, entries),
@@ -77,6 +112,33 @@ pub fn value(oid: i32, v: &Value) -> Result<Option<Vec<u8>>, String> {
             None => return Ok(None),
         },
     }))
+}
+
+/// `array_send`: one dimension, whether a NULL is among the elements, their
+/// type, the length and the lower bound 1, then each element's length and
+/// bytes as its type sends it; an empty list no dimension at all, as
+/// PostgreSQL sends `'{}'`.
+fn array(elem: i32, items: &[Value]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(20 + items.len() * 12);
+    let dims = !items.is_empty() as i32;
+    let nulls = items.iter().any(|v| matches!(v, Value::Null)) as i32;
+    for w in [dims, nulls, elem] {
+        out.extend_from_slice(&w.to_be_bytes());
+    }
+    if dims == 1 {
+        out.extend_from_slice(&(items.len() as i32).to_be_bytes());
+        out.extend_from_slice(&1i32.to_be_bytes());
+    }
+    for v in items {
+        match value(elem, v)? {
+            Some(bytes) => {
+                out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                out.extend_from_slice(&bytes);
+            }
+            None => out.extend_from_slice(&(-1i32).to_be_bytes()),
+        }
+    }
+    Ok(out)
 }
 
 /// A cell answered as text -- the catalog's, a shim's -- in the binary

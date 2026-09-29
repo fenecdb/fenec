@@ -50,7 +50,7 @@ def test_psycopg_copy_writes_rows(table):
         row = c.execute(
             f"get {table} select name, n, score, tags, at where n = 7"
         ).fetchone()
-        assert row == ("row\t7", 7, 1.75, '{"a","b 7"}', at)
+        assert row == ("row\t7", 7, 1.75, ["a", "b 7"], at)
         # The vectors went into the graph.
         hit = c.execute(f"get {table} select n near e [0, 1, 0] limit 1").fetchone()
         assert hit[0] == 0

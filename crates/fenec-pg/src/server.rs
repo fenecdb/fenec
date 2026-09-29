@@ -2263,7 +2263,19 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
         DataType::Vector(_, VecPrec::F32) => binary::OID_VECTOR,
         DataType::Vector(_, VecPrec::F16) => binary::OID_HALFVEC,
         DataType::Sparse(_) => binary::OID_SPARSEVEC,
-        DataType::Text | DataType::List(_) => OID_TEXT,
+        // A list of one scalar type is its array, which a driver reads as a
+        // list of its own; one of lists or vectors has no array type
+        // PostgreSQL would read, and goes as its text.
+        DataType::List(inner) => match **inner {
+            DataType::Bool
+            | DataType::Int
+            | DataType::Float
+            | DataType::Text
+            | DataType::Bytes
+            | DataType::Timestamp => binary::array_of(pg_oid(inner)),
+            _ => OID_TEXT,
+        },
+        DataType::Text => OID_TEXT,
     }
 }
 
@@ -2310,16 +2322,40 @@ pub fn to_pg_text(v: &Value) -> Option<String> {
             s
         }
         Value::List(items) => {
-            // PostgreSQL array notation: {a,b,c}
+            // PostgreSQL's array notation, as `array_out` writes it: an
+            // element quoted where it is empty, says NULL, or holds a brace,
+            // a comma, a quote, a backslash or a space -- a timestamp's --
+            // with each quote and backslash escaped. Only a text's quotes
+            // were: a backslash in a text escaped the character after it
+            // when read back, and bytes went unquoted, `\x01` read as `x01`.
             let mut s = String::from("{");
             for (i, x) in items.iter().enumerate() {
                 if i > 0 {
                     s.push(',');
                 }
-                match x {
-                    Value::Text(t) => s.push_str(&format!("\"{}\"", t.replace('"', "\\\""))),
-                    other => s.push_str(&to_pg_text(other).unwrap_or_else(|| "NULL".into())),
+                let Some(t) = to_pg_text(x) else {
+                    s.push_str("NULL");
+                    continue;
+                };
+                let quote = !matches!(x, Value::List(_))
+                    && (t.is_empty()
+                        || t.eq_ignore_ascii_case("null")
+                        || t.bytes().any(|c| {
+                            matches!(c, b'{' | b'}' | b',' | b'"' | b'\\')
+                                || c.is_ascii_whitespace()
+                        }));
+                if !quote {
+                    s.push_str(&t);
+                    continue;
                 }
+                s.push('"');
+                for c in t.chars() {
+                    if c == '"' || c == '\\' {
+                        s.push('\\');
+                    }
+                    s.push(c);
+                }
+                s.push('"');
             }
             s.push('}');
             s
