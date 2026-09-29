@@ -21,11 +21,18 @@
 //!     (`max_parallel_maintenance_workers`) and in memory
 //!     (`maintenance_work_mem`), then read into its buffers (`pg_prewarm`).
 //!
+//! Each row also carries a `tag`, 0 to 99, and its `quarter`, the tag's
+//! remainder by 4, from a hash of its own -- no cluster's -- each with an
+//! index: a filter on the tag keeps 1% of the rows, on the quarter 25%.
+//!
 //! Both indexes take m = 16 and ef_construction = 64, pgvector's defaults.
 //! Each server is then asked Q held-out queries at beams of 40, 100 and 200
 //! (`ef`, `hnsw.ef_search`; `--efs` names others) by one client, once to warm and once measured,
 //! for recall@10 against the exact ten -- found once, by brute force over
-//! the vectors -- and latency; and at a beam of 100 by C clients (8) for
+//! the vectors -- and latency, unfiltered and with each filter, the exact
+//! ten then those of the rows it keeps (pgvector searching with
+//! `hnsw.iterative_scan = relaxed_order`, as it advises for a filter); and
+//! at a beam of 100 by C clients (8) for
 //! 10 s, for throughput. PostgreSQL answers from inside Docker's virtual
 //! machine, whose network carries every byte, and fenec-pg on the host, so
 //! the round trip of an empty query is measured for each. Memory is
@@ -113,6 +120,30 @@ impl Data {
 /// Held-out queries are made from seeds past every row's.
 const QUERY_BASE: u64 = 1 << 40;
 
+/// A row's tag, 0 to 99, from a hash of its own: no cluster's and no
+/// direction's, so a filter on it keeps rows of every region.
+fn tag(i: u64) -> i64 {
+    (splitmix(i ^ 0x5EED_5EED) % 100) as i64
+}
+
+/// The filters a query `j` is asked with: its tag, 1% of the rows, and its
+/// quarter, 25%.
+fn filters(j: usize) -> (i64, i64) {
+    ((j % 100) as i64, (j % 4) as i64)
+}
+
+/// A query's nearest so far, most similar first: of every row, of its
+/// tag's, of its quarter's.
+type Tens = [Vec<(f32, i64)>; 3];
+
+/// The exact ten of every query: of all the rows, of the rows of its tag,
+/// and of the rows of its quarter.
+struct Truth {
+    all: Vec<Vec<i64>>,
+    tag: Vec<Vec<i64>>,
+    quarter: Vec<Vec<i64>>,
+}
+
 fn unit(v: &[f32]) -> Vec<f32> {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     v.iter().map(|x| x / n).collect()
@@ -129,27 +160,40 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     acc.iter().sum::<f32>() + ra.iter().zip(rb).map(|(x, y)| x * y).sum::<f32>()
 }
 
-/// The exact ten of each query by cosine, their ids from 1: a range of the
-/// rows to a thread, each keeping its own ten, merged at the end.
-fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<i64>> {
+/// The exact ten of each query by cosine, their ids from 1 -- of every row,
+/// of its tag's and of its quarter's: a range of the rows to a thread, each
+/// keeping its own tens, merged at the end.
+fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Truth {
     let qs: Vec<Vec<f32>> = queries.iter().map(|q| unit(q)).collect();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
     let per = n.div_ceil(threads);
-    let parts: Vec<Vec<Vec<(f32, i64)>>> = std::thread::scope(|s| {
+    let keep = |b: &mut Vec<(f32, i64)>, sim: f32, id: i64| {
+        if b.len() < 10 || sim > b[9].0 {
+            b.push((sim, id));
+            b.sort_by(|x, y| y.0.total_cmp(&x.0));
+            b.truncate(10);
+        }
+    };
+    let parts: Vec<Vec<Tens>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let qs = &qs;
                 s.spawn(move || {
-                    let mut best: Vec<Vec<(f32, i64)>> = vec![Vec::new(); qs.len()];
+                    let mut best: Vec<Tens> = vec![Default::default(); qs.len()];
                     for i in t * per..((t + 1) * per).min(n) {
                         let v = data.vector(i);
                         let norm = dot(&v, &v).sqrt();
-                        for (b, q) in best.iter_mut().zip(qs) {
+                        let row_tag = tag(i);
+                        for (j, (b, q)) in best.iter_mut().zip(qs).enumerate() {
                             let sim = dot(q, &v) / norm;
-                            if b.len() < 10 || sim > b[9].0 {
-                                b.push((sim, i as i64 + 1));
-                                b.sort_by(|x, y| y.0.total_cmp(&x.0));
-                                b.truncate(10);
+                            let id = i as i64 + 1;
+                            let (qt, qq) = filters(j);
+                            keep(&mut b[0], sim, id);
+                            if row_tag == qt {
+                                keep(&mut b[1], sim, id);
+                            }
+                            if row_tag % 4 == qq {
+                                keep(&mut b[2], sim, id);
                             }
                         }
                     }
@@ -159,13 +203,20 @@ fn truth(data: &Data, n: u64, queries: &[Vec<f32>]) -> Vec<Vec<i64>> {
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    (0..queries.len())
-        .map(|q| {
-            let mut all: Vec<(f32, i64)> = parts.iter().flat_map(|p| p[q].clone()).collect();
-            all.sort_by(|x, y| y.0.total_cmp(&x.0));
-            all.iter().take(10).map(|x| x.1).collect()
-        })
-        .collect()
+    let merged = |k: usize| -> Vec<Vec<i64>> {
+        (0..queries.len())
+            .map(|q| {
+                let mut all: Vec<(f32, i64)> = parts.iter().flat_map(|p| p[q][k].clone()).collect();
+                all.sort_by(|x, y| y.0.total_cmp(&x.0));
+                all.iter().take(10).map(|x| x.1).collect()
+            })
+            .collect()
+    };
+    Truth {
+        all: merged(0),
+        tag: merged(1),
+        quarter: merged(2),
+    }
 }
 
 // ---------------------------------------------------------------- a server
@@ -192,17 +243,28 @@ impl Server {
         cfg.connect(NoTls).unwrap()
     }
 
-    /// The statement a query of the ten nearest is, and what a session
+    /// The statement a query of the ten nearest is -- of the rows whose
+    /// `filter` field equals `$2`, where one is named -- and what a session
     /// runs first to search with a beam of `ef`.
-    fn query(&self, ef: usize) -> (Option<String>, String) {
-        match self.engine {
-            Engine::Fenec => (
+    fn query(&self, ef: usize, filter: Option<&str>) -> (Option<String>, String) {
+        match (self.engine, filter) {
+            (Engine::Fenec, None) => (
                 None,
                 format!("get items select id near embed $1 ef {ef} limit 10"),
             ),
-            Engine::Pg => (
+            (Engine::Fenec, Some(f)) => (
+                None,
+                format!("get items select id where {f} = $2 near embed $1 ef {ef} limit 10"),
+            ),
+            (Engine::Pg, None) => (
                 Some(format!("SET hnsw.ef_search = {ef}")),
                 "SELECT id FROM items ORDER BY embed <=> $1 LIMIT 10".into(),
+            ),
+            (Engine::Pg, Some(f)) => (
+                Some(format!(
+                    "SET hnsw.ef_search = {ef}; SET hnsw.iterative_scan = relaxed_order"
+                )),
+                format!("SELECT id FROM items WHERE {f} = $2 ORDER BY embed <=> $1 LIMIT 10"),
             ),
         }
     }
@@ -268,7 +330,7 @@ struct Workload<'a> {
     /// fenec-pg's index built once the rows are in, rather than as they land.
     after: bool,
     queries: &'a [Vec<f32>],
-    truth: &'a [Vec<i64>],
+    truth: &'a Truth,
     clients: usize,
     /// The beams searched with.
     efs: &'a [usize],
@@ -281,8 +343,9 @@ struct Measured {
     memory: u64,
     disk: u64,
     round_trip: f64,
-    /// Recall@10, p50 and p99 in ms, a beam each.
-    searches: Vec<(usize, f64, f64, f64)>,
+    /// Recall@10, p50 and p99 in ms, a beam each: unfiltered, then with
+    /// the tag's filter and the quarter's.
+    searches: [Vec<(usize, f64, f64, f64)>; 3],
     qps: f64,
 }
 
@@ -308,14 +371,14 @@ fn run(server: &Server, w: &Workload) -> Measured {
         Engine::Fenec => {
             let kept = if after { "" } else { index.as_str() };
             c.batch_execute(&format!(
-                "create collection items (embed vector<{dim}> {kept})"
+                "create collection items (tag int @hash, quarter int @hash, embed vector<{dim}> {kept})"
             ))
             .unwrap();
         }
         Engine::Pg => {
             c.batch_execute(&format!(
                 "CREATE EXTENSION IF NOT EXISTS vector; DROP TABLE IF EXISTS items; \
-                 CREATE TABLE items (id bigint, embed vector({dim}))"
+                 CREATE TABLE items (id bigint, tag bigint, quarter bigint, embed vector({dim}))"
             ))
             .unwrap();
         }
@@ -341,12 +404,14 @@ fn run(server: &Server, w: &Workload) -> Measured {
     let t = Instant::now();
     for from in (0..n).step_by(COPY_ROWS) {
         let sink = c
-            .copy_in("COPY items (id, embed) FROM STDIN WITH (FORMAT BINARY)")
+            .copy_in("COPY items (id, tag, quarter, embed) FROM STDIN WITH (FORMAT BINARY)")
             .unwrap();
-        let mut writer = BinaryCopyInWriter::new(sink, &[Type::INT8, vector.clone()]);
+        let mut writer =
+            BinaryCopyInWriter::new(sink, &[Type::INT8, Type::INT8, Type::INT8, vector.clone()]);
         for i in from..(from + COPY_ROWS as u64).min(n) {
             let v = Vector::from(data.vector(i));
-            writer.write(&[&(i as i64 + 1), &v]).unwrap();
+            let t = tag(i);
+            writer.write(&[&(i as i64 + 1), &t, &(t % 4), &v]).unwrap();
         }
         writer.finish().unwrap();
         let done = (from + COPY_ROWS as u64).min(n);
@@ -372,7 +437,8 @@ fn run(server: &Server, w: &Workload) -> Measured {
                  SET max_parallel_maintenance_workers = {workers}; \
                  ALTER TABLE items SET (parallel_workers = {workers}); \
                  CREATE INDEX ON items USING hnsw (embed vector_cosine_ops) \
-                 WITH (m = {M}, ef_construction = {EF_CONSTRUCTION})"
+                 WITH (m = {M}, ef_construction = {EF_CONSTRUCTION}); \
+                 CREATE INDEX ON items (tag); CREATE INDEX ON items (quarter)"
             ))
             .unwrap();
         }
@@ -398,44 +464,68 @@ fn run(server: &Server, w: &Workload) -> Measured {
         .collect();
     let round_trip = pct(&mut rtt, 0.5);
 
-    let mut searches = Vec::new();
-    for &ef in efs {
-        let (prelude, sql) = server.query(ef);
-        if let Some(p) = &prelude {
-            c.batch_execute(p).unwrap();
+    let qs: Vec<Vector> = queries.iter().map(|q| Vector::from(q.clone())).collect();
+    let kinds: [(Option<&str>, &[Vec<i64>]); 3] = [
+        (None, &truth.all),
+        (Some("tag"), &truth.tag),
+        (Some("quarter"), &truth.quarter),
+    ];
+    let mut searches: [Vec<(usize, f64, f64, f64)>; 3] = Default::default();
+    for (k, (filter, exact_tens)) in kinds.iter().enumerate() {
+        for &ef in efs {
+            let (prelude, sql) = server.query(ef, *filter);
+            if let Some(p) = &prelude {
+                c.batch_execute(p).unwrap();
+            }
+            let stmt = c.prepare(&sql).unwrap();
+            // The filter's value, $2: the query's tag or quarter.
+            let value = |j: usize| -> i64 {
+                let (t, q) = filters(j);
+                if *filter == Some("tag") {
+                    t
+                } else {
+                    q
+                }
+            };
+            let ask = |c: &mut Client, j: usize| match filter {
+                None => c.query(&stmt, &[&qs[j]]).unwrap(),
+                Some(_) => c.query(&stmt, &[&qs[j], &value(j)]).unwrap(),
+            };
+            for j in 0..qs.len() {
+                ask(&mut c, j);
+            }
+            let mut hits = 0usize;
+            // Queries that found none of their ten: a region of the graph
+            // the walk never reached, which no beam makes up for.
+            let mut lost = 0usize;
+            let mut lat = Vec::with_capacity(qs.len());
+            for (j, exact) in exact_tens.iter().enumerate() {
+                let t = Instant::now();
+                let rows = ask(&mut c, j);
+                lat.push(t.elapsed().as_secs_f64() * 1e3);
+                let found = rows
+                    .iter()
+                    .filter(|r| exact.contains(&r.get::<_, i64>(0)))
+                    .count();
+                hits += found;
+                lost += (found == 0) as usize;
+            }
+            let recall = hits as f64 / (10 * qs.len()) as f64;
+            let (p50, p99) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99));
+            eprintln!(
+                "  {}ef {ef}: recall {:.1}%, p50 {p50:.3} ms, p99 {p99:.3} ms, {lost} queries found none",
+                filter.map_or(String::new(), |f| format!("{f} filter, ")),
+                recall * 100.0
+            );
+            searches[k].push((ef, recall, p50, p99));
         }
-        let stmt = c.prepare(&sql).unwrap();
-        let qs: Vec<Vector> = queries.iter().map(|q| Vector::from(q.clone())).collect();
-        for q in &qs {
-            c.query(&stmt, &[q]).unwrap();
-        }
-        let mut hits = 0usize;
-        // Queries that found none of their ten: a region of the graph the
-        // walk never reached, which no beam makes up for.
-        let mut lost = 0usize;
-        let mut lat = Vec::with_capacity(qs.len());
-        for (q, exact) in qs.iter().zip(truth) {
-            let t = Instant::now();
-            let rows = c.query(&stmt, &[q]).unwrap();
-            lat.push(t.elapsed().as_secs_f64() * 1e3);
-            let found = rows
-                .iter()
-                .filter(|r| exact.contains(&r.get::<_, i64>(0)))
-                .count();
-            hits += found;
-            lost += (found == 0) as usize;
-        }
-        let recall = hits as f64 / (10 * qs.len()) as f64;
-        let (p50, p99) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99));
-        eprintln!(
-            "  ef {ef}: recall {:.1}%, p50 {p50:.3} ms, p99 {p99:.3} ms, {lost} queries found none",
-            recall * 100.0
-        );
-        searches.push((ef, recall, p50, p99));
+    }
+    if server.engine == Engine::Pg {
+        c.batch_execute("RESET hnsw.iterative_scan").unwrap();
     }
 
     // Throughput: `clients` sessions at a beam of 100 for 10 s.
-    let (prelude, sql) = server.query(100);
+    let (prelude, sql) = server.query(100, None);
     let deadline = Instant::now() + Duration::from_secs(10);
     let started = Instant::now();
     let done: usize = std::thread::scope(|s| {
@@ -598,13 +688,15 @@ fn main() {
     row("empty round trip p50", &|r| {
         format!("{:.3} ms", r.round_trip)
     });
-    for (i, ef) in efs.iter().enumerate() {
-        row(&format!("ef {ef}: recall@10"), &|r| {
-            format!("{:.1}%", r.searches[i].1 * 100.0)
-        });
-        row(&format!("ef {ef}: p50, p99"), &|r| {
-            format!("{:.3} ms, {:.3} ms", r.searches[i].2, r.searches[i].3)
-        });
+    for (k, kind) in ["", "tag (1%), ", "quarter (25%), "].iter().enumerate() {
+        for (i, ef) in efs.iter().enumerate() {
+            row(&format!("{kind}ef {ef}: recall@10"), &|r| {
+                format!("{:.1}%", r.searches[k][i].1 * 100.0)
+            });
+            row(&format!("{kind}ef {ef}: p50, p99"), &|r| {
+                format!("{:.3} ms, {:.3} ms", r.searches[k][i].2, r.searches[k][i].3)
+            });
+        }
     }
     row(&format!("{clients} clients at ef 100"), &|r| {
         format!("{:.0} queries/s", r.qps)
