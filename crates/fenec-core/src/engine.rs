@@ -393,9 +393,12 @@ impl Block {
         self
     }
 
-    /// What its buffers hold: the frames above all, a second copy of every
-    /// document the block wrote until it lands -- uncounted, a COPY could
-    /// write twice `--max-memory` before the ceiling saw it.
+    /// What an open block's buffers hold: the frames above all, a second
+    /// copy of every document the block wrote until it lands -- uncounted, a
+    /// COPY could write twice `--max-memory` before the ceiling saw it. The
+    /// spare's are not data, and a large block's are let go of as it lands
+    /// ([`Database::spare`]): counted, a small ceiling stayed shut after a
+    /// `del` and a `compact`, by the spare's buffers alone.
     fn bytes(&self) -> usize {
         use std::mem::size_of;
         self.frames.capacity()
@@ -2106,7 +2109,6 @@ impl Database {
             .sum::<usize>()
             + self.noted_bytes()
             + self.block.as_ref().map_or(0, Block::bytes)
-            + self.spare.bytes()
     }
 
     /// What the notes of where the records since the open went take
