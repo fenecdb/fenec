@@ -134,6 +134,18 @@ each keeps besides are clean, and the kernel takes them back as it needs
 the memory: the pages of <code>fenec-pg</code>'s mapped file that the
 queries read, and PostgreSQL's page cache of its table and index.</p>
 
+<p>What a load holds at its peak is another matter, and a <code>COPY</code>
+of every row in one command shows it (<code>make scale-bench
+SCALE_ARGS="--copy-rows 0"</code>). A block holds its writes until it lands,
+and it used to hold them twice, in its record and in the stores: 250 000
+768-dim rows in one block peaked at 2 389 MB of anonymous memory against the
+820 they left, measured in process in a Linux container. A block now spills
+into the file every 16 MB before it lands (<a
+href="file-format.html">File format</a>), and the same load peaks at 904 MB;
+in blocks of 50 000 rows, 888 against 1 144. On this Mac the peak footprint
+of that one <code>COPY</code> went from 2 577 to 1 396 MB, the rest of it
+blocks its allocator keeps.</p>
+
 <h2>Method</h2>
 
 <ul>
