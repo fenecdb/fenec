@@ -431,7 +431,11 @@ fn a_collection_dropped_in_a_spilled_block_comes_back_whole() {
         }
         db.begin().unwrap();
         // Written in the block before it is dropped: its frames spill.
-        exec(db, "put other {x: -1, note: $1}", &[Value::Text("block ".repeat(10))]);
+        exec(
+            db,
+            "put other {x: -1, note: $1}",
+            &[Value::Text("block ".repeat(10))],
+        );
         run(db, "drop collection other");
         for i in 0..300 {
             put_doc(db, i);
