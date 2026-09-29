@@ -82,7 +82,9 @@ worth making — fenecdb is not aiming at that job. That is exactly why `fenec-p
 exists: not to *replace* PostgreSQL but to reach fenecdb with the same tools.
 
 The numbers behind the comparison, and the method that produced them, are in
-[Benchmarks](https://fenecdb.com/docs/benchmarks).
+[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-pg` against
+PostgreSQL and pgvector over the same wire, at a million vectors
+([At scale](https://fenecdb.com/docs/benchmarks#scale)).
 
 ---
 
@@ -207,7 +209,7 @@ query; it is not a join and is not trying to be one.
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
-| [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process |
+| [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process, and against pgvector over the pg wire at scale |
 | [Limits](https://fenecdb.com/docs/limits) | What it does not do, every hard-coded ceiling, memory and scale |
 
 The docs are the long-form reference; their source is

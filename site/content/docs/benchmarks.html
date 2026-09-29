@@ -37,6 +37,86 @@ make compare          # without it, that arm is skipped
 </table>
 </div>
 
+<h2 id="scale">At scale, against pgvector over the wire</h2>
+
+<p>The table above measures fenecdb in process. Over the PostgreSQL wire,
+with the same client asking both — the <code>postgres</code> crate and
+pgvector-rust's types — <code>fenec-pg</code> loads and indexes a million
+128-dim vectors 2.5 times as fast as PostgreSQL with pgvector, keeps them in
+less than half the disk, and answers 14 to 21 times sooner; 250 000 768-dim
+ones 1.7 times as fast, answered 5 to 18 times sooner. Its recall is as
+high or higher in every row but two, where pgvector's is ahead by 1.2 and
+0.2 points.</p>
+
+<pre data-lang="bash">make pgvector-up
+make scale-bench                                   # 1 000 000 x 128
+make scale-bench SCALE_ROWS=250000 SCALE_DIM=768
+</pre>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 × 128</th><th class="n">fenec-pg</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<tbody>
+<tr><td>load and index</td><td class="n"><b>47.2 s</b></td><td class="n">117.8 s</td></tr>
+<tr><td>resident memory</td><td class="n"><b>926 MB</b></td><td class="n">1 210 MB</td></tr>
+<tr><td>disk</td><td class="n"><b>612 MB</b></td><td class="n">1 432 MB</td></tr>
+<tr><td>ef 40: recall@10, p50</td><td class="n">92.5%, <b>0.094 ms</b></td><td class="n"><b>93.7%</b>, 1.337 ms</td></tr>
+<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.147 ms</b></td><td class="n">98.3%, 2.353 ms</td></tr>
+<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.8%, 0.225 ms</b></td><td class="n">98.6%, 3.462 ms</td></tr>
+<tr><td>a filter keeping 1%, ef 100</td><td class="n"><b>100%, 0.632 ms</b></td><td class="n">98.8%, 13.5 ms</td></tr>
+<tr><td>a filter keeping 25%, ef 100</td><td class="n">97.2%, <b>0.159 ms</b></td><td class="n"><b>97.4%</b>, 2.481 ms</td></tr>
+<tr><td>8 clients, ef 100</td><td class="n"><b>17 001 queries/s</b></td><td class="n">2 097 queries/s</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="tbl">
+<table>
+<thead><tr><th>250 000 × 768</th><th class="n">fenec-pg</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<tbody>
+<tr><td>load and index</td><td class="n"><b>41.3 s</b></td><td class="n">69.9 s</td></tr>
+<tr><td>resident memory</td><td class="n">1 498 MB</td><td class="n"><b>1 244 MB</b></td></tr>
+<tr><td>disk</td><td class="n"><b>787 MB</b></td><td class="n">2 082 MB</td></tr>
+<tr><td>ef 40: recall@10, p50</td><td class="n"><b>96.9%, 0.228 ms</b></td><td class="n">95.2%, 1.583 ms</td></tr>
+<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.8%, 0.405 ms</b></td><td class="n">97.4%, 2.488 ms</td></tr>
+<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.9%, 0.585 ms</b></td><td class="n">97.6%, 3.435 ms</td></tr>
+<tr><td>a filter keeping 1%, ef 100</td><td class="n">100%, <b>0.613 ms</b></td><td class="n">100%, 11.1 ms</td></tr>
+<tr><td>a filter keeping 25%, ef 100</td><td class="n"><b>99.3%, 0.434 ms</b></td><td class="n">97.0%, 2.383 ms</td></tr>
+<tr><td>8 clients, ef 100</td><td class="n"><b>5 755 queries/s</b></td><td class="n">1 545 queries/s</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The vectors are <code>quant</code>'s: 64 centres spread along 32
+directions, as embeddings vary along far fewer directions than they have,
+1 000 held-out queries, and recall against the exact ten found by brute
+force. Each row also carries a tag from a hash of its own, which a filter
+keeps 1% or 25% of the rows by, with an index on it in both. Both HNSW
+indexes take m 16 and ef_construction 64, pgvector's defaults.</p>
+
+<p>Each side gets its best way. <code>fenec-pg</code> keeps its index as the
+rows land from a binary COPY. pgvector builds after the COPY, as it advises,
+in memory and on every core of Docker's virtual machine (4 GB, 8 CPUs; its
+<code>parallel_workers</code> is set, since 768-dim vectors live in TOAST and
+PostgreSQL planned one process for them), reads its index into its buffers
+before the queries (<code>pg_prewarm</code>), and searches a filter with
+<code>hnsw.iterative_scan = relaxed_order</code>. PostgreSQL answers from
+inside that virtual machine, so an empty query's round trip is 0.21 ms
+against <code>fenec-pg</code>'s 0.07 on the host: it accounts for 0.14 ms of
+each answer, not for the rest.</p>
+
+<p>Each server was run on its own after four idle minutes, on an Apple M1
+MacBook Air: fanless, it slows under minutes of load on every core, and a
+run straight after another took up to three times as long. pgvector's
+recall moves from build to build, since its workers insert in parallel:
+95.3 to 98.3% at a beam of 100 over four builds of the million. The greedy
+descent through its upper layers leaves some queries in another cluster
+than their own, and 3 to 23 of the 1 000 found none of their ten. Resident memory counts, for
+<code>fenec-pg</code>, the pages of its mapped file the process has
+touched as well as its vector arena, and for PostgreSQL what Docker counts
+of the container. A million 768-dim vectors does not fit this machine:
+pgvector's build alone needs about 4 GB.</p>
+
 <h2>Method</h2>
 
 <ul>

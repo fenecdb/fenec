@@ -46,6 +46,7 @@ make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
+make scale-bench         # fenec-pg against pgvector over the pg wire at scale: load, memory, recall, latency, filters (pgvector-up first)
 make statements-bench    # what counting a statement by its shape costs
 ```
 
@@ -597,6 +598,23 @@ pgvector's at the same m and ef_construction 93.0, 97.4 and 97.8 -- for a build
 needed: in the search alone it gave 98.2% at 100, in the build alone a
 graph the greedy search lost 32 queries in. The browser module grew 150
 bytes brotli.
+
+**`make scale-bench` holds fenec-pg to pgvector over the wire.** The same
+client asks both -- the `postgres` crate with pgvector-rust's types -- with
+the same vectors and m and ef_construction, and each side takes its best
+way: fenec-pg keeps its graph as a binary COPY lands, pgvector builds after
+it in memory on every core (`parallel_workers`: 768-dim vectors live in
+TOAST, and PostgreSQL planned one process for them), reads its index into
+its buffers and searches a filter with `iterative_scan`; the container
+needs 2 GB of shared memory for that build (`pgvector-up`). At a million
+128-dim vectors fenec-pg loads and indexes in 47.2 s against 117.8, on
+612 MB of disk against 1 432, answers at a beam of 100 with 99.1% recall in
+0.147 ms against 98.3% in 2.35, a filter keeping 1% in 0.63 ms against
+13.5, and eight clients at 17 001 queries/s against 2 097
+(`site/content/docs/benchmarks.html#scale`). The laptop this was measured
+on is a fanless M1 Air, which slows to a third under minutes of load on
+every core: a comparison runs its sides in turns, each after idle minutes,
+and a figure from a hot run is not one.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a pg transaction or pipeline, a `/batch`, a
