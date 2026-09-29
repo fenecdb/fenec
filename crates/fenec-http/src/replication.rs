@@ -359,8 +359,14 @@ impl Sink for Tee {
         self.file.sync_existing()
     }
     #[cfg(not(target_arch = "wasm32"))]
-    fn remapped(&self) -> Option<fenec_core::store::Base> {
+    fn remapped(&mut self) -> Option<fenec_core::store::Base> {
         self.file.remapped()
+    }
+    /// Passed on: the records it writes are the file's, which a replica is
+    /// sent once an fsync covers them, as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn written_through(&mut self) -> fenec_core::error::Result<Option<fenec_core::store::Base>> {
+        self.file.written_through()
     }
     /// Passed on, so a primary's `compact` writes its file beside the
     /// database as a server without replicas does.

@@ -131,7 +131,20 @@ memory are the same format, so a read decodes straight over the bytes: no
 eviction policy, no dirty pages, no cache of fenecdb's own. `fs::open` maps
 the file where the target can, so the documents stay in it and the process
 holds what it derived from them (1 GB file, hash and ordered index: 188 MB
-against 1 095 read in; `compact` peaks at 236 MB against 2 012).
+against 1 095 read in; `compact` peaks at 236 MB against 2 012), and the
+documents written since the open until it hands them over to the file.
+Once they amount to `HANDOVER_AT` (16 MB), `Database::hand_over` has the
+sink write what is pending (`Sink::written_through`) and each store point
+its documents at their places in the file, noted as each record landed
+(`handover::Landed`), and let its segments go (`Store::hand_over`, which
+moves nothing unless the runs account for every frame it holds): 250 000
+768-dim rows loaded into a server were 1 592 MB in the engine's count, 820
+now, 818 started again. The file is mapped with room past its end and the
+mapping grows over the appends. Linux's allocators give the freed heap
+back; macOS's keeps hundreds of megabytes in its large cache
+(`MallocSpaceEfficient=1` turns that off). A large block's buffers are let
+go of as it lands (`Database::spare`), and a record past the sink's buffer
+is written where it lies.
 `fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
 tenants included) is the other way. In the browser `store::Base` is a type
 of no value (`off::Mapped`), so the mapped-file code compiles for both
