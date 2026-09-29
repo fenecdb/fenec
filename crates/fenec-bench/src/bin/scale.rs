@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run --release -p fenec-bench --bin scale -- [N] [DIM] [--rank R] [--queries Q]
-//!     [--clients C] [--only fenec|pg] [--after] [--efs 40,100,200]
+//!     [--clients C] [--only fenec|pg] [--after] [--compact] [--efs 40,100,200]
 //! ```
 //!
 //! N vectors of DIM dimensions -- the generator `quant` uses, 64 centres
@@ -37,7 +37,12 @@
 //! machine, whose network carries every byte, and fenec-pg on the host, so
 //! the round trip of an empty query is measured for each. Memory is
 //! fenec-pg's resident set and the container's use, and the space on disk
-//! fenec-pg's file and the table with its index.
+//! fenec-pg's file and the table with its index. fenec-pg's resident set
+//! counts the pages of its mapped file it touched, which are clean and the
+//! kernel gives back under pressure, so it is broken down as well: its
+//! physical footprint, the dirty and compressed pages it cannot give back
+//! (`vmmap -summary`, macOS), the mapped file's resident pages, and what
+//! the engine counts it holds (`fenec_memory_bytes`).
 
 #[path = "../wire.rs"]
 #[allow(dead_code)]
@@ -232,6 +237,57 @@ struct Server {
     dsn: String,
     /// fenec-pg's process, and the file it keeps.
     fenec: Option<(wire::Server, std::path::PathBuf)>,
+    /// fenec-pg's HTTP port, for its `/_metrics`.
+    http: u16,
+}
+
+/// A size as `vmmap` writes it -- `1633K`, `1.2G` -- in bytes.
+fn vmmap_size(s: &str) -> Option<u64> {
+    let (num, unit) = s.split_at(s.find(|c: char| c.is_ascii_alphabetic())?);
+    let n: f64 = num.parse().ok()?;
+    let m = match unit {
+        "K" => 1u64 << 10,
+        "M" => 1 << 20,
+        "G" => 1 << 30,
+        _ => 1,
+    };
+    Some((n * m as f64) as u64)
+}
+
+/// fenec-pg's physical footprint and its mapped file's resident pages, as
+/// `vmmap -summary` gives them; `None` where there is no `vmmap`.
+fn footprint(pid: u32) -> Option<(u64, u64)> {
+    let out = std::process::Command::new("vmmap")
+        .args(["-summary", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let phys = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Physical footprint:"))
+        .and_then(|v| vmmap_size(v.trim()))?;
+    // `mapped file` and its virtual, then resident size.
+    let mapped = text
+        .lines()
+        .find(|l| l.starts_with("mapped file "))
+        .and_then(|l| l.split_whitespace().nth(3))
+        .and_then(vmmap_size)
+        .unwrap_or(0);
+    Some((phys, mapped))
+}
+
+/// One of fenec-pg's `/_metrics` without labels, `fenec_memory_bytes`
+/// among them: what the engine counts it holds.
+fn metric(http: u16, name: &str) -> Option<u64> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", http)).ok()?;
+    s.write_all(b"GET /_metrics HTTP/1.1\r\nHost: bench\r\nConnection: close\r\n\r\n")
+        .ok()?;
+    let mut body = String::new();
+    s.read_to_string(&mut body).ok()?;
+    body.lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+        .and_then(|v| v.trim().parse().ok())
 }
 
 impl Server {
@@ -336,6 +392,39 @@ struct Workload<'a> {
     efs: &'a [usize],
 }
 
+/// fenec-pg killed and started again: waits until no vector is left to link, asks
+/// every query once unfiltered and once with each filter, as the run did,
+/// and measures its memory.
+fn reopen(server: &Server, w: &Workload, started: Instant) -> Option<(f64, u64, u64, u64, u64)> {
+    while metric(server.http, "fenec_vectors_unlinked") != Some(0) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let secs = started.elapsed().as_secs_f64();
+    let mut c = server.connect();
+    let qs: Vec<Vector> = w.queries.iter().map(|q| Vector::from(q.clone())).collect();
+    for filter in [None, Some("tag"), Some("quarter")] {
+        let (_, sql) = server.query(100, filter);
+        let stmt = c.prepare(&sql).ok()?;
+        for (j, q) in qs.iter().enumerate() {
+            let (t, qq) = filters(j);
+            let v = if filter == Some("tag") { t } else { qq };
+            match filter {
+                None => c.query(&stmt, &[q]).ok()?,
+                Some(_) => c.query(&stmt, &[q, &v]).ok()?,
+            };
+        }
+    }
+    let (s, _) = server.fenec.as_ref()?;
+    let (phys, mapped) = footprint(s.pid())?;
+    Some((
+        secs,
+        server.memory(),
+        phys,
+        mapped,
+        metric(server.http, "fenec_memory_bytes").unwrap_or(0),
+    ))
+}
+
 /// What one server measured.
 struct Measured {
     load: f64,
@@ -343,6 +432,17 @@ struct Measured {
     memory: u64,
     disk: u64,
     round_trip: f64,
+    /// fenec-pg's physical footprint, its mapped file's resident pages and
+    /// what its engine counts it holds, bytes; none for PostgreSQL.
+    breakdown: Option<(u64, u64, u64)>,
+    /// fenec-pg killed and started again over its file, its documents in
+    /// the file rather than written since the open: the seconds until
+    /// every vector was linked, and the resident set, footprint, mapped
+    /// pages and engine count after every query was asked again.
+    reopened: Option<(f64, u64, u64, u64, u64)>,
+    /// With `--compact`, the same after a compact of the collection: its
+    /// seconds and the memory then.
+    compacted: Option<(f64, u64, u64, u64, u64)>,
     /// Recall@10, p50 and p99 in ms, a beam each: unfiltered, then with
     /// the tag's filter and the quarter's.
     searches: [Vec<(usize, f64, f64, f64)>; 3],
@@ -559,6 +659,16 @@ fn run(server: &Server, w: &Workload) -> Measured {
         load,
         build,
         memory: server.memory(),
+        breakdown: server.fenec.as_ref().and_then(|(s, _)| {
+            let (phys, mapped) = footprint(s.pid())?;
+            Some((
+                phys,
+                mapped,
+                metric(server.http, "fenec_memory_bytes").unwrap_or(0),
+            ))
+        }),
+        reopened: None,
+        compacted: None,
         disk: server.disk(&mut c),
         round_trip,
         searches,
@@ -580,7 +690,7 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--after" => i += 1,
+            "--after" | "--compact" => i += 1,
             a if a.starts_with("--") => i += 2,
             a => {
                 plain.push(a.to_string());
@@ -595,6 +705,7 @@ fn main() {
     let clients: usize = flag("--clients").map_or(8, |a| a.parse().unwrap());
     let only = flag("--only");
     let after = args.iter().any(|a| a == "--after");
+    let compact = args.iter().any(|a| a == "--compact");
     let efs: Vec<usize> = flag("--efs").map_or(vec![40, 100, 200], |a| {
         a.split(',').map(|x| x.parse().unwrap()).collect()
     });
@@ -631,9 +742,44 @@ fn main() {
             engine: Engine::Fenec,
             dsn: format!("host=127.0.0.1 port={pg} user=fenec dbname=fenec"),
             fenec: Some((s, file)),
+            http,
         };
         eprintln!("fenec-pg:");
-        let r = run(&server, &work);
+        let mut r = run(&server, &work);
+        // With `--compact`, the memory after a compact, which writes the
+        // documents into a new image the stores then read through the map.
+        if compact {
+            let mut c = server.connect();
+            let t = Instant::now();
+            c.simple_query("compact items").unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            let (s, _) = server.fenec.as_ref().unwrap();
+            r.compacted = footprint(s.pid()).map(|(phys, mapped)| {
+                (
+                    secs,
+                    server.memory(),
+                    phys,
+                    mapped,
+                    metric(server.http, "fenec_memory_bytes").unwrap_or(0),
+                )
+            });
+        }
+        // Killed and started again over the same file: the documents come
+        // from the mapped file now, where every one was written since the
+        // open before.
+        let Server { fenec, .. } = server;
+        let (process, file) = fenec.unwrap();
+        drop(process);
+        let (pg, http) = (wire::free_port(), wire::free_port());
+        let t = Instant::now();
+        let again = wire::start_fenec(&file, pg, http, "scale-bench");
+        let server = Server {
+            engine: Engine::Fenec,
+            dsn: format!("host=127.0.0.1 port={pg} user=fenec dbname=fenec"),
+            fenec: Some((again, file)),
+            http,
+        };
+        r.reopened = reopen(&server, &work, t);
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
         results.push(("fenec-pg", r));
@@ -645,6 +791,7 @@ fn main() {
                     engine: Engine::Pg,
                     dsn: PG.into(),
                     fenec: None,
+                    http: 0,
                 };
                 eprintln!("PostgreSQL + pgvector:");
                 let r = run(&server, &work);
@@ -683,7 +830,40 @@ fn main() {
             n as f64 / (r.load + r.build)
         )
     });
-    row("memory", &|r| format!("{:.0} MB", r.memory as f64 / 1e6));
+    row("memory, resident", &|r| {
+        format!("{:.0} MB", r.memory as f64 / 1e6)
+    });
+    let part = |r: &Measured, k: usize| {
+        r.breakdown.map_or("--".to_string(), |b| {
+            format!("{:.0} MB", [b.0, b.1, b.2][k] as f64 / 1e6)
+        })
+    };
+    row("  physical footprint", &|r| part(r, 0));
+    row("  the mapped file's resident pages", &|r| part(r, 1));
+    row("  the engine's count", &|r| part(r, 2));
+    if let Some((_, r)) = results.iter().find(|(_, r)| r.compacted.is_some()) {
+        let (secs, rss, phys, mapped, engine) = r.compacted.unwrap();
+        println!(
+            "\nfenec-pg after a compact of {secs:.1} s: resident {:.0} MB, physical footprint {:.0} MB, \
+             the mapped file's resident pages {:.0} MB, the engine's count {:.0} MB",
+            rss as f64 / 1e6,
+            phys as f64 / 1e6,
+            mapped as f64 / 1e6,
+            engine as f64 / 1e6
+        );
+    }
+    if let Some((_, r)) = results.iter().find(|(_, r)| r.reopened.is_some()) {
+        let (secs, rss, phys, mapped, engine) = r.reopened.unwrap();
+        println!(
+            "\nfenec-pg killed and started again over its file: every vector linked after {secs:.1} s; \
+             resident {:.0} MB, physical footprint {:.0} MB, the mapped file's resident pages {:.0} MB, \
+             the engine's count {:.0} MB",
+            rss as f64 / 1e6,
+            phys as f64 / 1e6,
+            mapped as f64 / 1e6,
+            engine as f64 / 1e6
+        );
+    }
     row("disk", &|r| format!("{:.0} MB", r.disk as f64 / 1e6));
     row("empty round trip p50", &|r| {
         format!("{:.3} ms", r.round_trip)
