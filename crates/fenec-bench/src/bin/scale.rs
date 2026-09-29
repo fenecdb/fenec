@@ -4,13 +4,14 @@
 //! ```text
 //! cargo run --release -p fenec-bench --bin scale -- [N] [DIM] [--rank R] [--queries Q]
 //!     [--clients C] [--only fenec|pg] [--after] [--compact] [--efs 40,100,200]
+//!     [--copy-rows ROWS]
 //! ```
 //!
 //! N vectors of DIM dimensions -- the generator `quant` uses, 64 centres
 //! spread along R directions (32 unless given), as embeddings vary along
-//! far fewer directions than they have -- go into each server by a binary
-//! COPY through the same client, the `postgres` crate with pgvector-rust's
-//! `Vector`:
+//! far fewer directions than they have -- go into each server by binary
+//! COPYs of ROWS rows (50 000; 0, every row in one) through the same client,
+//! the `postgres` crate with pgvector-rust's `Vector`:
 //!
 //!   * fenec-pg, started here over an empty file, its HNSW index kept as
 //!     the rows land -- or with `--after` built by a `create index` once
@@ -43,7 +44,9 @@
 //! pages and swap), and the container's anonymous memory and the shared
 //! memory PostgreSQL's buffers are -- and beside it the pages of their files
 //! each keeps in memory, clean, which the kernel takes back under pressure:
-//! fenec-pg's mapped file's, and the container's page cache. Then what
+//! fenec-pg's mapped file's, and the container's page cache; and the most
+//! each held of its own while the rows went in and its index was built
+//! (`Peak`), which a COPY of every row in one shows. Then what
 //! fenec-pg's engine counts it holds (`fenec_memory_bytes`), and each
 //! resident set as its tools count it: fenec-pg's, the pages of its file
 //! it touched included, and what `docker stats` counts of the container.
@@ -61,7 +64,6 @@ use std::time::{Duration, Instant};
 const PG: &str = "host=127.0.0.1 port=55432 user=postgres password=fenec dbname=fenecbench";
 const M: usize = 16;
 const EF_CONSTRUCTION: usize = 64;
-const COPY_ROWS: usize = 50_000;
 
 // ------------------------------------------------------------------ the data
 //
@@ -293,6 +295,68 @@ fn footprint(pid: u32) -> Option<(u64, u64)> {
     Some((phys, mapped))
 }
 
+/// The most a server holds of its own while the rows go in: fenec-pg's
+/// physical footprint at its peak, which macOS keeps (`vmmap`'s `Physical
+/// footprint (peak)`; Linux's peak resident set, `VmHWM`, whose mapped pages
+/// are few while the rows go in); PostgreSQL's, polled from its container
+/// every half second, the cgroup keeping no peak of it alone.
+struct Peak {
+    fenec: Option<u32>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    polled: Option<std::thread::JoinHandle<u64>>,
+}
+
+impl Peak {
+    fn watch(server: &Server) -> Peak {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fenec = server.fenec.as_ref().map(|(s, _)| s.pid());
+        let polled = fenec.is_none().then(|| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut most = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    most = most.max(pg_memory().map_or(0, |m| m.0));
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                most
+            })
+        });
+        Peak {
+            fenec,
+            stop,
+            polled,
+        }
+    }
+
+    fn most(self) -> Option<u64> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        match (self.fenec, self.polled) {
+            (Some(pid), _) => peak_footprint(pid),
+            (None, Some(polled)) => polled.join().ok().filter(|&m| m > 0),
+            _ => None,
+        }
+    }
+}
+
+/// fenec-pg's physical footprint at its peak so far; see [`Peak`].
+fn peak_footprint(pid: u32) -> Option<u64> {
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        return status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .map(|kb| kb * 1024);
+    }
+    let out = std::process::Command::new("vmmap")
+        .args(["-summary", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("Physical footprint (peak):"))
+        .and_then(|v| vmmap_size(v.trim()))
+}
+
 /// What PostgreSQL's container holds of its own -- its processes'
 /// anonymous memory and the shared memory its buffers are, which it cannot
 /// give back -- and the page cache of its files, from the container's
@@ -426,6 +490,8 @@ struct Workload<'a> {
     clients: usize,
     /// The beams searched with.
     efs: &'a [usize],
+    /// The rows a COPY sends.
+    copy_rows: u64,
 }
 
 /// fenec-pg killed and started again: waits until no vector is left to link, asks
@@ -473,6 +539,9 @@ struct Measured {
     /// ([`footprint`], [`pg_memory`]); and what fenec-pg's engine counts it
     /// holds. Bytes.
     breakdown: Option<(u64, u64, Option<u64>)>,
+    /// The most the server held of its own while the rows went in and its
+    /// index was built ([`Peak`]).
+    peak: Option<u64>,
     /// fenec-pg killed and started again over its file, its documents in
     /// the file rather than written since the open: the seconds until
     /// every vector was linked, and the resident set, footprint, mapped
@@ -502,6 +571,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
         truth,
         clients,
         efs,
+        copy_rows,
     } = *w;
     let mut c = server.connect();
     let index = format!("@hnsw(cosine, m={M}, ef_construction={EF_CONSTRUCTION})");
@@ -536,23 +606,24 @@ fn run(server: &Server, w: &Workload) -> Measured {
         Kind::Simple,
         found.get("schema"),
     );
-    // A COPY of `COPY_ROWS` rows at a time: one of 250 000 768-dim rows,
+    // A COPY of `copy_rows` rows at a time: one of 250 000 768-dim rows,
     // 770 MB, stalled in Docker's port forwarding, the server waiting for
     // bytes the client could not write.
+    let peak = Peak::watch(server);
     let t = Instant::now();
-    for from in (0..n).step_by(COPY_ROWS) {
+    for from in (0..n).step_by(copy_rows as usize) {
         let sink = c
             .copy_in("COPY items (id, tag, quarter, embed) FROM STDIN WITH (FORMAT BINARY)")
             .unwrap();
         let mut writer =
             BinaryCopyInWriter::new(sink, &[Type::INT8, Type::INT8, Type::INT8, vector.clone()]);
-        for i in from..(from + COPY_ROWS as u64).min(n) {
+        for i in from..(from + copy_rows).min(n) {
             let v = Vector::from(data.vector(i));
             let t = tag(i);
             writer.write(&[&(i as i64 + 1), &t, &(t % 4), &v]).unwrap();
         }
         writer.finish().unwrap();
-        let done = (from + COPY_ROWS as u64).min(n);
+        let done = (from + copy_rows).min(n);
         if done % 100_000 == 0 || done == n {
             eprintln!("  {done} rows in {:.1} s", t.elapsed().as_secs_f64());
         }
@@ -582,6 +653,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
         }
     }
     let build = t.elapsed().as_secs_f64();
+    let peak = peak.most();
     eprintln!("  loaded in {load:.1} s, index {build:.1} s more");
     // PostgreSQL's index read into its buffers, as far as they hold it:
     // fenec-pg holds its graph in memory.
@@ -702,6 +774,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
                 .map(|(held, mapped)| (held, mapped, metric(server.http, "fenec_memory_bytes"))),
             None => pg_memory().map(|(held, cache)| (held, cache, None)),
         },
+        peak,
         reopened: None,
         compacted: None,
         disk: server.disk(&mut c),
@@ -741,6 +814,7 @@ fn main() {
     let only = flag("--only");
     let after = args.iter().any(|a| a == "--after");
     let compact = args.iter().any(|a| a == "--compact");
+    let copy_rows: u64 = flag("--copy-rows").map_or(50_000, |a| a.parse().unwrap());
     let efs: Vec<usize> = flag("--efs").map_or(vec![40, 100, 200], |a| {
         a.split(',').map(|x| x.parse().unwrap()).collect()
     });
@@ -765,6 +839,7 @@ fn main() {
         truth: &truth,
         clients,
         efs: &efs,
+        copy_rows: if copy_rows == 0 { n } else { copy_rows },
     };
     let mut results: Vec<(&str, Measured)> = Vec::new();
     if only.as_deref() != Some("pg") {
@@ -867,6 +942,7 @@ fn main() {
     });
     let mb = |b: Option<u64>| b.map_or("--".to_string(), |b| format!("{:.0} MB", b as f64 / 1e6));
     row("memory the server holds", &|r| mb(r.breakdown.map(|b| b.0)));
+    row("  the most, while loading", &|r| mb(r.peak));
     row("  its files' pages besides", &|r| {
         mb(r.breakdown.map(|b| b.1))
     });

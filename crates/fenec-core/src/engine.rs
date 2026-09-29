@@ -393,6 +393,20 @@ impl Block {
         self
     }
 
+    /// What an open block's buffers hold: the frames above all, a second
+    /// copy of every document the block wrote until it lands -- uncounted, a
+    /// COPY could write twice `--max-memory` before the ceiling saw it. The
+    /// spare's are not data, and a large block's are let go of as it lands
+    /// ([`Database::spare`]): counted, a small ceiling stayed shut after a
+    /// `del` and a `compact`, by the spare's buffers alone.
+    fn bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.frames.capacity()
+            + self.heads.capacity() * size_of::<(u8, u32, usize)>()
+            + self.notes.capacity() * size_of::<(u32, DocId)>()
+            + self.was.capacity() * size_of::<Undo>()
+    }
+
     /// The block as the one record it lands as: one data record of every
     /// frame when they are all one collection's writes -- a lone write's
     /// record as it always was -- the record of a lone schema change, and a
@@ -2094,6 +2108,7 @@ impl Database {
             })
             .sum::<usize>()
             + self.noted_bytes()
+            + self.block.as_ref().map_or(0, Block::bytes)
     }
 
     /// What the notes of where the records since the open went take
