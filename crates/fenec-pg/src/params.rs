@@ -198,7 +198,7 @@ pub fn decode(
             .and_then(|(t, s)| crate::copy::value(s, t).ok());
         return Ok(typed.unwrap_or_else(|| decode_param(raw, false)));
     }
-    if let Some(elem) = element_of(oid) {
+    if let Some(elem) = binary::element_of(oid) {
         return Ok(array(raw, elem).unwrap_or_else(|| decode_param(raw, true)));
     }
     if matches!(oid, OID_VECTOR | OID_HALFVEC | OID_SPARSEVEC) {
@@ -247,25 +247,6 @@ pub fn decode(
     Ok(v.unwrap_or_else(|| decode_param(raw, true)))
 }
 
-/// An array type's element type.
-fn element_of(oid: i32) -> Option<i32> {
-    Some(match oid {
-        1000 => OID_BOOL,
-        1001 => OID_BYTEA,
-        1003 => OID_NAME,
-        1005 => OID_INT2,
-        1007 => OID_INT4,
-        1009 => OID_TEXT,
-        1015 => OID_VARCHAR,
-        1016 => OID_INT8,
-        1021 => OID_FLOAT4,
-        1022 => OID_FLOAT8,
-        1028 => OID_OID,
-        1185 => OID_TIMESTAMPTZ,
-        _ => return None,
-    })
-}
-
 /// A one-dimensional array in the binary format -- its dimensions, a flag
 /// for NULLs, its element type, its length and lower bound, then each
 /// element's length and bytes -- as the list of its elements, each read as
@@ -292,7 +273,14 @@ fn array(raw: &[u8], elem: i32) -> Option<Value> {
         }
         let cell = raw.get(at..at + len as usize)?;
         at += len as usize;
-        out.push(decode(cell, true, elem, None).ok()?);
+        // An element of a text array is text: read by its look, as a
+        // parameter no type names is, `"42"` was a number.
+        out.push(match elem {
+            OID_TEXT | OID_VARCHAR | OID_NAME | OID_BPCHAR => {
+                Value::Text(std::str::from_utf8(cell).ok()?.to_string())
+            }
+            _ => decode(cell, true, elem, None).ok()?,
+        });
     }
     (at == raw.len()).then_some(Value::List(out))
 }
@@ -330,7 +318,8 @@ mod tests {
         );
         assert_eq!(
             of("put t {h: $1, s: $2, tags: $3}"),
-            [OID_HALFVEC, OID_SPARSEVEC, OID_TEXT]
+            // A list its array, which a driver binds a list of its own to.
+            [OID_HALFVEC, OID_SPARSEVEC, 1009]
         );
         assert_eq!(
             of("get t where n > $1 and $2 = score or name ~ $3 or tags has $4 or id in [$5, $6]"),

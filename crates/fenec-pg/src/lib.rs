@@ -160,7 +160,45 @@ mod tests {
                 Value::Text("b".into())
             ]))
             .unwrap(),
-            "{\"a\",\"b\"}"
+            "{a,b}"
+        );
+    }
+
+    /// A list's text is what PostgreSQL's `array_out` writes: an element
+    /// quoted where it would not read back as itself, its quotes and
+    /// backslashes escaped.
+    #[test]
+    fn a_list_is_written_as_array_out_writes_it() {
+        let text = |t: &str| Value::Text(t.into());
+        assert_eq!(
+            to_pg_text(&Value::List(vec![
+                text("plain"),
+                text("a \"q\""),
+                text("back\\slash"),
+                text("x,y"),
+                text(""),
+                text("null"),
+                Value::Null,
+                text("{b}"),
+            ]))
+            .unwrap(),
+            r#"{plain,"a \"q\"","back\\slash","x,y","","null",NULL,"{b}"}"#
+        );
+        assert_eq!(
+            to_pg_text(&Value::List(vec![Value::Int(1), Value::Int(-2)])).unwrap(),
+            "{1,-2}"
+        );
+        assert_eq!(
+            to_pg_text(&Value::List(vec![Value::Bytes(vec![1, 255])])).unwrap(),
+            r#"{"\\x01ff"}"#
+        );
+        assert_eq!(
+            to_pg_text(&Value::List(vec![Value::Timestamp(0)])).unwrap(),
+            r#"{"1970-01-01 00:00:00+00"}"#
+        );
+        assert_eq!(
+            to_pg_text(&Value::List(vec![Value::List(vec![Value::Int(1)])])).unwrap(),
+            "{{1}}"
         );
     }
 }
