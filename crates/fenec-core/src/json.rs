@@ -445,7 +445,7 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
         if !matches!(b.get(j), Some(b'-' | b'0'..=b'9')) {
             return None;
         }
-        let x = match clinger(b, &mut j) {
+        let x = match crate::num::clinger(b, &mut j) {
             Some(x) => x,
             None => {
                 let (text, is_float) = number_at(s, &mut j);
@@ -466,86 +466,6 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
             _ => return None,
         }
     }
-}
-
-/// The number at `j` as the general path reads it -- a float through
-/// `num::parse_f64`, an integer through `i64` -- when it reads in the one
-/// pass that finds its end: `-`, digits, a fraction, an exponent, and up to
-/// 19 significant digits of no more than 2^53 over a power of ten an `f64`
-/// holds exactly, which Clinger's path rounds with one multiply or divide,
-/// as `parse_f64` does. That is every component of a vector's text but the
-/// widest. `None`, and `j` where it was, for anything else.
-#[cfg(not(target_arch = "wasm32"))]
-fn clinger(b: &[u8], j: &mut usize) -> Option<f64> {
-    let mut k = *j;
-    let neg = b.get(k) == Some(&b'-');
-    k += neg as usize;
-    // Leading zeros are not significant, and add nothing to `m`.
-    let (mut m, mut sig, mut e10) = (0u64, 0u32, 0i32);
-    let mut digits = |k: &mut usize, frac: bool| {
-        let start = *k;
-        while let Some(&d @ b'0'..=b'9') = b.get(*k) {
-            sig += (m != 0 || d != b'0') as u32;
-            m = m.wrapping_mul(10).wrapping_add((d - b'0') as u64);
-            e10 -= frac as i32;
-            *k += 1;
-        }
-        *k > start
-    };
-    if !digits(&mut k, false) {
-        return None;
-    }
-    let mut float = false;
-    if b.get(k) == Some(&b'.') {
-        k += 1;
-        if !digits(&mut k, true) {
-            return None;
-        }
-        float = true;
-    }
-    if let Some(b'e' | b'E') = b.get(k) {
-        k += 1;
-        let eneg = b.get(k) == Some(&b'-');
-        k += matches!(b.get(k), Some(b'-' | b'+')) as usize;
-        let start = k;
-        let mut e = 0i32;
-        while let Some(&d @ b'0'..=b'9') = b.get(k) {
-            e = e * 10 + (d - b'0') as i32;
-            k += 1;
-            if k - start > 3 {
-                return None;
-            }
-        }
-        if k == start {
-            return None;
-        }
-        e10 += if eneg { -e } else { e };
-        float = true;
-    }
-    // Past 19 digits `m` may have wrapped; and where the general path's
-    // scan would go on, it is the one to read what follows.
-    if sig > 19
-        || matches!(
-            b.get(k),
-            Some(b'0'..=b'9' | b'+' | b'-' | b'.' | b'e' | b'E')
-        )
-    {
-        return None;
-    }
-    let x = if m == 0 {
-        0.0
-    } else if m > 1 << 53 {
-        return None;
-    } else if (0..=22).contains(&e10) {
-        m as f64 * crate::num::POW10[e10 as usize]
-    } else if (-22..0).contains(&e10) {
-        m as f64 / crate::num::POW10[-e10 as usize]
-    } else {
-        return None;
-    };
-    *j = k;
-    // An integer is an `i64`, which has no -0.
-    Some(if neg && (float || m != 0) { -x } else { x })
 }
 
 /// Parses an array starting at `[` element by element; it does *not* apply

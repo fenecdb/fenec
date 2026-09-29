@@ -1385,7 +1385,19 @@ a character whole only outside ASCII and a number where it stands, and a
 list of numbers alone becomes its vector without an expression each
 (`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
 and takes 6.2, a row by id 1.1 and takes 0.9, and the simple protocol's
-`near` went 10.5k -> 11.6k requests a second. The text is sliced with
+`near` went 10.5k -> 11.6k requests a second. Natively the lexer reads a
+list of numbers alone at once, into the vector the parser would make of it
+(`Tok::Vector`, `tokenize_vectors`), each number in the one pass that finds
+its end (`num::clinger`, the JSON reader's), and not after `in`, whose list
+keeps its integers and `f64`s: a token a number and a comma, and each
+number's text read for its end, for a `_` and for its value, a `put` of
+1 000 128-dim rows parsed in 5.4 ms, now 2.4, and
+`a_list_read_as_a_vector_parses_as_its_tokens_did` holds 20 000 generated
+texts to the token-at-a-time parse. The message's text is checked as UTF-8
+whole before `from_utf8_lossy` walks it in chunks (`take_cstr`). A simple
+`put` of 1 000 went in at 105k rows/s without an index, and at 180k now,
+past `COPY` (`make load-bench`). The browser module reads such a list as
+it did: its vectors come in as `f32`s beside the text. The text is sliced with
 `get`: an index that can panic brought 2.7 KB brotli of a `char`'s
 formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and

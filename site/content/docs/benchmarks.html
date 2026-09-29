@@ -326,12 +326,12 @@ make load-bench
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">HNSW kept, rows/s</th><th class="n">no vector index</th></tr></thead>
 <tbody>
-<tr><td>in process, <code>put</code> of 1 000</td><td class="n">20 100</td><td class="n">947 000</td></tr>
-<tr><td>pg wire, <code>COPY</code></td><td class="n"><b>17 600</b></td><td class="n">171 000</td></tr>
-<tr><td>pg wire, a row a statement, in a transaction</td><td class="n">17 200</td><td class="n">152 000</td></tr>
-<tr><td>pg wire, simple <code>put</code> of 1 000</td><td class="n">17 000</td><td class="n">105 000</td></tr>
-<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">17 000</td><td class="n"><b>198 000</b></td></tr>
-<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">16 500</td><td class="n">154 000</td></tr>
+<tr><td>in process, <code>put</code> of 1 000</td><td class="n">20 000</td><td class="n">814 000</td></tr>
+<tr><td>pg wire, simple <code>put</code> of 1 000</td><td class="n"><b>18 100</b></td><td class="n">180 000</td></tr>
+<tr><td>pg wire, <code>COPY</code></td><td class="n">17 900</td><td class="n">165 000</td></tr>
+<tr><td>pg wire, a row a statement, in a transaction</td><td class="n">17 800</td><td class="n">147 000</td></tr>
+<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">18 000</td><td class="n"><b>195 000</b></td></tr>
+<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">17 500</td><td class="n">159 000</td></tr>
 <tr><td>PostgreSQL + pgvector, <code>COPY</code></td><td class="n">434</td><td class="n">62 000</td></tr>
 <tr><td>PostgreSQL + pgvector, <code>INSERT</code> of 1 000</td><td class="n">424</td><td class="n">37 700</td></tr>
 </tbody>
@@ -352,8 +352,10 @@ numbers written out, read straight into its <code>f32</code>s wherever it
 comes from — a JSON array, a pg parameter, a <code>COPY</code> cell — in
 one pass that finds each number's end: through a JSON value a number, the
 same rows went in over HTTP at 123 000 rows/s. The simple protocol reads
-them as FenecQL literals, with the rest of the statement's text, and is the
-slowest of the ways, still 1.7× PostgreSQL's <code>COPY</code>. In process
+them as FenecQL literals, and its lexer reads a list of numbers alone the
+same way, into one vector at once: a token a number and a comma, each
+number's text read three times, it was the slowest of the ways at 105 000
+rows/s, and now passes every way but HTTP's array. In process
 the rows arrive parsed, which is what the rest can at most reach.
 PostgreSQL answers from inside Docker's virtual machine on the same Mac,
 whose network carries every byte.</p>
@@ -583,7 +585,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1283 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1169 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1040 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>426 KB</b></td><td class="n"><b>141 KB</b></td><td class="n">168 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>426 KB</b></td><td class="n"><b>141 KB</b></td><td class="n">169 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">90 KB</td><td class="n">25 KB</td><td class="n">29 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>

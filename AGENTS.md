@@ -1194,7 +1194,10 @@ a character whole only outside ASCII and a number where it stands, and a
 list of numbers alone becomes its vector without an expression each
 (`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
 and takes 6.2, a row by id 1.1 and takes 0.9, and the simple protocol's
-`near` went 10.5k -> 11.6k requests a second. The text is sliced with
+`near` went 10.5k -> 11.6k requests a second. Natively a list of numbers
+alone is lexed at once into its vector (`Tok::Vector`, not after `in`),
+each number through `num::clinger`: a simple `put` of 1 000 128-dim rows
+went in at 105k rows/s without an index, 180k now. The text is sliced with
 `get`: an index that can panic brought 2.7 KB brotli of a `char`'s
 formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and

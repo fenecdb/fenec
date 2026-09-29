@@ -11,6 +11,10 @@ pub enum Tok {
     Float(f64),
     /// `$1` -> Param(0)
     Param(usize),
+    /// Numbers alone between brackets, read as the parser reads such a
+    /// list: into `f32`s, a vector ([`tokenize_vectors`]). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    Vector(Vec<f32>),
     LBrace,
     RBrace,
     LParen,
@@ -43,6 +47,8 @@ impl Tok {
                 text
             }
             Tok::Param(i) => format!("${}", i + 1),
+            #[cfg(not(target_arch = "wasm32"))]
+            Tok::Vector(v) => format!("a vector of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
             Tok::LParen => "`(`".into(),
@@ -72,6 +78,98 @@ pub struct Token {
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
+    lex::<false>(src)
+}
+
+/// [`tokenize`], with numbers alone between brackets read at once into
+/// the vector the parser makes of them (`Parser::numbers_in_brackets`): a
+/// token and a pass over the text for the whole list, where each number and
+/// each comma was a token of its own, and each number's text read three
+/// times -- for its end, for a `_`, for its value. A `put` of 1 000 rows
+/// holding a 128-dim vector each took 5.4 ms to parse, 4.6 of it the lexer.
+/// Not after `in`, whose list keeps its numbers as they are written: an
+/// integer an integer and a decimal an `f64`. Natively: the browser module's
+/// vectors come in as `f32`s beside the text, and the reader was 1.5 KB of
+/// it.
+pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
+    lex::<{ !cfg!(target_arch = "wasm32") }>(src)
+}
+
+/// At a `[` at byte `i`: the numbers alone up to the `]` that closes it,
+/// each read as a token of its own reads it and made an `f32` as the parser
+/// makes it, and where the `]` ends. `None` for anything else -- an empty
+/// list, a trailing comma, a comment, a `_` in a number, one that does not
+/// read -- which the tokens then read as they always did.
+#[cfg(not(target_arch = "wasm32"))]
+fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
+    let mut v = Vec::new();
+    i += 1;
+    loop {
+        while space(i) {
+            i += 1;
+        }
+        // Natively a number is read in the one pass that finds its end,
+        // where Clinger's path takes it (`num::clinger`, the JSON reader's):
+        // 3.5 -> 2.3 ms of the 1 000 rows' parse. The browser module goes
+        // the general way, and carries no second reader.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(x) = fenec_core::num::clinger(b, &mut i) {
+            v.push(x as f32);
+            while space(i) {
+                i += 1;
+            }
+            match b.get(i) {
+                Some(b',') => {
+                    i += 1;
+                    continue;
+                }
+                Some(b']') => return Some((v, i + 1)),
+                _ => return None,
+            }
+        }
+        let s = i;
+        i += (b.get(i) == Some(&b'-')) as usize;
+        if !digit(i) {
+            return None;
+        }
+        while digit(i) {
+            i += 1;
+        }
+        let mut float = false;
+        if b.get(i) == Some(&b'.') && digit(i + 1) {
+            float = true;
+            i += 1;
+            while digit(i) {
+                i += 1;
+            }
+        }
+        if let Some(b'e' | b'E') = b.get(i) {
+            float = true;
+            i += 1;
+            i += matches!(b.get(i), Some(b'+' | b'-')) as usize;
+            while digit(i) {
+                i += 1;
+            }
+        }
+        let text = src.get(s..i)?;
+        v.push(match float {
+            true => fenec_core::num::parse_f64(text)? as f32,
+            false => text.parse::<i64>().ok()? as f32,
+        });
+        while space(i) {
+            i += 1;
+        }
+        match b.get(i) {
+            Some(b',') => i += 1,
+            Some(b']') => return Some((v, i + 1)),
+            _ => return None,
+        }
+    }
+}
+
+fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
     // Walked a byte at a time, a character read whole only where one
     // outside ASCII stands. Collected into a `Vec<char>` first, and each
     // number copied into a `String` of its own to parse, a query holding a
@@ -131,6 +229,26 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             ')' => {
                 i += 1;
                 Tok::RParen
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            '[' if VECTORS => {
+                let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in"));
+                match !after_in {
+                    true => match numbers_at(src, b, i) {
+                        Some((v, end)) => {
+                            i = end;
+                            Tok::Vector(v)
+                        }
+                        None => {
+                            i += 1;
+                            Tok::LBracket
+                        }
+                    },
+                    false => {
+                        i += 1;
+                        Tok::LBracket
+                    }
+                }
             }
             '[' => {
                 i += 1;
