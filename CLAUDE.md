@@ -217,7 +217,7 @@ memory again -- so readers wait for it. With them the peaks were 904 and
 888 MB (in process, in a `rust:alpine` container), and the one block
 without a graph loaded in 3.8 s against 8.6. A binary from before refuses
 kinds 10 and 11. The browser module writes no spill, and reading them cost
-it 1.4 KB.
+it 1.5 KB, 0.5 KB brotli.
 
 **Single writer, and readers beside it.** Reads take a shared lock
 (`Database::query`), writes the exclusive one (`execute_with`). A pg
