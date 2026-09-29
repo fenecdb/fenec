@@ -26,4 +26,5 @@ mod replica;
 mod rewrite;
 mod sorted;
 mod sparse;
+mod spill;
 mod storage;

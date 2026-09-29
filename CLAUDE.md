@@ -192,6 +192,33 @@ where a COPY of 50 000 768-dim rows kept its 154 MB of frames until the next
 write, and a record the sink's buffer cannot hold is written where it lies
 rather than copied into it.
 
+**A block that outgrows 16 MB spills into the file before it lands.** Held
+back until it landed, a block's frames were in memory twice, in its record
+and in the stores: 250 000 768-dim rows in one block peaked at 2 389 MB of
+anonymous memory on Linux against the 820 they left, blocks of 50 000 at
+1 144. Once the frames a block holds amount to `SPILL_AT` (16 MB),
+`run_one` has it spill after the statement (`Database::spill`): the frames
+are appended as a spill record (kind 10, a block record's body), and each
+store takes its frames in from there with the records that landed before
+the block (`Store::hand_over_keeping`) -- the block's mark for it becomes
+where it stood then, those taken in (`Mark::spilled`), and each document
+the block overwrote is pointed at where it is in the file now
+(`store::Moved`), so a rollback puts it back. The block lands as a land
+record (kind 11) naming its spills by where their bodies are, then its
+writes since the last; a load applies a spill only where a land names it,
+and cuts off the spills a file ends with. A rollback, a lapsed lease or a
+crash leaves them dead in the file until a compact. The land never travels:
+the sink is handed the spills' bodies (`Sink::land`), and a primary's feed
+sends the block as the one block record it would have been
+(`landed_block`), which a replica applies whole. A savepoint stops the
+spills (its marks are where the stores stood in memory), and a block that
+spilled is not parked -- written again, its writes would be read into
+memory again -- so readers wait for it. With them the peaks were 904 and
+888 MB (in process, in a `rust:alpine` container), and the one block
+without a graph loaded in 3.8 s against 8.6. A binary from before refuses
+kinds 10 and 11. The browser module writes no spill, and reading them cost
+it 1.5 KB, 0.5 KB brotli.
+
 **Single writer, and readers beside it.** Reads take a shared lock
 (`Database::query`), writes the exclusive one (`execute_with`). A pg
 transaction is a block held open (`fenec-pg/src/server.rs`, `Hold`) from

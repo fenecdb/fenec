@@ -14,6 +14,14 @@
 //! collection's frames, so a handover reads nothing of the file: what a
 //! store's segments hold is its runs, in the order they landed, frame for
 //! frame -- which the store checks before anything moves.
+//!
+//! A block that has not landed is in no record, and held every document it
+//! wrote twice until it did, in its record and in the stores: 250 000
+//! 768-dim rows in one COPY peaked 1 569 MB over what they left. Once its
+//! frames amount to [`SPILL_AT`] bytes it spills them into the file
+//! ([`Database::spill`]), and the stores take them in from there with the
+//! records that landed before it; its land names the spills
+//! ([`REC_LAND`]), and a load applies them then or never.
 
 use super::*;
 
@@ -54,18 +62,27 @@ pub(super) fn note_record(landed: &mut Vec<Landed>, bytes: &mut u64, at: u64, re
     let Ok(r) = record_at(record, &mut pos) else {
         return;
     };
+    // The records a block's body holds, from `from` in the record's.
+    let mut inner = |from: usize| {
+        let body = &r.body[from - r.body_at..];
+        let mut p = 0;
+        while p < body.len() {
+            let Ok(inner) = record_at(body, &mut p) else {
+                return;
+            };
+            if inner.kind == REC_DATA {
+                let body_at = (from + inner.body_at) as u64;
+                note(landed, bytes, inner.cid, inner.body.len(), at + body_at);
+            }
+        }
+    };
     match r.kind {
         REC_DATA => note(landed, bytes, r.cid, r.body.len(), at + r.body_at as u64),
-        REC_BLOCK => {
-            let mut p = 0;
-            while p < r.body.len() {
-                let Ok(inner) = record_at(r.body, &mut p) else {
-                    return;
-                };
-                if inner.kind == REC_DATA {
-                    let body_at = (r.body_at + inner.body_at) as u64;
-                    note(landed, bytes, inner.cid, inner.body.len(), at + body_at);
-                }
+        REC_BLOCK => inner(r.body_at),
+        // Its spills' frames the stores took in as they spilled.
+        REC_LAND => {
+            if let Ok((_, rest)) = land_parts(r.body) {
+                inner(r.body_at + r.body.len() - rest.len());
             }
         }
         _ => {}
@@ -123,6 +140,162 @@ impl Database {
         if self.landed_bytes >= self.handover_at || self.landed.len() >= HANDOVER_RUNS {
             let _ = self.hand_over();
         }
+    }
+
+    /// [`Self::spill`], once the open block's frames amount to `spill_at`
+    /// bytes and it may spill: not while it is parked, nor once a savepoint
+    /// was taken in it.
+    pub(super) fn spill_when_due(&mut self) -> Result<()> {
+        let due = self.block.as_ref().is_some_and(|b| {
+            b.frames.len() - HEAD_ROOM >= self.spill_at as usize
+                && !b.parked
+                && !b.unspillable.load(Relaxed)
+        });
+        if due && self.mapped && self.failed.is_none() {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Spills the frames the open block holds into the file as a spill
+    /// record ([`REC_SPILL`]), which the stores take them in from with the
+    /// records that landed before the block, and lets the block's buffer go.
+    /// The block lands naming its spills ([`Self::land_spilled`]), or never:
+    /// a rollback, a crash or a lapsed lease leaves them dead in the file. A
+    /// rollback puts each store back to where it stood before the block,
+    /// the records before it taken in (`Mark::spilled`), and each document
+    /// to where it was, in the file now ([`crate::store::Moved`]).
+    pub fn spill(&mut self) -> Result<()> {
+        let Some(mut b) = self.block.take() else {
+            return Ok(());
+        };
+        let r = self.spill_block(&mut b);
+        self.block = Some(b);
+        r
+    }
+
+    fn spill_block(&mut self, b: &mut Block) -> Result<()> {
+        let body = b.body_from(b.spilled_writes);
+        // Each collection's runs, and where in the body their frames start.
+        let mut runs: Vec<(u32, u64, usize)> = Vec::new();
+        let mut p = 0;
+        while p < body.len() {
+            let r = record_at(&body, &mut p)?;
+            if r.kind == REC_DATA {
+                runs.push((r.cid, r.body.len() as u64, r.body_at));
+            }
+        }
+        let mut cids: Vec<u32> = runs.iter().map(|r| r.0).collect();
+        cids.sort_unstable();
+        cids.dedup();
+        // Every store takes its frames in, or the block spills nothing: asked
+        // before the record is written. A collection dropped in the block
+        // has no store here, and its frames go with it.
+        let lens = |cid: u32, landed: &[Landed]| -> Vec<u64> {
+            let before = landed.iter().filter(|l| l.cid == cid).map(|l| l.len);
+            before
+                .chain(runs.iter().filter(|r| r.0 == cid).map(|r| r.1))
+                .collect()
+        };
+        for &cid in &cids {
+            if let Some(c) = self.collections.values().find(|c| c.id == cid) {
+                if !c.store.would_hand_over(&lens(cid, &self.landed)) {
+                    b.unspillable.store(true, Relaxed);
+                    return Ok(());
+                }
+            }
+        }
+        let record = framed(REC_SPILL, 0, &body);
+        let head = (record.len() - body.len()) as u64;
+        let at = *self.appended.get_mut();
+        let r = self.sink_mut().append(&record);
+        self.storage(r)?;
+        *self.appended.get_mut() += record.len() as u64;
+        self.dirty = true;
+        let r = self.sink_mut().written_through();
+        let Some(base) = self.storage(r)? else {
+            // Nothing to take them in from: the spill is dead, and the block
+            // holds its frames as it did.
+            b.unspillable.store(true, Relaxed);
+            return Ok(());
+        };
+        // A collection the block dropped keeps the notes of what landed
+        // before it: put back, the block brings it back with them.
+        let mut handed = Vec::with_capacity(cids.len());
+        for &cid in &cids {
+            let Some(c) = self.collections.values_mut().find(|c| c.id == cid) else {
+                continue;
+            };
+            handed.push(cid);
+            let mut all: Vec<(u64, u64)> = self
+                .landed
+                .iter()
+                .filter(|l| l.cid == cid)
+                .map(|l| (l.len, l.at))
+                .collect();
+            let keep = all.len();
+            all.extend(
+                runs.iter()
+                    .filter(|r| r.0 == cid)
+                    .map(|r| (r.1, at + head + r.2 as u64)),
+            );
+            let Some((moved, kept)) = c.store.hand_over_keeping(&base, &all, keep) else {
+                return Err(Error::Corrupt(
+                    "a store could not take its spilled frames in".into(),
+                ));
+            };
+            if let Some(m) = b.marks.iter_mut().find(|(c, _)| *c == cid) {
+                m.1 = m.1.spilled(kept);
+            }
+            for u in b.was.iter_mut() {
+                if let Undo::Doc(c, _, Some(loc)) = u {
+                    if *c == cid {
+                        *loc = moved.loc(*loc);
+                    }
+                }
+            }
+        }
+        self.landed.retain(|l| !handed.contains(&l.cid));
+        self.landed_bytes = self.landed.iter().map(|l| l.len).sum();
+        b.spilled.push((at + head, body.len() as u64));
+        b.spill_base = Some(base);
+        b.frames.truncate(HEAD_ROOM);
+        b.spilled_writes = b.heads.len();
+        Ok(())
+    }
+
+    /// Lands a block that spilled, as a land record ([`REC_LAND`]) naming
+    /// its spills, then the rest of its records; returns what the sink said
+    /// and the record's length. The sink is handed the spills' bodies too,
+    /// for a feed to send the block as the one block record it would have
+    /// been ([`Sink::land`]).
+    pub(super) fn land_spilled(&mut self, b: &mut Block, seq: u64, at: u64) -> (Result<()>, usize) {
+        let mut body = Vec::new();
+        put_uvarint(&mut body, b.spilled.len() as u64);
+        for &(s, n) in &b.spilled {
+            put_uvarint(&mut body, s);
+            put_uvarint(&mut body, n);
+        }
+        body.extend_from_slice(&b.body_from(b.spilled_writes));
+        let record = framed(REC_LAND, 0, &body);
+        let base = b.spill_base.clone();
+        let file: &[u8] = base.as_deref().map_or(&[], |m| m.as_ref());
+        let spilled: Vec<&[u8]> = b
+            .spilled
+            .iter()
+            .map(|&(s, n)| file.get(s as usize..(s + n) as usize).unwrap_or(&[]))
+            .collect();
+        let r = self.sink_mut().land(seq, &spilled, &record);
+        if r.is_ok() {
+            note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
+        }
+        (r, record.len())
+    }
+
+    /// When an open block spills: once its frames amount to `bytes`
+    /// ([`SPILL_AT`] unless set), `u64::MAX` never.
+    pub fn set_spill(&mut self, bytes: u64) {
+        self.spill_at = bytes;
     }
 
     /// When a handover runs: once the documents written since the last one

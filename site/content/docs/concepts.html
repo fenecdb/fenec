@@ -76,7 +76,11 @@ over a 1.1 GB file, where writing it under the lock held them 1.22 s.</p>
 <p>What is written after the open reaches the file as each block lands — a
 transaction, a <code>COPY</code>, a statement — and the stores hold those
 documents in memory only until they amount to 16 MB: then they read them
-from the file, where the records put them, and let the memory go. Held until a restart before, 250 000 768-dim rows loaded into a
+from the file, where the records put them, and let the memory go. A block
+that has not landed yet spills into the file at 16 MB the same way, in a
+record a load takes only once the block's land names it, so a
+<code>COPY</code> of any size holds no more; one of 250 000 768-dim rows
+peaked at 904 MB where it had at 2 389, of which 820 are its graph. Held until a restart before, 250 000 768-dim rows loaded into a
 server were held twice, in the file and in memory: the engine counted 1 592
 MB after the load, 820 now and 818 for the same file started again. Nothing
 of the file is read or written for it — where each record went is noted as

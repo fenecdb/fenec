@@ -128,6 +128,59 @@ const REC_HISTORY: u8 = crate::history::RECORD;
 /// off whole: a crash leaves none of it.
 const REC_BLOCK: u8 = 9;
 
+/// A part of a block not yet landed, which spilled into the file as the
+/// block outgrew [`SPILL_AT`] (`Database::spill`): `[10][0][length]{record}`,
+/// its body a block record's. It moves no counter, and a load takes it only
+/// where a land names it: a crash, a rollback or a block put back leaves it
+/// dead in the file, and a load cuts off the ones after the last write. A
+/// version before it refuses it as corrupt.
+const REC_SPILL: u8 = 10;
+
+/// A block that spilled, landing: `[11][0][length][count]{[place][length]}
+/// {record}` -- the spills it takes, by where their bodies are in the file,
+/// then the rest of the block's records. A load applies the spills' records
+/// in order and then its own, and the counter moves by all their writes. It
+/// never travels: a primary's feed is sent the block as the one block record
+/// it would have been ([`Sink::land`], [`landed_block`]).
+const REC_LAND: u8 = 11;
+
+/// The spills a land names, by where their bodies are in the file and how
+/// long they are, and the records after them.
+type LandParts<'a> = (Vec<(u64, u64)>, &'a [u8]);
+
+/// A land's body, in its parts.
+fn land_parts(body: &[u8]) -> Result<LandParts<'_>> {
+    let mut p = 0;
+    let n = get_uvarint(body, &mut p)? as usize;
+    let mut named = Vec::with_capacity(n.min(body.len()));
+    for _ in 0..n {
+        let at = get_uvarint(body, &mut p)?;
+        named.push((at, get_uvarint(body, &mut p)?));
+    }
+    let rest = body
+        .get(p..)
+        .ok_or_else(|| Error::Corrupt("a land cut short".into()))?;
+    Ok((named, rest))
+}
+
+/// The block record a block that spilled would have been, from the bodies
+/// of its spills and its land: what a primary's feed sends its replicas,
+/// which apply a block whole.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn landed_block(spilled: &[&[u8]], land: &[u8]) -> Result<Vec<u8>> {
+    let r = record_at(land, &mut 0)?;
+    if r.kind != REC_LAND {
+        return Err(Error::Corrupt("not a land".into()));
+    }
+    let (_, rest) = land_parts(r.body)?;
+    let mut body = Vec::with_capacity(spilled.iter().map(|s| s.len()).sum::<usize>() + rest.len());
+    for s in spilled {
+        body.extend_from_slice(s);
+    }
+    body.extend_from_slice(rest);
+    Ok(framed(REC_BLOCK, 0, &body))
+}
+
 /// The writes a record holds, which is how far it moves the change counter:
 /// a data record's frames, a block's records' writes, one for a schema
 /// change, none for what is not a write. A feed counting records by their
@@ -152,6 +205,20 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
             Ok(n)
         }
         Some(&(REC_CREATE | REC_DROP | REC_ALTER)) => Ok(1),
+        // The land's own records; the spills' are counted where it is
+        // loaded, since it never travels.
+        Some(&REC_LAND) => {
+            let (_, rest) = land_parts(body)?;
+            let mut n = 0;
+            each_inner(rest, &mut |kind, _, inner| {
+                n += match kind {
+                    REC_DATA => frames_in(inner)?,
+                    _ => 1,
+                };
+                Ok(())
+            })?;
+            Ok(n)
+        }
         _ => Ok(0),
     }
 }
@@ -342,6 +409,23 @@ struct Block {
     /// waiting since they were last linked: the newest of the field's
     /// waiting nodes, since nothing else leaves one while a block is open.
     waiting: Vec<(u32, String, usize)>,
+    /// Where the block's spills' bodies are in the file (`Database::spill`),
+    /// and how many of its writes they hold -- the first of `heads`, whose
+    /// frames `frames` no longer holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    spilled: Vec<(u64, u64)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    spilled_writes: usize,
+    /// The file as mapped when the block last spilled: its land reads the
+    /// spills' bodies from there for a feed.
+    #[cfg(not(target_arch = "wasm32"))]
+    spill_base: Option<crate::store::Base>,
+    /// A savepoint was taken, or a spill could not be: the block spills no
+    /// more. A savepoint's marks are where the stores stood in memory, which
+    /// a spill after it would move. Set through `&self`, as a savepoint is
+    /// taken.
+    #[cfg(not(target_arch = "wasm32"))]
+    unspillable: std::sync::atomic::AtomicBool,
 }
 
 /// The nodes a block's `put`s leave waiting before they are linked, a
@@ -390,7 +474,40 @@ impl Block {
         self.left = false;
         self.defers = false;
         self.waiting.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.spilled.clear();
+            self.spilled_writes = 0;
+            self.spill_base = None;
+            *self.unspillable.get_mut() = false;
+        }
         self
+    }
+
+    /// The records of the writes from `from` on, as a block record's body
+    /// holds them: a data record for each run of one collection's frames --
+    /// its frames one stretch where a store takes them in from the file --
+    /// and each schema change's record. What a spill writes, and a land
+    /// after the spills.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn body_from(&self, from: usize) -> Vec<u8> {
+        let mut body = Vec::with_capacity(self.frames.len());
+        let (mut k, mut start) = (from, HEAD_ROOM);
+        while k < self.heads.len() {
+            let (kind, cid, mut end) = self.heads[k];
+            let mut next = k + 1;
+            while kind == REC_DATA
+                && next < self.heads.len()
+                && self.heads[next].0 == REC_DATA
+                && self.heads[next].1 == cid
+            {
+                end = self.heads[next].2;
+                next += 1;
+            }
+            frame_into(&mut body, kind, cid, &self.frames[start..end]);
+            (start, k) = (end, next);
+        }
+        body
     }
 
     /// What an open block's buffers hold: the frames above all, a second
@@ -470,6 +587,8 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
             | REC_NEXTID
             | REC_HISTORY
             | REC_BLOCK
+            | REC_SPILL
+            | REC_LAND
     ) {
         return Ok(true);
     }
@@ -505,6 +624,8 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
                 | REC_NEXTID
                 | REC_HISTORY
                 | REC_BLOCK
+                | REC_SPILL
+                | REC_LAND
         ) {
             break;
         }
@@ -624,6 +745,16 @@ pub trait Sink: Send {
     #[cfg(not(target_arch = "wasm32"))]
     fn written_through(&mut self) -> Result<Option<crate::store::Base>> {
         Ok(None)
+    }
+    /// Appends a block that spilled as it lands ([`Database::spill`]):
+    /// `record` is its land, naming the spills the file holds already, and
+    /// `spilled` their bodies, for a sink that passes writes on -- a
+    /// primary's feed -- to send the block as the one block record it
+    /// would have been ([`landed_block`]), which a replica applies whole.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn land(&mut self, seq: u64, spilled: &[&[u8]], record: &[u8]) -> Result<()> {
+        let _ = spilled;
+        self.record(seq, record)
     }
     /// Where a rewrite beside the database writes the file that will take
     /// this one's place ([`Self::adopt`]): a `compact` on a server, written
@@ -1782,6 +1913,9 @@ pub struct Database {
     landed_bytes: u64,
     #[cfg(not(target_arch = "wasm32"))]
     handover_at: u64,
+    /// When an open block spills ([`SPILL_AT`] unless set).
+    #[cfg(not(target_arch = "wasm32"))]
+    spill_at: u64,
     /// Whether a rewrite beside the database is writing its side file: one
     /// at a time, since the file has one name. Only where a file is mapped,
     /// the one place a rewrite writes beside it.
@@ -1813,6 +1947,13 @@ const GRAPH_NODE_BYTES: u64 = 72;
 /// ones, where 64 MB held it 3.9 and 8.5 ms: the same work in shorter
 /// pauses, and a quarter of the memory.
 pub const HANDOVER_AT: u64 = 16 << 20;
+
+/// A mapped database's open block spills the frames it holds into the file
+/// once they amount to this many bytes (`Database::spill`): a block held
+/// every document it wrote twice until it landed, once in its record and
+/// once in the stores, and 250 000 768-dim rows in one COPY peaked 1 569 MB
+/// over what they left.
+pub const SPILL_AT: u64 = 16 << 20;
 
 impl Default for Database {
     fn default() -> Self {
@@ -1852,6 +1993,8 @@ impl Database {
             landed_bytes: 0,
             #[cfg(not(target_arch = "wasm32"))]
             handover_at: HANDOVER_AT,
+            #[cfg(not(target_arch = "wasm32"))]
+            spill_at: SPILL_AT,
             #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
         }
@@ -2559,11 +2702,28 @@ impl Database {
         let mut touched: Vec<(String, Vec<DocId>)> = Vec::new();
         let mut whole = bytes.len();
         let mut walk = Walk::new(bytes, pos);
+        // The spills since the last write, by where each record and its
+        // body start and the body's length: a land takes the ones it names.
+        let mut spills: Vec<(usize, usize, usize)> = Vec::new();
+        // Where the spills the file ends with start: nothing lands them, and
+        // the file is cut there as after a torn record. One followed by any
+        // other record -- a graph, the history -- stays, dead.
+        let mut dead_tail: Option<usize> = None;
         // The index of a data record's frames an image writes after the
         // collection's id counter, for the record right after it alone.
         let mut frames: Option<(u32, &[u8])> = None;
         while let Some(r) = walk.next()? {
             let tail = r.at >= body_end;
+            if matches!(
+                r.kind,
+                REC_CREATE | REC_DROP | REC_ALTER | REC_DATA | REC_BLOCK
+            ) {
+                spills.clear();
+            }
+            dead_tail = match r.kind {
+                REC_SPILL => dead_tail.or(Some(r.at)),
+                _ => None,
+            };
             let index = frames
                 .take()
                 .filter(|(cid, _)| r.kind == REC_DATA && *cid == r.cid && !tail)
@@ -2590,31 +2750,54 @@ impl Database {
                     }
                 }
                 REC_BLOCK => {
-                    let mut frames = 0;
-                    each_inner(r.body, &mut |kind, cid, inner| {
-                        if kind != REC_DATA {
-                            frames += 1;
-                            return self.load_schema(kind, cid, inner, &mut by_id, &mut restored);
-                        }
-                        // Where the record's frames are in the file, which a
-                        // mapped store reads them from.
-                        let at = inner.as_ptr() as usize - bytes.as_ptr() as usize;
-                        frames += self.load_data(
-                            cid,
-                            bytes,
-                            at,
-                            inner.len(),
-                            &by_id,
-                            &restored,
-                            &mut touched,
-                            None,
-                            replay,
-                        )?;
-                        Ok(())
-                    })?;
+                    let frames = self.load_block(
+                        bytes,
+                        r.body,
+                        &mut by_id,
+                        &mut restored,
+                        &mut touched,
+                        replay,
+                    )?;
                     if tail {
                         seq_seen += frames;
                     }
+                }
+                // Held until a land names it; a land never comes for one a
+                // rollback or a crash left.
+                REC_SPILL => spills.push((r.at, r.body_at, r.body.len())),
+                REC_LAND => {
+                    let (named, rest) = land_parts(r.body)?;
+                    let mut frames = 0;
+                    for (at, len) in named {
+                        let Some(&(_, body_at, _)) = spills
+                            .iter()
+                            .find(|s| s.1 as u64 == at && s.2 as u64 == len)
+                        else {
+                            return Err(Error::Corrupt(
+                                "a land names a spill the file does not hold".into(),
+                            ));
+                        };
+                        frames += self.load_block(
+                            bytes,
+                            &bytes[body_at..body_at + len as usize],
+                            &mut by_id,
+                            &mut restored,
+                            &mut touched,
+                            replay,
+                        )?;
+                    }
+                    frames += self.load_block(
+                        bytes,
+                        rest,
+                        &mut by_id,
+                        &mut restored,
+                        &mut touched,
+                        replay,
+                    )?;
+                    if tail {
+                        seq_seen += frames;
+                    }
+                    spills.clear();
                 }
                 REC_NEXTID => {
                     // Not a write but the counter itself: it does not move `seq`.
@@ -2695,6 +2878,9 @@ impl Database {
                 ));
             }
             whole = walk.pos;
+        }
+        if let Some(at) = dead_tail {
+            whole = whole.min(at);
         }
         // A database loaded from a file has no *history*, only its current
         // state: the ring is emptied and the horizon is set to the counter.
@@ -2783,6 +2969,44 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    /// A block record's body loaded -- its data records and its schema
+    /// changes, in order -- as a block, a spill or a land holds them;
+    /// returns its writes.
+    #[allow(clippy::too_many_arguments)]
+    fn load_block(
+        &mut self,
+        bytes: &[u8],
+        body: &[u8],
+        by_id: &mut HashMap<u32, String>,
+        restored: &mut Vec<(String, String, usize)>,
+        touched: &mut Vec<(String, Vec<DocId>)>,
+        replay: &mut Replay<'_>,
+    ) -> Result<u64> {
+        let mut frames = 0;
+        each_inner(body, &mut |kind, cid, inner| {
+            if kind != REC_DATA {
+                frames += 1;
+                return self.load_schema(kind, cid, inner, by_id, restored);
+            }
+            // Where the record's frames are in the file, which a mapped
+            // store reads them from.
+            let at = inner.as_ptr() as usize - bytes.as_ptr() as usize;
+            frames += self.load_data(
+                cid,
+                bytes,
+                at,
+                inner.len(),
+                by_id,
+                restored,
+                touched,
+                None,
+                replay,
+            )?;
+            Ok(())
+        })?;
+        Ok(frames)
     }
 
     /// A data record's frames, `len` bytes at `at` in the file, into their
@@ -3639,7 +3863,14 @@ impl Database {
         let Some(mut b) = self.block.take() else {
             return true;
         };
-        if b.graphs != graphs || b.heads.iter().any(|h| h.0 != REC_DATA) {
+        // A block that spilled holds its writes in the file, which the
+        // stores read them from: put back and written again, they would be
+        // read into memory again, and spilled again.
+        #[cfg(not(target_arch = "wasm32"))]
+        let spilled = !b.spilled.is_empty();
+        #[cfg(target_arch = "wasm32")]
+        let spilled = false;
+        if b.graphs != graphs || b.heads.iter().any(|h| h.0 != REC_DATA) || spilled {
             self.block = Some(b);
             return false;
         }
@@ -3743,7 +3974,17 @@ impl Database {
         let seq = self.changes.seq() + b.heads.len() as u64;
         #[cfg(not(target_arch = "wasm32"))]
         let at = *self.appended.get_mut();
-        let (r, len) = {
+        // A block that spilled lands as the spills it names and the rest.
+        #[cfg(not(target_arch = "wasm32"))]
+        let landed = match b.spilled.is_empty() {
+            true => None,
+            false => Some(self.land_spilled(&mut b, seq, at)),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let landed = None;
+        let (r, len) = if let Some(landed) = landed {
+            landed
+        } else {
             let record = b.record();
             let r = self.sink_mut().record(seq, &record);
             // Where its frames are in the file, for the handover: the
@@ -3894,6 +4135,9 @@ impl Database {
             return Savepoint::default();
         };
         debug_assert!(!b.parked, "a savepoint of a parked block");
+        #[cfg(not(target_arch = "wasm32"))]
+        b.unspillable
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Savepoint {
             block: self.begun,
             frames: b.frames.len(),
@@ -4022,6 +4266,13 @@ impl Database {
     /// data the module has not been handed.
     fn run_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         let out = self.execute_inner(stmt, params);
+        // A block that outgrew its bound spills what it holds into the file,
+        // a statement's writes at a time: a COPY's puts of 10 000 rows, a
+        // transaction's statements.
+        #[cfg(not(target_arch = "wasm32"))]
+        if out.is_ok() && !stmt.is_read_only() {
+            self.spill_when_due()?;
+        }
         // The browser module compares text only in the collation data it
         // has been handed. A read that reached for more is refused rather
         // than answered in the order of what it had, and runs again once

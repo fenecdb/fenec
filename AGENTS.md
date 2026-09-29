@@ -144,7 +144,13 @@ mapping grows over the appends. Linux's allocators give the freed heap
 back; macOS's keeps hundreds of megabytes in its large cache
 (`MallocSpaceEfficient=1` turns that off). A large block's buffers are let
 go of as it lands (`Database::spare`), and a record past the sink's buffer
-is written where it lies.
+is written where it lies. A block that has not landed spills what it holds
+into the file at `SPILL_AT` (16 MB) as a spill record (kind 10), which the
+stores take in (`Database::spill`); it lands as a land record (kind 11)
+naming its spills, which a load applies only then, and a replica is sent
+the block as one block record (`Sink::land`, `landed_block`). A savepoint
+stops the spills, and a block that spilled is not parked. 250 000 768-dim
+rows in one block peaked at 904 MB where they had at 2 389.
 `fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
 tenants included) is the other way. In the browser `store::Base` is a type
 of no value (`off::Mapped`), so the mapped-file code compiles for both
