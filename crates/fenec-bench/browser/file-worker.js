@@ -1,6 +1,6 @@
 // What keeping a database costs a page, measured where a page keeps it: in a
 // dedicated worker (`make file-bench`). A database of 61 000 rows with
-// 128-dim vectors, a 32 MB image, kept in IndexedDB by `persist` and in a
+// 128-dim vectors, a 32 MB image, kept in IndexedDB by `persist`, plain and sealed, and in a
 // file of the origin private file system by `openFile`: the first image,
 // one new row stored, thirty times, and the database opened again.
 // Both stores are emptied before and after.
@@ -129,6 +129,30 @@ async function measure() {
     await restore(again, 'bench');
     out.idb_open = now() - t;
     out.idb_rows = again.rows('get docs count')[0].count;
+    again.close();
+  }
+
+  say('IndexedDB sealed: persist and restore with an AES-GCM key');
+  {
+    const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const db = await loaded(bytes);
+    let t = now();
+    await persist(db, 'sealed', { cryptoKey });
+    out.sealed_image = now() - t;
+    const r = rng(2);
+    const ms = [];
+    for (let i = 0; i < WRITES; i++) {
+      put(db, r, i);
+      t = now();
+      await persist(db, 'sealed', { cryptoKey });
+      ms.push(now() - t);
+    }
+    out.sealed_row = summary(ms);
+    db.close();
+    const again = await Fenec.open(MODULE);
+    t = now();
+    await restore(again, 'sealed', { cryptoKey });
+    out.sealed_open = now() - t;
     again.close();
   }
 

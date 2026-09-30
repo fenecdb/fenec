@@ -169,3 +169,65 @@ test('drain hands over frames, or an image after a rewrite', { skip: wasm ? fals
   fresh.load(after.bytes);
   assert.deepEqual(fresh.rows('get t select n order n'), db.rows('get t select n order n'));
 });
+
+test('a sealed database restores with its key and nothing else', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const idb = fakeIndexedDB();
+  globalThis.indexedDB = idb;
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fenec, persist, restore } = await import('./fenec.js');
+  const aes = () => crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const cryptoKey = await aes();
+
+  const db = await Fenec.open(wasm);
+  db.run('create collection t (n int, body text)');
+  for (let i = 0; i < 200; i++) db.run('put t {n: $1, body: "secret-text"}', [i]);
+  await persist(db, 's', { cryptoKey });
+  db.run('put t {n: 1000, body: "secret-chunk-one"}');
+  await persist(db, 's', { cryptoKey });
+  db.run('put t {n: 1001, body: "secret-chunk-two"}');
+  await persist(db, 's', { cryptoKey });
+
+  // Nothing stored holds the text in the clear.
+  const plainIn = (rec) => Buffer.from(rec.data).includes('secret');
+  assert.equal([...idb.records.values()].some(plainIn), false);
+  assert.deepEqual([...idb.records.keys()].sort(), ['s', 's#000000001', 's#000000002']);
+
+  const rows = (d) => d.rows('get t select n, body order n');
+  const back = await Fenec.open(wasm);
+  assert.equal(await restore(back, 's', { cryptoKey }), true);
+  assert.deepEqual(rows(back), rows(db));
+
+  const refused = async (re) => assert.rejects(restore(await Fenec.open(wasm), 's', { cryptoKey }), re);
+  await assert.rejects(restore(await Fenec.open(wasm), 's'), /sealed: restore needs its cryptoKey/);
+  await assert.rejects(restore(await Fenec.open(wasm), 's', { cryptoKey: await aes() }), /does not open/);
+
+  // A byte changed, two chunks swapped, a chunk from the image before.
+  const saved = new Map(idb.records);
+  const put = (k, v) => idb.records.set(k, v);
+  const one = saved.get('s#000000001');
+  const two = saved.get('s#000000002');
+  const flipped = { ...two, data: two.data.slice() };
+  flipped.data[3] ^= 1;
+  put('s#000000002', flipped);
+  await refused(/record 2 does not open/);
+  put('s#000000001', two);
+  put('s#000000002', one);
+  await refused(/record 1 does not open/);
+  idb.records.clear();
+  for (const [k, v] of saved) put(k, v);
+
+  // A new image gets a generation of its own, and the old chunk is refused.
+  db.run('compact');
+  await persist(db, 's', { cryptoKey });
+  assert.equal(idb.records.has('s#000000001'), false);
+  put('s#000000001', one);
+  await refused(/record 1 does not open/);
+  idb.records.delete('s#000000001');
+  const again = await Fenec.open(wasm);
+  await restore(again, 's', { cryptoKey });
+  assert.deepEqual(rows(again), rows(db));
+
+  // A record stored in the clear is not taken for a sealed one.
+  await persist(db, 'clear');
+  await assert.rejects(restore(await Fenec.open(wasm), 'clear', { cryptoKey }), /stored in the clear/);
+});

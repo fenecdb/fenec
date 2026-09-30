@@ -120,6 +120,11 @@ IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
 (`compact`, or appended writes past half the image and 64 KB) goes into
 `<name>~` and is flushed before the file is written over, so a crash leaves
 one of the two whole; `openFile` takes the copy when its image is whole.
+`persist(db, key, { cryptoKey })` seals the image and each chunk with
+AES-GCM (WebCrypto), a tag over the key, the image's random generation and
+the chunk's number, so one moved, dropped from the middle or kept from an
+image before is refused; a row persists in 0.16 ms either way, the 32 MB
+image in 129 ms against 76. The OPFS file stays plain: it is `fenec-pg`'s.
 
 ## Invariants worth knowing before you change things
 
