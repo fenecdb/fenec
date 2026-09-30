@@ -1469,8 +1469,10 @@ at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
 before the next is made: built into one `Vec` the image doubled as it grew,
 old and new side by side, and `boxed` copied it again -- 30 000 x 128 went
 from 60 to 128 MB, and goes to 70. An object holds about 50 000 rows of 128
-dimensions or 5 000 of 768, the writes' own growth the ceiling now;
-`wrangler dev` does not hold a Worker to it.
+dimensions -- what the same rows hold restored -- or 8 000 of 768 written
+250 a request: at 768 a write's own buffers are the peak, 5 000 rows
+written 1 000 a request holding 100 MB against 49 restored and 72 written
+250 at a time; `wrangler dev` does not hold a Worker to it.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
