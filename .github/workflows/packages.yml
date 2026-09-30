@@ -1,6 +1,7 @@
 name: packages
 
-# PyPI's `fenecdb` and npm's `@fenecdb/web` and `@fenecdb/react` go out when
+# PyPI's `fenecdb` and npm's `@fenecdb/web`, `@fenecdb/react`,
+# `@fenecdb/cloudflare` and `@fenecdb/langchain` go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
 # the moment the packages follow it. A registry keeps what it is given, so
@@ -114,8 +115,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -eu
-          # The web client first: the React hook's users install it beside.
-          for pkg in dist/fenecdb-web-*.tgz dist/fenecdb-react-*.tgz; do
+          # The web client first: the others' users install it beside.
+          for pkg in dist/fenecdb-web-*.tgz dist/fenecdb-react-*.tgz dist/fenecdb-cloudflare-*.tgz dist/fenecdb-langchain-*.tgz; do
             # A version already on npm is left, as PyPI's are: npm refuses to
             # publish one twice, and a dispatch after a run that failed part
             # of the way would otherwise stop at it.
