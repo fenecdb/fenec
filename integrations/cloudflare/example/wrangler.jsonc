@@ -1,0 +1,15 @@
+{
+  // The example Worker: a tenant's database a Durable Object each. Named
+  // with --config, since wrangler run below the repository took the site's
+  // wrangler.jsonc at its root, and served its static assets instead.
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "fenecdb-example",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "TENANT", "class_name": "Tenant" }]
+  },
+  // SQLite-backed: a value takes up to 2 MB there, and the pieces could be
+  // larger; the default holds on either kind.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tenant"] }]
+}

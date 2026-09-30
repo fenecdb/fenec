@@ -184,7 +184,9 @@ jobs:
         run: make wasm react-test
 
       # A database kept in a Durable Object's storage, against a stand-in
-      # holding to its limits, and storage that fails part way.
+      # holding to its limits, and storage that fails part way; then the
+      # example Worker under `wrangler dev`, workerd running it, stopped and
+      # started again over the same storage.
       - name: Durable Object storage
         run: make cloudflare-test
 

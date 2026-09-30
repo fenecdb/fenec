@@ -238,9 +238,10 @@ react-test:
 	cd integrations/react && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## A database kept in a Durable Object's storage: persist, restore, and
-## storage that fails part way, against a stand-in (needs `make wasm`)
+## storage that fails part way, against a stand-in; then the example Worker
+## under `wrangler dev`, stopped and started again (needs `make wasm`)
 cloudflare-test:
-	cd integrations/cloudflare && npm test
+	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## What `order ... collate tr` costs over a million Turkish names, in fenecdb
 ## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu
