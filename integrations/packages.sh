@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The packages as the registries would take them, installed where a user
 # would install them, and used: PyPI's `fenecdb`, npm's `@fenecdb/web`,
-# `@fenecdb/react` and `@fenecdb/cloudflare`. Needs `make wasm wasm-lite` first, since the web
+# `@fenecdb/react`, `@fenecdb/cloudflare` and `@fenecdb/langchain`. Needs `make wasm wasm-lite` first, since the web
 # package carries both modules. Run by `make packages`, by CI, and by
 # packages.yml before anything is published.
 set -euo pipefail
@@ -26,7 +26,8 @@ py="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/integrations/python/pyproject.t
 web="$(node -p "require('$root/web/package.json').version")"
 react="$(node -p "require('$root/integrations/react/package.json').version")"
 cloudflare="$(node -p "require('$root/integrations/cloudflare/package.json').version")"
-for v in "$py" "$web" "$react" "$cloudflare"; do
+langchain="$(node -p "require('$root/integrations/langchain/package.json').version")"
+for v in "$py" "$web" "$react" "$cloudflare" "$langchain"; do
   if [ "$v" != "$version" ]; then
     echo "a package says $v where the workspace says $version (make version V=...)" >&2
     exit 1
@@ -42,6 +43,7 @@ fi
 (cd "$root/web" && npm pack -q --pack-destination "$out/dist" >/dev/null)
 (cd "$root/integrations/react" && npm pack -q --pack-destination "$out/dist" >/dev/null)
 (cd "$root/integrations/cloudflare" && npm pack -q --pack-destination "$out/dist" >/dev/null)
+(cd "$root/integrations/langchain" && npm pack -q --pack-destination "$out/dist" >/dev/null)
 cd "$out/npm"
 npm init -y -q >/dev/null
 npm pkg set type=module >/dev/null
@@ -49,7 +51,8 @@ npm install -q --no-audit --no-fund \
   "$out/dist/fenecdb-web-$version.tgz" \
   "$out/dist/fenecdb-react-$version.tgz" \
   "$out/dist/fenecdb-cloudflare-$version.tgz" \
-  react@19 >/dev/null
+  "$out/dist/fenecdb-langchain-$version.tgz" \
+  @langchain/core@1 react@19 >/dev/null
 cat > smoke.mjs <<'EOF'
 import { readFile } from 'node:fs/promises';
 import { Fenec } from '@fenecdb/web';
@@ -91,6 +94,16 @@ if (!(await restore(back, storage)) || back.rows('get t count')[0].count !== 2) 
   throw new Error('@fenecdb/cloudflare did not bring the database back');
 }
 console.log('@fenecdb/cloudflare keeps a database');
+
+// The LangChain.js store over the database in the page.
+const { FenecVectorStore } = await import('@fenecdb/langchain');
+const { SyntheticEmbeddings } = await import('@langchain/core/utils/testing');
+const store = new FenecVectorStore(new SyntheticEmbeddings({ vectorSize: 8 }), { client: back, collection: 'lc' });
+await store.addDocuments([{ pageContent: 'a fox', metadata: {} }, { pageContent: 'a dog', metadata: {} }]);
+if ((await store.similaritySearch('a fox', 1))[0].pageContent !== 'a fox') {
+  throw new Error('@fenecdb/langchain did not find the document');
+}
+console.log('@fenecdb/langchain finds a document');
 EOF
 node smoke.mjs
 

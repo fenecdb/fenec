@@ -12,7 +12,7 @@ FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
 .PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
-	python-test drivers-test react-test cloudflare-test cloudflare-bench \
+	python-test drivers-test react-test langchain-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -241,6 +241,12 @@ drivers-test:
 react-test:
 	@$(CARGO) build -q -p fenec-pg
 	cd integrations/react && npm ci --no-audit --no-fund --loglevel=error && npm test
+
+## The LangChain.js vector store over a database in the page and over
+## fenec-pg's HTTP endpoint (needs `make wasm`)
+langchain-test:
+	@$(CARGO) build -q -p fenec-pg
+	cd integrations/langchain && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## A database kept in a Durable Object's storage: persist, restore, and
 ## storage that fails part way, against a stand-in; then the example Worker
