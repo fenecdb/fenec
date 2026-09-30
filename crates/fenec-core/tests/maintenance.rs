@@ -39,7 +39,8 @@ fn seeded() -> Database {
                 i % 7,
                 i % 50,
                 i % 11,
-                i % 13,
+                // A vector each: a vector written twice is one node.
+                i,
                 i % 5
             ),
         );
@@ -285,8 +286,13 @@ fn reads_and_writes_go_on_while_an_index_builds() {
     exec(&mut db, "create collection c (n int, v vector<16>)");
     let docs: Vec<String> = (0..3_000)
         .map(|i| {
+            // A vector each, the first component the row's own: a vector
+            // written twice is one node, and 97 of them built too soon.
             let v: Vec<String> = (0..16)
-                .map(|d| format!("{}", ((i * 31 + d * 7) % 97) as f32 / 97.0))
+                .map(|d| match d {
+                    0 => format!("{}", i as f32 / 3_000.0),
+                    _ => format!("{}", ((i * 31 + d * 7) % 97) as f32 / 97.0),
+                })
                 .collect();
             format!("{{n: {i}, v: [{}]}}", v.join(","))
         })
