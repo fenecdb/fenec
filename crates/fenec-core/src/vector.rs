@@ -20,9 +20,12 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+#[cfg(not(target_family = "wasm"))]
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::Mutex;
 
 // -------------------------------------------------------------- metrics
 
@@ -740,14 +743,17 @@ fn unit_scale(sq: f32) -> f32 {
 type Lookup<'a> = dyn Fn(DocId, &mut Vec<f32>) -> bool + Sync + 'a;
 
 /// Nodes a share of a restored arena holds, which a thread fills at a time.
+#[cfg(not(target_family = "wasm"))]
 const FILL_SHARE: usize = 1024;
 
 /// A share of a restored arena's slots, not yet written.
+#[cfg(not(target_family = "wasm"))]
 enum Part<'a> {
     F32(&'a mut [MaybeUninit<f32>]),
     F16(&'a mut [MaybeUninit<u16>]),
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Part<'_> {
     fn len(&self) -> usize {
         match self {
@@ -830,6 +836,7 @@ impl Part<'_> {
 /// and its first tombstone the record's `tomb`th: see
 /// [`VectorIndex::fill_restored`]. `false` where a document holds no vector
 /// of the index's length, or a tombstone's is cut short.
+#[cfg(not(target_family = "wasm"))]
 fn fill_share(
     part: &mut Part<'_>,
     (from, mut tomb): (usize, usize),
@@ -1493,10 +1500,143 @@ fn spread<S, T>(n: usize, states: &mut [S], work: impl Fn(&mut S, usize) -> T) -
 /// distances are estimates, and `near` puts the candidates they find in
 /// order again by the documents' own vectors.
 pub(crate) enum Arena {
-    F32(Vec<f32>),
-    F16(Vec<u16>),
-    I8(Vec<i8>, Vec<f32>),
+    F32(Rows<f32>),
+    F16(Rows<u16>),
+    I8(Rows<i8>, Vec<f32>),
     Bit(Bits),
+}
+
+/// An arena's vectors, a row of `dim` after another. Natively a `Vec`,
+/// grown by doubling: the allocator gives a freed block back, and a large
+/// one is moved rather than copied on Linux.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type Rows<T> = Vec<T>;
+
+/// In the browser module a list of chunks of about [`ROWS_CHUNK`] bytes, a
+/// whole number of rows each, the last grown by doubling up to that. A
+/// module's memory grows and is never given back, and one `Vec` doubled
+/// with old and new side by side: 5 000 768-dim vectors held a 25 MB
+/// arena, reached with its 12.6 MB before it still there, and left the
+/// module at 100 MB against the 31 its rows and documents are.
+#[cfg(target_family = "wasm")]
+pub(crate) struct Rows<T> {
+    chunks: Vec<Vec<T>>,
+    /// Where each chunk's values start, for [`RowsOf::row`] to reach a row
+    /// in a load and one bounds check, as a `Vec` does: through `chunks`,
+    /// with their checks, a 10 000 x 128 build took 11% longer.
+    starts: Vec<*const T>,
+    /// Rows a chunk holds, as a power of two, set by the first row.
+    shift: u32,
+    rows: usize,
+}
+
+#[cfg(target_family = "wasm")]
+const ROWS_CHUNK: usize = 1 << 20;
+
+/// What the engine asks of [`Rows`] on every target.
+pub(crate) trait RowsOf<T: Copy> {
+    /// Row `i` of `width`.
+    fn row(&self, i: usize, width: usize) -> &[T];
+    /// Appends a row of `width` from `values`.
+    fn push_row(&mut self, width: usize, values: impl IntoIterator<Item = T>);
+    /// The values held, rows times width.
+    fn values(&self) -> usize;
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T: Copy> RowsOf<T> for Vec<T> {
+    #[inline(always)]
+    fn row(&self, i: usize, width: usize) -> &[T] {
+        let s = i * width;
+        &self[s..s + width]
+    }
+    #[inline]
+    fn push_row(&mut self, _: usize, values: impl IntoIterator<Item = T>) {
+        self.extend(values);
+    }
+    fn values(&self) -> usize {
+        self.len()
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl<T> Rows<T> {
+    pub(crate) fn new() -> Rows<T> {
+        Rows {
+            chunks: Vec::new(),
+            starts: Vec::new(),
+            shift: 0,
+            rows: 0,
+        }
+    }
+
+    /// Nothing: room past the chunk being filled would be the doubling
+    /// the chunks are there to avoid.
+    pub(crate) fn reserve(&mut self, _: usize) {}
+
+    /// The chunk the next row of `width` goes into, with room for it.
+    /// Apart from [`RowsOf::push_row`], which is compiled for every
+    /// iterator it is handed: in it, the module grew 0.6 KB brotli.
+    fn room(&mut self, width: usize) -> Option<&mut Vec<T>> {
+        if width == 0 {
+            return None;
+        }
+        if self.chunks.is_empty() {
+            let rows = (ROWS_CHUNK / (width * size_of::<T>())).max(1);
+            self.shift = usize::BITS - 1 - rows.leading_zeros();
+        }
+        let full = (1 << self.shift) * width;
+        if self.chunks.last().is_none_or(|c| c.len() >= full) {
+            self.chunks.push(Vec::new());
+            self.starts.push(std::ptr::null());
+        }
+        let last = self.chunks.last_mut()?;
+        // Doubled as a `Vec` would be, but never past the chunk.
+        if last.capacity() - last.len() < width {
+            let to = (last.capacity() * 2).clamp(width, full);
+            last.reserve_exact(to - last.len());
+        }
+        Some(last)
+    }
+
+    /// Notes a row pushed into the last chunk, which starts at `start`.
+    fn landed(&mut self, whole: bool, start: *const T) {
+        // A row cut short would leave the next one straddling two places.
+        assert!(whole);
+        if let Some(s) = self.starts.last_mut() {
+            *s = start;
+        }
+        self.rows += 1;
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl<T: Copy> RowsOf<T> for Rows<T> {
+    #[inline(always)]
+    fn row(&self, i: usize, width: usize) -> &[T] {
+        assert!(i < self.rows);
+        let at = (i & ((1 << self.shift) - 1)) * width;
+        // SAFETY: row `i` was pushed, so its chunk is `starts[i >> shift]`
+        // and holds the `width` values from `at`; a chunk is never moved
+        // once a row is in it but by `push_row`, which notes where it went.
+        unsafe {
+            std::slice::from_raw_parts(self.starts.get_unchecked(i >> self.shift).add(at), width)
+        }
+    }
+
+    fn push_row(&mut self, width: usize, values: impl IntoIterator<Item = T>) {
+        let Some(last) = self.room(width) else {
+            return;
+        };
+        let before = last.len();
+        last.extend(values);
+        let (whole, start) = (last.len() - before == width, last.as_ptr());
+        self.landed(whole, start);
+    }
+
+    fn values(&self) -> usize {
+        self.chunks.iter().map(Vec::len).sum()
+    }
 }
 
 /// Vectors a `quant=bit` index holds whole, at the field's precision, before
@@ -1749,18 +1889,18 @@ impl Arena {
     /// holds them whole until it has learned its centres from them.
     fn new(prec: VecPrec, quant: Quant) -> Arena {
         match (quant, prec) {
-            (Quant::Int8, _) => Arena::I8(Vec::new(), Vec::new()),
-            (_, VecPrec::F32) => Arena::F32(Vec::new()),
-            (_, VecPrec::F16) => Arena::F16(Vec::new()),
+            (Quant::Int8, _) => Arena::I8(Rows::new(), Vec::new()),
+            (_, VecPrec::F32) => Arena::F32(Rows::new()),
+            (_, VecPrec::F16) => Arena::F16(Rows::new()),
         }
     }
 
     /// An empty arena that codes as this one does.
     fn empty_like(&self) -> Arena {
         match self {
-            Arena::F32(_) => Arena::F32(Vec::new()),
-            Arena::F16(_) => Arena::F16(Vec::new()),
-            Arena::I8(..) => Arena::I8(Vec::new(), Vec::new()),
+            Arena::F32(_) => Arena::F32(Rows::new()),
+            Arena::F16(_) => Arena::F16(Rows::new()),
+            Arena::I8(..) => Arena::I8(Rows::new(), Vec::new()),
             Arena::Bit(b) => Arena::Bit(Bits {
                 words: Vec::new(),
                 cells: Vec::new(),
@@ -1834,15 +1974,21 @@ impl Arena {
     fn push_scaled(&mut self, raw: &[f32], inv: f32) {
         match self {
             // Scaled as it is copied: a pass over the vector less.
-            Arena::F32(d) if inv != 1.0 => d.extend(raw.iter().map(|x| x * inv)),
-            Arena::F32(d) => d.extend_from_slice(raw),
+            Arena::F32(d) if inv != 1.0 => d.push_row(raw.len(), raw.iter().map(|x| x * inv)),
+            Arena::F32(d) => d.push_row(raw.len(), raw.iter().copied()),
             Arena::F16(d) => {
-                d.extend(raw.iter().map(|x| crate::codec::f16_from_f32(x * inv)));
+                d.push_row(
+                    raw.len(),
+                    raw.iter().map(|x| crate::codec::f16_from_f32(x * inv)),
+                );
             }
             Arena::I8(codes, scales) => {
                 let top = raw.iter().fold(0.0f32, |m, x| m.max((x * inv).abs()));
                 let scale = if top > 0.0 { top / 127.0 } else { 1.0 };
-                codes.extend(raw.iter().map(|x| (x * inv / scale).round() as i8));
+                codes.push_row(
+                    raw.len(),
+                    raw.iter().map(|x| (x * inv / scale).round() as i8),
+                );
                 scales.push(scale);
             }
             Arena::Bit(bits) => {
@@ -1861,22 +2007,19 @@ impl Arena {
     #[inline]
     fn slice_f32(&self, node: u32, dim: usize) -> Option<&[f32]> {
         match self {
-            Arena::F32(d) => {
-                let s = node as usize * dim;
-                Some(&d[s..s + dim])
-            }
+            Arena::F32(d) => Some(d.row(node as usize, dim)),
             _ => None,
         }
     }
 
     #[inline]
     fn dist_to(&self, metric: Metric, q: &[f32], node: u32, dim: usize) -> f32 {
-        let s = node as usize * dim;
+        let n = node as usize;
         match self {
-            Arena::F32(d) => distance(metric, q, &d[s..s + dim]),
-            Arena::F16(d) => distance_hf(metric, &d[s..s + dim], q),
+            Arena::F32(d) => distance(metric, q, d.row(n, dim)),
+            Arena::F16(d) => distance_hf(metric, d.row(n, dim), q),
             Arena::I8(c, sc) => {
-                let (code, scale) = (&c[s..s + dim], sc[node as usize]);
+                let (code, scale) = (c.row(n, dim), sc[n]);
                 match metric {
                     Metric::Cosine => 1.0 - scale * dot_i8(code, q),
                     Metric::L2 => l2_i8(code, q, scale),
@@ -1936,10 +2079,10 @@ impl Arena {
 
     #[inline]
     fn dist_nodes(&self, metric: Metric, a: u32, b: u32, dim: usize) -> f32 {
-        let (sa, sb) = (a as usize * dim, b as usize * dim);
+        let (ra, rb) = (a as usize, b as usize);
         match self {
-            Arena::F32(d) => distance(metric, &d[sa..sa + dim], &d[sb..sb + dim]),
-            Arena::F16(d) => distance_hh(metric, &d[sa..sa + dim], &d[sb..sb + dim]),
+            Arena::F32(d) => distance(metric, d.row(ra, dim), d.row(rb, dim)),
+            Arena::F16(d) => distance_hh(metric, d.row(ra, dim), d.row(rb, dim)),
             // Off the hot path: `select_heuristic` widens codes once and
             // keeps them, as it does halves.
             Arena::I8(..) | Arena::Bit(_) => {
@@ -1970,13 +2113,13 @@ impl Arena {
     #[inline]
     fn read_into(&self, node: u32, dim: usize, out: &mut Vec<f32>) {
         out.clear();
-        let s = node as usize * dim;
+        let n = node as usize;
         match self {
-            Arena::F32(d) => out.extend_from_slice(&d[s..s + dim]),
-            Arena::F16(d) => out.extend(d[s..s + dim].iter().map(|x| half(*x))),
+            Arena::F32(d) => out.extend_from_slice(d.row(n, dim)),
+            Arena::F16(d) => out.extend(d.row(n, dim).iter().map(|x| half(*x))),
             Arena::I8(c, sc) => {
-                let scale = sc[node as usize];
-                out.extend(c[s..s + dim].iter().map(|x| *x as f32 * scale));
+                let scale = sc[n];
+                out.extend(c.row(n, dim).iter().map(|x| *x as f32 * scale));
             }
             // The centre and the residual's signs at its scale: what the
             // code's products with a vector estimate, `κ` apart
@@ -1997,16 +2140,18 @@ impl Arena {
 
     /// Appends the node's vector as the arena holds it, little-endian.
     fn write_stored(&self, node: u32, dim: usize, out: &mut Vec<u8>) {
-        let s = node as usize * dim;
+        let n = node as usize;
         match self {
-            Arena::F32(d) => d[s..s + dim]
+            Arena::F32(d) => d
+                .row(n, dim)
                 .iter()
                 .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
-            Arena::F16(d) => d[s..s + dim]
+            Arena::F16(d) => d
+                .row(n, dim)
                 .iter()
                 .for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
             Arena::I8(c, sc) => {
-                out.extend(c[s..s + dim].iter().map(|x| *x as u8));
+                out.extend(c.row(n, dim).iter().map(|x| *x as u8));
                 out.extend_from_slice(&sc[node as usize].to_le_bytes());
             }
             Arena::Bit(b) => {
@@ -2026,23 +2171,17 @@ impl Arena {
     /// normalised, and normalising again would move its last bits.
     fn push_stored(&mut self, bytes: &[u8]) {
         match self {
-            Arena::F32(d) => d.extend(
-                bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|b| f32::from_le_bytes(*b)),
-            ),
-            Arena::F16(d) => d.extend(
-                bytes
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|b| u16::from_le_bytes(*b)),
-            ),
+            Arena::F32(d) => {
+                let v = bytes.as_chunks::<4>().0;
+                d.push_row(v.len(), v.iter().map(|b| f32::from_le_bytes(*b)));
+            }
+            Arena::F16(d) => {
+                let v = bytes.as_chunks::<2>().0;
+                d.push_row(v.len(), v.iter().map(|b| u16::from_le_bytes(*b)));
+            }
             Arena::I8(c, sc) => {
                 let (code, scale) = bytes.split_at(bytes.len() - 4);
-                c.extend(code.iter().map(|x| *x as i8));
+                c.push_row(code.len(), code.iter().map(|x| *x as i8));
                 sc.push(f32::from_le_bytes([scale[0], scale[1], scale[2], scale[3]]));
             }
             Arena::Bit(b) => {
@@ -2075,9 +2214,9 @@ impl Arena {
     /// Bytes the arena occupies in memory (for statistics).
     pub(crate) fn bytes(&self) -> usize {
         match self {
-            Arena::F32(d) => d.len() * 4,
-            Arena::F16(d) => d.len() * 2,
-            Arena::I8(c, s) => c.len() + s.len() * 4,
+            Arena::F32(d) => d.values() * 4,
+            Arena::F16(d) => d.values() * 2,
+            Arena::I8(c, s) => c.values() + s.len() * 4,
             Arena::Bit(b) => {
                 b.words.len() * 8 + b.cells.len() + (b.centres.at.len() + b.centres.half.len()) * 4
             }
@@ -4079,13 +4218,19 @@ impl VectorIndex {
     /// vector at a time, copied into a batch and then into the arena, it
     /// was 7.6 of a 22 ms open at 100 000 x 128. A code arena is filled in
     /// turn, as a code can depend on the ones before it.
+    #[cfg(target_family = "wasm")]
+    fn fill_restored(&mut self, read: &Read<'_>, lookup: &Lookup<'_>) -> bool {
+        // The browser has one thread, and the shares would only add to
+        // its module: 1.3 KB brotli, for the same 18 ms load.
+        let unit = self.spec.metric == Metric::Cosine;
+        self.fill_in_turn(read, lookup, unit)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn fill_restored(&mut self, read: &Read<'_>, lookup: &Lookup<'_>) -> bool {
         let (count, dim) = (read.docs.len(), self.dim);
         let unit = self.spec.metric == Metric::Cosine;
-        // The browser has one thread, and the shares would only add to
-        // its module: 1.3 KB brotli, for the same 18 ms load.
-        let one = cfg!(target_family = "wasm");
-        let Some(len) = count.checked_mul(dim).filter(|_| dim > 0 && !one) else {
+        let Some(len) = count.checked_mul(dim).filter(|_| dim > 0) else {
             return self.fill_in_turn(read, lookup, unit);
         };
         let share = FILL_SHARE * dim;
