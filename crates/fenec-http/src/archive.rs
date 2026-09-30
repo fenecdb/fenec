@@ -20,8 +20,16 @@
 //!                            numbered on from <first>
 //! history                    the history the archive is on
 //! ```
+//!
+//! With a key (`fenec archive --key-file`) every one of them is sealed
+//! (`seal.rs`): an image and the history whole, a segment a frame for each
+//! batch of writes the primary sent, so a crash cuts off at most the frame
+//! it was writing, as it cut a record short before. An archive is sealed or
+//! it is not: a file of the other kind in it is refused, rather than a key
+//! given for nothing or a sealed file read as garbage.
 
 use crate::replication::{fresh_id, Message, Upstream};
+use crate::seal::{self, Key};
 use fenec_core::codec::get_uvarint;
 use fenec_core::history::History;
 use std::fs::{self, File, OpenOptions};
@@ -87,6 +95,8 @@ pub struct Verified {
 
 pub struct Archive {
     dir: PathBuf,
+    /// The key its files are sealed with, if they are.
+    key: Option<Key>,
     /// Set once an image was taken here: the segment being written ends
     /// at its next write, so the writes before the image are in segments of
     /// their own, which `prune` can let go of whole -- in the segment going
@@ -102,6 +112,18 @@ fn now_ms() -> u64 {
 
 fn corrupt(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+/// A file of the other kind than the archive: a sealed one with no key, or
+/// a plain one where the archive is sealed.
+fn mixed(path: &Path, sealed: bool) -> io::Error {
+    corrupt(match sealed {
+        true => format!(
+            "{}: sealed; give the key it was sealed with (--key-file)",
+            path.display()
+        ),
+        false => format!("{}: not sealed, where the archive is", path.display()),
+    })
 }
 
 /// A write's record, whole, from the front of `bytes`: its length, or
@@ -151,10 +173,40 @@ struct Segment {
     len: usize,
     dirty: bool,
     synced: Instant,
+    /// Sealed: the key, the next frame's index and the writes waiting to be
+    /// sealed as one frame of whole records.
+    sealed: Option<(Key, u64, Vec<u8>)>,
 }
 
 impl Segment {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.len += bytes.len();
+        self.dirty = true;
+        match &mut self.sealed {
+            Some((_, _, pending)) => {
+                pending.extend_from_slice(bytes);
+                Ok(())
+            }
+            None => self.file.write_all(bytes),
+        }
+    }
+
+    /// Seals what waits as a frame, and writes it.
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some((key, index, pending)) = &mut self.sealed {
+            if !pending.is_empty() {
+                let mut frame = Vec::with_capacity(pending.len() + 32);
+                seal::seal_frame(key, *index, false, pending, &mut frame);
+                self.file.write_all(&frame)?;
+                *index += 1;
+                pending.clear();
+            }
+        }
+        Ok(())
+    }
+
     fn sync(&mut self) -> io::Result<()> {
+        self.flush()?;
         if self.dirty {
             self.file.sync_data()?;
             self.dirty = false;
@@ -164,13 +216,61 @@ impl Segment {
     }
 }
 
+/// A segment's writes, and for a sealed one where its last whole frame
+/// ends and how many frames it holds.
+struct Read {
+    plain: Vec<u8>,
+    sealed: Option<(usize, u64)>,
+    /// The file's own length.
+    len: usize,
+}
+
 impl Archive {
     pub fn new(dir: impl AsRef<Path>) -> io::Result<Archive> {
+        Archive::with_key(dir, None)
+    }
+
+    /// An archive whose files are sealed with `key`, or plain without one.
+    pub fn with_key(dir: impl AsRef<Path>, key: Option<Key>) -> io::Result<Archive> {
         fs::create_dir_all(dir.as_ref())?;
         Ok(Archive {
             dir: dir.as_ref().to_path_buf(),
+            key,
             roll: AtomicBool::new(false),
         })
+    }
+
+    /// A file of the kind this archive is, as it was written.
+    fn read_whole(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let bytes = fs::read(path)?;
+        match (seal::is_sealed(&bytes), &self.key) {
+            (true, Some(key)) => seal::open_whole(key, &bytes)
+                .map_err(|e| corrupt(format!("{}: {e}", path.display()))),
+            (false, None) => Ok(bytes),
+            (sealed, _) => Err(mixed(path, sealed)),
+        }
+    }
+
+    fn read_segment(&self, path: &Path) -> io::Result<Read> {
+        let bytes = fs::read(path)?;
+        let len = bytes.len();
+        match (seal::is_sealed(&bytes), &self.key) {
+            (true, Some(key)) => {
+                let (plain, end, frames) = seal::open_appended(key, &bytes)
+                    .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+                Ok(Read {
+                    plain,
+                    sealed: Some((end, frames)),
+                    len,
+                })
+            }
+            (false, None) => Ok(Read {
+                plain: bytes,
+                sealed: None,
+                len,
+            }),
+            (sealed, _) => Err(mixed(path, sealed)),
+        }
     }
 
     /// `(seq, time)` of each base image, oldest first.
@@ -224,7 +324,10 @@ impl Archive {
     fn put(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let tmp = path.with_extension("tmp");
         let mut f = File::create(&tmp)?;
-        f.write_all(bytes)?;
+        match &self.key {
+            Some(key) => f.write_all(&seal::seal_whole(key, bytes))?,
+            None => f.write_all(bytes)?,
+        }
         f.sync_all()?;
         fs::rename(&tmp, path)
     }
@@ -239,7 +342,7 @@ impl Archive {
     /// segment that ends there, opened to go on -- its torn tail, if a crash
     /// left one, cut off.
     fn position(&self) -> io::Result<(u64, History, Option<Segment>)> {
-        let history = match fs::read(self.dir.join("history")) {
+        let history = match self.read_whole(&self.dir.join("history")) {
             Ok(b) => History::decode(&b).map_err(|e| corrupt(e.to_string()))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => History::default(),
             Err(e) => return Err(e),
@@ -248,13 +351,25 @@ impl Archive {
         let mut open = None;
         if let Some(&first) = self.segments()?.last() {
             let path = self.segment_path(first);
-            let data = fs::read(&path)?;
-            let (list, end) = entries(&data)?;
+            let read = self.read_segment(&path)?;
+            let (list, end) = entries(&read.plain)?;
             let last = first + list.iter().map(|e| e.3).sum::<u64>() - 1;
             if !list.is_empty() && last >= at {
                 at = last;
+                // Plain, a record cut short is cut off; sealed, a frame is,
+                // and a frame holds whole records.
+                let cut = match read.sealed {
+                    Some(_) if end < read.plain.len() => {
+                        return Err(corrupt(format!(
+                            "{}: a record cut short inside a whole frame",
+                            path.display()
+                        )))
+                    }
+                    Some((whole, _)) => whole,
+                    None => end,
+                };
                 let mut file = OpenOptions::new().write(true).open(&path)?;
-                file.set_len(end as u64)?;
+                file.set_len(cut as u64)?;
                 file.seek(io::SeekFrom::End(0))?;
                 open = Some(Segment {
                     file,
@@ -262,6 +377,11 @@ impl Archive {
                     len: end,
                     dirty: false,
                     synced: Instant::now(),
+                    sealed: self
+                        .key
+                        .clone()
+                        .zip(read.sealed)
+                        .map(|(k, (_, frames))| (k, frames, Vec::new())),
                 });
             }
         }
@@ -371,26 +491,41 @@ impl Archive {
                                     s.sync()?;
                                 }
                                 let mut file = File::create(self.segment_path(seq))?;
-                                file.write_all(LOG_MAGIC)?;
+                                // Sealed, the magic is a frame of its own, so a
+                                // segment the archiver made and died in reads
+                                // as an empty one.
+                                let sealed = match &self.key {
+                                    Some(key) => {
+                                        let mut head = seal::MAGIC.to_vec();
+                                        seal::seal_frame(key, 0, false, LOG_MAGIC, &mut head);
+                                        file.write_all(&head)?;
+                                        Some((key.clone(), 1, Vec::new()))
+                                    }
+                                    None => {
+                                        file.write_all(LOG_MAGIC)?;
+                                        None
+                                    }
+                                };
                                 segment.insert(Segment {
                                     file,
                                     next: seq,
                                     len: LOG_MAGIC.len(),
                                     dirty: true,
                                     synced: Instant::now(),
+                                    sealed,
                                 })
                             }
                         };
-                        s.file.write_all(&time.to_le_bytes())?;
-                        s.file.write_all(&records[pos..pos + len])?;
-                        s.len += 8 + len;
+                        s.write(&time.to_le_bytes())?;
+                        s.write(&records[pos..pos + len])?;
                         s.next += n;
-                        s.dirty = true;
                         pos += len;
                         at = seq + n - 1;
                         written += n;
                     }
                     if let Some(s) = &mut segment {
+                        // The batch's writes a frame, whole records in it.
+                        s.flush()?;
                         if s.synced.elapsed() >= SYNC_EVERY {
                             s.sync()?;
                         }
@@ -442,7 +577,7 @@ impl Archive {
         let Some(&first) = self.segments()?.last() else {
             return Ok(None);
         };
-        let bytes = fs::read(self.segment_path(first))?;
+        let bytes = self.read_segment(&self.segment_path(first))?.plain;
         let (list, _) = entries(&bytes)?;
         let writes: u64 = list.iter().map(|e| e.3).sum();
         Ok(list.last().map(|e| (first + writes - 1, e.0)))
@@ -499,7 +634,7 @@ impl Archive {
         let Some(&first) = segments.iter().rev().find(|&&f| f <= seq) else {
             return Ok(None);
         };
-        let bytes = fs::read(self.segment_path(first))?;
+        let bytes = self.read_segment(&self.segment_path(first))?.plain;
         let (list, _) = entries(&bytes)?;
         let mut at = first;
         for &(time, _, _, n) in &list {
@@ -590,8 +725,16 @@ impl Archive {
         };
         for &(seq, time) in &images {
             let path = self.image_path(seq, time);
-            let db = fenec_core::fs::open_read_only(&path)
-                .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            let db = match &self.key {
+                None => fenec_core::fs::open_read_only(&path)
+                    .map_err(|e| corrupt(format!("{}: {e}", path.display())))?,
+                Some(_) => {
+                    let mut db = fenec_core::engine::Database::new();
+                    db.load(&self.read_whole(&path)?)
+                        .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+                    db
+                }
+            };
             if db.change_seq() != seq {
                 return Err(corrupt(format!(
                     "{}: the image is at change {}, not {seq}",
@@ -605,18 +748,28 @@ impl Archive {
         let mut gaps = Vec::new();
         for (k, &start) in segments.iter().enumerate() {
             let path = self.segment_path(start);
-            let bytes = fs::read(&path)?;
+            let read = self.read_segment(&path)?;
             let (list, end) =
-                entries(&bytes).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
-            if end < bytes.len() {
+                entries(&read.plain).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            // Cut short: a record, plain, or a frame, sealed.
+            let cut = match read.sealed {
+                Some(_) if end < read.plain.len() => {
+                    return Err(corrupt(format!(
+                        "{}: a record cut short inside a whole frame",
+                        path.display()
+                    )))
+                }
+                Some((whole, _)) => read.len - whole,
+                None => read.plain.len() - end,
+            };
+            if cut > 0 {
                 if k + 1 < segments.len() {
                     return Err(corrupt(format!(
-                        "{}: a record cut short {} bytes before its end, with segments after it",
+                        "{}: cut short {cut} bytes before its end, with segments after it",
                         path.display(),
-                        bytes.len() - end
                     )));
                 }
-                torn = bytes.len() - end;
+                torn = cut;
             }
             if start > covered + 1 {
                 if !images.iter().any(|i| i.0 + 1 == start) {
@@ -682,7 +835,7 @@ impl Archive {
         let mut inside: Option<u64> = None;
         let mut past = false;
         for &first in &segments {
-            let bytes = fs::read(self.segment_path(first))?;
+            let bytes = self.read_segment(&self.segment_path(first))?.plain;
             let (list, _) = entries(&bytes)?;
             let mut seq = first - 1;
             for &(time, _, _, n) in &list {
@@ -732,7 +885,12 @@ impl Archive {
 
         // The image, then the writes after it: that is a fenecdb file.
         let _ = fs::remove_file(tmp);
-        fs::copy(self.image_path(image, taken), tmp)?;
+        match &self.key {
+            None => {
+                fs::copy(self.image_path(image, taken), tmp)?;
+            }
+            Some(_) => fs::write(tmp, self.read_whole(&self.image_path(image, taken))?)?,
+        }
         let mut f = OpenOptions::new().append(true).open(tmp)?;
         let mut want = image + 1;
         for (k, &first) in segments.iter().enumerate() {
@@ -740,7 +898,7 @@ impl Archive {
             if want > stop || next <= want || first > stop {
                 continue;
             }
-            let bytes = fs::read(self.segment_path(first))?;
+            let bytes = self.read_segment(&self.segment_path(first))?.plain;
             let (list, _) = entries(&bytes)?;
             let mut seq = first;
             for &(_, start, end, n) in &list {
@@ -775,7 +933,7 @@ impl Archive {
 /// One image of the database behind `upstream`, taken while it runs, into
 /// `out`: a file, or an archive directory. A file gets its history forked,
 /// as a restore's does, so it can be opened as a primary of its own.
-pub fn backup(upstream: &Upstream, out: &Path) -> io::Result<u64> {
+pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<u64> {
     let mut rx = upstream.open(0, 0, true)?;
     let Message::Hello {
         image: true,
@@ -790,18 +948,37 @@ pub fn backup(upstream: &Upstream, out: &Path) -> io::Result<u64> {
         return Err(io::Error::other("the primary promised an image"));
     };
     if out.is_dir() {
-        Archive::new(out)?.add_image(seq, &bytes)?;
+        Archive::with_key(out, key.cloned())?.add_image(seq, &bytes)?;
     } else {
         let history = History {
             lineage,
             following: false,
         };
         bytes.extend_from_slice(&history.forked(fresh_id(), seq).record());
+        if let Some(key) = key {
+            bytes = seal::seal_whole(key, &bytes);
+        }
         let tmp = out.with_extension("tmp");
         let mut f = File::create(&tmp)?;
         f.write_all(&bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, out)?;
     }
+    Ok(seq)
+}
+
+/// A backup file sealed with `key` (`backup` with a key), opened into
+/// `out`: the database file it holds.
+pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
+    let bytes = seal::open_whole(key, &fs::read(sealed)?)
+        .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?;
+    let tmp = out.with_extension("tmp");
+    fs::write(&tmp, &bytes)?;
+    // Opened to check it whole, as a restore checks its file.
+    let seq = fenec_core::fs::open_read_only(&tmp)
+        .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
+        .change_seq();
+    File::open(&tmp)?.sync_all()?;
+    fs::rename(&tmp, out)?;
     Ok(seq)
 }

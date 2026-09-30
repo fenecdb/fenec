@@ -263,7 +263,7 @@ fn a_backup_is_a_database_of_its_own() {
     }
     let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
     let file = d.join("backup.fenec");
-    let seq = archive::backup(&upstream, &file).unwrap();
+    let seq = archive::backup(&upstream, &file, None).unwrap();
     assert_eq!(seq, p.seq());
 
     let mut db = fenec_core::fs::open(&file).unwrap();
@@ -277,7 +277,7 @@ fn a_backup_is_a_database_of_its_own() {
     // Into an archive, it is a base image a restore starts from.
     let arch = d.join("archive");
     std::fs::create_dir_all(&arch).unwrap();
-    archive::backup(&upstream, &arch).unwrap();
+    archive::backup(&upstream, &arch, None).unwrap();
     let (db, r) = restored(&arch, &d.join("from-image.fenec"), Target::End);
     assert_eq!((r.seq, r.image), (seq, seq));
     assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
@@ -691,4 +691,101 @@ fn copy_of_as_it_goes(arch: &Path, to: &Path) -> PathBuf {
         let _ = std::fs::copy(e.path(), to.join(name));
     }
     to.to_path_buf()
+}
+
+/// An archive sealed with a key: every file in it encrypted, a restore and a
+/// verify through the key as through a plain archive, and a file changed,
+/// the wrong key or no key refused rather than read. An archiver stopped
+/// mid-frame goes on from the last whole one.
+#[test]
+fn a_sealed_archive_restores_with_its_key_and_nothing_else() {
+    use fenec_http::seal::Key;
+    let d = dir("sealed");
+    let key = Key::from_hex(&"ab".repeat(32)).unwrap();
+    let wrong = Key::from_hex(&"cd".repeat(32)).unwrap();
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection c (x int, t text)");
+    let arch = d.join("archive");
+    let follow = |stop: Arc<AtomicBool>| {
+        let (path, url, key) = (arch.clone(), p.url.clone(), key.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            Archive::with_key(&path, Some(key))?.follow(&upstream, &stop, &|_| {})
+        })
+    };
+    let sealed = Archive::with_key(&arch, Some(key.clone())).unwrap();
+    let wait = |seq: u64| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let probe = d.join("probe.fenec");
+        while sealed
+            .restore(&probe, Target::End)
+            .map(|r| r.seq)
+            .unwrap_or(0)
+            < seq
+        {
+            assert!(Instant::now() < deadline, "the archive did not reach {seq}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let t = follow(Arc::clone(&stop));
+    for i in 0..30 {
+        p.exec(&format!("put c {{x: {i}, t: \"secret {i}\"}}"));
+    }
+    wait(p.seq());
+    stop.store(true, Ordering::SeqCst);
+    t.join().unwrap().unwrap();
+
+    // Nothing of the rows in the clear, in any file.
+    for e in std::fs::read_dir(&arch).unwrap() {
+        let bytes = std::fs::read(e.unwrap().path()).unwrap();
+        assert!(!bytes.windows(6).any(|w| w == b"secret"));
+    }
+    // A frame cut short at the end of the segment, as a crash leaves one:
+    // passed over, and the archiver goes on after the last whole frame.
+    let segment = std::fs::read_dir(&arch)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "log"))
+        .unwrap();
+    let whole = std::fs::read(&segment).unwrap();
+    std::fs::write(&segment, [&whole[..], &whole[whole.len() - 50..]].concat()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let t = follow(Arc::clone(&stop));
+    for i in 30..40 {
+        p.exec(&format!("put c {{x: {i}, t: \"secret {i}\"}}"));
+    }
+    wait(p.seq());
+    stop.store(true, Ordering::SeqCst);
+    t.join().unwrap().unwrap();
+
+    let out = d.join("restored.fenec");
+    let r = sealed.restore(&out, Target::End).unwrap();
+    assert_eq!(r.seq, p.seq());
+    let db = fenec_core::fs::open(&out).unwrap();
+    assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
+    assert_eq!(sealed.verify().unwrap().last, p.seq());
+    assert!(sealed.consolidate().unwrap().is_none() || sealed.verify().is_ok());
+
+    // The wrong key, no key, a byte changed: refused, not read.
+    assert!(Archive::with_key(&arch, Some(wrong))
+        .unwrap()
+        .verify()
+        .is_err());
+    assert!(Archive::new(&arch).unwrap().verify().is_err());
+    let mut bytes = std::fs::read(&segment).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 1;
+    std::fs::write(&segment, bytes).unwrap();
+    assert!(sealed.verify().is_err());
+
+    // A backup file sealed with the key opens into the database it holds.
+    let upstream = Upstream::new(&p.url, TOKEN.into()).unwrap();
+    let file = d.join("backup.sealed");
+    let seq = archive::backup(&upstream, &file, Some(&key)).unwrap();
+    assert!(fenec_core::fs::open_read_only(&file).is_err());
+    let opened = d.join("unsealed.fenec");
+    assert_eq!(archive::unseal(&file, &key, &opened).unwrap(), seq);
+    let db = fenec_core::fs::open(&opened).unwrap();
+    assert_eq!(rows(&db, "get c"), rows(&p.db.read().unwrap(), "get c"));
 }

@@ -271,6 +271,36 @@ verifies and restores to a prefix of what the primary wrote.
 <code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
 over to the copy; without it the copy keeps everything.</p>
 
+<h3 id="sealed">Sealed archives and backups</h3>
+
+<p>A copy in a bucket or on another disk is out of reach of the machine's
+disk encryption. With a key every file of an archive — its images, its
+segments, its history — and a backup file are sealed: encrypted and
+authenticated with ChaCha20-Poly1305 (RFC 8439), a random nonce a frame,
+each frame's place in the file and whether it is the last under its tag.
+A byte changed, a frame moved or dropped, a file cut short where it was
+sealed whole, or the wrong key, and the file is refused — never read as
+something else. A segment is sealed a frame for each batch of writes the
+primary sends, so a crash cuts off at most the frame being written, as it
+cut a record short before.</p>
+
+<pre data-lang="bash">fenec key /secrets/archive.key          # 64 hex digits, readable by its owner alone
+fenec archive http://primary:8080 /backups/archive --key-file /secrets/archive.key
+fenec verify /backups/archive --key-file /secrets/archive.key
+fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z \
+  --key-file /secrets/archive.key
+
+fenec backup http://primary:8080 today.sealed --key-file /secrets/archive.key
+fenec restore today.sealed today.fenec --key-file /secrets/archive.key</pre>
+
+<p>Keep the key apart from the archive: without it nothing can be
+restored. An archive is sealed or it is not; a file of the other kind in
+it is refused. <code>FENEC_KEY_FILE</code> names the key file too. Sealing
+and opening run at about 400 MB/s on one core, where writing the archive
+waits on the network and the disk. The database file itself stays plain:
+it is mapped and read where it lies, which encryption would take away —
+encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
+
 <h2>Endpoints</h2>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
