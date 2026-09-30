@@ -45,6 +45,7 @@ pub mod cdc;
 pub mod crypto;
 pub mod held;
 pub mod http;
+pub mod idempotent;
 pub mod lease;
 pub mod link;
 pub mod metrics;
@@ -88,6 +89,8 @@ pub struct Config {
     pub idle_timeout: Option<Duration>,
     /// `sync` after every write (the equivalent of fenec-pg's `--sync always`).
     pub sync_on_write: bool,
+    /// How long a write's `Idempotency-Key` and answer are kept.
+    pub idempotency_ttl: Duration,
     /// Ceiling on concurrent **subscriptions** (0 = unlimited).
     ///
     /// Counted apart from ordinary requests. Subscriptions are long lived and
@@ -128,6 +131,7 @@ impl Default for Config {
             max_body: 64 << 20,
             idle_timeout: Some(Duration::from_secs(60)),
             sync_on_write: false,
+            idempotency_ttl: Duration::from_secs(24 * 3600),
             max_streams: 64,
             stream_keepalive: Duration::from_secs(20),
             stream_write_timeout: Duration::from_secs(30),
@@ -735,7 +739,18 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     // collection` arriving in between leaves the two stages inconsistent.
     if wants_write(req) {
         metrics::wrote();
+        let key = match idempotent::key(req, &who) {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        };
         let mut guard = held::write_unheld(db);
+        let ttl = cfg.idempotency_ttl.as_millis() as i64;
+        if let Some(sent) = key
+            .as_ref()
+            .and_then(|k| idempotent::answered(&guard, k, ttl))
+        {
+            return sent;
+        }
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -747,7 +762,32 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
             return refused(why);
         }
+        if key.is_some() {
+            if let Err(e) = guard.begin() {
+                return error_response(&e);
+            }
+        }
         let result = access::within(&who, || guard.execute_with(&stmt, &[]));
+        let answer =
+            |result: &fenec_core::error::Result<fenec_core::prelude::Response>| match result {
+                Ok(resp) => {
+                    statements::rows(counted(resp));
+                    api::render(resp, &routed.shape, fenec_core::VERSION)
+                }
+                Err(e) => error_response(e),
+            };
+        // A key keeps the answer, so it is made under the lock; without
+        // one, after it, as before.
+        let kept = match &key {
+            Some(k) => {
+                let resp = answer(&result);
+                if let Err(e) = keyed(&mut guard, k, &resp, result.is_ok(), ttl) {
+                    return error_response(&e);
+                }
+                Some(resp)
+            }
+            None => None,
+        };
         let durability = match result {
             Ok(_) => match flush_for(cfg, &mut guard) {
                 Ok(d) => d,
@@ -759,13 +799,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         if let Err(e) = await_durable(db, durability) {
             return error_response(&e);
         }
-        match result {
-            Ok(resp) => {
-                statements::rows(counted(&resp));
-                api::render(&resp, &routed.shape, fenec_core::VERSION)
-            }
-            Err(e) => error_response(&e),
-        }
+        kept.unwrap_or_else(|| answer(&result))
     } else {
         let guard = held::read_landed(db);
         let routed = match api::route(&guard, req) {
@@ -787,6 +821,28 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
     }
 }
 
+/// Lands the block a keyed write ran in with its key and answer, or puts it
+/// back when the write failed: a failed write keeps no key, and is made
+/// when sent again.
+fn keyed(
+    db: &mut Database,
+    key: &idempotent::Key,
+    resp: &Response,
+    ok: bool,
+    ttl: i64,
+) -> fenec_core::error::Result<()> {
+    if !ok {
+        db.rollback();
+        return Ok(());
+    }
+    if let Err(e) = idempotent::keep(db, key, resp).and_then(|_| db.commit()) {
+        db.rollback();
+        return Err(e);
+    }
+    idempotent::purge(db, ttl);
+    Ok(())
+}
+
 /// Raw FenecQL: parsed first (without a lock), then whether it reads or writes
 /// is read off the statement itself.
 fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
@@ -798,6 +854,20 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
+    // A read is the same sent twice, and keeps no key.
+    let key = match stmt.is_read_only() {
+        true => None,
+        false => match idempotent::key(req, who) {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        },
+    };
+    if key.is_some() && !stmt.fits_block() {
+        return Response::error(
+            400,
+            "a compact cannot be put back, and takes no Idempotency-Key",
+        );
+    }
     // The statement parsed is shared (`api::parse_query`): a scope is ANDed
     // into a copy of it.
     let stmt = match who.scope() {
@@ -819,6 +889,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         if let Some(why) = over_ceiling(cfg.max_memory, &guard, &stmt) {
             return refused(why);
         }
+    }
+    if let Some(k) = &key {
+        return keyed_query(db, cfg, who, k, &stmt, &params);
     }
     let result = if stmt.is_read_only() {
         held::read_landed(db).query(&stmt, &params)
@@ -861,6 +934,49 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         Err(e) => error_response(&e),
     }
+}
+
+/// A keyed statement of `/query`: under the write lock, in a block that
+/// keeps its key and answer, beside the database for no index.
+fn keyed_query(
+    db: &Arc<RwLock<Database>>,
+    cfg: &Config,
+    who: &Who,
+    key: &idempotent::Key,
+    stmt: &Statement,
+    params: &[fenec_core::value::Value],
+) -> Response {
+    let mut guard = held::write_unheld(db);
+    let ttl = cfg.idempotency_ttl.as_millis() as i64;
+    if let Some(sent) = idempotent::answered(&guard, key, ttl) {
+        return sent;
+    }
+    if let Err(e) = guard.begin() {
+        return error_response(&e);
+    }
+    let result = access::within(who, || guard.execute_with(stmt, params));
+    let resp = match &result {
+        Ok(r) => {
+            statements::rows(counted(r));
+            api::render_any(&visible(who, r.clone()), fenec_core::VERSION)
+        }
+        Err(e) => error_response(e),
+    };
+    if let Err(e) = keyed(&mut guard, key, &resp, result.is_ok(), ttl) {
+        return error_response(&e);
+    }
+    let durability = match result {
+        Ok(_) => match flush_for(cfg, &mut guard) {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
+        },
+        Err(_) => None,
+    };
+    drop(guard);
+    if let Err(e) = await_durable(db, durability) {
+        return error_response(&e);
+    }
+    resp
 }
 
 /// The rows a response returned or changed, for the statements' counts.
@@ -906,8 +1022,29 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         metrics::wrote();
     }
 
+    let writes = stmts.iter().any(|(s, _)| !s.is_read_only());
+    let key = match writes {
+        true => match idempotent::key(req, who) {
+            Ok(k) => k,
+            Err(refusal) => return refusal,
+        },
+        false => None,
+    };
     let mut guard = held::write_unheld(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
+    if key.is_some() && !block {
+        return Response::error(
+            400,
+            "a batch holding a compact is not one block, and takes no Idempotency-Key",
+        );
+    }
+    let ttl = cfg.idempotency_ttl.as_millis() as i64;
+    if let Some(sent) = key
+        .as_ref()
+        .and_then(|k| idempotent::answered(&guard, k, ttl))
+    {
+        return sent;
+    }
     if block {
         if let Err(e) = guard.begin() {
             return error_response(&e);
@@ -945,9 +1082,17 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             }
         }
     }
-    if let Err(e) = guard.commit() {
-        return error_response(&e);
-    }
+    let kept = match &key {
+        Some(k) => {
+            let resp = api::render_batch(&results, fenec_core::VERSION);
+            keyed(&mut guard, k, &resp, true, ttl).map(|_| Some(resp))
+        }
+        None => guard.commit().map(|_| None),
+    };
+    let kept = match kept {
+        Ok(kept) => kept,
+        Err(e) => return error_response(&e),
+    };
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),
@@ -956,7 +1101,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
     }
-    api::render_batch(&results, fenec_core::VERSION)
+    kept.unwrap_or_else(|| api::render_batch(&results, fenec_core::VERSION))
 }
 
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.

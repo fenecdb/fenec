@@ -327,8 +327,12 @@ fn lines(
         if n == limit {
             return false;
         }
-        // The consumers' own cursors: passed over, and the cursor with them.
-        if c.collection.as_deref() == Some(CONSUMERS) {
+        // The consumers' own cursors and the writes' keys: passed over,
+        // and the cursor with them.
+        if matches!(
+            c.collection.as_deref(),
+            Some(CONSUMERS | crate::idempotent::KEYS)
+        ) {
             next = c.seq;
             return true;
         }

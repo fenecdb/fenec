@@ -9,4 +9,5 @@ mod api;
 mod archive;
 mod cdc;
 mod changes;
+mod idempotency;
 mod replication;

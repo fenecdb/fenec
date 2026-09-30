@@ -232,6 +232,42 @@ deliberately does not accept nested objects, so
 writing a second parser, the boundary was put at the end of a line — by the
 escaping rules no JSON encoder can write a bare newline into the body.</p>
 
+<h2 id="idempotency">Retrying a write</h2>
+
+<p>A <code>put</code> with no id makes a row each time it runs, so a client
+that sends a write again after a timeout or a dropped connection — not
+knowing whether the first landed — may write it twice. Send an
+<code>Idempotency-Key</code> with it, one per write, and a request sent again
+with the key is answered as the first was, with
+<code>Idempotent-Replayed: true</code>, and not made again:</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -H 'Idempotency-Key: 5f0c2d6e-order-1142' \
+  -d '{"query":"put orders {customer: $1, total: $2}","params":[7, 129.5]}'
+</pre>
+
+<ul>
+  <li>The key and the answer are kept in the same block as the write, under
+  the write lock: they land together, so a crash cannot leave a write whose
+  retry makes it again, and a second request with the key waits for the
+  first and is handed its answer.</li>
+  <li>A write that failed keeps no key: sent again, it runs again.</li>
+  <li>A key is for one request: the same key with another method, path or
+  body is refused (422).</li>
+  <li>Under a scoped token the keys are its subject's (<code>sub</code>), so
+  no user is handed another's answer; a token with no subject is refused a
+  key (400).</li>
+  <li>REST writes, <code>/query</code> and <code>/batch</code> take one, a
+  <code>compact</code> — which cannot be put back — does not; a read ignores
+  it. An answer over 64 KB is kept as its status and a note.</li>
+  <li>Keys are kept for <code>--idempotency-ttl</code> seconds, a day unless
+  given, in a <code>_idempotency</code> collection the change stream leaves
+  out.</li>
+</ul>
+
+<p>A write without a key costs what it did; with one, 16 200 single puts a
+second over HTTP against 18 300 without.</p>
+
 <h2>The data ceiling</h2>
 
 <p>Inside <code>fenec-pg</code> started with <code>--max-memory</code>, the
