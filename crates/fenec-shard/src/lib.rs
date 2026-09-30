@@ -1609,6 +1609,7 @@ fn message(e: &Error) -> String {
     match e {
         Error::NotFound(m)
         | Error::Exists(m)
+        | Error::Duplicate(m)
         | Error::Type(m)
         | Error::Query(m)
         | Error::Corrupt(m)

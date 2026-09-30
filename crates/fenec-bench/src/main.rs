@@ -167,6 +167,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
         db.execute(&Statement::Put {
             collection: "docs".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }

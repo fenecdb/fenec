@@ -396,6 +396,7 @@ fn write_marker(
     db.execute(&Statement::Put {
         collection: MARKER.to_string(),
         docs: vec![doc],
+        insert: false,
     })?;
     db.sync()?;
     let marker = read_marker(db, collection)?;
@@ -1227,6 +1228,7 @@ impl<'a> Mirror<'a> {
                     Statement::Put {
                         collection: collection.clone(),
                         docs,
+                        insert: false,
                     }
                 }
                 Op::Delete(_) => {

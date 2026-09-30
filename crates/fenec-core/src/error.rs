@@ -9,6 +9,9 @@ pub enum Error {
     NotFound(String),
     /// A resource that already exists.
     Exists(String),
+    /// An `insert` of a document whose id is taken: PostgreSQL's
+    /// `unique_violation`, where `Exists` is a collection's `42P07`.
+    Duplicate(String),
     /// A corrupt segment or an unexpected byte sequence.
     Corrupt(String),
     /// Invalid query (semantic errors after parsing).
@@ -29,6 +32,7 @@ impl fmt::Display for Error {
             Error::Type(m) => write!(f, "type error: {m}"),
             Error::NotFound(m) => write!(f, "not found: {m}"),
             Error::Exists(m) => write!(f, "already exists: {m}"),
+            Error::Duplicate(m) => write!(f, "duplicate: {m}"),
             Error::Corrupt(m) => write!(f, "corrupt: {m}"),
             Error::Query(m) => write!(f, "query error: {m}"),
             Error::Io(m) => write!(f, "io error: {m}"),

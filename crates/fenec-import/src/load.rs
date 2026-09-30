@@ -288,6 +288,7 @@ fn flush(
     db.execute(&Statement::Put {
         collection: collection.to_string(),
         docs,
+        insert: false,
     })
     .map_err(|e| locate(e, rows_done - n + 1, rows_done))
     .map(|_| ())

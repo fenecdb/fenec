@@ -357,6 +357,7 @@ fn main() {
             db.execute(&Statement::Put {
                 collection: "docs".into(),
                 docs,
+                insert: false,
             })
             .unwrap();
             i += batch;

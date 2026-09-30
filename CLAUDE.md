@@ -867,6 +867,15 @@ compact or an index is built beside the database, `COPY FROM` before a row
 is read, whatever the session sets. It needs `--password`, and the two
 passwords must differ.
 
+**`insert` never writes over; `put` does.** `Statement::Put` carries
+`insert` (the parser sets it for the keyword, `POST /<name>` over REST):
+a document naming an id the store holds is `Error::Duplicate` -- 409 over
+HTTP, `23505` over the pg wire, where `Exists` is a collection's `42P07`
+-- and the statement, a block of one, is put back whole. JWT scoping keeps
+the flag as it rewrites the statement; made a `put` there, a scoped insert
+would write over. The JS builder's `.insert()` still sends `put`: the sync
+layer writes rows back through it when it undoes an optimistic write.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer

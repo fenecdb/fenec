@@ -4547,7 +4547,11 @@ impl Database {
                 kind,
                 if_not_exists,
             } => self.create_index(collection, field, kind, *if_not_exists),
-            Statement::Put { collection, docs } => self.put(collection, docs, params),
+            Statement::Put {
+                collection,
+                docs,
+                insert,
+            } => self.put(collection, docs, *insert, params),
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::Update {
@@ -4694,6 +4698,7 @@ impl Database {
         &mut self,
         collection: &str,
         docs: &[Vec<(String, Expr)>],
+        insert: bool,
         params: &[Value],
     ) -> Result<Response> {
         let schema = self.collection(collection)?.schema.clone();
@@ -4721,6 +4726,15 @@ impl Database {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
             } else if c.store.contains(doc.id) {
+                // The statement is a block: what it wrote before this one
+                // is put back with it.
+                if insert {
+                    return Err(Error::Duplicate(format!(
+                        "`{collection}` holds a document {} already: insert makes new \
+                         ones, put writes over",
+                        doc.id
+                    )));
+                }
                 WriteOp::Update
             } else {
                 WriteOp::Insert

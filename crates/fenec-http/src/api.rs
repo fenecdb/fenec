@@ -561,9 +561,12 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
     for doc in docs {
         out.push(check_fields(schema, doc)?);
     }
+    // `POST` makes documents: one naming an id that is taken is refused
+    // (409) rather than written over.
     Ok(Statement::Put {
         collection: schema.name.clone(),
         docs: out,
+        insert: true,
     })
 }
 
@@ -1097,7 +1100,7 @@ fn schemas_json(list: &[Schema]) -> String {
 pub fn status_of(e: &Error) -> u16 {
     match e {
         Error::NotFound(_) => 404,
-        Error::Exists(_) => 409,
+        Error::Exists(_) | Error::Duplicate(_) => 409,
         Error::Type(_) | Error::Query(_) => 400,
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
         // As `--http-read-only` answers: the write is not this server's to take.

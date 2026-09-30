@@ -372,6 +372,10 @@ export declare class Query<
    */
   explain(): Promise<string[]>;
 
+  /**
+   * Writes the documents as FenecQL's `put`: new ones, and one naming an
+   * `id` written over. FenecQL's `insert` refuses a taken id instead.
+   */
   insert(docs: Insert<F> | Insert<F>[]): Promise<number>;
   update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;
   delete(opts?: { all?: boolean }): Promise<number>;

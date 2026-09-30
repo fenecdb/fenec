@@ -66,6 +66,7 @@ fn main() {
         db.execute(&Statement::Put {
             collection: "s".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }
@@ -137,6 +138,7 @@ fn main() {
             d2.execute(&Statement::Put {
                 collection: "v".into(),
                 docs,
+                insert: false,
             })
             .unwrap();
         }
@@ -172,6 +174,7 @@ fn main() {
             d.execute(&Statement::Put {
                 collection: "v".into(),
                 docs,
+                insert: false,
             })
             .unwrap();
         }
