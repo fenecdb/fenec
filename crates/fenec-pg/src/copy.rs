@@ -327,10 +327,13 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
             };
             let value = opt.get(1);
             match key.as_str() {
+                // Quoted too: DuckDB writes `(FORMAT "binary")`.
                 "format" => match value {
-                    Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "csv" => csv = true,
-                    Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "text" => csv = false,
-                    Some(Tok::Word(f)) | Some(Tok::Str(f)) if f == "binary" => binary = true,
+                    Some(Tok::Word(f) | Tok::Str(f) | Tok::Name(f)) if f == "csv" => csv = true,
+                    Some(Tok::Word(f) | Tok::Str(f) | Tok::Name(f)) if f == "text" => csv = false,
+                    Some(Tok::Word(f) | Tok::Str(f) | Tok::Name(f)) if f == "binary" => {
+                        binary = true
+                    }
                     _ => return Err(syntax("FORMAT is text or csv")),
                 },
                 "delimiter" => delimiter = Some(one_byte(value, "delimiter")?),

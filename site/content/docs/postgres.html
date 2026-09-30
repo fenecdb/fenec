@@ -66,6 +66,7 @@ transactions and its COPY — and with it pgvector's library for it
 <tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary), <code>CopyTo</code></td></tr>
 <tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>), <code>copy_out</code> in binary (<code>BinaryCopyOutStream</code>)</td></tr>
 <tr><td>node-postgres</td><td>rows and parameters in text</td></tr>
+<tr><td>DuckDB, its <code>postgres</code> extension</td><td>a collection attached as a table, read whole, aggregated, filtered with the conditions pushed down, and written out as Parquet (<a href="#duckdb">below</a>)</td></tr>
 </tbody>
 </table>
 </div>
@@ -467,6 +468,30 @@ the row, run whole as it would be on its own. Anything but one
 The same 100 000 rows of a text, an int and a 128-dim vector read out at
 157 000 rows/s in text and 1 540 000 in binary, against PostgreSQL's 156 000
 and 747 000 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
+
+<h3 id="duckdb">DuckDB, and Parquet through it</h3>
+
+<pre data-lang="sql">INSTALL postgres; LOAD postgres;
+ATTACH 'host=127.0.0.1 port=5433 user=fenec dbname=fenec' AS f (TYPE postgres, READ_ONLY);
+SELECT g, count(*), avg(x) FROM f.public.docs WHERE year = 2024 GROUP BY g;
+COPY (SELECT * FROM f.public.docs) TO 'docs.parquet' (FORMAT parquet);</pre>
+
+<p>DuckDB reads a collection as a table through its own
+<code>postgres</code> extension: the catalog lists it, and each read is
+<code>COPY (SELECT "col", ... FROM "public"."docs" WHERE ...) TO STDOUT
+(FORMAT "binary")</code>, which fenec-pg runs as the <code>get</code> it is.
+The conditions DuckDB pushes down — a column compared with a literal,
+<code>IS [NOT] NULL</code>, <code>IN (...)</code>, joined by
+<code>AND</code> — are read as their columns' types, since DuckDB quotes an
+int's <code>100</code> as <code>'100'</code>; <code>COLLATE "C"</code> is
+the byte order fenecdb compares in anyway. It splits a table into tasks by
+<code>ctid</code>, and fenecdb has no row addresses: the range covering
+every row is taken, and part of a table named by them refused rather than
+read wrong. A vector, whose type DuckDB has no reader for, it asks cast to
+<code>VARCHAR</code>, and gets its text. 50 000 rows went into a Parquet
+file in 97 ms, and <code>count</code>, <code>sum</code> and a
+<code>GROUP BY</code> over them in 52 to 90 ms; from Parquet, pandas, Spark
+and the rest read them.</p>
 
 <h2 id="pgvector">pgvector's clients</h2>
 
