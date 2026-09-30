@@ -1446,8 +1446,9 @@ number's text read for its end, for a `_` and for its value, a `put` of
 texts to the token-at-a-time parse. The message's text is checked as UTF-8
 whole before `from_utf8_lossy` walks it in chunks (`take_cstr`). A simple
 `put` of 1 000 went in at 105k rows/s without an index, and at 180k now,
-past `COPY` (`make load-bench`). The browser module reads such a list as
-it did: its vectors come in as `f32`s beside the text. The text is sliced with
+past `COPY` (`make load-bench`). The browser module reads such a list
+into a vector too, each number the general way: token by token, a `put`
+of 1 000 768-dim rows had 39 MB of tokens, which its memory keeps. The text is sliced with
 `get`: an index that can panic brought 2.7 KB brotli of a `char`'s
 formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
@@ -1473,11 +1474,27 @@ which grows and never gives back. A checkpoint writes the image a mebibyte
 at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
 before the next is made: built into one `Vec` the image doubled as it grew,
 old and new side by side, and `boxed` copied it again -- 30 000 x 128 went
-from 60 to 128 MB, and goes to 70. An object holds about 50 000 rows of 128
-dimensions -- what the same rows hold restored -- or 8 000 of 768 written
-250 a request: at 768 a write's own buffers are the peak, 5 000 rows
-written 1 000 a request holding 100 MB against 49 restored and 72 written
-250 at a time; `wrangler dev` does not hold a Worker to it.
+from 60 to 128 MB, and goes to 70. The chunks are made all at once, so a
+checkpoint is an object's peak: about 50 000 rows of 128 dimensions or
+10 000 of 768 fit, 109 and 111 MB at it; `wrangler dev` does not hold a
+Worker to it.
+
+**The browser module grows nothing by doubling past a mebibyte.** Its
+memory is never given back, so a peak stays for good. An index's vectors
+are `Rows` (`vector.rs`): natively a `Vec`, in the module chunks of about
+`ROWS_CHUNK` (1 MiB), a whole number of rows each, reached through where
+each starts (`starts`) in a load and one bounds check -- through the
+chunks' own `Vec`s a 10 000 x 128 build took 11% longer, and `row` out of
+line 5% (`#[inline(always)]`). A segment of documents doubles only up to
+the record that seals it (`Store::append`), where it went to 12.7 MB for
+8, and the lexer sets aside a token every four bytes up to 65 536 only: a
+list of numbers is one token (`Tok::Vector`, in the module too now), and
+a `put` of 1 000 768-dim rows had 39 MB set aside for 7 000. 5 000 x 768
+written 1 000 a request held 100 MB and holds 58, written as text 130 and
+62, 10 000 of them 150 and 84; a put of 200 of them as text went 10.1 ->
+7.0 ms, and builds and searches as fast (`make wasm-speed`), for 768
+bytes brotli. `web/fenec.test.js` holds an index over three chunks to the
+exact search, before and after an image.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

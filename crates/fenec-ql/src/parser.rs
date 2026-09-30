@@ -1119,7 +1119,6 @@ impl Parser {
 
     fn primary(&mut self) -> Result<Expr> {
         // Taken rather than cloned, as `next` would.
-        #[cfg(not(target_arch = "wasm32"))]
         if let Tok::Vector(v) = &mut self.toks[self.i].tok {
             let v = std::mem::take(v);
             self.i += 1;

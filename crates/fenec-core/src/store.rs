@@ -728,7 +728,19 @@ impl Store {
         let seg = &mut self.segments[seg_ix];
         let header_len = frame.len() - payload.len();
         let off = seg.data.len() + header_len;
-        grow(&mut seg.data).extend_from_slice(&frame);
+        let data = grow(&mut seg.data);
+        // Doubled as a `Vec` would be, but never past the record that
+        // seals it: doubled past 8 MiB, a segment of 768-dim documents took
+        // 12.7 MB beside the 6.3 it was copied out of, and the browser
+        // module's memory never gives a peak back.
+        let need = data.len() + frame.len();
+        if data.capacity() < need {
+            let to = (data.capacity() * 2)
+                .min(SEGMENT_MAX + frame.len())
+                .max(need);
+            data.reserve_exact(to - data.len());
+        }
+        data.extend_from_slice(&frame);
         self.total_bytes += frame.len();
 
         match op {

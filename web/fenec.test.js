@@ -1204,6 +1204,41 @@ test('distance kernels keep their summation order', { skip: wasm ? false : 'no w
   }
 });
 
+// The module keeps an index's vectors in chunks of about a mebibyte, a
+// whole number of rows each, rather than one array doubled as it grows
+// (`Rows` in vector.rs). 150 vectors fill three chunks of 64 rows each,
+// rows of 4 096 f32s, 8 192 halves or 16 384 int8 codes: every vector is
+// found by itself, the scores are the exact search's, and an
+// image written from the chunks reads back into them the same.
+test('an index held in chunks answers as one array did', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  let x = 0x9e3779b9;
+  const r = () => {
+    x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+    return (x / 2 ** 32) * 2 - 1;
+  };
+  for (const [type, dim, quant] of [['vector<4096>', 4096, ''], ['vector<8192, f16>', 8192, ''], ['vector<16384>', 16384, ', quant=int8']]) {
+    const n = 150;
+    const db = await Fenec.open(wasm);
+    db.run(`create collection c (n int, e ${type} @hnsw(l2${quant}))`);
+    const vs = Array.from({ length: n }, () => Float32Array.from({ length: dim }, r));
+    for (let i = 0; i < n; i += 50) {
+      await db.from('c').insert(vs.slice(i, i + 50).map((e, j) => ({ n: i + j, e })));
+    }
+    const again = await Fenec.open(wasm);
+    again.load(db.snapshot());
+    for (const d of [db, again]) {
+      for (let i = 0; i < n; i += 7) {
+        const [hit] = d.rows('get c select n near e $1 ef 64 limit 1', [vs[i]]);
+        assert.equal(hit.n, i, `${type}${quant}: row ${i}`);
+      }
+      const q = Float32Array.from({ length: dim }, r);
+      const scores = (sql) => d.rows(sql, [q]).map((row) => [row.n, row._score]);
+      assert.deepEqual(scores('get c select n near e $1 ef 150 limit 5'), scores('get c select n near e $1 exact limit 5'), type);
+    }
+  }
+});
+
 // The brief at /llms.txt is what a coding agent copies from, so every example
 // in it has to run as written. They live in site/build.py, which renders it.
 test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

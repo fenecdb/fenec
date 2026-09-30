@@ -12,8 +12,7 @@ pub enum Tok {
     /// `$1` -> Param(0)
     Param(usize),
     /// Numbers alone between brackets, read as the parser reads such a
-    /// list: into `f32`s, a vector ([`tokenize_vectors`]). Native only.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// list: into `f32`s, a vector ([`tokenize_vectors`]).
     Vector(Vec<f32>),
     LBrace,
     RBrace,
@@ -47,7 +46,6 @@ impl Tok {
                 text
             }
             Tok::Param(i) => format!("${}", i + 1),
-            #[cfg(not(target_arch = "wasm32"))]
             Tok::Vector(v) => format!("a vector of {}", v.len()),
             Tok::LBrace => "`{`".into(),
             Tok::RBrace => "`}`".into(),
@@ -88,11 +86,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 /// times -- for its end, for a `_`, for its value. A `put` of 1 000 rows
 /// holding a 128-dim vector each took 5.4 ms to parse, 4.6 of it the lexer.
 /// Not after `in`, whose list keeps its numbers as they are written: an
-/// integer an integer and a decimal an `f64`. Natively: the browser module's
-/// vectors come in as `f32`s beside the text, and the reader was 1.5 KB of
-/// it.
+/// integer an integer and a decimal an `f64`. The browser module too, for
+/// its memory rather than the time: a token a number, a `put` of 1 000
+/// 768-dim rows as text took it from 58 to 130 MB, which it never gives
+/// back, for 0.3 KB brotli.
 pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
-    lex::<{ !cfg!(target_arch = "wasm32") }>(src)
+    lex::<true>(src)
 }
 
 /// At a `[` at byte `i`: the numbers alone up to the `]` that closes it,
@@ -100,7 +99,6 @@ pub fn tokenize_vectors(src: &str) -> Result<Vec<Token>> {
 /// makes it, and where the `]` ends. `None` for anything else -- an empty
 /// list, a trailing comma, a comment, a `_` in a number, one that does not
 /// read -- which the tokens then read as they always did.
-#[cfg(not(target_arch = "wasm32"))]
 fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
     let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
     let space = |i: usize| matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
@@ -182,7 +180,11 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
     // bytes stepped past are counted as they are left, each but a UTF-8
     // continuation byte.
     let (mut chars, mut counted) = (0usize, 0usize);
-    let mut out = Vec::with_capacity(b.len() / 4 + 2);
+    // A token about every four bytes, but no more than 65 536 ahead: a
+    // list of numbers is one token, and a `put` of 1 000 768-dim rows had
+    // 39 MB set aside for 7 000 -- in the browser module, whose memory is
+    // never given back, for good.
+    let mut out = Vec::with_capacity((b.len() / 4 + 2).min(1 << 16));
     // The character at byte `i`, and its length in bytes.
     let at = |i: usize| -> (char, usize) {
         match b[i] {
@@ -230,7 +232,6 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 Tok::RParen
             }
-            #[cfg(not(target_arch = "wasm32"))]
             '[' if VECTORS => {
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in"));
                 match !after_in {
