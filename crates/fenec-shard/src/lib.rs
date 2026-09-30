@@ -667,6 +667,7 @@ impl Router {
             body: out.finish().into_bytes(),
             content_type: "text/plain; version=0.0.4; charset=utf-8",
             extra: Vec::new(),
+            seq: None,
         }
     }
 

@@ -86,6 +86,32 @@ position the primary's own history passed through:</p>
 8</a>), and the first time a primary serves replicas it draws an id of its
 own — the root history is every database's, so it names none.</p>
 
+<h2 id="read-your-writes">Reading your own writes</h2>
+
+<p>A replica is behind its primary by the time a write takes to reach it —
+0.2 ms at the median under <code>--sync always</code>, up to the sync
+interval otherwise — so a client that writes on the primary and reads on a
+replica can read from before its own write. Over HTTP a write's answer
+names the change it left the database at, <code>Fenec-Seq</code>; a request
+sent to a replica with <code>Fenec-After: &lt;that number&gt;</code> is
+served once the replica holds it, and answered 504 with where the replica
+stands if it does not within the wait — never from before the write.</p>
+
+<pre data-lang="bash">curl -i -X POST http://primary:8080/query -d '{"query":"put carts {user: 7}"}'
+# Fenec-Seq: 1042
+
+curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
+  -d '{"query":"get carts where user = 7"}'
+</pre>
+
+<p>The wait is 5 seconds unless <code>Fenec-Wait</code> gives it in
+milliseconds, 30 seconds at most, and a replica waits on the same
+<code>Condvar</code> its subscriptions do, so nothing polls. The Python
+client keeps the last write's number (<code>client.seq</code>) and sends it
+with <code>query(..., after=...)</code>. Writing the header costs the
+server nothing measurable; a client that parses every header, as Python's
+<code>http.client</code> does, reads one more.</p>
+
 <h2>Promotion</h2>
 
 <p>By hand, one of two ways: <code>POST /_replication/promote</code> on the

@@ -34,3 +34,18 @@ def test_a_refusal_says_why_and_how(client):
     with pytest.raises(FenecError) as e:
         client.query("get x wher")
     assert e.value.status == 400
+
+
+def test_a_write_names_its_change_and_a_read_can_wait_for_it(client):
+    name = fresh("seq")
+    client.query(f"create collection {name} (t text)")
+    try:
+        client.query(f'put {name} {{t: "x"}}')
+        assert client.seq and client.seq > 0
+        # On the primary the write is there already: answered at once.
+        assert client.query(f"get {name} count", after=client.seq) == [{"count": 1}]
+        with pytest.raises(FenecError) as e:
+            client.query(f"get {name} count", after="soon")
+        assert e.value.status == 400
+    finally:
+        client.query(f"drop collection if exists {name}")

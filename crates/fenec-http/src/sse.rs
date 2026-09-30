@@ -95,6 +95,26 @@ impl Hub {
         *g
     }
 
+    /// Waits until `seq` says the database holds write `n`, or `until`:
+    /// whether it does. A replica's writes come through `notify` as they
+    /// are applied, so a read sent with `Fenec-After` waits for the write
+    /// its client made on the primary.
+    pub(crate) fn reached(&self, n: u64, seq: impl Fn() -> u64, until: std::time::Instant) -> bool {
+        loop {
+            if seq() >= n {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= until || self.is_closed() {
+                return false;
+            }
+            self.wait(
+                n.saturating_sub(1),
+                (until - now).min(Duration::from_millis(100)),
+            );
+        }
+    }
+
     /// Ends every stream on this hub: each one writes an `error` event and
     /// closes, and a client reconnecting lands wherever the tenant is now.
     pub fn close(&self) {

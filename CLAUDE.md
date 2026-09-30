@@ -845,6 +845,19 @@ A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
 
+**A read can wait for a write on a replica** (`after` in `lib.rs`,
+`Hub::reached`). A write's answer carries `Fenec-Seq`, the change it left
+the database at -- a field of `Response`, written into the head with no
+allocation -- and a request sent with `Fenec-After: <n>` is served once
+the database holds change `n`, or answered 504 with where it stands after
+`Fenec-Wait` (5 s, 30 at most): never from before the write. A replica's
+applied records reach the hub through `Database::apply`'s watcher, so the
+wait is the subscriptions' `Condvar`. Held back, a replica answered a read
+without the header from before the write and with it after 300 ms, as the
+test holds it. It costs the server nothing measurable -- 37 500 puts a
+second against 37 700 from a client that does not parse headers -- while
+Python's `http.client`, parsing one more, went 18 200 -> 17 900.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer

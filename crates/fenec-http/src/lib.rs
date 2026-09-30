@@ -566,6 +566,18 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             sse::serve(&mut out, db, cfg, hub, &req, &who);
             return;
         }
+        // Reading one's own write on a replica: the request waits until the
+        // write its client made on the primary (`Fenec-Seq`) is here.
+        if let Some(refusal) = after(&req, db, hub) {
+            if cors(refusal, cfg)
+                .write(&mut out, keep_alive, head_only)
+                .is_err()
+                || !keep_alive
+            {
+                return;
+            }
+            continue;
+        }
         let started = std::time::Instant::now();
         let resp = match &tenant {
             None => handle(db, cfg, &req),
@@ -586,6 +598,47 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             return;
         }
     }
+}
+
+/// How long a request sent with `Fenec-After` waits for the write it names,
+/// unless `Fenec-Wait` says otherwise, and the longest it may.
+const AFTER_WAIT: Duration = Duration::from_secs(5);
+const AFTER_LONGEST: Duration = Duration::from_secs(30);
+
+/// A request sent with `Fenec-After: <n>` is served once this database holds
+/// change `n` -- a replica, once it has applied the write its client made on
+/// the primary and was answered with `Fenec-Seq: <n>` -- or answered 504
+/// after the wait, never with what came before it.
+fn after(req: &Request, db: &RwLock<Database>, hub: &sse::Hub) -> Option<Response> {
+    let n = req.header("fenec-after")?;
+    let Ok(n) = n.trim().parse::<u64>() else {
+        return Some(Response::error(400, "Fenec-After expects a change number"));
+    };
+    let wait = req
+        .header("fenec-wait")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(AFTER_WAIT, Duration::from_millis)
+        .min(AFTER_LONGEST);
+    let seq = || db.read().unwrap_or_else(|e| e.into_inner()).change_seq();
+    match hub.reached(n, seq, std::time::Instant::now() + wait) {
+        true => None,
+        false => Some(Response::json(
+            504,
+            format!(
+                "{{\"error\":\"change {n} has not reached this server in the wait\",\"seq\":{}}}",
+                seq()
+            ),
+        )),
+    }
+}
+
+/// A write's answer, with the change it left the database at: a replica
+/// sent `Fenec-After` with it serves the read once it holds the write.
+fn with_seq(mut resp: Response, seq: Option<u64>) -> Response {
+    if resp.status < 300 {
+        resp.seq = seq;
+    }
+    resp
 }
 
 /// What the slow-statement log says a request was: its method and target,
@@ -788,6 +841,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             }
             None => None,
         };
+        let seq = result.is_ok().then(|| guard.change_seq());
         let durability = match result {
             Ok(_) => match flush_for(cfg, &mut guard) {
                 Ok(d) => d,
@@ -799,7 +853,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         if let Err(e) = await_durable(db, durability) {
             return error_response(&e);
         }
-        kept.unwrap_or_else(|| answer(&result))
+        with_seq(kept.unwrap_or_else(|| answer(&result)), seq)
     } else {
         let guard = held::read_landed(db);
         let routed = match api::route(&guard, req) {
@@ -893,6 +947,8 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     if let Some(k) = &key {
         return keyed_query(db, cfg, who, k, &stmt, &params);
     }
+    // The change a write left the database at, for `Fenec-Seq`.
+    let mut seq = None;
     let result = if stmt.is_read_only() {
         held::read_landed(db).query(&stmt, &params)
     } else if let Some(built) = Database::maintain(db, &stmt) {
@@ -900,10 +956,14 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         // no lock held; the index's record then waits for the disk as any
         // write does.
         let durability = match built {
-            Ok(_) => match flush_for(cfg, &mut db.write().unwrap_or_else(|e| e.into_inner())) {
-                Ok(d) => d,
-                Err(e) => return error_response(&e),
-            },
+            Ok(_) => {
+                let mut g = db.write().unwrap_or_else(|e| e.into_inner());
+                seq = Some(g.change_seq());
+                match flush_for(cfg, &mut g) {
+                    Ok(d) => d,
+                    Err(e) => return error_response(&e),
+                }
+            }
             Err(_) => None,
         };
         if let Err(e) = await_durable(db, durability) {
@@ -913,6 +973,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     } else {
         let mut guard = held::write_unheld(db);
         let r = access::within(who, || guard.execute_with(&stmt, &params));
+        seq = Some(guard.change_seq());
         let durability = match r {
             Ok(_) => match flush_for(cfg, &mut guard) {
                 Ok(d) => d,
@@ -930,7 +991,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(resp) => {
             let resp = visible(who, resp);
             statements::rows(counted(&resp));
-            api::render_any(&resp, fenec_core::VERSION)
+            with_seq(api::render_any(&resp, fenec_core::VERSION), seq)
         }
         Err(e) => error_response(&e),
     }
@@ -965,6 +1026,7 @@ fn keyed_query(
     if let Err(e) = keyed(&mut guard, key, &resp, result.is_ok(), ttl) {
         return error_response(&e);
     }
+    let seq = result.is_ok().then(|| guard.change_seq());
     let durability = match result {
         Ok(_) => match flush_for(cfg, &mut guard) {
             Ok(d) => d,
@@ -976,7 +1038,7 @@ fn keyed_query(
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
     }
-    resp
+    with_seq(resp, seq)
 }
 
 /// The rows a response returned or changed, for the statements' counts.
@@ -1093,6 +1155,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(kept) => kept,
         Err(e) => return error_response(&e),
     };
+    let seq = Some(guard.change_seq());
     let durability = match flush_for(cfg, &mut guard) {
         Ok(d) => d,
         Err(e) => return error_response(&e),
@@ -1101,7 +1164,10 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     if let Err(e) = await_durable(db, durability) {
         return error_response(&e);
     }
-    kept.unwrap_or_else(|| api::render_batch(&results, fenec_core::VERSION))
+    with_seq(
+        kept.unwrap_or_else(|| api::render_batch(&results, fenec_core::VERSION)),
+        seq,
+    )
 }
 
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.

@@ -279,6 +279,10 @@ pub struct Response {
     pub body: Vec<u8>,
     pub content_type: &'static str,
     pub extra: Vec<(String, String)>,
+    /// `Fenec-Seq`: the change a write left the database at. A field of its
+    /// own rather than an `extra`, which cost every write two allocations
+    /// and 2-3% of a put's rate over HTTP.
+    pub seq: Option<u64>,
 }
 
 impl Response {
@@ -288,6 +292,7 @@ impl Response {
             body: body.into(),
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
+            seq: None,
         }
     }
 
@@ -304,6 +309,7 @@ impl Response {
             body: Vec::new(),
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
+            seq: None,
         }
     }
 
@@ -338,6 +344,11 @@ impl Response {
             head.push_str(k);
             head.push_str(": ");
             head.push_str(v);
+            head.push_str("\r\n");
+        }
+        if let Some(seq) = self.seq {
+            head.push_str("Fenec-Seq: ");
+            push_number(&mut head, seq);
             head.push_str("\r\n");
         }
         head.push_str("\r\n");

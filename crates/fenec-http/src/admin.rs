@@ -60,6 +60,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             body: image,
             content_type: "application/octet-stream",
             extra: Vec::new(),
+            seq: None,
         }),
         (Method::Put, ["tenants", t, "file"]) => tenants
             .import(t, &req.body)
