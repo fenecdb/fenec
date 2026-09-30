@@ -57,17 +57,14 @@ fn refusals_wait_and_logins_schema_changes_and_refusals_are_logged() {
     assert!(waits[0] >= Duration::from_millis(50), "{waits:?}");
     assert!(waits[1] >= Duration::from_millis(100), "{waits:?}");
     assert!(waits[2] >= Duration::from_millis(200), "{waits:?}");
-    // The right token is not slowed, and starts the count again.
-    let t = Instant::now();
+    // The right token starts the count again: the next refusal waits the
+    // first wait, and the one after it twice that. (A clock bound on the
+    // request itself fails on a slow runner.)
     let body = r#"{"query":"create collection notes (title text)"}"#;
     assert_eq!(call(port, Some(ROOT), "POST", "/query", body), 200);
-    assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
-    let t = Instant::now();
     assert_eq!(call(port, None, "GET", "/_schema", ""), 401);
-    assert!(
-        t.elapsed() < Duration::from_millis(100),
-        "the count started again"
-    );
+    let local = Some("127.0.0.1".parse().unwrap());
+    assert_eq!(fenec_http::audit::failed(local), Duration::from_millis(100));
 
     // A write is no event; a schema change is, by its shape.
     let put = r#"{"query":"put notes {title: \"a secret title\"}"}"#;

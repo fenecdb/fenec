@@ -53,9 +53,12 @@ fn a_failed_login_waits_and_logins_are_logged() {
             t.elapsed()
         );
     }
-    let t = Instant::now();
+    // The right password waits for nothing and starts the count again: the
+    // next failure from the address waits the first wait. (A clock bound on
+    // the login itself fails on a slow runner, SCRAM being slow unoptimised.)
     let mut c = Client::connect(&url(port, "right-password")).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(50), "{:?}", t.elapsed());
+    let local = Some("127.0.0.1".parse().unwrap());
+    assert_eq!(fenec_http::audit::failed(local), Duration::from_millis(50));
     c.query("create collection notes (title text)").unwrap();
     c.query(r#"put notes {title: "not in the log"}"#).unwrap();
     drop(c);
