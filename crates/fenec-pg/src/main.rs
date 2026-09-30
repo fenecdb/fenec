@@ -40,6 +40,12 @@ usage: fenec-pg [options]
 
   -W, --password <password> turn on password authentication
       --password-file <path> read the password from a file (argv shows up in `ps`)
+      --reader <name>       a user that logs in with --reader-password and
+                            writes nothing: every write of its session is
+                            refused (25006), whatever it sets
+      --reader-password <password>, --reader-password-file <path>
+                            the reader's password, by the same method as
+                            --password's. Also read from FENECPG_READER_PASSWORD
       --auth <method>       scram | cleartext        default: scram
   -U, --user <name>         accept only this user name
 
@@ -217,6 +223,8 @@ fn main() {
     let mut listen_given = false;
     let mut idle_close = Duration::from_secs(300);
     let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
+    let mut reader: Option<String> = None;
+    let mut reader_password: Option<String> = std::env::var("FENECPG_READER_PASSWORD").ok();
     let mut method = "scram".to_string();
     let mut ping = false;
     let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
@@ -265,6 +273,15 @@ fn main() {
                 idle_close = Duration::from_secs(secs);
             }
             "--password" | "-W" => password = Some(next(&mut i, "--password")),
+            "--reader" => reader = Some(next(&mut i, "--reader")),
+            "--reader-password" => reader_password = Some(next(&mut i, "--reader-password")),
+            "--reader-password-file" => {
+                let path = next(&mut i, "--reader-password-file");
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => reader_password = Some(s.trim_end_matches(['\n', '\r']).to_string()),
+                    Err(e) => fail(&format!("could not read {path}: {e}")),
+                }
+            }
             "--password-file" => {
                 let path = next(&mut i, "--password-file");
                 match std::fs::read_to_string(&path) {
@@ -531,6 +548,24 @@ fn main() {
             Err(e) => fail(&e),
         },
         None => Auth::Trust,
+    };
+    cfg.reader = match (reader, reader_password) {
+        (None, _) => None,
+        (Some(_), _) if password.is_none() => {
+            fail("--reader needs --password: without one every user writes")
+        }
+        (Some(name), _) if Some(&name) == cfg.user.as_ref() => {
+            fail("--reader names another user than --user")
+        }
+        (Some(_), None) => fail("--reader needs --reader-password or --reader-password-file"),
+        (Some(_), Some(pw)) if pw.is_empty() => fail("the reader's password cannot be empty"),
+        (Some(_), Some(pw)) if Some(&pw) == password.as_ref() => {
+            fail("the reader's password is the writer's: pick another")
+        }
+        (Some(name), Some(pw)) => match Auth::parse(&method, &pw) {
+            Ok(a) => Some((name, a)),
+            Err(e) => fail(&e),
+        },
     };
 
     if let Some(dir) = dir {

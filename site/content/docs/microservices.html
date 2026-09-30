@@ -23,7 +23,9 @@ several: see <a href="/docs/sharding">Tenants and sharding</a>.</p>
 the collections, and the rows, its role may read or write
 (<a href="/docs/http#scoped-access">Scoped access</a>). A service that only
 reads can be pointed at a replica, which refuses every write
-(<a href="/docs/replication">Replication</a>); a PostgreSQL driver that
+(<a href="/docs/replication">Replication</a>), or log in over the
+PostgreSQL wire as the reader, which writes nothing
+(<a href="/docs/postgres#authentication">Authentication</a>); a PostgreSQL driver that
 knows <code>target_session_attrs=read-write</code> finds the primary among
 several hosts by itself.</p>
 

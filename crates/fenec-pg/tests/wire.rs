@@ -3919,3 +3919,65 @@ fn spark_reads_a_collection_through_plain_selects() {
     // A missing collection is the error it is, not an empty count.
     assert!(outcome(&c.simple("SELECT 1 FROM nothing")).starts_with("42P01"));
 }
+
+/// The reader logs in with a password of its own and writes nothing -- out
+/// of a transaction or in one, by COPY, as an index or a compact, whatever
+/// it sets -- and reads what the writer wrote.
+#[test]
+fn the_reader_reads_and_writes_nothing() {
+    let mut db = Database::new();
+    db.install_plugin(&PgPlugin).unwrap();
+    let cfg = Config {
+        auth: Auth::parse("scram", "writer-pw").unwrap(),
+        user: Some("fenec".into()),
+        reader: Some((
+            "reporting".into(),
+            Auth::parse("scram", "reader-pw").unwrap(),
+        )),
+        ..Config::default()
+    };
+    let h = start(cfg, db);
+    let mut w = Client::connect(h.port, "fenec", Some("writer-pw")).unwrap();
+    w.simple("create collection t (name text)");
+    w.simple("put t {name: \"a\"}");
+
+    // Each name with its own password, and no other.
+    assert!(Client::connect(h.port, "reporting", Some("writer-pw")).is_err());
+    assert!(Client::connect(h.port, "fenec", Some("reader-pw")).is_err());
+    let mut r = Client::connect(h.port, "reporting", Some("reader-pw")).unwrap();
+    assert_eq!(
+        find(&r.simple("get t select name"), b'D').unwrap().cells(),
+        vec![Some("a".to_string())]
+    );
+    let refused = |r: &mut Client, sql: &str| {
+        let out = r.simple(sql);
+        let e = find(&out, b'E').unwrap_or_else(|| panic!("{sql} was not refused"));
+        assert_eq!(
+            e.sqlstate().as_deref(),
+            Some("25006"),
+            "{sql}: {:?}",
+            e.message()
+        );
+    };
+    for sql in [
+        "put t {name: \"x\"}",
+        "set t {name: \"y\"}",
+        "del t",
+        "create collection u (x int)",
+        "drop collection t",
+        "create index on t (name) @hash",
+        "compact",
+        "COPY t (name) FROM STDIN",
+    ] {
+        refused(&mut r, sql);
+    }
+    // Asking for a writable transaction changes nothing.
+    r.simple("SET default_transaction_read_only = off");
+    r.simple("BEGIN READ WRITE");
+    refused(&mut r, "put t {name: \"x\"}");
+    r.simple("ROLLBACK");
+    let n = w.simple("get t count");
+    assert_eq!(find(&n, b'D').unwrap().cells(), vec![Some("1".to_string())]);
+    // The writer writes on.
+    assert!(find(&w.simple("put t {name: \"b\"}"), b'E').is_none());
+}
