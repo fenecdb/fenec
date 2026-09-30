@@ -183,6 +183,11 @@ jobs:
       - name: React hook
         run: make wasm react-test
 
+      # web/fenec.d.ts held to web/fenec.js: every export and method the
+      # module has declared, and a caller's code type-checked under --strict.
+      - name: TypeScript declarations
+        run: make types-check
+
       # A database kept in a Durable Object's storage, against a stand-in
       # holding to its limits, and storage that fails part way; then the
       # example Worker under `wrangler dev`, workerd running it, stopped and
