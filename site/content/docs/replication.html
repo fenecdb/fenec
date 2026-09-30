@@ -164,11 +164,12 @@ it. The <code>fenec</code> command line writes and reads one:</p>
 <pre data-lang="bash"># the running database, taken whole: a file that opens as a database of its own
 fenec backup http://primary:8080 nightly.fenec --token "$REPL"
 
-# every write that reaches the primary's disk, until interrupted
-fenec archive http://primary:8080 /backups/archive --token "$REPL"
+# every write that reaches the primary's disk, until interrupted; an image of
+# its own every hour, and what no restore to the last week needs let go of
+fenec archive http://primary:8080 /backups/archive --token "$REPL" --image-every 1h --keep 7d
 
-# a base image into the archive -- a day's worth, say -- so a restore replays less
-fenec backup http://primary:8080 /backups/archive --token "$REPL"
+# what the archive can restore, read as a restore would; exits 1 if it cannot
+fenec verify /backups/archive
 
 # the database as it stood just before the mistake
 fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z
@@ -200,9 +201,49 @@ writes-&lt;first change&gt;.log      per record, the time it was appended and th
 history                        the history the archive is on
 </pre>
 
-<p>Pruning is by hand: a restore needs an image at or before its point and
-every segment after that image, so what is older than the newest image before
-the earliest moment worth keeping can go.</p>
+<p>An archive takes images of its own: every <code>--image-every</code> (an
+hour unless given), once a write came after the last one, it opens its last
+image and the writes after it and adds an image of the database there — the
+primary is asked for nothing — named by the time of its last write, and the
+segment being written ends so that the writes before the image are in
+segments of their own. A restore then replays at most that much. With
+<code>--keep</code>, what no restore within that window needs goes after
+each image: the images before the newest one taken by the window's start,
+which a restore to that moment starts from, and the segments whose writes
+all came before the oldest image kept — never the one being written.
+<code>fenec prune &lt;dir&gt; --keep 7d</code> does the same once.</p>
+
+<p><code>fenec verify &lt;dir&gt;</code> reads the archive as a restore
+would: every image opens at the change its name says, the segments run on
+from the oldest image with no change missing, only the last segment may end
+in a record cut short, and a restore to the end opens. It prints from when
+to when the archive can restore, names any gap — changes in no segment
+between two images, where a restore to the end passes but a restore to a
+moment inside cannot — and exits 1 when no restore can be made.</p>
+
+<h3 id="object-storage">In object storage</h3>
+
+<p>fenecdb speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
+archive goes there the way any directory does: a sync tool beside the
+archiver.</p>
+
+<pre data-lang="bash">rclone sync /backups/archive r2:backups/archive      # every few minutes
+aws s3 sync /backups/archive s3://backups/archive --delete
+
+# to restore: bring it back, check it, restore it
+rclone sync r2:backups/archive ./archive && fenec verify ./archive
+fenec restore ./archive before.fenec --to 2026-09-22T10:14:59Z</pre>
+
+<p>Every file but the segment being written is written once: a segment is
+closed and fsynced before the next begins, and an image is written beside
+and renamed into place. A sync tool lists the directory and then copies
+each file as it stands, so the copy it leaves is the archive up to a
+moment, its last segment at most cut in a record's middle — which
+<code>verify</code> reports and a restore passes over. A test copies an
+archive a file at a time while writes and images go on, and every copy
+verifies and restores to a prefix of what the primary wrote.
+<code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
+over to the copy; without it the copy keeps everything.</p>
 
 <h2>Endpoints</h2>
 
@@ -243,6 +284,7 @@ feeding and how far each has been sent.</p>
     failover</a>).</li>
   <li><b>No TLS.</b> The stream is plain HTTP, like every other listener
     here: across an open network, a tunnel carries it.</li>
-  <li><b>No retention.</b> Nothing prunes an archive's images and segments on
-    its own.</li>
+  <li><b>No object-storage client.</b> An archive is a directory; a sync
+    tool carries it to S3, R2 or GCS (<a href="#object-storage">In object
+    storage</a>).</li>
 </ul>

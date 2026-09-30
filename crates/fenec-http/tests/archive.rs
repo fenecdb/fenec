@@ -584,3 +584,102 @@ fn verify_says_what_an_archive_can_restore() {
     let e = Archive::new(&bad).unwrap().verify().unwrap_err();
     assert!(e.to_string().contains("image-"), "{e}");
 }
+
+/// What a sync tool -- `rclone sync`, `aws s3 sync` -- does to an archive
+/// being written: copies its files one after another, each as it stands
+/// then. A copy taken so is restorable to a moment or says it is not, and
+/// a copy taken again once the archive stood still is whole.
+#[test]
+fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
+    let d = dir("sync");
+    let p = Arc::new(primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER));
+    p.exec("create collection notes (n int @hash, title text)");
+    let arch = d.join("archive");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    // Writes all along, and images taken here meanwhile, so segments end
+    // and begin while the copies are made.
+    let writing = Arc::new(AtomicBool::new(true));
+    let writer = {
+        let (p, go, a) = (Arc::clone(&p), Arc::clone(&writing), Arc::clone(&shared));
+        std::thread::spawn(move || {
+            let mut i = 0;
+            while go.load(Ordering::SeqCst) {
+                p.exec(&format!("put notes {{n: {i}, title: \"note {i}\"}}"));
+                if i % 150 == 149 {
+                    a.consolidate().unwrap();
+                }
+                i += 1;
+            }
+            i
+        })
+    };
+    let (mut whole, mut refused) = (0, 0);
+    for k in 0..12 {
+        std::thread::sleep(Duration::from_millis(40));
+        let copy = copy_of_as_it_goes(&arch, &d.join(format!("copy{k}")));
+        match Archive::new(&copy).unwrap().verify() {
+            Ok(v) => {
+                whole += 1;
+                // What it restores is the primary as it stood at a change:
+                // every note up to one, none after.
+                let (db, r) = restored(&copy, &d.join(format!("copy{k}.fenec")), Target::End);
+                assert_eq!(r.seq, v.last);
+                let ns: Vec<i64> = rows(&db, "get notes select n")
+                    .into_iter()
+                    .map(|(_, v)| match v[0] {
+                        Value::Int(n) => n,
+                        ref other => panic!("{other:?}"),
+                    })
+                    .collect();
+                assert!(ns.iter().enumerate().all(|(i, &n)| n == i as i64), "copy {k}: a prefix");
+            }
+            Err(e) => {
+                refused += 1;
+                let e = e.to_string();
+                assert!(
+                    e.contains("cut short") || e.contains("missing") || e.contains("lacks") || e.contains("image"),
+                    "copy {k}: {e}"
+                );
+            }
+        }
+    }
+    writing.store(false, Ordering::SeqCst);
+    let n = writer.join().unwrap();
+    archived(&arch, p.seq());
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+    // Synced again once it stood still: whole, and all of it.
+    let last = copy_of_as_it_goes(&arch, &d.join("last"));
+    let v = Archive::new(&last).unwrap().verify().unwrap();
+    assert_eq!(v.last, p.seq());
+    let (db, _) = restored(&last, &d.join("last.fenec"), Target::End);
+    assert_eq!(rows(&db, "get notes").len(), n as usize);
+    assert!(whole + refused == 12 && whole > 0, "{whole} whole, {refused} refused");
+}
+
+/// Copies an archive's files one at a time, in the order a directory
+/// listing gives them, each as it stands when its turn comes -- the file
+/// being written may be cut in a record's middle.
+fn copy_of_as_it_goes(arch: &Path, to: &Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(arch).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name();
+        if name.to_string_lossy().ends_with(".tmp") {
+            continue;
+        }
+        // A file renamed away between the listing and its copy is skipped,
+        // as a sync tool skips it until its next run.
+        let _ = std::fs::copy(e.path(), to.join(name));
+    }
+    to.to_path_buf()
+}
