@@ -314,7 +314,30 @@ export class Fenec {
 
   /** Byte image of the whole database (to write into IndexedDB/OPFS). */
   snapshot() {
-    return this.#readBytes(this.#wasm.fenec_snapshot(this.#handle));
+    const parts = [...this.snapshotChunks()];
+    if (parts.length === 1) return parts[0];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) {
+      out.set(p, at);
+      at += p.length;
+    }
+    return out;
+  }
+
+  /**
+   * The image a mebibyte at a time, each let go of in the module as it is
+   * taken: the image is never in the module twice, nor whole here -- which
+   * a Durable Object's 128 MB needs, its storage taking pieces anyway.
+   */
+  *snapshotChunks() {
+    // A module from before chunks gives the image whole.
+    if (!this.#wasm.fenec_snapshot_chunks) {
+      yield this.#readBytes(this.#wasm.fenec_snapshot(this.#handle));
+      return;
+    }
+    const n = this.#wasm.fenec_snapshot_chunks(this.#handle);
+    for (let i = 0; i < n; i++) yield this.#readBytes(this.#wasm.fenec_snapshot_chunk(this.#handle));
   }
 
   /**

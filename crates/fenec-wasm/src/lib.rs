@@ -31,6 +31,54 @@ struct Slot {
     journal: Option<Arc<Mutex<Journal>>>,
     /// The bytes the last `fenec_load` took (`fenec_loaded`).
     loaded: usize,
+    /// An image `fenec_snapshot_chunks` made, its chunks yet to be taken,
+    /// the last first.
+    chunks: Vec<Vec<u8>>,
+}
+
+/// A snapshot's chunk: a mebibyte, written into and never grown.
+const CHUNK: usize = 1 << 20;
+
+/// An image written into chunks of [`CHUNK`] bytes. Into one `Vec` it grew
+/// by doubling, and its old and new buffers stood side by side as it
+/// copied: a 12 MB image took the module's memory, which WebAssembly never
+/// gives back, up by 37 MB -- the image itself, the slack, and the copy
+/// `boxed` made of it. In chunks, by the image and a chunk.
+#[derive(Default)]
+struct Chunks {
+    parts: Vec<Vec<u8>>,
+    len: u64,
+}
+
+impl fenec_core::engine::ImageOut for Chunks {
+    fn write(&mut self, mut bytes: &[u8]) -> fenec_core::error::Result<()> {
+        while !bytes.is_empty() {
+            if self.parts.last().is_none_or(|p| p.len() == CHUNK) {
+                self.parts.push(Vec::with_capacity(CHUNK));
+            }
+            let last = self.parts.len() - 1;
+            let part = &mut self.parts[last];
+            let take = (CHUNK - part.len()).min(bytes.len());
+            part.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            self.len += take as u64;
+        }
+        Ok(())
+    }
+
+    fn at(&self) -> u64 {
+        self.len
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> fenec_core::error::Result<()> {
+        // A header the image patches once its length is known, which may
+        // straddle two chunks.
+        for (i, &b) in bytes.iter().enumerate() {
+            let at = at as usize + i;
+            self.parts[at / CHUNK][at % CHUNK] = b;
+        }
+        Ok(())
+    }
 }
 
 /// What a page's database wrote since the page last took it: the frames
@@ -124,6 +172,7 @@ pub extern "C" fn fenec_open() -> u32 {
             db: Database::new(),
             journal: None,
             loaded: 0,
+            chunks: Vec::new(),
         }));
         (h.len() - 1) as u32
     })
@@ -376,14 +425,29 @@ pub extern "C" fn fenec_set_change_capacity(handle: u32, n: u32) {
 
 // --------------------------------------------------------- persistence
 
-/// Returns the full byte image of the database. The JS side writes it to
-/// IndexedDB or OPFS for persistence across sessions.
+/// Writes the database's image into chunks of [`CHUNK`] bytes, held until
+/// `fenec_snapshot_chunk` takes them, and returns how many: the page reads
+/// them one at a time and lets each go, so the image is never in the
+/// module twice, nor whole in the page -- a Durable Object's storage takes
+/// it a piece at a time anyway.
 #[no_mangle]
-pub extern "C" fn fenec_snapshot(handle: u32) -> *mut u8 {
-    match with_db(handle, |db| db.snapshot()) {
-        Some(bytes) => boxed(&bytes),
-        None => boxed(&[]),
-    }
+pub extern "C" fn fenec_snapshot_chunks(handle: u32) -> u32 {
+    with_slot(handle, |s| {
+        let mut out = Chunks::default();
+        let _ = s.db.snapshot_into(&mut out);
+        out.parts.reverse();
+        s.chunks = out.parts;
+        s.chunks.len() as u32
+    })
+    .unwrap_or(0)
+}
+
+/// The next chunk `fenec_snapshot_chunks` made, let go of here; empty when
+/// none is left.
+#[no_mangle]
+pub extern "C" fn fenec_snapshot_chunk(handle: u32) -> *mut u8 {
+    let part = with_slot(handle, |s| s.chunks.pop()).flatten();
+    boxed(part.as_deref().unwrap_or(&[]))
 }
 
 /// Starts keeping the database's writes for `fenec_drain`, or with `off`
