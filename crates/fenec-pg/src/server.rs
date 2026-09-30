@@ -1401,7 +1401,7 @@ fn copy_query_out(
 ) -> io::Result<(Copied, u64)> {
     // A plain SELECT, as DuckDB reads a table, its pushed-down conditions'
     // literals read as their columns' types; FenecQL otherwise.
-    let plain = sql::plain(query);
+    let plain = sql::plain(query).filter(|p| p.columns.iter().all(|c| c.2.is_none()));
     let (text, params) = match &plain {
         Some(p) => {
             let (text, literals) = p.fenecql();
@@ -1483,7 +1483,7 @@ fn copy_query_out(
     // A column cast to text goes as its text, in binary too: DuckDB asks a
     // vector so, having no reader for pgvector's type.
     if let Some(p) = &plain {
-        for (col, (_, cast)) in cols.iter_mut().zip(&p.columns) {
+        for (col, (_, cast, _)) in cols.iter_mut().zip(&p.columns) {
             if *cast {
                 col.1 = OID_TEXT;
             }
@@ -2980,6 +2980,15 @@ fn describe(
             },
         });
     }
+    if parsed.is_none() {
+        if let Some((_, values)) = sql::constants(trimmed) {
+            return Some(Shape {
+                params: Vec::new(),
+                places: Vec::new(),
+                columns: Some(constant_columns(&values)),
+            });
+        }
+    }
     let owned;
     let stmts: &[Statement] = match parsed {
         Some(s) => s,
@@ -3335,6 +3344,28 @@ fn execute_into(
 ) {
     let started = Instant::now();
     let (errors, rows) = (out.errors(), out.rows());
+    if parsed.is_none() {
+        if let Some((count, values)) = sql::constants(sql) {
+            constant_rows(
+                db,
+                tenant,
+                lock,
+                &count,
+                &values,
+                out,
+                row_desc_sent,
+                formats,
+            );
+            counted(
+                sql,
+                params.len(),
+                started.elapsed(),
+                out.errors() > errors,
+                out.rows() - rows,
+            );
+            return;
+        }
+    }
     let wait = run_locked(
         db,
         tenant,
@@ -3361,6 +3392,78 @@ fn execute_into(
         out.errors() > errors,
         out.rows() - rows,
     );
+}
+
+/// The columns a `SELECT 1 FROM t` answers: a constant a column, a whole
+/// number as `bigint` and anything else as text.
+fn constant_columns(values: &[String]) -> Vec<(String, i32)> {
+    values
+        .iter()
+        .map(|v| {
+            let oid = if v.parse::<i64>().is_ok() {
+                OID_INT8
+            } else {
+                OID_TEXT
+            };
+            ("?column?".to_string(), oid)
+        })
+        .collect()
+}
+
+/// `SELECT 1 FROM t [WHERE ...]`, as Spark counts a table's rows: the
+/// matching rows counted, and as many rows of the constants written. It
+/// was a FenecQL syntax error, and a Spark `count()` a failed job; a row's
+/// id in place of the constant would have counted as well, and been a
+/// wrong answer to a question nobody reads the answer to until someone
+/// does.
+#[allow(clippy::too_many_arguments)]
+fn constant_rows(
+    db: &Arc<RwLock<Database>>,
+    tenant: &Held,
+    lock: &mut Lock<'_>,
+    count: &str,
+    values: &[String],
+    out: &mut Writer,
+    row_desc_sent: bool,
+    formats: &[i16],
+) {
+    let stmt = match read(count) {
+        Ok(mut s) if s.len() == 1 => s.remove(0),
+        Ok(_) => return out.error("42601", "one statement is expected"),
+        Err(e) => return out.error(sqlstate(&e), &e.to_string()),
+    };
+    let answer = {
+        let _gate = tenant.as_ref().map(|t| t.enter());
+        lock.read(db, |d| d.query(&stmt, &[]))
+    };
+    let n = match answer.as_ref().map(|r| {
+        r.rows()
+            .and_then(|rs| rs.rows.first())
+            .map(|row| &row.values[..])
+    }) {
+        Ok(Some([Value::Int(n)])) => (*n).max(0) as u64,
+        Ok(_) => return out.error("XX000", "a count answered no number"),
+        Err(e) => return out.error(sqlstate(e), &e.to_string()),
+    };
+    let cols = constant_columns(values);
+    if !row_desc_sent {
+        out.row_description(&cols, formats);
+    }
+    let row: Vec<Value> = values
+        .iter()
+        .map(|v| {
+            v.parse::<i64>()
+                .map_or_else(|_| Value::Text(v.clone()), Value::Int)
+        })
+        .collect();
+    let cells: Vec<Option<Vec<u8>>> = match binary_row(&cols, &row, None, formats) {
+        Ok(c) => c,
+        Err(e) => return out.error("0A000", &e),
+    };
+    for _ in 0..n {
+        out.data_row(&cells);
+    }
+    out.command_complete(&format!("SELECT {n}"));
 }
 
 /// Counts a statement for `/_metrics` and `pg_stat_statements`: its time

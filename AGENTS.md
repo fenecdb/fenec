@@ -310,7 +310,12 @@ A plain `SELECT` of columns from one collection is the `get` it is
 pushes down (`sql::plain`), their literals read as the columns' types --
 DuckDB quotes an int's `100` as `'100'` -- a column cast to text sent as
 its text, and the `ctid` range covering every row, part of one refused:
-fenecdb has no row addresses. DuckDB opens with `SELECT version(), (SELECT
+fenecdb has no row addresses. Outside a COPY it takes Spark's JDBC reads:
+each condition in parentheses, a number bare and text quoted and so read
+(`Plain::inline`), `WHERE 1=0` for the columns, and `SELECT 1 FROM t` for
+`count()`, answered with as many rows of the constant as rows match
+(`constant_rows`) -- a row's id in the constant's place would have counted
+the same and been a wrong answer. DuckDB opens with `SELECT version(), (SELECT
 COUNT(*) FROM pg_settings ...)`, which `compat` answered as `version()`
 alone, dropping the column DuckDB then could not read; a call is answered
 there only alone now, and anything beside it goes to the catalog. A new field type

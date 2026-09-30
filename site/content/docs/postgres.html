@@ -66,6 +66,7 @@ transactions and its COPY — and with it pgvector's library for it
 <tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary), <code>CopyTo</code></td></tr>
 <tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>), <code>copy_out</code> in binary (<code>BinaryCopyOutStream</code>)</td></tr>
 <tr><td>node-postgres</td><td>rows and parameters in text</td></tr>
+<tr><td>Spark, its JDBC reader and pgjdbc</td><td>a collection read as a DataFrame: its columns, <code>count()</code>, filters pushed down, <code>IN</code>, a <code>groupBy</code> (<a href="#spark">below</a>)</td></tr>
 <tr><td>DuckDB, its <code>postgres</code> extension</td><td>a collection attached as a table, read whole, aggregated, filtered with the conditions pushed down, and written out as Parquet (<a href="#duckdb">below</a>)</td></tr>
 </tbody>
 </table>
@@ -492,6 +493,23 @@ read wrong. A vector, whose type DuckDB has no reader for, it asks cast to
 file in 97 ms, and <code>count</code>, <code>sum</code> and a
 <code>GROUP BY</code> over them in 52 to 90 ms; from Parquet, pandas, Spark
 and the rest read them.</p>
+
+<h3 id="spark">Spark, through JDBC</h3>
+
+<pre data-lang="python">df = spark.read.jdbc("jdbc:postgresql://127.0.0.1:5433/fenec", "docs",
+                     properties={"user": "fenec", "driver": "org.postgresql.Driver"})
+df.filter("year >= 2024 and g = 'a'").groupBy("g").count().show()</pre>
+
+<p>Spark reads a collection through pgjdbc with plain SQL, which fenec-pg
+runs as the <code>get</code> it is: <code>SELECT * FROM docs WHERE
+1=0</code> for the columns, <code>SELECT "n","g" FROM docs WHERE ("n" IS
+NOT NULL) AND ("n" &lt; 10) AND ("g" = 'a')</code> for the rows with the
+conditions it pushed down — each in parentheses, a number bare and text
+quoted, read so — and <code>SELECT 1 FROM docs</code> for
+<code>count()</code>, answered with as many rows of the constant as rows
+match, <code>Describe</code> naming the column first as pgjdbc asks it. The
+aggregation is Spark's. For a large table, DuckDB's Parquet
+(<a href="#duckdb">above</a>) is the faster road in.</p>
 
 <h2 id="pgvector">pgvector's clients</h2>
 

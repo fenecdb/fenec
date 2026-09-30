@@ -3856,3 +3856,66 @@ fn duckdb_reads_a_collection_through_a_plain_select() {
         assert!(tag.starts_with(code), "{select}: {tag}");
     }
 }
+
+/// What Spark's JDBC reader sends: `SELECT * FROM t WHERE 1=0` for a
+/// table's columns, `SELECT 1 FROM t` for its count -- a row of the
+/// constant a matching row -- and the columns with each pushed-down
+/// condition in parentheses, a number bare and text quoted.
+#[test]
+fn spark_reads_a_collection_through_plain_selects() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (n int @hash, g text, x float)");
+    let rows: Vec<String> = (0..30)
+        .map(|i| format!("{{n: {i}, g: \"g{}\", x: {}}}", i % 3, i as f64 / 2.0))
+        .collect();
+    c.simple(&format!("put t [{}]", rows.join(", ")));
+
+    // The table's columns, and no row.
+    let r = c.simple("SELECT * FROM t WHERE 1=0");
+    assert!(find(&r, b'T').is_some(), "{}", outcome(&r));
+    assert_eq!(outcome(&r), "SELECT 0");
+
+    // Its count: as many rows of the constant as rows match.
+    let r = c.simple("SELECT 1 FROM t");
+    let desc = find(&r, b'T').unwrap();
+    assert_eq!(desc.type_oids(), [20]);
+    let ones: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(ones.len(), 30);
+    assert!(ones.iter().all(|c| c == &[Some("1".to_string())]));
+    assert_eq!(outcome(&r), "SELECT 30");
+    let r = c.simple(r#"SELECT 1 FROM t WHERE ("n" >= 20) AND ("g" = 'g1')"#);
+    assert_eq!(outcome(&r), "SELECT 3");
+    // Prepared, as pgjdbc sends it: Describe says the column first.
+    let r = c.extended(r#"SELECT 1 FROM t WHERE ("n" < 5)"#, &[], true);
+    let t = r.iter().position(|m| m.tag == b'T').unwrap();
+    let d = r.iter().position(|m| m.tag == b'D').unwrap();
+    assert!(t < d);
+    assert_eq!(r.iter().filter(|m| m.tag == b'D').count(), 5);
+
+    // The columns, the conditions pushed down.
+    assert_eq!(
+        rows_of(
+            &mut c,
+            r#"SELECT "n","g" FROM t WHERE ("n" IS NOT NULL) AND ("g" IS NOT NULL) AND ("n" < 10) AND ("g" = 'g1')"#
+        ),
+        cells(&[
+            &[Some("1"), Some("g1")],
+            &[Some("4"), Some("g1")],
+            &[Some("7"), Some("g1")]
+        ])
+    );
+    assert_eq!(
+        rows_of(
+            &mut c,
+            r#"SELECT "n" FROM t WHERE ("g" IN ('g0','g2')) AND ("x" >= 13.5)"#
+        ),
+        cells(&[&[Some("27")], &[Some("29")]])
+    );
+    // A missing collection is the error it is, not an empty count.
+    assert!(outcome(&c.simple("SELECT 1 FROM nothing")).starts_with("42P01"));
+}
