@@ -2664,7 +2664,7 @@ fn copy_refuses_what_it_cannot_do() {
     for (sql, code) in [
         ("COPY nope FROM STDIN", "42P01"),
         ("COPY t (name, nope) FROM STDIN", "42703"),
-        ("COPY t TO STDOUT", "0A000"),
+        ("COPY t TO '/tmp/t.txt'", "0A000"),
         ("COPY t FROM '/etc/passwd'", "0A000"),
         ("COPY t FROM STDIN (FORMAT binary, HEADER)", "42601"),
         ("COPY t FROM STDIN; put t {name: \"x\"}", "0A000"),
@@ -3533,4 +3533,168 @@ fn lists_go_as_postgresqls_arrays() {
     );
     let r = c.simple(r#"get t select name where tags has "42""#);
     assert_eq!(find(&r, b'D').unwrap().cells(), [Some("b".to_string())]);
+}
+
+/// The CopyData of a COPY TO, one after another.
+fn copied_out(msgs: &[Msg]) -> Vec<u8> {
+    msgs.iter()
+        .filter(|m| m.tag == b'd')
+        .flat_map(|m| m.body.iter().copied())
+        .collect()
+}
+
+/// psql's `\copy ... to`, psycopg's `copy` read out: every row in id
+/// order, pages of it across holes in the ids, in the text format and in
+/// CSV, which COPY FROM loads back into the same rows.
+#[test]
+fn copy_to_stdout_writes_what_copy_from_reads_back() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let schema = "(name text, n int, score float, ok bool, at timestamp, \
+                  raw bytes, tags [text], e vector<2>)";
+    for t in ["src", "txt", "csv"] {
+        c.simple(&format!("create collection {t} {schema}"));
+    }
+    let mut rows = Vec::new();
+    for i in 0..2_500 {
+        // A NULL and an awkward text in some rows: tabs, line ends,
+        // backslashes, quotes, commas, the markers themselves.
+        let name = match i % 7 {
+            0 => "\\N".to_string(),
+            1 => "tab\there, \"q\"".to_string(),
+            2 => "line\nend\\".to_string(),
+            3 => String::new(),
+            _ => format!("row {i}"),
+        };
+        let name = serde_free_quote(&name);
+        let score = if i % 5 == 0 {
+            "null".into()
+        } else {
+            format!("{}", i as f64 / 8.0)
+        };
+        rows.push(format!(
+            "{{name: {name}, n: {i}, score: {score}, ok: {}, at: {}, raw: \"\\\\x0{}ff\", \
+             tags: [\"a b\", \"{i}\", \"\"], e: [{i}, 0.5]}}",
+            i % 2 == 0,
+            1_700_000_000_000i64 + i,
+            i % 10
+        ));
+    }
+    let r = c.simple(&format!("put src [{}]", rows.join(", ")));
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    // Holes in the ids for the pages to walk over, one of them across the
+    // first page's end.
+    let gone: Vec<String> = (0..2_500)
+        .filter(|i| i % 13 == 4 || (990..1_010).contains(i))
+        .map(|i| i.to_string())
+        .collect();
+    let r = c.simple(&format!("del src where n in [{}]", gone.join(", ")));
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+
+    let r = c.simple("COPY src TO STDOUT");
+    let head = find(&r, b'H').expect("a CopyOutResponse");
+    assert_eq!(head.body[0], 0, "text");
+    assert_eq!(i16::from_be_bytes([head.body[1], head.body[2]]), 9);
+    let n = rows_of(&mut c, "get src count")[0][0].clone().unwrap();
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+    assert!(find(&r, b'c').is_some(), "a CopyDone");
+    let text = copied_out(&r);
+    assert!(
+        text.starts_with(b"1\t\\\\N\t0\t\\N\tt\t"),
+        "{:?}",
+        String::from_utf8_lossy(&text[..40])
+    );
+    // Loaded back, without its ids, into a collection that has none yet.
+    let without_id = |stream: &[u8], csv: bool| -> Vec<u8> {
+        let mut out = Vec::new();
+        let body = if csv {
+            // The header, then each record; a record may span lines inside
+            // quotes, so it is split where an unquoted line ends.
+            let mut quoted = false;
+            let mut records = Vec::new();
+            let mut start = 0;
+            for (i, &b) in stream.iter().enumerate() {
+                if b == b'"' {
+                    quoted = !quoted;
+                } else if b == b'\n' && !quoted {
+                    records.push(&stream[start..=i]);
+                    start = i + 1;
+                }
+            }
+            for rec in records.into_iter().skip(1) {
+                let cut = rec.iter().position(|&b| b == b',').unwrap();
+                out.extend_from_slice(&rec[cut + 1..]);
+            }
+            return out;
+        } else {
+            stream
+        };
+        for rec in body.split_inclusive(|&b| b == b'\n') {
+            let cut = rec.iter().position(|&b| b == b'\t').unwrap();
+            out.extend_from_slice(&rec[cut + 1..]);
+        }
+        out
+    };
+    let cols = "(name, n, score, ok, at, raw, tags, e)";
+    let r = c.copy(
+        &format!("COPY txt {cols} FROM STDIN"),
+        &[&without_id(&text, false)],
+        None,
+    );
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+
+    let r = c.simple("COPY public.src TO STDOUT WITH (FORMAT csv, HEADER)");
+    let csv = copied_out(&r);
+    assert!(csv.starts_with(b"id,name,n,score,ok,at,raw,tags,e\n1,\\N,0,,t,"));
+    let r = c.copy(
+        &format!("COPY csv {cols} FROM STDIN WITH (FORMAT csv)"),
+        &[&without_id(&csv, true)],
+        None,
+    );
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+
+    let all = "select name, n, score, ok, at, raw, tags, e order n";
+    let src = rows_of(&mut c, &format!("get src {all}"));
+    assert_eq!(src.len().to_string(), n);
+    assert_eq!(rows_of(&mut c, &format!("get txt {all}")), src);
+    assert_eq!(rows_of(&mut c, &format!("get csv {all}")), src);
+
+    // Some columns, in the order named; the extended protocol too.
+    let r = c.extended("COPY src (n, id) TO STDOUT (DELIMITER ',')", &[], false);
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+    assert!(
+        copied_out(&r).starts_with(b"0,1\n1,2\n2,3\n3,4\n5,6\n"),
+        "{:?}",
+        String::from_utf8_lossy(&copied_out(&r)[..40.min(copied_out(&r).len())])
+    );
+
+    for (sql, code) in [
+        ("COPY nothing TO STDOUT", "42P01"),
+        ("COPY src (nope) TO STDOUT", "42703"),
+        ("COPY src TO STDOUT (FORMAT binary)", "0A000"),
+    ] {
+        let r = c.simple(sql);
+        assert!(find(&r, b'H').is_none(), "{sql}");
+        assert!(outcome(&r).starts_with(code), "{sql}: {}", outcome(&r));
+    }
+    c.simple("BEGIN");
+    c.simple("get nothing");
+    assert!(outcome(&c.simple("COPY src TO STDOUT")).starts_with("25P02"));
+    c.simple("ROLLBACK");
+}
+
+/// A FenecQL string literal holding `s`.
+fn serde_free_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

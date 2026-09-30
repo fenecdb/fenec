@@ -4659,9 +4659,18 @@ impl Database {
                 }
                 false
             }
-            // No index: the full scan, read lazily so a cap stops it early.
+            // No index: the full scan, read lazily so a cap stops it early,
+            // from the lowest id the filter lets through.
             None => {
-                for id in c.store.iter_ids() {
+                // The browser leaves it out: 0.4 KB brotli of its module,
+                // for collections it holds in memory.
+                #[cfg(not(target_arch = "wasm32"))]
+                let ids = c
+                    .store
+                    .iter_ids_from(f.conjunct_id_floor(params).unwrap_or(0));
+                #[cfg(target_arch = "wasm32")]
+                let ids = c.store.iter_ids();
+                for id in ids {
                     if out.len() >= want {
                         break;
                     }

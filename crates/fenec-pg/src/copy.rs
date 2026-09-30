@@ -1,12 +1,14 @@
 //! `COPY <collection> [(columns)] FROM STDIN`: the statement, the rows the
-//! client streams after it, and each cell read as its field's type.
+//! client streams after it, and each cell read as its field's type; and
+//! `COPY <collection> [(columns)] TO STDOUT`, each row written as `FROM`
+//! reads it back.
 //!
-//! PostgreSQL's clients load a table this way -- psql's `\copy`, psycopg's
-//! `copy`, JDBC's `CopyManager` -- and without it a pg client could only
-//! send a statement a row. Text and CSV, with their options; `binary`,
-//! `COPY ... TO`, and a file or a program on the server's side are refused
-//! with what to do instead. The server's side of the exchange is
-//! `server::copy_in`.
+//! PostgreSQL's clients load and unload a table this way -- psql's `\copy`,
+//! psycopg's `copy`, JDBC's `CopyManager` -- and without it a pg client could
+//! only send a statement a row. Text and CSV with their options both ways,
+//! PostgreSQL's binary format in; a query's rows, a file or a program on the
+//! server's side are refused with what to do instead. The server's side of
+//! the exchange is `server::copy_in` and `server::copy_out`.
 
 use fenec_core::json;
 use fenec_core::prelude::{Database, Expr, Value};
@@ -34,13 +36,15 @@ pub enum Format {
     },
 }
 
-/// What a `COPY ... FROM STDIN` names.
+/// What a `COPY ... FROM STDIN` or `COPY ... TO STDOUT` names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
     pub table: String,
     /// Empty: every column, `id` first, as the catalog lists them.
     pub columns: Vec<String>,
     pub format: Format,
+    /// `TO STDOUT`: the rows go to the client rather than come from it.
+    pub out: bool,
 }
 
 /// Why a COPY among other statements is refused: its rows follow the
@@ -148,7 +152,7 @@ fn statement(t: &[Tok]) -> Result<Spec, Refusal> {
     let mut i = 0;
     if t.first() == Some(&Tok::Punct('(')) {
         return Err(unsupported(
-            "COPY of a query is not supported: COPY a collection FROM STDIN",
+            "COPY of a query is not supported: COPY a collection FROM STDIN or TO STDOUT",
         ));
     }
     // The table, schema-qualified or not: `public` is the only schema.
@@ -177,32 +181,46 @@ fn statement(t: &[Tok]) -> Result<Spec, Refusal> {
             }
         }
     }
-    match t.get(i) {
-        Some(Tok::Word(w)) if w == "from" => {}
-        Some(Tok::Word(w)) if w == "to" => {
-            return Err(unsupported(
-                "COPY TO is not supported: read the rows with a query",
-            ))
-        }
-        _ => return Err(syntax("FROM STDIN is expected")),
-    }
+    let out = match t.get(i) {
+        Some(Tok::Word(w)) if w == "from" => false,
+        Some(Tok::Word(w)) if w == "to" => true,
+        _ => return Err(syntax("FROM STDIN or TO STDOUT is expected")),
+    };
     i += 1;
-    match t.get(i) {
-        Some(Tok::Word(w)) if w == "stdin" => {}
-        Some(Tok::Str(_)) | Some(Tok::Word(_)) => {
+    match (t.get(i), out) {
+        (Some(Tok::Word(w)), false) if w == "stdin" => {}
+        (Some(Tok::Word(w)), true) if w == "stdout" => {}
+        (Some(Tok::Word(w)), false) if w == "stdout" => {
+            return Err(syntax("FROM STDIN is expected"))
+        }
+        (Some(Tok::Word(w)), true) if w == "stdin" => return Err(syntax("TO STDOUT is expected")),
+        (Some(Tok::Str(_)) | Some(Tok::Word(_)), false) => {
             return Err(unsupported(
                 "COPY FROM a file or a program is not supported: send the rows FROM STDIN, \
                  as psql's \\copy does",
             ))
         }
-        _ => return Err(syntax("FROM STDIN is expected")),
+        (Some(Tok::Str(_)) | Some(Tok::Word(_)), true) => {
+            return Err(unsupported(
+                "COPY TO a file or a program is not supported: take the rows TO STDOUT, \
+                 as psql's \\copy does",
+            ))
+        }
+        (_, false) => return Err(syntax("FROM STDIN is expected")),
+        (_, true) => return Err(syntax("TO STDOUT is expected")),
     }
     i += 1;
     let format = options(&t[i..])?;
+    if out && format == Format::Binary {
+        return Err(unsupported(
+            "COPY TO STDOUT in binary is not supported: take the rows in text or CSV",
+        ));
+    }
     Ok(Spec {
         table,
         columns,
         format,
+        out,
     })
 }
 
@@ -360,6 +378,110 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
             null: null.unwrap_or_else(|| "\\N".into()),
         }
     })
+}
+
+// ------------------------------------------------------------- rows out
+
+/// One row of a `COPY ... TO STDOUT` as `format` writes it, each cell the
+/// value's PostgreSQL text or `None` for NULL, onto `out` with its line's
+/// end: what `COPY FROM` reads back as the same row.
+pub fn line(format: &Format, cells: &[Option<String>], out: &mut Vec<u8>) {
+    for (i, cell) in cells.iter().enumerate() {
+        match format {
+            Format::Text { delimiter, null } => {
+                if i > 0 {
+                    out.push(*delimiter);
+                }
+                match cell {
+                    None => out.extend_from_slice(null.as_bytes()),
+                    Some(s) => text_out(s, *delimiter, out),
+                }
+            }
+            Format::Csv {
+                delimiter,
+                null,
+                quote,
+                escape,
+                ..
+            } => {
+                if i > 0 {
+                    out.push(*delimiter);
+                }
+                match cell {
+                    None => out.extend_from_slice(null.as_bytes()),
+                    Some(s) => csv_out(
+                        s,
+                        (*delimiter, null, *quote, *escape),
+                        cells.len() == 1,
+                        out,
+                    ),
+                }
+            }
+            // Refused when the statement is read.
+            Format::Binary => {}
+        }
+    }
+    out.push(b'\n');
+}
+
+/// The header line CSV's `HEADER` asks for: the columns' names, quoted
+/// where a cell would be.
+pub fn header(format: &Format, names: &[String], out: &mut Vec<u8>) {
+    let cells: Vec<Option<String>> = names.iter().map(|n| Some(n.clone())).collect();
+    line(format, &cells, out);
+}
+
+/// A cell of the text format, as `CopyAttributeOutText` writes it: a
+/// backslash, the delimiter and the control characters a line holds
+/// escaped, so no byte of the value ends a cell or a line.
+fn text_out(s: &str, delimiter: u8, out: &mut Vec<u8>) {
+    for &b in s.as_bytes() {
+        let escaped = match b {
+            b'\\' => b'\\',
+            b'\n' => b'n',
+            b'\r' => b'r',
+            b'\t' => b't',
+            0x08 => b'b',
+            0x0c => b'f',
+            0x0b => b'v',
+            d if d == delimiter => d,
+            _ => {
+                out.push(b);
+                continue;
+            }
+        };
+        out.push(b'\\');
+        out.push(escaped);
+    }
+}
+
+/// A cell of CSV, as `CopyAttributeOutCSV` writes it: quoted where it holds
+/// the delimiter, the quote, a line's end, or is the NULL marker -- the
+/// empty string, by default, which unquoted would read back as NULL -- or,
+/// a row's only cell, the `\.` that would end the data; inside the quotes
+/// each quote and escape character is escaped.
+fn csv_out(
+    s: &str,
+    (delimiter, null, quote, escape): (u8, &str, u8, u8),
+    alone: bool,
+    out: &mut Vec<u8>,
+) {
+    let quoted = s == null
+        || (alone && s == "\\.")
+        || s.bytes()
+            .any(|b| b == delimiter || b == quote || b == b'\n' || b == b'\r');
+    if !quoted {
+        out.extend_from_slice(s.as_bytes());
+        return;
+    }
+    out.push(quote);
+    for &b in s.as_bytes() {
+        if b == quote || b == escape {
+            out.push(escape);
+        }
+        out.push(b);
+    }
+    out.push(quote);
 }
 
 // ------------------------------------------------------------------ rows
@@ -1068,10 +1190,32 @@ mod tests {
             spec("copy \"t\" ( \"a\", \"b\" ) from stdin binary;").format,
             Format::Binary
         );
+        let to =
+            spec("copy public.t (a, \"B\") to stdout with (format csv, header, delimiter ';')");
+        assert!(to.out);
+        assert_eq!(
+            (to.table.as_str(), to.columns.clone()),
+            ("t", vec!["a".into(), "B".into()])
+        );
+        assert_eq!(
+            to.format,
+            Format::Csv {
+                delimiter: b';',
+                null: String::new(),
+                quote: b'"',
+                escape: b'"',
+                header: true
+            }
+        );
+        assert!(!spec("COPY t FROM STDIN").out);
         assert!(parse("get docs").is_none());
         assert!(parse("copying things").is_none());
         for (sql, code) in [
-            ("COPY t TO STDOUT", "0A000"),
+            ("COPY t TO '/tmp/t.csv'", "0A000"),
+            ("COPY t TO PROGRAM 'cat'", "0A000"),
+            ("COPY t TO STDIN", "42601"),
+            ("COPY t TO STDOUT (FORMAT binary)", "0A000"),
+            ("COPY t FROM STDOUT", "42601"),
             ("COPY t FROM '/etc/passwd'", "0A000"),
             ("COPY t FROM PROGRAM 'ls'", "0A000"),
             ("COPY t FROM STDIN (FORMAT binary, DELIMITER ',')", "42601"),
@@ -1084,6 +1228,88 @@ mod tests {
             ("COPY t FROM STDIN; SELECT 1", "0A000"),
         ] {
             assert_eq!(parse(sql).unwrap().unwrap_err().0, code, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_row_goes_out_as_copy_from_reads_it_back() {
+        let out = |f: &Format, cells: &[Option<&str>]| {
+            let cells: Vec<Option<String>> = cells.iter().map(|c| c.map(String::from)).collect();
+            let mut b = Vec::new();
+            line(f, &cells, &mut b);
+            String::from_utf8(b).unwrap()
+        };
+        // What PostgreSQL writes for the same values.
+        assert_eq!(
+            out(&text(), &[Some("a\tb"), None, Some("x\\y\nz"), Some("")]),
+            "a\\tb\t\\N\tx\\\\y\\nz\t\n"
+        );
+        assert_eq!(
+            out(
+                &csv(false),
+                &[
+                    Some("a,b"),
+                    None,
+                    Some(""),
+                    Some("say \"hi\""),
+                    Some("plain")
+                ]
+            ),
+            "\"a,b\",,\"\",\"say \"\"hi\"\"\",plain\n"
+        );
+        assert_eq!(out(&csv(false), &[Some("\\.")]), "\"\\.\"\n");
+        assert_eq!(out(&csv(false), &[Some("\\."), Some("x")]), "\\.,x\n");
+        let semi = Format::Text {
+            delimiter: b';',
+            null: "".into(),
+        };
+        assert_eq!(out(&semi, &[Some("a;b\tc"), None]), "a\\;b\\tc;\n");
+
+        // Every awkward value reads back as itself, in every format.
+        let values: Vec<Option<String>> = [
+            Some("plain"),
+            None,
+            Some(""),
+            Some("\\N"),
+            Some("\\."),
+            Some("tab\there"),
+            Some("line\nbreak\r\nend"),
+            Some("back\\slash"),
+            Some("quote\"d, and, commas"),
+            Some("\u{8}\u{b}\u{c}ctrl"),
+            Some("İstanbul ığüşöç 漢字"),
+        ]
+        .iter()
+        .map(|v| v.map(String::from))
+        .collect();
+        for f in [text(), csv(false), csv(true), semi] {
+            for v in &values {
+                let row = vec![v.clone(), Some("x".into()), v.clone()];
+                let mut b = Vec::new();
+                if matches!(f, Format::Csv { header: true, .. }) {
+                    header(&f, &["a".into(), "b".into(), "c".into()], &mut b);
+                }
+                line(&f, &row, &mut b);
+                let back = read(f.clone(), &[&b]).unwrap();
+                let got: Vec<Option<String>> = back[0]
+                    .1
+                    .iter()
+                    .map(|c| match c {
+                        Some(Cell::Text(s)) => Some(s.clone()),
+                        None => None,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect();
+                // An empty text is NULL where the NULL marker is empty and
+                // nothing quotes it, as in PostgreSQL.
+                let want = match (&f, v.as_deref()) {
+                    (Format::Text { null, .. }, Some("")) if null.is_empty() => {
+                        vec![None, Some("x".into()), None]
+                    }
+                    _ => row.clone(),
+                };
+                assert_eq!(got, want, "{f:?} {v:?}: {:?}", String::from_utf8_lossy(&b));
+            }
         }
     }
 

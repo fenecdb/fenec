@@ -135,6 +135,13 @@ fn every_filter_path_names_itself() {
         &[],
         &["filter: a full scan, 2000 of 2000 rows tested, 667 matched"],
     );
+    // A page after an id starts where it does, not at the first row.
+    check(
+        &db,
+        "get a where id > 1990",
+        &[],
+        &["filter: a full scan, 10 of 2000 rows tested, 10 matched"],
+    );
     check(
         &db,
         "get a where title = \"t7\"",

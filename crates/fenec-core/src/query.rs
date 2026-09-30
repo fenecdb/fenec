@@ -118,6 +118,44 @@ impl Expr {
         None
     }
 
+    /// The lowest id a row can have and pass the `and` chain, from its `id >
+    /// x` and `id >= x` (or `x < id`, `x <= id`), so a scan in id order can
+    /// start there: a page read by its last id, as COPY TO and a keyset
+    /// pagination read one, went through every row before it again --
+    /// a million rows read a page of 1 000 at a time took 8.6 s, and take
+    /// 110 ms, 100 000 took 95.8 ms and take 10.9. The filter still tests
+    /// each row after it, so the floor need only be no higher than any
+    /// match; it is taken from a whole number alone, which is what a page
+    /// passes. Native only: the browser module leaves it out.
+    pub fn conjunct_id_floor(&self, params: &[Value]) -> Option<u64> {
+        match self {
+            Expr::And(a, b) => match (a.conjunct_id_floor(params), b.conjunct_id_floor(params)) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, y) => x.or(y),
+            },
+            Expr::Cmp(op, a, b) => {
+                let id = |e: &Expr| matches!(e, Expr::Field(f) if f == "id");
+                let (strict, x) = match op {
+                    CmpOp::Gt if id(a) => (true, b),
+                    CmpOp::Ge if id(a) => (false, b),
+                    CmpOp::Lt if id(b) => (true, a),
+                    CmpOp::Le if id(b) => (false, a),
+                    _ => return None,
+                };
+                let x = match x.as_ref() {
+                    Expr::Lit(Value::Int(i)) => *i,
+                    Expr::Param(i) => match params.get(*i) {
+                        Some(Value::Int(i)) => *i,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                Some(x.saturating_add(strict as i64).max(0) as u64)
+            }
+            _ => None,
+        }
+    }
+
     /// Collects the indexable equalities inside an `and` chain.
     ///
     /// In a filter like `category = "a" and score > 500`, looking only at the
