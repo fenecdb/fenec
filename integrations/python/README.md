@@ -14,6 +14,18 @@ db = Client("http://127.0.0.1:8080", token="...")
 db.query("get articles select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 ```
 
+In an event loop -- FastAPI, aiohttp, an agent -- `AsyncClient` makes the
+same calls awaited, over one kept-alive connection, the standard library
+alone:
+
+```python
+from fenecdb import AsyncClient
+
+async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
+    rows = await db.query("get articles select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+    await db.batch([("put articles {title: $1}", ["a"]), ("put articles {title: $1}", ["b"])])
+```
+
 ```python
 from fenecdb.langchain import FenecVectorStore
 

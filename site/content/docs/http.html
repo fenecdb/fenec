@@ -138,6 +138,21 @@ parameters.</p>
   -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
 </pre>
 
+<p>From Python, <code>pip install fenecdb</code> — the standard library
+alone — makes the same calls, blocking or in an event loop:</p>
+
+<pre data-lang="python">from fenecdb import AsyncClient, Client
+
+db = Client("http://127.0.0.1:8080", token="...")
+db.query("get articles where year >= $1 limit 10", [2024])
+
+async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
+    await db.query("get articles where year >= $1 limit 10", [2024])</pre>
+
+<p><code>AsyncClient</code> keeps one connection alive and opens it again
+when the server has closed it; calls made at once over one client go one
+after another over it, so requests side by side take a client each.</p>
+
 <h2>Embedding a collection</h2>
 
 <pre data-lang="bash">curl 'http://127.0.0.1:8080/products?limit=20&amp;select=name\
