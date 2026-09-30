@@ -12,6 +12,7 @@
 //! has read the contents it must call `fenec_free(ptr, 4 + length)`.
 
 use fenec_core::collate;
+use fenec_core::engine::Kept;
 use fenec_core::json;
 use fenec_core::prelude::*;
 use fenec_ql::parse;
@@ -31,37 +32,89 @@ struct Slot {
     journal: Option<Arc<Mutex<Journal>>>,
     /// The bytes the last `fenec_load` took (`fenec_loaded`).
     loaded: usize,
-    /// An image `fenec_snapshot_chunks` made, its chunks yet to be taken,
-    /// the last first.
-    chunks: Vec<Vec<u8>>,
+    /// An image `fenec_snapshot_chunks` began, its chunks yet to be taken.
+    chunks: Chunks,
 }
 
 /// A snapshot's chunk: a mebibyte, written into and never grown.
 const CHUNK: usize = 1 << 20;
 
-/// An image written into chunks of [`CHUNK`] bytes. Into one `Vec` it grew
-/// by doubling, and its old and new buffers stood side by side as it
-/// copied: a 12 MB image took the module's memory, which WebAssembly never
-/// gives back, up by 37 MB -- the image itself, the slack, and the copy
-/// `boxed` made of it. In chunks, by the image and a chunk.
+/// An image taken [`CHUNK`] bytes at a time. Into one `Vec` it grew by
+/// doubling, old and new side by side: a 12 MB image took the module's
+/// memory, which WebAssembly never gives back, up by 37 MB. Made whole in
+/// chunks, it stood beside the rows until the first was taken: 50 000
+/// 128-dim rows at 73 MB went to 109 checkpointed. So the stores' own
+/// bytes are held rather than copied ([`Kept`]) -- a segment written to
+/// meanwhile is copied then, and the image is the database as it stood --
+/// and each chunk is made as it is taken.
 #[derive(Default)]
 struct Chunks {
-    parts: Vec<Vec<u8>>,
+    parts: Vec<Part>,
     len: u64,
+    /// The first part not taken whole, and how much of it has been.
+    next: usize,
+    head: usize,
+}
+
+enum Part {
+    /// Written by the image itself: its records' heads, schemas, graphs.
+    Own(Vec<u8>),
+    Kept(Kept),
+}
+
+impl Part {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Part::Own(v) => v,
+            Part::Kept(k) => k.bytes(),
+        }
+    }
+}
+
+impl Chunks {
+    /// The next chunk: [`CHUNK`] bytes, or what is left.
+    fn take(&mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CHUNK);
+        while out.len() < CHUNK {
+            let Some(part) = self.parts.get_mut(self.next) else {
+                break;
+            };
+            let rest = &part.bytes()[self.head..];
+            let n = rest.len().min(CHUNK - out.len());
+            out.extend_from_slice(&rest[..n]);
+            self.head += n;
+            if self.head == part.bytes().len() {
+                // Let go of as soon as it is taken.
+                *part = Part::Own(Vec::new());
+                self.next += 1;
+                self.head = 0;
+            }
+        }
+        out
+    }
 }
 
 impl fenec_core::engine::ImageOut for Chunks {
     fn write(&mut self, mut bytes: &[u8]) -> fenec_core::error::Result<()> {
+        self.len += bytes.len() as u64;
         while !bytes.is_empty() {
-            if self.parts.last().is_none_or(|p| p.len() == CHUNK) {
-                self.parts.push(Vec::with_capacity(CHUNK));
+            if !matches!(self.parts.last(), Some(Part::Own(v)) if v.len() < CHUNK) {
+                self.parts.push(Part::Own(Vec::with_capacity(CHUNK)));
             }
-            let last = self.parts.len() - 1;
-            let part = &mut self.parts[last];
-            let take = (CHUNK - part.len()).min(bytes.len());
-            part.extend_from_slice(&bytes[..take]);
-            bytes = &bytes[take..];
-            self.len += take as u64;
+            let Some(Part::Own(part)) = self.parts.last_mut() else {
+                break;
+            };
+            let n = (CHUNK - part.len()).min(bytes.len());
+            part.extend_from_slice(&bytes[..n]);
+            bytes = &bytes[n..];
+        }
+        Ok(())
+    }
+
+    fn write_kept(&mut self, kept: Kept) -> fenec_core::error::Result<()> {
+        self.len += kept.len as u64;
+        if kept.len > 0 {
+            self.parts.push(Part::Kept(kept));
         }
         Ok(())
     }
@@ -71,13 +124,26 @@ impl fenec_core::engine::ImageOut for Chunks {
     }
 
     fn patch(&mut self, at: u64, bytes: &[u8]) -> fenec_core::error::Result<()> {
-        // A header the image patches once its length is known, which may
-        // straddle two chunks.
-        for (i, &b) in bytes.iter().enumerate() {
-            let at = at as usize + i;
-            self.parts[at / CHUNK][at % CHUNK] = b;
+        // The counter's header, once the image's length is known: in the
+        // image's own bytes, the first it wrote.
+        let mut start = 0usize;
+        for part in self.parts.iter_mut() {
+            let len = part.bytes().len();
+            let at = at as usize;
+            if at < start + len {
+                if let Part::Own(v) = part {
+                    if let Some(dst) = v.get_mut(at - start..at - start + bytes.len()) {
+                        dst.copy_from_slice(bytes);
+                        return Ok(());
+                    }
+                }
+                break;
+            }
+            start += len;
         }
-        Ok(())
+        Err(Error::Corrupt(
+            "an image patched outside its own bytes".into(),
+        ))
     }
 }
 
@@ -172,7 +238,7 @@ pub extern "C" fn fenec_open() -> u32 {
             db: Database::new(),
             journal: None,
             loaded: 0,
-            chunks: Vec::new(),
+            chunks: Chunks::default(),
         }));
         (h.len() - 1) as u32
     })
@@ -425,19 +491,19 @@ pub extern "C" fn fenec_set_change_capacity(handle: u32, n: u32) {
 
 // --------------------------------------------------------- persistence
 
-/// Writes the database's image into chunks of [`CHUNK`] bytes, held until
-/// `fenec_snapshot_chunk` takes them, and returns how many: the page reads
-/// them one at a time and lets each go, so the image is never in the
-/// module twice, nor whole in the page -- a Durable Object's storage takes
-/// it a piece at a time anyway.
+/// Begins the database's image, to be taken [`CHUNK`] bytes at a time by
+/// `fenec_snapshot_chunk`, and returns how many: the page stores each and
+/// lets it go before the next is made, so the image is never whole in the
+/// module, nor in the page -- a Durable Object's storage takes it a piece
+/// at a time anyway.
 #[no_mangle]
 pub extern "C" fn fenec_snapshot_chunks(handle: u32) -> u32 {
     with_slot(handle, |s| {
         let mut out = Chunks::default();
         let _ = s.db.snapshot_into(&mut out);
-        out.parts.reverse();
-        s.chunks = out.parts;
-        s.chunks.len() as u32
+        let n = (out.len as usize).div_ceil(CHUNK);
+        s.chunks = out;
+        n as u32
     })
     .unwrap_or(0)
 }
@@ -446,8 +512,8 @@ pub extern "C" fn fenec_snapshot_chunks(handle: u32) -> u32 {
 /// none is left.
 #[no_mangle]
 pub extern "C" fn fenec_snapshot_chunk(handle: u32) -> *mut u8 {
-    let part = with_slot(handle, |s| s.chunks.pop()).flatten();
-    boxed(part.as_deref().unwrap_or(&[]))
+    let part = with_slot(handle, |s| s.chunks.take()).unwrap_or_default();
+    boxed(&part)
 }
 
 /// Starts keeping the database's writes for `fenec_drain`, or with `off`

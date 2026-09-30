@@ -53,11 +53,11 @@ call it from an alarm once writes stop. A start then restores the graph
 rather than link every vector written since the last image, 36 ms against
 792 for the first `near` over 10 000 rows of 128 dimensions.
 
-An object holds about 50 000 rows of 128 dimensions, or 10 000 of 768,
+An object holds about 60 000 rows of 128 dimensions, or 12 000 of 768,
 within a Worker's 128 MB: the module's memory grows and never gives back,
 so it keeps an index's vectors in chunks of a mebibyte rather than one
-array doubled as it grows, and an image goes to storage a mebibyte at a
-time. See
+array doubled as it grows, reads a restored image's documents where they
+lie, and makes an image a mebibyte at a time as storage takes it. See
 [Serverless and Cloudflare](https://fenecdb.com/docs/serverless).
 
 A value is at most 128 KiB by default, which a key-value backed object

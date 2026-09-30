@@ -19,7 +19,7 @@ one object holds one database, as a tenant is one file on a
 <tr><td>where the data is</td><td>in the object's memory, kept in its storage</td><td>in <code>fenec-pg</code>'s file</td></tr>
 <tr><td>a query</td><td>no network in the object: 2.5 ms for a request's <code>near</code> over 10 000 × 128</td><td>a round trip to the server</td></tr>
 <tr><td>writers</td><td>one an object; a tenant an object</td><td>one a file; a node holds many</td></tr>
-<tr><td>size</td><td>about 50 000 rows of 128 dimensions, 10 000 of 768 (<a href="#limits">Limits</a>)</td><td>the machine's disk, the file mapped</td></tr>
+<tr><td>size</td><td>about 60 000 rows of 128 dimensions, 12 000 of 768 (<a href="#limits">Limits</a>)</td><td>the machine's disk, the file mapped</td></tr>
 <tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, the pg wire</td></tr>
 </tbody>
 </table>
@@ -131,13 +131,15 @@ reach past it. What the module holds, measured in Node on the same module
 <table>
 <thead><tr><th>rows</th><th class="n">restored</th><th class="n">written, 1 000 a request</th><th class="n">then a checkpoint</th><th class="n">the image</th></tr></thead>
 <tbody>
-<tr><td>10 000 × 128</td><td class="n">16 MB</td><td class="n">24 MB</td><td class="n">30 MB</td><td class="n">6 MB</td></tr>
-<tr><td>20 000 × 128</td><td class="n">29 MB</td><td class="n">38 MB</td><td class="n">51 MB</td><td class="n">12 MB</td></tr>
-<tr><td>30 000 × 128</td><td class="n">41 MB</td><td class="n">47 MB</td><td class="n">69 MB</td><td class="n">18 MB</td></tr>
-<tr><td>50 000 × 128</td><td class="n">67 MB</td><td class="n">73 MB</td><td class="n">109 MB</td><td class="n">30 MB</td></tr>
+<tr><td>10 000 × 128</td><td class="n">16 MB</td><td class="n">24 MB</td><td class="n">28 MB</td><td class="n">6 MB</td></tr>
+<tr><td>20 000 × 128</td><td class="n">29 MB</td><td class="n">37 MB</td><td class="n">42 MB</td><td class="n">12 MB</td></tr>
+<tr><td>30 000 × 128</td><td class="n">41 MB</td><td class="n">46 MB</td><td class="n">53 MB</td><td class="n">18 MB</td></tr>
+<tr><td>50 000 × 128</td><td class="n">67 MB</td><td class="n">73 MB</td><td class="n">83 MB</td><td class="n">30 MB</td></tr>
+<tr><td>60 000 × 128</td><td class="n">80 MB</td><td class="n">85 MB</td><td class="n">97 MB</td><td class="n">36 MB</td></tr>
 <tr><td>3 000 × 768</td><td class="n">21 MB</td><td class="n">40 MB</td><td class="n">40 MB</td><td class="n">9 MB</td></tr>
-<tr><td>5 000 × 768</td><td class="n">35 MB</td><td class="n">58 MB</td><td class="n">65 MB</td><td class="n">16 MB</td></tr>
-<tr><td>10 000 × 768</td><td class="n">66 MB</td><td class="n">84 MB</td><td class="n">112 MB</td><td class="n">32 MB</td></tr>
+<tr><td>5 000 × 768</td><td class="n">35 MB</td><td class="n">58 MB</td><td class="n">58 MB</td><td class="n">16 MB</td></tr>
+<tr><td>10 000 × 768</td><td class="n">66 MB</td><td class="n">84 MB</td><td class="n">84 MB</td><td class="n">32 MB</td></tr>
+<tr><td>12 000 × 768</td><td class="n">80 MB</td><td class="n">102 MB</td><td class="n">102 MB</td><td class="n">38 MB</td></tr>
 </tbody>
 </table>
 </div>
@@ -149,11 +151,13 @@ record that seals it: grown by doubling, old and new side by side, 5 000
 rows of 768 written 1 000 a request held 100 MB, 58 now, and 10 000 of
 them 150, 84 now. A restore keeps the image it reads and the documents in
 it, rather than copy each out: 10 000 rows of 768 restored held 97 MB, 66
-now. A checkpoint is the peak: the image is made in chunks of
-a mebibyte (<code>snapshotChunks</code>), each let go once it is in
-storage, but made all at once, so the object holds the image beside its
-rows for a moment. So an object holds about 50 000 rows of 128 dimensions
-and 10 000 of 768, however many a request brings; past that, a
+now. A checkpoint takes the image a mebibyte at a time
+(<code>snapshotChunks</code>), each chunk made as it is taken out of the
+documents the stores hold, not a copy of them, and let go once it is in
+storage: made all at once, the image stood beside the rows, and 50 000
+rows of 128 went from 73 to 109 MB at it, 83 now. So an object holds
+about 60 000 rows of 128 dimensions and 12 000 of 768, however many a
+request brings; past that, a
 <code>fenec-pg</code> node and <code>Fenec.connect</code>, or a tenant's
 data spread over more objects.</p>
 

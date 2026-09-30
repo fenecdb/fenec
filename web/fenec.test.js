@@ -1279,6 +1279,43 @@ test('a loaded image is read in place, and written over as a copy would be', { s
   assert.deepEqual(answers(again), answers(copy), 'its image');
 });
 
+// An image is made a chunk at a time as the page takes each, holding the
+// stores' own bytes rather than a copy of them: what is written between two
+// chunks -- to a loaded image's documents or to a segment -- is not in it,
+// and it is the image `snapshot` made before, byte for byte.
+test('an image taken a chunk at a time is the database as it stood when begun', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const rows = (from, n) => Array.from({ length: n }, (_, i) => ({ n: from + i, t: `row ${from + i}`, e: Array.from({ length: 256 }, (_, k) => Math.cos(from + i + k)) }));
+  const first = await Fenec.open(wasm);
+  first.run('create collection c (n int @hash, t text, e vector<256> @hnsw(l2))');
+  await first.from('c').insert(rows(0, 1500));
+  // Loaded, so some documents are read out of the image it kept, and the
+  // rest written after it into segments: 3 MB, three chunks and more.
+  const db = await Fenec.open(wasm);
+  db.load(first.snapshot());
+  await db.from('c').insert(rows(1500, 1500));
+  const before = db.snapshot();
+  const taken = [];
+  let k = 0;
+  for (const chunk of db.snapshotChunks()) {
+    taken.push(chunk);
+    if (k++ === 0) {
+      db.run('set c {t: "changed"} where n < 10 or n > 2990');
+      db.run('del c where n >= 1490 and n < 1510');
+      await db.from('c').insert(rows(3000, 200));
+    }
+  }
+  assert.ok(taken.length >= 3, `${taken.length} chunks`);
+  const joined = new Uint8Array(taken.reduce((n, c) => n + c.length, 0));
+  taken.reduce((at, c) => (joined.set(c, at), at + c.length), 0);
+  assert.deepEqual(joined, before);
+  const again = await Fenec.open(wasm);
+  again.load(joined);
+  assert.equal(again.rows('get c count')[0].count, 3000);
+  assert.equal(again.rows('get c where n = 5')[0].t, 'row 5');
+  assert.equal(db.rows('get c where n = 5')[0].t, 'changed');
+});
+
 // The brief at /llms.txt is what a coding agent copies from, so every example
 // in it has to run as written. They live in site/build.py, which renders it.
 test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

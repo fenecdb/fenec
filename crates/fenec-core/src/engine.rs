@@ -676,10 +676,32 @@ type Replay<'a> =
 /// patched where it stands rather than the image being written twice.
 pub trait ImageOut {
     fn write(&mut self, bytes: &[u8]) -> Result<()>;
+    /// Bytes of a store that stay as they are while `kept` holds them,
+    /// which a writer may hold rather than copy: in the browser an image
+    /// is taken a chunk at a time as the page stores each ([`Kept`]).
+    fn write_kept(&mut self, kept: Kept) -> Result<()> {
+        self.write(kept.bytes())
+    }
     /// Bytes written so far, which is where the next one lands.
     fn at(&self) -> u64;
     /// Overwrites bytes written earlier, in place.
     fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<()>;
+}
+
+/// A stretch of a store's bytes, held: the image a load kept, which never
+/// changes, or a segment, which a write copies first while it is held
+/// (`Arc::make_mut`). So an image taken a chunk at a time is the database
+/// as it stood when it was begun, whatever is written meanwhile.
+pub struct Kept {
+    pub whole: std::sync::Arc<Vec<u8>>,
+    pub at: usize,
+    pub len: usize,
+}
+
+impl Kept {
+    pub fn bytes(&self) -> &[u8] {
+        &self.whole[self.at..self.at + self.len]
+    }
 }
 
 impl ImageOut for Vec<u8> {

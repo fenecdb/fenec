@@ -426,20 +426,15 @@ pub struct Segment {
 /// a rewrite beside the database (`compact` on a server) shares its sealed
 /// segments rather than copying them -- a gigabyte written since the open
 /// was a gigabyte copied under the read lock. The open one is copied the
-/// first time it is written to while a clone holds it. The browser has no
-/// such rewrite, and keeps the bytes as they are.
-#[cfg(not(target_arch = "wasm32"))]
+/// first time it is written to while a clone holds it. In the browser an
+/// image being taken holds them the same way ([`crate::engine::Kept`]),
+/// rather than a copy of every one.
 pub type SegmentBytes = std::sync::Arc<Vec<u8>>;
-#[cfg(target_arch = "wasm32")]
-pub type SegmentBytes = Vec<u8>;
 
 /// The segment's bytes to append to.
 #[inline]
 fn grow(b: &mut SegmentBytes) -> &mut Vec<u8> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return std::sync::Arc::make_mut(b);
-    #[cfg(target_arch = "wasm32")]
-    b
+    std::sync::Arc::make_mut(b)
 }
 
 /// Where a store stood before a block of writes, for [`Store::rewind`] to
@@ -680,12 +675,9 @@ impl Store {
                 // 1.66 GB of heap. Sealed, it grows no more; one reallocation
                 // per 8 MiB gives the rest back -- unless a clone holds it,
                 // which a copy to give back the slack would not be worth.
-                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(data) = std::sync::Arc::get_mut(&mut last.data) {
                     data.shrink_to_fit();
                 }
-                #[cfg(target_arch = "wasm32")]
-                last.data.shrink_to_fit();
             }
             self.segments.push(Segment::default());
         }
@@ -1443,14 +1435,42 @@ impl Store {
     /// what a checkpoint of a large collection would otherwise hold beside
     /// the data.
     pub fn write_image(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
-        if let Some((base, stretches)) = &self.base {
-            let file: &[u8] = (**base).as_ref();
-            for &(at, len) in stretches {
-                out.write(&file[at as usize..(at + len) as usize])?;
+        // Held rather than copied in the browser: an image taken a chunk at
+        // a time held every chunk of it beside the rows until the first was
+        // stored, 30 MB of 50 000 128-dim rows.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::engine::Kept;
+            if let Some((base, stretches)) = &self.base {
+                for &(at, len) in stretches {
+                    let (at, len) = (at as usize, len as usize);
+                    out.write_kept(Kept {
+                        whole: base.clone(),
+                        at,
+                        len,
+                    })?;
+                }
+            }
+            for s in &self.segments {
+                let len = s.data.len();
+                out.write_kept(Kept {
+                    whole: s.data.clone(),
+                    at: 0,
+                    len,
+                })?;
             }
         }
-        for s in &self.segments {
-            out.write(s.data.as_slice())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some((base, stretches)) = &self.base {
+                let file: &[u8] = (**base).as_ref();
+                for &(at, len) in stretches {
+                    out.write(&file[at as usize..(at + len) as usize])?;
+                }
+            }
+            for s in &self.segments {
+                out.write(s.data.as_slice())?;
+            }
         }
         Ok(())
     }
