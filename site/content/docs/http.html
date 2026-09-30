@@ -460,9 +460,9 @@ fenec-pg --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456
   <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it.</li>
-  <li><b>Tokens</b> are HS256 only — the algorithm is the server's, not the
-    token's, so <code>alg: none</code> is refused — and checked against
-    <code>exp</code> and <code>nbf</code>. A rule with <code>for</code> applies
+  <li><b>Tokens</b> are HS256, or RS256 with <code>--jwt-keys</code> (below).
+    The algorithm is the key's, not the token's, so <code>alg: none</code> is
+    refused. Every token is checked against <code>exp</code> and <code>nbf</code>. A rule with <code>for</code> applies
     to tokens whose <code>role</code> claim names that role; rules on one
     collection widen each other; a rule whose filter names a claim the token
     lacks does not apply. A subscription is checked when it opens.</li>
@@ -470,3 +470,41 @@ fenec-pg --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456
 
 <p>The server's own <code>--http-token</code> keeps full access alongside, and
 the PostgreSQL listener is not affected: it has its own password.</p>
+
+<h3 id="jwt-keys">Keys, rotation and identity providers</h3>
+
+<pre data-lang="bash"># the provider's public keys, as it publishes them
+curl -s https://example.auth0.com/.well-known/jwks.json &gt; jwks.json
+fenec-pg --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt
+</pre>
+
+<p><code>--jwt-keys</code> takes a JWKS file, <code>{"keys": [...]}</code>, in
+place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
+least 32 bytes. An <code>RSA</code> key of at least 2048 bits verifies RS256
+tokens, which is what Auth0, Clerk, Firebase and most identity providers
+sign with. A token issued by one of them is taken with its public keys
+alone. Keys of any other kind (EC, OKP) are skipped. A key is only used for
+its own algorithm: an RSA modulus is public, and taken as an HS256 secret it
+would let anyone sign. A token that names a <code>kid</code> is checked
+against that key only. A token without one is checked against each key of
+its algorithm.</p>
+
+<p>The server looks at the file at most once a second and reads it again
+when it has changed, so keys rotate without a restart. To rotate:</p>
+
+<ol>
+  <li>Add the new key to the file.</li>
+  <li>Start signing with it.</li>
+  <li>Once the tokens signed with the old key have expired, remove the old
+    key.</li>
+</ol>
+
+<p>If the file can no longer be read, the server keeps the keys it read
+last and logs why. <code>--mint-token</code> signs with the first
+<code>oct</code> key and names its <code>kid</code>.</p>
+
+<p>A token that has already been verified is kept by its text, so that
+later requests with it skip the check. The server keeps up to 4 096 tokens,
+and the kept tokens are dropped whenever the keys change. Checking a token
+from that cache takes 0.3 µs for HS256 and 0.5 µs for RS256. Checking a new one takes 2.9 µs for HS256 and
+38 µs for RS256 over 2048 bits (Apple M1).</p>

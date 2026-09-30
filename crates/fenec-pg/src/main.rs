@@ -86,11 +86,18 @@ usage: fenec-pg [options]
                             rows (`where owner = $jwt.sub`). Also read from
                             FENEC_JWT_SECRET; at least 32 bytes
       --jwt-secret-file <path>  the secret from a file
+      --jwt-keys <path>     instead of a secret, the keys of a JWKS file
+                            (its `keys` list): `oct` keys take HS256 tokens,
+                            `RSA` keys an identity provider's RS256 ones, a
+                            token's `kid` names its key. Read again as the
+                            file changes, which is how keys rotate. Also read
+                            from FENEC_JWT_KEYS
       --policy <path>       the rules a token is held to, one per line:
                             <collection|*> <read|write|read,write>
                             [where <filter>] [for <role>]
       --mint-token <claims> print a token for this JSON object of claims,
-                            signed with the secret, and exit
+                            signed with the secret or the first `oct` key,
+                            and exit
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes over HTTP (the pg path is unaffected)
@@ -233,6 +240,7 @@ fn main() {
     let mut cdc = false;
     let mut replication_buffer = replication::DEFAULT_BUFFER;
     let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
+    let mut jwt_keys: Option<String> = std::env::var("FENEC_JWT_KEYS").ok();
     let mut policy: Option<String> = None;
     let mut mint: Option<String> = None;
     let mut follow_url: Option<String> = None;
@@ -346,6 +354,7 @@ fn main() {
             }
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
             "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
+            "--jwt-keys" => jwt_keys = Some(next(&mut i, "--jwt-keys")),
             "--jwt-secret-file" => {
                 let path = next(&mut i, "--jwt-secret-file");
                 match std::fs::read_to_string(&path) {
@@ -438,22 +447,37 @@ fn main() {
         i += 1;
     }
 
+    let access = |policy: &str| match (&jwt_secret, &jwt_keys) {
+        (Some(_), Some(_)) => {
+            fail("--jwt-secret or --jwt-keys: the keys file holds the secret too")
+        }
+        (Some(secret), None) => fenec_http::access::Access::new(secret.as_bytes(), policy),
+        (None, Some(path)) => {
+            fenec_http::access::Access::from_jwks(std::path::Path::new(path), policy)
+        }
+        (None, None) => unreachable!(),
+    };
+    let keyed = jwt_secret.is_some() || jwt_keys.is_some();
     if let Some(claims) = mint {
-        let secret = jwt_secret.unwrap_or_else(|| fail("--mint-token signs with --jwt-secret"));
-        let access =
-            fenec_http::access::Access::new(secret.as_bytes(), "").unwrap_or_else(|e| fail(&e));
+        if !keyed {
+            fail("--mint-token signs with --jwt-secret or --jwt-keys");
+        }
+        let access = access("").unwrap_or_else(|e| fail(&e));
         println!("{}", access.mint(&claims).unwrap_or_else(|e| fail(&e)));
         return;
     }
-    match (jwt_secret, policy) {
-        (Some(secret), Some(policy)) => {
-            let access = fenec_http::access::Access::new(secret.as_bytes(), &policy)
-                .unwrap_or_else(|e| fail(&e));
+    match (keyed, policy) {
+        (true, Some(policy)) => {
+            let access = access(&policy).unwrap_or_else(|e| fail(&e));
             http_cfg.access = Some(Arc::new(access));
         }
-        (Some(_), None) => fail("--jwt-secret needs --policy: without rules a token reads nothing"),
-        (None, Some(_)) => fail("--policy needs --jwt-secret: the rules are for tokens it signs"),
-        (None, None) => {}
+        (true, None) => {
+            fail("--jwt-secret and --jwt-keys need --policy: without rules a token reads nothing")
+        }
+        (false, Some(_)) => fail(
+            "--policy needs --jwt-secret or --jwt-keys: the rules are for the tokens they verify",
+        ),
+        (false, None) => {}
     }
 
     if ping {

@@ -2,7 +2,9 @@
 //! write.
 //!
 //! A server's `--http-token` is all or nothing. With `--jwt-secret` it also
-//! takes HS256 JSON Web Tokens, and a policy file says what each may do,
+//! takes HS256 JSON Web Tokens -- with `--jwt-keys`, those a JWKS file's
+//! keys verify, HS256 and RS256 (below) -- and a policy file says what each
+//! may do,
 //! collection by collection, down to the rows -- the way PostgreSQL's row
 //! level security lets a browser talk to the database directly:
 //!
@@ -32,12 +34,28 @@
 //! A scoped subscription is also told only of the rows it was sent: the
 //! shape's usual "a changed id that does not match is a deletion" would
 //! tell every user the ids everyone else writes (see `sse`).
+//!
+//! **Keys.** A JWKS file holds the keys, `{"keys": [...]}` as an identity
+//! provider publishes it: `oct` keys verify HS256 and `RSA` keys RS256, so
+//! a token an identity provider signs is taken with its public keys alone.
+//! A key's kind decides the algorithm it verifies, never the token: an
+//! RS256 key's modulus is public, and taken for an HS256 secret it would
+//! sign anything. A token naming a `kid` is checked against that key alone;
+//! one naming none against each key of its algorithm. The file is read
+//! again when it changes, looked at once a second at most, which is the
+//! rotation: add the new key, sign with it, and take the old one out once
+//! the tokens it signed have expired. A file that no longer reads keeps the
+//! keys read last.
 
-use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256};
+use crate::crypto::{b64url_decode, b64url_encode, ct_eq, hmac_sha256, RsaKey};
 use fenec_core::prelude::*;
 use fenec_core::query::{eval, truthy, CmpOp, EvalCtx, RowAccess};
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::SystemTime;
 
 /// Who a request is.
 #[derive(Clone)]
@@ -56,10 +74,121 @@ impl Who {
     }
 }
 
-/// The key tokens are checked against, and the policy.
+/// The keys tokens are checked against, and the policy.
 pub struct Access {
-    secret: Vec<u8>,
+    keys: RwLock<Arc<Vec<Jwk>>>,
+    /// The JWKS file the keys are read again from as it changes.
+    source: Option<Source>,
     rules: Vec<Rule>,
+    /// Tokens already verified, by their text: a client sends the same one
+    /// for as long as it lives, and an RS256 verification takes 38 us (166
+    /// in 32-bit limbs), an HS256 token's with its parses 2.9, a token
+    /// found here 0.5.
+    /// Emptied when the keys change, since a key taken out must take its
+    /// tokens with it; `exp` and `nbf` are asked on every request.
+    verified: [Mutex<HashMap<Box<str>, Claims>>; SHARDS],
+}
+
+type Claims = Arc<Vec<(String, Value)>>;
+const SHARDS: usize = 16;
+/// Tokens a shard keeps, emptied when full.
+const KEPT: usize = 256;
+
+fn shard(token: &str) -> usize {
+    // The signature's last characters are as random as it is.
+    let b = token.as_bytes();
+    (b[b.len().saturating_sub(2)..]
+        .iter()
+        .fold(0usize, |a, &c| a * 31 + c as usize))
+        % SHARDS
+}
+
+struct Source {
+    path: PathBuf,
+    /// The second the file was last looked at.
+    looked: AtomicU64,
+    modified: Mutex<Option<SystemTime>>,
+}
+
+struct Jwk {
+    kid: Option<String>,
+    kind: KeyKind,
+}
+
+enum KeyKind {
+    /// HS256.
+    Hmac(Vec<u8>),
+    /// RS256.
+    Rsa(RsaKey),
+}
+
+const SHORT: &str = "a JWT secret shorter than 32 bytes can be guessed: HS256 needs 256 bits of it";
+
+/// The keys of a JWKS file: `{"keys": [...]}`, or the list alone. A key of
+/// another kind (`EC`, `OKP`) or for encryption (`"use": "enc"`) is passed
+/// over, as a verifier that does not know it would; a file with no key this
+/// server can use is refused.
+fn read_jwks(text: &str) -> std::result::Result<Vec<Jwk>, String> {
+    let t = text.trim();
+    let list = if t.starts_with('[') {
+        t
+    } else {
+        // A JWK holds no `[` or `]` inside a string: base64url, a kid, an
+        // algorithm's name, a URL -- only `x5c`'s list and `key_ops`'s.
+        let at = t
+            .find("\"keys\"")
+            .ok_or("a JWKS file is {\"keys\": [...]}")?;
+        let open = at
+            + t[at..]
+                .find('[')
+                .ok_or("a JWKS file is {\"keys\": [...]}")?;
+        let mut depth = 0;
+        let close = t[open..]
+            .char_indices()
+            .find(|&(_, c)| {
+                depth += (c == '[') as i32 - (c == ']') as i32;
+                depth == 0
+            })
+            .ok_or("the list of keys is not closed")?
+            .0;
+        &t[open..=open + close]
+    };
+    let docs = fenec_core::json::parse_documents(list).map_err(|e| format!("a JWKS file: {e}"))?;
+    let mut keys = Vec::new();
+    for d in docs {
+        let text = |k: &str| match d.iter().find(|(n, _)| n == k) {
+            Some((_, Value::Text(t))) => Some(t.as_str()),
+            _ => None,
+        };
+        let bytes = |k: &str| -> std::result::Result<Vec<u8>, String> {
+            b64url_decode(text(k).ok_or(format!("a key without `{k}`"))?)
+                .ok_or(format!("`{k}` is not base64url"))
+        };
+        if text("use").is_some_and(|u| u != "sig") {
+            continue;
+        }
+        let kid = text("kid").map(str::to_string);
+        let alg = text("alg");
+        let kind = match text("kty") {
+            Some("oct") if alg.is_none_or(|a| a == "HS256") => {
+                let k = bytes("k")?;
+                if k.len() < 32 {
+                    return Err(SHORT.into());
+                }
+                KeyKind::Hmac(k)
+            }
+            Some("RSA") if alg.is_none_or(|a| a == "RS256") => KeyKind::Rsa(
+                RsaKey::new(&bytes("n")?, &bytes("e")?)
+                    .ok_or("an RSA key of 2048 bits at the least and an odd exponent from 3")?,
+            ),
+            _ => continue,
+        };
+        keys.push(Jwk { kid, kind });
+    }
+    if keys.is_empty() {
+        return Err("no HS256 or RS256 key in the JWKS file".into());
+    }
+    Ok(keys)
 }
 
 struct Rule {
@@ -94,11 +223,33 @@ impl Access {
     /// `policy` is the text of a policy file (module header).
     pub fn new(secret: &[u8], policy: &str) -> std::result::Result<Access, String> {
         if secret.len() < 32 {
-            return Err(
-                "a JWT secret shorter than 32 bytes can be guessed: HS256 needs 256 bits of it"
-                    .into(),
-            );
+            return Err(SHORT.into());
         }
+        let key = Jwk {
+            kid: None,
+            kind: KeyKind::Hmac(secret.to_vec()),
+        };
+        Access::with(vec![key], None, policy)
+    }
+
+    /// The keys of the JWKS file at `path`, read again as it changes.
+    pub fn from_jwks(path: &std::path::Path, policy: &str) -> std::result::Result<Access, String> {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let keys = read_jwks(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let source = Source {
+            path: path.to_path_buf(),
+            looked: AtomicU64::new(0),
+            modified: Mutex::new(modified),
+        };
+        Access::with(keys, Some(source), policy)
+    }
+
+    fn with(
+        keys: Vec<Jwk>,
+        source: Option<Source>,
+        policy: &str,
+    ) -> std::result::Result<Access, String> {
         let mut rules = Vec::new();
         for (n, line) in policy.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -108,23 +259,69 @@ impl Access {
             rules.push(rule(line).map_err(|e| format!("policy line {}: {e}", n + 1))?);
         }
         Ok(Access {
-            secret: secret.to_vec(),
+            keys: RwLock::new(Arc::new(keys)),
+            source,
             rules,
+            verified: Default::default(),
         })
+    }
+
+    /// The keys, the file's read again first where it changed -- looked at
+    /// once in a second `now`, at most.
+    fn keys(&self, now: u64) -> Arc<Vec<Jwk>> {
+        if let Some(src) = &self.source {
+            if src.looked.swap(now, Ordering::Relaxed) != now {
+                let modified = std::fs::metadata(&src.path).and_then(|m| m.modified()).ok();
+                let mut last = src.modified.lock().unwrap_or_else(|e| e.into_inner());
+                if modified != *last {
+                    *last = modified;
+                    match std::fs::read_to_string(&src.path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| read_jwks(&t))
+                    {
+                        Ok(keys) => {
+                            *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(keys);
+                            for v in &self.verified {
+                                v.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                            }
+                        }
+                        Err(e) => {
+                            crate::log!("{}: {e}; the keys read before stay", src.path.display())
+                        }
+                    }
+                }
+            }
+        }
+        self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// A token for `claims`, a JSON object -- what `fenec-pg --mint-token`
     /// prints.
+    /// Signed with the first HS256 key, its `kid` named.
     pub fn mint(&self, claims: &str) -> std::result::Result<String, String> {
         fenec_core::json::parse_object(claims).map_err(|e| e.to_string())?;
-        let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let keys = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let (kid, secret) = keys
+            .iter()
+            .find_map(|k| match &k.kind {
+                KeyKind::Hmac(s) => Some((k.kid.as_deref(), s)),
+                KeyKind::Rsa(_) => None,
+            })
+            .ok_or("no HS256 key to sign with: an RS256 key's private half is its owner's")?;
+        let mut head = String::from(r#"{"alg":"HS256","typ":"JWT""#);
+        if let Some(kid) = kid {
+            head.push_str(r#","kid":"#);
+            fenec_core::json::escape_into(&mut head, kid);
+        }
+        head.push('}');
+        let head = b64url_encode(head.as_bytes());
         let body = b64url_encode(claims.as_bytes());
-        let sig = hmac_sha256(&self.secret, format!("{head}.{body}").as_bytes());
+        let sig = hmac_sha256(secret, format!("{head}.{body}").as_bytes());
         Ok(format!("{head}.{body}.{}", b64url_encode(&sig)))
     }
 
-    /// The scope of a token, checked: HS256 only, signed with this secret,
-    /// not expired and already valid, at `now` seconds since the epoch.
+    /// The scope of a token, checked: HS256 or RS256, signed with one of the
+    /// keys, not expired and already valid, at `now` seconds since the epoch.
     pub fn scope(&self, token: &str, now: u64) -> std::result::Result<Scope, &'static str> {
         let claims = self.verify(token, now)?;
         let claim = |name: &str| claims.iter().find(|(k, _)| k == name).map(|(_, v)| v);
@@ -162,35 +359,17 @@ impl Access {
         })
     }
 
-    fn verify(
-        &self,
-        token: &str,
-        now: u64,
-    ) -> std::result::Result<Vec<(String, Value)>, &'static str> {
-        let mut parts = token.split('.');
-        let (Some(head), Some(body), Some(sig), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err("not a JSON Web Token");
+    fn verify(&self, token: &str, now: u64) -> std::result::Result<Claims, &'static str> {
+        let keys = self.keys(now);
+        let cached = self.verified[shard(token)]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(token)
+            .cloned();
+        let claims = match cached {
+            Some(c) => c,
+            None => self.check(token, &keys)?,
         };
-        let object = |part: &str| {
-            let bytes = b64url_decode(part).ok_or("not a JSON Web Token")?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| "not a JSON Web Token")?;
-            fenec_core::json::parse_object(text).map_err(|_| "not a JSON Web Token")
-        };
-        // The algorithm is the server's, never the token's: a token saying
-        // `none` -- or anything else -- is refused rather than believed.
-        let header = object(head)?;
-        match header.iter().find(|(k, _)| k == "alg") {
-            Some((_, Value::Text(a))) if a == "HS256" => {}
-            _ => return Err("only HS256 tokens are accepted"),
-        }
-        let expected = hmac_sha256(&self.secret, format!("{head}.{body}").as_bytes());
-        let given = b64url_decode(sig).ok_or("not a JSON Web Token")?;
-        if !ct_eq(&given, &expected) {
-            return Err("the token's signature does not match");
-        }
-        let claims = object(body)?;
         let seconds = |name: &str| {
             claims
                 .iter()
@@ -207,6 +386,62 @@ impl Access {
         if seconds("nbf").is_some_and(|nbf| (now as f64) < nbf) {
             return Err("the token is not valid yet");
         }
+        Ok(claims)
+    }
+
+    /// The claims of a token one of `keys` signed.
+    fn check(&self, token: &str, keys: &[Jwk]) -> std::result::Result<Claims, &'static str> {
+        let mut parts = token.split('.');
+        let (Some(head), Some(body), Some(sig), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err("not a JSON Web Token");
+        };
+        let object = |part: &str| {
+            let bytes = b64url_decode(part).ok_or("not a JSON Web Token")?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| "not a JSON Web Token")?;
+            fenec_core::json::parse_object(text).map_err(|_| "not a JSON Web Token")
+        };
+        // The algorithm is the server's, never the token's: a token saying
+        // `none` -- or anything else -- is refused rather than believed.
+        let header = object(head)?;
+        let field = |name: &str| match header.iter().find(|(k, _)| k == name) {
+            Some((_, Value::Text(a))) => Some(a.as_str()),
+            _ => None,
+        };
+        let rsa = match field("alg") {
+            Some("HS256") => false,
+            Some("RS256") => true,
+            _ => return Err("only HS256 and RS256 tokens are accepted"),
+        };
+        let kid = field("kid");
+        let signed = format!("{head}.{body}");
+        let given = b64url_decode(sig).ok_or("not a JSON Web Token")?;
+        let mut named = false;
+        let good = keys
+            .iter()
+            .filter(|k| kid.is_none() || k.kid.as_deref() == kid)
+            .inspect(|_| named = true)
+            .any(|k| match (&k.kind, rsa) {
+                (KeyKind::Hmac(s), false) => ct_eq(&given, &hmac_sha256(s, signed.as_bytes())),
+                (KeyKind::Rsa(r), true) => r.verify_sha256(signed.as_bytes(), &given),
+                _ => false,
+            });
+        if !good {
+            return Err(if named {
+                "the token's signature does not match"
+            } else {
+                "no key has the token's kid"
+            });
+        }
+        let claims = Arc::new(object(body)?);
+        let mut kept = self.verified[shard(token)]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if kept.len() >= KEPT {
+            kept.clear();
+        }
+        kept.insert(token.into(), claims.clone());
         Ok(claims)
     }
 }
@@ -584,10 +819,11 @@ mod tests {
     /// its secret: a signature computed elsewhere, checked here.
     #[test]
     fn a_token_signed_elsewhere_verifies() {
-        let a = Access {
-            secret: b"your-256-bit-secret".to_vec(),
-            rules: Vec::new(),
+        let key = Jwk {
+            kid: None,
+            kind: KeyKind::Hmac(b"your-256-bit-secret".to_vec()),
         };
+        let a = Access::with(vec![key], None, "").unwrap();
         let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
                      eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.\
                      SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
@@ -619,11 +855,77 @@ mod tests {
         );
         assert_eq!(
             a.verify(&none, 1_000).unwrap_err(),
-            "only HS256 tokens are accepted"
+            "only HS256 and RS256 tokens are accepted"
         );
         let early = a.mint(r#"{"sub":"alice","nbf":5000}"#).unwrap();
         assert!(a.verify(&early, 1_000).is_err());
         assert!(Access::new(b"short", "").is_err());
+    }
+
+    /// A JWKS as an identity provider publishes it -- an EC key this server
+    /// passes over, an RSA key -- and tokens node:crypto signed with the
+    /// RSA key's private half.
+    #[test]
+    fn an_identity_providers_keys_verify_its_tokens() {
+        let mut lines = include_str!("jwks_vectors.txt").lines();
+        let (jwks, alice, bob, confused) = (
+            lines.next().unwrap(),
+            lines.next().unwrap(),
+            lines.next().unwrap(),
+            lines.next().unwrap(),
+        );
+        let dir = std::env::temp_dir().join(format!("fenec-jwks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        std::fs::write(&path, jwks).unwrap();
+        let a = Access::from_jwks(&path, "notes read where owner = $jwt.sub").unwrap();
+        let sub = |t: &str, now| a.scope(t, now).map(|s| s.subject.unwrap_or_default());
+        assert_eq!(sub(alice, 1).unwrap(), "alice", "named by its kid");
+        assert_eq!(sub(bob, 1).unwrap(), "bob", "no kid: each RS256 key");
+        // The modulus is public: an HS256 token signed with it is refused.
+        assert_eq!(
+            sub(confused, 1).unwrap_err(),
+            "the token's signature does not match"
+        );
+        assert!(a.mint("{}").is_err(), "an RS256 key does not sign");
+
+        // Rotation: the file changes, an oct key comes in with a kid of its
+        // own, the RSA key goes -- seen the next second.
+        let secret = b64url_encode(&[5u8; 32]);
+        let next = format!(r#"{{"keys":[{{"kty":"oct","kid":"h2","k":"{secret}"}}]}}"#);
+        std::fs::write(&path, &next).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(sub(alice, 1).unwrap(), "alice", "looked at once a second");
+        assert_eq!(sub(alice, 2).unwrap_err(), "no key has the token's kid");
+        let minted = a.mint(r#"{"sub":"carol"}"#).unwrap();
+        assert!(minted.starts_with(&b64url_encode(br#"{"alg":"HS256","typ":"JWT","kid":"h2"}"#)));
+        assert_eq!(sub(&minted, 2).unwrap(), "carol");
+        // A file that no longer reads keeps the keys read last.
+        std::fs::write(&path, "{").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(sub(&minted, 3).unwrap(), "carol");
+
+        for bad in [
+            r#"{"keys":[]}"#,
+            r#"{"keys":[{"kty":"oct","k":"c2hvcnQ"}]}"#,
+            r#"{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB"}]}"#,
+            r#"{"keys":[{"kty":"oct","use":"enc","k":"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"}]}"#,
+            r#"{"nothing": 1}"#,
+        ] {
+            assert!(read_jwks(bad).is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

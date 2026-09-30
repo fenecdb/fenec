@@ -522,6 +522,174 @@ pub fn nonce(len: usize) -> String {
     b64_encode(&random_bytes(len)).replace('=', "")
 }
 
+/// An RSA public key, for RS256 tokens an identity provider signs: the
+/// modulus in 64-bit limbs, least significant first, and what Montgomery
+/// multiplication by it needs, worked out once a key. Only verification,
+/// which uses nothing secret, so nothing here needs to run in constant time.
+/// In 32-bit limbs a 2048-bit verification took 166 us.
+pub struct RsaKey {
+    n: Vec<u64>,
+    /// `-n^-1 mod 2^64`.
+    n0: u64,
+    /// `R^2 mod n`, `R = 2^(64 limbs)`.
+    r2: Vec<u64>,
+    e: u64,
+    /// The modulus's length in bytes, a signature's.
+    len: usize,
+}
+
+fn limbs(be: &[u8], k: usize) -> Vec<u64> {
+    let mut out = vec![0u64; k];
+    for (i, b) in be.iter().rev().enumerate() {
+        out[i / 8] |= (*b as u64) << (8 * (i % 8));
+    }
+    out
+}
+
+/// `a >= b`, both `k` limbs.
+fn geq(a: &[u64], b: &[u64]) -> bool {
+    for i in (0..a.len()).rev() {
+        if a[i] != b[i] {
+            return a[i] > b[i];
+        }
+    }
+    true
+}
+
+/// `a -= b`.
+fn sub_in(a: &mut [u64], b: &[u64]) {
+    let mut borrow = false;
+    for (x, y) in a.iter_mut().zip(b) {
+        let (d, o1) = x.overflowing_sub(*y);
+        let (d, o2) = d.overflowing_sub(borrow as u64);
+        *x = d;
+        borrow = o1 || o2;
+    }
+}
+
+impl RsaKey {
+    /// A key from its modulus and exponent, big-endian as a JWK's `n` and
+    /// `e` hold them: 2048 bits at the least, an odd exponent from 3.
+    pub fn new(n: &[u8], e: &[u8]) -> Option<RsaKey> {
+        let n = &n[n.iter().position(|&b| b != 0)?..];
+        let e = &e[e.iter().position(|&b| b != 0)?..];
+        if n.len() < 256 || n.len() > 1024 || e.len() > 8 || n[n.len() - 1] & 1 == 0 {
+            return None;
+        }
+        let e = e.iter().fold(0u64, |a, &b| a << 8 | b as u64);
+        if e < 3 || e & 1 == 0 {
+            return None;
+        }
+        let k = n.len().div_ceil(8);
+        let nl = limbs(n, k);
+        let mut inv = 1u64;
+        for _ in 0..6 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(nl[0].wrapping_mul(inv)));
+        }
+        // 2^(128k) mod n by doubling 1 that many times.
+        let mut r2 = vec![0u64; k];
+        r2[0] = 1;
+        for _ in 0..128 * k {
+            let mut carry = 0;
+            for x in r2.iter_mut() {
+                let top = *x >> 63;
+                *x = *x << 1 | carry;
+                carry = top;
+            }
+            if carry != 0 || geq(&r2, &nl) {
+                sub_in(&mut r2, &nl);
+            }
+        }
+        Some(RsaKey {
+            n: nl,
+            n0: inv.wrapping_neg(),
+            r2,
+            e,
+            len: n.len(),
+        })
+    }
+
+    /// `a * b / R mod n`, into `out` (CIOS).
+    fn mont(&self, a: &[u64], b: &[u64], t: &mut [u64], out: &mut [u64]) {
+        let (n, k) = (&self.n, self.n.len());
+        t.fill(0);
+        for &bi in b {
+            let mut c = 0u128;
+            for j in 0..k {
+                let x = t[j] as u128 + a[j] as u128 * bi as u128 + c;
+                t[j] = x as u64;
+                c = x >> 64;
+            }
+            let x = t[k] as u128 + c;
+            t[k] = x as u64;
+            t[k + 1] = (x >> 64) as u64;
+            let m = t[0].wrapping_mul(self.n0) as u128;
+            let mut c = (t[0] as u128 + m * n[0] as u128) >> 64;
+            for j in 1..k {
+                let x = t[j] as u128 + m * n[j] as u128 + c;
+                t[j - 1] = x as u64;
+                c = x >> 64;
+            }
+            let x = t[k] as u128 + c;
+            t[k - 1] = x as u64;
+            t[k] = t[k + 1] + (x >> 64) as u64;
+        }
+        out.copy_from_slice(&t[..k]);
+        if t[k] != 0 || geq(out, n) {
+            sub_in(out, n);
+        }
+    }
+
+    /// Whether `sig` is this key's RSASSA-PKCS1-v1_5 signature of `msg`
+    /// with SHA-256: RS256.
+    pub fn verify_sha256(&self, msg: &[u8], sig: &[u8]) -> bool {
+        let k = self.n.len();
+        if sig.len() != self.len {
+            return false;
+        }
+        let s = limbs(sig, k);
+        if geq(&s, &self.n) {
+            return false;
+        }
+        let (mut t, mut a, mut x, mut y) = (
+            vec![0u64; k + 2],
+            vec![0u64; k],
+            vec![0u64; k],
+            vec![0u64; k],
+        );
+        self.mont(&s, &self.r2, &mut t, &mut a);
+        x.copy_from_slice(&a);
+        for bit in (0..63 - self.e.leading_zeros()).rev() {
+            self.mont(&x, &x, &mut t, &mut y);
+            if self.e >> bit & 1 == 1 {
+                self.mont(&y, &a, &mut t, &mut x);
+            } else {
+                std::mem::swap(&mut x, &mut y);
+            }
+        }
+        let mut one = vec![0u64; k];
+        one[0] = 1;
+        self.mont(&x, &one, &mut t, &mut y);
+        // EMSA-PKCS1-v1_5: 00 01 ff.. 00, SHA-256's DigestInfo, the hash.
+        const INFO: [u8; 19] = [
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x01, 0x05, 0x00, 0x04, 0x20,
+        ];
+        let mut want = vec![0xffu8; self.len];
+        want[0] = 0;
+        want[1] = 1;
+        let tail = INFO.len() + SHA256_LEN;
+        want[self.len - tail - 1] = 0;
+        want[self.len - tail..self.len - SHA256_LEN].copy_from_slice(&INFO);
+        want[self.len - SHA256_LEN..].copy_from_slice(&sha256(msg));
+        let got: Vec<u8> = (0..self.len)
+            .rev()
+            .map(|i| (y[i / 8] >> (8 * (i % 8))) as u8)
+            .collect();
+        ct_eq(&got, &want)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +706,34 @@ mod tests {
         only one tip for the future, sunscreen would be it.";
 
     /// RFC 8439, 2.4.2: ChaCha20 encryption.
+    /// Keys of 2048, 2056, 3072 (e = 3) and 4096 bits, and messages each
+    /// signed by node:crypto (`sign('sha256', msg, key)`).
+    #[test]
+    fn rsa_pkcs1_sha256_as_node_signs() {
+        for line in include_str!("rsa_vectors.txt").lines() {
+            let f: Vec<Vec<u8>> = line.split(' ').map(unhex).collect();
+            let key = RsaKey::new(&f[0], &f[1]).unwrap();
+            let (msg, sig) = (&f[2], &f[3]);
+            assert!(key.verify_sha256(msg, sig), "{} bits", f[0].len() * 8);
+            let mut other = msg.clone();
+            other.push(0);
+            assert!(!key.verify_sha256(&other, sig));
+            for at in [0, sig.len() / 2, sig.len() - 1] {
+                let mut bad = sig.clone();
+                bad[at] ^= 1;
+                assert!(!key.verify_sha256(msg, &bad));
+            }
+            assert!(!key.verify_sha256(msg, &sig[1..]));
+            // The modulus itself is no signature, nor anything above it.
+            assert!(!key.verify_sha256(msg, &f[0]));
+        }
+        assert!(RsaKey::new(&[0xff; 128], &[1, 0, 1]).is_none(), "1024 bits");
+        assert!(RsaKey::new(&[0xff; 256], &[1]).is_none(), "e = 1");
+        let mut even = vec![0xff; 256];
+        even[255] = 0xfe;
+        assert!(RsaKey::new(&even, &[1, 0, 1]).is_none(), "an even modulus");
+    }
+
     #[test]
     fn chacha20_rfc8439() {
         let key: [u8; 32] = (0u8..32).collect::<Vec<_>>().try_into().unwrap();
