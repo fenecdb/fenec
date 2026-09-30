@@ -60,11 +60,11 @@ transactions and its COPY — and with it pgvector's library for it
 <table>
 <thead><tr><th>driver</th><th>what is held</th></tr></thead>
 <tbody>
-<tr><td>psycopg 3</td><td>nested transactions as savepoints, pipeline mode, <code>cursor.copy</code> in text and CSV</td></tr>
+<tr><td>psycopg 3</td><td>nested transactions as savepoints, pipeline mode, <code>cursor.copy</code> in text and CSV, and out in text and binary typed by <code>set_types</code></td></tr>
 <tr><td>SQLAlchemy 2</td><td><code>begin_nested</code>, the queries its dialect opens a connection with</td></tr>
-<tr><td>asyncpg</td><td>every row and parameter in binary, prepared statements, <code>executemany</code>, transactions, <code>copy_records_to_table</code> (binary) and <code>copy_to_table</code></td></tr>
-<tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary)</td></tr>
-<tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>)</td></tr>
+<tr><td>asyncpg</td><td>every row and parameter in binary, prepared statements, <code>executemany</code>, transactions, <code>copy_records_to_table</code> (binary), <code>copy_to_table</code>, <code>copy_from_table</code> and <code>copy_from_query</code></td></tr>
+<tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary), <code>CopyTo</code></td></tr>
+<tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>), <code>copy_out</code> in binary (<code>BinaryCopyOutStream</code>)</td></tr>
 <tr><td>node-postgres</td><td>rows and parameters in text</td></tr>
 </tbody>
 </table>
@@ -384,7 +384,7 @@ pipeline mode while busy</i>. What ran <i>before</i> the error in the
 pipeline is put back as well: a pipeline is one block up to its
 <code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
 
-<h2 id="copy">Loading rows: COPY</h2>
+<h2 id="copy">Loading and reading rows out: COPY</h2>
 
 <p><code>COPY docs [(col, ...)] FROM STDIN</code> loads rows the way a
 PostgreSQL client loads a table: psql's <code>\copy</code>, psycopg's
@@ -426,10 +426,9 @@ bigint: "n/a"</code>, <code>22P02</code>; a row of too few or too many cells,
 <code>22P04</code>) and is sent at once; what the client still streams is
 dropped.</p>
 
-<p>Refused with <code>0A000</code>, before a row is sent: <code>COPY ...
-TO</code> (read the rows with a query), a file or a program on the server's
-side (<code>\copy</code> sends the file from the client), and a COPY among
-other statements in one query. In binary an int, a float, a timestamp and
+<p>Refused with <code>0A000</code>, before a row is sent: a file or a
+program on the server's side (<code>\copy</code> sends the file from the
+client), and a COPY among other statements in one query. In binary an int, a float, a timestamp and
 a vector are read without parsing text: pgx's <code>CopyFrom</code> of the
 same 100 000 rows loads at 600 000 rows/s without an index with
 pgvector-go's <code>Vector</code>, and at 243 000 with each vector written
@@ -440,6 +439,34 @@ the HNSW graph kept as they land and 171 000 without, against 17 200 and
 <code>executemany</code> sends them, and 434 and 62 000 into PostgreSQL with
 pgvector by its own <code>COPY</code>
 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
+
+<p><code>COPY docs [(col, ...)] TO STDOUT</code> reads a collection out the
+way a client reads a table: psql's <code>\copy ... to</code>, psycopg's
+<code>cursor.copy</code>, asyncpg's <code>copy_from_table</code>, pgx's
+<code>CopyTo</code> and the <code>postgres</code> crate's
+<code>copy_out</code>. Every row goes, in id order, in the text format or CSV
+with the same options — each value as its PostgreSQL text, escaped or quoted
+so that <code>COPY ... FROM</code> reads the same row back — or in the binary
+format, each cell as a binary query's row sends it: a list as its element's
+array, a vector as pgvector's.</p>
+
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
+  -c "\copy docs (title, year) to 'docs.csv' with (format csv, header)"
+# COPY 30000</pre>
+
+<p>The rows are read a page of 1 000 at a time, each page under a read lock
+of its own and written to the client with none held, so a slow client keeps
+no writer waiting and only a page is in memory. A row goes out once, as it
+stood when its page was read; a transaction that holds the database — one
+that wrote, or a serializable one — reads it as it stands throughout.
+<code>COPY (get ...) TO STDOUT</code> reads a FenecQL <code>get</code>'s rows
+out instead, as the <code>get</code> answers them: its order and page, a
+<code>near</code>'s <code>_score</code>, a <code>lookup</code> widened into
+the row, run whole as it would be on its own. Anything but one
+<code>get</code> in the parentheses is refused (<code>0A000</code>).
+The same 100 000 rows of a text, an int and a 128-dim vector read out at
+157 000 rows/s in text and 1 540 000 in binary, against PostgreSQL's 156 000
+and 747 000 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
 
 <h2 id="pgvector">pgvector's clients</h2>
 

@@ -1,9 +1,9 @@
 //! tokio-postgres over fenec-pg's pg wire: typed parameters, typed rows in
 //! the binary format, a COPY through Execute, and pgvector-rust's types.
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, TryStreamExt};
 use pgvector::{HalfVector, SparseVector, Vector};
-use tokio_postgres::binary_copy::BinaryCopyInWriter;
+use tokio_postgres::binary_copy::{BinaryCopyInWriter, BinaryCopyOutStream};
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{Client, NoTls};
 
@@ -219,4 +219,50 @@ async fn lists_are_arrays() {
     assert_eq!(row.get::<_, Vec<String>>(0), tags);
     assert_eq!(row.get::<_, Vec<i64>>(1), vec![1, -2, 3]);
     assert_eq!(row.get::<_, Vec<f64>>(2), vec![0.5, 1.25]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_binary_copy_reads_typed_rows_out() {
+    let Some((c, t)) = connect("copyout").await else {
+        return;
+    };
+    for i in 0..1_500i64 {
+        c.execute(
+            &format!("put {t} {{name: $1, n: $2, score: $3, e: $4}}"),
+            &[
+                &format!("r{i}"),
+                &i,
+                &(i as f64 / 4.0),
+                &Vector::from(vec![i as f32, 1.0]),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    // pgvector's type, as the server names it, looked up before the COPY:
+    // a query behind it on the same connection waits for it to be read.
+    let vector = c
+        .query_one(&format!("get {t} select e limit 1"), &[])
+        .await
+        .unwrap()
+        .columns()[0]
+        .type_()
+        .clone();
+    let stream = c
+        .copy_out(&format!(
+            "COPY {t} (name, n, score, e) TO STDOUT (FORMAT binary)"
+        ))
+        .await
+        .unwrap();
+    let rows = BinaryCopyOutStream::new(stream, &[Type::TEXT, Type::INT8, Type::FLOAT8, vector]);
+    futures_util::pin_mut!(rows);
+    let mut n = 0i64;
+    while let Some(row) = rows.try_next().await.unwrap() {
+        assert_eq!(row.get::<String>(0), format!("r{n}"));
+        assert_eq!(row.get::<i64>(1), n);
+        assert_eq!(row.get::<f64>(2), n as f64 / 4.0);
+        assert_eq!(row.get::<Vector>(3).to_vec(), vec![n as f32, 1.0]);
+        n += 1;
+    }
+    assert_eq!(n, 1_500);
 }

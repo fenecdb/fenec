@@ -1230,10 +1230,11 @@ const COPY_OUT_ROWS: usize = 1_000;
 /// in memory at once. So a row goes out once, as it stood when its page was
 /// read, and a transaction that holds the database -- one that wrote, or
 /// a serializable one -- reads it as it stands for the whole of the COPY.
-/// 100 000 rows of a text, an int and a 128-dim vector go out at 158k
-/// rows/s, PostgreSQL's own COPY TO at 150k, and in the binary format --
+/// 100 000 rows of a text, an int and a 128-dim vector go out at 157k
+/// rows/s, PostgreSQL's own COPY TO at 156k, and in the binary format --
 /// each cell as a binary query's, no number written out as text -- at
-/// 1.6M rows/s against 746k (`make load-bench`). Returns the rows copied.
+/// 1.54M rows/s against 747k (`make load-bench`, the median of three).
+/// Returns the rows copied.
 #[allow(clippy::too_many_arguments)]
 fn copy_out(
     spec: copy::Spec,
@@ -1290,9 +1291,13 @@ fn copy_out(
     let binary = spec.format == copy::Format::Binary;
     out.copy_out_response(target.columns.len(), binary);
     let mut line = Vec::new();
-    if binary {
-        out.copy_data(copy::BINARY_HEADER);
-    }
+    // The binary header goes in the first row's CopyData, as PostgreSQL
+    // sends it: psycopg reads a message a row, and took a message of the
+    // header alone for a row cut short.
+    let mut head: &[u8] = match binary {
+        true => copy::BINARY_HEADER,
+        false => &[],
+    };
     if let copy::Format::Csv { header: true, .. } = spec.format {
         let names: Vec<String> = target.columns.iter().map(|(n, _)| n.clone()).collect();
         copy::header(&spec.format, &names, &mut line);
@@ -1321,6 +1326,7 @@ fn copy_out(
         };
         for row in &set.rows {
             line.clear();
+            line.extend_from_slice(std::mem::take(&mut head));
             let mut values = row.values.iter();
             if binary {
                 // Each cell as its column is described, as a query's row
@@ -1370,7 +1376,10 @@ fn copy_out(
     }
     if binary {
         // The trailer: a row of -1 columns.
-        out.copy_data(&(-1i16).to_be_bytes());
+        // With no row, the header rides with the trailer.
+        let mut end = std::mem::take(&mut head).to_vec();
+        end.extend_from_slice(&(-1i16).to_be_bytes());
+        out.copy_data(&end);
     }
     out.copy_done();
     out.command_complete(&format!("COPY {done}"));
@@ -1437,9 +1446,13 @@ fn copy_query_out(
     let binary = *format == copy::Format::Binary;
     out.copy_out_response(cols.len(), binary);
     let mut line = Vec::new();
-    if binary {
-        out.copy_data(copy::BINARY_HEADER);
-    }
+    // The binary header goes in the first row's CopyData, as PostgreSQL
+    // sends it: psycopg reads a message a row, and took a message of the
+    // header alone for a row cut short.
+    let mut head: &[u8] = match binary {
+        true => copy::BINARY_HEADER,
+        false => &[],
+    };
     if let copy::Format::Csv { header: true, .. } = format {
         let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
         copy::header(format, &names, &mut line);
@@ -1447,6 +1460,7 @@ fn copy_query_out(
     }
     for row in &rs.rows {
         line.clear();
+        line.extend_from_slice(std::mem::take(&mut head));
         let score = with_score.then_some(row.score);
         if binary {
             let cells = match binary_row(&cols, &row.values, score, &[1]) {
@@ -1476,7 +1490,10 @@ fn copy_query_out(
         out.copy_data(&line);
     }
     if binary {
-        out.copy_data(&(-1i16).to_be_bytes());
+        // With no row, the header rides with the trailer.
+        let mut end = std::mem::take(&mut head).to_vec();
+        end.extend_from_slice(&(-1i16).to_be_bytes());
+        out.copy_data(&end);
     }
     let n = rs.rows.len() as u64;
     out.copy_done();

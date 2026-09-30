@@ -3,9 +3,11 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,5 +163,33 @@ func TestListsAreArrays(t *testing.T) {
 	err = c.QueryRow(ctx, "get "+coll+" select tags, ns where name = $1", "c7").Scan(&gotTags, &ns)
 	if err != nil || fmt.Sprint(gotTags) != fmt.Sprint(tags) || fmt.Sprint(ns) != "[7 -7]" {
 		t.Fatalf("got %q %v %v", gotTags, ns, err)
+	}
+}
+
+// CopyTo reads a collection's rows out as COPY TO STDOUT sends them, and a
+// query's.
+func TestCopyToReadsRowsOut(t *testing.T) {
+	c, coll := connect(t)
+	ctx := context.Background()
+	rows := make([][]any, 1500)
+	for i := range rows {
+		rows[i] = []any{fmt.Sprintf("r\t%d", i), int64(i)}
+	}
+	if _, err := c.CopyFrom(ctx, pgx.Identifier{coll}, []string{"name", "n"}, pgx.CopyFromRows(rows)); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	tag, err := c.PgConn().CopyTo(ctx, &buf, "COPY "+coll+" (name, n) TO STDOUT")
+	if err != nil || tag.RowsAffected() != 1500 {
+		t.Fatalf("%v %v", tag, err)
+	}
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	if len(lines) != 1500 || lines[0] != "r\\t0\t0" || lines[1499] != "r\\t1499\t1499" {
+		t.Fatalf("%d lines: %q ... %q", len(lines), lines[0], lines[len(lines)-1])
+	}
+	buf.Reset()
+	tag, err = c.PgConn().CopyTo(ctx, &buf, "COPY (get "+coll+" select n where n < 3 order n desc) TO STDOUT (FORMAT csv)")
+	if err != nil || tag.RowsAffected() != 3 || buf.String() != "2\n1\n0\n" {
+		t.Fatalf("%v %v %q", tag, err, buf.String())
 	}
 }

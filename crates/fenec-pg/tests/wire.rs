@@ -3777,6 +3777,16 @@ fn copy_of_a_query_writes_its_rows() {
     assert_eq!(&bin[21..25], &8i32.to_be_bytes());
     assert!(bin.ends_with(&[0xff, 0xff]));
     assert_eq!(outcome(&r), "COPY 1");
+    // The header rides in the first row's message, as PostgreSQL sends it
+    // and psycopg reads it; with no row, in the trailer's.
+    let first = r.iter().find(|m| m.tag == b'd').unwrap();
+    assert!(first.body.len() > 19 && first.body.starts_with(b"PGCOPY"));
+    let r = c.simple("COPY (get docs where n > 1000) TO STDOUT (FORMAT binary)");
+    let data: Vec<&Msg> = r.iter().filter(|m| m.tag == b'd').collect();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].body.len(), 21);
+    assert!(data[0].body.ends_with(&[0xff, 0xff]));
+    assert_eq!(outcome(&r), "COPY 0");
 
     for (sql, code) in [
         ("COPY (put docs {n: 1}) TO STDOUT", "0A000"),
