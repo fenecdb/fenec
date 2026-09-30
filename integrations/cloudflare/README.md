@@ -43,6 +43,11 @@ which generation is whole is written last. Storage that stops part way
 therefore still holds the last whole database. A Durable Object combines a
 call's puts into one atomic write anyway; this does not depend on it.
 
+`example/` is a Worker giving each tenant a database of its own:
+`POST /t/<tenant>/query` with `{sql, params}`. `npx wrangler dev --config
+example/wrangler.jsonc` serves it locally, and `worker.test.js` runs it
+under workerd, stopping and starting it over the same storage.
+
 A value is at most 128 KiB by default, which a key-value backed object
 takes. A SQLite-backed object takes up to 2 MB, so `piece` can be larger
 there, for fewer rows.

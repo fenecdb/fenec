@@ -6,9 +6,18 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts", "README.md"],
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
   "peerDependencies": {
     "@fenecdb/web": ">=0.1.5"
+  },
+  "peerDependenciesMeta": {
+    "@fenecdb/web": {
+      "optional": true
+    }
   },
   "keywords": [
     "fenecdb",
@@ -27,7 +36,14 @@
     "access": "public",
     "provenance": true
   },
+  "devDependencies": {
+    "wrangler": "^4.144.0"
+  },
+  "allowScripts": {
+    "workerd@1.20260926.1": true,
+    "esbuild@0.28.1": true
+  },
   "scripts": {
-    "test": "node --test test.js"
+    "test": "node --test test.js worker.test.js"
   }
 }
