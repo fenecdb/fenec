@@ -360,6 +360,26 @@ the rows arrive parsed, which is what the rest can at most reach.
 PostgreSQL answers from inside Docker's virtual machine on the same Mac,
 whose network carries every byte.</p>
 
+<p><b>Read back, binary is twice PostgreSQL's.</b> The same 100 000 rows
+read out whole by <code>COPY docs TO STDOUT</code>, through the
+<code>postgres</code> crate's <code>copy_out</code>, median of three:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">text, rows/s</th><th class="n">binary</th></tr></thead>
+<tbody>
+<tr><td>fenec-pg, <code>COPY ... TO STDOUT</code></td><td class="n">157 000</td><td class="n"><b>1 540 000</b></td></tr>
+<tr><td>PostgreSQL + pgvector, <code>COPY ... TO STDOUT</code></td><td class="n">156 000</td><td class="n">747 000</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>In text each vector is 128 numbers written out, which is most of the
+time on both sides; in binary each goes as pgvector's four bytes a
+component, and fenec-pg's rows are read a page of 1 000 at a time by
+<code>where id &gt; $last</code>, which starts the scan where the page
+before it stopped.</p>
+
 <h2>Scale measurement</h2>
 
 <p>Apple M-series, single thread, <code>--release</code>. 100 000 documents ×

@@ -1230,10 +1230,11 @@ const COPY_OUT_ROWS: usize = 1_000;
 /// in memory at once. So a row goes out once, as it stood when its page was
 /// read, and a transaction that holds the database -- one that wrote, or
 /// a serializable one -- reads it as it stands for the whole of the COPY.
-/// 100 000 rows of a text, an int and a 128-dim vector go out at 158k
-/// rows/s, PostgreSQL's own COPY TO at 150k, and in the binary format --
+/// 100 000 rows of a text, an int and a 128-dim vector go out at 157k
+/// rows/s, PostgreSQL's own COPY TO at 156k, and in the binary format --
 /// each cell as a binary query's, no number written out as text -- at
-/// 1.6M rows/s against 746k (`make load-bench`). Returns the rows copied.
+/// 1.54M rows/s against 747k (`make load-bench`, the median of three).
+/// Returns the rows copied.
 #[allow(clippy::too_many_arguments)]
 fn copy_out(
     spec: copy::Spec,

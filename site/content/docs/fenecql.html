@@ -377,6 +377,12 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
   evaluated. <code>~</code> in particular is substring matching without
   ranking and reaches no index; ranked retrieval is <code>match</code> over a
   <code>@text</code> field.</p>
+  <p>A full scan reads rows in id order, and starts at the lowest id an
+  <code>id &gt; x</code> or <code>id &gt;= x</code> in the <code>and</code>
+  chain lets through, so a page read after the last id of the one before —
+  <code>where id &gt; $1 limit 1000</code> — reads only its own rows: a
+  million rows read that way a page at a time took 8.6 s and take 110 ms.
+  The browser module leaves this out.</p>
 </div>
 
 <h3 id="quantized">Quantized vector indexes</h3>

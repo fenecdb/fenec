@@ -250,6 +250,29 @@ first, which `sql::select` reads as the `get` it is. 100 000 rows x 128: 17.6k r
 PostgreSQL's own COPY 434 and 62k (`make load-bench`, the median of three;
 `site/content/docs/benchmarks.html#loading` has every way).
 
+**`COPY ... TO STDOUT` reads a page at a time** (`server::copy_out`).
+psql's `\copy ... to`, psycopg's `copy`, asyncpg's `copy_from_table` and
+`copy_from_query`, pgx's `CopyTo` and tokio-postgres's `copy_out` read a
+table out this way, and it was refused. A collection's rows go in id order,
+1 000 at a time by `get <c> select .. where id > $last limit 1000`, each
+page under a read lock of its own and held against a move for its read
+alone, then written to the client with no lock held: read whole under one,
+a slow client kept every writer waiting and every row was in memory. So a
+row goes out once, as it stood when its page was read, and a transaction
+that holds the database reads it as it stands throughout. A page costs only
+its own rows because a full scan starts at the floor an `id > x` or `id >=
+x` in the `and` chain sets (`Expr::conjunct_id_floor`,
+`Store::iter_ids_from`): a million rows a page at a time took 8.6 s, now
+110 ms; native only, since it was 0.4 KB brotli of the browser module. A
+cell is its PostgreSQL text escaped as `CopyAttributeOutText` or quoted as
+`CopyAttributeOutCSV` would -- `COPY FROM` reads the row back -- or, in
+binary, what a binary query's row sends, the `PGCOPY` header riding in the
+first row's CopyData: psycopg reads a message a row, and took the header
+alone for a row cut short. `COPY (get ...) TO STDOUT` runs the one `get`
+whole, as on its own, its `_score` and `lookup` levels in the row. 100 000
+rows x 128 go out at 157k rows/s in text and 1.54M in binary, against
+PostgreSQL's 156k and 747k (`make load-bench`).
+
 **A driver reads rows and sends parameters in the formats it asks for.**
 A column goes in binary where Bind's result codes ask (`binary.rs`: the
 types' `typsend`, a text type as its text, an array refused), which
