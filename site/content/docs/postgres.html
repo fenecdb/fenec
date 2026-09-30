@@ -323,6 +323,23 @@ wrong secret key, is ignored.</p>
 <code>FENECPG_PASSWORD</code> environment variable —
 <code>argv</code> shows up in <code>ps</code> output.</p>
 
+<p>A reporting tool, a dashboard or a service that only reads can log in as a
+reader: <code>--reader &lt;name&gt;</code> with a password of its own
+(<code>--reader-password</code>, <code>--reader-password-file</code> or
+<code>FENECPG_READER_PASSWORD</code>), by the same method as the writer's.
+Every write of its session is refused with <code>25006</code> — out of a
+transaction or in one, by <code>COPY FROM</code>, as an index or a
+<code>compact</code> — whatever it sets, <code>BEGIN READ WRITE</code> and
+<code>default_transaction_read_only</code> included. It needs
+<code>--password</code>, since without one every user writes. Over HTTP the
+same is a JSON Web Token's policy granting <code>read</code>
+(<a href="/docs/http#scoped-access">Scoped access</a>).</p>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --password-file writer.pw \
+  --reader reporting --reader-password-file reader.pw
+psql 'host=127.0.0.1 port=5433 user=reporting dbname=fenec'
+</pre>
+
 <div class="note trap">
   <p><b>There is no TLS.</b> <code>SSLRequest</code> is refused with
   <code>N</code>, and a client connecting remotely gets a

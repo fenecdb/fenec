@@ -146,6 +146,9 @@ pub struct Config {
     pub auth: Auth,
     /// When set, only this user name is accepted.
     pub user: Option<String>,
+    /// A user name that logs in with a password of its own and writes
+    /// nothing (`--reader`).
+    pub reader: Option<(String, Auth)>,
     pub server_version: String,
     pub sync: SyncPolicy,
     /// Since there is no TLS, binding openly outside loopback is refused by
@@ -188,6 +191,7 @@ impl Default for Config {
             addr: "127.0.0.1:5433".into(),
             auth: Auth::Trust,
             user: None,
+            reader: None,
             server_version: format!("16.0 (fenecdb {})", fenec_core::VERSION),
             sync: SyncPolicy::Interval(Duration::from_millis(250)),
             insecure: false,
@@ -1069,6 +1073,8 @@ fn copy_in(
             "25006",
             "cannot execute COPY FROM in a read-only transaction",
         ))
+    } else if tx.reader {
+        Some(("25006", "the reader takes no write: COPY FROM is one"))
     } else if held.as_ref().is_some_and(|t| t.is_frozen()) {
         Some(("57P03", "the tenant is being moved; retry shortly"))
     } else {
@@ -1780,14 +1786,19 @@ fn session(
         out.flush_to(&mut w)?;
         return Ok(());
     }
-    if let Some(expected) = &cfg.user {
+    // The reader has a password of its own, and its session writes nothing.
+    let (auth, reader) = match &cfg.reader {
+        Some((name, auth)) if *name == user => (auth, true),
+        _ => (&cfg.auth, false),
+    };
+    if let Some(expected) = cfg.user.as_ref().filter(|_| !reader) {
         if &user != expected {
             out.error("28000", &format!("user `{user}` is not accepted"));
             out.flush_to(&mut w)?;
             return Ok(());
         }
     }
-    if let Err(msg) = authenticate(&cfg.auth, &user, &mut r, &mut w, &mut out) {
+    if let Err(msg) = authenticate(auth, &user, &mut r, &mut w, &mut out) {
         out.error("28P01", &msg);
         out.flush_to(&mut w)?;
         return Ok(());
@@ -1863,7 +1874,10 @@ fn session(
     let mut portals: HashMap<String, Portal> = HashMap::new();
     let mut described_stmts: HashSet<String> = HashSet::new();
     let mut described_portals: HashSet<String> = HashSet::new();
-    let mut tx = TxState::default();
+    let mut tx = TxState {
+        reader,
+        ..TxState::default()
+    };
     // After an error in the extended protocol everything up to the next Sync
     // is read and dropped, as PostgreSQL does. A pipelining client has
     // written off what it queued behind the failure and reads no answer for
@@ -3081,6 +3095,9 @@ struct TxState {
     mode: compat::Mode,
     /// Every transaction's mode (`SET SESSION CHARACTERISTICS`).
     default: compat::Mode,
+    /// The session logged in as the reader (`--reader`): no write of it
+    /// runs, in a transaction or out of one, whatever it sets.
+    reader: bool,
 }
 
 /// A savepoint of a transaction.
@@ -3108,6 +3125,7 @@ impl TxState {
             open: true,
             mode,
             default: self.default,
+            reader: self.reader,
             ..TxState::default()
         };
     }
@@ -3115,6 +3133,7 @@ impl TxState {
     fn end(&mut self) {
         *self = TxState {
             default: self.default,
+            reader: self.reader,
             ..TxState::default()
         };
     }
@@ -3620,6 +3639,13 @@ fn run_locked(
     };
     if tx.open {
         tx.ran = true;
+    }
+
+    // The reader's session writes nothing, whatever it sets: refused before
+    // a compact or an index is built beside the database, as any write.
+    if tx.reader && stmts.iter().any(|s| !s.is_read_only()) {
+        out.error("25006", "the reader takes no write");
+        return None;
     }
 
     // A compact rewrites the file, which no block can put back, so it

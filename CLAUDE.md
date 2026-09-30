@@ -858,6 +858,15 @@ test holds it. It costs the server nothing measurable -- 37 500 puts a
 second against 37 700 from a client that does not parse headers -- while
 Python's `http.client`, parsing one more, went 18 200 -> 17 900.
 
+**The reader writes nothing** (`fenec-pg --reader <name>`). The pg wire
+had one password, which wrote. A session whose startup user is the
+reader's name is authenticated against a password of its own (SCRAM picks
+its verifier by the name before the proof) and carries `TxState::reader`,
+kept through `begin` and `end`: every write is refused (`25006`) before a
+compact or an index is built beside the database, `COPY FROM` before a row
+is read, whatever the session sets. It needs `--password`, and the two
+passwords must differ.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer
