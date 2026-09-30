@@ -515,13 +515,20 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   setChangeCapacity(n: number): void;
 }
 
+export interface PersistOptions {
+  /**
+   * An AES-GCM key (`crypto.subtle.generateKey` or `deriveKey`): each
+   * record is sealed with it, and a restore needs it.
+   */
+  cryptoKey?: CryptoKey | null;
+}
 /**
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call. Returns the bytes written.
  */
-export function persist(fenec: Fenec<any>, key?: string): Promise<number>;
+export function persist(fenec: Fenec<any>, key?: string, opts?: PersistOptions): Promise<number>;
 /** Restores from IndexedDB, image and chunks; `false` when there is no record. */
-export function restore(fenec: Fenec<any>, key?: string): Promise<boolean>;
+export function restore(fenec: Fenec<any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
@@ -595,6 +602,8 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   fetch?: typeof globalThis.fetch;
   /** IndexedDB key: the image **and the cursors** are stored. */
   persist?: string;
+  /** Seals the stored image and its chunks with AES-GCM (`persist`). */
+  cryptoKey?: CryptoKey | null;
   /** `false` turns off multi-tab leader election. */
   leader?: 'auto' | false;
   /** Lock manager (defaults to `navigator.locks`). */

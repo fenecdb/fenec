@@ -1346,6 +1346,31 @@ const FOLD = 0.5;
 const stored = new WeakMap();
 
 const chunkKey = (key, n) => `${key}#${String(n).padStart(9, '0')}`;
+
+// Sealed with a `CryptoKey` (AES-GCM), each record is `{gen, iv, data}` --
+// the image -- or `{iv, data}`, a chunk, its tag over the key it is stored
+// under, the image's generation and its place: a chunk moved, dropped from
+// the middle, or kept from an image before is refused, as is one byte
+// changed. The generation is random and new with each image, since the
+// chunks' numbers start again under it.
+const te = new TextEncoder();
+const aad = (key, gen, n) => te.encode(`fenecdb\0${key}\0${gen}\0${n}`);
+
+async function seal(ck, key, gen, n, bytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(key, gen, n) }, ck, bytes));
+  return n === 0 ? { gen, iv, data } : { iv, data };
+}
+
+async function unseal(ck, key, gen, n, rec) {
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv, additionalData: aad(key, gen, n) }, ck, rec.data));
+  } catch {
+    throw new FenecError(`${key}: record ${n} does not open: another key, or the stored bytes changed`);
+  }
+}
+
+const isSealed = (rec) => rec != null && rec.data != null && rec.iv != null;
 const chunkRange = (key) => IDBKeyRange.bound(`${key}#`, `${key}#\uffff`);
 
 function idb() {
@@ -1360,18 +1385,19 @@ function idb() {
 /**
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call, as a chunk. Returns the bytes
- * written.
+ * written. With `{cryptoKey}` (AES-GCM) each is sealed before it is stored.
  */
-export async function persist(fenec, key = 'default') {
+export async function persist(fenec, key = 'default', opts = {}) {
   if (kept.has(fenec)) throw new FenecError('the database is kept in a file (openFile): persist would take the writes it appends');
+  const ck = opts.cryptoKey ?? null;
   const db = await idb();
   let s = stored.get(fenec);
   let image = null;
   let chunk = null;
-  if (s?.key !== key) {
+  if (s?.key !== key || s.ck !== ck) {
     fenec.journal();
     image = fenec.snapshot();
-    s = { key, next: 1, image: 0, chunks: 0 };
+    s = { key, ck, gen: null, next: 1, image: 0, chunks: 0 };
     stored.set(fenec, s);
   } else {
     const { replace, bytes } = fenec.drain();
@@ -1380,15 +1406,17 @@ export async function persist(fenec, key = 'default') {
     else if (s.chunks + bytes.length > s.image * FOLD) image = fenec.snapshot();
     else chunk = bytes;
   }
+  const gen = image && ck ? [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('') : s.gen;
   try {
+    const rec = !ck ? (image ?? chunk) : image ? await seal(ck, key, gen, 0, image) : await seal(ck, key, gen, s.next, chunk);
     await new Promise((res, rej) => {
       const tx = db.transaction(STORE, 'readwrite');
       const os = tx.objectStore(STORE);
       if (image) {
-        os.put(image, key);
+        os.put(rec, key);
         os.delete(chunkRange(key));
       } else {
-        os.put(chunk, chunkKey(key, s.next));
+        os.put(rec, chunkKey(key, s.next));
       }
       tx.oncomplete = res;
       tx.onerror = () => rej(tx.error);
@@ -1399,7 +1427,7 @@ export async function persist(fenec, key = 'default') {
     stored.delete(fenec);
     throw e;
   }
-  if (image) Object.assign(s, { next: 1, image: image.length, chunks: 0 });
+  if (image) Object.assign(s, { gen, next: 1, image: image.length, chunks: 0 });
   else Object.assign(s, { next: s.next + 1, chunks: s.chunks + chunk.length });
   return (image ?? chunk).length;
 }
@@ -1429,10 +1457,13 @@ export async function getState(key) {
 /**
  * Restores from IndexedDB, the image and its chunks read as one file; later
  * `persist` calls go on adding chunks. Returns false when there is no record.
+ * A sealed record needs the `{cryptoKey}` it was sealed with, and a key
+ * refuses a record stored in the clear.
  */
-export async function restore(fenec, key = 'default') {
+export async function restore(fenec, key = 'default', opts = {}) {
+  const ck = opts.cryptoKey ?? null;
   const db = await idb();
-  const [image, chunks] = await new Promise((res, rej) => {
+  let [image, chunks] = await new Promise((res, rej) => {
     const tx = db.transaction(STORE, 'readonly');
     const os = tx.objectStore(STORE);
     const img = os.get(key);
@@ -1441,6 +1472,14 @@ export async function restore(fenec, key = 'default') {
     tx.onerror = () => rej(tx.error);
   });
   if (!image) return false;
+  if (isSealed(image) !== !!ck) {
+    throw new FenecError(ck ? `${key} is stored in the clear, not sealed with a key` : `${key} is sealed: restore needs its cryptoKey`);
+  }
+  const gen = ck ? image.gen : null;
+  if (ck) {
+    image = await unseal(ck, key, gen, 0, image);
+    chunks = await Promise.all(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+  }
   let bytes = image;
   if (chunks.length) {
     bytes = new Uint8Array(chunks.reduce((n, c) => n + c.length, image.length));
@@ -1453,7 +1492,7 @@ export async function restore(fenec, key = 'default') {
   }
   await fenec.loadAsync(bytes);
   fenec.journal();
-  stored.set(fenec, { key, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+  stored.set(fenec, { key, ck, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
   return true;
 }
 
@@ -1937,6 +1976,7 @@ export class FenecSync {
   #ready;
   #resolveReady;
   #persistKey = null;
+  #cryptoKey = null;
   #chan = null;
   #leader = true;
   #leaderMode = 'auto';
@@ -1956,6 +1996,7 @@ export class FenecSync {
     this.#fetch = this.#fetch.bind(globalThis);
     this.#remote = new FenecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
     this.#persistKey = opts.persist ?? null;
+    this.#cryptoKey = opts.cryptoKey ?? null;
     this.#onError = opts.onError ?? null;
     this.#leaderMode = opts.leader ?? 'auto';
     // The lock manager can be supplied from outside: the default is the Web
@@ -2587,7 +2628,7 @@ export class FenecSync {
 
   async #savePersist() {
     if (!this.#persistKey || !globalThis.indexedDB) return;
-    await persist(this.#local, this.#persistKey);
+    await persist(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
     await putState(`${this.#persistKey}:cursors`, {
       cursors: Object.fromEntries(
         [...this.#shapes.values()].map((s) => [s.collection, s.cursor]),
@@ -2603,7 +2644,7 @@ export class FenecSync {
   async #loadPersist() {
     if (!this.#persistKey || !globalThis.indexedDB) return;
     try {
-      if (!(await restore(this.#local, this.#persistKey))) return;
+      if (!(await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey }))) return;
       const state = await getState(`${this.#persistKey}:cursors`);
       for (const shape of this.#shapes.values()) {
         const cursor = state?.cursors?.[shape.collection];
@@ -2655,6 +2696,8 @@ function normalizeShape(raw) {
  *              its collation data from `collation` (`Fenec.open`)
  * - `token`    `Authorization: Bearer`
  * - `persist`  IndexedDB key: the image **and the cursors** are stored
+ * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
+ *              with (`persist`); the cursors, numbers alone, are not
  * - `leader`   `false` turns off multi-tab leader election
  * - `locks`    lock manager (defaults to `navigator.locks`)
  */

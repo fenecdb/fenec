@@ -80,6 +80,35 @@ flushed before every answer. Over 32.4 MB (61 000 rows with a
 Safari, its vector handed over as <code>f32</code>s, and its flush. Firefox
 was not measured.</p>
 
+<h3 id="sealed">Sealed in IndexedDB</h3>
+
+<pre data-lang="js">// A key from a passphrase, never stored: the page asks for it again.
+const salt = new TextEncoder().encode('myapp:' + userId);
+const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+const cryptoKey = await crypto.subtle.deriveKey(
+  { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
+  base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+
+await persist(db, 'notes', { cryptoKey });   // the image and each chunk sealed
+await restore(db, 'notes', { cryptoKey });   // another key, or none, is refused
+</pre>
+
+<p>With a <code>cryptoKey</code> (AES-GCM, from WebCrypto) the image and
+every chunk are sealed before they reach IndexedDB, each with a random nonce
+and a tag over the key it is stored under and its place. A chunk moved,
+dropped from the middle, or left from an image before is refused, as is one
+byte changed. A restore without the key refuses a sealed record, and a
+restore with one refuses a record stored in the clear. Where the key comes
+from is the page's decision: derived from a passphrase, as above, or handed
+over by the server after a login, so that what IndexedDB holds on the disk
+reads as nothing without it. A key kept in IndexedDB beside the data protects
+nothing. The sync layer takes it as <code>sync({ persist, cryptoKey })</code>.
+Its cursors, which are only numbers, are stored in the clear. The same 32.4 MB in
+Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
+way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
+The file of <code>openFile</code> stays plain, since it is the file
+<code>fenec-pg</code> opens. The disk's own encryption covers it.</p>
+
 <h2 id="collation">Collation data</h2>
 
 <pre data-lang="js">const db = await Fenec.open('./fenec.wasm');            // collate/ beside it
