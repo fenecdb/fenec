@@ -267,7 +267,8 @@ feeding and how far each has been sent.</p>
 <tr><td><code>--replication-token &lt;value&gt;</code></td><td>turns replication on; needs <code>--file</code>, and <code>--http</code> to feed replicas. Also read from <code>FENEC_REPLICATION_TOKEN</code></td></tr>
 <tr><td><code>--replica-of http://host:port</code></td><td>follows that primary into <code>--file</code>; needs the token</td></tr>
 <tr><td><code>--promote</code></td><td>opens a replica's file to take writes, forking its history</td></tr>
-<tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>writes kept for replicas that fall behind; default 64</td></tr>
+<tr><td><code>--replication-buffer &lt;MiB&gt;</code></td><td>writes kept for replicas that fall behind, and for <code>/_changes</code>; default 64</td></tr>
+<tr><td><code>--cdc</code></td><td>keeps the writes for <a href="/docs/http#changes"><code>GET /_changes</code></a> with no replica fed; on already with <code>--replication-token</code></td></tr>
 </tbody>
 </table>
 </div>

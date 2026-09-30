@@ -63,7 +63,7 @@ fn primary(path: &Path, buffer: usize, sync_on_write: bool) -> Primary {
         ..Config::default()
     };
     let server = Server::new(Arc::clone(&db), cfg).with_replication(Replication::new(
-        TOKEN.into(),
+        Some(TOKEN.into()),
         Some(feed),
         None,
     ));

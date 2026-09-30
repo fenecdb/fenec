@@ -188,7 +188,7 @@ fn main() {
         f
     });
     let router = match replication_token.filter(|_| replicating) {
-        Some(token) => Router::replicated(dir, cfg, Replication::new(token, feed, follower)),
+        Some(token) => Router::replicated(dir, cfg, Replication::new(Some(token), feed, follower)),
         None => Router::new(dir, cfg),
     };
     let listener = match router.bind() {

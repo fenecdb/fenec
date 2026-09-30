@@ -54,7 +54,7 @@ fn primary(file: &Path, buffer: usize) -> Node {
     let db = Arc::new(RwLock::new(db));
     let port = serve(
         Arc::clone(&db),
-        Replication::new(TOKEN.into(), Some(feed), None),
+        Replication::new(Some(TOKEN.into()), Some(feed), None),
     );
     Node {
         port,
@@ -85,7 +85,7 @@ fn replica(file: &Path, upstream: u16) -> Node {
     std::thread::spawn(move || f.run());
     let port = serve(
         Arc::clone(&db),
-        Replication::new(TOKEN.into(), Some(feed), Some(Arc::clone(&follower))),
+        Replication::new(Some(TOKEN.into()), Some(feed), Some(Arc::clone(&follower))),
     );
     Node {
         port,

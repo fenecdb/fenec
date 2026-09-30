@@ -126,6 +126,10 @@ usage: fenec-pg [options]
                             --replica-of or this
       --replication-buffer <MiB>  writes kept for replicas that fall behind
                             default: 64. One further behind is sent an image
+      --cdc                 keep the writes on disk for GET /_changes on the
+                            HTTP listener (change data capture), as many as
+                            --replication-buffer holds, with no replicas.
+                            With --replication-token it is on already
 
       --follow <url>        mirror a table of the PostgreSQL server at
                             postgres://user@host/db into --file, and serve it:
@@ -216,6 +220,7 @@ fn main() {
     let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
     let mut replica_of: Option<String> = None;
     let mut promote = false;
+    let mut cdc = false;
     let mut replication_buffer = replication::DEFAULT_BUFFER;
     let mut jwt_secret: Option<String> = std::env::var("FENEC_JWT_SECRET").ok();
     let mut policy: Option<String> = None;
@@ -370,6 +375,7 @@ fn main() {
                 replica_of = Some(url)
             }
             "--promote" => promote = true,
+            "--cdc" => cdc = true,
             "--replication-buffer" => {
                 let v = next(&mut i, "--replication-buffer");
                 let mib: usize = v.parse().unwrap_or_else(|_| {
@@ -450,6 +456,15 @@ fn main() {
     }
     if replicating && replica_of.is_none() && http.is_none() {
         fail("replicas are fed over HTTP: give --http <address>");
+    }
+    if cdc && file.is_none() {
+        fail("--cdc keeps a file's writes: give --file (a --dir node's tenants have theirs with --replication-token)");
+    }
+    if cdc && cfg.sync == SyncPolicy::Off {
+        fail("--sync off puts nothing on disk before shutdown, and /_changes hands over only what is on disk: use --sync always or --sync <ms>");
+    }
+    if cdc && http.is_none() {
+        fail("/_changes is served over HTTP: give --http <address>");
     }
     if lease && dir.is_none() {
         fail("--lease is a tenant node's, whose router grants it: give --dir");
@@ -559,7 +574,7 @@ fn main() {
     let mut feed = None;
     let mut db = match &file {
         Some(path) => {
-            let opened = if replicating {
+            let opened = if replicating || cdc {
                 replication::open_serving(path, replication_buffer, mmap).map(|(db, f)| {
                     feed = Some(f);
                     db
@@ -641,9 +656,12 @@ fn main() {
         fenec_http::log!("following: {url}");
         f
     });
-    let repl = replication_token
-        .filter(|_| replicating)
-        .map(|token| Replication::new(token, feed.clone(), follower));
+    let repl = match replication_token.filter(|_| replicating) {
+        Some(token) => Some(Replication::new(Some(token), feed.clone(), follower)),
+        // The feed for `/_changes` alone: no token, so no replica is fed.
+        None if cdc => Some(Replication::new(None, feed.clone(), None)),
+        None => None,
+    };
 
     // Before the HTTP thread announces its listener, as `Server::serve_on`
     // does before its own: the flag a signal sets waits for the syncer.

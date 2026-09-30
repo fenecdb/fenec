@@ -643,6 +643,27 @@ than write its megabytes under it: a record held the lock 5.0 ms p50 and
 7.9 at most, against 18.3 and 33.3, the same bytes (`make reopen-bench`,
 in turns).
 
+**`/_changes` reads the writes on disk, documents and all** (`cdc.rs`,
+`fenec-pg --cdc`; a primary's feed with `--replication-token`). A
+subscription keeps a query's rows and is reseeded past its ring of ids,
+which holds no documents; change data capture has to see every write once.
+So it reads the records the feed keeps for replicas (`Feed::changes_after`:
+from the record holding the write after the cursor, where a replica is sent
+an image) and has the engine read them out a write at a time
+(`Database::changes_in`, native only): numbered as the counter numbered
+them, each document by its collection's schema as the database knows it or
+as a create among the records made it. `since` is the last write a
+consumer has and `Fenec-Next` the last one an answer holds; a cursor inside
+a block's record goes on after the write it names. Only what an fsync
+covered is handed over, a cursor the feed no longer reaches is answered 410
+with the first `since` it does -- never with writes missing -- one past the
+last write 409, and `wait` waits on the feed's `Condvar` for a write. A
+scoped token is refused: its filter could not hold back the deletion of a
+row it never saw. A feed kept for it alone has no token (`Replication`'s
+token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
+cost nothing measurable, 16 400 single puts a second over HTTP either way,
+and 9 000 rows of 128 dimensions read back at 283 000 a second.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
 because a silently cut result is a wrong answer believed right. Full table in

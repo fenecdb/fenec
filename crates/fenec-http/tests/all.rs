@@ -7,5 +7,6 @@
 mod access;
 mod api;
 mod archive;
+mod cdc;
 mod changes;
 mod replication;
