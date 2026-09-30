@@ -48,6 +48,10 @@ POST   /query                   body: {"query":"&lt;FenecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
 GET    /_metrics                counters and gauges, Prometheus's text format
 GET    /_changes?since=N        every write on disk after N, a JSON line each (--cdc)
+GET    /_changes?consumer=C     from where consumer C committed
+POST   /_changes/consumers/C    body: {"since": N} -- make C, or move it
+GET    /_changes/consumers      each consumer, where it is and how far behind
+DELETE /_changes/consumers/C
 </pre>
 
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
@@ -304,6 +308,31 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
   token's filter could not hold back the deletion of a row it never saw,
   and is refused (403).</li>
 </ul>
+
+<h3>Consumers</h3>
+
+<p>A consumer that keeps no state of its own can have the server keep where
+it is, as a Kafka consumer group keeps its committed offset. Made with a
+<code>POST</code> — at the last write on disk unless the body names a
+<code>since</code> — it reads with <code>?consumer=</code> from where it
+stands, and moves once it has done with what it read:</p>
+
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index
+curl -i 'http://127.0.0.1:8080/_changes?consumer=search-index&amp;wait=10000'
+# Fenec-Next: 42 -- index the lines, then:
+curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since": 42}'
+</pre>
+
+<p>So a consumer has each write at least once, and a write again after a
+crash between reading it and committing. The cursors are rows of a
+<code>_consumers</code> collection, written as any write is — on disk
+before the answer under <code>--sync always</code>, and on the replicas —
+and their own writes are left out of the stream, the cursor going past
+them. An unknown consumer is 404 rather than read from "now" each time,
+which would miss what is written between two reads; a commit past the last
+write on disk is 409. <code>GET /_changes/consumers</code> lists each
+consumer's <code>since</code> and how many writes it is
+<code>behind</code>.</p>
 
 <p><code>--cdc</code> keeps the feed a primary keeps for its replicas and
 feeds none; with <code>--replication-token</code> it is kept already, and a

@@ -263,3 +263,133 @@ fn what_is_refused() {
     );
     assert_eq!(n.call(None, "GET", "/_replication?since=0", "").status, 401);
 }
+
+#[test]
+fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
+    let n = start("consumer", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    // Made first, at the last write on disk; unmade, it is not read.
+    assert_eq!(n.changes("consumer=idx").status, 404);
+    assert_eq!(
+        n.call(Some(ROOT), "POST", "/_changes/consumers/idx", "")
+            .status,
+        200
+    );
+    assert_eq!(n.changes("consumer=idx").body, "");
+    n.run("put a [{t: \"one\"}, {t: \"two\"}]");
+    let first = n.changes("consumer=idx");
+    let seen: Vec<_> = events(&first.body).into_iter().map(|e| e.4).collect();
+    assert_eq!(seen, [Some("one".into()), Some("two".into())]);
+    // Not committed: read again, as after a crash before the commit.
+    assert_eq!(n.changes("consumer=idx").body, first.body);
+    let next = first.next.unwrap();
+    let c = n.call(
+        Some(ROOT),
+        "POST",
+        "/_changes/consumers/idx",
+        &format!("{{\"since\": {next}}}"),
+    );
+    assert_eq!(c.status, 200, "{}", c.body);
+    assert_eq!(n.changes("consumer=idx").body, "");
+    n.run("put a {t: \"three\"}");
+    let later = n.changes("consumer=idx");
+    assert_eq!(
+        events(&later.body)
+            .iter()
+            .map(|e| e.4.clone())
+            .collect::<Vec<_>>(),
+        [Some("three".into())]
+    );
+    // A commit is a write, and the stream leaves the consumers' own out:
+    // the cursor goes past them, and nothing of `_consumers` is read.
+    let all = n.changes("since=0");
+    assert!(!all.body.contains("_consumers"), "{}", all.body);
+    assert_eq!(
+        all.next,
+        Some(n.changes("since=0&limit=10000").next.unwrap())
+    );
+    let list = n.call(Some(ROOT), "GET", "/_changes/consumers", "");
+    assert_eq!(field(&list.body, "name"), Some("idx"));
+    assert_eq!(field(&list.body, "since"), Some(next.to_string().as_str()));
+    assert!(field(&list.body, "behind").unwrap().parse::<u64>().unwrap() >= 1);
+    // Refused: past the last write on disk, a body without `since`.
+    assert_eq!(
+        n.call(
+            Some(ROOT),
+            "POST",
+            "/_changes/consumers/idx",
+            "{\"since\": 99999}"
+        )
+        .status,
+        409
+    );
+    assert_eq!(
+        n.call(
+            Some(ROOT),
+            "POST",
+            "/_changes/consumers/idx",
+            "{\"since\": \"x\"}"
+        )
+        .status,
+        400
+    );
+    // Let go of, it is unseen again.
+    assert_eq!(
+        n.call(Some(ROOT), "DELETE", "/_changes/consumers/idx", "")
+            .status,
+        204
+    );
+    assert_eq!(
+        n.call(Some(ROOT), "GET", "/_changes/consumers", "").body,
+        "[]"
+    );
+}
+
+#[test]
+fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
+    let path = file("kept");
+    let (db, feed) =
+        replication::open(path.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    let cfg = Config {
+        addr: "127.0.0.1:0".into(),
+        sync_on_write: true,
+        ..Config::default()
+    };
+    let server = Server::new(Arc::new(RwLock::new(db)), cfg).with_replication(Replication::new(
+        None,
+        Some(feed),
+        None,
+    ));
+    let listener = server.bind().unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let _ = server.serve_on(listener);
+    });
+    let n = Node {
+        port,
+        access: Arc::new(Access::new(SECRET, "").unwrap()),
+    };
+    n.run("create collection a (t text)");
+    n.run("put a {t: \"x\"}");
+    let c = n.call(None, "POST", "/_changes/consumers/idx", "{\"since\": 2}");
+    assert_eq!(c.status, 200, "{}", c.body);
+    // What the file holds now, read as a tool that only looks reads it.
+    let on_disk = fenec_core::fs::open_read_only(path.to_str().unwrap()).unwrap();
+    let rows = on_disk
+        .query(
+            &fenec_ql::parse_one("get _consumers select name, since").unwrap(),
+            &[],
+        )
+        .unwrap();
+    let fenec_core::query::Response::Rows(rs) = rows else {
+        panic!()
+    };
+    assert_eq!(rs.rows.len(), 1);
+    assert_eq!(
+        rs.rows[0].values,
+        [
+            fenec_core::value::Value::Text("idx".into()),
+            fenec_core::value::Value::Int(2)
+        ]
+    );
+}

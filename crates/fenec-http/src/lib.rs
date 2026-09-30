@@ -534,10 +534,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     409,
                     "this server keeps no change feed: start it with --cdc or --replication-token",
                 ),
-                (Ok(_), Some(feed)) => match req.method {
-                    http::Method::Get if req.segments().len() == 1 => cdc::handle(db, feed, &req),
-                    _ => Response::error(404, &format!("path `{}`", req.path)),
-                },
+                (Ok(_), Some(feed)) => cdc::route(db, feed, cfg, &req),
             };
             if cors(resp, cfg)
                 .write(&mut out, keep_alive, head_only)

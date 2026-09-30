@@ -13,9 +13,21 @@
 //! in it waits for a write that long first. A cursor the feed no longer
 //! reaches is answered 410 with the first `since` it does, never with a
 //! stretch of writes missing from the middle.
+//!
+//! A consumer that keeps no state of its own has the server keep where it
+//! is (`/_changes/consumers/<name>`), as a Kafka consumer group's committed
+//! offset: a `POST` makes it, at the last write on disk unless it names a
+//! `since`; `?consumer=<name>` reads from where it is, and a `POST` of
+//! `since` moves it once the consumer has done with what it read -- so it
+//! has each write at least once, and again after a crash before the `POST`. The
+//! cursors are rows of [`CONSUMERS`], written as any write is: on disk
+//! before the answer where writes are, and on the replicas. Their own
+//! writes are not in the stream, or every acknowledgement would be a write
+//! to read.
 
-use crate::http::{Request, Response};
+use crate::http::{Method, Request, Response};
 use crate::replication::{Feed, Tail};
+use crate::Config;
 use fenec_core::engine::{Change, ChangeKind};
 use fenec_core::json;
 use fenec_core::prelude::*;
@@ -30,7 +42,196 @@ const LONGEST: Duration = Duration::from_secs(30);
 /// Bytes of records read from the feed at a time.
 const READ: usize = 4 << 20;
 
-pub fn handle(db: &Arc<RwLock<Database>>, feed: &Feed, req: &Request) -> Response {
+/// The collection the consumers' cursors are kept in.
+pub const CONSUMERS: &str = "_consumers";
+
+/// `/_changes` and `/_changes/consumers/...`.
+pub fn route(db: &Arc<RwLock<Database>>, feed: &Feed, cfg: &Config, req: &Request) -> Response {
+    match (req.method, req.segments().as_slice()) {
+        (Method::Get, ["_changes"]) => {
+            let consumer = req.query.iter().find(|(k, _)| k == "consumer");
+            match consumer {
+                None => handle(db, feed, req, None),
+                Some((_, name)) => match cursor(db, name) {
+                    Ok(Some(since)) => handle(db, feed, req, Some(since)),
+                    // Read from "now" each time, it would miss what is
+                    // written between two reads: a consumer is made first.
+                    Ok(None) => Response::error(
+                        404,
+                        &format!("no consumer `{name}`: POST /_changes/consumers/{name} first"),
+                    ),
+                    Err(e) => crate::error_response(&e),
+                },
+            }
+        }
+        (Method::Get, ["_changes", "consumers"]) => list(db, feed),
+        (Method::Post, ["_changes", "consumers", name]) => commit(db, feed, cfg, name, req),
+        (Method::Delete, ["_changes", "consumers", name]) => forget(db, cfg, name),
+        _ => Response::error(404, &format!("path `{}`", req.path)),
+    }
+}
+
+fn run(db: &Database, sql: &str, params: &[Value]) -> Result<Response2> {
+    db.query(&fenec_ql::parse_one(sql)?, params)
+}
+
+type Response2 = fenec_core::query::Response;
+
+/// Where `name` stands, `None` for a consumer not seen yet.
+fn cursor(db: &Arc<RwLock<Database>>, name: &str) -> Result<Option<u64>> {
+    let g = crate::held::read_landed(db);
+    if g.collection(CONSUMERS).is_err() {
+        return Ok(None);
+    }
+    let r = run(
+        &g,
+        "get _consumers select since where name = $1",
+        &[Value::Text(name.into())],
+    )?;
+    Ok(match r {
+        Response2::Rows(rs) => rs.rows.first().and_then(|row| match row.values.first() {
+            Some(&Value::Int(n)) => Some(n as u64),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+
+fn list(db: &Arc<RwLock<Database>>, feed: &Feed) -> Response {
+    let durable = feed.durable();
+    let g = crate::held::read_landed(db);
+    let mut out = String::from("[");
+    if g.collection(CONSUMERS).is_ok() {
+        let rows = match run(
+            &g,
+            "get _consumers select name, since order name limit 10000",
+            &[],
+        ) {
+            Ok(Response2::Rows(rs)) => rs.rows,
+            Ok(_) => Vec::new(),
+            Err(e) => return crate::error_response(&e),
+        };
+        for (i, row) in rows.iter().enumerate() {
+            let (Some(Value::Text(name)), Some(&Value::Int(since))) =
+                (row.values.first(), row.values.get(1))
+            else {
+                continue;
+            };
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"name\":");
+            json::escape_into(&mut out, name);
+            out.push_str(&format!(
+                ",\"since\":{since},\"behind\":{}}}",
+                durable.saturating_sub(since as u64)
+            ));
+        }
+    }
+    out.push(']');
+    Response::json(200, out)
+}
+
+/// Moves `name` to the `since` the body names: once the consumer has done
+/// with every write up to it.
+fn commit(
+    db: &Arc<RwLock<Database>>,
+    feed: &Feed,
+    cfg: &Config,
+    name: &str,
+    req: &Request,
+) -> Response {
+    if name.is_empty() || name.len() > 200 {
+        return Response::error(400, "a consumer's name is 1 to 200 bytes");
+    }
+    let body = std::str::from_utf8(&req.body).unwrap_or("").trim();
+    let since = match body.is_empty() {
+        true => None,
+        false => match json::parse_object(body) {
+            Ok(o) => o.into_iter().find(|(k, _)| k == "since").map(|(_, v)| v),
+            Err(e) => return crate::error_response(&e),
+        },
+    };
+    let durable = feed.durable();
+    // None given: from the last write on disk, what is written from now on.
+    let since = match since {
+        None | Some(Value::Null) => durable as i64,
+        Some(Value::Int(n)) if n >= 0 => n,
+        Some(_) => {
+            return Response::error(400, "the body is {\"since\": <the last write done with>}")
+        }
+    };
+    if since as u64 > durable {
+        return Response::json(
+            409,
+            format!("{{\"error\":\"{since} is past the last write on disk, {durable}\",\"seq\":{durable}}}"),
+        );
+    }
+    write(db, cfg, name, Some(since))
+}
+
+fn forget(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str) -> Response {
+    write(db, cfg, name, None)
+}
+
+/// Sets `name`'s cursor, or with `None` lets it go, on disk before the
+/// answer where writes are.
+fn write(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, since: Option<i64>) -> Response {
+    if cfg.read_only {
+        return Response::error(403, "this server takes no writes (--http-read-only)");
+    }
+    let key = Value::Text(name.into());
+    let done = (|| -> Result<_> {
+        let mut g = crate::held::write_unheld(db);
+        let there = g.collection(CONSUMERS).is_ok();
+        let mut exec =
+            |sql: &str, params: &[Value]| g.execute_with(&fenec_ql::parse_one(sql)?, params);
+        let n = match since {
+            Some(n) => {
+                exec(
+                    "create collection if not exists _consumers (name text @hash, since int)",
+                    &[],
+                )?;
+                let at = Value::Int(n);
+                let set = exec(
+                    "set _consumers {since: $2} where name = $1",
+                    &[key.clone(), at.clone()],
+                )?;
+                if !matches!(set, Response2::Affected(1..)) {
+                    exec("put _consumers {name: $1, since: $2}", &[key.clone(), at])?;
+                }
+                n
+            }
+            None => {
+                if there {
+                    exec("del _consumers where name = $1", std::slice::from_ref(&key))?;
+                }
+                -1
+            }
+        };
+        Ok((n, crate::flush_for(cfg, &mut g)?))
+    })();
+    match done {
+        Ok((n, durability)) => match crate::await_durable(db, durability) {
+            Ok(()) if n >= 0 => {
+                let mut out = String::from("{\"name\":");
+                json::escape_into(&mut out, name);
+                out.push_str(&format!(",\"since\":{n}}}"));
+                Response::json(200, out)
+            }
+            Ok(()) => Response::empty(204),
+            Err(e) => crate::error_response(&e),
+        },
+        Err(e) => crate::error_response(&e),
+    }
+}
+
+pub fn handle(
+    db: &Arc<RwLock<Database>>,
+    feed: &Feed,
+    req: &Request,
+    from: Option<u64>,
+) -> Response {
     let param = |k: &str| {
         req.query
             .iter()
@@ -49,8 +250,9 @@ pub fn handle(db: &Arc<RwLock<Database>>, feed: &Feed, req: &Request) -> Respons
     let [since, limit, wait] = numbers;
     let limit = limit.map_or(LIMIT, |n| n as usize).clamp(1, MOST);
     let wait = Duration::from_millis(wait.unwrap_or(0)).min(LONGEST);
-    // No cursor: from the last write on disk, what is written from now on.
-    let since = since.unwrap_or_else(|| feed.durable());
+    // No cursor: the consumer's, or the last write on disk -- what is
+    // written from now on.
+    let since = since.or(from).unwrap_or_else(|| feed.durable());
     let until = Instant::now() + wait;
     loop {
         let epoch = feed.epoch();
@@ -124,6 +326,11 @@ fn lines(
         }
         if n == limit {
             return false;
+        }
+        // The consumers' own cursors: passed over, and the cursor with them.
+        if c.collection.as_deref() == Some(CONSUMERS) {
+            next = c.seq;
+            return true;
         }
         let at = times[lasts.partition_point(|&l| l < c.seq).min(times.len() - 1)];
         line(&mut out, &c, at);
