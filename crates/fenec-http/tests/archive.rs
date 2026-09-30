@@ -639,13 +639,19 @@ fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
                         ref other => panic!("{other:?}"),
                     })
                     .collect();
-                assert!(ns.iter().enumerate().all(|(i, &n)| n == i as i64), "copy {k}: a prefix");
+                assert!(
+                    ns.iter().enumerate().all(|(i, &n)| n == i as i64),
+                    "copy {k}: a prefix"
+                );
             }
             Err(e) => {
                 refused += 1;
                 let e = e.to_string();
                 assert!(
-                    e.contains("cut short") || e.contains("missing") || e.contains("lacks") || e.contains("image"),
+                    e.contains("cut short")
+                        || e.contains("missing")
+                        || e.contains("lacks")
+                        || e.contains("image"),
                     "copy {k}: {e}"
                 );
             }
@@ -662,7 +668,10 @@ fn a_copy_taken_while_the_archive_writes_restores_or_says_why_not() {
     assert_eq!(v.last, p.seq());
     let (db, _) = restored(&last, &d.join("last.fenec"), Target::End);
     assert_eq!(rows(&db, "get notes").len(), n as usize);
-    assert!(whole + refused == 12 && whole > 0, "{whole} whole, {refused} refused");
+    assert!(
+        whole + refused == 12 && whole > 0,
+        "{whole} whole, {refused} refused"
+    );
 }
 
 /// Copies an archive's files one at a time, in the order a directory
