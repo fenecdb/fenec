@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
 	python-test drivers-test react-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -45,6 +45,11 @@ test-js:
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
+
+## web/fenec.d.ts held to web/fenec.js -- every export and method declared --
+## and to what a caller writes, under tsc --strict
+types-check:
+	cd web/types && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## TypeScript declarations from the schema: make types FILE=data.fenec
 types:

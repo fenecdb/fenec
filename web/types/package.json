@@ -1,0 +1,12 @@
+{
+  "name": "fenecdb-types-check",
+  "private": true,
+  "type": "module",
+  "description": "web/fenec.d.ts held to web/fenec.js and to what a caller writes: make types-check",
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "test": "node check.mjs"
+  }
+}
