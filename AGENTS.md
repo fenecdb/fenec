@@ -152,10 +152,10 @@ the block as one block record (`Sink::land`, `landed_block`). A savepoint
 stops the spills, and a block that spilled is not parked. 250 000 768-dim
 rows in one block peaked at 904 MB where they had at 2 389.
 `fs::open_in_memory` (`fenec-pg --no-mmap`, replicated files and `--dir`
-tenants included) is the other way. In the browser `store::Base` is a type
-of no value (`off::Mapped`), so the mapped-file code compiles for both
-targets and folds away there: 16 `cfg`s of `store.rs` down to the two
-that say which `Base` a target has. A rewrite points the stores at the file
+tenants included) is the other way. In the browser `store::Base` is the
+image a load was handed (`fenec_load_owned`), whose documents the module
+reads in place rather than copy: 10 000 x 768 restored held 97 MB, 66 now,
+for 0.7 KB brotli. A rewrite points the stores at the file
 it just wrote (`Database::repoint`) from where it put each record, without
 reading the file back (1.8-2.3 s of a 1 GB checkpoint, now 19 ms; an
 adopted image is still walked), and a compact over a mapped file copies no

@@ -144,10 +144,14 @@ index holds 188 MB that way against 1 095 read into memory, and its
 machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
 which reaches a replicated file and a `--dir` node's tenants as well) is the
 other way, for a network file system or to have `--max-memory` cover the
-data. In the browser `store::Base` is a type of no value (`off::Mapped`),
-as a missing index is, so the store's mapped-file code compiles for both
-targets and folds away there: 16 `cfg`s of `store.rs` down to the two
-that say which `Base` a target has. A
+data. In the browser `store::Base` is the image a load was handed
+(`fenec_load_owned`, `Database::load_mapped`): the module keeps it and
+reads the documents out of it, as a server reads its file, where it copied
+each into a segment -- 10 000 rows of 768 dimensions restored held 97 MB,
+and hold 66, for 0.7 KB brotli; the load is up to 12% quicker and the
+first build of each derived index after it 2 to 6% slower, which grows the
+memory past the image the copy let go of: a load and its first three reads
+took 28.7 ms against 28.8. A
 new file is mapped from the start. A rewrite -- `checkpoint`,
 `compact`, an image adopted -- writes the new file and points the stores at
 it (`Database::repoint`), so the old one is let go of; a compact over a

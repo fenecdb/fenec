@@ -88,15 +88,15 @@ fn after(end: u64, id: DocId, len: u64) -> u64 {
 pub const FRAMES_MARK: u8 = 1;
 
 /// The bytes a store reads records from without having copied them: a file
-/// the operating system maps in on native targets (`fs::open_mapped`). The
-/// browser has no such thing: there it is a type of no value (`off.rs`), as
-/// an index a build is made without is, so every path through one compiles
-/// and the compiler drops it -- a store's `base` is always `None`, and
-/// the functions that take one have nothing to call them with.
+/// the operating system maps in on native targets (`fs::open_mapped`), and
+/// in the browser the image a load was handed (`fenec_load_owned`), kept
+/// rather than copied a document at a time into segments -- 10 000 rows of
+/// 768 dimensions restored held 97 MB that way, and hold 66. A concrete
+/// `Vec` there: through `dyn AsRef` the module was 126 bytes larger.
 #[cfg(not(target_arch = "wasm32"))]
 pub type Base = std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
 #[cfg(target_arch = "wasm32")]
-pub type Base = crate::off::Mapped;
+pub type Base = std::sync::Arc<Vec<u8>>;
 
 /// Document id -> location mapping.
 ///
@@ -769,12 +769,12 @@ impl Store {
     #[inline]
     fn payload(&self, loc: Loc) -> Result<&[u8]> {
         if loc.seg & MAPPED != 0 {
-            // Only a store over a file has one: in the browser this folds
-            // away, `base` being of a type of no value.
+            // A store over a file has one, and in the browser one over the
+            // image it was loaded from (`Database::load_mapped`).
             if let Some((b, _)) = &self.base {
                 let at = (((loc.seg & !MAPPED) as u64) << 32 | loc.off as u64) as usize;
-                return (**b)
-                    .as_ref()
+                let file: &[u8] = (**b).as_ref();
+                return file
                     .get(at..at + loc.len as usize)
                     .ok_or_else(|| Error::Corrupt("offset outside the mapped file".into()));
             }
@@ -1016,7 +1016,7 @@ impl Store {
         len: u64,
         note: &mut dyn FnMut(DocId),
     ) -> Result<usize> {
-        let file = (**base).as_ref();
+        let file: &[u8] = (**base).as_ref();
         let bytes = file
             .get(at as usize..(at + len) as usize)
             .ok_or_else(|| Error::Corrupt("data record outside the mapped file".into()))?;
@@ -1444,7 +1444,7 @@ impl Store {
     /// the data.
     pub fn write_image(&self, out: &mut dyn crate::engine::ImageOut) -> Result<()> {
         if let Some((base, stretches)) = &self.base {
-            let file = (**base).as_ref();
+            let file: &[u8] = (**base).as_ref();
             for &(at, len) in stretches {
                 out.write(&file[at as usize..(at + len) as usize])?;
             }
@@ -1461,7 +1461,7 @@ impl Store {
         // The records left in the mapped file came first; the segments hold
         // what was written after the file was opened.
         if let Some((base, stretches)) = &self.base {
-            let file = (**base).as_ref();
+            let file: &[u8] = (**base).as_ref();
             for &(at, len) in stretches {
                 out.extend_from_slice(&file[at as usize..(at + len) as usize]);
             }

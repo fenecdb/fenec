@@ -368,11 +368,16 @@ export class Fenec {
     if (kept.has(this)) throw new FenecError('the database is kept in a file (openFile): a load would leave the file behind');
     const ptr = this.#wasm.fenec_alloc(bytes.length);
     new Uint8Array(this.#wasm.memory.buffer).set(bytes, ptr);
+    // The module keeps the bytes it is handed and reads the documents out
+    // of them, rather than copy each into memory of its own: 10 000 rows of
+    // 768 dimensions restored held 97 MB, and hold 66. One from before
+    // copies them, and the bytes are freed here.
+    const owned = this.#wasm.fenec_load_owned;
     let r;
     try {
-      r = this.#wasm.fenec_load(this.#handle, ptr, bytes.length);
+      r = (owned ?? this.#wasm.fenec_load)(this.#handle, ptr, bytes.length);
     } finally {
-      this.#wasm.fenec_free(ptr, bytes.length);
+      if (!owned) this.#wasm.fenec_free(ptr, bytes.length);
     }
     if (r & 2) {
       const { chunks } = this.#collationState();

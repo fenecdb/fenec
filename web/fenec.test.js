@@ -1239,6 +1239,46 @@ test('an index held in chunks answers as one array did', { skip: wasm ? false : 
   }
 });
 
+// A load keeps the image it is handed and reads the documents out of it
+// (`fenec_load_owned`), as a server reads a mapped file: what is written
+// over, deleted, compacted and written again after it answers as the same
+// rows written one by one do, and so does its image.
+test('a loaded image is read in place, and written over as a copy would be', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const src = await Fenec.open(wasm);
+  src.run('create collection c (n int @hash, t text @text, e vector<8> @hnsw(l2))');
+  const rows = Array.from({ length: 300 }, (_, n) => ({ n, t: `word${n % 7} row ${n}`, e: Array.from({ length: 8 }, (_, k) => Math.sin(n + k)) }));
+  await src.from('c').insert(rows);
+  const image = src.snapshot();
+  const steps = [
+    'set c {t: "changed"} where n < 20',
+    'del c where n >= 280',
+    'put c {n: 1000, t: "word3 new", e: [1, 2, 3, 4, 5, 6, 7, 8]}',
+  ];
+  // The same rows written rather than loaded: every document its own.
+  const [copy, kept] = [await Fenec.open(wasm), await Fenec.open(wasm)];
+  copy.run('create collection c (n int @hash, t text @text, e vector<8> @hnsw(l2))');
+  await copy.from('c').insert(rows);
+  kept.load(image);
+  const q = [0.5, 0.1, -0.2, 0.3, 0.9, -0.4, 0.2, 0.0];
+  const answers = (d) => [
+    d.rows('get c where n in [3, 25, 290, 1000] order n'),
+    d.rows('get c select n near e $1 limit 7', [q]),
+    d.rows('get c select n match t "word3" limit 5'),
+    d.rows('get c count'),
+  ];
+  for (const sql of steps) {
+    copy.run(sql);
+    kept.run(sql);
+    assert.deepEqual(answers(kept), answers(copy), sql);
+  }
+  kept.run('compact');
+  assert.deepEqual(answers(kept), answers(copy), 'compact');
+  const again = await Fenec.open(wasm);
+  again.load(kept.snapshot());
+  assert.deepEqual(answers(again), answers(copy), 'its image');
+});
+
 // The brief at /llms.txt is what a coding agent copies from, so every example
 // in it has to run as written. They live in site/build.py, which renders it.
 test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
