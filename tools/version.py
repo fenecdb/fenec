@@ -33,14 +33,16 @@ def main():
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
     for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json"):
         sub(path, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
-    # The lock file names the package's version twice, at its top and as the
-    # root of `packages`; `make react-test` installs from it with `npm ci`.
-    # The bump to 0.1.5 found it still at 0.1.4.
-    lock = "integrations/react/package-lock.json"
-    sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
-    sub(lock, r'^(    "": \{\n      "name": "@fenecdb/react",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
+    # A lock file names the package's version twice, at its top and as the
+    # root of `packages`; each package's `make ...-test` installs from it
+    # with `npm ci`. The bump to 0.1.5 found React's still at 0.1.4, and the
+    # one to 0.1.6 the two locks made since at 0.1.5.
+    for name in ("react", "cloudflare", "langchain"):
+        lock = f"integrations/{name}/package-lock.json"
+        sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
+        sub(lock, rf'^(    "": \{{\n      "name": "@fenecdb/{name}",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub("README.md", r"(ghcr\.io/fenecdb/fenec-pg:)\d+\.\d+\.\d+", rf"\g<1>{v}")
-    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json, the lock, README.md")
+    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, README.md")
 
 
 if __name__ == "__main__":
