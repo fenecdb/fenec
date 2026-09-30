@@ -211,11 +211,6 @@ fn statement(t: &[Tok]) -> Result<Spec, Refusal> {
     }
     i += 1;
     let format = options(&t[i..])?;
-    if out && format == Format::Binary {
-        return Err(unsupported(
-            "COPY TO STDOUT in binary is not supported: take the rows in text or CSV",
-        ));
-    }
     Ok(Spec {
         table,
         columns,
@@ -382,6 +377,10 @@ fn options(t: &[Tok]) -> Result<Format, Refusal> {
 
 // ------------------------------------------------------------- rows out
 
+/// What a binary COPY begins with: the signature, no flags, and no header
+/// extension.
+pub const BINARY_HEADER: &[u8] = b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0";
+
 /// One row of a `COPY ... TO STDOUT` as `format` writes it, each cell the
 /// value's PostgreSQL text or `None` for NULL, onto `out` with its line's
 /// end: what `COPY FROM` reads back as the same row.
@@ -417,7 +416,8 @@ pub fn line(format: &Format, cells: &[Option<String>], out: &mut Vec<u8>) {
                     ),
                 }
             }
-            // Refused when the statement is read.
+            // Written by the server a cell at a time, as its column's
+            // type sends it (`server::copy_out`).
             Format::Binary => {}
         }
     }
@@ -1214,7 +1214,6 @@ mod tests {
             ("COPY t TO '/tmp/t.csv'", "0A000"),
             ("COPY t TO PROGRAM 'cat'", "0A000"),
             ("COPY t TO STDIN", "42601"),
-            ("COPY t TO STDOUT (FORMAT binary)", "0A000"),
             ("COPY t FROM STDOUT", "42601"),
             ("COPY t FROM '/etc/passwd'", "0A000"),
             ("COPY t FROM PROGRAM 'ls'", "0A000"),

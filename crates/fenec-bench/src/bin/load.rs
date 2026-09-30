@@ -18,8 +18,9 @@
 //!   * HTTP: `POST /docs` with a JSON array of 1 000 rows;
 //!   * HTTP: `POST /batch` with 1 000 lines, each a `POST /query` body.
 //!
-//! Then the rows are read back whole by `COPY docs TO STDOUT`, through
-//! the `postgres` crate's `copy_out`, from fenec-pg and from PostgreSQL.
+//! Then the rows are read back whole by `COPY docs TO STDOUT`, in text and
+//! in binary, through the `postgres` crate's `copy_out`, from fenec-pg and
+//! from PostgreSQL.
 //!
 //! PostgreSQL + pgvector, the container `make pgvector-up` starts (skipped
 //! without it), is sent the same rows by `COPY ... FROM STDIN` and by
@@ -262,16 +263,36 @@ fn postgres_insert(c: &mut Client, name: &str, rows: &[Row]) -> String {
     rate(t)
 }
 
-/// `COPY <name> TO STDOUT` read to its end: its rows a second.
-fn copy_out(c: &mut Client, name: &str) -> String {
+/// `COPY <name> TO STDOUT` read to its end, in text or in binary: its rows
+/// a second.
+fn copy_out(c: &mut Client, name: &str, binary: bool) -> String {
     use std::io::Read as _;
     let t = Instant::now();
     let mut bytes = Vec::new();
-    c.copy_out(&format!("COPY {name} (category, score, embed) TO STDOUT"))
-        .unwrap()
-        .read_to_end(&mut bytes)
-        .unwrap();
-    let rows = bytes.iter().filter(|&&b| b == b'\n').count();
+    let with = if binary { " (FORMAT binary)" } else { "" };
+    c.copy_out(&format!(
+        "COPY {name} (category, score, embed) TO STDOUT{with}"
+    ))
+    .unwrap()
+    .read_to_end(&mut bytes)
+    .unwrap();
+    // Text: a line a row. Binary: a row's 3 columns, then its cells, each
+    // behind its length.
+    let rows = match binary {
+        false => bytes.iter().filter(|&&b| b == b'\n').count(),
+        true => {
+            let (mut at, mut rows) = (19, 0);
+            while i16::from_be_bytes([bytes[at], bytes[at + 1]]) == 3 {
+                at += 2;
+                for _ in 0..3 {
+                    let len = i32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+                    at += 4 + len.max(0) as usize;
+                }
+                rows += 1;
+            }
+            rows
+        }
+    };
     assert_eq!(rows, ROWS, "{name}");
     let secs = t.elapsed().as_secs_f64();
     format!("{:.1}k rows/s", rows as f64 / secs / 1e3)
@@ -345,7 +366,12 @@ fn main() {
     println!(
         "\n{:<34} {:>16}",
         "read back, COPY TO STDOUT",
-        copy_out(&mut fenec, "docs2")
+        copy_out(&mut fenec, "docs2", false)
+    );
+    println!(
+        "{:<34} {:>16}",
+        "read back, COPY TO, binary",
+        copy_out(&mut fenec, "docs2", true)
     );
     if let Some(c) = postgres.as_mut() {
         let mut row = |what: &str, way: &dyn Fn(&mut Client, &str, &[Row]) -> String| {
@@ -361,7 +387,12 @@ fn main() {
         println!(
             "{:<34} {:>16}",
             "PostgreSQL, COPY TO STDOUT",
-            copy_out(c, "load_plain")
+            copy_out(c, "load_plain", false)
+        );
+        println!(
+            "{:<34} {:>16}",
+            "PostgreSQL, COPY TO, binary",
+            copy_out(c, "load_plain", true)
         );
         c.batch_execute("DROP TABLE IF EXISTS load_hnsw; DROP TABLE IF EXISTS load_plain")
             .unwrap();

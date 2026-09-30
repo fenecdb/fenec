@@ -1231,8 +1231,9 @@ const COPY_OUT_ROWS: usize = 1_000;
 /// read, and a transaction that holds the database -- one that wrote, or
 /// a serializable one -- reads it as it stands for the whole of the COPY.
 /// 100 000 rows of a text, an int and a 128-dim vector go out at 158k
-/// rows/s, PostgreSQL's own COPY TO at 150k (`make load-bench`). Returns
-/// the rows copied.
+/// rows/s, PostgreSQL's own COPY TO at 150k, and in the binary format --
+/// each cell as a binary query's, no number written out as text -- at
+/// 1.6M rows/s against 746k (`make load-bench`). Returns the rows copied.
 #[allow(clippy::too_many_arguments)]
 fn copy_out(
     spec: copy::Spec,
@@ -1283,8 +1284,12 @@ fn copy_out(
             return Ok((Copied::On, 0));
         }
     };
-    out.copy_out_response(target.columns.len());
+    let binary = spec.format == copy::Format::Binary;
+    out.copy_out_response(target.columns.len(), binary);
     let mut line = Vec::new();
+    if binary {
+        out.copy_data(copy::BINARY_HEADER);
+    }
     if let copy::Format::Csv { header: true, .. } = spec.format {
         let names: Vec<String> = target.columns.iter().map(|(n, _)| n.clone()).collect();
         copy::header(&spec.format, &names, &mut line);
@@ -1312,16 +1317,44 @@ fn copy_out(
             break;
         };
         for row in &set.rows {
-            cells.clear();
-            let mut values = row.values.iter();
-            for (name, _) in &target.columns {
-                cells.push(match name.as_str() {
-                    "id" => Some(row.id.to_string()),
-                    _ => values.next().and_then(to_pg_text),
-                });
-            }
             line.clear();
-            copy::line(&spec.format, &cells, &mut line);
+            let mut values = row.values.iter();
+            if binary {
+                // Each cell as its column is described, as a query's row
+                // goes where Bind asks for binary: a list as its element's
+                // array, a vector as pgvector sends one.
+                line.extend_from_slice(&(target.columns.len() as i16).to_be_bytes());
+                for (name, ty) in &target.columns {
+                    let id;
+                    let v = match name.as_str() {
+                        "id" => {
+                            id = Value::Int(row.id as i64);
+                            &id
+                        }
+                        _ => values.next().unwrap_or(&Value::Null),
+                    };
+                    match binary::value(pg_oid(ty), v) {
+                        Ok(Some(b)) => {
+                            line.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                            line.extend_from_slice(&b);
+                        }
+                        Ok(None) => line.extend_from_slice(&(-1i32).to_be_bytes()),
+                        Err(why) => {
+                            out.error("0A000", &why);
+                            return Ok((Copied::On, 0));
+                        }
+                    }
+                }
+            } else {
+                cells.clear();
+                for (name, _) in &target.columns {
+                    cells.push(match name.as_str() {
+                        "id" => Some(row.id.to_string()),
+                        _ => values.next().and_then(to_pg_text),
+                    });
+                }
+                copy::line(&spec.format, &cells, &mut line);
+            }
             out.copy_data(&line);
             last = row.id;
         }
@@ -1331,6 +1364,10 @@ fn copy_out(
         if !full {
             break;
         }
+    }
+    if binary {
+        // The trailer: a row of -1 columns.
+        out.copy_data(&(-1i16).to_be_bytes());
     }
     out.copy_done();
     out.command_complete(&format!("COPY {done}"));

@@ -3552,7 +3552,7 @@ fn copy_to_stdout_writes_what_copy_from_reads_back() {
     let mut c = Client::connect(h.port, "fenec", None).unwrap();
     let schema = "(name text, n int, score float, ok bool, at timestamp, \
                   raw bytes, tags [text], e vector<2>)";
-    for t in ["src", "txt", "csv"] {
+    for t in ["src", "txt", "csv", "bin"] {
         c.simple(&format!("create collection {t} {schema}"));
     }
     let mut rows = Vec::new();
@@ -3653,11 +3653,31 @@ fn copy_to_stdout_writes_what_copy_from_reads_back() {
     );
     assert_eq!(outcome(&r), format!("COPY {n}"));
 
+    // PostgreSQL's binary format: each cell as its column's type sends it,
+    // which COPY FROM reads the same way.
+    let r = c.simple(&format!("COPY src {cols} TO STDOUT (FORMAT binary)"));
+    let head = find(&r, b'H').expect("a CopyOutResponse");
+    assert_eq!(
+        head.body,
+        [1, 0, 8, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+    );
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+    let bin = copied_out(&r);
+    assert!(bin.starts_with(b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0\0\x08"));
+    assert!(bin.ends_with(&[0xff, 0xff]));
+    let r = c.copy(
+        &format!("COPY bin {cols} FROM STDIN (FORMAT binary)"),
+        &[&bin],
+        None,
+    );
+    assert_eq!(outcome(&r), format!("COPY {n}"));
+
     let all = "select name, n, score, ok, at, raw, tags, e order n";
     let src = rows_of(&mut c, &format!("get src {all}"));
     assert_eq!(src.len().to_string(), n);
     assert_eq!(rows_of(&mut c, &format!("get txt {all}")), src);
     assert_eq!(rows_of(&mut c, &format!("get csv {all}")), src);
+    assert_eq!(rows_of(&mut c, &format!("get bin {all}")), src);
 
     // Some columns, in the order named; the extended protocol too.
     let r = c.extended("COPY src (n, id) TO STDOUT (DELIMITER ',')", &[], false);
@@ -3671,7 +3691,6 @@ fn copy_to_stdout_writes_what_copy_from_reads_back() {
     for (sql, code) in [
         ("COPY nothing TO STDOUT", "42P01"),
         ("COPY src (nope) TO STDOUT", "42703"),
-        ("COPY src TO STDOUT (FORMAT binary)", "0A000"),
     ] {
         let r = c.simple(sql);
         assert!(find(&r, b'H').is_none(), "{sql}");
