@@ -1,0 +1,33 @@
+{
+  "name": "@fenecdb/cloudflare",
+  "version": "0.1.5",
+  "description": "fenecdb in a Cloudflare Durable Object: the database kept in the object's storage as a file would hold it",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md"],
+  "peerDependencies": {
+    "@fenecdb/web": ">=0.1.5"
+  },
+  "keywords": [
+    "fenecdb",
+    "cloudflare",
+    "durable-objects",
+    "workers",
+    "vector"
+  ],
+  "homepage": "https://fenecdb.com/docs/serverless",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fenecdb/fenec.git",
+    "directory": "integrations/cloudflare"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  }
+}

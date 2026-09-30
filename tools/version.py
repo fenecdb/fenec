@@ -31,7 +31,7 @@ def main():
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     sub("Cargo.toml", r'^(fenec-wire = \{ version = )"[^"]+"', rf'\g<1>"{v}"')
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
-    for path in ("web/package.json", "integrations/react/package.json"):
+    for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json"):
         sub(path, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
     # The lock file names the package's version twice, at its top and as the
     # root of `packages`; `make react-test` installs from it with `npm ci`.
@@ -40,7 +40,7 @@ def main():
     sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub(lock, r'^(    "": \{\n      "name": "@fenecdb/react",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub("README.md", r"(ghcr\.io/fenecdb/fenec-pg:)\d+\.\d+\.\d+", rf"\g<1>{v}")
-    print(f"version {v}: Cargo.toml, pyproject.toml, both package.json, the lock, README.md")
+    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json, the lock, README.md")
 
 
 if __name__ == "__main__":
