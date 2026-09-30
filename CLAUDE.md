@@ -447,7 +447,16 @@ under `always` lost no acknowledged write. An archive (`fenec archive`,
 `fenec-http/src/archive.rs`) is the same stream written to files, each write
 with the time the primary appended it; `fenec restore` is an image plus the
 archived writes up to a time or a change, forked -- a fenecdb file is exactly
-that, so a restore is a concatenation checked by opening it.
+that, so a restore is a concatenation checked by opening it. An archive
+takes images of its own end (`Archive::consolidate`, `--image-every`, an
+hour): it kept its first image for good, and a restore replayed every write
+since. The segment being written ends at the next write after one, so
+`prune` (`--keep`) lets go of whole segments -- in the open segment the
+writes before an image stayed until it reached 64 MB. `fenec verify` reads
+an archive as a restore would. A segment is closed and fsynced before the
+next begins and an image renamed into place, so a sync tool's copy, taken
+a file at a time while the archive writes, is the archive up to a moment:
+fenecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
 
 **Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
 whose directory replicates to a standby router like any other file, the
