@@ -259,7 +259,8 @@ fn a_compact_beside_a_mapped_database_copies_no_record() {
                      v: [{}.0, 1.0, {}.0, 0.5]}}",
                     i % 5,
                     i % 9,
-                    i % 13,
+                    // A vector each: a vector written twice is one node.
+                    i,
                     i % 7
                 ),
             );

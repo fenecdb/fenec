@@ -37,7 +37,8 @@ fn put_all(db: &mut Database) {
                 i % 9,
                 i % 7,
                 1 + i % 16,
-                i % 13,
+                // A vector each: a vector written twice is one node.
+                i,
                 i % 5
             ),
         );
@@ -92,7 +93,7 @@ fn a_rewrite_keeps_the_nodes_of_vectors_it_leaves_alone() {
     exec(
         &mut db,
         "put d {id: 60, title: \"again\", tag: \"t4\", n: 59, s: \"{2:1.5}/16\", \
-         v: [7.0, 1.0, 4.0, 0.5]}",
+         v: [59.0, 1.0, 4.0, 0.5]}",
     );
     assert_eq!((dead(&db), live(&db)), (0, 200));
     same_answers(&db);

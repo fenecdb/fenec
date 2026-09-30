@@ -72,7 +72,8 @@ fn db() -> Database {
     let words = ["rust", "borrow", "ownership", "vector", "index", "query"];
     let docs: Vec<Vec<(String, Expr)>> = (0..2000usize)
         .map(|i| {
-            let x = (i % 97) as f32 / 97.0;
+            // A vector each: a vector written twice is one node.
+            let x = i as f32 / 2000.0;
             vec![
                 (
                     "title".into(),

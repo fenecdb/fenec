@@ -876,6 +876,31 @@ the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
 
+**A vector written again is one node** (`VectorIndex::place`,
+`aliases`, `Same`). Written hundreds of times, a node each filled its
+neighbours' lists with copies -- the diversity rule takes a candidate at
+distance 0 from the owner, `0 < 0` being false -- and a walk could not
+leave them: 1 812 of 6 019 copies over 20 000 x 128 found by no search,
+other queries' recall 0.82 -> 0.67. Skipping copies in the heuristic took
+the recall back to 0.72 and orphaned the copies, since no list took them
+in. Now every insert, batch and deferral goes through `place`, which
+finds a live node storing the same vector to the bit -- `Same`, open
+addressing over `node + 1` beside the hash's top half, made on the first
+insert rather than at an open, 16 to 32 bytes a node -- and makes the
+document one of its `aliases` (`(node, doc)` sorted, not a map: another
+hashbrown in the browser) rather than a node. A search hands a node out as
+its documents in id order, the exact paths by `(node, doc)` pairs put in
+node order through the `u64` sort; a document leaving a node hands it to
+another holding its vector, and only the last makes it a tombstone
+(`detach`). Over codes the stored codes are compared, which `near` puts in
+order by the documents' own vectors anyway. The level is drawn only for a
+new node, so a graph with no vector twice is byte for byte the graph it
+was. Graph records 9 and 10 carry the aliases after the tombstones; a
+restore checks each alias's document holds the node's vector. Tests whose
+data repeated vectors (`i % 13`) to count nodes and tombstones now write a
+vector a row. The browser module 2.2 KB brotli; builds, searches and
+opens as fast.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer

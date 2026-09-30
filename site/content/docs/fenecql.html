@@ -315,6 +315,15 @@ retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
 for <code>int</code>, <code>float</code>, <code>timestamp</code> and
 <code>text</code> — the types with an order.</p>
 
+<p>An <code>@hnsw</code> graph holds a vector once. Documents written with
+the same vector — the embedding of an empty chunk, a line of boilerplate,
+a zero vector — share its node, and <code>near</code> hands back each of
+them at the one distance. A node each, a vector written hundreds of times
+filled its neighbours' lists with copies of itself: over 20 000 rows of 128
+dimensions, a third of them copies of 20 vectors, 1 812 copies were found by
+no search and other queries' recall fell from 0.82 to 0.67; one node each,
+none is missed and it is 0.87.</p>
+
 <div class="note">
   <p><b><code>prefix=N</code> indexes each word's prefixes alongside it</b>
   (3..N by default; <code>prefix_min</code> moves the lower bound). It is a

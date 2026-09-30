@@ -486,6 +486,8 @@ struct Read<'a> {
     upper: Vec<Vec<Vec<u32>>>,
     /// A tombstone's vector as the arena stores it, in node order.
     tombs: Vec<&'a [u8]>,
+    /// `(node, doc)`: the documents holding another's vector, in order.
+    aliases: Vec<(u32, DocId)>,
 }
 
 impl<'a> Read<'a> {
@@ -497,6 +499,7 @@ impl<'a> Read<'a> {
             l0: vec![0; count.checked_mul(m0)?],
             upper: Vec::with_capacity(count),
             tombs: Vec::new(),
+            aliases: Vec::new(),
         })
     }
 
@@ -581,6 +584,7 @@ impl<'a> Read<'a> {
         m0: usize,
         stored: usize,
         waits: bool,
+        aliased: bool,
     ) -> Option<Read<'a>> {
         let mut r = Read::new(count, m0)?;
         let mut at = Cursor { bytes, pos: 0 };
@@ -624,6 +628,21 @@ impl<'a> Read<'a> {
         }
         for _ in r.flags.iter().filter(|&&f| f == DEAD) {
             r.tombs.push(at.take(stored)?);
+        }
+        if aliased {
+            let n = at.number(8)? as usize;
+            r.aliases.reserve(n.min(count.saturating_mul(64)));
+            for _ in 0..n {
+                let node = at.number(lw)?;
+                if node as usize >= count {
+                    return None;
+                }
+                r.aliases.push((node as u32, at.number(8)?));
+            }
+            // Written in order: anything else is no record of this build.
+            if r.aliases.windows(2).any(|w| w[0] >= w[1]) {
+                return None;
+            }
         }
         Some(r)
     }
@@ -2349,12 +2368,18 @@ impl Rng {
 /// `u32`, where the others took a varint delta a link. Decoding them one at
 /// a time was a quarter of opening a 100 000 x 128 graph; laid out flat they
 /// are copied. A binary before 7 does not know it, and rebuilds.
+///
+/// 9 and 10 are 7 and 8 with the documents that hold another's vector
+/// after the tombstones (`VectorIndex::aliases`): their number, then each
+/// one's node and document.
 const GRAPH_VERSION: u8 = 3;
 const GRAPH_VERSION_QUANT: u8 = 4;
 const GRAPH_VERSION_UNLINKED: u8 = 5;
 const GRAPH_VERSION_KEPT: u8 = 6;
 const GRAPH_VERSION_FLAT: u8 = 7;
 const GRAPH_VERSION_FLAT_KEPT: u8 = 8;
+const GRAPH_VERSION_ALIASED: u8 = 9;
+const GRAPH_VERSION_ALIASED_KEPT: u8 = 10;
 
 /// Whether a graph can hold nodes not linked yet: a server's open leaves
 /// them for a thread beside its queries (`fs::open_serving`). The browser
@@ -2876,6 +2901,56 @@ pub struct VectorIndex {
     /// these would be linked again after a crash.
     changes: u64,
     persisted: Persisted,
+    /// Documents holding the vector of another document's node, as
+    /// `(node, doc)` in order: a vector written again and again is one node
+    /// ([`VectorIndex::place`]). A node each, a vector written hundreds of
+    /// times filled its neighbours' lists with copies of itself, which a
+    /// walk could not leave: over 20 000 x 128 with 30% of the rows copies
+    /// of 20 vectors, 1 812 of 6 019 copies were found by no search, and
+    /// recall@10 of other queries fell from 0.82 to 0.67. A sorted `Vec`,
+    /// not a map, which would be another copy of hashbrown in the browser.
+    aliases: Vec<(u32, DocId)>,
+    /// The live nodes by their vector (`Same`).
+    same: Same,
+    /// The vector being placed, as the arena would store it: kept from one
+    /// insert to the next.
+    stored_buf: Vec<u8>,
+}
+
+/// The nodes by their vector as the arena stores it, for a vector written
+/// again to find its node: open addressing over `node + 1` beside the top
+/// half of the vector's hash, which is tested before the vectors are: with
+/// the node alone, every slot a probe passed read a vector, and a build of
+/// 10 000 x 128 in the browser took 5% longer. 8 bytes a slot, 16 to 32 a
+/// node -- 3 to 6% of a 128-dim f32 arena, under 1% of a 768-dim one. Made the first time a vector is placed, from the arena:
+/// made at an open, it would read every vector again for a database that
+/// may only be read. A node that became a tombstone stays in it, passed
+/// over, until it grows.
+#[derive(Default)]
+struct Same {
+    slots: Vec<u64>,
+    used: usize,
+    built: bool,
+}
+
+/// A hash of a vector as the arena stores it (`Arena::write_stored`), four
+/// bytes at a time -- so an f32 arena's is its floats' bits, taken with no
+/// bytes written ([`hash_words`]).
+fn hash_stored(bytes: &[u8]) -> u64 {
+    let (words, rest) = bytes.as_chunks::<4>();
+    let words = words.iter().map(|w| u32::from_le_bytes(*w));
+    hash_words(words.chain(rest.iter().map(|&b| b as u32)))
+}
+
+/// A multiply and a rotate a word.
+fn hash_words(words: impl Iterator<Item = u32>) -> u64 {
+    let mut h: u64 = 0x243F_6A88_85A3_08D3;
+    for w in words {
+        h = (h ^ w as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(29);
+    }
+    h ^ (h >> 32)
 }
 
 thread_local! {
@@ -2920,6 +2995,9 @@ impl VectorIndex {
             pending: Vec::new(),
             changes: 0,
             persisted: Persisted::default(),
+            aliases: Vec::new(),
+            same: Same::default(),
+            stored_buf: Vec::new(),
         }
     }
 
@@ -2934,8 +3012,10 @@ impl VectorIndex {
         self.by_doc.reserve(n);
     }
 
+    /// Documents in the index: a node each, and the documents holding the
+    /// vector of another's node.
     pub fn len(&self) -> usize {
-        self.doc_ids.len() - self.deleted_count
+        self.doc_ids.len() - self.deleted_count + self.aliases.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -3041,6 +3121,8 @@ impl VectorIndex {
             + self.deleted.capacity()
             + self.upper.capacity() * size_of::<Vec<Vec<u32>>>()
             + self.pending.capacity() * 4
+            + self.aliases.capacity() * size_of::<(u32, DocId)>()
+            + self.same.slots.capacity() * 8
     }
 
     /// Nodes that no link reaches yet ([`Self::defer_batch`]), tombstones
@@ -3297,18 +3379,197 @@ impl VectorIndex {
         if raw.len() != self.dim {
             return;
         }
-        // The same document written again keeps its node when the vector is
-        // the one it holds, and tombstones it otherwise.
-        if let Some(old) = self.node_of(doc) {
-            if self.retire(old, raw) {
-                return;
-            }
-        }
-        let level = self.random_level();
-        let node = self.alloc_node(doc, raw, level);
-        self.by_doc.insert(doc, node + 1);
+        let Some((node, level)) = self.place(doc, raw) else {
+            return;
+        };
         let query = self.build_query(raw);
         self.link_node(node, level, None, query.as_deref());
+    }
+
+    /// Where `doc`'s vector goes: a node of its own, allocated and not yet
+    /// linked, and its level -- or `None` where it needs none: the node it
+    /// holds already, when the vector is the one it holds, or the node of
+    /// another document holding the same vector to the bit, which it joins
+    /// ([`VectorIndex::aliases`]). A document written again with another
+    /// vector leaves its node first ([`Self::detach`]). The level is drawn
+    /// only for a new node, so a graph with no vector twice is the graph it
+    /// was.
+    #[inline(never)]
+    fn place(&mut self, doc: DocId, raw: &[f32]) -> Option<(u32, usize)> {
+        if let Some(old) = self.node_of(doc) {
+            if self.retire(doc, old, raw) {
+                return None;
+            }
+        }
+        let (hash, copy) = self.find_copy(raw);
+        if let Some(node) = copy {
+            self.alias(node, doc);
+            return None;
+        }
+        let level = self.random_level();
+        let coded = self.data.quantized();
+        let node = self.alloc_node(doc, raw, level);
+        self.by_doc.insert(doc, node + 1);
+        if coded != self.data.quantized() {
+            // A bit index has coded the vectors it held whole: made again,
+            // over the codes, the next time a vector is placed.
+            self.same.built = false;
+        } else if self.same.built {
+            self.same_put(node, hash);
+        }
+        Some((node, level))
+    }
+
+    /// `raw` as the arena would store it (`Arena::write_stored`): pushed
+    /// into an empty arena coded as this one, made a unit one for cosine as
+    /// `insert` makes it. Over codes two vectors may share a code, and
+    /// share a node: `near` puts the documents it finds in order by their
+    /// own vectors, so each keeps its score.
+    fn stored(&self, raw: &[f32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.stored_into(raw, &mut out);
+        out
+    }
+
+    /// [`Self::stored`] into `out`, through an arena of its own.
+    fn stored_into(&self, raw: &[f32], out: &mut Vec<u8>) {
+        out.clear();
+        let mut probe = self.data.empty_like();
+        probe.push(raw, self.spec.metric == Metric::Cosine);
+        probe.write_stored(0, self.dim, out);
+    }
+
+    /// `raw`'s hash in [`Same`], and a live node holding it to the bit.
+    /// Over an f32 arena both come straight from `raw`, scaled as
+    /// `Arena::push` scales it, and a node's vector is compared only once
+    /// the top half of its hash is `raw`'s: stored into an arena of its own
+    /// and written out, and compared at every slot a probe passed, a 10 000
+    /// x 128 build in the browser took 5% longer.
+    fn find_copy(&mut self, raw: &[f32]) -> (u64, Option<u32>) {
+        if !self.same.built {
+            self.same_build();
+        }
+        let scaled = |x: f32, inv: f32| if inv != 1.0 { x * inv } else { x };
+        let (hash, inv) = match &self.data {
+            Arena::F32(_) => {
+                let inv = match self.spec.metric == Metric::Cosine {
+                    true => unit_scale(flat_sq(raw)),
+                    false => 1.0,
+                };
+                (
+                    hash_words(raw.iter().map(|&x| scaled(x, inv).to_bits())),
+                    Some(inv),
+                )
+            }
+            _ => {
+                let mut stored = std::mem::take(&mut self.stored_buf);
+                self.stored_into(raw, &mut stored);
+                let hash = hash_stored(&stored);
+                self.stored_buf = stored;
+                (hash, None)
+            }
+        };
+        let mask = self.same.slots.len() - 1;
+        let mut i = hash as usize & mask;
+        loop {
+            let slot = self.same.slots[i];
+            let Some(node) = (slot as u32).checked_sub(1) else {
+                return (hash, None);
+            };
+            if slot >> 32 == hash >> 32 && !self.is_deleted(node) {
+                let same = match (&self.data, inv) {
+                    (Arena::F32(d), Some(inv)) => d
+                        .row(node as usize, self.dim)
+                        .iter()
+                        .zip(raw)
+                        .all(|(a, &b)| a.to_bits() == scaled(b, inv).to_bits()),
+                    _ => self.stored_of(node) == self.stored_buf,
+                };
+                if same {
+                    return (hash, Some(node));
+                }
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn stored_of(&self, node: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.data.write_stored(node, self.dim, &mut out);
+        out
+    }
+
+    /// Makes [`Same`] from the arena, two to four slots a live node: more
+    /// than half full it is made again twice the size.
+    fn same_build(&mut self) {
+        let live = self.doc_ids.len() - self.deleted_count;
+        self.same.slots = vec![0; (live.max(8) * 2).next_power_of_two()];
+        self.same.used = 0;
+        self.same.built = true;
+        for node in 0..self.doc_ids.len() as u32 {
+            if !self.is_deleted(node) {
+                let h = match &self.data {
+                    Arena::F32(d) => {
+                        hash_words(d.row(node as usize, self.dim).iter().map(|x| x.to_bits()))
+                    }
+                    _ => hash_stored(&self.stored_of(node)),
+                };
+                self.same_put(node, h);
+            }
+        }
+    }
+
+    fn same_put(&mut self, node: u32, hash: u64) {
+        if (self.same.used + 1) * 2 > self.same.slots.len() {
+            // Made again, `node` among the rest: it is in the arena.
+            return self.same_build();
+        }
+        let mask = self.same.slots.len() - 1;
+        let mut i = hash as usize & mask;
+        while self.same.slots[i] != 0 {
+            i = (i + 1) & mask;
+        }
+        self.same.slots[i] = (hash >> 32) << 32 | (node as u64 + 1);
+        self.same.used += 1;
+    }
+
+    /// The documents holding `node`'s vector but its own.
+    fn aliases_of(&self, node: u32) -> &[(u32, DocId)] {
+        let a = self.aliases.partition_point(|&(n, _)| n < node);
+        let b = a + self.aliases[a..].partition_point(|&(n, _)| n == node);
+        &self.aliases[a..b]
+    }
+
+    /// `doc` joins `node`, whose vector it holds.
+    fn alias(&mut self, node: u32, doc: DocId) {
+        let at = self.aliases.partition_point(|&x| x < (node, doc));
+        self.aliases.insert(at, (node, doc));
+        self.by_doc.insert(doc, node + 1);
+        self.changes += 1;
+    }
+
+    /// Takes `doc` off `node`: one holding its vector besides is left, or
+    /// takes the node over where it was the node's own, and the node becomes
+    /// a tombstone only when no document holds its vector any more.
+    fn detach(&mut self, doc: DocId, node: u32) {
+        self.by_doc.remove(doc);
+        if let Ok(at) = self.aliases.binary_search(&(node, doc)) {
+            self.aliases.remove(at);
+            self.changes += 1;
+            return;
+        }
+        let first = self.aliases.partition_point(|&(n, _)| n < node);
+        if self.aliases.get(first).is_some_and(|&(n, _)| n == node) {
+            let (_, next) = self.aliases.remove(first);
+            self.doc_ids[node as usize] = next;
+            self.changes += 1;
+            return;
+        }
+        if !self.deleted[node as usize] {
+            self.deleted[node as usize] = true;
+            self.deleted_count += 1;
+            self.changes += 1;
+        }
     }
 
     /// Number of usable threads.
@@ -3492,15 +3753,9 @@ impl VectorIndex {
                 if v.len() != self.dim {
                     continue;
                 }
-                if let Some(old) = self.node_of(*doc) {
-                    if self.retire(old, v) {
-                        continue;
-                    }
+                if let Some((node, level)) = self.place(*doc, v) {
+                    pending.push((node, level, self.build_query(v)));
                 }
-                let level = self.random_level();
-                let node = self.alloc_node(*doc, v, level);
-                self.by_doc.insert(*doc, node + 1);
-                pending.push((node, level, self.build_query(v)));
             }
             if pending.is_empty() {
                 continue;
@@ -3544,15 +3799,9 @@ impl VectorIndex {
             if v.len() != self.dim {
                 continue;
             }
-            if let Some(old) = self.node_of(*doc) {
-                if self.retire(old, v) {
-                    continue;
-                }
+            if let Some((node, _)) = self.place(*doc, v) {
+                self.pending.push(node);
             }
-            let level = self.random_level();
-            let node = self.alloc_node(*doc, v, level);
-            self.by_doc.insert(*doc, node + 1);
-            self.pending.push(node);
         }
         self.pending.len() - before
     }
@@ -3707,32 +3956,20 @@ impl VectorIndex {
     /// empty arena as it would be here and both are written out as the graph
     /// record writes them -- the code already in the browser module, where
     /// a comparison per arena kind was 800 bytes more.
-    fn retire(&mut self, node: u32, raw: &[f32]) -> bool {
+    fn retire(&mut self, doc: DocId, node: u32, raw: &[f32]) -> bool {
         if self.deleted[node as usize] {
             return false;
         }
-        let mut probe = self.data.empty_like();
-        probe.push(raw, self.spec.metric == Metric::Cosine);
-        let (mut held, mut new) = (Vec::new(), Vec::new());
-        self.data.write_stored(node, self.dim, &mut held);
-        probe.write_stored(0, self.dim, &mut new);
-        if held == new {
+        if self.stored_of(node) == self.stored(raw) {
             return true;
         }
-        self.deleted[node as usize] = true;
-        self.deleted_count += 1;
-        self.changes += 1;
+        self.detach(doc, node);
         false
     }
 
     pub fn remove(&mut self, doc: DocId) {
         if let Some(node) = self.node_of(doc) {
-            if !self.deleted[node as usize] {
-                self.deleted[node as usize] = true;
-                self.deleted_count += 1;
-                self.changes += 1;
-            }
-            self.by_doc.remove(doc);
+            self.detach(doc, node);
         }
     }
 
@@ -3792,17 +4029,61 @@ impl VectorIndex {
         }
 
         let mut out = Vec::with_capacity(k);
-        for c in found {
+        let mut docs = Vec::new();
+        'found: for c in found {
             if self.is_deleted(c.node) {
                 continue;
             }
-            let doc = self.doc_ids[c.node as usize];
-            if !accept(doc) {
-                continue;
+            let score = score_from_distance(self.spec.metric, c.dist);
+            if self.aliases.is_empty() {
+                let doc = self.doc_ids[c.node as usize];
+                if accept(doc) {
+                    out.push((doc, score));
+                }
+            } else {
+                // A node is every document holding its vector, at one
+                // distance, in the order of their ids.
+                self.docs_of(c.node, &mut docs);
+                for &doc in &docs {
+                    if accept(doc) {
+                        out.push((doc, score));
+                        if out.len() == k {
+                            break 'found;
+                        }
+                    }
+                }
             }
-            out.push((doc, score_from_distance(self.spec.metric, c.dist)));
             if out.len() == k {
                 break;
+            }
+        }
+        out
+    }
+
+    /// `node`'s documents: its own and those holding its vector, in order.
+    fn docs_of(&self, node: u32, out: &mut Vec<DocId>) {
+        out.clear();
+        out.push(self.doc_ids[node as usize]);
+        out.extend(self.aliases_of(node).iter().map(|&(_, d)| d));
+        if out.len() > 1 {
+            out.sort_unstable();
+        }
+    }
+
+    /// The `k` nearest of `pairs` -- `(node, doc)`, in order -- each node
+    /// measured once and handed out as its documents.
+    fn nearest_docs(&self, q: &[f32], pairs: &[(u32, DocId)], k: usize) -> Vec<(DocId, f32)> {
+        let mut nodes: Vec<u32> = pairs.iter().map(|p| p.0).collect();
+        nodes.dedup();
+        let mut out = Vec::with_capacity(k);
+        for c in self.nearest_of(q, &nodes, k) {
+            let score = score_from_distance(self.spec.metric, c.dist);
+            let at = pairs.partition_point(|p| p.0 < c.node);
+            for &(_, doc) in pairs[at..].iter().take_while(|p| p.0 == c.node) {
+                out.push((doc, score));
+                if out.len() == k {
+                    return out;
+                }
             }
         }
         out
@@ -3837,8 +4118,8 @@ impl VectorIndex {
         let n = self.doc_ids.len();
         out.reserve(64 + n * (12 + 4 * self.m0));
         out.push(match kept {
-            true => GRAPH_VERSION_FLAT_KEPT,
-            false => GRAPH_VERSION_FLAT,
+            true => GRAPH_VERSION_ALIASED_KEPT,
+            false => GRAPH_VERSION_ALIASED,
         });
         self.write_head(out, true);
         put_uvarint(out, n as u64);
@@ -3879,6 +4160,11 @@ impl VectorIndex {
         // travels with it.
         for node in (0..n as u32).filter(|&v| self.is_deleted(v)) {
             self.data.write_stored(node, self.dim, out);
+        }
+        put_le(out, self.aliases.len() as u64, 8);
+        for &(node, doc) in &self.aliases {
+            put_le(out, node as u64, lw);
+            put_le(out, doc, 8);
         }
     }
 
@@ -4079,14 +4365,19 @@ impl VectorIndex {
     ) -> Option<VectorIndex> {
         let mut pos = 0usize;
         let version = *bytes.first()?;
-        let flat = matches!(version, GRAPH_VERSION_FLAT | GRAPH_VERSION_FLAT_KEPT);
+        let aliased = matches!(version, GRAPH_VERSION_ALIASED | GRAPH_VERSION_ALIASED_KEPT);
+        let flat = aliased || matches!(version, GRAPH_VERSION_FLAT | GRAPH_VERSION_FLAT_KEPT);
         // A browser keeps no graph of its own in a tail, and rebuilds one a
         // server kept, as it does one with nodes waiting.
-        let kept = UNLINKED && matches!(version, GRAPH_VERSION_KEPT | GRAPH_VERSION_FLAT_KEPT);
+        let kept = UNLINKED
+            && matches!(
+                version,
+                GRAPH_VERSION_KEPT | GRAPH_VERSION_FLAT_KEPT | GRAPH_VERSION_ALIASED_KEPT
+            );
         let waits = UNLINKED && (version == GRAPH_VERSION_UNLINKED || kept || flat);
         let plain = matches!(
             version,
-            GRAPH_VERSION | GRAPH_VERSION_QUANT | GRAPH_VERSION_FLAT
+            GRAPH_VERSION | GRAPH_VERSION_QUANT | GRAPH_VERSION_FLAT | GRAPH_VERSION_ALIASED
         );
         if !waits && !kept && !plain {
             return None;
@@ -4159,7 +4450,7 @@ impl VectorIndex {
         let stored = ix.data.stored_len(dim);
         let body = &bytes[pos..];
         let read = match flat {
-            true => Read::flat(body, count, ix.m0, stored, waits)?,
+            true => Read::flat(body, count, ix.m0, stored, waits, aliased)?,
             false => Read::varint(body, count, ix.m0, stored, waits, kept)?,
         };
         ix.build_restored(read, entry, max_level, &lookup)
@@ -4199,10 +4490,25 @@ impl VectorIndex {
         if dead > read.tombs.len() || !self.fill_restored(&read, lookup) {
             return None;
         }
+        // Each document named as holding a node's vector holds it, to the
+        // bit, and is no other node's: anything else is a graph of other
+        // documents, built again.
+        let mut raw = Vec::new();
+        for &(node, doc) in &read.aliases {
+            if read.flags[node as usize] == DEAD || self.by_doc.insert(doc, node + 1).is_some() {
+                return None;
+            }
+            if !lookup(doc, &mut raw) || raw.len() != self.dim {
+                return None;
+            }
+            if self.stored(&raw) != self.stored_of(node) {
+                return None;
+            }
+        }
         self.deleted = read.flags.iter().map(|&f| f == DEAD).collect();
         self.deleted_count = dead;
-        (self.doc_ids, self.l0, self.l0_len, self.upper) =
-            (read.docs, read.l0, read.l0_len, read.upper);
+        (self.doc_ids, self.l0, self.l0_len, self.upper, self.aliases) =
+            (read.docs, read.l0, read.l0_len, read.upper, read.aliases);
         (self.entry, self.max_level) = (entry, max_level);
         // As its record has it: nothing to write again.
         self.changes = 0;
@@ -4331,6 +4637,23 @@ impl VectorIndex {
             return Vec::new();
         }
         let q = self.query_for(query);
+        if !self.aliases.is_empty() {
+            // Put in node order through the `u64` sort the module has: a
+            // node and where its document is, one word. A sort of pairs was
+            // a copy of its own, most of what the aliases cost the module.
+            let mut keyed: Vec<u64> = ids
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &doc)| self.node_of(doc).map(|n| (n as u64) << 32 | i as u64))
+                .filter(|&w| !self.is_deleted((w >> 32) as u32))
+                .collect();
+            keyed.sort_unstable();
+            let pairs: Vec<(u32, DocId)> = keyed
+                .iter()
+                .map(|&w| ((w >> 32) as u32, ids[(w & 0xFFFF_FFFF) as usize]))
+                .collect();
+            return self.nearest_docs(&q, &pairs, k);
+        }
         let nodes: Vec<u32> = ids
             .iter()
             .filter_map(|doc| self.node_of(*doc))
@@ -4364,6 +4687,15 @@ impl VectorIndex {
         let q = self.query_for(query);
         // The test runs here, in turn: `accept` may read the documents
         // through a filter that is not the threads' to share.
+        if !self.aliases.is_empty() {
+            let mut pairs = Vec::new();
+            let mut docs = Vec::new();
+            for node in (0..self.doc_ids.len() as u32).filter(|n| !self.is_deleted(*n)) {
+                self.docs_of(node, &mut docs);
+                pairs.extend(docs.iter().filter(|&&d| accept(d)).map(|&d| (node, d)));
+            }
+            return self.nearest_docs(&q, &pairs, k);
+        }
         let nodes: Vec<u32> = (0..self.doc_ids.len() as u32)
             .filter(|n| !self.is_deleted(*n))
             .filter(|n| accept(self.doc_ids[*n as usize]))
@@ -4990,8 +5322,13 @@ mod tests {
             .map(|i| (i, few[(i * 7 % 24) as usize].clone()))
             .collect();
         let mut ix = VectorIndex::new(4, spec());
-        // Measured, never walked: no graph is needed.
-        ix.defer_batch(&items);
+        // Measured, never walked: no graph is needed. A node each, the
+        // vectors repeated for the ties, which `place` would make one node.
+        for (doc, v) in &items {
+            let node = ix.alloc_node(*doc, v, 0);
+            ix.by_doc.insert(*doc, node + 1);
+            ix.pending.push(node);
+        }
         let q = ix.query_for(&[0.1, -0.2, 0.3, 0.05]);
         let every: Vec<u32> = (0..n as u32).collect();
         let odd: Vec<u32> = (0..n as u32).filter(|x| x % 3 != 1).rev().collect();
@@ -5097,6 +5434,160 @@ mod tests {
                 "{metric:?} {quant:?} {prec:?}: the batch linked otherwise"
             );
         }
+    }
+
+    /// 17 vectors written 200 times each among 2 000 others, in batches
+    /// and one at a time: every copy is found by a search for its vector,
+    /// each is one node's document, and a query of the others finds what
+    /// the exact scan finds. A node each, most copies were found by no
+    /// search and the other queries lost a third of their recall.
+    #[test]
+    fn the_graph_reaches_every_copy_of_a_vector_written_many_times() {
+        let mut rng = Rng(5);
+        let pool: Vec<Vec<f32>> = (0..17)
+            .map(|_| (0..16).map(|_| rng.next_f32() - 0.5).collect())
+            .collect();
+        let mut items: Vec<(u64, Vec<f32>)> = Vec::new();
+        for i in 0..5_400u64 {
+            let v = match i % 8 < 5 {
+                true => pool[(i % 17) as usize].clone(),
+                false => (0..16).map(|_| rng.next_f32() - 0.5).collect(),
+            };
+            items.push((i, v));
+        }
+        let mut ix = VectorIndex::new(16, spec());
+        let (head, tail) = items.split_at(1_000);
+        for (d, v) in head {
+            ix.insert(*d, v);
+        }
+        ix.insert_batch(tail);
+        assert_eq!(ix.len(), items.len());
+        let distinct = items.len() - items.iter().filter(|(i, _)| i % 8 < 5).count() + 17;
+        assert_eq!(ix.doc_ids.len(), distinct, "a node a vector");
+        for (k, v) in pool.iter().enumerate() {
+            let copies: Vec<u64> = items
+                .iter()
+                .filter(|(i, w)| i % 8 < 5 && w == v)
+                .map(|p| p.0)
+                .collect();
+            let mut found: Vec<u64> = ix
+                .search(v, copies.len(), None, |_| true)
+                .into_iter()
+                .map(|x| x.0)
+                .collect();
+            found.sort_unstable();
+            assert_eq!(found, copies, "vector {k}");
+        }
+        let queries: Vec<(u64, Vec<f32>)> = (0..50)
+            .map(|i| (i, (0..16).map(|_| rng.next_f32() - 0.5).collect()))
+            .collect();
+        let mut hit = 0;
+        for (_, q) in &queries {
+            let exact: Vec<f32> = ix
+                .search_exact(q, 10, |_| true)
+                .iter()
+                .map(|x| x.1)
+                .collect();
+            let walked = ix.search(q, 10, Some(100), |_| true);
+            // L2: the score is the distance, the tenth the farthest kept.
+            let reach = exact[9] + 1e-6;
+            hit += walked.iter().filter(|x| x.1 <= reach).count();
+        }
+        assert!(hit >= 490, "recall {hit} of 500");
+    }
+
+    /// A document holding another's vector joins its node, and leaves it as
+    /// it goes: deleted or written with another vector, the others keep the
+    /// node, the node's own handing it on, and the node is a tombstone only
+    /// once no document holds its vector.
+    #[test]
+    fn a_copy_joins_its_node_and_the_node_outlives_it() {
+        let mut ix = VectorIndex::new(4, spec());
+        let v = vec![0.1, 0.2, 0.3, 0.4];
+        for d in [1u64, 2, 3] {
+            ix.insert(d, &v);
+        }
+        ix.insert(4, &[0.9, -0.2, 0.1, 0.0]);
+        let found = |ix: &VectorIndex| {
+            let mut f: Vec<u64> = ix
+                .search(&v, 3, None, |_| true)
+                .iter()
+                .map(|x| x.0)
+                .collect();
+            f.sort_unstable();
+            f
+        };
+        assert_eq!(
+            (ix.doc_ids.len(), ix.len(), found(&ix)),
+            (2, 4, vec![1, 2, 3])
+        );
+        // The node's own document goes: another takes the node over.
+        ix.remove(1);
+        assert_eq!((ix.dead(), ix.len()), (0, 3));
+        assert_eq!(found(&ix)[..2], [2, 3]);
+        // Written with another vector, a document leaves for a node of its own.
+        ix.insert(2, &[-0.5, 0.5, 0.5, -0.5]);
+        assert_eq!((ix.dead(), ix.doc_ids.len()), (0, 3));
+        assert_eq!(ix.search(&v, 1, None, |_| true)[0].0, 3);
+        // The last goes: a tombstone, and a copy written after is a node again.
+        ix.remove(3);
+        assert_eq!(ix.dead(), 1);
+        ix.insert(9, &v);
+        assert_eq!(ix.search(&v, 1, None, |_| true)[0].0, 9);
+        // A filter and the exact paths see each document.
+        ix.insert(10, &v);
+        assert_eq!(ix.search(&v, 5, None, |d| d == 10)[0].0, 10);
+        assert_eq!(ix.search_ids(&v, 1, &[10])[0].0, 10);
+        let exact: Vec<u64> = ix
+            .search_exact(&v, 2, |_| true)
+            .iter()
+            .map(|x| x.0)
+            .collect();
+        assert_eq!(exact, [9, 10]);
+    }
+
+    /// The documents holding another's vector travel in the graph record,
+    /// and one whose document holds another vector now has the graph built
+    /// again rather than restored.
+    #[test]
+    fn copies_survive_serialization() {
+        let mut ix = VectorIndex::new(4, spec());
+        let mut rng = Rng(3);
+        let mut vecs: Vec<Vec<f32>> = (0..200)
+            .map(|_| (0..4).map(|_| rng.next_f32()).collect())
+            .collect();
+        for i in 200..260 {
+            vecs.push(vecs[i % 7].clone());
+        }
+        for (d, v) in vecs.iter().enumerate() {
+            ix.insert(d as u64, v);
+        }
+        ix.remove(3);
+        assert_eq!(ix.len(), 259);
+        let bytes = ix.serialize_graph();
+        let fetch = |d: u64, out: &mut Vec<f32>| match vecs.get(d as usize) {
+            Some(v) => {
+                out.clear();
+                out.extend_from_slice(v);
+                true
+            }
+            None => false,
+        };
+        let back = VectorIndex::restore_graph(&bytes, 4, VecPrec::F32, fetch).expect("restored");
+        assert_eq!((back.len(), back.aliases.len()), (259, ix.aliases.len()));
+        for (k, v) in vecs.iter().enumerate().take(7) {
+            let got = |ix: &VectorIndex| ix.search(v, 12, None, |_| true);
+            assert_eq!(got(&back), got(&ix), "vector {k}");
+        }
+        let other = |d: u64, out: &mut Vec<f32>| {
+            out.clear();
+            match d {
+                205 => out.extend_from_slice(&[9.0, 9.0, 9.0, 9.0]),
+                _ => out.extend_from_slice(&vecs[d as usize]),
+            }
+            true
+        };
+        assert!(VectorIndex::restore_graph(&bytes, 4, VecPrec::F32, other).is_none());
     }
 
     #[test]
@@ -5405,7 +5896,7 @@ mod tests {
                 ix.remove(i * 7);
             }
             let bytes = ix.serialize_graph();
-            assert_eq!(bytes[0], GRAPH_VERSION_FLAT);
+            assert_eq!(bytes[0], GRAPH_VERSION_ALIASED);
             // The varint layout wrote a quantized graph as 4, others as 3.
             let old = ix.serialize_varint(false)[0];
             assert_eq!(old, if quant == Quant::None { 3 } else { 4 });
@@ -5646,7 +6137,7 @@ mod tests {
             // Deleted while waiting: a tombstone, no longer waiting.
             ix.remove(600);
             let bytes = ix.serialize_graph();
-            assert_eq!(bytes[0], GRAPH_VERSION_FLAT, "{quant:?}");
+            assert_eq!(bytes[0], GRAPH_VERSION_ALIASED, "{quant:?}");
             assert_eq!(ix.serialize_varint(false)[0], 5, "{quant:?}");
             let back = VectorIndex::restore_graph(&bytes, dim, VecPrec::F32, fetch)
                 .expect("restore failed");
