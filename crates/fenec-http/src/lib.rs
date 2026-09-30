@@ -41,6 +41,7 @@ pub mod access;
 pub mod admin;
 pub mod api;
 pub mod archive;
+pub mod cdc;
 pub mod crypto;
 pub mod held;
 pub mod http;
@@ -519,6 +520,33 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     }
                 }
             }
+        }
+        // The writes on disk, documents and all (`cdc.rs`): to what reads
+        // every row. A scoped token's filter holds no deletion of a row it
+        // never saw, as a scoped subscription's ids do, so it is refused.
+        if req.segments().first() == Some(&"_changes") {
+            let resp = match (authenticate(cfg, &req), repl.and_then(|r| r.feed())) {
+                (Err(deny), _) => deny,
+                (Ok(Who::Scoped(_)), _) => {
+                    Response::error(403, "a scoped token cannot read the change stream")
+                }
+                (Ok(_), None) => Response::error(
+                    409,
+                    "this server keeps no change feed: start it with --cdc or --replication-token",
+                ),
+                (Ok(_), Some(feed)) => match req.method {
+                    http::Method::Get if req.segments().len() == 1 => cdc::handle(db, feed, &req),
+                    _ => Response::error(404, &format!("path `{}`", req.path)),
+                },
+            };
+            if cors(resp, cfg)
+                .write(&mut out, keep_alive, head_only)
+                .is_err()
+                || !keep_alive
+            {
+                return;
+            }
+            continue;
         }
         // A subscription cannot go down the ordinary response path: it is a
         // body with unknown `Content-Length` and no end. It takes the

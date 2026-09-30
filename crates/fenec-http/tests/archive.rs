@@ -35,7 +35,7 @@ fn primary(file: &Path, buffer: usize) -> Primary {
         ..Config::default()
     };
     let server = Server::new(Arc::clone(&db), cfg).with_replication(Replication::new(
-        TOKEN.into(),
+        Some(TOKEN.into()),
         Some(feed),
         None,
     ));

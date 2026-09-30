@@ -47,6 +47,7 @@ GET    /&lt;name&gt;/changes?since=N  subscription (SSE): shape plus incremental
 POST   /query                   body: {"query":"&lt;FenecQL&gt;","params":[...]}
 POST   /batch                   one query body per line (NDJSON)
 GET    /_metrics                counters and gauges, Prometheus's text format
+GET    /_changes?since=N        every write on disk after N, a JSON line each (--cdc)
 </pre>
 
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
@@ -254,6 +255,63 @@ separately from ordinary requests (<code>--http-max-streams</code>, default
 64). Sharing one ceiling would let 100 subscribers shut the server to plain
 requests. The client-side layer built on this stream is
 <a href="sync.html">Sync</a>.</p>
+
+<h2 id="changes">Change data capture</h2>
+
+<p>A subscription keeps a query's rows up to date, and a client that falls
+behind its ring of ids is sent the rows again. A service that must see every
+write — to index it elsewhere, send it on to Kafka, or keep a read model —
+reads <code>GET /_changes</code> instead: the writes on disk, documents and
+all, one JSON object a line, from any write the server still keeps.</p>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 --sync 250 --cdc
+
+curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
+# Content-Type: application/x-ndjson
+# Fenec-Next: 5
+#
+# {"seq":1,"at":1790784252138,"collection":"a","op":"create"}
+# {"seq":2,"at":1790784252158,"collection":"a","op":"put","id":1,"doc":{"id":1,"n":1,"t":"x"}}
+# {"seq":3,"at":1790784252158,"collection":"a","op":"put","id":2,"doc":{"id":2,"n":2,"t":"y"}}
+# {"seq":4,"at":1790784252173,"collection":"a","op":"put","id":1,"doc":{"id":1,"n":1,"t":"z"}}
+# {"seq":5,"at":1790784252187,"collection":"a","op":"del","id":2}
+</pre>
+
+<ul>
+  <li><code>seq</code> is the change counter's number for the write, and
+  <code>Fenec-Next</code> the last one in the answer: sent back as the next
+  <code>since</code>, nothing is missed or had twice. Keep it where your
+  consumer keeps its own state, and commit the two together.</li>
+  <li>A transaction's writes are one record on disk and come together,
+  numbered one by one; a cursor inside one goes on after the write it
+  names.</li>
+  <li>Only what an fsync has covered is handed over, as a replica is fed:
+  a write the server lost in a crash never reached a consumer.</li>
+  <li><code>since</code> left out is the last write on disk: what is written
+  from now on. <code>limit</code> is 1 000 unless given, 10 000 at most;
+  <code>wait</code> is how long an answer with nothing in it waits for a
+  write first, in milliseconds, 30 000 at most.</li>
+  <li>The server keeps as many writes as <code>--replication-buffer</code>
+  holds (64 MiB unless given). A cursor further back is answered 410 with
+  the first <code>since</code> it does serve, never with writes missing
+  from the middle; one past the last write — another database's cursor, or
+  this one restored — 409. The feed starts at the change counter when the
+  server starts.</li>
+  <li><code>op</code> is <code>put</code>, <code>del</code>,
+  <code>create</code>, <code>alter</code> or <code>drop</code>; a put
+  carries the document as it was written, as JSON writes a row.</li>
+  <li>It needs <code>--http-token</code> or no token at all: a scoped
+  token's filter could not hold back the deletion of a row it never saw,
+  and is refused (403).</li>
+</ul>
+
+<p><code>--cdc</code> keeps the feed a primary keeps for its replicas and
+feeds none; with <code>--replication-token</code> it is kept already, and a
+tenant node's tenants have theirs at <code>/t/&lt;tenant&gt;/_changes</code>.
+It needs <code>--file</code> and a <code>--sync</code> other than
+<code>off</code>. Keeping it cost nothing measurable: 16 400 single puts a
+second over HTTP either way, and 9 000 rows of 128 dimensions read back at
+283 000 a second.</p>
 
 <h2>Security</h2>
 

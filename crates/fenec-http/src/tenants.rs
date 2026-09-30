@@ -610,7 +610,7 @@ impl Tenants {
         let repl = self
             .repl
             .as_ref()
-            .map(|r| Replication::new(r.token.clone(), feed.clone(), follower));
+            .map(|r| Replication::new(Some(r.token.clone()), feed.clone(), follower));
         Ok(Arc::new(Tenant {
             name: name.to_string(),
             db,

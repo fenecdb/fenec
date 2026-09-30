@@ -100,7 +100,7 @@ fn router(path: &Path, upstream: Option<&str>) -> u16 {
     let router = Router::replicated(
         dir,
         cfg,
-        Replication::new(TOKEN.into(), Some(feed), follower),
+        Replication::new(Some(TOKEN.into()), Some(feed), follower),
     );
     let listener = router.bind().unwrap();
     let port = listener.local_addr().unwrap().port();

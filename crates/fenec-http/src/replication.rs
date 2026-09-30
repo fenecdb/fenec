@@ -140,6 +140,25 @@ struct Chunk {
     times: Vec<u64>,
 }
 
+/// What [`Feed::changes_after`] finds.
+pub(crate) enum Tail {
+    /// Records, the first write in them numbered `first`; each record's
+    /// last write and when it was appended.
+    Records {
+        first: u64,
+        lasts: Vec<u64>,
+        times: Vec<u64>,
+        bytes: Vec<u8>,
+    },
+    Nothing,
+    /// The writes after the cursor are no longer kept: the first that is.
+    Behind(u64),
+    /// The cursor is past the last write, which is: a database restored,
+    /// or another one's cursor.
+    Ahead(u64),
+    Gone,
+}
+
 enum Next {
     /// The first write's number, the last's, the records' times, the
     /// records.
@@ -206,7 +225,7 @@ impl Feed {
         lock(&self.ring).durable
     }
 
-    fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> u64 {
         lock(&self.ring).epoch
     }
 
@@ -326,9 +345,68 @@ impl Feed {
         Next::Records(first, last, times, out)
     }
 
+    /// The durable records holding the writes after `cursor`, up to about
+    /// `max` bytes, for the change stream (`/_changes`): from the record
+    /// holding the write after it, which a cursor inside a block's record
+    /// starts before -- the reader passes over what it has had -- where a
+    /// replica is sent an image. `Behind` names the first write kept.
+    pub(crate) fn changes_after(&self, cursor: u64, max: usize) -> Tail {
+        let r = lock(&self.ring);
+        if r.closed {
+            return Tail::Gone;
+        }
+        if cursor > r.seq {
+            return Tail::Ahead(r.seq);
+        }
+        if cursor >= r.durable {
+            return Tail::Nothing;
+        }
+        let first = cursor + 1;
+        let oldest = r.chunks.front().map_or(r.seq + 1, |c| c.first);
+        if first < oldest {
+            return Tail::Behind(oldest);
+        }
+        let mut out = Tail::Records {
+            first: 0,
+            lasts: Vec::new(),
+            times: Vec::new(),
+            bytes: Vec::new(),
+        };
+        let Tail::Records {
+            first: from,
+            lasts,
+            times,
+            bytes,
+        } = &mut out
+        else {
+            unreachable!()
+        };
+        'chunks: for c in &r.chunks {
+            for k in 0..c.ends.len() {
+                if c.lasts[k] < first {
+                    continue;
+                }
+                if c.lasts[k] > r.durable || !bytes.is_empty() && bytes.len() >= max {
+                    break 'chunks;
+                }
+                if bytes.is_empty() {
+                    *from = if k == 0 { c.first } else { c.lasts[k - 1] + 1 };
+                }
+                let start = if k == 0 { 0 } else { c.ends[k - 1] };
+                bytes.extend_from_slice(&c.data[start..c.ends[k]]);
+                lasts.push(c.lasts[k]);
+                times.push(c.times[k]);
+            }
+        }
+        match bytes.is_empty() {
+            true => Tail::Nothing,
+            false => out,
+        }
+    }
+
     /// Waits until a write after `cursor` is on disk, the feed starts over,
     /// or `timeout` passes.
-    fn wait(&self, cursor: u64, epoch: u64, timeout: Duration) {
+    pub(crate) fn wait(&self, cursor: u64, epoch: u64, timeout: Duration) {
         let r = lock(&self.ring);
         if r.durable > cursor || r.epoch != epoch {
             return;
@@ -555,7 +633,10 @@ pub fn settle_history(
 /// A server's part in replication: the token replicas and operators
 /// present, the feed it serves replicas from, and the primary it follows.
 pub struct Replication {
-    token: String,
+    /// `None` for a server that keeps its feed for `/_changes` alone
+    /// (`--cdc`): no replica is fed. Never an empty token, which an empty
+    /// `Bearer` would match.
+    token: Option<String>,
     feed: Option<Arc<Feed>>,
     follower: Option<Arc<Follower>>,
     streams: Mutex<Vec<Stream>>,
@@ -572,7 +653,7 @@ struct Stream {
 
 impl Replication {
     pub fn new(
-        token: String,
+        token: Option<String>,
         feed: Option<Arc<Feed>>,
         follower: Option<Arc<Follower>>,
     ) -> Arc<Replication> {
@@ -628,7 +709,14 @@ impl Replication {
             .header("authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        constant_eq(given.as_bytes(), self.token.as_bytes())
+        self.token
+            .as_ref()
+            .is_some_and(|t| constant_eq(given.as_bytes(), t.as_bytes()))
+    }
+
+    /// The writes kept for replicas, which `/_changes` reads too.
+    pub fn feed(&self) -> Option<&Arc<Feed>> {
+        self.feed.as_ref()
     }
 }
 

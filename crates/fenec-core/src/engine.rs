@@ -239,6 +239,102 @@ fn frames_in(body: &[u8]) -> Result<u64> {
     Ok(n)
 }
 
+/// A write, as [`Database::changes_in`] reads it out of a record.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Change {
+    /// The change counter's number for it.
+    pub seq: u64,
+    /// Its collection's name; `None` for one this database no longer
+    /// knows.
+    pub collection: Option<String>,
+    pub kind: ChangeKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub enum ChangeKind {
+    /// A document written, `None` where its collection is not known.
+    Put(DocId, Option<Document>),
+    Del(DocId),
+    Create(Schema),
+    /// An index made or dropped: the fields stay where they were.
+    Alter(Schema),
+    Drop,
+}
+
+/// [`Database::changes_in`]'s walk: the schemas by collection id, as the
+/// records change them, and the number of the last write handed over.
+#[cfg(not(target_arch = "wasm32"))]
+struct ChangeWalk<'a> {
+    known: HashMap<u32, Schema>,
+    seq: u64,
+    go: bool,
+    each: &'a mut dyn FnMut(Change) -> bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ChangeWalk<'_> {
+    fn record(&mut self, kind: u8, cid: u32, body: &[u8]) -> Result<()> {
+        if kind != REC_DATA {
+            let what = match kind {
+                REC_DROP => ChangeKind::Drop,
+                _ => {
+                    let schema = Schema::decode(body, &mut 0)?;
+                    self.known.insert(cid, schema.clone());
+                    match kind {
+                        REC_CREATE => ChangeKind::Create(schema),
+                        _ => ChangeKind::Alter(schema),
+                    }
+                }
+            };
+            let collection = match kind {
+                REC_DROP => self.known.remove(&cid).map(|s| s.name),
+                _ => self.known.get(&cid).map(|s| s.name.clone()),
+            };
+            self.hand(collection, what);
+            return Ok(());
+        }
+        let cut = || Error::Corrupt("a write record cut short".into());
+        let mut p = 0;
+        while p < body.len() && self.go {
+            let op = body[p];
+            p += 1;
+            let id = get_uvarint(body, &mut p)?;
+            let plen = get_uvarint(body, &mut p)? as usize;
+            let payload = body.get(p..p + plen).ok_or_else(cut)?;
+            p += plen;
+            let schema = self.known.get(&cid);
+            let what = match (op, schema) {
+                (OP_PUT, Some(schema)) => {
+                    let mut at = 0;
+                    let mut fields = Vec::with_capacity(schema.fields.len());
+                    for f in &schema.fields {
+                        fields.push((
+                            f.name.clone(),
+                            crate::codec::decode_value(payload, &mut at)?,
+                        ));
+                    }
+                    ChangeKind::Put(id, Some(Document { id, fields }))
+                }
+                (OP_PUT, None) => ChangeKind::Put(id, None),
+                _ => ChangeKind::Del(id),
+            };
+            let collection = schema.map(|s| s.name.clone());
+            self.hand(collection, what);
+        }
+        Ok(())
+    }
+
+    fn hand(&mut self, collection: Option<String>, kind: ChangeKind) {
+        self.seq += 1;
+        let seq = self.seq;
+        self.go = (self.each)(Change {
+            seq,
+            collection,
+            kind,
+        });
+    }
+}
+
 /// What [`each_inner`] hands a block's records to: each one's kind,
 /// collection id and body.
 type Inner<'a> = dyn FnMut(u8, u32, &[u8]) -> Result<()> + 'a;
@@ -3516,6 +3612,48 @@ impl Database {
             }
         }
         applied
+    }
+
+    /// The writes `records` hold -- what a primary's feed carries, the
+    /// first of them numbered `first` -- one at a time to `each`, numbered
+    /// as the change counter numbered them, until `each` says to stop.
+    /// Returns the number of the last write handed over, `first - 1` for
+    /// none. A document is read by the schema of its collection as this
+    /// database knows it, or as a create among the records made it; a
+    /// collection known to neither -- made before them and dropped since --
+    /// has its writes handed over without their documents. What a record
+    /// holds that is no write (a graph, the history) is no change: the feed
+    /// sends none of it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn changes_in(
+        &self,
+        records: &[u8],
+        first: u64,
+        each: &mut dyn FnMut(Change) -> bool,
+    ) -> Result<u64> {
+        let mut d = ChangeWalk {
+            known: self
+                .collections
+                .values()
+                .map(|c| (c.id, c.schema.clone()))
+                .collect(),
+            seq: first.saturating_sub(1),
+            go: true,
+            each,
+        };
+        let mut pos = 0;
+        while pos < records.len() && d.go {
+            let r = record_at(records, &mut pos)?;
+            match r.kind {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_DATA => d.record(r.kind, r.cid, r.body)?,
+                REC_BLOCK => each_inner(r.body, &mut |kind, cid, inner| match d.go {
+                    true => d.record(kind, cid, inner),
+                    false => Ok(()),
+                })?,
+                _ => {}
+            }
+        }
+        Ok(d.seq)
     }
 
     fn apply_records(&mut self, bytes: &[u8], batch: &mut VectorBatch) -> Result<usize> {
