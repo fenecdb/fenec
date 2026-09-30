@@ -105,7 +105,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~329 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~352 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -1464,10 +1464,13 @@ linked one after another in the browser module's one thread -- the first
 (`make cloudflare-bench`, under `wrangler dev`, which runs from the example
 Worker's own `--config`: below the repository it took the site's
 `wrangler.jsonc`). A Worker's isolate has 128 MB with the module's memory,
-which grows and never gives back, and a checkpoint builds the whole image in
-it: 20 000 x 128 held 88 MB after one, 30 000 x 128 128 MB, so an object
-holds about 20 000 rows of 128 dimensions or 3 000 of 768; `wrangler dev`
-does not hold a Worker to it.
+which grows and never gives back. A checkpoint writes the image a mebibyte
+at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
+before the next is made: built into one `Vec` the image doubled as it grew,
+old and new side by side, and `boxed` copied it again -- 30 000 x 128 went
+from 60 to 128 MB, and goes to 70. An object holds about 50 000 rows of 128
+dimensions or 5 000 of 768, the writes' own growth the ceiling now;
+`wrangler dev` does not hold a Worker to it.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

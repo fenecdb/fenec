@@ -58,6 +58,24 @@ function pieces(storage, key, gen, part, first, bytes, size) {
 }
 
 /**
+ * An image into generation `gen`'s pieces, a chunk of it at a time as the
+ * module hands them over (`snapshotChunks`): taken whole, the image stood
+ * in the page once and in the module three times over as it was built and
+ * copied out, which a Worker's 128 MB did not hold past 30 000 rows of 128
+ * dimensions. Each chunk's writes are waited for before the next is taken.
+ */
+async function image(fenec, storage, key, gen, size) {
+  const chunks = fenec.snapshotChunks ? fenec.snapshotChunks() : [fenec.snapshot()];
+  let [next, bytes] = [0, 0];
+  for (const chunk of chunks) {
+    const put = pieces(storage, key, gen, 'i', next, chunk, size);
+    await Promise.all(put.writes);
+    [next, bytes] = [put.next, bytes + chunk.length];
+  }
+  return [next, bytes];
+}
+
+/**
  * Writes the database into `storage` -- a Durable Object's `ctx.storage`,
  * or anything with its `get`, `put`, `delete` and `list` -- under `key`:
  * the image the first time, then only the writes since the last call.
@@ -70,27 +88,34 @@ function pieces(storage, key, gen, part, first, bytes, size) {
  */
 export async function persist(fenec, storage, { key = 'fenec', piece = PIECE } = {}) {
   let s = kept.get(fenec);
-  let image = null;
+  // A new image: `true` to take one, or the bytes a `compact`'s drain gave.
+  let whole = null;
   let log = null;
   if (s?.key !== key) {
     fenec.journal();
-    image = fenec.snapshot();
+    whole = true;
     const old = await storage.get(meta(key));
     s = { key, gen: old?.gen ?? 0, image: [0, 0], log: [0, 0] };
     kept.set(fenec, s);
   } else {
     const { replace, bytes } = fenec.drain();
-    if (replace) image = bytes;
+    if (replace) whole = bytes;
     else if (bytes.length === 0) return 0;
-    else if (s.log[1] + bytes.length > s.image[1] * FOLD) image = fenec.snapshot();
+    else if (s.log[1] + bytes.length > s.image[1] * FOLD) whole = true;
     else log = bytes;
   }
   try {
-    if (image) {
+    if (whole) {
       const gen = s.gen + 1;
-      const { writes, next } = pieces(storage, key, gen, 'i', 0, image, piece);
-      await Promise.all(writes);
-      const record = { v: 1, gen, image: [next, image.length], log: [0, 0] };
+      let written;
+      if (whole === true) {
+        written = await image(fenec, storage, key, gen, piece);
+      } else {
+        const { writes, next } = pieces(storage, key, gen, 'i', 0, whole, piece);
+        await Promise.all(writes);
+        written = [next, whole.length];
+      }
+      const record = { v: 1, gen, image: written, log: [0, 0] };
       await storage.put(meta(key), record);
       const before = s.gen;
       Object.assign(s, record);
@@ -108,7 +133,7 @@ export async function persist(fenec, storage, { key = 'fenec', piece = PIECE } =
     kept.delete(fenec);
     throw e;
   }
-  return (image ?? log).length;
+  return whole ? s.image[1] : log.length;
 }
 
 /**

@@ -476,6 +476,11 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   stats(): unknown;
   snapshot(): Uint8Array;
   /**
+   * The image a mebibyte at a time, each let go of in the module as it is
+   * taken: never twice in the module, nor whole in the page.
+   */
+  snapshotChunks(): Generator<Uint8Array>;
+  /**
    * Starts keeping the writes for `drain()`, or with `false` stops;
    * `persist` and `openFile` start it themselves.
    */
