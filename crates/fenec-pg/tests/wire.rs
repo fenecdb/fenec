@@ -3802,3 +3802,57 @@ fn copy_of_a_query_writes_its_rows() {
     }
     assert_eq!(rows_of(&mut c, "get docs count"), cells(&[&[Some("50")]]));
 }
+
+/// What DuckDB's postgres extension sends: its opening query, whole, and a
+/// table read by a plain SELECT inside a COPY, the conditions it pushed
+/// down read as their columns' types -- `'100'` is a number to an int
+/// column and text to a text one.
+#[test]
+fn duckdb_reads_a_collection_through_a_plain_select() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    let r = c.simple("SELECT version(), (SELECT COUNT(*) FROM pg_settings WHERE name LIKE 'rds%')");
+    let row = find(&r, b'D').expect("a row").cells();
+    assert_eq!(row.len(), 2, "{}", outcome(&r));
+    assert!(row[0].as_deref().unwrap().starts_with("PostgreSQL"));
+    assert_eq!(row[1].as_deref(), Some("0"));
+
+    c.simple("create collection t (code text, n int, e vector<2>)");
+    c.simple(r#"put t [{code: "100", n: 5, e: [1, 0]}, {code: "7", n: 100, e: [0, 1]}, {code: "x", n: 101, e: [1, 1]}]"#);
+    let copy = |c: &mut Client, select: &str| -> (String, Vec<u8>) {
+        let r = c.simple(&format!("COPY ({select}) TO STDOUT"));
+        (outcome(&r), copied_out(&r))
+    };
+    let whole = r#"ctid BETWEEN '(0,0)'::tid AND '(4294967295,0)'::tid"#;
+    let (tag, rows) = copy(
+        &mut c,
+        &format!(
+            r#"SELECT "code", "n" FROM "public"."t" WHERE {whole} AND "code" = '100' COLLATE "C""#
+        ),
+    );
+    assert_eq!(
+        (tag.as_str(), rows.as_slice()),
+        ("COPY 1", &b"100\t5\n"[..])
+    );
+    let (_, rows) = copy(
+        &mut c,
+        &format!(r#"SELECT "n" FROM "public"."t" WHERE {whole} AND "n" < '101' AND "n" >= '100'"#),
+    );
+    assert_eq!(rows, b"100\n");
+    let (_, rows) = copy(
+        &mut c,
+        r#"SELECT "code", "e"::VARCHAR FROM "t" WHERE "code" IN ('7', 'x') AND "n" <> '101'"#,
+    );
+    assert_eq!(rows, b"7\t[0,1]\n");
+    // A vector cast to text goes as its text in binary too.
+    let r = c.simple(r#"COPY (SELECT "e"::VARCHAR FROM "public"."t" WHERE "code" = '7') TO STDOUT (FORMAT "binary")"#);
+    let bin = copied_out(&r);
+    assert!(bin.windows(5).any(|w| w == b"[0,1]"), "{bin:?}");
+    for (select, code) in [
+        (r#"SELECT "nope" FROM "t" WHERE "nope" = '1'"#, "42703"),
+        (r#"SELECT "n" FROM "t" WHERE "n" = 'many'"#, "22P02"),
+    ] {
+        let (tag, _) = copy(&mut c, select);
+        assert!(tag.starts_with(code), "{select}: {tag}");
+    }
+}

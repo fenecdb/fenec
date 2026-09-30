@@ -362,7 +362,15 @@ and a parameter in its place is described so: as `text`, every driver read
 `{a,b}` as a string. A list of lists or of vectors has no array and stays
 text.
 A plain `SELECT` of columns from one collection is the `get` it is
-(`sql.rs`), which asyncpg and pgx ask before a binary COPY. A new field type
+(`sql.rs`), which asyncpg and pgx ask before a binary COPY. Inside `COPY
+(...) TO STDOUT` it also takes the conditions DuckDB's postgres extension
+pushes down (`sql::plain`), their literals read as the columns' types --
+DuckDB quotes an int's `100` as `'100'` -- a column cast to text sent as
+its text, and the `ctid` range covering every row, part of one refused:
+fenecdb has no row addresses. DuckDB opens with `SELECT version(), (SELECT
+COUNT(*) FROM pg_settings ...)`, which `compat` answered as `version()`
+alone, dropping the column DuckDB then could not read; a call is answered
+there only alone now, and anything beside it goes to the catalog. A new field type
 needs its binary form in both. `make drivers-test` holds psycopg,
 SQLAlchemy, asyncpg, pgx, tokio-postgres and node-postgres to their own
 flows, and pgvector's library for each: pgvector-python over psycopg and

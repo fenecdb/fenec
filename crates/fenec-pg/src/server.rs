@@ -1399,7 +1399,44 @@ fn copy_query_out(
     lock: &mut Lock<'_>,
     out: &mut Writer,
 ) -> io::Result<(Copied, u64)> {
-    let sel = match read(query) {
+    // A plain SELECT, as DuckDB reads a table, its pushed-down conditions'
+    // literals read as their columns' types; FenecQL otherwise.
+    let plain = sql::plain(query);
+    let (text, params) = match &plain {
+        Some(p) => {
+            let (text, literals) = p.fenecql();
+            let typed = lock.read(
+                db,
+                |d| -> std::result::Result<Vec<Value>, (&'static str, String)> {
+                    let c = d
+                        .collection(&p.collection)
+                        .map_err(|e| (sqlstate(&e), e.to_string()))?;
+                    literals
+                        .iter()
+                        .map(|(col, lit)| {
+                            let ty =
+                                match col.as_str() {
+                                    "id" => DataType::Int,
+                                    name => c.schema.field(name).map(|f| f.ty.clone()).ok_or_else(
+                                        || ("42703", format!("column \"{name}\" does not exist")),
+                                    )?,
+                                };
+                            copy::value(lit, &ty).map_err(|why| ("22P02", format!("{col}: {why}")))
+                        })
+                        .collect()
+                },
+            );
+            match typed {
+                Ok(params) => (text, params),
+                Err((code, msg)) => {
+                    out.error(code, &msg);
+                    return Ok((Copied::On, 0));
+                }
+            }
+        }
+        None => (query.to_string(), Vec::new()),
+    };
+    let sel = match read(&text) {
         Ok(mut stmts) if stmts.len() == 1 && matches!(stmts[0], Statement::Select(_)) => {
             match stmts.remove(0) {
                 Statement::Select(sel) => sel,
@@ -1426,7 +1463,7 @@ fn copy_query_out(
                 Statement::Select(sel) => select_columns(d, sel),
                 _ => None,
             };
-            d.query(&stmt, &[]).map(|r| (r, cols))
+            d.query(&stmt, &params).map(|r| (r, cols))
         })
     };
     let (resp, cols) = match answer {
@@ -1441,7 +1478,17 @@ fn copy_query_out(
         return Ok((Copied::On, 0));
     };
     let rs = rs.flatten();
-    let cols = cols.unwrap_or_else(|| rs.columns.iter().map(|c| (c.clone(), OID_TEXT)).collect());
+    let mut cols =
+        cols.unwrap_or_else(|| rs.columns.iter().map(|c| (c.clone(), OID_TEXT)).collect());
+    // A column cast to text goes as its text, in binary too: DuckDB asks a
+    // vector so, having no reader for pgvector's type.
+    if let Some(p) = &plain {
+        for (col, (_, cast)) in cols.iter_mut().zip(&p.columns) {
+            if *cast {
+                col.1 = OID_TEXT;
+            }
+        }
+    }
     let with_score = cols.last().is_some_and(|(n, _)| n == "_score");
     let binary = *format == copy::Format::Binary;
     out.copy_out_response(cols.len(), binary);

@@ -3498,6 +3498,13 @@ pub fn is_catalog(lower: &str) -> bool {
         "set_config(",
         "to_regtype(",
         "::regtype",
+        // A catalog function beside anything else: the call alone is
+        // answered before this is asked.
+        "version()",
+        "current_database()",
+        "current_schema",
+        "current_user",
+        "pg_backend_pid(",
     ]
     .iter()
     .any(|marker| lower.contains(marker))

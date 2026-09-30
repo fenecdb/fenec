@@ -336,7 +336,18 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
         _ => {}
     }
 
-    if lower.starts_with("select version()") || lower == "select version" {
+    // A call alone, as a driver sends it to open a session; with more in its
+    // select list it goes on to the catalog, which runs the whole of it:
+    // DuckDB opens with `SELECT version(), (SELECT COUNT(*) FROM
+    // pg_settings WHERE name LIKE 'rds%')`, and the second column, dropped
+    // here, was one it could not read.
+    let alone = |call: &str| {
+        let q = lower.trim_end_matches(';').trim_end();
+        q == call
+            || q.strip_prefix("select pg_catalog.")
+                .is_some_and(|rest| format!("select {rest}") == call)
+    };
+    if alone("select version()") || lower == "select version" {
         return Some(one(
             "version",
             &format!(
@@ -346,13 +357,13 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
             ),
         ));
     }
-    if lower.starts_with("select current_schema") {
+    if alone("select current_schema()") || alone("select current_schema") {
         return Some(one("current_schema", "public"));
     }
-    if lower.starts_with("select current_database") {
+    if alone("select current_database()") {
         return Some(one("current_database", "fenec"));
     }
-    if lower.starts_with("select current_user") || lower.starts_with("select user") {
+    if alone("select current_user") || alone("select user") {
         return Some(one("current_user", "fenec"));
     }
     if lower.starts_with("select 1") && !lower.contains("from") {
