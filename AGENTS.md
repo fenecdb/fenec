@@ -426,8 +426,14 @@ set writes against the filter, found through a thread-local set by `within()`
 around the execution -- a scoped write executed outside `within` goes
 unchecked. A scoped subscription keeps the ids it sent and reports deletions
 only for those; the unscoped shape's "a changed id that does not match is a
-deletion" would hand every user everyone's ids. The algorithm is the server's
-(HS256 only), never the token's.
+deletion" would hand every user everyone's ids. The algorithm is the key's,
+never the token's: `--jwt-keys` reads a JWKS file, `oct` keys for HS256 and
+`RSA` keys (2048 bits up, `crypto::RsaKey`, 64-bit limbs: 166 us a check in
+32-bit ones, 38 now) for an identity provider's RS256, a `kid` picking the
+key; an RSA modulus taken for an HS256 secret would sign anything. The file
+is read again as it changes, looked at once a second, which is the rotation.
+A verified token is kept by its text (`verified`, 16 shards of 256, emptied
+when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied

@@ -174,7 +174,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) |
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
-| **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
+| **Access** | a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
 | **Runtime size** | 444 KB wasm + 94 KB client (172 KB brotli served) · 1153–1687 KB binary · 2.88 MB container image |
 
