@@ -7,11 +7,28 @@ use crate::stop::{on_signals, STOP};
 use fenec_http::archive::{self, Archive, Target};
 use fenec_http::replication::Upstream;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// `90s`, `30m`, `6h`, `7d`.
+fn duration(v: &str) -> Option<Duration> {
+    let (n, unit) = v.split_at(v.len().checked_sub(1)?);
+    let n: u64 = n.parse().ok().filter(|&n| n > 0)?;
+    let secs = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    Some(Duration::from_secs(n.checked_mul(secs)?))
+}
 
 pub const USAGE: &str = r#"
 usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
        fenec archive <primary> <archive-dir>                [--token <t>]
+                     [--image-every <1h>] [--keep <7d>]
        fenec restore <archive-dir> <out.fenec> [--to <time> | --to-change <n>]
+       fenec prune   <archive-dir> --keep <7d>
 
   <primary> is its HTTP address, http://host:port, and <t> its
   --replication-token (also read from FENEC_REPLICATION_TOKEN).
@@ -20,10 +37,18 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             file that opens as a database of its own, or into an archive as
             a base image a restore can start from
   archive   keeps every write that reaches the primary's disk, with when it
-            was made, until interrupted; starts with a base image
+            was made, until interrupted; starts with a base image, and takes
+            one of its own end every --image-every (1h unless given) without
+            asking the primary, so a restore replays at most that much;
+            with --keep, lets go of what no restore within it needs
   restore   the database as it stood at <time> (2026-09-22T10:15:00Z) or
             after change <n>, or at the archive's end: the latest image at
             or before that point and the writes after it
+  prune     what `archive --keep` lets go of, done once: the images before the
+            newest one taken by the start of the window and the segments
+            before the oldest image kept -- as on a copy synced elsewhere
+
+  A duration is a number and s, m, h or d: 90s, 30m, 6h, 7d.
 "#;
 
 fn fail(msg: &str) -> ! {
@@ -37,6 +62,8 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     let mut positional = Vec::new();
     let mut token = std::env::var("FENEC_REPLICATION_TOKEN").ok();
     let mut target = Target::End;
+    let mut every = Duration::from_secs(3600);
+    let mut keep: Option<Duration> = None;
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -64,6 +91,20 @@ pub fn main(command: &str, args: &[String]) -> i32 {
                     Err(_) => fail(&format!("--to-change expects a number, got `{v}`")),
                 }
             }
+            "--image-every" => {
+                let v = next(&mut i, "--image-every");
+                every = duration(&v).unwrap_or_else(|| {
+                    fail(&format!(
+                        "--image-every expects a duration like 1h, got `{v}`"
+                    ))
+                });
+            }
+            "--keep" => {
+                let v = next(&mut i, "--keep");
+                keep = Some(duration(&v).unwrap_or_else(|| {
+                    fail(&format!("--keep expects a duration like 7d, got `{v}`"))
+                }));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return 0;
@@ -72,6 +113,27 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             other => positional.push(other.to_string()),
         }
         i += 1;
+    }
+    if command == "prune" {
+        let [dir] = positional.as_slice() else {
+            fail(&format!(
+                "`fenec prune` takes the archive's directory\n{USAGE}"
+            ));
+        };
+        let keep = keep.unwrap_or_else(|| fail("`fenec prune` needs --keep <duration>"));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        return match Archive::new(dir).and_then(|a| a.prune(keep.as_millis() as u64, now)) {
+            Ok((images, segments)) => {
+                println!("{dir}: let go of {images} images and {segments} segments");
+                0
+            }
+            Err(e) => {
+                eprintln!("fenec prune: {e}");
+                1
+            }
+        };
     }
     let [a, b] = positional.as_slice() else {
         fail(&format!("`fenec {command}` takes two arguments\n{USAGE}"));
@@ -92,7 +154,17 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             let upstream = upstream();
             Archive::new(b).and_then(|arch| {
                 eprintln!("archiving {} into {b}; interrupt to stop", upstream.url());
-                arch.follow(&upstream, &STOP, &|line| eprintln!("{line}"))
+                // Its own images and the pruning beside the stream, on a
+                // thread of their own: an image of a large database takes
+                // a while, and the stream goes on meanwhile.
+                std::thread::scope(|s| {
+                    let beside =
+                        s.spawn(|| arch.keep_up(every, keep, &STOP, &|line| eprintln!("{line}")));
+                    let followed = arch.follow(&upstream, &STOP, &|line| eprintln!("{line}"));
+                    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let kept = beside.join().unwrap_or(Ok(()));
+                    followed.and(kept)
+                })
             })
         }
         "restore" => Archive::new(a)
