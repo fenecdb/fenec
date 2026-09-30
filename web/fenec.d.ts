@@ -440,12 +440,14 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
 
   /**
    * Loads the WASM module. On Node the file bytes are passed directly:
-   * `Fenec.open(await readFile('fenec.wasm'))`. `collation` says where the
-   * collation data it does not carry comes from: by default `collate/`
-   * beside the module, when `src` is a URL.
+   * `Fenec.open(await readFile('fenec.wasm'))`; in a Cloudflare Worker the
+   * module as the Worker imports it, compiled:
+   * `import wasm from './fenec.wasm'; Fenec.open(wasm)`. `collation` says
+   * where the collation data it does not carry comes from: by default
+   * `collate/` beside the module, when `src` is a URL.
    */
   static open<S extends AnySchema<S> = Schema>(
-    src?: string | BufferSource,
+    src?: string | BufferSource | WebAssembly.Module,
     opts?: { collation?: CollationSource },
   ): Promise<Fenec<S>>;
 
