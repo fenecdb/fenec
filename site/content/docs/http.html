@@ -156,7 +156,11 @@ async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
 
 <p><code>AsyncClient</code> keeps one connection alive and opens it again
 when the server has closed it; calls made at once over one client go one
-after another over it, so requests side by side take a client each.</p>
+after another over it, so requests side by side take a client each.
+<code>Client.follow</code> reads the <a href="#changes">change stream</a>
+as a consumer, and <code>python -m fenecdb.relay</code> hands it on to
+another program or a webhook: see <a href="/docs/microservices">Services
+and events</a>.</p>
 
 <h2>Embedding a collection</h2>
 
