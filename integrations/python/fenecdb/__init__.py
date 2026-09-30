@@ -68,12 +68,18 @@ class Client:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # The change the last write left the database at (`Fenec-Seq`): a
+        # read on a replica passed it as `after` waits for that write.
+        self.seq: int | None = None
 
-    def query(self, fenecql: str, params: Sequence[Any] | None = None) -> Any:
+    def query(
+        self, fenecql: str, params: Sequence[Any] | None = None, *, after: int | None = None
+    ) -> Any:
         """Runs one FenecQL statement. Values go in as `$1`, `$2`, ... and
-        never into the text."""
+        never into the text. With `after` -- a primary's `seq` -- a replica
+        answers once it holds that write."""
         body = {"query": fenecql, "params": list(params or [])}
-        return self._post("/query", json.dumps(body).encode(), "application/json")
+        return self._post("/query", json.dumps(body).encode(), "application/json", after)
 
     def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
         """Runs statements in order under one write lock, as one block:
@@ -148,13 +154,18 @@ class Client:
             _answer(e.code, e.read())
             raise
 
-    def _post(self, path: str, body: bytes, content_type: str) -> Any:
+    def _post(self, path: str, body: bytes, content_type: str, after: int | None = None) -> Any:
         req = urllib.request.Request(self.url + path, data=body, method="POST")
         req.add_header("Content-Type", content_type)
         if self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
+        if after is not None:
+            req.add_header("Fenec-After", str(after))
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                seq = resp.headers.get("Fenec-Seq")
+                if seq is not None:
+                    self.seq = int(seq)
                 return json.load(resp)
         except urllib.error.HTTPError as e:
             raw = e.read()

@@ -423,3 +423,117 @@ fn a_replica_on_the_forked_side_of_nothing_goes_on_without_an_image() {
         a.db.read().unwrap().history().lineage
     );
 }
+
+/// A request as written, and the answer's status, head and body.
+fn raw(port: u16, method: &str, path: &str, headers: &str, body: &str) -> (u16, String, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: x\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    (
+        head[9..12].parse().unwrap(),
+        head.to_string(),
+        body.to_string(),
+    )
+}
+
+/// A client that wrote on the primary reads its write on a replica: the
+/// write's answer names the change it made (`Fenec-Seq`), and a read sent
+/// with `Fenec-After` waits until the replica holds it -- never answered
+/// from before it.
+#[test]
+fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
+    let d = dir("ryw");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let r = replica(&d.join("r.fenec"), p.port);
+    query(&p, SCHEMA);
+    caught_up(&r, &p);
+    for i in 0..50 {
+        let put = format!(
+            "{{\"query\":\"put items {{name: \\\"ryw {i}\\\", n: {i}, e: [1.0, 0.5, {i}.0]}}\"}}"
+        );
+        let (status, head, body) = raw(p.port, "POST", "/query", "", &put);
+        assert_eq!(status, 200, "{body}");
+        let seq: u64 = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Fenec-Seq: "))
+            .expect("a write names its change")
+            .trim()
+            .parse()
+            .unwrap();
+        let get = format!("{{\"query\":\"get items where n = {i}\"}}");
+        let (status, _, body) = raw(
+            r.port,
+            "POST",
+            "/query",
+            &format!("Fenec-After: {seq}\r\n"),
+            &get,
+        );
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains(&format!("ryw {i}")),
+            "read {i} on the replica missed its write: {body}"
+        );
+    }
+    // A replica held back: without the header a read is answered from
+    // where it stands, and with it waits until the write is there.
+    let f = r.follower.as_ref().unwrap();
+    f.halt();
+    let put = "{\"query\":\"put items {name: \\\"held back\\\", n: 999, e: [1.0, 0.5, 2.0]}\"}";
+    let (_, head, _) = raw(p.port, "POST", "/query", "", put);
+    let written: u64 = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Fenec-Seq: "))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let get = "{\"query\":\"get items where n = 999\"}";
+    let (_, _, body) = raw(r.port, "POST", "/query", "", get);
+    assert!(!body.contains("held back"), "{body}");
+    let port = r.port;
+    let reader = std::thread::spawn(move || {
+        let started = Instant::now();
+        let answer = raw(
+            port,
+            "POST",
+            "/query",
+            &format!("Fenec-After: {written}\r\n"),
+            get,
+        );
+        (started.elapsed(), answer)
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    f.start("replica".into()).unwrap();
+    let (took, (status, _, body)) = reader.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("held back"), "{body}");
+    assert!(took >= Duration::from_millis(250), "{took:?}");
+    // A change that has not come: the wait, then 504 and where it stands.
+    let started = Instant::now();
+    let (status, _, body) = raw(
+        r.port,
+        "POST",
+        "/query",
+        &format!("Fenec-After: {}\r\nFenec-Wait: 300\r\n", seq(&p) + 1000),
+        "{\"query\":\"get items count\"}",
+    );
+    assert_eq!(status, 504, "{body}");
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert!(body.contains("\"seq\":"), "{body}");
+    let (status, _, _) = raw(
+        r.port,
+        "POST",
+        "/query",
+        "Fenec-After: soon\r\n",
+        "{\"query\":\"get items count\"}",
+    );
+    assert_eq!(status, 400);
+}

@@ -89,6 +89,11 @@ python -m fenecdb.relay http://127.0.0.1:8080 --consumer search \
   by id makes harmless.</li>
   <li><b>What is on disk.</b> A write the server lost in a crash was never
   handed to anyone, as it was never sent to a replica.</li>
+  <li><b>Reading one's own writes.</b> A service that writes on the primary
+  and reads on a replica sends the write's <code>Fenec-Seq</code> back as
+  <code>Fenec-After</code>, and the replica answers once it holds the write
+  (<a href="/docs/replication#read-your-writes">Reading your own
+  writes</a>).</li>
   <li><b>Retries.</b> A service that sends a write again after a timeout
   sends it with an <code>Idempotency-Key</code>, and a write that landed is
   answered as before rather than made twice
