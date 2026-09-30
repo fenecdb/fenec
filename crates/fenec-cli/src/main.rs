@@ -59,6 +59,7 @@ Backup
   fenec backup <http://primary> <file|dir>   the database, taken while it runs
   fenec archive <http://primary> <dir>       keep every write, until interrupted
   fenec restore <dir> <out> [--to <time>]    the database as it stood then
+  fenec prune <dir> --keep <7d>              let go of what no restore since then needs
                                          for details: fenec backup --help
 "#;
 #[cfg(not(feature = "backup"))]
@@ -90,7 +91,9 @@ fn main() {
         std::process::exit(types::main(&args[1..]));
     }
 
-    if let Some(command @ ("backup" | "archive" | "restore")) = args.first().map(String::as_str) {
+    if let Some(command @ ("backup" | "archive" | "restore" | "prune")) =
+        args.first().map(String::as_str)
+    {
         #[cfg(feature = "backup")]
         std::process::exit(backup::main(command, &args[1..]));
         #[cfg(not(feature = "backup"))]

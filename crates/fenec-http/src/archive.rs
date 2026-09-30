@@ -64,6 +64,11 @@ pub struct Restored {
 
 pub struct Archive {
     dir: PathBuf,
+    /// Set once an image was taken here: the segment being written ends
+    /// at its next write, so the writes before the image are in segments of
+    /// their own, which `prune` can let go of whole -- in the segment going
+    /// on, they stayed until it reached its 64 MB.
+    roll: AtomicBool,
 }
 
 fn now_ms() -> u64 {
@@ -141,6 +146,7 @@ impl Archive {
         fs::create_dir_all(dir.as_ref())?;
         Ok(Archive {
             dir: dir.as_ref().to_path_buf(),
+            roll: AtomicBool::new(false),
         })
     }
 
@@ -334,8 +340,9 @@ impl Archive {
                         // name is: a block's writes are one record.
                         let n = writes(&records[pos..pos + len]);
                         let seq = at + 1;
+                        let rolled = self.roll.swap(false, Ordering::SeqCst);
                         let s = match &mut segment {
-                            Some(s) if s.next == seq && s.len < SEGMENT => s,
+                            Some(s) if s.next == seq && s.len < SEGMENT && !rolled => s,
                             _ => {
                                 if let Some(s) = &mut segment {
                                     s.sync()?;
@@ -383,10 +390,173 @@ impl Archive {
     }
 
     /// Writes the database as it stood at `to` into `out`, a new file.
+    pub fn restore(&self, out: &Path, to: Target) -> io::Result<Restored> {
+        let tmp = out.with_extension("restoring");
+        let r = self.assemble(&tmp, to)?;
+        // Opened to check it whole, and forked: from here its writes are no
+        // longer the primary's. The checkpoint lands the graph the open just
+        // built in the file, as a clean shutdown would, so the database's
+        // first real open does not build it a second time.
+        let mut db = fenec_core::fs::open(&tmp).map_err(|e| corrupt(e.to_string()))?;
+        if db.change_seq() != r.seq {
+            return Err(corrupt(format!(
+                "the restored file is at change {}, not {}",
+                db.change_seq(),
+                r.seq
+            )));
+        }
+        db.fork(fresh_id())
+            .and_then(|_| db.checkpoint())
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        drop(db);
+        fs::rename(&tmp, out)?;
+        Ok(r)
+    }
+
+    /// The last change the segments hold and when it was appended: the
+    /// last segment's last whole record.
+    fn last_write(&self) -> io::Result<Option<(u64, u64)>> {
+        let Some(&first) = self.segments()?.last() else {
+            return Ok(None);
+        };
+        let bytes = fs::read(self.segment_path(first))?;
+        let (list, _) = entries(&bytes)?;
+        let writes: u64 = list.iter().map(|e| e.3).sum();
+        Ok(list.last().map(|e| (first + writes - 1, e.0)))
+    }
+
+    /// Takes an image of the database as the archive's end holds it -- its
+    /// last image and the writes after it, opened -- and adds it, named by
+    /// when its last write was appended: the database stood so from then
+    /// on. Nothing is asked of the primary. `None` when no write came after
+    /// the last image.
+    ///
+    /// Without it an archive kept its first image for good: a restore
+    /// replayed every write since, and nothing could be let go.
+    pub fn consolidate(&self) -> io::Result<Option<u64>> {
+        let Some(&(last_image, _)) = self.images()?.last() else {
+            return Ok(None);
+        };
+        let Some((end, time)) = self.last_write()? else {
+            return Ok(None);
+        };
+        if end <= last_image {
+            return Ok(None);
+        }
+        let tmp = self.dir.join("consolidating.fenec");
+        let r = self.assemble(&tmp, Target::End);
+        let image = r.and_then(|r| {
+            let db = fenec_core::fs::open_in_memory(&tmp).map_err(|e| corrupt(e.to_string()))?;
+            if db.change_seq() != r.seq {
+                return Err(corrupt(format!(
+                    "the archive's end is change {}, the database opened at {}",
+                    r.seq,
+                    db.change_seq()
+                )));
+            }
+            Ok((r.seq, db.snapshot()))
+        });
+        let _ = fs::remove_file(&tmp);
+        let (seq, bytes) = image?;
+        // The segments may have gone on while this read them: the image is
+        // of the change it holds, timed by that change's write.
+        let time = if seq == end {
+            time
+        } else {
+            self.time_of(seq)?.unwrap_or(time)
+        };
+        self.put(&self.image_path(seq, time), &bytes)?;
+        self.roll.store(true, Ordering::SeqCst);
+        Ok(Some(seq))
+    }
+
+    /// When change `seq` was appended, from the segment that holds it.
+    fn time_of(&self, seq: u64) -> io::Result<Option<u64>> {
+        let segments = self.segments()?;
+        let Some(&first) = segments.iter().rev().find(|&&f| f <= seq) else {
+            return Ok(None);
+        };
+        let bytes = fs::read(self.segment_path(first))?;
+        let (list, _) = entries(&bytes)?;
+        let mut at = first;
+        for &(time, _, _, n) in &list {
+            if seq < at + n {
+                return Ok(Some(time));
+            }
+            at += n;
+        }
+        Ok(None)
+    }
+
+    /// Lets go of what a restore to any moment in the last `keep_ms` does
+    /// not need: the images before the newest one taken by then -- a
+    /// restore to that moment starts from it -- and the segments whose
+    /// writes all came before the oldest image kept. The segment being
+    /// written is never among them. Returns the images and segments removed.
+    pub fn prune(&self, keep_ms: u64, now_ms: u64) -> io::Result<(usize, usize)> {
+        let images = self.images()?;
+        let cutoff = now_ms.saturating_sub(keep_ms);
+        // The newest image at or before the cutoff, or the oldest there is.
+        let base = match images.iter().rposition(|i| i.1 <= cutoff) {
+            Some(k) => k,
+            None => return Ok((0, 0)),
+        };
+        let oldest = images[base].0;
+        let mut removed = (0, 0);
+        for &(seq, time) in &images[..base] {
+            fs::remove_file(self.image_path(seq, time))?;
+            removed.0 += 1;
+        }
+        let segments = self.segments()?;
+        for k in 0..segments.len().saturating_sub(1) {
+            // A segment's writes end where the next one's begin.
+            if segments[k + 1] - 1 <= oldest {
+                fs::remove_file(self.segment_path(segments[k]))?;
+                removed.1 += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Beside `follow`: an image of the archive's end every `every` once a
+    /// write came after the last, and what a restore within `keep` does not
+    /// need let go after it, until `stop` is set.
+    pub fn keep_up(
+        &self,
+        every: Duration,
+        keep: Option<Duration>,
+        stop: &AtomicBool,
+        report: &dyn Fn(&str),
+    ) -> io::Result<()> {
+        let mut last = Instant::now();
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(200));
+            if last.elapsed() < every {
+                continue;
+            }
+            last = Instant::now();
+            match self.consolidate() {
+                Ok(Some(seq)) => report(&format!("image at change {seq}, taken here")),
+                Ok(None) => {}
+                Err(e) => report(&format!("no image taken: {e}")),
+            }
+            if let Some(keep) = keep {
+                match self.prune(keep.as_millis() as u64, now_ms()) {
+                    Ok((0, 0)) => {}
+                    Ok((i, s)) => report(&format!("let go of {i} images and {s} segments")),
+                    Err(e) => report(&format!("nothing let go: {e}")),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The image `to` starts from and the writes after it up to there,
+    /// copied into `tmp`: a fenecdb file, not yet opened.
     ///
     /// Two passes over the segments, one in memory at a time: the first
     /// finds where to stop, the second copies the writes up to there.
-    pub fn restore(&self, out: &Path, to: Target) -> io::Result<Restored> {
+    fn assemble(&self, tmp: &Path, to: Target) -> io::Result<Restored> {
         let images = self.images()?;
         let segments = self.segments()?;
         let last_image = images.last().map_or(0, |i| i.0);
@@ -451,10 +621,9 @@ impl Archive {
         };
 
         // The image, then the writes after it: that is a fenecdb file.
-        let tmp = out.with_extension("restoring");
-        let _ = fs::remove_file(&tmp);
-        fs::copy(self.image_path(image, taken), &tmp)?;
-        let mut f = OpenOptions::new().append(true).open(&tmp)?;
+        let _ = fs::remove_file(tmp);
+        fs::copy(self.image_path(image, taken), tmp)?;
+        let mut f = OpenOptions::new().append(true).open(tmp)?;
         let mut want = image + 1;
         for (k, &first) in segments.iter().enumerate() {
             let next = segments.get(k + 1).copied().unwrap_or(u64::MAX);
@@ -485,23 +654,6 @@ impl Archive {
         }
         f.sync_all()?;
         drop(f);
-
-        // Opened to check it whole, and forked: from here its writes are no
-        // longer the primary's. The checkpoint lands the graph the open just
-        // built in the file, as a clean shutdown would, so the database's
-        // first real open does not build it a second time.
-        let mut db = fenec_core::fs::open(&tmp).map_err(|e| corrupt(e.to_string()))?;
-        if db.change_seq() != stop {
-            return Err(corrupt(format!(
-                "the restored file is at change {}, not {stop}",
-                db.change_seq()
-            )));
-        }
-        db.fork(fresh_id())
-            .and_then(|_| db.checkpoint())
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        drop(db);
-        fs::rename(&tmp, out)?;
         Ok(Restored {
             seq: stop,
             image,

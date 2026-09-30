@@ -389,3 +389,100 @@ fn a_block_with_schema_changes_is_archived_and_restored_whole() {
     assert_eq!(db.collection_names(), ["a", "b"]);
     assert_eq!(rows(&db, "get b").len(), 1);
 }
+
+/// Every file of the archive whose name starts with `prefix`.
+fn files(arch: &Path, prefix: &str) -> usize {
+    std::fs::read_dir(arch)
+        .unwrap()
+        .filter(|e| {
+            let name = e.as_ref().unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(prefix) && !name.ends_with(".tmp")
+        })
+        .count()
+}
+
+/// An archive takes images of its own end, without asking the primary,
+/// and a new segment begins after each: then what no restore within the
+/// window needs -- the images before its start, the segments before the
+/// oldest image kept -- goes, and a restore to any moment in the window, or
+/// to the end, holds what the primary held.
+#[test]
+fn an_archive_takes_its_own_images_and_lets_go_of_what_no_restore_needs() {
+    let d = dir("images");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection notes (title text, n int @hash, e vector<4> @hnsw(cosine))");
+    let arch = d.join("archive");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    let batch = |from: i64| {
+        for i in from..from + 10 {
+            p.exec(&format!(
+                "put notes {{title: \"note {i}\", n: {i}, e: [{i}, 1, 0, 1]}}"
+            ));
+        }
+    };
+    batch(0);
+    let seq_a = p.seq();
+    archived(&arch, seq_a);
+    assert_eq!(shared.consolidate().unwrap(), Some(seq_a));
+    assert_eq!(shared.consolidate().unwrap(), None, "nothing after it");
+
+    batch(10);
+    let seq_b = p.seq();
+    let rows_b = rows(&p.db.read().unwrap(), "get notes");
+    archived(&arch, seq_b);
+    std::thread::sleep(Duration::from_millis(30));
+    let moment_b = now_ms();
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(shared.consolidate().unwrap(), Some(seq_b));
+
+    batch(20);
+    p.exec("del notes where n = 3");
+    archived(&arch, p.seq());
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+
+    // The primary's first image and the two taken here; a segment for the
+    // writes before each image taken here, and the one going on.
+    assert_eq!(files(&arch, "image-"), 3);
+    assert_eq!(files(&arch, "writes-"), 3);
+
+    // Kept within the window since moment B: the image of change B, which
+    // a restore to B starts from, and what came after it.
+    let now = now_ms();
+    let (images, segments) = shared.prune(now - moment_b, now).unwrap();
+    assert_eq!((images, segments), (2, 2));
+    assert_eq!(files(&arch, "image-"), 1);
+    assert_eq!(files(&arch, "writes-"), 1);
+
+    let (db, r) = restored(&arch, &d.join("b.fenec"), Target::Time(moment_b));
+    assert_eq!(r.seq, seq_b);
+    assert_eq!(rows(&db, "get notes"), rows_b);
+    let (db, _) = restored(&arch, &d.join("end.fenec"), Target::End);
+    assert_eq!(
+        rows(&db, "get notes"),
+        rows(&p.db.read().unwrap(), "get notes")
+    );
+    assert_eq!(
+        rows(&db, "get notes select n near e [5, 1, 0, 1] limit 3"),
+        rows(
+            &p.db.read().unwrap(),
+            "get notes select n near e [5, 1, 0, 1] limit 3"
+        )
+    );
+    // Before the window, nothing to start from.
+    let err = shared
+        .restore(&d.join("a.fenec"), Target::Change(seq_a))
+        .unwrap_err();
+    assert!(err.to_string().contains("no image"), "{err}");
+    // A second prune finds nothing more to let go of.
+    assert_eq!(shared.prune(now - moment_b, now).unwrap(), (0, 0));
+}
