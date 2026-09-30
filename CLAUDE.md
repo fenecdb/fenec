@@ -820,7 +820,12 @@ covered is handed over, a cursor the feed no longer reaches is answered 410
 with the first `since` it does -- never with writes missing -- one past the
 last write 409, and `wait` waits on the feed's `Condvar` for a write. A
 scoped token is refused: its filter could not hold back the deletion of a
-row it never saw. A feed kept for it alone has no token (`Replication`'s
+row it never saw. A consumer with no state of its own has the server keep
+where it is (`/_changes/consumers/<name>`, rows of `_consumers`, made by a
+`POST` at the last write on disk -- read from "now" each time, it missed
+what came between two reads -- and moved by a `POST` of `since`), each
+write at least once; the stream leaves `_consumers`' own writes out, the
+cursor going past them. A feed kept for it alone has no token (`Replication`'s
 token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
 cost nothing measurable, 16 400 single puts a second over HTTP either way,
 and 9 000 rows of 128 dimensions read back at 283 000 a second.
