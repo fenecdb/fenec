@@ -92,7 +92,7 @@ fn main() {
         std::process::exit(types::main(&args[1..]));
     }
 
-    if let Some(command @ ("backup" | "archive" | "restore" | "prune" | "verify")) =
+    if let Some(command @ ("backup" | "archive" | "restore" | "prune" | "verify" | "key")) =
         args.first().map(String::as_str)
     {
         #[cfg(feature = "backup")]

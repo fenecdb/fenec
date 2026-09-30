@@ -6,6 +6,7 @@
 use crate::stop::{on_signals, STOP};
 use fenec_http::archive::{self, Archive, Target};
 use fenec_http::replication::Upstream;
+use fenec_http::seal::Key;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,9 +28,12 @@ pub const USAGE: &str = r#"
 usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
        fenec archive <primary> <archive-dir>                [--token <t>]
                      [--image-every <1h>] [--keep <7d>]
-       fenec restore <archive-dir> <out.fenec> [--to <time> | --to-change <n>]
+       fenec restore <archive-dir | sealed-file> <out.fenec> [--to <time> | --to-change <n>]
        fenec prune   <archive-dir> --keep <7d>
        fenec verify  <archive-dir>
+       fenec key     <key-file>
+  each but `key` takes --key-file <path> (or FENEC_KEY_FILE): the archive's
+  files, or the backup file, sealed with it
 
   <primary> is its HTTP address, http://host:port, and <t> its
   --replication-token (also read from FENEC_REPLICATION_TOKEN).
@@ -54,8 +58,30 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
             end opens; says from when to when it can restore, and exits 1
             when it cannot
 
+  key       writes a new key into <key-file>, 64 hexadecimal digits,
+            readable by its owner alone. With it an archive's images,
+            segments and history, and a backup, are encrypted and
+            authenticated (ChaCha20-Poly1305): a byte changed, a file cut
+            short or the wrong key is refused, never read. Keep the key
+            apart from the archive: without it nothing can be restored
+
   A duration is a number and s, m, h or d: 90s, 30m, 6h, 7d.
 "#;
+
+/// Writes `text` into a new file only its owner can read.
+fn write_private(path: &str, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()
+}
 
 fn fail(msg: &str) -> ! {
     eprintln!("{msg}");
@@ -70,6 +96,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     let mut target = Target::End;
     let mut every = Duration::from_secs(3600);
     let mut keep: Option<Duration> = None;
+    let mut key_file = std::env::var("FENEC_KEY_FILE").ok();
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
         *i += 1;
@@ -81,6 +108,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--token" => token = Some(next(&mut i, "--token")),
+            "--key-file" => key_file = Some(next(&mut i, "--key-file")),
             "--to" => {
                 let v = next(&mut i, "--to");
                 match fenec_core::time::parse(&v) {
@@ -120,6 +148,35 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
+    if command == "key" {
+        let [path] = positional.as_slice() else {
+            fail(&format!(
+                "`fenec key` takes the file to write the key into\n{USAGE}"
+            ));
+        };
+        if Path::new(path).exists() {
+            fail(&format!(
+                "{path} is there already: a key written over is an archive lost"
+            ));
+        }
+        let Some(hex) = Key::generate() else {
+            fail("no randomness from the system (/dev/urandom) to make a key with");
+        };
+        return match write_private(path, &format!("{hex}\n")) {
+            Ok(()) => {
+                println!("{path}: a new key; keep it apart from the archive");
+                0
+            }
+            Err(e) => {
+                eprintln!("fenec key: {path}: {e}");
+                1
+            }
+        };
+    }
+    let key = key_file.as_ref().map(|p| {
+        Key::from_file(Path::new(p)).unwrap_or_else(|e| fail(&format!("--key-file {p}: {e}")))
+    });
+    let archive = |dir: &str| Archive::with_key(dir, key.clone());
     if command == "verify" {
         let [dir] = positional.as_slice() else {
             fail(&format!(
@@ -127,7 +184,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             ));
         };
         let iso = |t: u64| fenec_core::time::format_iso(t as i64);
-        return match Archive::new(dir).and_then(|a| a.verify()) {
+        return match archive(dir).and_then(|a| a.verify()) {
             Ok(v) => {
                 println!("{dir}: {} images, {} segments", v.images, v.segments);
                 println!(
@@ -163,7 +220,7 @@ pub fn main(command: &str, args: &[String]) -> i32 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        return match Archive::new(dir).and_then(|a| a.prune(keep.as_millis() as u64, now)) {
+        return match archive(dir).and_then(|a| a.prune(keep.as_millis() as u64, now)) {
             Ok((images, segments)) => {
                 println!("{dir}: let go of {images} images and {segments} segments");
                 0
@@ -185,13 +242,13 @@ pub fn main(command: &str, args: &[String]) -> i32 {
     };
 
     let result = match command {
-        "backup" => archive::backup(&upstream(), Path::new(b)).map(|seq| {
+        "backup" => archive::backup(&upstream(), Path::new(b), key.as_ref()).map(|seq| {
             println!("{b}: the database at change {seq}");
         }),
         "archive" => {
             on_signals();
             let upstream = upstream();
-            Archive::new(b).and_then(|arch| {
+            archive(b).and_then(|arch| {
                 eprintln!("archiving {} into {b}; interrupt to stop", upstream.url());
                 // Its own images and the pruning beside the stream, on a
                 // thread of their own: an image of a large database takes
@@ -206,7 +263,16 @@ pub fn main(command: &str, args: &[String]) -> i32 {
                 })
             })
         }
-        "restore" => Archive::new(a)
+        // A sealed backup file: the database it holds.
+        "restore" if Path::new(a).is_file() => {
+            let key = key
+                .as_ref()
+                .unwrap_or_else(|| fail("a sealed backup opens with --key-file"));
+            archive::unseal(Path::new(a), key, Path::new(b)).map(|seq| {
+                println!("{b}: the database at change {seq}");
+            })
+        }
+        "restore" => archive(a)
             .and_then(|arch| arch.restore(Path::new(b), target))
             .map(|r| {
                 let when = r.time.map_or(String::new(), |t| {

@@ -50,6 +50,7 @@ pub mod lease;
 pub mod link;
 pub mod metrics;
 pub mod replication;
+pub mod seal;
 pub mod sse;
 pub mod statements;
 pub mod tenants;

@@ -901,6 +901,22 @@ data repeated vectors (`i % 13`) to count nodes and tombstones now write a
 vector a row. The browser module 2.2 KB brotli; builds, searches and
 opens as fast.
 
+**An archive and a backup can be sealed** (`seal.rs`, `fenec key`,
+`--key-file`). A copy in a bucket is out of reach of the disk's
+encryption, so with a key every archive file and a backup file is
+ChaCha20-Poly1305 (`crypto.rs`, RFC 8439's vectors and 2 000 random cases
+against node:crypto): ChaCha20 over AES-GCM because it has no secret-indexed
+tables in software, Poly1305 in 26-bit limbs. Frames carry a random nonce
+and their place and last-ness in the AAD; an image and the history are
+sealed whole (`open_whole` refuses a file cut short), a segment a frame for
+each batch of writes, whole records in each, so a crash cuts off a frame as
+it cut a record (`open_appended`, the segment's `sealed` state). A file of
+the other kind than the archive is refused. About 400 MB/s either way on
+one core. The live file stays plain -- mapped and read in place -- for the
+disk to encrypt. A checksum a record was measured and not taken: hardware
+CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
+lock, and the browser has no hardware CRC.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer

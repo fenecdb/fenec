@@ -1,5 +1,6 @@
 //! The smallest crypto set SCRAM-SHA-256 and HS256 JWTs need: SHA-256,
-//! HMAC, PBKDF2, and base64 in both its alphabets.
+//! HMAC, PBKDF2, and base64 in both its alphabets -- and ChaCha20-Poly1305
+//! (RFC 8439), which seals an archive's files (`seal.rs`).
 //!
 //! No dependencies, like the rest of fenecdb. All three functions are checked
 //! against RFC test vectors (see the tests at the end of the module);
@@ -272,6 +273,218 @@ pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     b64_decode(&s.replace('-', "+").replace('_', "/"))
 }
 
+// -------------------------------------------------------- ChaCha20-Poly1305
+//
+// Chosen over AES-GCM for what hand-written crypto has to get right: ChaCha20
+// is additions, rotations and xors, constant-time with no tables, where AES
+// in software reads S-boxes by secret indexes. Poly1305 is the 26-bit-limb
+// form (poly1305-donna), every step the same whatever the key.
+
+fn quarter(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] = (s[d] ^ s[a]).rotate_left(16);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] = (s[b] ^ s[c]).rotate_left(12);
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] = (s[d] ^ s[a]).rotate_left(8);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] = (s[b] ^ s[c]).rotate_left(7);
+}
+
+fn le32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// One 64-byte block of the ChaCha20 key stream.
+fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+    let mut init = [0u32; 16];
+    init[..4].copy_from_slice(&[0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]);
+    for i in 0..8 {
+        init[4 + i] = le32(&key[i * 4..]);
+    }
+    init[12] = counter;
+    for i in 0..3 {
+        init[13 + i] = le32(&nonce[i * 4..]);
+    }
+    let mut s = init;
+    for _ in 0..10 {
+        quarter(&mut s, 0, 4, 8, 12);
+        quarter(&mut s, 1, 5, 9, 13);
+        quarter(&mut s, 2, 6, 10, 14);
+        quarter(&mut s, 3, 7, 11, 15);
+        quarter(&mut s, 0, 5, 10, 15);
+        quarter(&mut s, 1, 6, 11, 12);
+        quarter(&mut s, 2, 7, 8, 13);
+        quarter(&mut s, 3, 4, 9, 14);
+    }
+    let mut out = [0u8; 64];
+    for i in 0..16 {
+        out[i * 4..i * 4 + 4].copy_from_slice(&s[i].wrapping_add(init[i]).to_le_bytes());
+    }
+    out
+}
+
+/// `data` xored with the key stream from block `counter` on.
+pub fn chacha20_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &mut [u8]) {
+    for (i, chunk) in data.chunks_mut(64).enumerate() {
+        let ks = chacha20_block(key, counter.wrapping_add(i as u32), nonce);
+        for (b, k) in chunk.iter_mut().zip(ks) {
+            *b ^= k;
+        }
+    }
+}
+
+/// Poly1305's tag of `msg` under a one-time `key`.
+pub fn poly1305(key: &[u8; 32], msg: &[u8]) -> [u8; 16] {
+    // r, clamped, in five 26-bit limbs; s the key's second half.
+    let r0 = le32(&key[0..]) & 0x3ffffff;
+    let r1 = (le32(&key[3..]) >> 2) & 0x3ffff03;
+    let r2 = (le32(&key[6..]) >> 4) & 0x3ffc0ff;
+    let r3 = (le32(&key[9..]) >> 6) & 0x3f03fff;
+    let r4 = (le32(&key[12..]) >> 8) & 0x00fffff;
+    let (s1, s2, s3, s4) = (r1 * 5, r2 * 5, r3 * 5, r4 * 5);
+    let (mut h0, mut h1, mut h2, mut h3, mut h4) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for chunk in msg.chunks(16) {
+        let mut b = [0u8; 17];
+        b[..chunk.len()].copy_from_slice(chunk);
+        b[chunk.len()] = 1;
+        let hibit = (b[16] as u32) << 24;
+        h0 += le32(&b[0..]) & 0x3ffffff;
+        h1 += (le32(&b[3..]) >> 2) & 0x3ffffff;
+        h2 += (le32(&b[6..]) >> 4) & 0x3ffffff;
+        h3 += (le32(&b[9..]) >> 6) & 0x3ffffff;
+        h4 += (le32(&b[12..]) >> 8) | hibit;
+        let m = |a: u32, b: u32| a as u64 * b as u64;
+        let d0 = m(h0, r0) + m(h1, s4) + m(h2, s3) + m(h3, s2) + m(h4, s1);
+        let mut d1 = m(h0, r1) + m(h1, r0) + m(h2, s4) + m(h3, s3) + m(h4, s2);
+        let mut d2 = m(h0, r2) + m(h1, r1) + m(h2, r0) + m(h3, s4) + m(h4, s3);
+        let mut d3 = m(h0, r3) + m(h1, r2) + m(h2, r1) + m(h3, r0) + m(h4, s4);
+        let mut d4 = m(h0, r4) + m(h1, r3) + m(h2, r2) + m(h3, r1) + m(h4, r0);
+        let mut c = (d0 >> 26) as u32;
+        h0 = d0 as u32 & 0x3ffffff;
+        d1 += c as u64;
+        c = (d1 >> 26) as u32;
+        h1 = d1 as u32 & 0x3ffffff;
+        d2 += c as u64;
+        c = (d2 >> 26) as u32;
+        h2 = d2 as u32 & 0x3ffffff;
+        d3 += c as u64;
+        c = (d3 >> 26) as u32;
+        h3 = d3 as u32 & 0x3ffffff;
+        d4 += c as u64;
+        c = (d4 >> 26) as u32;
+        h4 = d4 as u32 & 0x3ffffff;
+        h0 += c * 5;
+        c = h0 >> 26;
+        h0 &= 0x3ffffff;
+        h1 += c;
+    }
+    // Full carry, then h - p chosen over h without a branch.
+    let mut c = h1 >> 26;
+    h1 &= 0x3ffffff;
+    h2 += c;
+    c = h2 >> 26;
+    h2 &= 0x3ffffff;
+    h3 += c;
+    c = h3 >> 26;
+    h3 &= 0x3ffffff;
+    h4 += c;
+    c = h4 >> 26;
+    h4 &= 0x3ffffff;
+    h0 += c * 5;
+    c = h0 >> 26;
+    h0 &= 0x3ffffff;
+    h1 += c;
+    let mut g0 = h0.wrapping_add(5);
+    c = g0 >> 26;
+    g0 &= 0x3ffffff;
+    let mut g1 = h1.wrapping_add(c);
+    c = g1 >> 26;
+    g1 &= 0x3ffffff;
+    let mut g2 = h2.wrapping_add(c);
+    c = g2 >> 26;
+    g2 &= 0x3ffffff;
+    let mut g3 = h3.wrapping_add(c);
+    c = g3 >> 26;
+    g3 &= 0x3ffffff;
+    let g4 = h4.wrapping_add(c).wrapping_sub(1 << 26);
+    let mask = (g4 >> 31).wrapping_sub(1);
+    let keep = !mask;
+    h0 = (h0 & keep) | (g0 & mask);
+    h1 = (h1 & keep) | (g1 & mask);
+    h2 = (h2 & keep) | (g2 & mask);
+    h3 = (h3 & keep) | (g3 & mask);
+    h4 = (h4 & keep) | (g4 & mask);
+    // h mod 2^128, plus s.
+    let w0 = h0 | (h1 << 26);
+    let w1 = (h1 >> 6) | (h2 << 20);
+    let w2 = (h2 >> 12) | (h3 << 14);
+    let w3 = (h3 >> 18) | (h4 << 8);
+    let mut f = w0 as u64 + le32(&key[16..]) as u64;
+    let t0 = f as u32;
+    f = w1 as u64 + le32(&key[20..]) as u64 + (f >> 32);
+    let t1 = f as u32;
+    f = w2 as u64 + le32(&key[24..]) as u64 + (f >> 32);
+    let t2 = f as u32;
+    f = w3 as u64 + le32(&key[28..]) as u64 + (f >> 32);
+    let t3 = f as u32;
+    let mut tag = [0u8; 16];
+    for (i, t) in [t0, t1, t2, t3].iter().enumerate() {
+        tag[i * 4..i * 4 + 4].copy_from_slice(&t.to_le_bytes());
+    }
+    tag
+}
+
+/// The Poly1305 tag of `aad` and `ct` as RFC 8439's AEAD lays them out.
+fn aead_tag(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ct: &[u8]) -> [u8; 16] {
+    let block = chacha20_block(key, 0, nonce);
+    let mut otk = [0u8; 32];
+    otk.copy_from_slice(&block[..32]);
+    let pad = |n: usize| (16 - n % 16) % 16;
+    let mut mac = Vec::with_capacity(aad.len() + ct.len() + 48);
+    mac.extend_from_slice(aad);
+    mac.resize(mac.len() + pad(aad.len()), 0);
+    mac.extend_from_slice(ct);
+    mac.resize(mac.len() + pad(ct.len()), 0);
+    mac.extend_from_slice(&(aad.len() as u64).to_le_bytes());
+    mac.extend_from_slice(&(ct.len() as u64).to_le_bytes());
+    poly1305(&otk, &mac)
+}
+
+/// Encrypts `data` in place and returns its tag: ChaCha20-Poly1305.
+pub fn seal_in_place(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], data: &mut [u8]) -> [u8; 16] {
+    chacha20_xor(key, 1, nonce, data);
+    aead_tag(key, nonce, aad, data)
+}
+
+/// Decrypts `data` in place when `tag` is its tag under `key`, `nonce` and
+/// `aad`, and leaves it as it was otherwise.
+pub fn open_in_place(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    data: &mut [u8],
+    tag: &[u8],
+) -> bool {
+    if !ct_eq(&aead_tag(key, nonce, aad, data), tag) {
+        return false;
+    }
+    chacha20_xor(key, 1, nonce, data);
+    true
+}
+
+/// Randomness from the system alone: a key must not come from the clock,
+/// as [`random_bytes`] falls back to.
+pub fn system_random(n: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut buf)
+        .ok()?;
+    Some(buf)
+}
+
 // ------------------------------------------------------------------- random
 
 /// Cryptographic randomness. `/dev/urandom` on Unix; when that cannot be
@@ -312,6 +525,80 @@ pub fn nonce(len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    const SUNSCREEN: &[u8] = b"Ladies and Gentlemen of the class of '99: If I could offer you \
+        only one tip for the future, sunscreen would be it.";
+
+    /// RFC 8439, 2.4.2: ChaCha20 encryption.
+    #[test]
+    fn chacha20_rfc8439() {
+        let key: [u8; 32] = (0u8..32).collect::<Vec<_>>().try_into().unwrap();
+        let nonce: [u8; 12] = unhex("000000000000004a00000000").try_into().unwrap();
+        let mut data = SUNSCREEN.to_vec();
+        chacha20_xor(&key, 1, &nonce, &mut data);
+        assert_eq!(
+            data,
+            unhex(
+                "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b
+                 f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8
+                 07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736
+                 5af90bbf74a35be6b40b8eedf2785e42874d"
+            )
+        );
+    }
+
+    /// RFC 8439, 2.5.2: Poly1305.
+    #[test]
+    fn poly1305_rfc8439() {
+        let key: [u8; 32] =
+            unhex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+                .try_into()
+                .unwrap();
+        assert_eq!(
+            poly1305(&key, b"Cryptographic Forum Research Group").to_vec(),
+            unhex("a8061dc1305136c6c22b8baf0c0127a9")
+        );
+    }
+
+    /// RFC 8439, 2.8.2: the AEAD, and a tag that no longer matches.
+    #[test]
+    fn aead_rfc8439() {
+        let key: [u8; 32] = (0x80u8..0xa0).collect::<Vec<_>>().try_into().unwrap();
+        let nonce: [u8; 12] = unhex("070000004041424344454647").try_into().unwrap();
+        let aad = unhex("50515253c0c1c2c3c4c5c6c7");
+        let mut data = SUNSCREEN.to_vec();
+        let tag = seal_in_place(&key, &nonce, &aad, &mut data);
+        assert_eq!(
+            data,
+            unhex(
+                "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6
+                 3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36
+                 92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc
+                 3ff4def08e4b7a9de576d26586cec64b6116"
+            )
+        );
+        assert_eq!(tag.to_vec(), unhex("1ae10b594f09e26a7e902ecbd0600691"));
+        let mut back = data.clone();
+        assert!(open_in_place(&key, &nonce, &aad, &mut back, &tag));
+        assert_eq!(back, SUNSCREEN);
+        // One bit of the text, of the associated data or of the tag.
+        for (d, a, t) in [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+            let (mut d2, mut a2, mut t2) = (data.clone(), aad.clone(), tag.to_vec());
+            d2[5] ^= d;
+            a2[3] ^= a;
+            t2[15] ^= t;
+            let ok = open_in_place(&key, &nonce, &a2, &mut d2, &t2);
+            assert_eq!(ok, d + a + t == 0);
+        }
+    }
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()

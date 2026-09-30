@@ -176,7 +176,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
 | **Access** | a server token · HS256 JSON Web Tokens held to a policy, down to the rows (`owner = $jwt.sub`) |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 444 KB wasm + 92 KB client (172 KB brotli served) · 1040–1477 KB binary · 2.88 MB container image |
+| **Runtime size** | 444 KB wasm + 92 KB client (172 KB brotli served) · 1153–1687 KB binary · 2.88 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
