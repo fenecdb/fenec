@@ -62,9 +62,12 @@ export class Fenec {
 
   /**
    * Loads the WASM module and opens an empty database.
-   * @param {string|BufferSource} src  A URL, or the module bytes themselves.
-   *   The bytes are for Node: `fetch` cannot resolve a relative path there,
-   *   so the file is read with `readFile` and handed over directly.
+   * @param {string|BufferSource|WebAssembly.Module} src  A URL, the module
+   *   bytes themselves, or the module compiled. The bytes are for Node:
+   *   `fetch` cannot resolve a relative path there, so the file is read with
+   *   `readFile` and handed over directly. The compiled module is for
+   *   Cloudflare Workers, which import a `.wasm` file as one and refuse to
+   *   compile bytes at run time.
    * @param {{collation?: string|URL|Function}} opts  Where the collation
    *   data the module does not carry comes from (`collation()`): the URL of
    *   the directory holding `<name>.bin`, or a function handed the name and
@@ -87,7 +90,10 @@ export class Fenec {
     } catch (e) {
       throw whyNoModule(e);
     }
-    const wasm = mod.instance.exports;
+    // Instantiated from a compiled module, `instantiate` gives the instance
+    // alone, and from bytes the module and the instance: read as the
+    // latter, a Worker's module had no exports and `open` threw.
+    const wasm = (mod instanceof WebAssembly.Instance ? mod : mod.instance).exports;
     return new Fenec(wasm, wasm.fenec_open(), opts.collation ?? beside(src));
   }
 

@@ -408,6 +408,23 @@ import { readFile } from 'node:fs/promises';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
 
+// A Cloudflare Worker imports a `.wasm` file compiled, and cannot compile
+// bytes at run time: `open` takes the module that way too, and the database
+// it opens is the one the bytes open.
+test('open takes a compiled module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const images = [];
+  for (const src of [wasm, new WebAssembly.Module(wasm)]) {
+    const db = await Fenec.open(src);
+    db.run('create collection t (a int, e vector<2> @hnsw(cosine))');
+    db.run('put t [{a: 1, e: [1, 0]}, {a: 2, e: [0, 1]}]');
+    assert.equal(db.rows('get t select a near e [0.9, 0.1] limit 1')[0].a, 1);
+    images.push(db.snapshot());
+    db.close();
+  }
+  assert.deepEqual(images[0], images[1]);
+});
+
 test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);
