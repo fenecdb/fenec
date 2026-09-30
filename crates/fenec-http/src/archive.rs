@@ -62,6 +62,29 @@ pub struct Restored {
     pub time: Option<u64>,
 }
 
+/// What `verify` found an archive holds, whole.
+#[derive(Debug)]
+pub struct Verified {
+    pub images: usize,
+    pub segments: usize,
+    /// The change the oldest image is at and when it was taken: nothing
+    /// before it can be restored.
+    pub first: u64,
+    pub from: u64,
+    /// The last change, and when it was appended (none when only images).
+    pub last: u64,
+    pub to: Option<u64>,
+    /// Bytes of a last record cut short at the end of the last segment --
+    /// an archiver stopped mid-write, or a copy taken while it wrote --
+    /// which the next archive run cuts off and a restore passes over.
+    pub torn: usize,
+    /// Changes no segment holds between two images, first to last: a
+    /// restore to the end passes over them from the later image, but not
+    /// to a moment inside them. An archiver that fell behind the primary's
+    /// feed was sent an image and left one; a segment gone leaves one too.
+    pub gaps: Vec<(u64, u64)>,
+}
+
 pub struct Archive {
     dir: PathBuf,
     /// Set once an image was taken here: the segment being written ends
@@ -549,6 +572,93 @@ impl Archive {
             }
         }
         Ok(())
+    }
+
+    /// Reads the whole archive the way a restore would, and says what it
+    /// holds: each image opens and is at the change its name says, the
+    /// segments run on from the oldest image with no change missing -- a
+    /// gap is the start of a later image, where the primary sent one --
+    /// only the last segment may end in a record cut short, and a restore
+    /// to the end opens. A backup no restore can be made from is not one,
+    /// and this is how to know before it is needed.
+    pub fn verify(&self) -> io::Result<Verified> {
+        let images = self.images()?;
+        let Some(&(first, from)) = images.first() else {
+            return Err(corrupt(
+                "no image: a restore has nothing to start from".into(),
+            ));
+        };
+        for &(seq, time) in &images {
+            let path = self.image_path(seq, time);
+            let db = fenec_core::fs::open_read_only(&path)
+                .map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            if db.change_seq() != seq {
+                return Err(corrupt(format!(
+                    "{}: the image is at change {}, not {seq}",
+                    path.display(),
+                    db.change_seq()
+                )));
+            }
+        }
+        let segments = self.segments()?;
+        let (mut covered, mut to, mut torn) = (first, None, 0);
+        let mut gaps = Vec::new();
+        for (k, &start) in segments.iter().enumerate() {
+            let path = self.segment_path(start);
+            let bytes = fs::read(&path)?;
+            let (list, end) =
+                entries(&bytes).map_err(|e| corrupt(format!("{}: {e}", path.display())))?;
+            if end < bytes.len() {
+                if k + 1 < segments.len() {
+                    return Err(corrupt(format!(
+                        "{}: a record cut short {} bytes before its end, with segments after it",
+                        path.display(),
+                        bytes.len() - end
+                    )));
+                }
+                torn = bytes.len() - end;
+            }
+            if start > covered + 1 {
+                if !images.iter().any(|i| i.0 + 1 == start) {
+                    return Err(corrupt(format!(
+                        "changes {} to {} are missing: no segment holds them and no image starts after them",
+                        covered + 1,
+                        start - 1
+                    )));
+                }
+                gaps.push((covered + 1, start - 1));
+            }
+            let writes: u64 = list.iter().map(|e| e.3).sum();
+            if writes > 0 {
+                covered = covered.max(start + writes - 1);
+                to = list.last().map(|e| e.0);
+            }
+        }
+        let last = covered.max(images.last().map_or(0, |i| i.0));
+        let probe = std::env::temp_dir().join(format!(
+            "fenec-verify-{}-{}.fenec",
+            std::process::id(),
+            now_ms()
+        ));
+        let restored = self.restore(&probe, Target::End);
+        let _ = fs::remove_file(&probe);
+        let r = restored?;
+        if r.seq != last {
+            return Err(corrupt(format!(
+                "a restore to the end reached change {}, the archive holds {last}",
+                r.seq
+            )));
+        }
+        Ok(Verified {
+            images: images.len(),
+            segments: segments.len(),
+            first,
+            from,
+            last,
+            to,
+            torn,
+            gaps,
+        })
     }
 
     /// The image `to` starts from and the writes after it up to there,

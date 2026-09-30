@@ -29,6 +29,7 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
                      [--image-every <1h>] [--keep <7d>]
        fenec restore <archive-dir> <out.fenec> [--to <time> | --to-change <n>]
        fenec prune   <archive-dir> --keep <7d>
+       fenec verify  <archive-dir>
 
   <primary> is its HTTP address, http://host:port, and <t> its
   --replication-token (also read from FENEC_REPLICATION_TOKEN).
@@ -47,6 +48,11 @@ usage: fenec backup  <primary> <file.fenec | archive-dir>   [--token <t>]
   prune     what `archive --keep` lets go of, done once: the images before the
             newest one taken by the start of the window and the segments
             before the oldest image kept -- as on a copy synced elsewhere
+
+  verify    reads the archive as a restore would: every image opens at its
+            change, the segments run on with none missing, a restore to the
+            end opens; says from when to when it can restore, and exits 1
+            when it cannot
 
   A duration is a number and s, m, h or d: 90s, 30m, 6h, 7d.
 "#;
@@ -113,6 +119,39 @@ pub fn main(command: &str, args: &[String]) -> i32 {
             other => positional.push(other.to_string()),
         }
         i += 1;
+    }
+    if command == "verify" {
+        let [dir] = positional.as_slice() else {
+            fail(&format!(
+                "`fenec verify` takes the archive's directory\n{USAGE}"
+            ));
+        };
+        let iso = |t: u64| fenec_core::time::format_iso(t as i64);
+        return match Archive::new(dir).and_then(|a| a.verify()) {
+            Ok(v) => {
+                println!("{dir}: {} images, {} segments", v.images, v.segments);
+                println!(
+                    "  restores changes {} to {}, from {} to {}",
+                    v.first,
+                    v.last,
+                    iso(v.from),
+                    v.to.map_or("its last image".into(), iso)
+                );
+                for (a, b) in &v.gaps {
+                    println!(
+                        "  changes {a} to {b} are in no segment: no restore to a moment among them"
+                    );
+                }
+                if v.torn > 0 {
+                    println!("  the last segment ends in a record cut short ({} bytes), which a restore passes over", v.torn);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("fenec verify: {dir}: {e}");
+                1
+            }
+        };
     }
     if command == "prune" {
         let [dir] = positional.as_slice() else {

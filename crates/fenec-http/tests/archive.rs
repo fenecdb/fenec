@@ -486,3 +486,101 @@ fn an_archive_takes_its_own_images_and_lets_go_of_what_no_restore_needs() {
     // A second prune finds nothing more to let go of.
     assert_eq!(shared.prune(now - moment_b, now).unwrap(), (0, 0));
 }
+
+/// A copy of an archive's directory, to damage.
+fn copy_of(arch: &Path, to: &Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(arch).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+    }
+    to.to_path_buf()
+}
+
+/// The archive's files named `prefix`..., in order.
+fn named(arch: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(arch)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `verify` reads an archive as a restore would and says what it holds --
+/// and what no restore could be made from: a record cut short before the
+/// last segment's end, an image that does not open, a change missing.
+#[test]
+fn verify_says_what_an_archive_can_restore() {
+    let d = dir("verify");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection notes (n int @hash)");
+    let arch = d.join("archive");
+    let shared = Arc::new(Archive::new(&arch).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let follower = {
+        let (a, flag, url) = (Arc::clone(&shared), Arc::clone(&stop), p.url.clone());
+        std::thread::spawn(move || {
+            let upstream = Upstream::new(&url, TOKEN.into()).unwrap();
+            a.follow(&upstream, &flag, &|_| {})
+        })
+    };
+    for round in 0..3 {
+        for i in 0..5 {
+            p.exec(&format!("put notes {{n: {}}}", round * 10 + i));
+        }
+        archived(&arch, p.seq());
+        if round < 2 {
+            shared.consolidate().unwrap();
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    follower.join().unwrap().unwrap();
+
+    let v = shared.verify().unwrap();
+    assert_eq!((v.images, v.segments, v.last, v.torn), (3, 3, p.seq(), 0));
+    assert!(v.gaps.is_empty() && v.to.is_some());
+
+    // The last segment cut in a record's middle, as an archiver stopped
+    // mid-write leaves it: the rest restores, and it says how much.
+    let torn = copy_of(&arch, &d.join("torn"));
+    let last = named(&torn, "writes-").pop().unwrap();
+    let len = std::fs::metadata(&last).unwrap().len();
+    let f = std::fs::OpenOptions::new().write(true).open(&last).unwrap();
+    f.set_len(len - 3).unwrap();
+    let v = Archive::new(&torn).unwrap().verify().unwrap();
+    assert!(v.torn > 0 && v.last < p.seq(), "{v:?}");
+
+    // Cut short before the last segment's end: no restore passes it.
+    let cut = copy_of(&arch, &d.join("cut"));
+    let first = named(&cut, "writes-").remove(0);
+    let len = std::fs::metadata(&first).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&first)
+        .unwrap()
+        .set_len(len - 3)
+        .unwrap();
+    let e = Archive::new(&cut).unwrap().verify().unwrap_err();
+    assert!(e.to_string().contains("cut short"), "{e}");
+
+    // A segment gone between two images: the end restores from the later
+    // one, and the changes no restore can reach are named.
+    let gone = copy_of(&arch, &d.join("gone"));
+    std::fs::remove_file(named(&gone, "writes-").remove(1)).unwrap();
+    let v = Archive::new(&gone).unwrap().verify().unwrap();
+    assert_eq!(v.gaps.len(), 1, "{v:?}");
+    assert_eq!(v.last, p.seq());
+
+    // An image that does not open.
+    let bad = copy_of(&arch, &d.join("bad"));
+    let image = named(&bad, "image-").remove(1);
+    let mut bytes = std::fs::read(&image).unwrap();
+    let mid = bytes.len() / 2;
+    bytes.truncate(mid);
+    std::fs::write(&image, bytes).unwrap();
+    let e = Archive::new(&bad).unwrap().verify().unwrap_err();
+    assert!(e.to_string().contains("image-"), "{e}");
+}
