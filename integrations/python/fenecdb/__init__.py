@@ -15,6 +15,16 @@ request would stall:
 
     async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
         rows = await db.query("get articles near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+
+`Client.follow` reads every write on the server's disk (`GET /_changes`,
+`fenec-pg --cdc`) for a consumer whose cursor the server keeps, and
+commits each batch once the loop comes back for the next:
+
+    for batch in db.follow("search-index"):
+        for change in batch:
+            index(change)          # an exception: this batch is read again
+
+`python -m fenecdb.relay` hands the same to another program or a webhook.
 """
 
 from __future__ import annotations
@@ -25,9 +35,9 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, NamedTuple, Sequence
 
-__all__ = ["AsyncClient", "Client", "FenecError", "placeholders"]
+__all__ = ["AsyncClient", "Changes", "Client", "FenecError", "placeholders"]
 
 
 class FenecError(Exception):
@@ -36,6 +46,14 @@ class FenecError(Exception):
     def __init__(self, message: str, status: int):
         super().__init__(message)
         self.status = status
+
+
+class Changes(NamedTuple):
+    """Writes `GET /_changes` handed over, a dict each, and `next`: the last
+    one's number, which is the `since` to read on from."""
+
+    writes: list
+    next: int
 
 
 class Client:
@@ -66,6 +84,70 @@ class Client:
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return self._post("/batch", "\n".join(lines).encode(), "application/x-ndjson")
 
+    def changes(
+        self,
+        since: int | None = None,
+        *,
+        consumer: str | None = None,
+        limit: int | None = None,
+        wait: float | None = None,
+    ) -> Changes:
+        """The writes on the server's disk after `since` -- or after where
+        `consumer` stands, or from now with neither -- at most `limit`, each
+        `{"seq", "at", "collection", "op", "id", "doc"}`. With `wait`, an
+        answer with nothing in it waits that many seconds for a write."""
+        query = {"since": since, "consumer": consumer, "limit": limit}
+        if wait is not None:
+            query["wait"] = int(wait * 1000)
+        q = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        req = urllib.request.Request(f"{self.url}/_changes?{q}", method="GET")
+        timeout = self.timeout + (wait or 0)
+        with self._open(req, timeout) as resp:
+            raw = resp.read()
+            nxt = int(resp.headers.get("Fenec-Next", since or 0))
+        return Changes([json.loads(line) for line in raw.splitlines() if line], nxt)
+
+    def consumer(self, name: str, since: int | None = None) -> dict:
+        """Makes `name` a consumer at the last write on disk, or at `since`,
+        or moves it there: once it has done with every write up to it."""
+        body = json.dumps({} if since is None else {"since": since}).encode()
+        return self._post(f"/_changes/consumers/{_seg(name)}", body, "application/json")
+
+    def consumers(self) -> list:
+        """Each consumer: its `name`, `since`, and how many writes `behind`."""
+        req = urllib.request.Request(f"{self.url}/_changes/consumers", method="GET")
+        with self._open(req, self.timeout) as resp:
+            return json.load(resp)
+
+    def forget_consumer(self, name: str) -> None:
+        req = urllib.request.Request(f"{self.url}/_changes/consumers/{_seg(name)}", method="DELETE")
+        with self._open(req, self.timeout):
+            pass
+
+    def follow(self, consumer: str, *, limit: int = 1000, wait: float = 10.0) -> Iterator[list]:
+        """Each batch of writes for `consumer`, made if it is new, committed
+        once the loop asks for the next: a batch the loop did not finish is
+        read again, so each write comes at least once."""
+        if not any(c["name"] == consumer for c in self.consumers()):
+            self.consumer(consumer)
+        while True:
+            got = self.changes(consumer=consumer, limit=limit, wait=wait)
+            # Nothing read, nothing committed: a commit is a write, which
+            # the stream passes over, and committing past it every time
+            # would write once a wait.
+            if got.writes:
+                yield got.writes
+                self.consumer(consumer, got.next)
+
+    def _open(self, req: urllib.request.Request, timeout: float):
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            _answer(e.code, e.read())
+            raise
+
     def _post(self, path: str, body: bytes, content_type: str) -> Any:
         req = urllib.request.Request(self.url + path, data=body, method="POST")
         req.add_header("Content-Type", content_type)
@@ -81,6 +163,10 @@ class Client:
             except (ValueError, AttributeError):
                 message = raw.decode(errors="replace")
             raise FenecError(message, e.code) from None
+
+
+def _seg(name: str) -> str:
+    return urllib.parse.quote(name, safe="")
 
 
 def _answer(status: int, raw: bytes) -> Any:

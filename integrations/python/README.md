@@ -26,6 +26,21 @@ async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
     await db.batch([("put articles {title: $1}", ["a"]), ("put articles {title: $1}", ["b"])])
 ```
 
+Every write on the server's disk (`fenec-pg --cdc`), for a consumer whose
+cursor the server keeps -- each batch committed once the loop comes back
+for the next, so each write comes at least once -- and the same handed on
+to another program or a webhook:
+
+```python
+for batch in db.follow("search-index"):
+    for change in batch:               # {"seq", "at", "collection", "op", "id", "doc"}
+        index(change)
+```
+
+```sh
+python -m fenecdb.relay http://127.0.0.1:8080 --consumer kafka | kcat -P -b broker:9092 -t fenec
+```
+
 ```python
 from fenecdb.langchain import FenecVectorStore
 
