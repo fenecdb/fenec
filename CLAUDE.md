@@ -1478,10 +1478,16 @@ which grows and never gives back. A checkpoint writes the image a mebibyte
 at a time (`fenec_snapshot_chunks`, `snapshotChunks`), each into storage
 before the next is made: built into one `Vec` the image doubled as it grew,
 old and new side by side, and `boxed` copied it again -- 30 000 x 128 went
-from 60 to 128 MB, and goes to 70. The chunks are made all at once, so a
-checkpoint is an object's peak: about 50 000 rows of 128 dimensions or
-10 000 of 768 fit, 109 and 111 MB at it; `wrangler dev` does not hold a
-Worker to it.
+from 60 to 128 MB, and goes to 70. Made all at once, the chunks stood
+beside the rows until the first was stored: 50 000 x 128 at 73 MB went to
+109. So each is made as it is taken (`Chunks::take`), out of the stores'
+own bytes held rather than copied (`ImageOut::write_kept`, `Kept`: the
+image a load kept, and each segment -- an `Arc` in the module too now,
+copied by a write while an image holds it, so the image is the database
+as it stood when begun): 83 MB, and a checkpoint of 10 000 x 768 holds no
+more than the rows, for 0.6 KB brotli; puts and the image as fast. About
+60 000 rows of 128 dimensions or 12 000 of 768 fit, 97 and 102 MB at the
+most; `wrangler dev` does not hold a Worker to it.
 
 **The browser module grows nothing by doubling past a mebibyte.** Its
 memory is never given back, so a peak stays for good. An index's vectors
