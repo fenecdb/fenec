@@ -1,11 +1,12 @@
 <!--
 title: Integrations — fenecdb
-description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, and useLiveQuery for React over a synced replica.
+description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, a LangChain.js one over a database in the page or the endpoint, and useLiveQuery for React over a synced replica.
 -->
 
 <h1>Integrations</h1>
 <p class="kicker">A vector store for LangChain and one for LlamaIndex, over
-fenec-pg's HTTP endpoint, and <code>useLiveQuery</code> for React, over a
+fenec-pg's HTTP endpoint; one for LangChain.js, over a database in the page
+or the same endpoint; and <code>useLiveQuery</code> for React, over a
 replica the sync layer keeps. Each passes the tests its framework holds its
 own integrations to.</p>
 
@@ -64,6 +65,36 @@ scores are BM25's and the fusion's, not similarities. <code>quant</code>,
 <code>"int8"</code> or <code>"bit"</code> (<code>cosine</code> only), keeps the
 graph over codes, and <code>near</code> still orders by the vectors
 themselves.</p>
+
+<h2 id="langchain-js">LangChain.js</h2>
+
+<pre data-lang="js">import { Fenec, connect } from '@fenecdb/web';
+import { FenecVectorStore } from '@fenecdb/langchain';
+
+// The database in the page -- or behind fenec-pg: connect('http://127.0.0.1:8080')
+const db = await Fenec.open('./fenec.wasm');
+const store = new FenecVectorStore(embeddings, {
+  client: db,
+  collection: 'handbook',
+  metadataFields: { source: 'text' },
+  fullText: true,
+});
+await store.addDocuments(documents);
+await store.similaritySearch('how do I compact', 4, { source: 'handbook' });
+await store.search('compact', 4, { mode: 'hybrid' });
+const retriever = store.asRetriever({ k: 4 });</pre>
+
+<p>The Python store's collection, from JavaScript: a document is a row of
+its id, text, metadata as JSON and vector under <code>@hnsw</code>, made on
+the first write; <code>metadataFields</code> get columns of their own under
+<code>@hash</code>, and <code>filter</code> takes equality and
+<code>$in</code> over them; with <code>fullText</code>,
+<code>search(query, k, {mode})</code> ranks by the words
+(<code>'text'</code>) or both (<code>'hybrid'</code>). <code>client</code>
+is anything with <code>run(sql, params)</code>: a <code>Fenec</code> keeps
+the whole RAG index in the page, no server, and a <code>FenecHttp</code> the
+server's. Writing an id already there replaces it — two statements, which
+over HTTP are two requests.</p>
 
 <h2>LlamaIndex</h2>
 
@@ -139,6 +170,7 @@ dependency.</p>
 <tbody>
 <tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance, <code>from_texts</code>, the text and hybrid modes and int8 codes besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
 <tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top — and the text search and hybrid modes</td></tr>
+<tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-pg's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
 <tr><td>React</td><td>a stand-in database for the contract, and a real fenec-pg and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
 </tbody>
 </table>

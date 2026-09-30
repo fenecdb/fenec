@@ -1,0 +1,33 @@
+{
+  "name": "@fenecdb/langchain",
+  "version": "0.1.5",
+  "description": "A LangChain.js vector store over fenecdb: the database in the page, or behind fenec-pg's HTTP endpoint",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "index.js",
+  "files": ["index.js", "README.md"],
+  "peerDependencies": {
+    "@langchain/core": ">=1.0.0",
+    "@fenecdb/web": ">=0.1.5"
+  },
+  "peerDependenciesMeta": {
+    "@fenecdb/web": { "optional": true }
+  },
+  "keywords": ["fenecdb", "langchain", "vector-store", "rag", "hnsw", "bm25"],
+  "homepage": "https://fenecdb.com/docs/integrations",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fenecdb/fenec.git",
+    "directory": "integrations/langchain"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "@langchain/core": "^1.2.13"
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  }
+}

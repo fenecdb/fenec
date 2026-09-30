@@ -31,7 +31,7 @@ def main():
     sub("Cargo.toml", r'^version = "[^"]+"', f'version = "{v}"')
     sub("Cargo.toml", r'^(fenec-wire = \{ version = )"[^"]+"', rf'\g<1>"{v}"')
     sub("integrations/python/pyproject.toml", r'^version = "[^"]+"', f'version = "{v}"')
-    for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json"):
+    for path in ("web/package.json", "integrations/react/package.json", "integrations/cloudflare/package.json", "integrations/langchain/package.json"):
         sub(path, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
     # The lock file names the package's version twice, at its top and as the
     # root of `packages`; `make react-test` installs from it with `npm ci`.

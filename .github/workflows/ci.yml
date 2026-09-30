@@ -183,6 +183,11 @@ jobs:
       - name: React hook
         run: make wasm react-test
 
+      # The LangChain.js store over a database in the page and over the
+      # HTTP endpoint of a fenec-pg started here.
+      - name: LangChain.js store
+        run: make langchain-test
+
       # web/fenec.d.ts held to web/fenec.js: every export and method the
       # module has declared, and a caller's code type-checked under --strict.
       - name: TypeScript declarations
