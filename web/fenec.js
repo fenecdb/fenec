@@ -1478,7 +1478,12 @@ export async function restore(fenec, key = 'default', opts = {}) {
   const gen = ck ? image.gen : null;
   if (ck) {
     image = await unseal(ck, key, gen, 0, image);
-    chunks = await Promise.all(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+    // Opened side by side, refused in order: the first record that does not
+    // open is the one named, whichever settled first.
+    const opened = await Promise.allSettled(chunks.map((c, i) => unseal(ck, key, gen, i + 1, c)));
+    const bad = opened.find((r) => r.status === 'rejected');
+    if (bad) throw bad.reason;
+    chunks = opened.map((r) => r.value);
   }
   let bytes = image;
   if (chunks.length) {
