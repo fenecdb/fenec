@@ -1431,6 +1431,27 @@ formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
 errors to the old lexer's over 40 000 generated texts.
 
+**A Durable Object keeps a database as a file would** (`integrations/cloudflare`,
+`@fenecdb/cloudflare`). A Worker imports a `.wasm` compiled, and `Fenec.open`
+takes the module so -- it read `.instance.exports` off what `instantiate`
+gives a module, and the engine could not start in a Worker at all.
+`persist` writes an image into `ctx.storage` and then only the writes since
+(`journal`/`drain`), until they outgrow half the image; each cut into
+pieces under a key-value backed object's 128 KiB, each image under a
+generation of its own and the record naming the whole one written last, so
+storage that stops part way -- held to after every number of puts -- holds
+the last whole database. `checkpoint` writes a new image now: a restore
+takes the graphs in it, where the vectors written after the last image are
+linked one after another in the browser module's one thread -- the first
+`near` over 10 000 x 128 after a restart 792 ms, after a checkpoint 36
+(`make cloudflare-bench`, under `wrangler dev`, which runs from the example
+Worker's own `--config`: below the repository it took the site's
+`wrangler.jsonc`). A Worker's isolate has 128 MB with the module's memory,
+which grows and never gives back, and a checkpoint builds the whole image in
+it: 20 000 x 128 held 88 MB after one, 30 000 x 128 128 MB, so an object
+holds about 20 000 rows of 128 dimensions or 3 000 of 768; `wrangler dev`
+does not hold a Worker to it.
+
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
 the standard library for its client) and `useLiveQuery`

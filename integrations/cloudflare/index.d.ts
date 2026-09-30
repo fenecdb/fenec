@@ -32,6 +32,13 @@ export const PIECE: number;
 export function persist(fenec: Fenec<any>, storage: Storage, options?: Options): Promise<number>;
 
 /**
+ * Writes a new image now, graphs included, and lets the writes kept after
+ * the last one go, so a restore takes the graphs rather than link every
+ * vector written since. Resolves to the bytes written.
+ */
+export function checkpoint(fenec: Fenec<any>, storage: Storage, options?: Options): Promise<number>;
+
+/**
  * Loads the database kept under `key` into `fenec`. Resolves to false when
  * there is none.
  */

@@ -70,6 +70,7 @@ NAV = [
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),
         ("docs/sharding", "Tenants and sharding"),
+        ("docs/serverless", "Serverless and Cloudflare"),
         ("docs/import", "Import"),
         ("docs/embedding", "Embedded Rust"),
     ]),

@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { persist, restore, PIECE } from './index.js';
+import { checkpoint, persist, restore, PIECE } from './index.js';
 
 const wasm = await readFile(new URL('../../web/fenec.wasm', import.meta.url)).catch(() => null);
 const skip = wasm ? false : 'no web/fenec.wasm (make wasm)';
@@ -127,6 +127,31 @@ test('storage that fails part way keeps the last whole database', { skip }, asyn
     }
   }
   assert.ok(failed >= 8, `only ${failed} writes were cut short`);
+});
+
+test('a checkpoint writes the writes since into a new image', { skip }, async () => {
+  const storage = new Storage();
+  const db = await open();
+  db.run('create collection t (n int, s text, e vector<8> @hnsw(cosine))');
+  db.run(`put t [${Array.from({ length: 500 }, (_, i) => `{n: ${i}, s: "a", e: [${[1, i, 0, 0, 0, 0, 0, 0]}]}`).join(', ')}]`);
+  await persist(db, storage);
+  db.run('put t {n: 900, s: "b", e: [0, 0, 1, 0, 0, 0, 0, 0]}');
+  await persist(db, storage);
+  const before = await storage.get('fenec:meta');
+  assert.ok(before.log[0] > 0, 'a write kept after the image');
+  assert.ok((await checkpoint(db, storage)) > 0);
+  const after = await storage.get('fenec:meta');
+  assert.equal(after.gen, before.gen + 1);
+  assert.deepEqual(after.log, [0, 0], 'nothing after the new image');
+  const back = await open();
+  await restore(back, storage);
+  assert.deepEqual(rows(back), rows(db));
+  // And writes after it are kept after it.
+  db.run('put t {n: 901, s: "c", e: [0, 0, 0, 1, 0, 0, 0, 0]}');
+  await persist(db, storage);
+  const again = await open();
+  await restore(again, storage);
+  assert.deepEqual(rows(again), rows(db));
 });
 
 test('databases under two keys are kept apart', { skip }, async () => {

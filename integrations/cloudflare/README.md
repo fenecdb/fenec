@@ -48,6 +48,16 @@ call's puts into one atomic write anyway; this does not depend on it.
 example/wrangler.jsonc` serves it locally, and `worker.test.js` runs it
 under workerd, stopping and starting it over the same storage.
 
+`checkpoint(fenec, storage)` writes a new image now, the graphs in it:
+call it from an alarm once writes stop. A start then restores the graph
+rather than link every vector written since the last image, 36 ms against
+792 for the first `near` over 10 000 rows of 128 dimensions.
+
+An object holds about 20 000 rows of 128 dimensions, or 3 000 of 768,
+within a Worker's 128 MB: the module's memory grows and never gives back,
+and a checkpoint builds the whole image in it. See
+[Serverless and Cloudflare](https://fenecdb.com/docs/serverless).
+
 A value is at most 128 KiB by default, which a key-value backed object
 takes. A SQLite-backed object takes up to 2 MB, so `piece` can be larger
 there, for fewer rows.

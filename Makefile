@@ -12,7 +12,7 @@ FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
 .PHONY: all test test-js types wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
-	python-test drivers-test react-test cloudflare-test \
+	python-test drivers-test react-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -242,6 +242,12 @@ react-test:
 ## under `wrangler dev`, stopped and started again (needs `make wasm`)
 cloudflare-test:
 	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && npm test
+
+## A Durable Object's first answer after an eviction: the example Worker
+## under `wrangler dev`, loaded, restarted, and its first `near` timed
+## against the ones after it (needs `make wasm`; SIZES=1000,10000 to choose)
+cloudflare-bench:
+	cd integrations/cloudflare && npm ci --no-audit --no-fund --loglevel=error && node coldstart.mjs
 
 ## What `order ... collate tr` costs over a million Turkish names, in fenecdb
 ## and (after `make pgvector-up`) in PostgreSQL under ICU's tr-x-icu
