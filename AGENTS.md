@@ -669,6 +669,21 @@ token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
 cost nothing measurable, 16 400 single puts a second over HTTP either way,
 and 9 000 rows of 128 dimensions read back at 283 000 a second.
 
+**An `Idempotency-Key` makes a write once** (`idempotent.rs`). A `put`
+with no id makes a row each time, so a retry after a timeout wrote it
+twice. A keyed REST write, `/query` or `/batch` runs as a block under the
+write lock, and its answer is kept in the same block as a row of
+`_idempotency` -- the key the subject's for a scoped token, and the
+request's hash beside it -- so the write and its key land together, a
+second request with the key waits for the lock and is handed the answer
+(`Idempotent-Replayed`), the key with another request is 422, a failed
+write keeps none, and a `compact`, which cannot be put back, takes none.
+Kept for `--idempotency-ttl` (a day), let go of a range of the `@sorted`
+`at` at a time, at most once a minute; the change stream leaves them out.
+A write without a key is rendered after the lock as before; with one, 16
+200 single puts a second over HTTP against 18 300 -- with its statements
+parsed each time and the collection made if missing every time, 14 600.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`) and expression depth at 512 levels; both return a query error,
 because a silently cut result is a wrong answer believed right. Full table in

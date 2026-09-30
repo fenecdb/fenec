@@ -88,6 +88,8 @@ usage: fenec-pg [options]
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
       --http-read-only      turn off writes over HTTP (the pg path is unaffected)
+      --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
+                            are kept, in seconds. default: 86400
       --http-max-streams <n>  ceiling on concurrent subscriptions (0 = unlimited)
                             default: 64. Subscriptions (`GET /<name>/changes`)
                             are long lived and each holds a thread, so they
@@ -344,6 +346,13 @@ fn main() {
             "--mint-token" => mint = Some(next(&mut i, "--mint-token")),
             "--http-cors" => http_cfg.cors = Some(next(&mut i, "--http-cors")),
             "--http-read-only" => http_cfg.read_only = true,
+            "--idempotency-ttl" => {
+                let v = next(&mut i, "--idempotency-ttl");
+                let s: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--idempotency-ttl expects seconds, got `{v}`"))
+                });
+                http_cfg.idempotency_ttl = std::time::Duration::from_secs(s);
+            }
             "--http-max-streams" => {
                 let v = next(&mut i, "--http-max-streams");
                 http_cfg.max_streams = v.parse().unwrap_or_else(|_| {
