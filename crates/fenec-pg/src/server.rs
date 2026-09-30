@@ -1254,6 +1254,9 @@ fn copy_out(
         );
         return Ok((Copied::On, 0));
     }
+    if let Some(query) = &spec.query {
+        return copy_query_out(query, &spec.format, db, held, lock, out);
+    }
     let target = match lock.read(db, |d| copy::target(d, &spec)) {
         Ok(t) => t,
         Err((code, msg)) => {
@@ -1372,6 +1375,113 @@ fn copy_out(
     out.copy_done();
     out.command_complete(&format!("COPY {done}"));
     Ok((Copied::On, done))
+}
+
+/// `COPY (<get>) TO STDOUT`: the rows of a FenecQL `get`, as the same `get`
+/// answers them -- a `near`'s `_score` last, a `lookup`'s levels widened
+/// into the row -- in the format asked for. The query is read whole under
+/// one read lock, as it would be run on its own: its order, its page and
+/// its ranking are the query's, not pages by id.
+fn copy_query_out(
+    query: &str,
+    format: &copy::Format,
+    db: &Arc<RwLock<Database>>,
+    held: &Held,
+    lock: &mut Lock<'_>,
+    out: &mut Writer,
+) -> io::Result<(Copied, u64)> {
+    let sel = match read(query) {
+        Ok(mut stmts) if stmts.len() == 1 && matches!(stmts[0], Statement::Select(_)) => {
+            match stmts.remove(0) {
+                Statement::Select(sel) => sel,
+                _ => unreachable!("matched above"),
+            }
+        }
+        Ok(_) => {
+            out.error(
+                "0A000",
+                "COPY of a query takes one get: COPY (get ...) TO STDOUT",
+            );
+            return Ok((Copied::On, 0));
+        }
+        Err(e) => {
+            out.error(sqlstate(&e), &e.to_string());
+            return Ok((Copied::On, 0));
+        }
+    };
+    let stmt = Statement::Select(sel);
+    let answer = {
+        let _gate = held.as_ref().map(|t| t.enter());
+        lock.read(db, |d| {
+            let cols = match &stmt {
+                Statement::Select(sel) => select_columns(d, sel),
+                _ => None,
+            };
+            d.query(&stmt, &[]).map(|r| (r, cols))
+        })
+    };
+    let (resp, cols) = match answer {
+        Ok(a) => a,
+        Err(e) => {
+            out.error(sqlstate(&e), &e.to_string());
+            return Ok((Copied::On, 0));
+        }
+    };
+    let Some(rs) = resp.rows() else {
+        out.error("0A000", "COPY of a query takes one get");
+        return Ok((Copied::On, 0));
+    };
+    let rs = rs.flatten();
+    let cols = cols.unwrap_or_else(|| rs.columns.iter().map(|c| (c.clone(), OID_TEXT)).collect());
+    let with_score = cols.last().is_some_and(|(n, _)| n == "_score");
+    let binary = *format == copy::Format::Binary;
+    out.copy_out_response(cols.len(), binary);
+    let mut line = Vec::new();
+    if binary {
+        out.copy_data(copy::BINARY_HEADER);
+    }
+    if let copy::Format::Csv { header: true, .. } = format {
+        let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
+        copy::header(format, &names, &mut line);
+        out.copy_data(&line);
+    }
+    for row in &rs.rows {
+        line.clear();
+        let score = with_score.then_some(row.score);
+        if binary {
+            let cells = match binary_row(&cols, &row.values, score, &[1]) {
+                Ok(c) => c,
+                Err(why) => {
+                    out.error("0A000", &why);
+                    return Ok((Copied::On, 0));
+                }
+            };
+            line.extend_from_slice(&(cells.len() as i16).to_be_bytes());
+            for cell in &cells {
+                match cell {
+                    Some(b) => {
+                        line.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                        line.extend_from_slice(b);
+                    }
+                    None => line.extend_from_slice(&(-1i32).to_be_bytes()),
+                }
+            }
+        } else {
+            let mut cells: Vec<Option<String>> = row.values.iter().map(to_pg_text).collect();
+            if let Some(score) = score {
+                cells.push(score.map(|s| format!("{s}")));
+            }
+            copy::line(format, &cells, &mut line);
+        }
+        out.copy_data(&line);
+    }
+    if binary {
+        out.copy_data(&(-1i16).to_be_bytes());
+    }
+    let n = rs.rows.len() as u64;
+    out.copy_done();
+    out.command_complete(&format!("COPY {n}"));
+    Ok((Copied::On, n))
 }
 
 /// A put of a COPY's rows so far, as a statement of its block -- which the
