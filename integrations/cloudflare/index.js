@@ -111,6 +111,18 @@ export async function persist(fenec, storage, { key = 'fenec', piece = PIECE } =
   return (image ?? log).length;
 }
 
+/**
+ * Writes a new image now, the graphs in it, and lets the writes kept after
+ * the last one go: a restore then takes the graphs as they were rather than
+ * link every vector written since, one after another. A Durable Object can
+ * call it from an alarm, when no request waits. Returns the bytes written.
+ */
+export async function checkpoint(fenec, storage, options = {}) {
+  // Kept anew, `persist` writes an image under the next generation.
+  kept.delete(fenec);
+  return persist(fenec, storage, options);
+}
+
 /** Deletes a generation's pieces, 128 keys a call as a Durable Object takes them. */
 async function drop(storage, key, gen) {
   for (const part of ['i', 'l']) {

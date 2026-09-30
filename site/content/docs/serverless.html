@@ -1,0 +1,160 @@
+<!--
+title: Serverless and Cloudflare — fenecdb
+description: The engine inside a Cloudflare Worker, a tenant's database in a Durable Object kept in its storage, what a cold start costs, what an object holds, and when a function should talk to a server instead.
+-->
+
+<h1>Serverless and Cloudflare</h1>
+<p class="kicker">The browser module runs wherever V8 runs a WebAssembly
+module, a Cloudflare Worker among them. A Durable Object gives it what a
+file gives a server: one writer, and storage that outlives the process. So
+one object holds one database, as a tenant is one file on a
+<code>fenec-pg</code> node.</p>
+
+<h2 id="models">Two ways to use it</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>the engine in the function</th><th>the function talks to a server</th></tr></thead>
+<tbody>
+<tr><td>where the data is</td><td>in the object's memory, kept in its storage</td><td>in <code>fenec-pg</code>'s file</td></tr>
+<tr><td>a query</td><td>no network in the object: 2.5 ms for a request's <code>near</code> over 10 000 × 128</td><td>a round trip to the server</td></tr>
+<tr><td>writers</td><td>one an object; a tenant an object</td><td>one a file; a node holds many</td></tr>
+<tr><td>size</td><td>about 20 000 rows of 128 dimensions, 3 000 of 768 (<a href="#limits">Limits</a>)</td><td>the machine's disk, the file mapped</td></tr>
+<tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, the pg wire</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The second needs nothing new: <code>Fenec.connect(url)</code>, the
+Python <code>Client</code> or any pg driver, and a function's connections
+are HTTP requests, so there is no pool to exhaust. The rest of this page is
+the first.</p>
+
+<h2 id="worker">A database a Durable Object</h2>
+
+<pre data-lang="js">import { DurableObject } from 'cloudflare:workers';
+import { Fenec } from '@fenecdb/web';
+import { checkpoint, persist, restore } from '@fenecdb/cloudflare';
+import wasm from '@fenecdb/web/fenec.wasm';
+
+export class Tenant extends DurableObject {
+  async db() {
+    if (!this.fenec) {
+      this.fenec = await Fenec.open(wasm);        // the module as the Worker imports it
+      await restore(this.fenec, this.ctx.storage);
+    }
+    return this.fenec;
+  }
+
+  async query(sql, params) {
+    const db = await this.db();
+    const out = db.run(sql, params);
+    await persist(db, this.ctx.storage);          // kept before the answer goes
+    await this.ctx.storage.setAlarm(Date.now() + 10_000);
+    return out;
+  }
+
+  async alarm() {
+    await checkpoint(await this.db(), this.ctx.storage);
+  }
+}
+
+export default {
+  async fetch(req, env) {
+    const tenant = env.TENANT.get(env.TENANT.idFromName('acme'));
+    const { sql, params } = await req.json();
+    return Response.json(await tenant.query(sql, params));
+  },
+};</pre>
+
+<p>A Worker imports a <code>.wasm</code> file compiled, and cannot compile
+bytes at run time; <code>Fenec.open</code> takes the module so.
+<code>integrations/cloudflare/example</code> is this Worker with a tenant
+from the path, <code>POST /t/&lt;tenant&gt;/query</code>, and its test runs
+it under <code>wrangler dev</code> — workerd, as Cloudflare runs it — then
+stops and starts it over the same storage and reads the rows, a
+<code>near</code>'s answer and each tenant's own database back.</p>
+
+<h2 id="storage">What the storage holds</h2>
+
+<p><code>persist</code> keeps what a file would hold: an image the first
+time, then only the writes since the last call — the engine's journal, as
+<code>persist</code> in the browser takes it for IndexedDB — until they
+outgrow half the image and a new image replaces them. Each is cut into
+pieces under a key-value backed object's 128 KiB a value; a SQLite-backed
+object takes 2 MB with the key, and <code>{piece}</code> can be set larger
+there. Every image goes under a generation of its own, and the record
+naming the whole one is written last, the generation before let go after
+it: storage that stops part way holds the last whole database. A Durable
+Object combines a call's puts into one atomic write besides; this does not
+lean on it, and a test stops the storage after every number of puts, an
+image's and an append's, and restores the last whole database each
+time.</p>
+
+<h2 id="cold-start">A cold start</h2>
+
+<p>An object evicted, or a deploy, starts the next request with no
+database in memory: the module instantiated, the image and the writes
+after it read out of storage and loaded. The graphs the image holds are
+restored as they were; the writes after it are applied as the write path
+would, their vectors linked into the graph one after another — the browser
+module has one thread. So a <code>checkpoint</code> — a new image now, the
+writes since folded into it — once the writes stop, from an alarm, is what
+keeps a start short. The first <code>near</code> after a restart, against
+the ones after it, under <code>wrangler dev</code> on an M1 (<code>make
+cloudflare-bench</code>, median of five restarts; rows of a text, an int and
+a 128-dim vector, 1 000 a request, each kept before it was answered):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th class="n">rows</th><th class="n">first <code>near</code>, as written</th><th class="n">after a checkpoint</th><th class="n">every <code>near</code> after</th></tr></thead>
+<tbody>
+<tr><td class="n">1 000</td><td class="n">22 ms</td><td class="n">23 ms</td><td class="n">2.5 ms</td></tr>
+<tr><td class="n">10 000</td><td class="n">792 ms</td><td class="n"><b>36 ms</b></td><td class="n">2.5 ms</td></tr>
+<tr><td class="n">50 000</td><td class="n">1 455 ms</td><td class="n"><b>84 ms</b></td><td class="n">2.4 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A request's round trip through <code>wrangler dev</code> is in every
+figure. 50 000 rows is past what an object holds under Cloudflare's
+128 MB (<a href="#limits">Limits</a>): it is there for how a start grows
+with the rows. The rows went in at 3 000 to 5 700 a second, a request of
+1 000 at a time with its vectors linked and kept before the answer.</p>
+
+<h2 id="limits">Limits</h2>
+
+<p>A Worker's isolate has 128 MB, the WebAssembly memory in it, and
+<code>wrangler dev</code> does not hold a Worker to it: the figures above
+reach past it. What the module holds, measured in Node on the same module
+(rows of a text, an int and a vector under HNSW):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>rows</th><th class="n">restored</th><th class="n">written, 1 000 a request</th><th class="n">then a checkpoint</th></tr></thead>
+<tbody>
+<tr><td>10 000 × 128</td><td class="n">20 MB</td><td class="n">34 MB</td><td class="n">56 MB</td></tr>
+<tr><td>20 000 × 128</td><td class="n">38 MB</td><td class="n">51 MB</td><td class="n">88 MB</td></tr>
+<tr><td>30 000 × 128</td><td class="n">56 MB</td><td class="n">60 MB</td><td class="n">128 MB</td></tr>
+<tr><td>3 000 × 768</td><td class="n">30 MB</td><td class="n">62 MB</td><td class="n">79 MB</td></tr>
+<tr><td>5 000 × 768</td><td class="n">—</td><td class="n">100 MB</td><td class="n">133 MB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A WebAssembly memory grows and never gives back, so an object that has
+written for a while holds what its lists grew to, and a checkpoint builds
+the whole image in it and copies it out. So an object holds about 20 000
+rows of 128 dimensions or 3 000 of 768 with room to spare; past that, a
+<code>fenec-pg</code> node and <code>Fenec.connect</code>, or a tenant's
+data spread over more objects.</p>
+
+<ul>
+  <li>One writer an object: writes to one tenant go one after another, as
+  on a server; tenants write side by side.</li>
+  <li>Collation data for scripts the module does not carry is fetched from
+  a URL by default; in a Worker, pass <code>{collation: name =&gt; ...}</code>
+  to <code>Fenec.open</code> and hand the chunks from your bundle.</li>
+  <li><code>@fenecdb/cloudflare</code> is built and installed by CI with
+  the other packages; it is not yet published to npm.</li>
+</ul>
