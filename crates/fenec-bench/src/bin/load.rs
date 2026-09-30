@@ -18,6 +18,9 @@
 //!   * HTTP: `POST /docs` with a JSON array of 1 000 rows;
 //!   * HTTP: `POST /batch` with 1 000 lines, each a `POST /query` body.
 //!
+//! Then the rows are read back whole by `COPY docs TO STDOUT`, through
+//! the `postgres` crate's `copy_out`, from fenec-pg and from PostgreSQL.
+//!
 //! PostgreSQL + pgvector, the container `make pgvector-up` starts (skipped
 //! without it), is sent the same rows by `COPY ... FROM STDIN` and by
 //! `INSERT` of 1 000 rows a statement, with `synchronous_commit = off`, as
@@ -259,6 +262,21 @@ fn postgres_insert(c: &mut Client, name: &str, rows: &[Row]) -> String {
     rate(t)
 }
 
+/// `COPY <name> TO STDOUT` read to its end: its rows a second.
+fn copy_out(c: &mut Client, name: &str) -> String {
+    use std::io::Read as _;
+    let t = Instant::now();
+    let mut bytes = Vec::new();
+    c.copy_out(&format!("COPY {name} (category, score, embed) TO STDOUT"))
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let rows = bytes.iter().filter(|&&b| b == b'\n').count();
+    assert_eq!(rows, ROWS, "{name}");
+    let secs = t.elapsed().as_secs_f64();
+    format!("{:.1}k rows/s", rows as f64 / secs / 1e3)
+}
+
 fn main() {
     let rows = rows();
     let dir = std::env::temp_dir().join(format!("fenecbench-load-{}", std::process::id()));
@@ -317,6 +335,18 @@ fn main() {
         let without = way(&table(&mut admin, false), &rows);
         println!("{what:<34} {with:>16} {without:>16}");
     }
+    // Read back from a collection loaded with no vector index: the second.
+    let (host, port) = pg_addr.split_once(':').unwrap();
+    let mut fenec = Client::connect(
+        &format!("host={host} port={port} user=fenec dbname=fenec"),
+        NoTls,
+    )
+    .unwrap();
+    println!(
+        "\n{:<34} {:>16}",
+        "read back, COPY TO STDOUT",
+        copy_out(&mut fenec, "docs2")
+    );
     if let Some(c) = postgres.as_mut() {
         let mut row = |what: &str, way: &dyn Fn(&mut Client, &str, &[Row]) -> String| {
             pg_table(c, "load_hnsw", true);
@@ -328,6 +358,11 @@ fn main() {
         println!();
         row("PostgreSQL, COPY", &postgres_copy);
         row("PostgreSQL, INSERT of 1 000", &postgres_insert);
+        println!(
+            "{:<34} {:>16}",
+            "PostgreSQL, COPY TO STDOUT",
+            copy_out(c, "load_plain")
+        );
         c.batch_execute("DROP TABLE IF EXISTS load_hnsw; DROP TABLE IF EXISTS load_plain")
             .unwrap();
     }

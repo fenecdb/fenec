@@ -275,6 +275,22 @@ impl IdIndex {
             .chain(extra)
     }
 
+    /// [`Self::iter`] from `from` on: the dense part from its slot, the
+    /// sparse ids at or above it. Only a native scan starts from an id
+    /// (`Expr::conjunct_id_floor`); `iter` keeps its own walk, which as
+    /// this one from 1 was 75 bytes brotli of the browser module.
+    fn iter_from(&self, from: DocId) -> impl Iterator<Item = DocId> + '_ {
+        let mut extra: Vec<DocId> = self.sparse.keys().copied().filter(|&k| k >= from).collect();
+        extra.sort_unstable();
+        let skip = (from.max(1) - 1).min(self.dense.len() as u64) as usize;
+        self.dense[skip..]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty())
+            .map(move |(i, _)| (skip + i) as u64 + 1)
+            .chain(extra)
+    }
+
     /// Replaces every location with `f`'s, visiting the ids in `iter`'s
     /// order.
     fn relocate(&mut self, mut f: impl FnMut(DocId, Loc) -> Loc) {
@@ -577,6 +593,10 @@ impl Store {
     /// `limit` should not first build a list of every id in the collection.
     pub fn iter_ids(&self) -> impl Iterator<Item = DocId> + '_ {
         self.index.iter()
+    }
+    /// The ids from `from` on, ascending.
+    pub fn iter_ids_from(&self, from: DocId) -> impl Iterator<Item = DocId> + '_ {
+        self.index.iter_from(from)
     }
     /// Reserves room up front for a known record count.
     pub fn reserve(&mut self, n: usize) {
@@ -1682,6 +1702,25 @@ mod tests {
         assert_eq!(st.len(), 5);
         assert_eq!(st.read_field(10_000, 1).unwrap(), Some(Value::Int(-10)));
         assert_eq!(st.ids(), vec![4_000, 5_000, 8_000, 10_000, 11_000]);
+        for from in [
+            0,
+            1,
+            4_000,
+            4_001,
+            8_000,
+            9_999,
+            10_000,
+            11_000,
+            11_001,
+            u64::MAX,
+        ] {
+            let want: Vec<_> = st.ids().into_iter().filter(|&i| i >= from).collect();
+            assert_eq!(
+                st.iter_ids_from(from).collect::<Vec<_>>(),
+                want,
+                "from {from}"
+            );
+        }
 
         let mut st2 = Store::new();
         st2.replay(&st.image()).unwrap();

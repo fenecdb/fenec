@@ -155,3 +155,49 @@ fn count_and_required_still_see_every_match() {
     let got: Vec<u64> = page.rows().unwrap().rows.iter().map(|r| r.id).collect();
     assert_eq!(got, ids[ids.len() - 5..ids.len() - 2].to_vec());
 }
+
+/// `id > x` and `id >= x` start the scan at `x`, which is how a page is
+/// read after the last id of the one before; the rows are the ones the
+/// same filter gives under an `or`, which never starts anywhere but the
+/// first row.
+#[test]
+fn a_scan_from_an_id_gives_the_rows_a_whole_scan_does() {
+    let mut db = fixture();
+    let bounds = [
+        "id > 0",
+        "id > 1",
+        "id >= 1",
+        "id > 1234",
+        "id >= 1234",
+        "id > 1234.5",
+        "id >= 1234.5",
+        "id > -7",
+        "id > 2999",
+        "id > 3000",
+        "id > 9000000000000000000",
+        "1234 < id",
+        "1234 <= id",
+        "id > \"x\"",
+        "id > 1234 and id > 2000",
+        "id >= 2000 and a >= 3 and id > 1500",
+        "a = 1 and id > 2500",
+    ];
+    for b in bounds {
+        for page in ["", "limit 7", "limit 50 offset 3"] {
+            let pushed = format!("get t select a, b, tag where {b} {page}");
+            let whole = format!("get t select a, b, tag where ({b}) or id = 0 {page}");
+            assert_eq!(rows(&mut db, &pushed), rows(&mut db, &whole), "{pushed}");
+        }
+    }
+    let q = fenec_ql::parse_one("get t select a where id > $1 limit 5").unwrap();
+    for p in [
+        Value::Int(2000),
+        Value::Float(1999.5),
+        Value::Text("2000".into()),
+    ] {
+        let got = db.execute_with(&q, std::slice::from_ref(&p));
+        let q2 = fenec_ql::parse_one("get t select a where (id > $1) or id = 0 limit 5").unwrap();
+        let want = db.execute_with(&q2, std::slice::from_ref(&p));
+        assert_eq!(format!("{got:?}"), format!("{want:?}"), "{p:?}");
+    }
+}

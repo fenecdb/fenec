@@ -214,6 +214,27 @@ impl Writer {
         });
     }
 
+    /// CopyOutResponse: CopyData follows until CopyDone, each of `columns`
+    /// in text.
+    pub fn copy_out_response(&mut self, columns: usize) {
+        self.msg(b'H', |b| {
+            b.push(0);
+            b.extend_from_slice(&(columns as i16).to_be_bytes());
+            for _ in 0..columns {
+                b.extend_from_slice(&0i16.to_be_bytes());
+            }
+        });
+    }
+
+    /// CopyData: bytes of the stream, a row of it as PostgreSQL sends them.
+    pub fn copy_data(&mut self, data: &[u8]) {
+        self.msg(b'd', |b| b.extend_from_slice(data));
+    }
+
+    pub fn copy_done(&mut self) {
+        self.msg(b'c', |_| {});
+    }
+
     pub fn empty_query(&mut self) {
         self.msg(b'I', |_| {});
     }
