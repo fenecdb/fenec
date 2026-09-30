@@ -183,6 +183,11 @@ jobs:
       - name: React hook
         run: make wasm react-test
 
+      # A database kept in a Durable Object's storage, against a stand-in
+      # holding to its limits, and storage that fails part way.
+      - name: Durable Object storage
+        run: make cloudflare-test
+
       # What PyPI and npm would take, built as they build it, installed and
       # used. A published release publishes them (packages.yml).
       - name: Packages

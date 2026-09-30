@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The three packages as the registries would take them, installed where a
-# user would install them, and used: PyPI's `fenecdb`, npm's `@fenecdb/web`
-# and `@fenecdb/react`. Needs `make wasm wasm-lite` first, since the web
+# The packages as the registries would take them, installed where a user
+# would install them, and used: PyPI's `fenecdb`, npm's `@fenecdb/web`,
+# `@fenecdb/react` and `@fenecdb/cloudflare`. Needs `make wasm wasm-lite` first, since the web
 # package carries both modules. Run by `make packages`, by CI, and by
 # packages.yml before anything is published.
 set -euo pipefail
@@ -25,7 +25,8 @@ version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
 py="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/integrations/python/pyproject.toml" | head -1)"
 web="$(node -p "require('$root/web/package.json').version")"
 react="$(node -p "require('$root/integrations/react/package.json').version")"
-for v in "$py" "$web" "$react"; do
+cloudflare="$(node -p "require('$root/integrations/cloudflare/package.json').version")"
+for v in "$py" "$web" "$react" "$cloudflare"; do
   if [ "$v" != "$version" ]; then
     echo "a package says $v where the workspace says $version (make version V=...)" >&2
     exit 1
@@ -40,12 +41,14 @@ fi
 # client opening the module and its collation data the way its README says.
 (cd "$root/web" && npm pack -q --pack-destination "$out/dist" >/dev/null)
 (cd "$root/integrations/react" && npm pack -q --pack-destination "$out/dist" >/dev/null)
+(cd "$root/integrations/cloudflare" && npm pack -q --pack-destination "$out/dist" >/dev/null)
 cd "$out/npm"
 npm init -y -q >/dev/null
 npm pkg set type=module >/dev/null
 npm install -q --no-audit --no-fund \
   "$out/dist/fenecdb-web-$version.tgz" \
   "$out/dist/fenecdb-react-$version.tgz" \
+  "$out/dist/fenecdb-cloudflare-$version.tgz" \
   react@19 >/dev/null
 cat > smoke.mjs <<'EOF'
 import { readFile } from 'node:fs/promises';
@@ -69,6 +72,25 @@ if (typeof useLiveQuery !== 'function' || typeof FenecProvider !== 'function') {
   throw new Error('@fenecdb/react exports are missing');
 }
 console.log('@fenecdb/react imports');
+
+// A Durable Object's storage kept in a Map: the database there and back.
+const { persist, restore } = await import('@fenecdb/cloudflare');
+const map = new Map();
+const storage = {
+  get: async (k) => map.get(k),
+  put: async (k, v) => void map.set(k, v),
+  delete: async (ks) => ks.forEach((k) => map.delete(k)),
+  list: async ({ prefix }) => new Map([...map].filter(([k]) => k.startsWith(prefix)).sort()),
+};
+const kept = await Fenec.open(await file('fenec.wasm'));
+kept.run('create collection t (n int)');
+kept.run('put t [{n: 1}, {n: 2}]');
+await persist(kept, storage);
+const back = await Fenec.open(await file('fenec.wasm'));
+if (!(await restore(back, storage)) || back.rows('get t count')[0].count !== 2) {
+  throw new Error('@fenecdb/cloudflare did not bring the database back');
+}
+console.log('@fenecdb/cloudflare keeps a database');
 EOF
 node smoke.mjs
 
