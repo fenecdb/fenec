@@ -3717,3 +3717,78 @@ fn serde_free_quote(s: &str) -> String {
     out.push('"');
     out
 }
+
+/// `COPY (get ...) TO STDOUT`: a query's rows as the query answers them --
+/// its order and page, a `near`'s `_score`, a `lookup` widened into the
+/// row -- in text, CSV and binary.
+#[test]
+fn copy_of_a_query_writes_its_rows() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple(
+        "create collection docs (name text, n int, e vector<2> @hnsw(cosine), author int @hash)",
+    );
+    c.simple("create collection authors (who text)");
+    c.simple("put authors [{who: \"ada\"}, {who: \"bob\"}]");
+    let docs: Vec<String> = (0..50)
+        .map(|i| {
+            format!(
+                "{{name: \"doc {i}\", n: {i}, e: [{i}, 1], author: {}}}",
+                1 + i % 2
+            )
+        })
+        .collect();
+    c.simple(&format!("put docs [{}]", docs.join(", ")));
+
+    // The text format's line for each row the query itself answers.
+    let lines = |c: &mut Client, q: &str| -> Vec<u8> {
+        let mut out = Vec::new();
+        for row in rows_of(c, q) {
+            let cells: Vec<String> = row
+                .into_iter()
+                .map(|v| v.unwrap_or_else(|| "\\N".into()))
+                .collect();
+            out.extend_from_slice(cells.join("\t").as_bytes());
+            out.push(b'\n');
+        }
+        out
+    };
+    for q in [
+        "get docs select name, n where n >= 10 order n desc limit 5 offset 2",
+        "get docs select name near e [3, 1] limit 4",
+        "get docs select name, author where n < 4 lookup authors on id = author select who",
+        "get docs count",
+    ] {
+        let r = c.simple(&format!("COPY ({q}) TO STDOUT"));
+        let want = lines(&mut c, q);
+        assert_eq!(copied_out(&r), want, "{q}");
+        let n = want.iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(outcome(&r), format!("COPY {n}"), "{q}");
+    }
+    let r = c.simple("COPY (get docs select name, n where n < 3) TO STDOUT (FORMAT csv, HEADER)");
+    assert_eq!(copied_out(&r), b"name,n\ndoc 0,0\ndoc 1,1\ndoc 2,2\n");
+    // Binary: a bigint and a `_score` as the query's binary row sends them.
+    let r = c.simple("COPY (get docs select n near e [1, 0] limit 1) TO STDOUT (FORMAT binary)");
+    let head = find(&r, b'H').unwrap();
+    assert_eq!(head.body, [1, 0, 2, 0, 1, 0, 1]);
+    let bin = copied_out(&r);
+    assert!(bin.starts_with(b"PGCOPY\n\xff\r\n\0"));
+    assert_eq!(&bin[19..21], &2i16.to_be_bytes());
+    assert_eq!(&bin[21..25], &8i32.to_be_bytes());
+    assert!(bin.ends_with(&[0xff, 0xff]));
+    assert_eq!(outcome(&r), "COPY 1");
+
+    for (sql, code) in [
+        ("COPY (put docs {n: 1}) TO STDOUT", "0A000"),
+        ("COPY (get docs; get docs) TO STDOUT", "0A000"),
+        ("COPY (get nothing) TO STDOUT", "42P01"),
+        ("COPY (get docs where) TO STDOUT", "42601"),
+        ("COPY (get docs where n = $1) TO STDOUT", ""),
+    ] {
+        let r = c.simple(sql);
+        assert!(find(&r, b'H').is_none(), "{sql}");
+        assert!(find(&r, b'E').is_some(), "{sql}");
+        assert!(outcome(&r).starts_with(code), "{sql}: {}", outcome(&r));
+    }
+    assert_eq!(rows_of(&mut c, "get docs count"), cells(&[&[Some("50")]]));
+}

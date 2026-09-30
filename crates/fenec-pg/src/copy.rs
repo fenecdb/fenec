@@ -45,6 +45,9 @@ pub struct Spec {
     pub format: Format,
     /// `TO STDOUT`: the rows go to the client rather than come from it.
     pub out: bool,
+    /// `COPY (<query>) TO STDOUT`: the rows of a FenecQL `get` rather than
+    /// a collection's, `table` and `columns` empty.
+    pub query: Option<String>,
 }
 
 /// Why a COPY among other statements is refused: its rows follow the
@@ -65,6 +68,12 @@ pub fn parse(sql: &str) -> Option<Result<Spec, Refusal>> {
             .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80)
     {
         return None;
+    }
+    // A query's text is kept as it is written, for FenecQL to read: the
+    // tokens here fold case and drop what they do not know.
+    let after = sql.trim_start()[4..].trim_start();
+    if after.starts_with('(') {
+        return Some(query_copy(after));
     }
     let mut toks = tokens(sql);
     match toks.first() {
@@ -150,11 +159,6 @@ fn syntax(what: &str) -> Refusal {
 
 fn statement(t: &[Tok]) -> Result<Spec, Refusal> {
     let mut i = 0;
-    if t.first() == Some(&Tok::Punct('(')) {
-        return Err(unsupported(
-            "COPY of a query is not supported: COPY a collection FROM STDIN or TO STDOUT",
-        ));
-    }
     // The table, schema-qualified or not: `public` is the only schema.
     let mut table = name(t.get(i)).ok_or_else(|| syntax("a table name is expected"))?;
     i += 1;
@@ -216,6 +220,65 @@ fn statement(t: &[Tok]) -> Result<Spec, Refusal> {
         columns,
         format,
         out,
+        query: None,
+    })
+}
+
+/// `COPY (<query>) TO STDOUT [options]`, `text` starting at the `(`: the
+/// query runs to the `)` that closes it, past the parentheses nested in it
+/// and whatever a string literal holds.
+fn query_copy(text: &str) -> Result<Spec, Refusal> {
+    let b = text.as_bytes();
+    let (mut depth, mut i, mut quote) = (0usize, 0, None);
+    let close = loop {
+        let Some(&c) = b.get(i) else {
+            return Err(syntax("the query's `(` is not closed"));
+        };
+        match (quote, c) {
+            (Some(_), b'\\') => i += 1,
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'"' | b'\'') => quote = Some(c),
+            (None, b'(') => depth += 1,
+            (None, b')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    };
+    let query = text[1..close].trim().to_string();
+    let mut toks = tokens(&text[close + 1..]);
+    while toks.last() == Some(&Tok::Punct(';')) {
+        toks.pop();
+    }
+    if toks.contains(&Tok::Punct(';')) {
+        return Err(unsupported(ALONE));
+    }
+    match (toks.first(), toks.get(1)) {
+        (Some(Tok::Word(to)), Some(Tok::Word(stdout))) if to == "to" && stdout == "stdout" => {}
+        (Some(Tok::Word(from)), _) if from == "from" => {
+            return Err(syntax(
+                "a query's rows go TO STDOUT, not come FROM anywhere",
+            ))
+        }
+        (Some(Tok::Word(to)), Some(Tok::Str(_) | Tok::Word(_))) if to == "to" => {
+            return Err(unsupported(
+                "COPY TO a file or a program is not supported: take the rows TO STDOUT, \
+                 as psql's \\copy does",
+            ))
+        }
+        _ => return Err(syntax("TO STDOUT is expected")),
+    }
+    Ok(Spec {
+        table: String::new(),
+        columns: Vec::new(),
+        format: options(&toks[2..])?,
+        out: true,
+        query: Some(query),
     })
 }
 
@@ -1208,6 +1271,18 @@ mod tests {
             }
         );
         assert!(!spec("COPY t FROM STDIN").out);
+        // A query's text as written, its parentheses and strings whole.
+        let q = spec(
+            "copy (get T select Name where (a = \")(\" or b = 'x\\'') and c > 1) \
+             to stdout (format csv, header);",
+        );
+        assert_eq!(
+            q.query.as_deref(),
+            Some("get T select Name where (a = \")(\" or b = 'x\\'') and c > 1")
+        );
+        assert!(q.out && q.table.is_empty());
+        assert!(matches!(q.format, Format::Csv { header: true, .. }));
+        assert_eq!(spec("COPY(get t)TO STDOUT").query.as_deref(), Some("get t"));
         assert!(parse("get docs").is_none());
         assert!(parse("copying things").is_none());
         for (sql, code) in [
@@ -1221,7 +1296,10 @@ mod tests {
             ("COPY t FROM STDIN WITH BINARY CSV", "42601"),
             ("COPY t FROM STDIN (HEADER)", "0A000"),
             ("COPY t FROM STDIN (DELIMITER ';;')", "0A000"),
-            ("COPY (select 1) TO STDOUT", "0A000"),
+            ("COPY (get t TO STDOUT", "42601"),
+            ("COPY (get t) FROM STDIN", "42601"),
+            ("COPY (get t) TO '/tmp/x'", "0A000"),
+            ("COPY (get t) TO STDOUT; get t", "0A000"),
             ("COPY other.t FROM STDIN", "3F000"),
             ("COPY t (a b) FROM STDIN", "42601"),
             ("COPY t FROM STDIN; SELECT 1", "0A000"),
