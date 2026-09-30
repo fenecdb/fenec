@@ -404,6 +404,7 @@ fn fenec_file(path: &Path, vecs: &[Vec<f32>]) {
         db.execute(&Statement::Put {
             collection: "docs".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }

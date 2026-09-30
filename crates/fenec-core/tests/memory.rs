@@ -28,6 +28,7 @@ fn sessions(index: &str) -> Database {
     db.execute(&Statement::Put {
         collection: "s".into(),
         docs,
+        insert: false,
     })
     .unwrap();
     db

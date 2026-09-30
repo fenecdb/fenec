@@ -961,6 +961,9 @@ pub enum Statement {
         collection: String,
         /// Field-expression pairs per document. Supplying `id` makes it an upsert.
         docs: Vec<Vec<(String, Expr)>>,
+        /// `insert`: a document naming an id that is taken is refused
+        /// (`Error::Duplicate`), where `put` writes over it.
+        insert: bool,
     },
     Select(Select),
     /// `explain get ...`: the query runs, and what comes back is the path it

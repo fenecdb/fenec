@@ -85,6 +85,7 @@ fn collection_with(options: &str) -> (Database, Vec<Value>) {
     db.execute(&Statement::Put {
         collection: "c".into(),
         docs,
+        insert: false,
     })
     .unwrap();
     // Queries near every cluster but the one `side` marks, so that filter

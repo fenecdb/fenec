@@ -537,7 +537,7 @@ impl Parser {
     }
 
     fn put(&mut self) -> Result<Statement> {
-        self.next(); // put / insert
+        let insert = matches!(self.next(), Tok::Ident(w) if w.eq_ignore_ascii_case("insert"));
         self.eat_kw("into");
         let collection = self.ident()?;
         let mut docs = Vec::new();
@@ -564,7 +564,11 @@ impl Parser {
         if docs.is_empty() {
             return self.err("put expects at least one document");
         }
-        Ok(Statement::Put { collection, docs })
+        Ok(Statement::Put {
+            collection,
+            docs,
+            insert,
+        })
     }
 
     fn object(&mut self) -> Result<Vec<(String, Expr)>> {

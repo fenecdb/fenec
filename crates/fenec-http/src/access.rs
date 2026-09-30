@@ -405,6 +405,7 @@ impl Scope {
             Statement::Put {
                 collection,
                 mut docs,
+                insert,
             } => {
                 let f = self.writable(&collection)?;
                 let mut pins = Vec::new();
@@ -425,7 +426,12 @@ impl Scope {
                         }
                     }
                 }
-                Statement::Put { collection, docs }
+                // An insert stays one: made a put here, it would write over.
+                Statement::Put {
+                    collection,
+                    docs,
+                    insert,
+                }
             }
             Statement::Update {
                 collection,

@@ -1100,3 +1100,44 @@ fn sparse_vectors_over_json() {
     );
     assert_eq!(r.status, 400, "{}", r.body);
 }
+
+/// `POST /<name>` makes documents: one naming an id that is taken is 409,
+/// and nothing of the request is written. `insert` over `/query` the same;
+/// `put` writes over.
+#[test]
+fn a_post_and_an_insert_refuse_a_taken_id() {
+    let h = start_with(Config::default(), Database::new());
+    call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"create collection n (t text)"}"#),
+    );
+    assert_eq!(
+        call(h.port, "POST", "/n", Some(r#"{"id": 3, "t": "a"}"#)).status,
+        201
+    );
+    let r = call(
+        h.port,
+        "POST",
+        "/n",
+        Some(r#"[{"id": 4, "t": "b"}, {"id": 3, "t": "c"}]"#),
+    );
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert_eq!(rows(&get(h.port, "/n").body), 1);
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"insert n {id: 3, t: \"d\"}"}"#),
+    );
+    assert_eq!(r.status, 409, "{}", r.body);
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"put n {id: 3, t: \"e\"}"}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(get(h.port, "/n").body.contains("\"e\""));
+}

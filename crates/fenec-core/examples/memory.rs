@@ -78,6 +78,7 @@ fn main() {
         db.execute(&Statement::Put {
             collection: "s".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }

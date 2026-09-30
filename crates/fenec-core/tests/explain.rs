@@ -98,6 +98,7 @@ fn db() -> Database {
     db.execute(&Statement::Put {
         collection: "a".into(),
         docs,
+        insert: false,
     })
     .unwrap();
     let children: Vec<Vec<(String, Expr)>> = (0..4000usize)
@@ -114,6 +115,7 @@ fn db() -> Database {
     db.execute(&Statement::Put {
         collection: "r".into(),
         docs: children,
+        insert: false,
     })
     .unwrap();
     db

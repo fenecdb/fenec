@@ -120,7 +120,9 @@ fn statement(db: &Database, s: &Statement, out: &mut [Option<DataType>]) {
         }
     };
     match s {
-        Statement::Put { collection, docs } => {
+        Statement::Put {
+            collection, docs, ..
+        } => {
             let sc = schema(collection);
             docs.iter().for_each(|d| pairs(sc, d, out));
         }

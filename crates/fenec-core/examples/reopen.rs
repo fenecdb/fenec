@@ -110,6 +110,7 @@ fn put(db: &mut Database, centres: &[Vec<f32>], rows: std::ops::Range<u64>) {
     db.execute(&Statement::Put {
         collection: "d".into(),
         docs,
+        insert: false,
     })
     .unwrap();
 }

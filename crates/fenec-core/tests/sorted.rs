@@ -118,6 +118,7 @@ fn twins(docs: usize) -> (Database, Database) {
         db.execute(&Statement::Put {
             collection: "c".into(),
             docs: batch.clone(),
+            insert: false,
         })
         .unwrap();
     }

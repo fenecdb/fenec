@@ -123,6 +123,7 @@ fn in_process(rows: &[Row], indexed: bool) -> String {
         db.execute(&Statement::Put {
             collection: "docs".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }

@@ -37,7 +37,7 @@ GET    /&lt;name&gt;?&lt;filter&gt;         rows
 GET    /&lt;name&gt;?&lt;filter&gt;&count   number of matching rows
 GET    /&lt;name&gt;?select=status,count(*),sum(total)&group=status&order=sum(total).desc
                                 aggregates, whole or per group
-POST   /&lt;name&gt;                  body: {...} or [{...}]
+POST   /&lt;name&gt;                  body: {...} or [{...}] -- an id that is taken: 409
 PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
 DELETE /&lt;name&gt;?&lt;filter&gt;
 PATCH  /&lt;name&gt;/all              no filter — deliberately explicit

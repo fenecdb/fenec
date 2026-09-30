@@ -134,6 +134,7 @@ fn main() {
         db.execute(&Statement::Put {
             collection: "bench".into(),
             docs,
+            insert: false,
         })
         .unwrap();
     }

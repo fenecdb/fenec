@@ -3981,3 +3981,19 @@ fn the_reader_reads_and_writes_nothing() {
     // The writer writes on.
     assert!(find(&w.simple("put t {name: \"b\"}"), b'E').is_none());
 }
+
+/// An `insert` of a taken id is PostgreSQL's unique_violation, and a `put`
+/// of it writes over.
+#[test]
+fn an_insert_of_a_taken_id_is_a_unique_violation() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection t (name text)");
+    c.simple("insert into t {id: 1, name: \"a\"}");
+    let r = c.simple("insert into t {id: 1, name: \"b\"}");
+    assert_eq!(
+        find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+        Some("23505")
+    );
+    assert!(find(&c.simple("put t {id: 1, name: \"b\"}"), b'E').is_none());
+}

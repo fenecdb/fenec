@@ -720,6 +720,8 @@ fn sqlstate(e: &Error) -> &'static str {
         Error::Type(_) => "42804",
         Error::Query(_) => "42601",
         Error::Exists(_) => "42P07",
+        // unique_violation: an INSERT's key taken, as PostgreSQL says it.
+        Error::Duplicate(_) => "23505",
         // PostgreSQL's io_error: the disk refused, and the engine now refuses
         // writes until the file is reopened.
         Error::Io(_) => "58030",
@@ -1577,6 +1579,7 @@ fn copy_put(
     let stmt = [Statement::Put {
         collection: target.collection.clone(),
         docs: std::mem::take(docs),
+        insert: false,
     }];
     // Held against a move for the put alone, as a transaction's statements
     // are: never across a wait for the client.

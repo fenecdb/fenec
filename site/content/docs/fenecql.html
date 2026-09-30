@@ -15,6 +15,7 @@ drop collection [if exists] &lt;name&gt;
 create index [if not exists] on &lt;name&gt; (&lt;field&gt;) @index
 
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
+insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
@@ -33,7 +34,13 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 </pre>
 
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
-<code>put</code> turns it into an upsert.</p>
+<code>put</code> turns it into an upsert. <code>insert</code> makes documents
+and never writes over one: a document naming an id that is taken refuses the
+statement, and nothing of it is written — <code>409</code> over HTTP,
+<code>23505</code> (<code>unique_violation</code>) over the PostgreSQL wire,
+as PostgreSQL's <code>INSERT</code> answers. Without an <code>id</code> the
+two are the same. A retried write that must not be made twice either way
+sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 
 <h2>Reference</h2>
 
