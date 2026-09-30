@@ -22,3 +22,8 @@ path = "tests/all.rs"
 [[test]]
 name = "tenants"
 path = "tests/tenants.rs"
+
+# Apart: the audit log and the count of failures are the process's own.
+[[test]]
+name = "audit"
+path = "tests/audit.rs"

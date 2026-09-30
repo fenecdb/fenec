@@ -28,6 +28,11 @@ name = "all"
 path = "tests/all.rs"
 
 # Apart: reads the process's own counts.
+# Apart: the audit log and the count of failures are the process's own.
+[[test]]
+name = "audit"
+path = "tests/audit.rs"
+
 [[test]]
 name = "metrics"
 path = "tests/metrics.rs"

@@ -335,6 +335,11 @@ transaction or in one, by <code>COPY FROM</code>, as an index or a
 same is a JSON Web Token's policy granting <code>read</code>
 (<a href="/docs/http#scoped-access">Scoped access</a>).</p>
 
+<p>A failed login waits before it is answered, twice as long for each
+failure from the same address within a minute, and <code>--audit</code> logs
+logins, failed ones and schema changes (<a href="/docs/monitoring#audit">The
+audit log</a>).</p>
+
 <pre data-lang="bash">fenec-pg --file data.fenec --password-file writer.pw \
   --reader reporting --reader-password-file reader.pw
 psql 'host=127.0.0.1 port=5433 user=reporting dbname=fenec'

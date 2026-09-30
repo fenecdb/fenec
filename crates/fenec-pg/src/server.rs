@@ -1717,10 +1717,9 @@ fn session(
     // both while waiting for the next message and in the middle of a
     // half-received one -- both are signs of a dropped connection.
     stream.set_read_timeout(cfg.idle_timeout).ok();
-    let peer_is_remote = stream
-        .peer_addr()
-        .map(|a| !a.ip().is_loopback())
-        .unwrap_or(false);
+    let peer = stream.peer_addr().ok();
+    let peer_is_remote = peer.is_some_and(|a| !a.ip().is_loopback());
+    fenec_http::audit::connection("pg", peer);
     let mut r = BufReader::new(stream.try_clone()?);
     let mut w = BufWriter::new(stream);
     let mut out = Writer::new();
@@ -1794,18 +1793,46 @@ fn session(
         Some((name, auth)) if *name == user => (auth, true),
         _ => (&cfg.auth, false),
     };
+    // A refusal waits before it is answered, and a login is logged
+    // (`fenec_http::audit`), the database it names with it.
+    let database = params.get("database").map(String::as_str).unwrap_or("");
+    let refuse = |out: &mut Writer, w: &mut BufWriter<TcpStream>, code, msg: &str| {
+        fenec_http::audit::event(
+            "login_failed",
+            &[
+                ("as", fenec_http::audit::Field::Text(&user)),
+                ("database", fenec_http::audit::Field::Text(database)),
+                ("reason", fenec_http::audit::Field::Text(msg)),
+            ],
+        );
+        std::thread::sleep(fenec_http::audit::failed(peer.map(|p| p.ip())));
+        out.error(code, msg);
+        out.flush_to(w)
+    };
     if let Some(expected) = cfg.user.as_ref().filter(|_| !reader) {
         if &user != expected {
-            out.error("28000", &format!("user `{user}` is not accepted"));
-            out.flush_to(&mut w)?;
+            refuse(
+                &mut out,
+                &mut w,
+                "28000",
+                &format!("user `{user}` is not accepted"),
+            )?;
             return Ok(());
         }
     }
     if let Err(msg) = authenticate(auth, &user, &mut r, &mut w, &mut out) {
-        out.error("28P01", &msg);
-        out.flush_to(&mut w)?;
+        refuse(&mut out, &mut w, "28P01", &msg)?;
         return Ok(());
     }
+    fenec_http::audit::succeeded(peer.map(|p| p.ip()));
+    fenec_http::audit::user(&user);
+    fenec_http::audit::event(
+        "login",
+        &[
+            ("database", fenec_http::audit::Field::Text(database)),
+            ("reader", fenec_http::audit::Field::Bool(reader)),
+        ],
+    );
 
     // ---- the tenant, over a directory of them: the database name.
     // Resolved once here so a name that is no tenant of this node fails at

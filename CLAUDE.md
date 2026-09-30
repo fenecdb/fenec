@@ -928,6 +928,19 @@ disk to encrypt. A checksum a record was measured and not taken: hardware
 CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
 lock, and the browser has no hardware CRC.
 
+**Logins, refusals and schema changes are logged; a failure waits**
+(`fenec_http::audit`, `--audit`, `--auth-delay`). A JSON line an event: a
+pg login and a failed one, an HTTP 401, a statement whose shape starts with
+`create`/`drop`/`alter`/`compact` -- found where `statements::record` shapes
+every statement of both protocols, so no literal reaches the log -- and a
+`/_admin/` or `/_shard/` request that changes something. Who is a
+thread-local set as the connection starts, a connection being a thread. A
+refusal waits 100 ms, doubled for each more from its address within a
+minute, 5 s at most; a good token clears the count, asking the table only
+when an address has one (`FAILING`), so the hooks cost a request 12 ns.
+Reads and writes are no events. A test that opens the log is a `[[test]]`
+of its own: the log and the counts are the process's.
+
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
 (`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
 all three return a query error, because a silently cut result is a wrong answer

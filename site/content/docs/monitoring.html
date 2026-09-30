@@ -147,6 +147,51 @@ collection. A tenant node keeps each tenant's apart —
 <code>/t/&lt;tenant&gt;/_stats/statements</code> and its own connection's
 view — and lists every tenant's, named, to its admin alone.</p>
 
+<h2 id="audit">The audit log</h2>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --password-file pw --http 0.0.0.0:8080 \
+         --http-token "$TOKEN" --audit /var/log/fenec/audit.log</pre>
+
+<pre data-lang="json">{"at":"2026-10-01T09:30:12.041Z","event":"login","proto":"pg","peer":"10.0.0.7:53112","user":"app","database":"fenec","reader":false}
+{"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"pg","peer":"10.0.0.7:53112","user":"app","statement":"create collection notes (title text)","failed":false}
+{"at":"2026-10-01T09:31:40.902Z","event":"login_failed","proto":"pg","peer":"198.51.100.4:40022","as":"postgres","database":"fenec","reason":"password verification failed"}
+{"at":"2026-10-01T09:32:05.117Z","event":"refused","proto":"http","peer":"198.51.100.4:40031","method":"GET","path":"/notes"}
+{"at":"2026-10-01T09:40:00.550Z","event":"admin","proto":"http","peer":"10.0.0.2:61200","method":"POST","path":"/_shard/tenants/acme/move","status":200}</pre>
+
+<p><code>--audit &lt;path&gt;</code> appends one JSON line for each of these
+events:</p>
+
+<ul>
+  <li><b>A login over the pg wire</b> and <b>a failed one</b>, with the user
+    and the database it asked for.</li>
+  <li><b>An HTTP request refused for its token</b> (401).</li>
+  <li><b>A statement that changes the schema</b>, over either protocol:
+    <code>create</code>, <code>drop</code>, <code>alter</code>,
+    <code>compact</code>, or SQL's <code>CREATE TABLE</code>. The statement is
+    logged by its shape, as <a href="#statements"><code>/_stats/statements</code></a>
+    shows it, so no literal it held reaches the log.</li>
+  <li><b>A request to <code>/_admin/</code> or <code>/_shard/</code> that
+    changes something</b>, with its status. <code>fenec-shard</code> takes
+    <code>--audit</code> as well.</li>
+</ul>
+
+<p>Each line has the time, the protocol, the peer's address and, once a pg
+session has logged in, its user. Reads and writes are not logged, so the
+log costs nothing on their path. Lines are written as the events happen and
+are not synced: after a crash the log can lose its last lines, but the data
+loses nothing.</p>
+
+<p><b>A failed login waits</b> before it is answered, the way PostgreSQL's
+<code>auth_delay</code> works. The first failure from an address within a
+minute waits <code>--auth-delay</code> (100 ms by default). Each further
+failure from that address doubles the wait, up to 5 s. This applies to a
+refused password or user over the pg wire and to a 401 over HTTP, logged or
+not. A guessing client gets about one try every five seconds per address. A
+request with a good token or password waits for nothing, and clears its
+address's count. Behind a reverse proxy every client has the proxy's
+address, so the proxy's own rate limit is the one that counts there.
+<code>--auth-delay 0</code> turns the wait off.</p>
+
 <h2 id="router">The router</h2>
 
 <pre data-lang="bash">curl -H "Authorization: Bearer $SHARD_TOKEN" http://127.0.0.1:8090/_metrics

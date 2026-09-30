@@ -41,6 +41,7 @@ pub mod access;
 pub mod admin;
 pub mod api;
 pub mod archive;
+pub mod audit;
 pub mod cdc;
 pub mod crypto;
 pub mod held;
@@ -398,6 +399,8 @@ fn is_remote(addr: &str) -> bool {
 fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(cfg.idle_timeout);
+    let peer = stream.peer_addr().ok();
+    audit::connection("http", peer);
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
@@ -445,6 +448,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                     metrics::handle(cfg, &req, metrics::Source::Tenants(t.stats()))
                 }
             };
+            audit::http(&req, resp.status, peer);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -461,6 +465,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 _ => (statements::View::Node, full(cfg, &req)),
             };
             let resp = cors(statements::handle(&req, view, allowed), cfg);
+            audit::http(&req, resp.status, peer);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -476,6 +481,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             Backend::Tenants(tenants) => match route_tenant(tenants, cfg, &mut req) {
                 Ok(t) => Some(t),
                 Err(resp) => {
+                    audit::http(&req, resp.status, peer);
                     let resp = cors(resp, cfg);
                     if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                         return;
@@ -487,6 +493,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if let (Some(t), ["_stats", "statements"]) = (&tenant, req.segments().as_slice()) {
             let view = statements::View::Tenant(t.name());
             let resp = cors(statements::handle(&req, view, full(cfg, &req)), cfg);
+            audit::http(&req, resp.status, peer);
             if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
                 return;
             }
@@ -513,6 +520,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 match replication::handle(&mut out, db, repl, &req) {
                     None => return,
                     Some(resp) => {
+                        audit::http(&req, resp.status, peer);
                         if cors(resp, cfg)
                             .write(&mut out, keep_alive, head_only)
                             .is_err()
@@ -541,6 +549,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
                 ),
                 (Ok(_), Some(feed)) => cdc::route(db, feed, cfg, &req),
             };
+            audit::http(&req, resp.status, peer);
             if cors(resp, cfg)
                 .write(&mut out, keep_alive, head_only)
                 .is_err()
@@ -557,6 +566,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             let who = match authenticate(cfg, &req) {
                 Ok(who) => who,
                 Err(deny) => {
+                    audit::http(&req, deny.status, peer);
                     let _ = cors(deny, cfg).write(&mut out, false, false);
                     return;
                 }
@@ -594,6 +604,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         // Let go of the tenant before writing: a slow client must not keep
         // it from closing.
         drop(tenant);
+        audit::http(&req, resp.status, peer);
         let resp = cors(resp, cfg);
         if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
             return;
