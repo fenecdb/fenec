@@ -1,13 +1,14 @@
 <!--
 title: Integrations — fenecdb
-description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, a LangChain.js one over a database in the page or the endpoint, and useLiveQuery for React over a synced replica.
+description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, a LangChain.js one over a database in the page or the endpoint, retrieval for the Vercel AI SDK, and useLiveQuery for React over a synced replica.
 -->
 
 <h1>Integrations</h1>
 <p class="kicker">A vector store for LangChain and one for LlamaIndex, over
 fenec-pg's HTTP endpoint; one for LangChain.js, over a database in the page
-or the same endpoint; and <code>useLiveQuery</code> for React, over a
-replica the sync layer keeps. Each passes the tests its framework holds its
+or the same endpoint; retrieval and a search tool for the Vercel AI SDK;
+and <code>useLiveQuery</code> for React, over a replica the sync layer
+keeps. Each passes the tests its framework holds its
 own integrations to.</p>
 
 <h2>LangChain</h2>
@@ -134,6 +135,37 @@ is not read. <code>quant</code> is taken as the LangChain store takes it.</p>
 retriever = index.as_retriever(similarity_top_k=4, vector_store_query_mode="hybrid")
 </pre>
 
+<h2 id="ai-sdk">Vercel AI SDK</h2>
+
+<pre data-lang="js">import { generateText, stepCountIs } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { Fenec } from '@fenecdb/web';
+import { index, retrieve, searchTool } from './rag.js';   // integrations/ai-sdk/rag.js
+
+const db = await Fenec.open('./fenec.wasm');
+const model = openai.textEmbeddingModel('text-embedding-3-small');
+await index(db, { collection: 'docs', model, documents });   // [{text, source?}]
+
+const { text } = await generateText({
+  model: openai('gpt-4.1'),
+  tools: { search: searchTool(db, { collection: 'docs', model }) },
+  stopWhen: stepCountIs(4),
+  prompt: 'How do I compact the database?',
+});</pre>
+
+<p>The AI SDK has no vector store interface to implement — it has embedding
+models and <code>tool</code> — so the integration is a file of three
+functions to copy, <code>integrations/ai-sdk/rag.js</code>:
+<code>index</code> embeds with <code>embedMany</code> and writes the
+documents, their text under <code>@text</code> and their vectors under
+<code>@hnsw</code>; <code>retrieve</code> embeds the question with
+<code>embed</code> and answers with <code>near</code>, or with
+<code>hybrid</code> the words and the vector fused, kept to a
+<code>source</code> through its <code>@hash</code> index;
+<code>searchTool</code> is a <code>tool</code> a model calls with a query.
+It takes a <code>Fenec</code>, so the index lives in the page or a Worker,
+or a <code>FenecHttp</code> for the server's.</p>
+
 <h2>React</h2>
 
 <pre data-lang="js">import { sync } from './fenec.js';
@@ -171,6 +203,7 @@ dependency.</p>
 <tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance, <code>from_texts</code>, the text and hybrid modes and int8 codes besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
 <tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top — and the text search and hybrid modes</td></tr>
 <tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-pg's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
+<tr><td>Vercel AI SDK</td><td>the SDK's own mock models: documents embedded with <code>embedMany</code> and found again with <code>near</code>, kept to a source and fused with the words, and a model that calls the search tool in <code>generateText</code> and answers from what it returned</td><td><code>make ai-sdk-test</code></td></tr>
 <tr><td>React</td><td>a stand-in database for the contract, and a real fenec-pg and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
 </tbody>
 </table>

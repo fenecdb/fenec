@@ -1486,7 +1486,18 @@ where it does not (RELEASING.md). With
 the words (`match`) or by the words and the vector fused (`fuse`):
 LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
 `"hybrid"`. `alpha` is not read, since `fuse` adds ranks; `quant` passes
-`int8` or `bit` codes to `@hnsw`. A store names
+`int8` or `bit` codes to `@hnsw`. The same store for LangChain.js
+(`integrations/langchain`, `@fenecdb/langchain`) runs over anything with
+`run(sql, params)` -- a `Fenec` keeps a RAG index in the page -- and is
+held, LangChain.js publishing no standard suite, to what its own vector
+store integrations are tested for, over a database in the page and over a
+fenec-pg's HTTP endpoint (`make langchain-test`); the Vercel AI SDK has no
+store interface, so `integrations/ai-sdk/rag.js` is three functions to copy,
+held to the SDK's mock models (`make ai-sdk-test`). `web/fenec.d.ts` is
+held to `web/fenec.js` by `make types-check`: every export and class method
+read at run time and touched from a generated file, and a caller's code with
+the lines the types must refuse, under `tsc --strict` -- the module stays
+JS with no build step. A store names
 its collection and metadata columns in the statement's text, so both are
 checked against FenecQL's name pattern; values always go in as parameters,
 and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
