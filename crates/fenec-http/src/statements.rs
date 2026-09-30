@@ -122,6 +122,7 @@ pub fn record(tenant: Option<&str>, text: &str, took: Duration, failed: bool) {
             shape(if noted.is_empty() { text } else { &noted }, &mut buf);
             noted.clear();
         });
+        crate::audit::statement(tenant, &buf, failed);
         let id = hash(tenant, &buf);
         let shard = &shards()[MINE.with(|m| *m)];
         let mut map = shard.0.lock().unwrap_or_else(|e| e.into_inner());

@@ -25,6 +25,12 @@ usage: fenec-shard [options]
                             Data requests pass their own Authorization through
                             to the nodes, which check it against --http-token
       --insecure            allow a non-loopback address without --token
+      --audit <path>        append a JSON line to this file for each request
+                            refused for its token and each /_shard/ request
+                            that changes something
+      --auth-delay <ms>     how long a request refused for its token waits,
+                            doubled for each one from the same address within
+                            a minute, 5 s at most; 0 turns it off. default: 100
       --max-connections <n> ceiling on concurrent connections  default: 1000
       --max-body <MiB>      request body ceiling  default: 64
       --upstream-timeout <s> connect/read bound towards a node  default: 60
@@ -89,6 +95,15 @@ fn main() {
             "--directory" | "-d" => path = next(&mut i, "--directory"),
             "--token" => cfg.token = Some(next(&mut i, "--token")),
             "--insecure" => cfg.insecure = true,
+            "--audit" => {
+                let p = next(&mut i, "--audit");
+                if let Err(e) = fenec_http::audit::open(std::path::Path::new(&p)) {
+                    fail(&format!("could not open {p}: {e}"));
+                }
+            }
+            "--auth-delay" => {
+                fenec_http::audit::set_delay(number(next(&mut i, "--auth-delay"), "--auth-delay"))
+            }
             "--replicas" => cfg.replicas = true,
             "--auto-failover" => {
                 let secs = number(next(&mut i, "--auto-failover"), "--auto-failover");

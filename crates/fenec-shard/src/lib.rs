@@ -325,6 +325,8 @@ impl Router {
     fn connection(&self, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(self.cfg.idle_timeout);
+        let peer = stream.peer_addr().ok();
+        fenec_http::audit::connection("http", peer);
         let Ok(mut out) = stream.try_clone() else {
             return;
         };
@@ -343,6 +345,7 @@ impl Router {
             // Everything but a forwarded request is counted here, as it is
             // answered; `forward` counts its own, a stream at its head.
             let answer = |out: &mut TcpStream, route: Route, resp: Response| {
+                fenec_http::audit::http(&req, resp.status, peer);
                 let sent = resp
                     .write(out, req.keep_alive, req.method == Method::Head)
                     .is_ok();

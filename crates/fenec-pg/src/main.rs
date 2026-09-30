@@ -118,6 +118,14 @@ usage: fenec-pg [options]
       --slow-ms <ms>        log every statement that takes this long or longer,
                             with its text: pg and HTTP alike, from its arrival
                             to its answer. Off by default
+      --audit <path>        append a JSON line to this file for each login,
+                            each login and HTTP request refused, each change
+                            of the schema and each admin request. Off by
+                            default
+      --auth-delay <ms>     how long a failed login waits before it is
+                            answered, doubled for each failure from the same
+                            address within a minute, 5 s at most. 0 turns it
+                            off. default: 100
       --metrics <address>   serve /_metrics, and nothing else, here -- for a
                             server with no --http. With --http, the HTTP
                             listener serves it too. Readable with
@@ -345,6 +353,19 @@ fn main() {
             }
             "--http" => http = Some(next(&mut i, "--http")),
             "--metrics" => metrics = Some(next(&mut i, "--metrics")),
+            "--audit" => {
+                let path = next(&mut i, "--audit");
+                if let Err(e) = fenec_http::audit::open(std::path::Path::new(&path)) {
+                    fail(&format!("could not open {path}: {e}"));
+                }
+            }
+            "--auth-delay" => {
+                let v = next(&mut i, "--auth-delay");
+                let ms: u64 = v.parse().unwrap_or_else(|_| {
+                    fail(&format!("--auth-delay expects milliseconds, got `{v}`"))
+                });
+                fenec_http::audit::set_delay(ms);
+            }
             "--slow-ms" => {
                 let v = next(&mut i, "--slow-ms");
                 let ms: u64 = v.parse().unwrap_or_else(|_| {
