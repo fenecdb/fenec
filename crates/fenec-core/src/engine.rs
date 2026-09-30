@@ -2454,16 +2454,19 @@ impl Database {
     /// [`Self::load`] over a mapped file (`fs::open_mapped`): the documents
     /// stay in the file, read through the pages the operating system maps
     /// in, and only what is derived from them -- the offset index, the hash,
-    /// ordered and text indexes, the graph -- is built in memory.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// ordered and text indexes, the graph -- is built in memory. In the
+    /// browser the image a load was handed, kept rather than copied.
     pub fn load_mapped(&mut self, file: crate::store::Base) -> Result<usize> {
         let keep = file.clone();
-        self.mapped = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.mapped = true;
+        }
         self.load_from((*keep).as_ref(), Some(&file))
     }
 
-    /// In the browser `base` is always `None`: its `Base` is a type of no
-    /// value, and the arm that maps folds away.
+    /// With `base` the documents are read where they lie in it, and
+    /// without it copied into segments.
     fn load_from(&mut self, bytes: &[u8], base: Option<&crate::store::Base>) -> Result<usize> {
         #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         self.load_records(bytes, &mut |store, chunk_at, chunk, index, note| {

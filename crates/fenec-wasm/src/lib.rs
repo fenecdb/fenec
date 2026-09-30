@@ -535,6 +535,40 @@ pub unsafe extern "C" fn fenec_load(handle: u32, ptr: *const u8, len: usize) -> 
     }
 }
 
+/// [`fenec_load`] over bytes it takes: an allocation `fenec_alloc` made
+/// for `len`, which the database keeps and reads its documents from rather
+/// than copy them out of it. The caller does not free it.
+///
+/// # Safety
+/// `ptr` must come from `fenec_alloc(len)` and not be used after.
+#[no_mangle]
+pub unsafe extern "C" fn fenec_load_owned(handle: u32, ptr: *mut u8, len: usize) -> i32 {
+    if ptr.is_null() || len == 0 {
+        return 1;
+    }
+    let bytes: Vec<u8> = unsafe { Vec::from_raw_parts(ptr, len, len) };
+    let base: fenec_core::store::Base = Arc::new(bytes);
+    collate::take_missing();
+    let out = with_slot(handle, |s| {
+        s.loaded = s.db.load_mapped(base).ok()?;
+        let missing = s.db.collation_missing() | collate::take_missing();
+        if missing != 0 {
+            let mut empty = Database::new();
+            empty.set_change_capacity(s.db.change_capacity());
+            if let Some(j) = &s.journal {
+                empty.set_sink(Box::new(JournalSink(Arc::clone(j))));
+            }
+            s.db = empty;
+        }
+        Some(missing)
+    });
+    match out.flatten() {
+        Some(0) => 0,
+        Some(missing) => (2 | missing << 2) as i32,
+        None => 1,
+    }
+}
+
 /// The bytes the last `fenec_load` took: all of them, or those before a
 /// last record a crash cut short. A page's file is cut back there before
 /// anything is appended to it: a write appended after the torn bytes is
