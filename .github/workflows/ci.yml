@@ -188,6 +188,10 @@ jobs:
       - name: LangChain.js store
         run: make langchain-test
 
+      # Retrieval for the Vercel AI SDK, against the SDK's own mock models.
+      - name: Vercel AI SDK retrieval
+        run: make ai-sdk-test
+
       # web/fenec.d.ts held to web/fenec.js: every export and method the
       # module has declared, and a caller's code type-checked under --strict.
       - name: TypeScript declarations

@@ -1,0 +1,12 @@
+{
+  "name": "fenecdb-ai-sdk-example",
+  "private": true,
+  "type": "module",
+  "description": "Retrieval for the Vercel AI SDK over fenecdb: embed with the SDK, find with near; a tool a model calls",
+  "devDependencies": {
+    "ai": "^7.0.123"
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  }
+}
