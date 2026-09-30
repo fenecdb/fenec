@@ -18,7 +18,8 @@ nothing reaches a registry before the notes have had a read.
 3. Read the draft, then publish it: `gh release edit vX.Y.Z --draft=false`.
    `packages.yml` builds the three packages again, installs them where a user
    would and uses them (`integrations/packages.sh`), and only then publishes
-   `fenecdb` to PyPI and `@fenecdb/web` and `@fenecdb/react` to npm. A
+   `fenecdb` to PyPI and `@fenecdb/web`, `@fenecdb/react`,
+   `@fenecdb/cloudflare` and `@fenecdb/langchain` to npm. A
    package whose version is not the tag's stops it before anything goes out.
 
 `make packages` runs the same check locally at any time.
@@ -28,6 +29,8 @@ nothing reaches a registry before the notes have had a read.
 | `fenecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |
 | `@fenecdb/web` on npm | `web/` | `fenec.js` and its types, `fenec.wasm`, `fenec-lite.wasm` and `collate/` |
 | `@fenecdb/react` on npm | `integrations/react` | `FenecProvider`, `useFenec`, `useLiveQuery` |
+| `@fenecdb/cloudflare` on npm | `integrations/cloudflare` | `persist`, `restore`, `checkpoint`: a database kept in a Durable Object's storage |
+| `@fenecdb/langchain` on npm | `integrations/langchain` | `FenecVectorStore` for LangChain.js, over a `Fenec` or a `FenecHttp` |
 
 ## Once: the registries' side
 
@@ -64,8 +67,8 @@ first version goes out with a token:
 
 1. Make a granular access token with read and write on `@fenecdb` and store it
    as the repository secret `NPM_TOKEN`.
-2. Publish the release: `@fenecdb/web` and `@fenecdb/react` go out with it.
-3. On npmjs.com, for each of the two, *Settings*, *Trusted publishing*,
+2. Publish the release: the four `@fenecdb` packages go out with it.
+3. On npmjs.com, for each of the four, *Settings*, *Trusted publishing*,
    GitHub Actions: `fenecdb/fenec`, workflow `packages.yml`, environment
    `npm`.
 4. Delete the secret and revoke the token. Later releases publish with the
