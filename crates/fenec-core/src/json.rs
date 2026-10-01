@@ -346,7 +346,7 @@ fn parse_exact_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
     skip_ws(s, i);
     match s.as_bytes().get(*i) {
         Some(b'[') if depth < crate::value::MAX_JSON_DEPTH => {
-            Ok(Value::List(parse_array_at(s, i, depth + 1)?))
+            Ok(Value::List(parse_array_at(s, i, depth + 1, false)?))
         }
         _ => parse_value_at(s, i, depth),
     }
@@ -414,7 +414,7 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
         b'"' => Ok(Value::Text(parse_string(s, i)?)),
         b'[' => {
             if depth > 0 {
-                return Ok(Value::List(parse_array_at(s, i, depth + 1)?));
+                return Ok(Value::List(parse_array_at(s, i, depth + 1, false)?));
             }
             // Numbers alone are a vector, read straight into its `f32`s --
             // natively: a page's vectors come into the browser module as
@@ -424,7 +424,7 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
             if let Some(v) = numbers(s, i) {
                 return Ok(Value::Vector(v));
             }
-            let items = parse_array_at(s, i, depth + 1)?;
+            let items = parse_array_at(s, i, depth + 1, false)?;
             // If every item is a number, read it as a vector (embedding transfer)
             if !items.is_empty()
                 && items
@@ -448,9 +448,15 @@ fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
                     .map(Value::Float)
                     .ok_or_else(|| Error::Query(format!("invalid number `{text}`")))
             } else {
-                text.parse::<i64>()
-                    .map(Value::Int)
-                    .map_err(|_| Error::Query(format!("invalid number `{text}`")))
+                // A whole number past an `i64` is the `f64` it says, as the
+                // writer writes a float that large without an exponent:
+                // refused, `1e300` written out did not read back.
+                match text.parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => crate::num::parse_f64(text)
+                        .map(Value::Float)
+                        .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),
+                }
             }
         }
         _ => {
@@ -529,16 +535,12 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
 }
 
 /// Parses an array starting at `[` element by element; it does *not* apply
-/// the vector shortcut. That shortcut only makes sense in value position.
-fn parse_array(s: &str, i: &mut usize) -> Result<Vec<Value>> {
-    // Its elements are values of their own -- a query's parameters, a
-    // listed member -- each read as at the top: `[[0.1, 0.2], 7]` hands a
-    // vector and an integer.
-    parse_array_at(s, i, 0)
-}
-
-/// [`parse_array`], its elements `depth` containers down.
-fn parse_array_at(s: &str, i: &mut usize, depth: usize) -> Result<Vec<Value>> {
+/// the vector shortcut to the array itself. Its elements are `depth`
+/// containers down -- at 0 values of their own, a query's parameters or a
+/// listed member, each read as at the top: `[[0.1, 0.2], 7]` hands a vector
+/// and an integer -- and each read as [`parse_json`] reads a value when
+/// `exact`.
+fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<Vec<Value>> {
     let b = s.as_bytes();
     *i += 1; // `[`
     let mut items = Vec::new();
@@ -548,7 +550,10 @@ fn parse_array_at(s: &str, i: &mut usize, depth: usize) -> Result<Vec<Value>> {
             *i += 1;
             break;
         }
-        items.push(parse_value_at(s, i, depth)?);
+        items.push(match exact {
+            true => parse_exact_at(s, i, depth)?,
+            false => parse_value_at(s, i, depth)?,
+        });
         skip_ws(s, i);
         match b.get(*i) {
             Some(b',') => *i += 1,
@@ -628,9 +633,20 @@ pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
 /// that list -- read as a vector, `[123456789]` handed the query the `f32`
 /// 123456792, and `[19.99]` 19.989999771118164.
 pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[])
+}
+
+/// [`parse_object_listing`], the listed member's elements read as
+/// [`parse_json`] reads a value: a list of numbers alone as written, where
+/// a json field is given one (`Database::exactly`).
+pub fn parse_object_listing_exact(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[list])
+}
+
+fn listing(src: &str, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
     let s = src.trim();
     let mut i = 0;
-    let out = parse_object_at(s, &mut i, list)?;
+    let out = document(s, &mut i, list, json)?;
     skip_ws(s, &mut i);
     if i != s.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -689,10 +705,6 @@ pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String,
     Ok(out)
 }
 
-fn parse_object_at(s: &str, i: &mut usize, list: &str) -> Result<Vec<(String, Value)>> {
-    document(s, i, list, &[])
-}
-
 /// A document at `i`: the member named `list` a parameter list, and those
 /// named in `json` read as [`parse_json`] reads a value.
 fn document(s: &str, i: &mut usize, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
@@ -746,7 +758,7 @@ fn parse_members(
         // A listed member keeps its elements' types, a parameter list's;
         // a json field's, every number.
         let value = if depth == 0 && key == list && b.get(*i) == Some(&b'[') {
-            Value::List(parse_array(s, i)?)
+            Value::List(parse_array_at(s, i, 0, json.contains(&list))?)
         } else if depth == 0 && json.contains(&key.as_str()) {
             parse_exact_at(s, i, 0)?
         } else {
@@ -778,6 +790,17 @@ fn parse_members(
 /// `year in [$1, $2]` returned no rows at all. The shortcut stays valid
 /// inside nested arrays, so embedding transfer is unaffected.
 pub fn parse_params(src: &str) -> Result<Vec<Value>> {
+    params(src, false)
+}
+
+/// [`parse_params`], each read as [`parse_json`] reads a value: a list of
+/// numbers alone as written, where a json field is given one
+/// (`Database::exactly`).
+pub fn parse_params_exact(src: &str) -> Result<Vec<Value>> {
+    params(src, true)
+}
+
+fn params(src: &str, exact: bool) -> Result<Vec<Value>> {
     let t = src.trim();
     if t.is_empty() {
         return Ok(Vec::new());
@@ -786,9 +809,12 @@ pub fn parse_params(src: &str) -> Result<Vec<Value>> {
     skip_ws(t, &mut i);
     if t.as_bytes().get(i) != Some(&b'[') {
         // A single value is accepted too.
-        return Ok(vec![parse(t)?]);
+        return Ok(vec![match exact {
+            true => parse_json(t)?,
+            false => parse(t)?,
+        }]);
     }
-    let items = parse_array(t, &mut i)?;
+    let items = parse_array_at(t, &mut i, 0, exact)?;
     skip_ws(t, &mut i);
     if i != t.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -806,7 +832,7 @@ mod tests {
     fn a_value_at_a_time(s: &str) -> Result<Value> {
         let mut i = 0;
         skip_ws(s, &mut i);
-        let items = parse_array(s, &mut i)?;
+        let items = parse_array_at(s, &mut i, 0, false)?;
         skip_ws(s, &mut i);
         if i != s.len() {
             return Err(Error::Query("trailing characters after JSON".into()));
@@ -1065,6 +1091,32 @@ mod tests {
         assert_eq!(
             to_string(&parse(r#"{"b":1,"a":2}"#).unwrap()),
             r#"{"a":2,"b":1}"#
+        );
+    }
+
+    #[test]
+    fn exact_parameters_keep_their_digits() {
+        let text = "[[0.1, 12345678901, 3], 7, {\"a\": [1.5]}]";
+        assert_eq!(
+            parse_params(text).unwrap()[0],
+            Value::Vector(vec![0.1, 12345678901.0, 3.0])
+        );
+        assert_eq!(
+            parse_params_exact(text).unwrap(),
+            vec![
+                parse_json("[0.1, 12345678901, 3]").unwrap(),
+                Value::Int(7),
+                parse_json(r#"{"a": [1.5]}"#).unwrap()
+            ]
+        );
+        assert_eq!(
+            parse_params_exact("[0.1, 2]").unwrap(),
+            vec![Value::Float(0.1), Value::Int(2)]
+        );
+        let body = r#"{"query": "q", "params": [[19.99, 1]]}"#;
+        assert_eq!(
+            parse_object_listing_exact(body, "params").unwrap()[1].1,
+            Value::List(vec![Value::List(vec![Value::Float(19.99), Value::Int(1)])])
         );
     }
 

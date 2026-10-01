@@ -674,6 +674,21 @@ test('json fields and paths in the browser, and a file holding them loaded', { s
   await db.from('docs').where('title', 'a').update({ 'meta.source.rank': 4 });
   assert.deepEqual((await db.from('docs').select('meta').where('title', 'a').rows())[0].meta,
     { lang: 'tr', source: { rank: 4, site: 'x' } });
+  // A list of numbers is kept as written: in the text, and handed as a
+  // plain array, which goes over as f32s for a vector field and as JSON
+  // for this one; a Float32Array as the numbers it holds.
+  const many = [0.1, 12345678901, 3.141592653589793, -7, 19.99];
+  db.run(`put docs {title: "l", meta: ${JSON.stringify(many)}}`);
+  db.run('put docs {title: "p", meta: $1}', [many]);
+  db.run('put docs {title: "f", meta: $1}', [new Float32Array([0.5, 0.1])]);
+  await db.from('docs').insert({ title: 'o', meta: { n: many } });
+  const got = (t, p = 'meta') => db.rows(`get docs select ${p} where title = "${t}"`)[0][p];
+  assert.deepEqual(got('l'), many);
+  assert.deepEqual(got('p'), many);
+  assert.deepEqual(got('f'), [0.5, Math.fround(0.1)]);
+  assert.deepEqual(got('o', 'meta.n'), many);
+  assert.deepEqual(db.rows('get docs select title where meta = $1', [many]).map((r) => r.title), ['l', 'p']);
+  db.run('del docs where title in ["l", "p", "f", "o"]');
   // A file holding them, loaded: the objects and the indexes come back.
   const again = await Fenec.open(wasm);
   again.load(db.snapshot());

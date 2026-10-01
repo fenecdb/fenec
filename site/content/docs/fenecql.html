@@ -625,16 +625,18 @@ create index on docs (meta.source.rank) @sorted
 FenecQL, in a JSON body, in a pg parameter — refuses the write rather than
 keep one of them, since which one a reader keeps differs from reader to
 reader. Its numbers are kept as written, an integer an integer and
-<code>19.99</code> the decimal it is. One shape is the exception: a list of
-numbers alone, written as the whole value of the field in FenecQL or
-handed by the browser module as a parameter, arrives as the vector any
-such list is read as for an embedding, and each number is kept as the
-shortest decimal its <code>f32</code> reads back as — <code>0.1</code>
-stays <code>0.1</code>, but a number of more than about seven digits there
-loses the rest. Inside an object, in a JSON body over HTTP and over the pg
-wire every number keeps its digits. A timestamp becomes its ISO text, as
-JSON writes one; bytes, a sparse vector and a number that is not finite
-have no JSON and are refused. A value nests at most 64 levels, and a path
+<code>19.99</code> the decimal it is, everywhere one comes in: FenecQL, a
+parameter over HTTP, over the pg wire and in the browser, a JSON body, a
+COPY cell. A list of numbers alone is read the quick way, into the
+<code>f32</code>s of the vector it nearly always is; where it is given a
+<code>json</code> field, or compared with a path into one, the statement's
+text or the parameter's JSON is read again as written, so
+<code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
+was never text — a <code>Float32Array</code> handed to the browser module,
+a vector built through the Rust API — is refused there rather than kept as
+numbers it was not given. A timestamp becomes its ISO text, as JSON writes
+one; bytes, a sparse vector and a number that is not finite have no JSON
+and are refused. A value nests at most 64 levels, and a path
 names at most 64 keys past its field: past either a write or a query is
 refused, never cut.</p>
 

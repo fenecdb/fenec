@@ -167,7 +167,16 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
     }
 }
 
+/// One body natively for each way, the flag a constant in each; the browser
+/// module keeps one, the flag read at run time: [`tokenize`] is there only
+/// for a list a json field is given (`fenec_ql::parse_exact`), and a copy
+/// of its own was 2.9 KB of the module.
 fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
+    lex_with(src, VECTORS)
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
     // Walked a byte at a time, a character read whole only where one
     // outside ASCII stands. Collected into a `Vec<char>` first, and each
     // number copied into a `String` of its own to parse, a query holding a
@@ -238,7 +247,7 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
             }
             // Not inside an object literal, two braces down: only a json
             // field holds one, and its numbers stay as they are written.
-            '[' if VECTORS && braces < 2 => {
+            '[' if vectors && braces < 2 => {
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in"));
                 match !after_in {
                     true => match numbers_at(src, b, i) {

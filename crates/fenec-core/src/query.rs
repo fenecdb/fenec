@@ -1005,7 +1005,61 @@ pub enum Alter {
     RenameField(String, String),
 }
 
+/// Whether `v` is or holds a vector: what a reader with no schema makes of a
+/// list of numbers alone.
+pub fn holds_vector(v: &Value) -> bool {
+    match v {
+        Value::Vector(_) => true,
+        Value::List(items) => items.iter().any(holds_vector),
+        Value::Object(m) => m.iter().any(|(_, v)| holds_vector(v)),
+        _ => false,
+    }
+}
+
+impl Expr {
+    /// Whether a literal anywhere in it holds a vector, as a list of
+    /// numbers alone is read: what a json field could be handed instead of
+    /// the numbers written ([`crate::engine::Database::exactly`]).
+    pub fn reads_vectors(&self) -> bool {
+        match self {
+            Expr::Lit(v) => holds_vector(v),
+            Expr::Field(_) | Expr::Param(_) => false,
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b) => a.reads_vectors() || b.reads_vectors(),
+            Expr::Not(a) | Expr::IsNull(a) => a.reads_vectors(),
+            Expr::In(a, items) => a.reads_vectors() || items.iter().any(Expr::reads_vectors),
+            Expr::Call(_, args) => args.iter().any(Expr::reads_vectors),
+        }
+    }
+}
+
 impl Statement {
+    /// Whether a literal in it holds a vector: when none does, no json
+    /// field can be handed one, and nothing has to be asked of the schema.
+    pub fn reads_vectors(&self) -> bool {
+        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
+        match self {
+            Statement::Put { docs, .. } => docs.iter().flatten().any(|(_, e)| e.reads_vectors()),
+            Statement::Update { set, filter, .. } => {
+                set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter)
+            }
+            Statement::Delete { filter, .. } => opt(filter),
+            Statement::Select(s) | Statement::Explain(s) => {
+                let mut level = s.lookup.as_ref();
+                let mut any = opt(&s.filter);
+                while let (false, Some(l)) = (any, level) {
+                    any = opt(&l.filter);
+                    level = l.next.as_deref();
+                }
+                any
+            }
+            _ => false,
+        }
+    }
+
     /// Statements that need no write access. The server runs these under a
     /// shared (read) lock; the others take the exclusive write lock.
     pub fn is_read_only(&self) -> bool {

@@ -23,6 +23,7 @@
 
 use crate::lexer::{tokenize_vectors as tokenize, Tok, Token};
 use fenec_core::collate::Collation;
+use fenec_core::engine::Database;
 use fenec_core::error::{Error, Result};
 use fenec_core::query::*;
 use fenec_core::schema::{Field, IndexKind, Metric, Quant, Schema, TextIndexSpec, VectorIndexSpec};
@@ -63,11 +64,49 @@ pub struct Parser {
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
+    statements(tokenize(src)?, false)
+}
+
+/// [`parse`], every list of numbers kept as written -- integers integers,
+/// decimals the `f64`s they say -- rather than read into a vector's `f32`s:
+/// what a json field is handed. A vector field takes such a list a number
+/// at a time, which is slower than the vector [`parse`] makes, so a text is
+/// read so only where [`parse_for`] finds a json field given one.
+pub fn parse_exact(src: &str) -> Result<Vec<Statement>> {
+    statements(crate::lexer::tokenize(src)?, true)
+}
+
+/// `src` parsed for `db`: [`parse`], read again by [`parse_exact`] where a
+/// statement hands a json field of `db` a list of numbers, or compares one
+/// with a path into it (`Database::exactly`). A statement with no list of
+/// numbers costs the walk of its literals, and one into a collection with
+/// no json field a look at its fields.
+pub fn parse_for(db: &Database, src: &str) -> Result<Vec<Statement>> {
+    let stmts = parse(src)?;
+    match stmts
+        .iter()
+        .any(|s| s.reads_vectors() && db.exactly(s).text)
+    {
+        true => parse_exact(src),
+        false => Ok(stmts),
+    }
+}
+
+/// [`parse_for`], of a single statement.
+pub fn parse_one_for(db: &Database, src: &str) -> Result<Statement> {
+    one(parse_for(db, src)?)
+}
+
+/// Inlined into each caller natively: called out of line, a `put` of 1 000
+/// 128-dim rows parsed 1.4% slower (8.27 -> 8.39 ms) than with the body in
+/// `parse`; the browser module keeps one copy.
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
     let mut p = Parser {
-        toks: tokenize(src)?,
+        toks,
         i: 0,
         depth: 0,
-        exact: false,
+        exact,
     };
     let mut out = Vec::new();
     while !p.at_eof() {
@@ -81,7 +120,10 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
 
 /// Parses a single statement; errors when there is more than one.
 pub fn parse_one(src: &str) -> Result<Statement> {
-    let mut s = parse(src)?;
+    one(parse(src)?)
+}
+
+fn one(mut s: Vec<Statement>) -> Result<Statement> {
     if s.len() != 1 {
         return Err(Error::Query(format!(
             "expected a single statement, found {}",

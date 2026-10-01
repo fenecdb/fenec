@@ -3702,6 +3702,23 @@ fn run_locked(
             }
         },
     };
+    // A list of numbers a json field is handed, or a path compared with, is
+    // read again as written: a vector's `f32`s are not the numbers sent,
+    // and the field refuses them (`Database::exactly`). Only a statement
+    // holding such a list asks the schema.
+    let exact;
+    let stmts: &[Statement] = match stmts.iter().any(Statement::reads_vectors)
+        && lock.read(db, |d| stmts.iter().any(|s| d.exactly(s).text))
+    {
+        true => match fenec_ql::parse_exact(trimmed) {
+            Ok(s) => {
+                exact = s;
+                &exact
+            }
+            Err(_) => stmts,
+        },
+        false => stmts,
+    };
     if tx.open {
         tx.ran = true;
     }

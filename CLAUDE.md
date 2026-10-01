@@ -105,7 +105,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~352 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~368 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -984,16 +984,31 @@ list, an object, an int past 2^53 -- answering nothing while it holds one
 (`SortedIndex::answers`); `tests/json.rs` holds both to a twin collection
 row for row. Nesting is 64 levels and a path 64 keys, refused past either
 (`MAX_JSON_DEPTH`, `MAX_PATH_KEYS`), the JSON reader's recursion bounded
-with them. A list of numbers alone at the top of a value is still the
-vector an embedding travels as: in a json field it becomes each `f32`'s
-shortest decimal (`json_value`), exact inside an object, in an HTTP body
-(`parse_documents_json`), a pg `jsonb` (`json::parse_json`) and a COPY cell.
+with them. A json field keeps a number as written, and a list of numbers
+alone is read the quick way, into a vector's `f32`s, by every reader that
+has no schema -- the lexer (`Tok::Vector`), a query's parameters, the
+browser module's vectors handed apart -- so a vector given to one, or
+compared with a path into one, is refused (`json_value`,
+`Database::refuse_inexact`) and the caller reads that part again as
+written: `Database::exactly` names it (the text, or parameters by place),
+`fenec_ql::parse_for` / `parse_exact`, `json::parse_params_exact`, the pg
+session, `/query`, `/batch`, a REST `where=`, and the module, which answers
+`"exact": [places]` for `run` to send those as JSON. A statement with no
+list of numbers costs the walk of its literals, one into a collection with
+no json field a look at its fields: 0.03 us for a `put` of 1 000 128-dim
+rows, 14 us with a json field beside the vector, against its 9.0 ms, which
+parsed and ran as before natively and in the browser module (`make
+wasm-speed`'s `put`). A typed array handed to the module goes as the
+numbers it holds, each an `f32` exactly. An object, an HTTP body (`parse_documents_json`), a pg `jsonb`
+(`json::parse_json`) and a COPY cell are read exact from the start.
 Over the pg wire it is `jsonb` (3802), `jsonb_send`'s version byte in
 binary, a path's parameter described as jsonb as `meta->'lang'` is (pgx
 refused to send a number into a text place). Over 100 000 documents a path
 filter scans in 5.7 ms against a text field's 4.2, 0.025 ms through `@hash`;
 a scan with no json field moved by noise alone. The browser module grew
-8.1 KB brotli; the standard library's sort for the members (4.1 KB) and a
+29.8 KB, 9.6 KB brotli -- 3.7 KB of it reading a list as written, a second
+lexer 2.9 KB of that until it took its flag at run time there
+(`lex_with`); the standard library's sort for the members (4.1 KB) and a
 walk generic over its callback (3.8 KB) were taken out on the way.
 
 **A vector written again is one node** (`VectorIndex::place`,

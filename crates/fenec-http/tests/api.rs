@@ -1236,4 +1236,31 @@ fn a_json_field_is_native_over_http() {
     // A key twice in an object is refused.
     let r = call(h.port, "POST", "/docs", Some(r#"{"meta":{"a":1,"a":2}}"#));
     assert_eq!(r.status, 400, "{}", r.body);
+
+    // A list of numbers is kept as written, in the statement's text and as
+    // a parameter, alone and in a batch, and a path compared with one
+    // finds it: read into a vector's f32s, 12345678901 was 12345679000.
+    let many = "[0.1,12345678901,3.141592653589793,19.99]";
+    let r = q(&format!(
+        r#"{{"query":"put docs {{title: \"l\", meta: {many}}}"}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = q(&format!(
+        r#"{{"query":"put docs {{title: $1, meta: $2}}","params":["p",{many}]}}"#
+    ));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let line =
+        format!(r#"{{"query":"set docs {{meta.n: $1}} where title = $2","params":[{many},"a"]}}"#);
+    let r = call(h.port, "POST", "/batch", Some(&line));
+    assert_eq!(r.status, 200, "{}", r.body);
+    for t in ["l", "p"] {
+        let r = get(h.port, &format!("/docs?select=meta&title=eq.{t}"));
+        assert_eq!(r.body.trim(), format!(r#"[{{"meta":{many}}}]"#));
+    }
+    let r = get(h.port, "/docs?select=meta.n&title=eq.a");
+    assert_eq!(r.body.trim(), format!(r#"[{{"meta.n":{many}}}]"#));
+    let r = q(&format!(
+        r#"{{"query":"get docs select title where meta = $1 order title","params":[{many}]}}"#
+    ));
+    assert_eq!(r.body.trim(), r#"[{"title":"l"},{"title":"p"}]"#);
 }

@@ -147,9 +147,16 @@ export class Fenec {
    * @returns {{kind:string, ...}} `{columns, rows}` for row results
    */
   run(sql, params = []) {
+    return this.#run(sql, params, null);
+  }
+
+  /** `run`, the parameters at `asJson` sent as JSON rather than apart. */
+  #run(sql, params, asJson) {
+    // A typed array sent as JSON goes as the numbers it holds.
+    if (asJson) params = params.map((p, i) => (asJson.includes(i) && ArrayBuffer.isView(p) ? Array.from(p) : p));
     // A module from before vectors went over as f32s takes five arguments,
     // and would read the JSON's `null` where each vector goes.
-    const [json, vectors] = this.#wasm.fenec_query.length > 5 ? vectorsApart(params) : [params, null];
+    const [json, vectors] = this.#wasm.fenec_query.length > 5 ? vectorsApart(params, asJson) : [params, null];
     const [sp, sl] = this.#write(sql);
     const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
@@ -165,6 +172,10 @@ export class Fenec {
     // may follow ones in the same text that wrote.
     kept.get(this)?.flush();
     const res = JSON.parse(out);
+    // A json field takes a list of numbers as written, not as the f32s it
+    // went over apart as: the module names those, before running anything,
+    // and they go again as JSON.
+    if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact);
     if (res.kind === 'error') {
       const e = new FenecError(res.message);
       // Refused for collation data the module has not been handed: which,
@@ -631,12 +642,15 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
  * its length, then its values, and the JSON holds `null` where it goes.
  * Written out as text and read back, a page of 200 768-dim vectors spent
  * most of its time on the digits, both sides of the call. A `-0` goes over
- * as `0`, as JSON writes it, so either way stores the same vector.
+ * as `0`, as JSON writes it, so either way stores the same vector. Those
+ * at `asJson` stay in the JSON: a json field keeps a list's numbers as
+ * written, which the module asks for by their places.
  */
-function vectorsApart(params) {
+function vectorsApart(params, asJson = null) {
   const found = [];
   let size = 0;
   params.forEach((p, i) => {
+    if (asJson?.includes(i)) return;
     const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
     for (let k = 0; k < list.length; k++) {

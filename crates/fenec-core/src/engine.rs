@@ -4878,6 +4878,7 @@ impl Database {
                     .into(),
             ));
         }
+        self.refuse_inexact(stmt, params)?;
         match stmt {
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
@@ -4943,6 +4944,7 @@ impl Database {
     }
 
     fn execute_inner(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
+        self.refuse_inexact(stmt, params)?;
         match stmt {
             Statement::CreateCollection {
                 schema,
@@ -7567,6 +7569,167 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// What of a statement has to be read as written for a json field: its
+/// text, where a literal list of numbers is put into one or compared with a
+/// path into one, and the parameters given there by their number (`$1` is
+/// 0). A list of numbers alone is read into a vector's `f32`s by a reader
+/// that has no schema -- FenecQL's lexer, the JSON reader of a query's
+/// parameters, the browser module's vectors handed over apart -- which is
+/// the quick way for the vector fields it nearly always is, and a json
+/// field refuses (`Value::coerce`). A caller holding the text reads it again
+/// as written (`fenec_ql::parse_exact`, `json::parse_params_exact`) where
+/// this names it, and only then: a statement with no list of numbers costs
+/// the walk of its literals, and one into a collection with no json field a
+/// look at its fields.
+#[derive(Debug, Default, PartialEq)]
+pub struct Exactly {
+    pub text: bool,
+    pub params: Vec<usize>,
+}
+
+impl Exactly {
+    pub fn is_needed(&self) -> bool {
+        self.text || !self.params.is_empty()
+    }
+}
+
+impl Database {
+    /// The refusal of a statement that would hand a json field, or compare
+    /// a path with, a vector where a list of numbers was written: read in
+    /// the quick way it holds `f32`s, and a write would keep other numbers
+    /// than those given and a comparison find none of the documents holding
+    /// them -- a wrong answer believed right. A statement with no list of
+    /// numbers, the one nearly every statement is, costs the walk of its
+    /// literals.
+    fn refuse_inexact(&self, stmt: &Statement, params: &[Value]) -> Result<()> {
+        if !stmt.reads_vectors() && !params.iter().any(crate::query::holds_vector) {
+            return Ok(());
+        }
+        let need = self.exactly(stmt);
+        let param = need
+            .params
+            .iter()
+            .any(|&i| params.get(i).is_some_and(crate::query::holds_vector));
+        match need.text || param {
+            false => Ok(()),
+            true => Err(Error::Query(
+                "a json field keeps a list of numbers as written, and this one was read into \
+                 a vector's f32s: read the text with fenec_ql::parse_for, a parameter as JSON"
+                    .into(),
+            )),
+        }
+    }
+
+    /// What of `stmt` a json field needs read as written ([`Exactly`]).
+    pub fn exactly(&self, stmt: &Statement) -> Exactly {
+        let mut out = match self.collection(stmt_collection(stmt)) {
+            Ok(c) => exactly_for(&c.schema, stmt),
+            Err(_) => Exactly::default(),
+        };
+        // Each `lookup` level's filter, by its own collection.
+        if let Statement::Select(s) | Statement::Explain(s) = stmt {
+            let mut level = s.lookup.as_ref();
+            while let Some(l) = level {
+                if let (Some(f), Ok(c)) = (&l.filter, self.collection(&l.collection)) {
+                    filter_needs(&c.schema, f, &mut out);
+                }
+                level = l.next.as_deref();
+            }
+        }
+        out
+    }
+}
+
+/// The collection a statement [`exactly_for`] looks at is of, or `""`.
+fn stmt_collection(stmt: &Statement) -> &str {
+    match stmt {
+        Statement::Put { collection, .. }
+        | Statement::Update { collection, .. }
+        | Statement::Delete { collection, .. } => collection,
+        Statement::Select(s) | Statement::Explain(s) => &s.collection,
+        _ => "",
+    }
+}
+
+/// What of `stmt`, a statement over a collection of `schema`, a json field
+/// needs read as written ([`Exactly`]).
+pub fn exactly_for(schema: &Schema, stmt: &Statement) -> Exactly {
+    let mut out = Exactly::default();
+    if !schema.fields.iter().any(|f| f.ty == DataType::Json) {
+        return out;
+    }
+    // The value first: a key is looked up only for a list of numbers or a
+    // parameter, so a `put` of 1 000 rows looks up the vector field's name
+    // and none of the others.
+    let mut pair = |(k, e): &(String, Expr)| {
+        if (matches!(e, Expr::Param(_)) || e.reads_vectors()) && names_json(schema, k) {
+            given(e, &mut out);
+        }
+    };
+    let filter = match stmt {
+        Statement::Put { docs, .. } => {
+            docs.iter().flatten().for_each(&mut pair);
+            None
+        }
+        Statement::Update { set, filter, .. } => {
+            set.iter().for_each(&mut pair);
+            filter.as_ref()
+        }
+        Statement::Delete { filter, .. } => filter.as_ref(),
+        Statement::Select(s) | Statement::Explain(s) => s.filter.as_ref(),
+        _ => None,
+    };
+    if let Some(f) = filter {
+        filter_needs(schema, f, &mut out);
+    }
+    out
+}
+
+/// Whether `name` is a json field of `schema` or a path into one.
+fn names_json(schema: &Schema, name: &str) -> bool {
+    // A path's field is a json one, or the path is refused where it is read.
+    let field = name.split_once('.').map_or(name, |(f, _)| f);
+    schema.field(field).is_some_and(|f| f.ty == DataType::Json)
+}
+
+/// What a value given a json field, or compared with one, needs.
+fn given(e: &Expr, out: &mut Exactly) {
+    match e {
+        Expr::Param(i) => out.params.push(*i),
+        e => out.text |= e.reads_vectors(),
+    }
+}
+
+/// What a filter over a collection of `schema` needs ([`Exactly`]): each
+/// value compared with a json field or a path into one.
+fn filter_needs(schema: &Schema, filter: &Expr, out: &mut Exactly) {
+    if !schema.fields.iter().any(|f| f.ty == DataType::Json) {
+        return;
+    }
+    let json = |name: &str| names_json(schema, name);
+    fn walk(e: &Expr, json: &dyn Fn(&str) -> bool, given: &mut dyn FnMut(&Expr)) {
+        let field = |e: &Expr| matches!(e, Expr::Field(n) if json(n));
+        match e {
+            Expr::And(a, b) | Expr::Or(a, b) => {
+                walk(a, json, given);
+                walk(b, json, given);
+            }
+            Expr::Not(a) => walk(a, json, given),
+            Expr::Cmp(_, a, b) | Expr::Has(a, b) => {
+                if field(a) {
+                    given(b);
+                }
+                if field(b) {
+                    given(a);
+                }
+            }
+            Expr::In(a, items) if field(a) => items.iter().for_each(given),
+            _ => {}
+        }
+    }
+    walk(filter, &json, &mut |e| given(e, out));
 }
 
 /// Sets `k` of `doc` to `v`: a field, coerced to its type, or a path into

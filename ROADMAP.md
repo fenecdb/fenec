@@ -152,10 +152,12 @@ field's equality 4.2), 0.025 ms through `@hash`; a range 7.2 ms, 0.009
 through `@sorted`; an index on a path builds in 11 (`@hash`) and 21 ms
 (`@sorted`). A scan with no json field moved by nothing beyond noise (3.47
 -> 3.38, 4.17 -> 4.21, 3.06 -> 3.08, 2.72 -> 2.60 ms), the browser module's
-filter 1.67 -> 1.66 ms. The browser module grew 25 KB, 8.1 KB brotli
-(162 988 against 154 731 bytes) -- more than the few hundred bytes guessed
-below: the object codec and reader, the path reads and writes, and the
-ordered index's json kind. The LangChain and LlamaIndex stores were not
+filter 1.67 -> 1.66 ms. The browser module grew 29.8 KB, 9.6 KB brotli
+(164 365 against 154 731 bytes) -- more than the few hundred bytes guessed
+below: the object codec and reader, the path reads and writes, the
+ordered index's json kind, and reading a list of numbers as written where a
+json field is given one (3.7 KB), which the quick read into a vector's
+`f32`s had cut to seven digits. The LangChain and LlamaIndex stores were not
 moved onto a json field in this phase.
 
 ```

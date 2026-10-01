@@ -80,12 +80,27 @@ async function measure(path) {
   const pn = rng(13);
   await db.from('page').insert(Array.from({ length: 200 }, () => ({ embed: Float32Array.from({ length: 768 }, () => pn() - 0.5) })));
   out.json = best(10, () => db.run('get page limit 200'));
+
+  // A put of 1 000 128-dim rows as text, into a collection with a json
+  // field beside the vector: what a list of numbers is read as is asked of
+  // the schema there, and nowhere else.
+  const pv = rng(17);
+  const text = 'put t [' + Array.from({ length: 1000 }, (_, i) =>
+    `{n: ${i}, embed: [${Array.from({ length: 128 }, () => pv() - 0.5).join(', ')}]}`).join(', ') + ']';
+  for (const [key, schema] of [['put', ''], ['putJson', ', meta json']]) {
+    out[key] = best(10, () => {
+      const d = db;
+      d.run('drop collection if exists t');
+      d.run(`create collection t (n int, embed vector<128>${schema})`);
+      d.run(text);
+    });
+  }
   return out;
 }
 
 const paths = process.argv.slice(2);
 if (paths.length === 0) paths.push(new URL('../../web/fenec.wasm', import.meta.url).pathname);
-console.log('module'.padEnd(40), 'build ms'.padStart(9), 'near ms'.padStart(9), 'filter ms'.padStart(10), 'match ms'.padStart(9), 'json ms'.padStart(9));
+console.log('module'.padEnd(40), 'build ms'.padStart(9), 'near ms'.padStart(9), 'filter ms'.padStart(10), 'match ms'.padStart(9), 'json ms'.padStart(9), 'put ms'.padStart(8), 'put+json'.padStart(9));
 for (const p of paths) {
   const m = await measure(p);
   console.log(
@@ -95,5 +110,7 @@ for (const p of paths) {
     m.filter.toFixed(2).padStart(10),
     m.match.toFixed(3).padStart(9),
     m.json.toFixed(2).padStart(9),
+    m.put.toFixed(2).padStart(8),
+    m.putJson.toFixed(2).padStart(9),
   );
 }

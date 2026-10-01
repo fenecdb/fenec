@@ -4201,6 +4201,42 @@ fn a_json_field_goes_as_jsonb() {
     );
     assert!(text.contains("x\t\\N\n"), "{text}");
 
+    // A list of numbers is kept as written, in a statement's text -- read
+    // into a vector's f32s, 12345678901 was 12345679000 -- and as a
+    // parameter, and a path compared with one finds it.
+    let many = "[0.1,12345678901,3.141592653589793,19.99]";
+    let r = c.simple(&format!("put d {{title: \"m\", meta: {many}}}"));
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    let r = c.extended("put d {title: $1, meta: $2}", &["n", many], false);
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    assert_eq!(
+        rows_of(
+            &mut c,
+            "get d select meta where title = \"m\" or title = \"n\""
+        ),
+        [vec![s(many)], vec![s(many)]]
+    );
+    let r = c.extended(
+        "get d select title where meta = $1 order title",
+        &[many],
+        false,
+    );
+    let titles: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(titles, [vec![s("m")], vec![s("n")]]);
+    let r = c.simple(&format!(
+        "get d select title where meta = {many} order title"
+    ));
+    let titles: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(titles, [vec![s("m")], vec![s("n")]]);
+
     // The catalog shows it so.
     let r = c.simple(
         "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a \

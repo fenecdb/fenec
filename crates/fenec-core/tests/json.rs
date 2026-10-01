@@ -49,7 +49,8 @@ impl Sink for Tap {
 }
 
 fn run(db: &mut Database, q: &str) -> Result<Response> {
-    db.execute(&fenec_ql::parse_one(q).unwrap_or_else(|e| panic!("{q}: {e}")))
+    let stmt = fenec_ql::parse_one_for(db, q).unwrap_or_else(|e| panic!("{q}: {e}"));
+    db.execute(&stmt)
 }
 
 fn ok(db: &mut Database, q: &str) {
@@ -57,7 +58,7 @@ fn ok(db: &mut Database, q: &str) {
 }
 
 fn err(db: &mut Database, q: &str) -> String {
-    match fenec_ql::parse_one(q) {
+    match fenec_ql::parse_one_for(db, q) {
         Err(e) => e.to_string(),
         Ok(s) => db.execute(&s).expect_err(q).to_string(),
     }
@@ -69,7 +70,7 @@ fn rows(db: &Database, q: &str) -> Vec<(u64, Vec<Value>)> {
 
 fn rows_with(db: &Database, q: &str, params: &[Value]) -> Vec<(u64, Vec<Value>)> {
     db.query(
-        &fenec_ql::parse_one(q).unwrap_or_else(|e| panic!("{q}: {e}")),
+        &fenec_ql::parse_one_for(db, q).unwrap_or_else(|e| panic!("{q}: {e}")),
         params,
     )
     .unwrap_or_else(|e| panic!("{q}: {e}"))
@@ -153,6 +154,90 @@ fn an_object_is_kept_whole_sorted_and_read_back() {
             &[Value::Float(f64::NAN)]
         )
         .is_err());
+}
+
+/// A list of numbers is kept as written: read into a vector's `f32`s, as
+/// a reader with no schema reads one for the vector fields it nearly always
+/// is, `0.1` was 0.10000000149011612 and 12345678901 was 12345679000. Read
+/// for the schema (`parse_for`) a json field is given it as written; read
+/// the quick way, or handed as a vector, it is refused, in a write and in a
+/// comparison with a path alike, never kept as other numbers.
+#[test]
+fn a_list_of_numbers_is_kept_as_written_or_refused() {
+    let mut db = Database::new();
+    docs(&mut db);
+    let many = "[0.1, 12345678901, 3.141592653589793, 1e300, -7, 2.5, 9007199254740993]";
+    ok(&mut db, &format!("put docs {{id: 9, meta: {many}}}"));
+    ok(
+        &mut db,
+        &format!("set docs {{meta.n: {many}}} where id = 1"),
+    );
+    let want = json(many);
+    assert_eq!(
+        rows(&db, "get docs select meta where id = 9")[0].1,
+        std::slice::from_ref(&want)
+    );
+    assert_eq!(
+        rows(&db, "get docs select meta.n where id = 1")[0].1,
+        std::slice::from_ref(&want)
+    );
+    let text = fenec_core::json::to_string(&want);
+    assert!(
+        text.starts_with("[0.1,12345678901,3.141592653589793,1")
+            && text.ends_with(",-7,2.5,9007199254740993]"),
+        "{text}"
+    );
+    assert_eq!(fenec_core::json::parse_json(&text).unwrap(), want);
+    // A comparison with a path finds it, written the same way.
+    assert_eq!(ids(&db, &format!("get docs where meta.n = {many}")), [1]);
+    assert_eq!(ids(&db, &format!("get docs where meta = {many}")), [9]);
+    // A vector field beside it still takes its list the quick way.
+    ok(&mut db, "create collection mixed (e vector<2>, meta json)");
+    ok(&mut db, "put mixed {e: [0.5, 1], meta: [0.1, 1]}");
+    assert_eq!(
+        rows(&db, "get mixed select e, meta")[0].1,
+        [Value::Vector(vec![0.5, 1.0]), json("[0.1, 1]")]
+    );
+
+    // Read the quick way, or handed a vector, it is refused.
+    let quick = fenec_ql::parse_one("put docs {meta: [0.1, 2]}").unwrap();
+    let e = db.execute(&quick).unwrap_err().to_string();
+    assert!(e.contains("as written"), "{e}");
+    let quick = fenec_ql::parse_one("get docs where meta.n = [0.1, 2]").unwrap();
+    assert!(db.query(&quick, &[]).is_err());
+    let put = fenec_ql::parse_one("put docs {meta: $1}").unwrap();
+    let vector = Value::Vector(vec![0.1, 2.0]);
+    assert!(db
+        .execute_with(&put, std::slice::from_ref(&vector))
+        .is_err());
+    assert_eq!(
+        db.exactly(&put),
+        fenec_core::engine::Exactly {
+            text: false,
+            params: vec![0]
+        }
+    );
+    // A parameter read as written goes in as it is.
+    let exact = fenec_core::json::parse_params_exact("[[0.1, 12345678901]]").unwrap();
+    db.execute_with(&put, &exact).unwrap();
+    assert_eq!(
+        rows(&db, "get docs select meta order id desc limit 1")[0].1,
+        [json("[0.1, 12345678901]")]
+    );
+    // A lookup level's filter is read by its own collection.
+    ok(&mut db, "create collection p (k int)");
+    ok(&mut db, "put p {id: 1, k: 1}");
+    let q = "get p lookup docs on id = k where meta.n = [0.1, 12345678901]";
+    let quick = fenec_ql::parse_one(q).unwrap();
+    assert!(quick.reads_vectors() && db.exactly(&quick).text);
+    assert!(db.query(&quick, &[]).is_err());
+    assert_eq!(rows(&db, q).len(), 1);
+    // A collection with no json field is asked nothing, and its vectors go
+    // in the quick way.
+    ok(&mut db, "create collection v (e vector<2>)");
+    let quick = fenec_ql::parse_one("put v {e: [0.1, 2]}").unwrap();
+    assert_eq!(db.exactly(&quick), fenec_core::engine::Exactly::default());
+    db.execute(&quick).unwrap();
 }
 
 #[test]

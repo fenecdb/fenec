@@ -425,12 +425,8 @@ impl Value {
 
 /// `v` as a `json` field holds it: what JSON can say, nested no deeper
 /// than [`MAX_JSON_DEPTH`]. A timestamp becomes its ISO text, as JSON
-/// writes one, and a vector -- an array of numbers alone, as a reader with
-/// no schema makes one (`json.rs`, a FenecQL list) -- the numbers it was
-/// written as: each `f32` read back through its shortest text, so `0.1`
-/// stays `0.1` rather than `0.10000000149011612`, a whole one an integer.
-/// Bytes, a sparse vector and a number that is not finite have no JSON,
-/// and are refused.
+/// writes one. Bytes, a sparse vector, a number that is not finite and a
+/// vector -- `f32`s, not the numbers they were read from -- are refused.
 fn json_value(v: Value, depth: usize) -> Result<Value> {
     let deeper = || {
         Error::Type(format!(
@@ -442,27 +438,18 @@ fn json_value(v: Value, depth: usize) -> Result<Value> {
             return Err(Error::Type("a json number is finite".into()));
         }
         Value::Timestamp(ms) => Value::Text(crate::time::format_iso(ms)),
-        Value::Vector(v) => {
-            if depth >= MAX_JSON_DEPTH {
-                return Err(deeper());
-            }
-            let mut out = Vec::with_capacity(v.len());
-            let mut text = String::new();
-            for x in v {
-                if !x.is_finite() {
-                    return Err(Error::Type("a json number is finite".into()));
-                }
-                text.clear();
-                crate::num::f32_into(&mut text, x);
-                let f = crate::num::parse_f64(&text).unwrap_or(x as f64);
-                out.push(
-                    match f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0 {
-                        true => Value::Int(f as i64),
-                        false => Value::Float(f),
-                    },
-                );
-            }
-            Value::List(out)
+        // A vector holds the `f32`s a list of numbers was read into, not
+        // the numbers written -- `0.1` is 0.10000000149011612 there, and
+        // 12345678901 is 12345679000 -- so a json field, which keeps what
+        // it is given, refuses one rather than keep another number. The
+        // readers of text hand a json field the list as written instead
+        // (`Database::exactly`).
+        Value::Vector(_) => {
+            return Err(Error::Type(
+                "a json field keeps numbers as they were written, and a vector holds the \
+                 f32s a list of them was read into: give the list as text, or as JSON"
+                    .into(),
+            ))
         }
         Value::List(items) => {
             if depth >= MAX_JSON_DEPTH {

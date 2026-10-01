@@ -916,7 +916,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
     };
-    let (stmt, params) = match api::parse_query(body) {
+    let (stmt, params) = match api::parse_query(body)
+        .and_then(|(stmt, params)| api::exactly(db, body, stmt, params))
+    {
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
@@ -1075,7 +1077,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
     };
-    let stmts = match api::parse_batch(body) {
+    let stmts = match api::parse_batch(body).and_then(|s| api::exactly_batch(db, body, s)) {
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };

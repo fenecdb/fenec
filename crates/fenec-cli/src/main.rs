@@ -16,7 +16,6 @@ mod stop;
 mod types;
 
 use fenec_core::prelude::*;
-use fenec_ql::parse;
 use std::io::{self, BufRead, IsTerminal, Write};
 
 const HELP: &str = r#"
@@ -348,7 +347,8 @@ fn human(n: usize) -> String {
 }
 
 fn run(db: &mut Database, src: &str) -> bool {
-    let stmts = match parse(src) {
+    // A list of numbers for a json field read as written.
+    let stmts = match fenec_ql::parse_for(db, src) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
