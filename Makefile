@@ -169,30 +169,26 @@ replica-bench:
 	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
 	$(CARGO) run --release -p fenec-server --example failover -- 10
 
-## A pg transaction: a lone write under each sync policy, a write in a
-## transaction of 100, each in a savepoint, a ROLLBACK TO over 100, and a
-## read, over the wire.
-tx-bench:
-	$(CARGO) run --release -p fenec-server --example transactions -- 20000
-
 ## Writers and readers at once, fenecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
-## beside writers and beside a transaction held open.
+## beside writers and beside blocks of 1 000 writes (a /batch's).
 concurrency-bench:
 	$(CARGO) run --release -p fenec-bench --bin concurrency
 
 ## What one request costs over the wire: a row by id, a filter, a near and a
-## put, over the pg wire's extended and simple protocols and over HTTP, one
-## client at a time and eight at once, against fenec-server started here and
-## PostgreSQL + pgvector (`make pgvector-up` first, skipped without it).
+## put, over fenec-server's HTTP (POST /query, kept alive) and PostgreSQL's
+## extended and simple protocols, one client at a time and eight at once,
+## against fenec-server started here and PostgreSQL + pgvector (`make
+## pgvector-up` first, skipped without it).
 requests-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin requests
 
 ## What loading 100 000 rows costs each way a client can send them: in
-## process, the pg wire's simple and extended protocols, HTTP's array and
-## /batch, with the vector index kept and without; PostgreSQL's COPY and
-## INSERT beside them (`make pgvector-up` first, skipped without it).
+## process, and over HTTP as a REST array, a /batch and a /query put of
+## 1 000, with the vector index kept and without, then read back a page at
+## a time; PostgreSQL's COPY and INSERT beside them (`make pgvector-up`
+## first, skipped without it).
 load-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin load
@@ -373,11 +369,13 @@ quant-bench:
 	$(CARGO) build --release -p fenec-core --example quant
 	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32 --filter 3000; done
 
-## fenec-server against PostgreSQL + pgvector at scale, both over the pg wire
-## (make pgvector-up first): the load and the index, memory, disk, recall@10
-## and latency at beams of 40, 100 and 200, and eight clients' throughput.
-## SCALE_ROWS x SCALE_DIM, a million 128-dim vectors unless given;
-## SCALE_ARGS=--after builds fenec-server's index once the rows are in.
+## fenec-server over HTTP against PostgreSQL + pgvector over its own wire, at
+## scale (make pgvector-up first): the load and the index, memory, disk,
+## recall@10 and latency at beams of 40, 100 and 200, and eight clients'
+## throughput. SCALE_ROWS x SCALE_DIM, a million 128-dim vectors unless
+## given; SCALE_ARGS=--after builds fenec-server's index once the rows are
+## in, SCALE_ARGS="--only fenec" (or pg) runs one side, for running them in
+## turns after idle minutes.
 SCALE_ROWS ?= 1000000
 SCALE_DIM ?= 128
 scale-bench:

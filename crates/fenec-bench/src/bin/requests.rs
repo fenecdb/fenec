@@ -2,25 +2,26 @@
 //! `make requests-bench`.
 //!
 //! fenec-server is started here over a file of 10 000 rows, a 128-dim vector
-//! each, with its pg wire and HTTP on loopback; PostgreSQL + pgvector is the
-//! container `make pgvector-up` starts, and is skipped without it. Four
-//! requests -- a row by id, a filter with a limit, a `near` top ten and a
-//! put of a row without a vector -- each asked by one client at a time (the
-//! round trip's p50 and p99) and by eight at once (requests a second):
+//! each, with its HTTP on loopback; PostgreSQL + pgvector is the container
+//! `make pgvector-up` starts, and is skipped without it. Four requests -- a
+//! row by id, a filter with a limit, a `near` top ten and a put of a row
+//! without a vector -- each asked by one client at a time (the round trip's
+//! p50 and p99) and by eight at once (requests a second):
 //!
-//!   * over the pg wire's extended protocol, the statement prepared once
+//!   * fenec-server: `POST /query` with the parameters beside the text, on a
+//!     connection a client keeps alive ([`http::Http`]);
+//!   * PostgreSQL over its extended protocol, the statement prepared once
 //!     and bound for each request, as a driver does;
-//!   * over its simple protocol, the literals in the text;
-//!   * over HTTP (fenec-server alone), `POST /query` with the parameters beside
-//!     the text, on a kept-alive connection.
+//!   * PostgreSQL over its simple protocol, the literals in the text.
 //!
 //! PostgreSQL answers from inside Docker's virtual machine, so its figures
-//! carry that network: its empty query's round trip is printed beside them.
-//! Its writes commit with `synchronous_commit = off`, as fenec-server's reach
-//! the disk within `--sync 250`.
+//! carry that network: the round trip of the least each can be asked --
+//! fenec-server's `GET /`, PostgreSQL's empty query -- is printed beside
+//! them. Its writes commit with `synchronous_commit = off`, as
+//! fenec-server's reach the disk within `--sync 250`.
 
-#[path = "../wire.rs"]
-mod wire;
+#[path = "../http.rs"]
+mod http;
 
 use postgres::{Client, NoTls, SimpleQueryMessage};
 use std::io::Write;
@@ -32,7 +33,7 @@ use fenec_core::prelude::*;
 
 const ROWS: usize = 10_000;
 const DIM: usize = 128;
-/// Requests timed one at a time, a case and a protocol.
+/// Requests timed one at a time, a case and a way of asking.
 const ONE: usize = 3_000;
 const CLIENTS: usize = 8;
 const RUN: Duration = Duration::from_secs(2);
@@ -110,72 +111,51 @@ fn params(case: Case, rng: &mut Rng, queries: &[String], n: u64) -> Vec<Param> {
 
 // ------------------------------------------------------------- engines
 
-/// One engine's statements for each case: the text with `$n`, and the text
+/// fenec-server's statement for each case, its parameters `$n`.
+fn fenec_text(case: Case) -> &'static str {
+    match case {
+        Case::ById => "get docs select id, category, score where id = $1",
+        Case::Filter => "get docs select id where category = $1 and score > $2 limit 10",
+        Case::Near => "get docs select id near embed $1 limit 10",
+        Case::Put => "put docs {category: $1, score: $2}",
+    }
+}
+
+/// PostgreSQL's statement for each case: the text with `$n`, and the text
 /// with the literals in for the simple protocol.
-trait Engine: Sync {
-    fn text(&self, case: Case) -> &'static str;
-    fn inline(&self, case: Case, p: &[Param]) -> String;
-}
-
-struct Fenec;
-impl Engine for Fenec {
-    fn text(&self, case: Case) -> &'static str {
-        match case {
-            Case::ById => "get docs select id, category, score where id = $1",
-            Case::Filter => "get docs select id where category = $1 and score > $2 limit 10",
-            Case::Near => "get docs select id near embed $1 limit 10",
-            Case::Put => "put docs {category: $1, score: $2}",
-        }
-    }
-    fn inline(&self, case: Case, p: &[Param]) -> String {
-        let (a, b) = (lit(&p[0], '"'), p.get(1).map(|x| lit(x, '"')));
-        match case {
-            Case::ById => format!("get docs select id, category, score where id = {a}"),
-            Case::Filter => format!(
-                "get docs select id where category = {a} and score > {} limit 10",
-                b.unwrap()
-            ),
-            Case::Near => format!("get docs select id near embed {} limit 10", raw(&p[0])),
-            Case::Put => format!("put docs {{category: {a}, score: {}}}", b.unwrap()),
-        }
+fn pg_text(case: Case) -> &'static str {
+    match case {
+        Case::ById => "SELECT id, category, score FROM docs WHERE id = $1",
+        Case::Filter => "SELECT id FROM docs WHERE category = $1 AND score > $2 LIMIT 10",
+        Case::Near => "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
+        Case::Put => "INSERT INTO docs (category, score) VALUES ($1, $2)",
     }
 }
 
-struct Pg;
-impl Engine for Pg {
-    fn text(&self, case: Case) -> &'static str {
-        match case {
-            Case::ById => "SELECT id, category, score FROM docs WHERE id = $1",
-            Case::Filter => "SELECT id FROM docs WHERE category = $1 AND score > $2 LIMIT 10",
-            Case::Near => "SELECT id FROM docs ORDER BY embed <=> $1::text::vector LIMIT 10",
-            Case::Put => "INSERT INTO docs (category, score) VALUES ($1, $2)",
-        }
-    }
-    fn inline(&self, case: Case, p: &[Param]) -> String {
-        let (a, b) = (lit(&p[0], '\''), p.get(1).map(|x| lit(x, '\'')));
-        match case {
-            Case::ById => format!("SELECT id, category, score FROM docs WHERE id = {a}"),
-            Case::Filter => format!(
-                "SELECT id FROM docs WHERE category = {a} AND score > {} LIMIT 10",
-                b.unwrap()
-            ),
-            Case::Near => format!(
-                "SELECT id FROM docs ORDER BY embed <=> '{}' LIMIT 10",
-                raw(&p[0])
-            ),
-            Case::Put => format!(
-                "INSERT INTO docs (category, score) VALUES ({a}, {})",
-                b.unwrap()
-            ),
-        }
+fn pg_inline(case: Case, p: &[Param]) -> String {
+    let (a, b) = (lit(&p[0]), p.get(1).map(lit));
+    match case {
+        Case::ById => format!("SELECT id, category, score FROM docs WHERE id = {a}"),
+        Case::Filter => format!(
+            "SELECT id FROM docs WHERE category = {a} AND score > {} LIMIT 10",
+            b.unwrap()
+        ),
+        Case::Near => format!(
+            "SELECT id FROM docs ORDER BY embed <=> '{}' LIMIT 10",
+            raw(&p[0])
+        ),
+        Case::Put => format!(
+            "INSERT INTO docs (category, score) VALUES ({a}, {})",
+            b.unwrap()
+        ),
     }
 }
 
-/// A literal in the text: FenecQL quotes a string in `"`, SQL in `'`.
-fn lit(p: &Param, quote: char) -> String {
+/// A literal in SQL's text.
+fn lit(p: &Param) -> String {
     match p {
         Param::Int(i) => i.to_string(),
-        Param::Text(s) => format!("{quote}{s}{quote}"),
+        Param::Text(s) => format!("'{s}'"),
     }
 }
 
@@ -206,7 +186,7 @@ impl Extended {
         let mut client = pg_client(url);
         let stmts = CASES
             .iter()
-            .map(|(c, _)| client.prepare(Pg.text(*c)).unwrap())
+            .map(|(c, _)| client.prepare(pg_text(*c)).unwrap())
             .collect();
         Extended { client, stmts }
     }
@@ -246,7 +226,7 @@ struct Simple {
 
 impl Asker for Simple {
     fn ask(&mut self, case: Case, p: &[Param]) {
-        let out = self.client.simple_query(&Pg.inline(case, p)).unwrap();
+        let out = self.client.simple_query(&pg_inline(case, p)).unwrap();
         assert!(out
             .iter()
             .any(|m| matches!(m, SimpleQueryMessage::CommandComplete(_))));
@@ -261,47 +241,8 @@ fn pg_client(url: &str) -> Client {
     client
 }
 
-/// fenec-server over the pg wire ([`wire::Wire`]), each case's statement
-/// parsed once when `extended`.
-struct Pgw {
-    c: wire::Wire,
-    extended: bool,
-}
-
-impl Pgw {
-    fn new(addr: &str, extended: bool) -> Pgw {
-        let mut c = wire::Wire::connect(addr);
-        if extended {
-            for (i, (case, _)) in CASES.iter().enumerate() {
-                c.prepare(&format!("s{i}"), Fenec.text(*case));
-            }
-        }
-        Pgw { c, extended }
-    }
-}
-
-impl Asker for Pgw {
-    fn ask(&mut self, case: Case, p: &[Param]) {
-        if !self.extended {
-            self.c.simple(&Fenec.inline(case, p));
-            return;
-        }
-        let i = CASES.iter().position(|(c, _)| *c == case).unwrap();
-        let values: Vec<String> = p
-            .iter()
-            .map(|x| match x {
-                Param::Int(n) => n.to_string(),
-                Param::Text(s) => s.clone(),
-            })
-            .collect();
-        let values: Vec<&str> = values.iter().map(String::as_str).collect();
-        self.c.bind_execute(&format!("s{i}"), &values);
-        self.c.sync();
-    }
-}
-
 /// `POST /query`, the parameters beside the text, one connection kept alive.
-struct Http(wire::Http);
+struct Http(http::Http);
 
 impl Asker for Http {
     fn ask(&mut self, case: Case, p: &[Param]) {
@@ -314,12 +255,7 @@ impl Asker for Http {
                 Param::Text(s) => format!("\"{s}\""),
             })
             .collect();
-        let json = format!(
-            "{{\"query\":\"{}\",\"params\":[{}]}}",
-            Fenec.text(case),
-            params.join(",")
-        );
-        self.0.post("/query", "application/json", json.as_bytes());
+        self.0.query(fenec_text(case), &params.join(","));
     }
 }
 
@@ -437,11 +373,12 @@ fn pg_setup(url: &str, vecs: &[Vec<f32>]) -> bool {
     true
 }
 
-fn round_trip(a: &mut Client) -> f64 {
+/// p50 in ms of the least a server can be asked, `ONE` times.
+fn round_trip(mut ask: impl FnMut()) -> f64 {
     let mut lat: Vec<f64> = (0..ONE)
         .map(|_| {
             let t = Instant::now();
-            a.simple_query("").unwrap();
+            ask();
             t.elapsed().as_secs_f64() * 1e3
         })
         .collect();
@@ -455,74 +392,68 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("requests.fenec");
     fenec_file(&file, &vecs);
-    let (pg_port, http_port) = (wire::free_port(), wire::free_port());
-    let _server = wire::start_fenec(&file, pg_port, http_port, "requests-bench");
-    let fenec_url = format!("host=127.0.0.1 port={pg_port} user=fenec dbname=fenec");
+    let http_port = http::free_port();
+    let _server = http::start_fenec(&file, http_port, "requests-bench", &[]);
     let http_addr = format!("127.0.0.1:{http_port}");
-    let fenec_wire = format!("127.0.0.1:{pg_port}");
     let pg_url = std::env::var("FENECBENCH_PG").unwrap_or_else(|_| {
         "host=127.0.0.1 port=55432 user=postgres password=fenec dbname=fenecbench".into()
     });
     let pg = pg_setup(&pg_url, &vecs);
 
     println!("{ROWS} rows x {DIM} dims; one client: round trip p50 / p99 in ms; {CLIENTS} clients: requests a second");
-    let mut empty = Client::connect(&fenec_url, NoTls).unwrap();
+    let mut empty = http::Http::connect(&http_addr);
     print!(
-        "empty query's round trip: fenec-server {:.3} ms",
-        round_trip(&mut empty)
+        "the least request's round trip: fenec-server's GET / {:.3} ms",
+        round_trip(|| {
+            empty.get("/");
+        })
     );
     if pg {
         let mut c = Client::connect(&pg_url, NoTls).unwrap();
         print!(
-            ", PostgreSQL {:.3} ms (Docker's network)",
-            round_trip(&mut c)
+            ", PostgreSQL's empty query {:.3} ms (Docker's network)",
+            round_trip(|| {
+                c.simple_query("").unwrap();
+            })
         );
     }
     println!("\n");
     println!(
-        "{:<28} {:>22} {:>22}",
+        "{:<20} {:>22} {:>22} {:>22}",
         "",
-        "fenec-server",
-        if pg { "PostgreSQL" } else { "" }
+        "fenec-server, HTTP",
+        if pg { "PostgreSQL, extended" } else { "" },
+        if pg { "PostgreSQL, simple" } else { "" }
     );
-    for (proto, label) in [(0, "extended"), (1, "simple"), (2, "HTTP")] {
-        for (case, name) in CASES {
-            let mut cells = Vec::new();
-            for engine_pg in [false, true] {
-                if engine_pg && (!pg || proto == 2) {
-                    continue;
-                }
-                let url = if engine_pg {
-                    pg_url.clone()
-                } else {
-                    fenec_url.clone()
-                };
-                let (addr, u) = (http_addr.clone(), url.clone());
-                let wire = fenec_wire.clone();
-                let make = move || -> Box<dyn Asker> {
-                    match (proto, engine_pg) {
-                        (0, true) => Box::new(Extended::new(&u)),
-                        (1, true) => Box::new(Simple {
-                            client: pg_client(&u),
-                        }),
-                        (0, false) => Box::new(Pgw::new(&wire, true)),
-                        (1, false) => Box::new(Pgw::new(&wire, false)),
-                        _ => Box::new(Http(wire::Http::connect(&addr))),
-                    }
-                };
-                let mut one = make();
-                let (p50, p99) = one_at_a_time(one.as_mut(), case, &queries, 42);
-                drop(one);
-                let rate = at_once(&make, case, &queries);
-                cells.push(format!("{p50:.3} / {p99:.3}  {:>7.0}/s", rate));
+    for (case, name) in CASES {
+        let mut cells = Vec::new();
+        for way in 0..3 {
+            if way > 0 && !pg {
+                continue;
             }
-            println!(
-                "{:<28} {:>22} {:>22}",
-                format!("{label}: {name}"),
-                cells[0],
-                cells.get(1).map(String::as_str).unwrap_or("")
-            );
+            let (addr, u) = (http_addr.clone(), pg_url.clone());
+            let make = move || -> Box<dyn Asker> {
+                match way {
+                    0 => Box::new(Http(http::Http::connect(&addr))),
+                    1 => Box::new(Extended::new(&u)),
+                    _ => Box::new(Simple {
+                        client: pg_client(&u),
+                    }),
+                }
+            };
+            let mut one = make();
+            let (p50, p99) = one_at_a_time(one.as_mut(), case, &queries, 42);
+            drop(one);
+            let rate = at_once(&make, case, &queries);
+            cells.push(format!("{p50:.3} / {p99:.3}  {:>7.0}/s", rate));
         }
+        println!(
+            "{:<20} {:>22} {:>22} {:>22}",
+            name,
+            cells[0],
+            cells.get(1).map(String::as_str).unwrap_or(""),
+            cells.get(2).map(String::as_str).unwrap_or("")
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

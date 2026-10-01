@@ -10,15 +10,14 @@ default-run = "fenec-bench"
 
 [dependencies]
 fenec-core = { path = "../fenec-core" }
-fenec-http = { path = "../fenec-http" }
 fenec-ql = { path = "../fenec-ql" }
 # For benchmarking only. SQLite is built from source so the version and the
 # compile flags stay fixed.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # For the PostgreSQL + pgvector comparison (only in this harness).
 postgres = "0.19"
-# pgvector's own types for the `postgres` crate, which both servers take
-# in pgvector's binary format (`scale`).
+# pgvector's own types for the `postgres` crate, in pgvector's binary
+# format: PostgreSQL's side of `scale`.
 pgvector = { version = "0.4", features = ["postgres"] }
 
 [[bin]]

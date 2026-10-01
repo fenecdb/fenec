@@ -14,15 +14,14 @@
 //!   * the same without an fsync -- fenecdb's writes stay in its buffer,
 //!     SQLite's reach the operating system (`synchronous=NORMAL`);
 //!   * a read by id, alone and beside four writers, p50 and p99;
-//!   * a read by id beside a writer that holds a transaction open 20 ms at a
-//!     time, as a client between two statements does: fenecdb's readers
-//!     read what has landed, the transaction's block parked while it waits
-//!     for its next statement, SQLite's the last commit (WAL). p50, p99 and
-//!     the longest.
+//!   * a read by id beside a writer landing blocks of 1 000 writes one after
+//!     another, as `POST /batch` of 1 000 lines does: fenecdb's block holds
+//!     the write lock until it lands, SQLite's readers read the last commit
+//!     (WAL) beside its transaction. p50, p99 and the longest.
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
-//! `RwLock`, taken as `fenec-server` takes it (`fenec_http::held`).
+//! `RwLock`, taken as `fenec-server` takes it.
 
 use fenec_core::prelude::*;
 use rusqlite::{params, Connection};
@@ -33,6 +32,8 @@ use std::time::{Duration, Instant};
 
 const ROWS: i64 = 10_000;
 const RUN: Duration = Duration::from_secs(2);
+/// The writes a block holds beside the readers, a `/batch` of them.
+const BLOCK: i64 = 1_000;
 
 fn stmt(src: &str) -> Statement {
     fenec_ql::parse_one(src).unwrap()
@@ -121,7 +122,7 @@ fn fenec_readers(db: &Arc<RwLock<Database>>, beside: impl FnOnce(&AtomicBool) + 
                     while !stop.load(Ordering::Relaxed) {
                         let id = (next(&mut seed) % ROWS as u64) as i64 + 1;
                         let t = Instant::now();
-                        let out = fenec_http::held::read_landed(&db).query(&get, &[Value::Int(id)]);
+                        let out = db.read().unwrap().query(&get, &[Value::Int(id)]);
                         times.push(t.elapsed().as_secs_f64() * 1e3);
                         out.unwrap();
                     }
@@ -285,51 +286,39 @@ fn main() {
     });
     row("  beside 4 writers, no fsync", reads(&mut f), reads(&mut s));
 
-    // A transaction held open 20 ms at a time, as a client between its
-    // statements holds one: two writes, the pause between them, and the
-    // write lock taken for each statement alone, the block left open
-    // between them, as `fenec-server` takes it.
-    let hold = Duration::from_millis(20);
+    // Blocks of 1 000 writes, one after another, as `POST /batch` of 1 000
+    // lines runs them: the block holds the write lock from its first write
+    // to its record, and a reader waits for it -- SQLite's WAL reads the
+    // last commit meanwhile.
     let mut f = fenec_readers(&db, |stop| {
         let put = stmt("put t {k: $1, n: $2}");
         let end = Instant::now() + RUN;
         let mut n = 0i64;
         while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-            let mut g = fenec_http::held::write_unheld(&db);
-            g.begin().unwrap();
-            g.execute_with(&put, &[Value::Text("held".into()), Value::Int(n)])
-                .unwrap();
-            g.leave_block();
-            drop(g);
-            std::thread::sleep(hold);
-            let mut g = db.write().unwrap();
-            g.rejoin_block();
-            g.execute_with(&put, &[Value::Text("held".into()), Value::Int(n + 1)])
-                .unwrap();
-            g.commit().unwrap();
-            drop(g);
-            n += 2;
-            std::thread::sleep(Duration::from_millis(1));
+            let args: Vec<[Value; 2]> = (n..n + BLOCK)
+                .map(|i| [Value::Text("block".into()), Value::Int(i)])
+                .collect();
+            let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
+            db.write().unwrap().execute_block(&stmts).unwrap();
+            n += BLOCK;
         }
     });
     let mut s = sqlite_readers(&spath, |stop| {
-        let c = sqlite_conn(&spath, false);
+        let mut c = sqlite_conn(&spath, false);
         let end = Instant::now() + RUN;
         let mut n = 0i64;
         while Instant::now() < end && !stop.load(Ordering::Relaxed) {
-            c.execute_batch("begin immediate").unwrap();
-            c.execute("insert into t (k, n) values ('held', ?1)", [n])
-                .unwrap();
-            std::thread::sleep(hold);
-            c.execute("insert into t (k, n) values ('held', ?1)", [n + 1])
-                .unwrap();
-            c.execute_batch("commit").unwrap();
-            n += 2;
-            std::thread::sleep(Duration::from_millis(1));
+            let tx = c.transaction().unwrap();
+            for i in n..n + BLOCK {
+                tx.execute("insert into t (k, n) values ('block', ?1)", [i])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+            n += BLOCK;
         }
     });
     row(
-        "  beside a transaction held 20 ms",
+        "  beside blocks of 1 000 writes",
         reads(&mut f),
         reads(&mut s),
     );
