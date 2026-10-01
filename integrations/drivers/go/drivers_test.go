@@ -193,3 +193,35 @@ func TestCopyToReadsRowsOut(t *testing.T) {
 		t.Fatalf("%v %v %q", tag, err, buf.String())
 	}
 }
+
+// A json field is jsonb to pgx: it asks the column in binary, a version
+// byte and the text, decodes it into what it holds, sends a parameter the
+// same way, and CopyFrom writes one.
+func TestJsonbDecodesIntoWhatItHolds(t *testing.T) {
+	c, _ := connect(t)
+	ctx := context.Background()
+	coll := fmt.Sprintf("gj_%d", time.Now().UnixNano())
+	if _, err := c.Exec(ctx, "create collection "+coll+" (title text, meta json)"); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{"lang": "tr", "source": map[string]any{"rank": 3.0, "site": "x"}, "tags": []any{"ai"}}
+	if _, err := c.Exec(ctx, "put "+coll+" {title: $1, meta: $2}", "a", meta); err != nil {
+		t.Fatal(err)
+	}
+	// A path's value is jsonb too: into `any`, the text it holds -- into a
+	// `string`, as from PostgreSQL's `->`, its JSON.
+	var got map[string]any
+	var lang any
+	err := c.QueryRow(ctx, "get "+coll+" select meta, meta.lang where meta.source.rank >= $1", 2).Scan(&got, &lang)
+	if err != nil || fmt.Sprint(got) != fmt.Sprint(meta) || lang != "tr" {
+		t.Fatalf("got %v %q %v", got, lang, err)
+	}
+	rows := [][]any{{"b", map[string]any{"n": []any{1.0, 2.5}}}}
+	if _, err := c.CopyFrom(ctx, pgx.Identifier{coll}, []string{"title", "meta"}, pgx.CopyFromRows(rows)); err != nil {
+		t.Fatal(err)
+	}
+	var n []any
+	if err := c.QueryRow(ctx, "get "+coll+" select meta.n where title = $1", "b").Scan(&n); err != nil || fmt.Sprint(n) != "[1 2.5]" {
+		t.Fatalf("got %v %v", n, err)
+	}
+}

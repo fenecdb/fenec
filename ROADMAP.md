@@ -8,7 +8,7 @@ measurements, as every feature here does.
 | Phase | Feature | Size | Why it fits |
 |---|---|---|---|
 | 1 | `alter` and `@unique` -- **done** | small | expected of any database; both ride on what exists |
-| 2 | Objects (`json` fields, paths) | medium | the largest gap for a *document* database |
+| 2 | Objects (`json` fields, paths) -- **done** | medium | the largest gap for a *document* database |
 | 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
 | 4 | TLS 1.3, our own | large | the security story ends at a terminator today |
 
@@ -116,7 +116,47 @@ measured with `make open-bench`.
 
 ---
 
-## Phase 2: objects
+## Phase 2: objects -- done
+
+Shipped as designed below, with these changes the code asked for:
+
+- **Tags 13 and 14, not 12.** Phase 1 took type tag 12 for a dropped place,
+  and the value and type tags share their numbers, so an object is value
+  tag 13 and a `json` field type tag 14 -- new to both spaces, 11 and 12
+  being a collation's and a dropped place's. A binary from before refuses
+  the schema (*unknown type tag 14*) before it could meet an object.
+- **A path is a name, not an `Expr::Path`.** A field's name holds no dot
+  (`Schema::new` refuses one), so `meta.source.rank` is an `Expr::Field`
+  whose name `Schema::path_of` splits; every place a name already went --
+  `select`'s columns, `order`'s keys, an index's name in `Fields`, the
+  planner's equalities and ranges -- takes it unchanged, and an
+  `Expr::Path` would have been one more variant for every match over an
+  expression in six crates.
+- **A path's index is a field of its own, beside the fields**
+  (`Schema::paths`, a `json` field named by the path), written inside its
+  json field's entry in the schema. One per path, so a field holds several,
+  and a rename or a drop of the field takes them with it.
+- **`@sorted` on a path holds numbers and text, and holds the rest apart.**
+  A value has no declared type there: numbers are keyed as `f64`s (an int
+  past 2^53 has no exact place and goes apart), text by its bytes, every
+  number below every text as `cmp_value` ranks them; a boolean, a list or an
+  object goes apart too, and while any is held the index answers nothing
+  and the scan does. `@hash` files a whole float under the int it equals, so
+  `3` and `3.0` share a bucket.
+- **Path updates are in**: `set docs {meta.lang: "en"}` sets one key and
+  keeps the rest, an object made where there is none, a non-object on the
+  way refused.
+
+Measured over 100 000 documents: a path filter scans in 5.7 ms (a text
+field's equality 4.2), 0.025 ms through `@hash`; a range 7.2 ms, 0.009
+through `@sorted`; an index on a path builds in 11 (`@hash`) and 21 ms
+(`@sorted`). A scan with no json field moved by nothing beyond noise (3.47
+-> 3.38, 4.17 -> 4.21, 3.06 -> 3.08, 2.72 -> 2.60 ms), the browser module's
+filter 1.67 -> 1.66 ms. The browser module grew 25 KB, 8.1 KB brotli
+(162 988 against 154 731 bytes) -- more than the few hundred bytes guessed
+below: the object codec and reader, the path reads and writes, and the
+ordered index's json kind. The LangChain and LlamaIndex stores were not
+moved onto a json field in this phase.
 
 ```
 create collection docs (title text, meta json)

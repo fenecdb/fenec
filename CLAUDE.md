@@ -955,6 +955,47 @@ the answer is tagged `ALTER TABLE`. An add, a rename and a drop take 0.025,
 4.0 KB brotli -- the reading side, which a file from a server needs, and
 the writing side, which a page's own database does.
 
+**A `json` field holds any value, and a path is a name.**
+`DataType::Json` (type tag 14) holds an object (`Value::Object`, value tag
+13 -- 11 and 12 being a collation's and a dropped place's, in a number space
+the two share), a list or a scalar; a typed field still refuses an object.
+An object's members are sorted and unique (`Value::object`: a key twice is
+refused, never one of them kept), so a member is found by binary search, two
+equal objects encode alike and a hash index files them as one. A field's
+name holds no dot (`Schema::new`), so a path -- `meta.source.rank` -- is an
+`Expr::Field` whose name `Schema::path_of` splits, and every place a name
+went takes it unchanged: `select`'s columns, `order`'s keys, `Fields`, the
+planner's equalities and ranges; an `Expr::Path` would have been a variant
+for every match over an expression in six crates. A path that leads nowhere
+is `null`. `Filter` binds one as a field (`Slot::Path`) and reads it off the
+row's bytes (`Store::read_paths`, `codec::decode_path_into`: the members
+before the key passed over undecoded, a text into the text its slot held);
+the reading is out of line and `matches` inlined natively, since left to the
+compiler a scan by a text field went 3.05 -> 3.17 ms with no path in the
+filter at all. A path's index is a field of its own beside the fields
+(`Schema::paths`), written inside its json field's schema entry, and kept up
+from `Document::at`; `Collection::fit_paths` makes the structures match the
+schema after an alter or an undo, unbuilt, rather than move them by name.
+`@hash` files a whole float as the int it equals (`hash_key`), and a lookup
+over json takes only what a bucket answers exactly (`lookup_key`: not an int
+past 2^53, not a timestamp); `@sorted` keys numbers as `f64`s and text by its
+bytes, numbers first, and holds apart what it cannot order -- a boolean, a
+list, an object, an int past 2^53 -- answering nothing while it holds one
+(`SortedIndex::answers`); `tests/json.rs` holds both to a twin collection
+row for row. Nesting is 64 levels and a path 64 keys, refused past either
+(`MAX_JSON_DEPTH`, `MAX_PATH_KEYS`), the JSON reader's recursion bounded
+with them. A list of numbers alone at the top of a value is still the
+vector an embedding travels as: in a json field it becomes each `f32`'s
+shortest decimal (`json_value`), exact inside an object, in an HTTP body
+(`parse_documents_json`), a pg `jsonb` (`json::parse_json`) and a COPY cell.
+Over the pg wire it is `jsonb` (3802), `jsonb_send`'s version byte in
+binary, a path's parameter described as jsonb as `meta->'lang'` is (pgx
+refused to send a number into a text place). Over 100 000 documents a path
+filter scans in 5.7 ms against a text field's 4.2, 0.025 ms through `@hash`;
+a scan with no json field moved by noise alone. The browser module grew
+8.1 KB brotli; the standard library's sort for the members (4.1 KB) and a
+walk generic over its callback (3.8 KB) were taken out on the way.
+
 **A vector written again is one node** (`VectorIndex::place`,
 `aliases`, `Same`). Written hundreds of times, a node each filled its
 neighbours' lists with copies -- the diversity rule takes a candidate at
@@ -1401,8 +1442,9 @@ unindexed one follows `near` and `match`, because a silent full scan of the
 child collection would be a different feature under the same name. Nesting
 lives in `ResultSet.nested`, never in `Value` -- JSON transports nest all the
 way down, the PostgreSQL wire flattens (`ResultSet::flatten`: one row per
-root-to-leaf path, nulls below the first level that ran out), and the "no
-nested objects" rule stands. Measured at 22.7 us in process against 0.332 ms for the same
+root-to-leaf path, nulls below the first level that ran out); a
+`Value::Object` is a `json` field's value, not a level of children.
+Measured at 22.7 us in process against 0.332 ms for the same
 page as a `/batch` of 21 queries merged on the client.
 
 **`required` is the other half, and it is a pass.** `lookup ... required`
