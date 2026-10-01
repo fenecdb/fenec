@@ -1170,3 +1170,70 @@ fn a_unique_field_taken_is_a_conflict() {
     let r = call(h.port, "POST", "/query", Some(r#"{"query":"describe u"}"#));
     assert!(r.body.contains("\"unique\""), "{}", r.body);
 }
+
+/// A `json` field over HTTP: an object in a body is its value, every number
+/// in it as written -- a list of numbers alone too, which is a vector in a
+/// typed field's place -- a path filters the query string and `/query`, and
+/// a `PATCH` names one to set a key inside the field.
+#[test]
+fn a_json_field_is_native_over_http() {
+    let h = start(Config::default());
+    let q = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = q(r#"{"query":"create collection docs (title text, meta json)"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = call(
+        h.port,
+        "POST",
+        "/docs",
+        Some(
+            r#"[{"title":"a","meta":{"lang":"tr","source":{"rank":3,"site":"x"}}},
+                {"title":"b","meta":[19.99, 12345678901]},
+                {"title":"c","meta":{"lang":"en","source":{"rank":1.5}}}]"#,
+        ),
+    );
+    assert_eq!(r.status, 201, "{}", r.body);
+    let r = get(h.port, "/docs?select=title,meta&title=eq.b");
+    assert_eq!(
+        r.body.trim(),
+        r#"[{"title":"b","meta":[19.99,12345678901]}]"#
+    );
+
+    let r = get(h.port, "/docs?select=title&meta.lang=tr");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.trim(), r#"[{"title":"a"}]"#);
+    let r = get(
+        h.port,
+        "/docs?select=title&meta.source.rank=gte.1.5&order=meta.source.rank.desc",
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body.trim(), r#"[{"title":"a"},{"title":"c"}]"#);
+
+    let r =
+        q(r#"{"query":"get docs select title, meta.source where meta.lang = $1","params":["en"]}"#);
+    assert_eq!(
+        r.body.trim(),
+        r#"[{"title":"c","meta.source":{"rank":1.5}}]"#
+    );
+    // An object as a parameter.
+    let r =
+        q(r#"{"query":"put docs {title: $1, meta: $2}","params":["d",{"lang":"de","n":[1,2]}]}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = get(h.port, "/docs?select=meta&title=eq.d");
+    assert_eq!(r.body.trim(), r#"[{"meta":{"lang":"de","n":[1,2]}}]"#);
+
+    let r = call(
+        h.port,
+        "PATCH",
+        "/docs?title=eq.a",
+        Some(r#"{"meta.lang":"az"}"#),
+    );
+    assert_eq!(r.body.trim(), "{\"updated\":1}", "{}", r.body);
+    let r = get(h.port, "/docs?select=meta&title=eq.a");
+    assert_eq!(
+        r.body.trim(),
+        r#"[{"meta":{"lang":"az","source":{"rank":3,"site":"x"}}}]"#
+    );
+    // A key twice in an object is refused.
+    let r = call(h.port, "POST", "/docs", Some(r#"{"meta":{"a":1,"a":2}}"#));
+    assert_eq!(r.status, 400, "{}", r.body);
+}

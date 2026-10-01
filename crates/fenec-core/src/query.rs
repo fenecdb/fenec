@@ -490,6 +490,7 @@ pub fn truthy(v: &Value) -> bool {
         Value::List(l) => !l.is_empty(),
         Value::Vector(v) => !v.is_empty(),
         Value::Sparse(_, e) => !e.is_empty(),
+        Value::Object(m) => !m.is_empty(),
     }
 }
 
@@ -1079,13 +1080,13 @@ pub struct Row {
 
 /// Children attached by `lookup`, grouped per parent row.
 ///
-/// The grouping sits beside the rows instead of inside `Value` because no
-/// value in this database is an object and none is going to become one --
-/// a field you want to filter on should be a field. Keeping the nesting in
-/// the envelope leaves the value model, the codec and the JSON *parser*
-/// untouched; only serialisation learns a second shape, which is the easy
-/// direction. It is also the shape the codebase already uses to answer for
-/// more than one collection: `Response::Schemas` goes long rather than wide.
+/// The grouping sits beside the rows instead of inside `Value`: a
+/// `Value::Object` is a `json` field's value, which a filter reads into,
+/// while children are rows of another collection with ids and scores of
+/// their own, and the PostgreSQL wire flattens them into a join's shape
+/// (`ResultSet::flatten`) rather than send an object a cell. It is also the
+/// shape the codebase already uses to answer for more than one collection:
+/// `Response::Schemas` goes long rather than wide.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nested {
     /// The looked-up collection's name, and the key it serialises under.

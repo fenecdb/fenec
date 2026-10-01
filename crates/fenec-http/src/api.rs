@@ -313,24 +313,32 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
         if part.is_empty() {
             continue;
         }
-        // No name holds a dot -- an aggregate's parentheses neither -- so
-        // everything after the first one is a modifier.
-        let mut words = part.split('.');
-        let name = words.next().unwrap_or_default();
+        // A field's name holds no dot, but a path into a json field does
+        // (`meta.source.rank.desc`): the modifiers are the words after the
+        // first that name a direction or a collation, read from the end, and
+        // the name what is before them -- a field, which no dot follows
+        // but a modifier's, or a path into a json field.
+        let mut words: Vec<&str> = part.split('.').collect();
         let (mut asc, mut collate) = (true, None);
-        for w in words {
+        while words.len() > 1 {
+            let w = words[words.len() - 1];
             match w {
                 "asc" => asc = true,
                 "desc" => asc = false,
-                w => {
-                    collate = Some(Collation::named(w).ok_or_else(|| {
-                        Error::Query(format!(
+                w => match Collation::named(w) {
+                    Some(c) => collate = Some(c),
+                    None if schema.path_of(&words.join(".")).ok().flatten().is_some() => break,
+                    None => {
+                        return Err(Error::Query(format!(
                             "`order`: `{w}` in `{part}` is not asc, desc or a collation (tr)"
-                        ))
-                    })?)
-                }
+                        )))
+                    }
+                },
             }
+            words.pop();
         }
+        let joined = words.join(".");
+        let name = joined.as_str();
         let name = if let Some((f, rest)) = name.split_once('(') {
             // The function's name folds as FenecQL folds it; the field's does not.
             match (f.to_ascii_lowercase().as_str(), rest) {
@@ -531,6 +539,14 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
                 "`{name}` is a vector: it cannot be filtered in the query string, use `POST /<collection>/near`"
             )))
         }
+        // A json value has no type to read the text by: a number, `true`,
+        // `false`, `null` or a quoted string as JSON reads it, and any other
+        // text as itself -- `?meta.lang=tr`, `?meta.rank=gte.2`.
+        DataType::Json => match fenec_core::json::parse(raw) {
+            Ok(v @ (Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_))) => v,
+            Ok(Value::Text(t)) if raw.starts_with('"') => Value::Text(t),
+            _ => Value::Text(raw.to_string()),
+        },
     };
     Ok(v)
 }
@@ -539,6 +555,10 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
 fn field<'a>(schema: &'a Schema, name: &str) -> Result<&'a DataType> {
     if name == "id" {
         return Ok(&DataType::Int);
+    }
+    // A path into a json field: `?meta.lang=tr`.
+    if let Ok(Some(_)) = schema.path_of(name) {
+        return Ok(&DataType::Json);
     }
     schema
         .field(name)
@@ -552,8 +572,17 @@ fn body_str(req: &Request) -> Result<&str> {
     std::str::from_utf8(&req.body).map_err(|_| Error::Query("the body is not UTF-8".into()))
 }
 
+/// The collection's json fields, whose members a body's reader keeps every
+/// number of (`json::parse_documents_json`).
+fn json_fields(schema: &Schema) -> Vec<&str> {
+    (schema.fields.iter())
+        .filter(|f| f.ty == DataType::Json)
+        .map(|f| f.name.as_str())
+        .collect()
+}
+
 fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
-    let docs = json::parse_documents(body_str(req)?)?;
+    let docs = json::parse_documents_json(body_str(req)?, &json_fields(schema))?;
     if docs.is_empty() {
         return Err(Error::Query("empty body: no document to write".into()));
     }
@@ -571,7 +600,11 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
 }
 
 fn document(schema: &Schema, req: &Request) -> Result<Vec<(String, Expr)>> {
-    check_fields(schema, json::parse_object(body_str(req)?)?)
+    let mut docs = json::parse_documents_json(body_str(req)?, &json_fields(schema))?;
+    if docs.len() != 1 {
+        return Err(Error::Query("expected a JSON object".into()));
+    }
+    check_fields(schema, docs.remove(0))
 }
 
 /// Field names are validated against the schema: the engine validates them
@@ -580,7 +613,8 @@ fn document(schema: &Schema, req: &Request) -> Result<Vec<(String, Expr)>> {
 fn check_fields(schema: &Schema, doc: Vec<(String, Value)>) -> Result<Vec<(String, Expr)>> {
     let mut out = Vec::with_capacity(doc.len());
     for (k, v) in doc {
-        if k != "id" && schema.field(&k).is_none() {
+        // A path names a key inside a json field: `{"meta.lang": "en"}`.
+        if k != "id" && schema.field(&k).is_none() && !matches!(schema.path_of(&k), Ok(Some(_))) {
             return Err(Error::Query(format!(
                 "collection `{}` has no field `{k}`",
                 schema.name
@@ -653,8 +687,8 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     };
 
     // `"match": "words"` makes it hybrid: BM25 over the text field ranks
-    // too, and the two rankings are fused. Flat keys, since a JSON body
-    // here holds no nested objects.
+    // too, and the two rankings are fused. Flat keys, as the rest of the
+    // body's are.
     match get("match") {
         None | Some(Value::Null) => {}
         Some(Value::Text(q)) => {

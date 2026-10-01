@@ -1129,6 +1129,9 @@ pub fn value(s: &str, ty: &DataType) -> Result<Value, String> {
                 .collect::<Result<_, _>>()?,
         ),
         DataType::Timestamp | DataType::Sparse(_) => Value::Text(t.to_string()),
+        // A json cell is its JSON text, every number as written.
+        DataType::Json => fenec_core::json::parse_json(t)
+            .map_err(|e| format!("invalid input syntax for type json: {e}"))?,
     })
 }
 

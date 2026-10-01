@@ -513,6 +513,9 @@ const OPS = {
 // letter or `_`, then letters/digits/`_`). Names cannot be parameterised,
 // so this is exactly where the injection boundary sits.
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
+// A field, or a path into a json field: names joined by dots, as the lexer
+// reads `meta.source.rank` -- where a query reads, orders or writes a field.
+const PATH = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*(\.[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*)*$/u;
 
 /**
  * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`,
@@ -522,10 +525,10 @@ const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
  */
 function orderKeys(spec) {
   if (spec === undefined || spec === null) return [];
-  if (typeof spec === 'string') return [{ field: ident(spec), asc: true, collate: null }];
+  if (typeof spec === 'string') return [{ field: path(spec), asc: true, collate: null }];
   return spec.map((k) => {
     const [field, dir = 'asc', opts = {}] = [k].flat();
-    return { field: ident(field), asc: direction(dir), collate: collation(opts.collate) };
+    return { field: path(field), asc: direction(dir), collate: collation(opts.collate) };
   });
 }
 
@@ -561,6 +564,14 @@ function ident(name, what = 'field') {
   return name;
 }
 
+/** A field's name, or a path into a json field: `'meta.lang'`. */
+function path(name) {
+  if (typeof name !== 'string' || !PATH.test(name)) {
+    throw new FenecError(`invalid field name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
 /**
  * A select-list item: a field, or an aggregate spelled as FenecQL spells it
  * -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- which answers
@@ -570,7 +581,7 @@ const AGGREGATE = /^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)
 
 function column(name) {
   const m = typeof name === 'string' ? AGGREGATE.exec(name.trim()) : null;
-  if (!m) return { text: ident(name), aggregate: false };
+  if (!m) return { text: path(name), aggregate: false };
   const text = m[1] ? 'count(*)' : `${m[2].toLowerCase()}(${m[3]})`;
   return { text, aggregate: true };
 }
@@ -597,7 +608,16 @@ function normalize(v, what = 'value') {
   if (v instanceof Date) return v.toISOString();
   if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
   if (Array.isArray(v)) return v.map((x) => normalize(x, what));
-  throw new FenecError(`an object cannot be used as a fenecdb value (${what})`);
+  // A plain object is a json field's value, each member as a value is.
+  const proto = Object.getPrototypeOf(v);
+  if (proto === Object.prototype || proto === null) {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) {
+      if (x !== undefined) out[k] = normalize(x, what);
+    }
+    return out;
+  }
+  throw new FenecError(`this object cannot be used as a fenecdb value (${what})`);
 }
 
 // Whether this machine's typed arrays are little-endian, as the module
@@ -695,7 +715,7 @@ function toCond(x) {
 /** `{ year: {gte: 2024}, tags: {has: 'rust'} }` -> an `and` tree */
 function objectCond(obj) {
   const items = Object.entries(obj).map(([field, spec]) =>
-    fieldCond(ident(field), spec),
+    fieldCond(path(field), spec),
   );
   if (items.length === 0) return { t: 'and', items: [] };
   return items.length === 1 ? items[0] : { t: 'and', items };
@@ -989,7 +1009,7 @@ export class Query {
       project:
         select === null || select.includes('*')
           ? null
-          : select.map((c) => ident(c)),
+          : select.map((c) => path(c)),
       cond: opts.where === undefined ? [] : [condOf([opts.where])],
       required: !!opts.required,
       order: orderKeys(opts.order),
@@ -1297,11 +1317,11 @@ export class Query {
 /** Turns the `where` arguments into a single condition. */
 function condOf(args) {
   if (args.length === 1) return toCond(args[0]);
-  if (args.length === 2) return fieldCond(ident(args[0]), args[1]);
+  if (args.length === 2) return fieldCond(path(args[0]), args[1]);
   if (args.length === 3) {
     const op = OPS[args[1]];
     if (!op) throw new FenecError(`unknown operator \`${args[1]}\``);
-    const field = ident(args[0]);
+    const field = path(args[0]);
     return op === 'in' ? inCond(field, args[2]) : cmp(field, op, args[2]);
   }
   throw new FenecError('where(field, op, value) | where(field, value) | where(object)');
@@ -1318,7 +1338,7 @@ function renderDoc(doc, bind) {
   if (!isSpec(doc)) throw new FenecError('expected a document object');
   const pairs = Object.entries(doc)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${ident(k)}: ${bind(v, k)}`);
+    .map(([k, v]) => `${path(k)}: ${bind(v, k)}`);
   if (pairs.length === 0) throw new FenecError('cannot write an empty document');
   return `{${pairs.join(', ')}}`;
 }

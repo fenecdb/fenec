@@ -37,6 +37,17 @@ pub const TAG_COLLATED: u8 = 11;
 /// tag and refuses the file, rather than read every later field one place
 /// early.
 pub const TAG_DROPPED: u8 = 12;
+/// A JSON object, in a `json` field: `[count]` then each member's key, as
+/// a text without its tag, and its value, ascending by key. Not 12, which
+/// the schema already writes for a dropped place, nor 11: the two spaces
+/// share these numbers, and a reader of either would meet the other's tag
+/// at the first damaged byte. A version before objects meets an unknown
+/// value tag and refuses the file.
+pub const TAG_OBJECT: u8 = 13;
+/// Never a value's: the type tag of a `json` field, whose values are any of
+/// the tags above. A version that knows no `json` meets an unknown type tag
+/// and refuses the schema, and with it the file, before it reads a value.
+pub const TAG_JSON: u8 = 14;
 
 // ------------------------------------------------------- half precision
 //
@@ -213,6 +224,14 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
                 encode_value(out, it);
             }
         }
+        Value::Object(members) => {
+            out.push(TAG_OBJECT);
+            put_uvarint(out, members.len() as u64);
+            for (k, v) in members {
+                encode_str(out, k);
+                encode_value(out, v);
+            }
+        }
         Value::Sparse(dim, entries) => {
             out.push(TAG_SPARSE);
             put_uvarint(out, *dim as u64);
@@ -284,6 +303,15 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
                 items.push(decode_value(buf, pos)?);
             }
             Ok(Value::List(items))
+        }
+        TAG_OBJECT => {
+            let n = get_uvarint(buf, pos)? as usize;
+            let mut members = Vec::with_capacity(n.min(4096));
+            for _ in 0..n {
+                let k = decode_str(buf, pos)?;
+                members.push((k, decode_value(buf, pos)?));
+            }
+            Ok(Value::Object(members))
         }
         TAG_SPARSE => {
             let dim = get_uvarint(buf, pos)? as u32;
@@ -373,6 +401,15 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
             }
             Ok(())
         }
+        TAG_OBJECT => {
+            let n = get_uvarint(buf, pos)?;
+            for _ in 0..n {
+                let k = get_uvarint(buf, pos)? as usize;
+                take(buf, pos, k)?;
+                skip_value(buf, pos)?;
+            }
+            Ok(())
+        }
         TAG_SPARSE => {
             get_uvarint(buf, pos)?;
             let n = get_uvarint(buf, pos)? as usize;
@@ -384,6 +421,58 @@ fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
         }
         other => Err(Error::Corrupt(format!("unknown value tag {other}"))),
     }
+}
+
+/// The value at `keys` (`source.rank`) inside the value at `at`, read off
+/// the bytes into `slot`: each object's members are passed over without
+/// decoding until the key -- they are ascending, so a key past it ends the
+/// search -- and only the value found is decoded, a text into the text the
+/// slot held. `null` where the path leads nowhere. A filter over a path
+/// reads it a row at a time, and decoding the object whole, its keys and
+/// texts allocated, was most of what such a scan cost.
+pub fn decode_path_into(buf: &[u8], mut at: usize, keys: &str, slot: &mut Value) -> Result<()> {
+    for k in keys.split('.') {
+        if buf.get(at) != Some(&TAG_OBJECT) {
+            *slot = Value::Null;
+            return Ok(());
+        }
+        at += 1;
+        let n = get_uvarint(buf, &mut at)?;
+        let mut found = false;
+        for _ in 0..n {
+            let len = get_uvarint(buf, &mut at)? as usize;
+            let key = take(buf, &mut at, len)?;
+            match key.cmp(k.as_bytes()) {
+                std::cmp::Ordering::Less => skip_value(buf, &mut at)?,
+                std::cmp::Ordering::Equal => {
+                    found = true;
+                    break;
+                }
+                std::cmp::Ordering::Greater => break,
+            }
+        }
+        if !found {
+            *slot = Value::Null;
+            return Ok(());
+        }
+    }
+    match (buf.get(at), slot) {
+        (Some(&TAG_TEXT), Value::Text(s)) => {
+            at += 1;
+            decode_text_into(buf, &mut at, s)
+        }
+        (_, slot) => {
+            *slot = decode_value(buf, &mut at)?;
+            Ok(())
+        }
+    }
+}
+
+/// [`decode_path_into`], the value handed back.
+pub fn decode_path(buf: &[u8], at: usize, keys: &str) -> Result<Value> {
+    let mut v = Value::Null;
+    decode_path_into(buf, at, keys, &mut v)?;
+    Ok(v)
 }
 
 #[inline]
@@ -427,6 +516,7 @@ pub fn encode_type(out: &mut Vec<u8>, ty: &DataType) {
             out.push(TAG_SPARSE);
             put_uvarint(out, *d as u64);
         }
+        DataType::Json => out.push(TAG_JSON),
     }
 }
 
@@ -446,6 +536,7 @@ pub fn decode_type(buf: &[u8], pos: &mut usize) -> Result<DataType> {
         TAG_VECTOR_F16 => DataType::Vector(get_uvarint(buf, pos)? as usize, VecPrec::F16),
         TAG_LIST => DataType::List(Box::new(decode_type(buf, pos)?)),
         TAG_SPARSE => DataType::Sparse(get_uvarint(buf, pos)? as usize),
+        TAG_JSON => DataType::Json,
         other => return Err(Error::Corrupt(format!("unknown type tag {other}"))),
     })
 }
@@ -490,6 +581,14 @@ mod tests {
             Value::List(vec![Value::Int(1), Value::Text("a".into())]),
             Value::Sparse(30_522, vec![(0, 0.5), (7, -1.25), (30_521, 3.0)]),
             Value::Sparse(4, vec![]),
+            Value::Object(vec![]),
+            Value::Object(vec![
+                ("a".into(), Value::Int(1)),
+                (
+                    "b".into(),
+                    Value::Object(vec![("c".into(), Value::List(vec![Value::Null]))]),
+                ),
+            ]),
         ];
         let mut buf = Vec::new();
         for v in &vals {
@@ -507,6 +606,78 @@ mod tests {
             skip_value(&buf, &mut skip_pos).unwrap();
         }
         assert_eq!(skip_pos, buf.len());
+    }
+
+    #[test]
+    fn a_path_is_read_off_the_bytes_as_the_decoded_value_reads_it() {
+        let v = Value::Object(vec![
+            ("lang".into(), Value::Text("tr".into())),
+            (
+                "source".into(),
+                Value::Object(vec![
+                    ("rank".into(), Value::Int(3)),
+                    ("site".into(), Value::Text("x".into())),
+                ]),
+            ),
+            ("z".into(), Value::Bool(true)),
+        ]);
+        let mut buf = Vec::new();
+        encode_value(&mut buf, &v);
+        encode_value(&mut buf, &Value::Int(9));
+        let mut slot = Value::Text("held".into());
+        for path in [
+            "lang",
+            "source",
+            "source.rank",
+            "source.site",
+            "source.nope",
+            "z",
+            "a",
+            "zz",
+            "lang.x",
+            "source.rank.x",
+        ] {
+            assert_eq!(
+                &decode_path(&buf, 0, path).unwrap(),
+                v.at_path(path),
+                "{path}"
+            );
+            decode_path_into(&buf, 0, path, &mut slot).unwrap();
+            assert_eq!(&slot, v.at_path(path), "{path}");
+        }
+        let mut text = Vec::new();
+        encode_value(&mut text, &Value::Text("t".into()));
+        assert_eq!(decode_path(&text, 0, "a").unwrap(), Value::Null);
+    }
+
+    /// A version before objects meets the tags as a version before any new
+    /// tag does: unknown, and the file refused.
+    #[test]
+    fn the_new_tags_collide_with_none_and_an_unknown_one_is_refused() {
+        let mut tags = vec![
+            TAG_NULL,
+            TAG_BOOL,
+            TAG_INT,
+            TAG_FLOAT,
+            TAG_TEXT,
+            TAG_BYTES,
+            TAG_VECTOR,
+            TAG_LIST,
+            TAG_VECTOR_F16,
+            TAG_TIMESTAMP,
+            TAG_SPARSE,
+            TAG_COLLATED,
+            TAG_DROPPED,
+            TAG_OBJECT,
+            TAG_JSON,
+        ];
+        tags.sort();
+        tags.dedup();
+        assert_eq!(tags.len(), 15);
+        assert!(decode_value(&[15], &mut 0).is_err());
+        assert!(decode_type(&[TAG_OBJECT], &mut 0).is_err());
+        assert!(decode_value(&[TAG_JSON], &mut 0).is_err());
+        assert_eq!(decode_type(&[TAG_JSON], &mut 0).unwrap(), DataType::Json);
     }
 
     #[test]

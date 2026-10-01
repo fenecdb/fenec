@@ -604,6 +604,8 @@ enum Undo {
     Dropped(Box<Collection>, usize),
     /// An index built over a collection's field: it goes.
     Indexed(u32, usize),
+    /// An index built on a path into a json field, by the path: it goes.
+    PathIndexed(u32, String),
     /// A collection's fields changed: the schema before, and the indexes
     /// a dropped field took with it, to put back.
     Altered(u32, Box<Altered>),
@@ -630,13 +632,22 @@ struct Taken {
 }
 
 /// Puts `ix` among a collection's ordered or sparse indexes where `field`
-/// stands in the schema: the order they are kept in, which keeps the choice
+/// stands in the schema -- a field among the fields, a path after them
+/// among the paths: the order they are kept in, which keeps the choice
 /// between two ranges the same as after an open.
 fn in_schema_order<T>(list: &mut Vec<(String, T)>, schema: &Schema, field: &str, ix: T) {
-    let pos = schema.field_pos(field);
+    let rank = |n: &str| match schema.field_pos(n) {
+        Some(p) => Some(p),
+        None => schema
+            .paths
+            .iter()
+            .position(|p| p.name == n)
+            .map(|i| schema.fields.len() + i),
+    };
+    let pos = rank(field);
     let at = list
         .iter()
-        .position(|(n, _)| schema.field_pos(n) > pos)
+        .position(|(n, _)| rank(n) > pos)
         .unwrap_or(list.len());
     list.insert(at, (field.to_string(), ix));
 }
@@ -1305,7 +1316,7 @@ impl Collection {
         let mut texts = Fields::default();
         let mut sorted = Vec::new();
         let mut sparse = Vec::new();
-        for f in &schema.fields {
+        for f in schema.fields.iter().chain(&schema.paths) {
             match (&f.index, &f.ty) {
                 #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -1362,7 +1373,7 @@ impl Collection {
         self.texts.clear();
         self.sorted.clear();
         self.sparse.clear();
-        for f in &self.schema.fields {
+        for f in self.schema.fields.iter().chain(&self.schema.paths) {
             match (&f.index, &f.ty) {
                 #[cfg(feature = "vector")]
                 (IndexKind::Vector(spec), DataType::Vector(dim, prec)) => {
@@ -1394,10 +1405,11 @@ impl Collection {
     /// The hash index on `field`, built from the documents if nothing has
     /// read it since the open.
     pub fn hash(&self, field: &str) -> Result<Option<&HashIndex>> {
-        let (Some(d), Some(pos)) = (self.hashes.get(field), self.schema.field_pos(field)) else {
+        let (Some(d), Some((pos, keys))) = (self.hashes.get(field), source(&self.schema, field))
+        else {
             return Ok(None);
         };
-        d.or_build(|| hash_of(&self.store, pos)).map(Some)
+        d.or_build(|| hash_of(&self.store, pos, keys)).map(Some)
     }
 
     /// Takes `field`'s indexes off the collection, whichever it has.
@@ -1433,6 +1445,38 @@ impl Collection {
         }
     }
 
+    /// The indexes on paths made to match the schema's paths: one it names
+    /// and the collection lacks made unbuilt, for the first read to build
+    /// from the documents, as an open leaves it; one it names no more let
+    /// go. What an alter of a json field leaves, and a block put back --
+    /// moved by name as a field's are, the moves were 1.4 KB of the browser
+    /// module for what a read builds again.
+    fn fit_paths(&mut self) {
+        let schema = &self.schema;
+        let gone: Vec<String> = (self.hashes.keys())
+            .chain(self.sorted.iter().map(|(n, _)| n))
+            .filter(|n| n.contains('.') && schema.path(n).is_none())
+            .cloned()
+            .collect();
+        for n in gone {
+            drop(self.take_indexes(&n));
+        }
+        for i in 0..self.schema.paths.len() {
+            let p = &self.schema.paths[i];
+            match p.index {
+                IndexKind::Hash { .. } if !self.hashes.contains_key(&p.name) => {
+                    self.hashes.insert(p.name.clone(), Derived::unbuilt());
+                }
+                #[cfg(feature = "sorted")]
+                IndexKind::Sorted if !self.sorted.iter().any(|(n, _)| *n == p.name) => {
+                    let name = p.name.clone();
+                    in_schema_order(&mut self.sorted, &self.schema, &name, Derived::unbuilt());
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The fields changed as `ch` says -- the schema after it in place, and
     /// the store reading by its places -- and the indexes of a field
     /// dropped taken off, those of one renamed moved to its name: what an
@@ -1445,6 +1489,9 @@ impl Collection {
         };
         self.schema = ch.schema.clone();
         self.store.set_dropped(&self.schema.dropped);
+        // A json field's indexes on paths go with it, by the paths the
+        // schema after names.
+        self.fit_paths();
         if ch.op == FIELD_RENAME {
             self.put_indexes(&ch.to, taken);
             return Taken::default();
@@ -1478,11 +1525,11 @@ impl Collection {
     /// document keeping its own value is not a second one. A field without
     /// `@unique` costs the look at its index kind.
     fn unique_clash(&self, doc: &Document) -> Result<()> {
-        for f in &self.schema.fields {
+        for f in self.schema.fields.iter().chain(&self.schema.paths) {
             if !f.index.is_unique() {
                 continue;
             }
-            let Some(v) = doc.get(&f.name).filter(|v| !matches!(v, Value::Null)) else {
+            let Some(v) = doc.at(&f.name).filter(|v| !matches!(v, Value::Null)) else {
                 continue;
             };
             let Some(ix) = self.hash(&f.name)? else {
@@ -1529,10 +1576,12 @@ impl Collection {
         let Some((_, d)) = self.sorted.iter().find(|(name, _)| name == field) else {
             return Ok(None);
         };
-        let Some(pos) = self.schema.field_pos(field) else {
+        let (Some((pos, keys)), Some(fd)) =
+            (source(&self.schema, field), self.schema.indexed(field))
+        else {
             return Ok(None);
         };
-        d.or_build(|| sorted_of(&self.store, &self.schema.fields[pos], pos))
+        d.or_build(|| sorted_of(&self.store, fd, pos, keys))
             .map(Some)
     }
 
@@ -1553,10 +1602,10 @@ impl Collection {
     /// path. A field `old` held as it is, `unindex_doc` left in place, and
     /// it is left here too.
     fn index_scalar(&mut self, doc: &Document, old: Option<&Document>) {
-        let kept = |name: &str| old.is_some_and(|o| same(o.get(name), doc.get(name)));
+        let kept = |name: &str| old.is_some_and(|o| same(o.at(name), doc.at(name)));
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
-            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
+            if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
                 ix.add(hash_key(v), doc.id);
             }
         }
@@ -1569,7 +1618,7 @@ impl Collection {
         for (name, ix) in self.sorted.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
-                ix.insert(doc.id, doc.get(name));
+                ix.insert(doc.id, doc.at(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
@@ -1624,7 +1673,7 @@ impl Collection {
     /// tombstone each time. A vector stays while `new` has one in its field:
     /// `insert` keeps the node that holds it or retires it for the new one.
     fn unindex_doc(&mut self, doc: &Document, new: Option<&Document>) {
-        let kept = |name: &str| new.is_some_and(|n| same(doc.get(name), n.get(name)));
+        let kept = |name: &str| new.is_some_and(|n| same(doc.at(name), n.at(name)));
         for (name, ix) in self.vectors.iter_mut() {
             let replaced = new.is_some_and(|n| matches!(n.get(name), Some(Value::Vector(_))));
             if doc.get(name).is_some() && !replaced {
@@ -1633,7 +1682,7 @@ impl Collection {
         }
         for (name, ix) in self.hashes.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
-            if let Some(v) = doc.get(name).filter(|_| !kept(name)) {
+            if let Some(v) = doc.at(name).filter(|_| !kept(name)) {
                 ix.remove(&hash_key(v), doc.id);
             }
         }
@@ -1648,7 +1697,7 @@ impl Collection {
         for (name, ix) in self.sorted.iter_mut() {
             let Some(ix) = ix.get_mut() else { continue };
             if !kept(name) {
-                ix.remove(doc.id, doc.get(name));
+                ix.remove(doc.id, doc.at(name));
             }
         }
         for (name, ix) in self.sparse.iter_mut() {
@@ -1794,14 +1843,82 @@ fn id_candidates(store: &Store, vals: &[&Value]) -> Option<Vec<DocId>> {
 /// it was written. A -0.0 inside a list or a vector keeps its sign: folding
 /// those too was 570 bytes of the browser module, for a hash index on such
 /// a field meeting a -0.0.
+///
+/// A whole float an `f64` holds exactly as an int, up to 2^53, is filed
+/// under the int: a json path holds `3` in one document and `3.0` in
+/// another, which the scan finds equal and a bucket each would have split.
+/// A typed field never meets the two, its values and its literals coerced
+/// to its one type first, so it files and finds as it did.
 fn hash_key(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     match v {
+        Value::Float(f) if f.fract() == 0.0 && f.abs() <= EXACT_INT => {
+            crate::codec::encode_value(&mut out, &Value::Int(*f as i64))
+        }
         // Adding +0.0 turns -0.0 into 0.0 and leaves every other float alone.
         Value::Float(f) => crate::codec::encode_value(&mut out, &Value::Float(f + 0.0)),
         _ => crate::codec::encode_value(&mut out, v),
     }
     out
+}
+
+/// 2^53: the ints an `f64` holds every one of.
+const EXACT_INT: f64 = 9_007_199_254_740_992.0;
+
+/// The bucket key `v` finds in the hash index on `field`: the value coerced
+/// to the field's type, as the write path filed it, or -- over a `json`
+/// field or a path, whose values have no type -- the value itself where
+/// the bucket is exactly what `=` finds: null, a boolean, text, and a
+/// number an `f64` holds exactly. `None` sends the comparison to the scan:
+/// an int past 2^53 equals floats near it that no bucket of its own holds,
+/// and a timestamp equals the text it parses from.
+fn lookup_key(schema: &Schema, field: &str, v: &Value) -> Option<Vec<u8>> {
+    match &schema.indexed(field)?.ty {
+        DataType::Json => match v {
+            Value::Null | Value::Bool(_) | Value::Text(_) => Some(hash_key(v)),
+            Value::Int(i) if i.unsigned_abs() <= 1 << 53 => Some(hash_key(v)),
+            Value::Float(f) if f.abs() <= EXACT_INT => Some(hash_key(v)),
+            _ => None,
+        },
+        ty => v.clone().coerce(ty).ok().map(|k| hash_key(&k)),
+    }
+}
+
+/// Where a query reads `name`: the position of its field, and for a path
+/// the keys past it. `None` for a name the schema has no field for, or a
+/// path it cannot read ([`Schema::path_of`] says why).
+fn source<'a>(schema: &Schema, name: &'a str) -> Option<(usize, Option<&'a str>)> {
+    match schema.path_of(name) {
+        Ok(Some((pos, keys))) => Some((pos, Some(keys))),
+        Ok(None) => schema.field_pos(name).map(|p| (p, None)),
+        Err(_) => None,
+    }
+}
+
+/// [`source`], refused naming what is wrong: a field not there, or a path
+/// into one that is not `json`. `owner` goes before the name, as
+/// `reviews.` does for a `lookup`'s.
+fn source_or_err<'a>(
+    schema: &Schema,
+    name: &'a str,
+    owner: &str,
+) -> Result<(usize, Option<&'a str>)> {
+    match schema.path_of(name)? {
+        Some((pos, keys)) => Ok((pos, Some(keys))),
+        None => schema
+            .field_pos(name)
+            .map(|p| (p, None))
+            .ok_or_else(|| Error::NotFound(format!("field `{owner}{name}`"))),
+    }
+}
+
+/// The value of document `id` at a [`source`], `null` where it has none.
+fn read_source(store: &Store, id: DocId, (pos, keys): (usize, Option<&str>)) -> Result<Value> {
+    Ok(match keys {
+        None => store.read_field(id, pos)?,
+        Some(keys) => store.read_path(id, pos, keys)?,
+    }
+    .unwrap_or(Value::Null))
 }
 
 /// The feature `kind` needs when this build was made without it
@@ -2118,11 +2235,8 @@ impl<'a> RowAccess for StoreRow<'a> {
         self.id
     }
     fn field(&mut self, name: &str) -> Result<Value> {
-        let pos = self
-            .schema
-            .field_pos(name)
-            .ok_or_else(|| Error::NotFound(format!("field `{name}`")))?;
-        Ok(self.store.read_field(self.id, pos)?.unwrap_or(Value::Null))
+        let at = source_or_err(self.schema, name, "")?;
+        read_source(self.store, self.id, at)
     }
     fn collation(&self, name: &str) -> Option<Collation> {
         self.schema.field(name).and_then(|f| f.collate)
@@ -2136,7 +2250,8 @@ impl<'a> RowAccess for DocRow<'a> {
         self.0.id
     }
     fn field(&mut self, name: &str) -> Result<Value> {
-        Ok(self.0.get(name).cloned().unwrap_or(Value::Null))
+        self.1.path_of(name)?;
+        Ok(self.0.at(name).cloned().unwrap_or(Value::Null))
     }
     fn collation(&self, name: &str) -> Option<Collation> {
         self.1.field(name).and_then(|f| f.collate)
@@ -2442,8 +2557,8 @@ impl Database {
 
         let columns = projection_columns(&c.schema, &project.map(|p| p.to_vec()));
         for col in &columns {
-            if col != "id" && c.schema.field(col).is_none() {
-                return Err(Error::NotFound(format!("field `{col}`")));
+            if col != "id" {
+                source_or_err(&c.schema, col, "")?;
             }
         }
         let ctx = EvalCtx {
@@ -2480,8 +2595,8 @@ impl Database {
                 if col == "id" {
                     values.push(Value::Int(id as i64));
                 } else {
-                    let pos = c.schema.field_pos(col).unwrap();
-                    values.push(c.store.read_field(id, pos)?.unwrap_or(Value::Null));
+                    let at = source_or_err(&c.schema, col, "")?;
+                    values.push(read_source(&c.store, id, at)?);
                 }
             }
             rows.push(Row {
@@ -4028,7 +4143,8 @@ impl Database {
                 "a schema change moved the fields of `{name}`"
             )));
         }
-        // `create index` adds one; anything else rebuilds them all.
+        // `create index` adds one -- on a field, or on a path -- and
+        // anything else rebuilds them all.
         let changed: Vec<usize> = (0..schema.fields.len())
             .filter(|&i| c.schema.fields[i].index != schema.fields[i].index)
             .collect();
@@ -4040,6 +4156,8 @@ impl Database {
             for i in changed {
                 build_index(c, i)?;
             }
+            // A path's, built by the first read.
+            c.fit_paths();
         } else {
             c.reset_index_structures();
             for i in 0..c.schema.fields.len() {
@@ -4535,6 +4653,15 @@ impl Database {
                         c.schema.fields[pos].index = IndexKind::None;
                     }
                 }
+                Undo::PathIndexed(cid, path) => {
+                    if let Some(name) = self.named(cid) {
+                        let c = self.collections.get_mut(&name).unwrap();
+                        if let Some(at) = c.schema.paths.iter().position(|p| p.name == path) {
+                            c.schema.paths.remove(at);
+                        }
+                        c.fit_paths();
+                    }
+                }
                 // The schema as it was, then the indexes: a field added has
                 // its index taken off, a dropped one's put back, and a
                 // renamed one's moved back to the name it had.
@@ -4558,6 +4685,7 @@ impl Database {
                                 c.put_indexes(&field, t);
                             }
                         }
+                        c.fit_paths();
                     }
                 }
             }
@@ -4952,6 +5080,9 @@ impl Database {
                 schema.fields.remove(pos);
                 let at = schema.dropped.partition_point(|&d| d < place);
                 schema.dropped.insert(at, place);
+                // The indexes on paths into it go with it.
+                let prefix = format!("{name}.");
+                schema.paths.retain(|p| !p.name.starts_with(&prefix));
                 (FIELD_DROP, name.clone(), String::new())
             }
             Alter::RenameField(from, to) => {
@@ -4960,6 +5091,13 @@ impl Database {
                 let mut fields = schema.fields.clone();
                 fields[pos].name = to.clone();
                 schema.fields = Schema::new(collection.to_string(), fields)?.fields;
+                // The paths into it are under its new name.
+                let prefix = format!("{from}.");
+                for p in schema.paths.iter_mut() {
+                    if let Some(keys) = p.name.strip_prefix(&prefix) {
+                        p.name = format!("{to}.{keys}");
+                    }
+                }
                 (FIELD_RENAME, from.clone(), to.clone())
             }
         };
@@ -5017,19 +5155,35 @@ impl Database {
         }
         let c = self.collections.get_mut(collection).unwrap();
         let cid = c.id;
-        let pos = c.schema.field_pos(field).unwrap();
-        c.schema.fields[pos].index = kind.resolved();
-        // Before the build, which a block that does not land -- or a build
-        // that fails -- puts back with it.
-        if let Some(b) = &mut self.block {
-            b.was.push(Undo::Indexed(cid, pos));
+        // A path's index is a field of its own beside the fields, and is
+        // built here under the write lock: a hash or an ordered index reads
+        // a value a row -- 11 ms over 100 000 documents for `@hash` on
+        // `meta.lang`, 21 for `@sorted` on `meta.source.rank` -- not worth a
+        // copy beside the database, as an HNSW build's seconds are.
+        if crate::schema::split_path(field).is_some() {
+            let f = crate::schema::Field::new(field, DataType::Json).indexed(kind.resolved());
+            c.schema.add_path(f);
+            if let Some(b) = &mut self.block {
+                b.was.push(Undo::PathIndexed(cid, field.to_string()));
+            }
+            let c = self.collections.get_mut(collection).unwrap();
+            build_path_index(c, field)?;
+        } else {
+            let pos = c.schema.field_pos(field).unwrap();
+            c.schema.fields[pos].index = kind.resolved();
+            // Before the build, which a block that does not land -- or a
+            // build that fails -- puts back with it.
+            if let Some(b) = &mut self.block {
+                b.was.push(Undo::Indexed(cid, pos));
+            }
+            let c = self.collections.get_mut(collection).unwrap();
+            build_index(c, pos)?;
         }
         let c = self.collections.get_mut(collection).unwrap();
-        build_index(c, pos)?;
         // Over documents that hold a value twice, a unique index is refused
         // -- the statement put back, the index with it -- and names one.
         if kind.is_unique() {
-            refuse_shared(c, pos)?;
+            refuse_shared(c, field)?;
         }
 
         let encoded = c.schema.encode();
@@ -5061,10 +5215,7 @@ impl Database {
                 };
                 continue;
             }
-            let f = schema.field(k).ok_or_else(|| {
-                Error::NotFound(format!("field `{k}` in collection `{}`", schema.name))
-            })?;
-            doc.set(k, v.coerce(&f.ty)?);
+            set_field(schema, &mut doc, k, v)?;
         }
         for f in &schema.fields {
             if doc.get(&f.name).is_none() {
@@ -5311,13 +5462,10 @@ impl Database {
             // return 0 rows -- the mere presence of the index would change the
             // query's answer. A literal that cannot be coerced (`year = "abc"`)
             // skips the index and leaves the decision to the eval path.
-            let Some(fd) = c.schema.field(field) else {
+            let Some(key) = lookup_key(&c.schema, field, val) else {
                 continue;
             };
-            let Ok(key) = val.clone().coerce(&fd.ty) else {
-                continue;
-            };
-            let bucket = map.get(&hash_key(&key)).cloned().unwrap_or_default();
+            let bucket = map.get(&key).cloned().unwrap_or_default();
             if candidates
                 .as_ref()
                 .map(|c| bucket.len() < c.len())
@@ -5358,9 +5506,6 @@ impl Database {
             let Some(map) = c.hash(field)? else {
                 continue;
             };
-            let Some(fd) = c.schema.field(field) else {
-                continue;
-            };
             let mut union: Vec<DocId> = Vec::new();
             let mut whole = true;
             for v in vals {
@@ -5368,11 +5513,11 @@ impl Database {
                 // same reason. An element the index cannot express takes the
                 // whole list back to the eval path: a union missing one
                 // element's rows is a wrong answer, not a slow one.
-                let Ok(key) = v.clone().coerce(&fd.ty) else {
+                let Some(key) = lookup_key(&c.schema, field, v) else {
                     whole = false;
                     break;
                 };
-                if let Some(bucket) = map.get(&hash_key(&key)) {
+                if let Some(bucket) = map.get(&key) {
                     union.extend_from_slice(bucket);
                 }
             }
@@ -5420,7 +5565,7 @@ impl Database {
                 if !ranges.iter().any(|r| r.0 == field) {
                     continue;
                 }
-                let Some(fd) = c.schema.field(field) else {
+                let Some(fd) = c.schema.indexed(field) else {
                     continue;
                 };
                 let Some((range, exact)) = sorted_range(fd, field, f, params) else {
@@ -5429,6 +5574,15 @@ impl Database {
                 let Some(ix) = c.sorted_index(field)? else {
                     continue;
                 };
+                if !ix.answers() {
+                    plan(|| {
+                        format!(
+                            "filter: the ordered index on {field} not used, it holds a value \
+                             it cannot order"
+                        )
+                    });
+                    continue;
+                }
                 let mut cap = candidates.as_ref().map_or(n / 2, |b| b.len()).min(n / 2);
                 if want != usize::MAX {
                     cap = cap.min(want.saturating_mul(64).max(4096));
@@ -5713,11 +5867,11 @@ impl Database {
                 take(1);
                 continue;
             }
-            let (Some(map), Some(fd)) = (c.hash(field)?, c.schema.field(field)) else {
+            let Some(map) = c.hash(field)? else {
                 continue;
             };
-            if let Ok(key) = val.clone().coerce(&fd.ty) {
-                take(map.get(&hash_key(&key)).map_or(0, |b| b.len()));
+            if let Some(key) = lookup_key(&c.schema, field, val) {
+                take(map.get(&key).map_or(0, |b| b.len()));
             }
         }
         let mut ins = Vec::new();
@@ -5727,15 +5881,15 @@ impl Database {
                 take(vals.len());
                 continue;
             }
-            let (Some(map), Some(fd)) = (c.hash(field)?, c.schema.field(field)) else {
+            let Some(map) = c.hash(field)? else {
                 continue;
             };
             let mut sum = 0;
             let mut whole = true;
             for v in vals {
-                match v.clone().coerce(&fd.ty) {
-                    Ok(key) => sum += map.get(&hash_key(&key)).map_or(0, |b| b.len()),
-                    Err(_) => {
+                match lookup_key(&c.schema, field, v) {
+                    Some(key) => sum += map.get(&key).map_or(0, |b| b.len()),
+                    None => {
                         whole = false;
                         break;
                     }
@@ -5782,7 +5936,11 @@ impl Database {
             return Ok(None);
         };
         if ix.has_nan() {
-            plan(|| format!("order: the ordered index on {field} not walked, it holds a NaN"));
+            let what = match ix.answers() {
+                true => "a NaN",
+                false => "a value it cannot order",
+            };
+            plan(|| format!("order: the ordered index on {field} not walked, it holds {what}"));
             return Ok(None);
         }
         if sel.lookup.as_ref().is_some_and(|l| l.required) {
@@ -5809,9 +5967,13 @@ impl Database {
                 if name == field {
                     continue;
                 }
-                let (Some(other), Some(fd)) = (c.sorted_index(name)?, c.schema.field(name)) else {
+                let (Some(other), Some(fd)) = (c.sorted_index(name)?, c.schema.indexed(name))
+                else {
                     continue;
                 };
+                if !other.answers() {
+                    continue;
+                }
                 if let Some((r, _)) = sorted_range(fd, name, f, params) {
                     if other.range_ids(&r, 4096).is_some() {
                         plan(|| {
@@ -5826,7 +5988,7 @@ impl Database {
             }
             let fd = c
                 .schema
-                .field(field)
+                .indexed(field)
                 .expect("an ordered index has its field");
             let own = sorted_range(fd, field, f, params);
             bare = matches!(&own, Some((_, true))) && f.only_ranges_on(field, params);
@@ -6525,9 +6687,8 @@ impl Database {
                 sources.push(None);
                 continue;
             }
-            sources.push(Some(child.schema.field_pos(col).ok_or_else(|| {
-                Error::NotFound(format!("field `{}.{col}`", l.collection))
-            })?));
+            let owner = format!("{}.", l.collection);
+            sources.push(Some(source_or_err(&child.schema, col, &owner)?));
         }
 
         let mut keys = Vec::with_capacity(l.order.len());
@@ -6590,7 +6751,7 @@ impl Database {
                 for src in &sources {
                     values.push(match src {
                         None => Value::Int(cid as i64),
-                        Some(p) => child.store.read_field(cid, *p)?.unwrap_or(Value::Null),
+                        Some(at) => read_source(&child.store, cid, *at)?,
                     });
                 }
                 group.push(Row {
@@ -6692,10 +6853,13 @@ impl Database {
         }
 
         let columns = projection_columns(&c.schema, &sel.project);
+        // Each column's field, or the path into one, found once a query.
+        let mut sources = Vec::with_capacity(columns.len());
         for col in &columns {
-            if col != "id" && c.schema.field(col).is_none() {
-                return Err(Error::NotFound(format!("field `{col}`")));
-            }
+            sources.push(match col == "id" {
+                true => None,
+                false => Some(source_or_err(&c.schema, col, "")?),
+            });
         }
 
         let limit = sel.limit.unwrap_or(usize::MAX);
@@ -6783,13 +6947,11 @@ impl Database {
                 break;
             }
             let mut values = Vec::with_capacity(columns.len());
-            for col in &columns {
-                if col == "id" {
-                    values.push(Value::Int(id as i64));
-                } else {
-                    let pos = c.schema.field_pos(col).unwrap();
-                    values.push(c.store.read_field(id, pos)?.unwrap_or(Value::Null));
-                }
+            for src in &sources {
+                values.push(match src {
+                    None => Value::Int(id as i64),
+                    Some(at) => read_source(&c.store, id, *at)?,
+                });
             }
             rows.push(Row { id, values, score });
         }
@@ -6822,10 +6984,15 @@ impl Database {
     /// index's map, `order`'s sort: the first version, in iterator chains
     /// over types of its own, was 25 KB of the browser module.
     fn aggregate(&self, c: &Collection, sel: &Select, params: &[Value]) -> Result<ResultSet> {
-        let pos_of = |name: &str| {
-            c.schema
+        let pos_of = |name: &str| match name.contains('.') {
+            // Folded by its field's type, which a path has none of.
+            true => Err(Error::Query(format!(
+                "`{name}` is a path: an aggregate and `group` read a field"
+            ))),
+            false => c
+                .schema
                 .field_pos(name)
-                .ok_or_else(|| Error::NotFound(format!("field `{name}`")))
+                .ok_or_else(|| Error::NotFound(format!("field `{name}`"))),
         };
         // Every field the list and the group read, each read once a row, in
         // field order. Kept sorted as it is built: a handful of fields, and
@@ -6971,9 +7138,9 @@ impl Database {
                 _ => None,
             };
             picked.push(at);
-            order.push((None, s.asc, s.collate.or(field)));
+            order.push((None, s.asc, s.collate.or(field), None));
         }
-        order.push((None, true, None));
+        order.push((None, true, None, None));
         let w = order.len();
         let mut flat: Vec<Value> = Vec::with_capacity(n * w);
         for g in 0..n {
@@ -7077,11 +7244,13 @@ impl Database {
             registry: &self.registry,
         };
         for (k, e) in set {
-            let f = schema
-                .field(k)
-                .ok_or_else(|| Error::NotFound(format!("field `{k}`")))?;
+            // Checked before the value is worked out, over the document as
+            // it was, as every other is.
+            if schema.field(k).is_none() && schema.path_of(k)?.is_none() {
+                return Err(Error::NotFound(format!("field `{k}`")));
+            }
             let v = eval(e, &mut DocRow(&snapshot, schema), &ctx)?;
-            doc.set(k, v.coerce(&f.ty)?);
+            set_field(schema, &mut doc, k, v)?;
         }
         Ok(doc)
     }
@@ -7237,10 +7406,14 @@ fn build_graph(c: &mut Collection, pos: usize, spec: crate::schema::VectorIndexS
 
 /// The hash index of the field at `pos`, from the documents: what `create
 /// index` builds, and what the first read after an open does.
-fn hash_of(store: &Store, pos: usize) -> Result<HashIndex> {
+fn hash_of(store: &Store, pos: usize, keys: Option<&str>) -> Result<HashIndex> {
     let mut ix = HashIndex::default();
     for id in store.ids() {
-        if let Some(v) = store.read_field(id, pos)? {
+        let v = match keys {
+            None => store.read_field(id, pos)?,
+            Some(keys) => store.read_path(id, pos, keys)?,
+        };
+        if let Some(v) = v {
             ix.add(hash_key(&v), id);
         }
     }
@@ -7249,8 +7422,7 @@ fn hash_of(store: &Store, pos: usize) -> Result<HashIndex> {
 
 /// The refusal of a unique index over the field at `pos` whose documents
 /// hold a value twice.
-fn refuse_shared(c: &Collection, pos: usize) -> Result<()> {
-    let field = &c.schema.fields[pos].name;
+fn refuse_shared(c: &Collection, field: &str) -> Result<()> {
     let shared = c.hash(field)?.and_then(HashIndex::shared);
     match shared {
         Some((v, a, b)) => Err(Error::Duplicate(format!(
@@ -7277,10 +7449,21 @@ fn text_of(store: &Store, pos: usize, spec: crate::schema::TextIndexSpec) -> Res
 /// The ordered index of the field at `pos`, as [`hash_of`]: sorted once
 /// from its keys rather than inserted row by row.
 #[cfg(feature = "sorted")]
-fn sorted_of(store: &Store, field: &crate::schema::Field, pos: usize) -> Result<SortedIndex> {
+fn sorted_of(
+    store: &Store,
+    field: &crate::schema::Field,
+    pos: usize,
+    keys: Option<&str>,
+) -> Result<SortedIndex> {
     let mut rows = Vec::with_capacity(store.len());
     for id in store.ids() {
-        rows.push((id, store.read_field(id, pos)?));
+        rows.push((
+            id,
+            match keys {
+                None => store.read_field(id, pos)?,
+                Some(keys) => store.read_path(id, pos, keys)?,
+            },
+        ));
     }
     Ok(SortedIndex::build(
         &field.ty,
@@ -7291,7 +7474,12 @@ fn sorted_of(store: &Store, field: &crate::schema::Field, pos: usize) -> Result<
 
 /// A build without ordered indexes holds none to build.
 #[cfg(not(feature = "sorted"))]
-fn sorted_of(_: &Store, _: &crate::schema::Field, _: usize) -> Result<SortedIndex> {
+fn sorted_of(
+    _: &Store,
+    _: &crate::schema::Field,
+    _: usize,
+    _: Option<&str>,
+) -> Result<SortedIndex> {
     Err(not_built("the index", "sorted"))
 }
 
@@ -7325,7 +7513,7 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
         IndexKind::Hash { .. } => {
-            let ix = Derived::new(hash_of(&c.store, pos)?);
+            let ix = Derived::new(hash_of(&c.store, pos, None)?);
             c.hashes.insert(field, ix);
         }
         IndexKind::Text(spec) => {
@@ -7333,7 +7521,7 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             c.texts.insert(field, ix);
         }
         IndexKind::Sorted => {
-            let ix = Derived::new(sorted_of(&c.store, &c.schema.fields[pos], pos)?);
+            let ix = Derived::new(sorted_of(&c.store, &c.schema.fields[pos], pos, None)?);
             match c.sorted.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
                 None => c.sorted.push((field, ix)),
@@ -7348,6 +7536,54 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
         }
         IndexKind::None => {}
     }
+    Ok(())
+}
+
+/// Builds the index the schema declares on the path `path` into a json
+/// field and fills it from the documents, as [`build_index`] does a
+/// field's: a hash or an ordered index, the two a path takes.
+fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
+    let Some(f) = c.schema.path(path) else {
+        return Ok(());
+    };
+    if !EVERY_INDEX && missing_feature(&f.index).is_some() {
+        return Ok(());
+    }
+    let Some((pos, keys)) = source(&c.schema, path) else {
+        return Ok(());
+    };
+    match f.index {
+        IndexKind::Hash { .. } => {
+            let ix = Derived::new(hash_of(&c.store, pos, keys)?);
+            c.hashes.insert(path.to_string(), ix);
+        }
+        IndexKind::Sorted => {
+            let ix = Derived::new(sorted_of(&c.store, f, pos, keys)?);
+            match c.sorted.iter_mut().find(|(n, _)| *n == path) {
+                Some(slot) => slot.1 = ix,
+                None => in_schema_order(&mut c.sorted, &c.schema, path, ix),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Sets `k` of `doc` to `v`: a field, coerced to its type, or a path into
+/// a json field (`meta.lang: "en"`), the one key set inside it and the rest
+/// kept, an object made where the path finds none.
+fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<()> {
+    if let Some((pos, keys)) = schema.path_of(k)? {
+        let f = &schema.fields[pos];
+        let mut whole = doc.get(&f.name).cloned().unwrap_or(Value::Null);
+        whole.set_path(&f.name, keys, v)?;
+        doc.set(&f.name, whole.coerce(&f.ty)?);
+        return Ok(());
+    }
+    let f = schema
+        .field(k)
+        .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
+    doc.set(k, v.coerce(&f.ty)?);
     Ok(())
 }
 
@@ -7788,15 +8024,21 @@ struct Filter<'q> {
     /// among them.
     positions: Vec<usize>,
     index_of: Vec<usize>,
+    /// The paths into json fields the filter reads, each its field's
+    /// position and the keys past it: read a row after the fields, each
+    /// its value off the bytes, into `vals` past theirs.
+    paths: Vec<(usize, &'q str)>,
+    /// A row's values: its fields', then its paths'.
     vals: std::cell::RefCell<Vec<Value>>,
 }
 
-/// Where a bound test reads its field: the document's id, or a field by
-/// its position in the schema.
+/// Where a bound test reads its field: the document's id, a field by its
+/// position in the schema, or the `n`th of the filter's paths.
 #[derive(Clone, Copy)]
 enum Slot {
     Id,
     At(usize),
+    Path(usize),
 }
 
 enum Test<'q> {
@@ -7822,7 +8064,8 @@ enum Test<'q> {
 impl<'q> Filter<'q> {
     fn new(c: &'q Collection, f: &'q Expr, ctx: &EvalCtx) -> Filter<'q> {
         let mut positions = Vec::new();
-        let root = Filter::bind(c, f, ctx, &mut positions);
+        let mut paths = Vec::new();
+        let root = Filter::bind(c, f, ctx, &mut positions, &mut paths);
         let mut index_of = vec![usize::MAX; c.schema.fields.len()];
         for (i, p) in positions.iter_mut().enumerate() {
             index_of[*p] = i;
@@ -7835,13 +8078,34 @@ impl<'q> Filter<'q> {
             root,
             positions,
             index_of,
+            paths,
             vals: std::cell::RefCell::new(Vec::new()),
         }
     }
 
-    fn bind(c: &Collection, e: &'q Expr, ctx: &EvalCtx, used: &mut Vec<usize>) -> Test<'q> {
-        let mut slot = |e: &Expr| match e {
+    fn bind(
+        c: &Collection,
+        e: &'q Expr,
+        ctx: &EvalCtx,
+        used: &mut Vec<usize>,
+        paths: &mut Vec<(usize, &'q str)>,
+    ) -> Test<'q> {
+        let mut slot = |e: &'q Expr| match e {
             Expr::Field(name) if name == "id" => Some(Slot::Id),
+            // A path is bound as a field is: its field's position and its
+            // keys once a query, the keys walked a row. One the schema
+            // cannot read is left to `eval`, which says why at the first
+            // row.
+            Expr::Field(name) if name.contains('.') => match c.schema.path_of(name) {
+                Ok(Some(p)) => Some(Slot::Path(match paths.iter().position(|q| *q == p) {
+                    Some(n) => n,
+                    None => {
+                        paths.push(p);
+                        paths.len() - 1
+                    }
+                })),
+                _ => None,
+            },
             // Kept ascending as they come, a few at most: sorted after,
             // `usize` was a sort of its own, 3 KB of the browser module.
             Expr::Field(name) => c.schema.field_pos(name).map(|p| {
@@ -7860,18 +8124,18 @@ impl<'q> Filter<'q> {
         };
         let coll = |s: Slot| match s {
             Slot::At(p) => c.schema.fields[p].collate,
-            Slot::Id => None,
+            Slot::Id | Slot::Path(_) => None,
         };
         match e {
             Expr::And(a, b) => Test::And(
-                Box::new(Filter::bind(c, a, ctx, used)),
-                Box::new(Filter::bind(c, b, ctx, used)),
+                Box::new(Filter::bind(c, a, ctx, used, paths)),
+                Box::new(Filter::bind(c, b, ctx, used, paths)),
             ),
             Expr::Or(a, b) => Test::Or(
-                Box::new(Filter::bind(c, a, ctx, used)),
-                Box::new(Filter::bind(c, b, ctx, used)),
+                Box::new(Filter::bind(c, a, ctx, used, paths)),
+                Box::new(Filter::bind(c, b, ctx, used, paths)),
             ),
-            Expr::Not(a) => Test::Not(Box::new(Filter::bind(c, a, ctx, used))),
+            Expr::Not(a) => Test::Not(Box::new(Filter::bind(c, a, ctx, used, paths))),
             Expr::IsNull(a) => match slot(a) {
                 Some(s) => Test::IsNull(s),
                 None => Test::Eval(e),
@@ -7920,6 +8184,12 @@ impl<'q> Filter<'q> {
 
     /// Whether the stored row `id` passes the filter; `ctx` is what the
     /// filter was bound with, for what it evaluates as `eval` does.
+    ///
+    /// Inlined into its scans natively: left to the compiler, the paths'
+    /// branch beside a field's read had it out of line, and a scan of
+    /// 100 000 rows by a text field took 3.05 -> 3.17 ms; inlined, 3.07,
+    /// and one by two numbers 3.47 -> 3.36.
+    #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
     fn matches(&self, id: DocId, ctx: &EvalCtx) -> Result<bool> {
         let mut vals = self.vals.borrow_mut();
         if !self.positions.is_empty()
@@ -7928,7 +8198,24 @@ impl<'q> Filter<'q> {
             vals.clear();
             vals.resize(self.positions.len(), Value::Null);
         }
+        // A filter over no path reads none, and asks no more than this,
+        // the reading out of line so that what is inlined into every scan
+        // stays the size it was. Its paths' values go after its fields',
+        // which `read_fields` leaves where they are.
+        if !self.paths.is_empty() {
+            self.read_paths(id, &mut vals)?;
+        }
         self.test(&self.root, id, &vals, &Value::Int(id as i64), ctx)
+    }
+
+    #[inline(never)]
+    fn read_paths(&self, id: DocId, vals: &mut Vec<Value>) -> Result<()> {
+        let n = self.positions.len();
+        vals.resize(n + self.paths.len(), Value::Null);
+        if !self.c.store.read_paths(id, &self.paths, &mut vals[n..])? {
+            vals[n..].fill(Value::Null);
+        }
+        Ok(())
     }
 
     fn test(
@@ -7942,6 +8229,7 @@ impl<'q> Filter<'q> {
         let get = |s: Slot| match s {
             Slot::Id => idv,
             Slot::At(p) => &vals[self.index_of[p]],
+            Slot::Path(n) => &vals[self.positions.len() + n],
         };
         Ok(match t {
             Test::And(a, b) => {
@@ -8094,26 +8382,31 @@ fn sorted_range(
     any.then_some((range, exact))
 }
 
-/// Sort keys: a field position (`None` for `id`), whether it ascends, and
-/// the collation its text is compared in.
-type OrderKey = (Option<usize>, bool, Option<Collation>);
+/// Sort keys: a field position (`None` for `id`), whether it ascends, the
+/// collation its text is compared in, and the keys past the field of a
+/// path into a json one.
+type OrderKey = (Option<usize>, bool, Option<Collation>, Option<Box<str>>);
 
 /// The key `s` names in `schema`. `collate` is refused on anything but text:
 /// on a number it would claim an order it does not change. `owner` goes in
 /// front of the field's name in an error -- `reviews.` for a `lookup`'s.
 fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
     let f = &s.field;
-    let pos = if f == "id" {
-        None
-    } else {
-        Some(
-            schema
-                .field_pos(f)
-                .ok_or_else(|| Error::NotFound(format!("field `{owner}{f}`")))?,
-        )
+    let (pos, keys) = match f == "id" {
+        true => (None, None),
+        false => {
+            let (p, keys) = source_or_err(schema, f, owner)?;
+            (Some(p), keys.map(Box::from))
+        }
     };
     if let Some(c) = s.collate {
-        let ty = pos.map_or(&DataType::Int, |p| &schema.fields[p].ty);
+        let ty = match (pos, &keys) {
+            // A path's values have no type: a text among them orders in
+            // the collation, and the rest as they always do.
+            (_, Some(_)) => &DataType::Text,
+            (Some(p), None) => &schema.fields[p].ty,
+            (None, _) => &DataType::Int,
+        };
         if !collatable(ty) {
             return Err(Error::Query(format!(
                 "`collate {}` orders text; `{owner}{f}` is {}",
@@ -8123,13 +8416,15 @@ fn order_key(schema: &Schema, s: &Sort, owner: &str) -> Result<OrderKey> {
         }
     }
     // A field in a collation orders in it unless the query names one.
-    let field = pos.and_then(|p| schema.fields[p].collate);
-    Ok((pos, s.asc, s.collate.or(field)))
+    let field = pos
+        .filter(|_| keys.is_none())
+        .and_then(|p| schema.fields[p].collate);
+    Ok((pos, s.asc, s.collate.or(field), keys))
 }
 
 /// The order `order` asks for between two rows' keys, before any tie-break.
 fn rank(keys: &[OrderKey], a: &[Value], b: &[Value]) -> Ordering {
-    for (i, (_, asc, collate)) in keys.iter().enumerate() {
+    for (i, (_, asc, collate, _)) in keys.iter().enumerate() {
         let o = match collate {
             Some(c) => c.compare_values(&a[i], &b[i]),
             None => a[i].cmp_value(&b[i]),
@@ -8164,10 +8459,11 @@ fn order_ids(store: &Store, ids: &[DocId], keys: &[OrderKey], k: usize) -> Resul
     // The read stays inline: behind a closure returning `Result<Value>` the
     // same query measured 39 ms.
     for &id in ids {
-        for (pos, ..) in keys {
-            flat.push(match pos {
-                None => Value::Int(id as i64),
-                Some(p) => store.read_field(id, *p)?.unwrap_or(Value::Null),
+        for (pos, _, _, path) in keys {
+            flat.push(match (pos, path) {
+                (None, _) => Value::Int(id as i64),
+                (Some(p), None) => store.read_field(id, *p)?.unwrap_or(Value::Null),
+                (Some(p), Some(k)) => store.read_path(id, *p, k)?.unwrap_or(Value::Null),
             });
         }
     }

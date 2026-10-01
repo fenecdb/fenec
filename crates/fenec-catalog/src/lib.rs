@@ -359,6 +359,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
         DataType::Vector(n, VecPrec::F32) => (VECTOR, *n as i64, 0),
         DataType::Vector(n, VecPrec::F16) => (HALFVEC, *n as i64, 0),
         DataType::Sparse(n) => (SPARSEVEC, *n as i64, 0),
+        DataType::Json => (TEXT, -1, 0),
         DataType::List(inner) => {
             let oid = match **inner {
                 DataType::Bool => BOOL_ARRAY,

@@ -30,7 +30,7 @@ use std::ops::Bound;
 pub fn orderable(ty: &DataType) -> bool {
     matches!(
         ty,
-        DataType::Int | DataType::Float | DataType::Timestamp | DataType::Text
+        DataType::Int | DataType::Float | DataType::Timestamp | DataType::Text | DataType::Json
     )
 }
 
@@ -40,6 +40,23 @@ pub fn orderable(ty: &DataType) -> bool {
 pub enum SortedIndex {
     Num(Ordered<u64>),
     Text(Ordered<Box<str>>),
+    /// A `json` field's, or a path's into one, whose values have no type:
+    /// numbers and text, each in an order of its own and every number below
+    /// every text, as `cmp_value` ranks them.
+    Json(Box<JsonOrdered>),
+}
+
+/// The entries of a [`SortedIndex::Json`]. A number of either kind is keyed
+/// as an `f64`, which is how `cmp_value` meets an int and a float; an int
+/// past 2^53 has no exact place there and is held apart, as is a `true` or
+/// `false`, a list and an object -- each orders against the rest by its
+/// kind and within it by its contents, which no key here says. While any
+/// value is held apart the index answers nothing and the scan does: a
+/// wrong order is never the price of an index. The nulls are `num`'s.
+pub struct JsonOrdered {
+    num: Ordered<u64>,
+    text: Ordered<Box<str>>,
+    apart: Chunked<(u64, DocId)>,
 }
 
 /// The entries, and the rows that have no place among them.
@@ -271,7 +288,9 @@ enum Slot<K> {
     Nan,
 }
 
-/// A bound on the key space, from `where` comparisons.
+/// A bound on the key space, from `where` comparisons. Over a json path a
+/// bound of either kind may come, and every `Num` orders below every
+/// `Text` ([`bound_cmp`]), as their values do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     Num(u64),
@@ -319,6 +338,11 @@ impl SortedIndex {
     pub fn new(ty: &DataType, coll: Option<Collation>) -> SortedIndex {
         match ty {
             DataType::Text => SortedIndex::Text(Ordered::new(coll)),
+            DataType::Json => SortedIndex::Json(Box::new(JsonOrdered {
+                num: Ordered::new(None),
+                text: Ordered::new(None),
+                apart: Chunked::new(None),
+            })),
             _ => SortedIndex::Num(Ordered::new(None)),
         }
     }
@@ -332,6 +356,16 @@ impl SortedIndex {
         rows: &mut dyn Iterator<Item = (DocId, Option<Value>)>,
     ) -> Self {
         match ty {
+            // Rows a write at a time: a path's index is built under the
+            // write lock in one pass, and a sort of its own for each part
+            // would be more code in the browser module for little.
+            DataType::Json => {
+                let mut ix = SortedIndex::new(ty, None);
+                for (id, v) in rows {
+                    ix.insert(id, v.as_ref());
+                }
+                ix
+            }
             DataType::Text => {
                 let (mut keys, mut nulls) = (Vec::new(), Vec::new());
                 let mut heap = 0;
@@ -370,6 +404,23 @@ impl SortedIndex {
 
     pub fn insert(&mut self, id: DocId, v: Option<&Value>) {
         match self {
+            SortedIndex::Json(j) => match json_slot(v) {
+                JsonSlot::Num(k) => {
+                    j.num.keys.insert((k, id));
+                }
+                JsonSlot::Text(k) => {
+                    let len = k.len();
+                    if j.text.keys.insert((k, id)) {
+                        j.text.heap += len;
+                    }
+                }
+                JsonSlot::Null => {
+                    j.num.nulls.insert((0, id));
+                }
+                JsonSlot::Apart => {
+                    j.apart.insert((0, id));
+                }
+            },
             SortedIndex::Num(o) => match num_slot(v) {
                 Slot::Key(k) => {
                     o.keys.insert((k, id));
@@ -399,6 +450,23 @@ impl SortedIndex {
     /// caller reads the stored document first, as the other indexes do.
     pub fn remove(&mut self, id: DocId, v: Option<&Value>) {
         match self {
+            SortedIndex::Json(j) => match json_slot(v) {
+                JsonSlot::Num(k) => {
+                    j.num.keys.remove(&(k, id));
+                }
+                JsonSlot::Text(k) => {
+                    let len = k.len();
+                    if j.text.keys.remove(&(k, id)) {
+                        j.text.heap -= len;
+                    }
+                }
+                JsonSlot::Null => {
+                    j.num.nulls.remove(&(0, id));
+                }
+                JsonSlot::Apart => {
+                    j.apart.remove(&(0, id));
+                }
+            },
             SortedIndex::Num(o) => match num_slot(v) {
                 Slot::Key(k) => {
                     o.keys.remove(&(k, id));
@@ -429,6 +497,16 @@ impl SortedIndex {
         match self {
             SortedIndex::Num(o) => !o.nans.is_empty(),
             SortedIndex::Text(_) => false,
+            SortedIndex::Json(j) => !j.apart.is_empty(),
+        }
+    }
+
+    /// Whether the index answers at all: a json one holding a value apart
+    /// does not, and the scan answers instead.
+    pub fn answers(&self) -> bool {
+        match self {
+            SortedIndex::Json(j) => j.apart.is_empty(),
+            _ => true,
         }
     }
 
@@ -440,6 +518,11 @@ impl SortedIndex {
         match self {
             SortedIndex::Num(o) => o.entries() * size_of::<(u64, DocId)>() * 5 / 4,
             SortedIndex::Text(o) => o.entries() * size_of::<(Box<str>, DocId)>() * 5 / 4 + o.heap,
+            SortedIndex::Json(j) => {
+                (j.num.entries() + j.apart.len) * size_of::<(u64, DocId)>() * 5 / 4
+                    + j.text.entries() * size_of::<(Box<str>, DocId)>() * 5 / 4
+                    + j.text.heap
+            }
         }
     }
 
@@ -463,6 +546,15 @@ impl SortedIndex {
             (DataType::Float, Value::Float(f)) if !f.is_nan() => Some(Key::Num(float_key(*f))),
             (DataType::Float, Value::Int(i)) => Some(Key::Num(float_key(*i as f64))),
             (DataType::Text, Value::Text(t)) => Some(Key::Text(t.as_str().into())),
+            // A json path's numbers are keyed as `f64`s, exact for an int
+            // up to 2^53; text by its bytes. A literal of another kind --
+            // a timestamp, which compares against text by parsing it --
+            // is evaluated row by row.
+            (DataType::Json, v) => match json_slot(Some(v)) {
+                JsonSlot::Num(k) => Some(Key::Num(k)),
+                JsonSlot::Text(t) => Some(Key::Text(t)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -491,6 +583,12 @@ impl SortedIndex {
             SortedIndex::Text(o) => {
                 let (lo, hi) = (text_bound(&r.lo, true), text_bound(&r.hi, false));
                 take(&mut o.keys.range(&lo, &hi).map(|e| e.1))
+            }
+            SortedIndex::Json(j) => {
+                let (num, text) = json_ends(Some(r));
+                num.is_none_or(|(lo, hi)| take(&mut j.num.keys.range(&lo, &hi).map(|e| e.1)))
+                    && text
+                        .is_none_or(|(lo, hi)| take(&mut j.text.keys.range(&lo, &hi).map(|e| e.1)))
             }
         };
         whole.then_some(out)
@@ -521,8 +619,111 @@ impl SortedIndex {
                 let bounds = range.map(|r| (text_bound(&r.lo, true), text_bound(&r.hi, false)));
                 walk_ordered(o, bounds, desc, &mut emit)
             }
+            // The numbers then the text, as `cmp_value` ranks them, and
+            // the other way round descending; the nulls of a whole walk
+            // where `walk_ordered` puts them, at the far end.
+            SortedIndex::Json(j) => {
+                let (num, text) = json_ends(range);
+                let whole = range.is_none();
+                let nums = |emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>| match &num {
+                    Some(b) => walk_part(&j.num, *b, whole, desc, emit),
+                    None => Ok(true),
+                };
+                let texts = |emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>| match &text
+                {
+                    Some(b) => walk_part(&j.text, b.clone(), false, desc, emit),
+                    None => Ok(true),
+                };
+                match desc {
+                    false => {
+                        let _ = nums(&mut emit)? && texts(&mut emit)?;
+                    }
+                    true => {
+                        let _ = texts(&mut emit)? && nums(&mut emit)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// Where a json value goes: a number's key, a text's, the nulls, or apart.
+enum JsonSlot {
+    Num(u64),
+    Text(Box<str>),
+    Null,
+    Apart,
+}
+
+/// Where a json value goes in its index. An int is keyed as the `f64` it
+/// is, which `cmp_value` meets a float as; past 2^53 two ints share an `f64`
+/// that `cmp_value` tells apart, so it goes apart, as a `NaN` does.
+fn json_slot(v: Option<&Value>) -> JsonSlot {
+    const EXACT: u64 = 1 << 53;
+    match v {
+        Some(Value::Int(i)) if i.unsigned_abs() <= EXACT => JsonSlot::Num(float_key(*i as f64)),
+        Some(Value::Float(f)) if !f.is_nan() => JsonSlot::Num(float_key(*f)),
+        Some(Value::Text(t)) => JsonSlot::Text(t.as_str().into()),
+        None | Some(Value::Null) => JsonSlot::Null,
+        Some(_) => JsonSlot::Apart,
+    }
+}
+
+/// A range over a json index as the ends of its two parts, `None` for a
+/// part it holds nothing of. A bound of the other kind is no bound on a
+/// part it ranks above, and leaves nothing of a part it ranks below: `>= 5`
+/// takes every text, `< "a"` every number, `> "a"` none of them.
+#[allow(clippy::type_complexity)]
+fn json_ends(r: Option<&Range>) -> (Option<Ends<u64>>, Option<Ends<Box<str>>>) {
+    let Some(r) = r else {
+        return (
+            Some((Bound::Unbounded, Bound::Unbounded)),
+            Some((Bound::Unbounded, Bound::Unbounded)),
+        );
+    };
+    let is_text = |b: &Bound<Key>| {
+        matches!(
+            b,
+            Bound::Included(Key::Text(_)) | Bound::Excluded(Key::Text(_))
+        )
+    };
+    let is_num = |b: &Bound<Key>| {
+        matches!(
+            b,
+            Bound::Included(Key::Num(_)) | Bound::Excluded(Key::Num(_))
+        )
+    };
+    let num = (!is_text(&r.lo)).then(|| {
+        let hi = match is_text(&r.hi) {
+            true => Bound::Unbounded,
+            false => num_bound(&r.hi, false),
+        };
+        (num_bound(&r.lo, true), hi)
+    });
+    let text = (!is_num(&r.hi)).then(|| {
+        let lo = match is_num(&r.lo) {
+            true => Bound::Unbounded,
+            false => text_bound(&r.lo, true),
+        };
+        (lo, text_bound(&r.hi, false))
+    });
+    (num, text)
+}
+
+/// [`walk_ordered`] over one part of a json index, `false` once `emit`
+/// stopped it.
+fn walk_part<K: Ord + Clone + Default>(
+    o: &Ordered<K>,
+    (lo, hi): Ends<K>,
+    with_nulls: bool,
+    desc: bool,
+    emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>,
+) -> crate::error::Result<bool>
+where
+    (K, DocId): Entry,
+{
+    walk_bounded(o, lo, hi, with_nulls, desc, emit)
 }
 
 impl<K: Ord + Clone + Default> Ordered<K>
@@ -556,7 +757,7 @@ fn walk_ordered<K: Ord + Clone + Default>(
     o: &Ordered<K>,
     bounds: Option<Ends<K>>,
     desc: bool,
-    emit: &mut impl FnMut(DocId) -> crate::error::Result<bool>,
+    emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>,
 ) -> crate::error::Result<()>
 where
     (K, DocId): Entry,
@@ -564,20 +765,37 @@ where
     // A range never matches `null`, so only a whole walk visits those rows.
     let with_nulls = bounds.is_none();
     let (lo, hi) = bounds.unwrap_or((Bound::Unbounded, Bound::Unbounded));
+    walk_bounded(o, lo, hi, with_nulls, desc, emit).map(|_| ())
+}
+
+/// The walk between two ends, `false` once `emit` stopped it. `emit` comes
+/// through `dyn`: generic over it, each walk and each part of a json
+/// index's walk was a copy of its own, 3.8 KB of the browser module.
+fn walk_bounded<K: Ord + Clone + Default>(
+    o: &Ordered<K>,
+    lo: Bound<(K, DocId)>,
+    hi: Bound<(K, DocId)>,
+    with_nulls: bool,
+    desc: bool,
+    emit: &mut dyn FnMut(DocId) -> crate::error::Result<bool>,
+) -> crate::error::Result<bool>
+where
+    (K, DocId): Entry,
+{
     if !desc {
         if with_nulls {
             for (_, id) in o.nulls.iter() {
                 if !emit(*id)? {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
         for (_, id) in o.keys.range(&lo, &hi) {
             if !emit(*id)? {
-                return Ok(());
+                return Ok(false);
             }
         }
-        return Ok(());
+        return Ok(true);
     }
     let mut run: Vec<DocId> = Vec::new();
     let mut run_key: Option<&K> = None;
@@ -585,7 +803,7 @@ where
         if run_key != Some(k) {
             for id in run.drain(..).rev() {
                 if !emit(id)? {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             run_key = Some(k);
@@ -594,17 +812,17 @@ where
     }
     for id in run.drain(..).rev() {
         if !emit(id)? {
-            return Ok(());
+            return Ok(false);
         }
     }
     if with_nulls {
         for (_, id) in o.nulls.iter() {
             if !emit(*id)? {
-                return Ok(());
+                return Ok(false);
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Sorts `(key, id)` pairs with an LSD radix over their sixteen bytes,
@@ -748,8 +966,10 @@ fn bound_cmp(a: &Bound<Key>, b: &Bound<Key>, lower: bool, coll: Option<Collation
     let key = |k: &Key, k2: &Key| match (k, k2) {
         (Key::Num(x), Key::Num(y)) => x.cmp(y),
         (Key::Text(x), Key::Text(y)) => coll.map_or_else(|| x.cmp(y), |c| c.compare(x, y)),
-        // One field has one key type; mixed bounds never meet.
-        _ => Equal,
+        // A typed field has one key type; a json path both, and every
+        // number ranks below every text, as `cmp_value` ranks them.
+        (Key::Num(_), Key::Text(_)) => Less,
+        (Key::Text(_), Key::Num(_)) => Greater,
     };
     let unbounded = if lower { Less } else { Greater };
     match (a, b) {

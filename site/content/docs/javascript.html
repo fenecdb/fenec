@@ -294,7 +294,16 @@ table lists everything else a query can carry.</p>
 <pre data-lang="js">.where('year', '>=', 2024)                   // field, operator, value
 .where('category', 'book')                   // two arguments means equality
 .where({ year: { gte: 2024 }, tags: { has: 'rust' } })
+.where('meta.lang', '=', 'tr')               // a path into a json field
 </pre>
+
+<p>A path into a <a href="fenecql.html#json"><code>json</code> field</a>
+goes wherever a field does — <code>where</code>, <code>select</code>,
+<code>order</code>, and the keys of <code>update</code>, which sets one key
+inside the field — and a plain object is a <code>json</code> field's value:
+<code>insert({ meta: { lang: 'tr' } })</code>. <code>fenec types</code>
+writes a <code>json</code> field as <code>Json</code>, and the builder's
+types take <code>'meta.lang'</code> as a path of it.</p>
 
 <div class="tbl">
 <table>

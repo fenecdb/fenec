@@ -83,6 +83,7 @@ impl ScalarFn for PgTypeof {
                 Value::Vector(_) => "vector",
                 Value::Sparse(..) => "sparsevec",
                 Value::List(_) => "array",
+                Value::Object(_) => "jsonb",
             }
             .to_string(),
         ))

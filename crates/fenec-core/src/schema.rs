@@ -1,7 +1,7 @@
 use crate::codec::*;
 use crate::collate::Collation;
 use crate::error::{Error, Result};
-use crate::value::DataType;
+use crate::value::{DataType, MAX_PATH_KEYS};
 
 /// Vector similarity metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +316,14 @@ impl IndexKind {
     /// collection was created, and a `create index` taking it silently
     /// answered `near` from candidates chosen by sign alone.
     pub fn check(&self, field: &str, ty: &DataType) -> Result<()> {
+        // A path reads a value of no declared type: equality and order are
+        // what it takes, and the text, vector and sparse indexes stay on
+        // the fields that declare their type.
+        if field.contains('.') && !matches!(self, IndexKind::Hash { .. } | IndexKind::Sorted) {
+            return Err(Error::Query(format!(
+                "`{field}` is a path: it takes @hash, @unique or @sorted"
+            )));
+        }
         match self {
             IndexKind::Vector(spec) => {
                 if !matches!(ty, DataType::Vector(..)) {
@@ -338,8 +346,8 @@ impl IndexKind {
             }
             IndexKind::Sorted if !crate::sorted::orderable(ty) => {
                 return Err(Error::Type(format!(
-                    "field `{field}` is not int, float, timestamp or text, no ordered index \
-                     can be built"
+                    "field `{field}` is not int, float, timestamp, text or json, no ordered \
+                     index can be built"
                 )));
             }
             IndexKind::Inverted if !matches!(ty, DataType::Sparse(_)) => {
@@ -415,6 +423,13 @@ pub struct Schema {
     /// The fields a document holds, in the order it holds them -- the
     /// positions every reader of a field passes the store.
     pub fields: Vec<Field>,
+    /// The indexes on paths into `json` fields (`create index on docs
+    /// (meta.lang) @hash`), each a field of type `json` named by its whole
+    /// path, in the order of the fields they read into. Beside the fields
+    /// rather than among them: a document holds no value for one, so a
+    /// position in `fields` stays a place in the payload. The schema writes
+    /// each with the field it reads into ([`Schema::encode`]).
+    pub paths: Vec<Field>,
     /// Where a dropped field's value still is in the documents written
     /// before its drop, ascending: a document is a run of values in field
     /// order, so `alter ... drop field` leaves the place, skipped on read
@@ -423,6 +438,13 @@ pub struct Schema {
     /// this. Every field after one sits a place further in the documents
     /// than in `fields` ([`Schema::place`]).
     pub dropped: Vec<usize>,
+}
+
+/// A name read as a path: the field and the keys past it (`meta` and
+/// `source.rank` of `meta.source.rank`), `None` for a plain field's name.
+/// A field's name holds no dot ([`Schema::new`]), so the first one ends it.
+pub fn split_path(name: &str) -> Option<(&str, &str)> {
+    name.split_once('.')
 }
 
 /// Where the field at `pos` is in a document, past the `dropped` places
@@ -450,6 +472,20 @@ impl Schema {
                     "`id` is a reserved field, it cannot be declared in a schema".into(),
                 ));
             }
+            // A dot is where a path starts (`meta.lang`): a field named
+            // with one could not be told from a path into another.
+            if f.name.contains('.') || f.name.is_empty() {
+                return Err(Error::Query(format!(
+                    "`{}` cannot name a field: a name holds no dot, which starts a path",
+                    f.name
+                )));
+            }
+            if matches!(&f.ty, DataType::List(t) if **t == DataType::Json) {
+                return Err(Error::Type(format!(
+                    "`{}`: a list of json is a json field holding a list",
+                    f.name
+                )));
+            }
             if seen.contains(&f.name) {
                 return Err(Error::Exists(format!("duplicate field `{}`", f.name)));
             }
@@ -467,8 +503,70 @@ impl Schema {
         Ok(Schema {
             name,
             fields,
+            paths: Vec::new(),
             dropped: Vec::new(),
         })
+    }
+
+    /// The field a path reads into, by its position, and the keys past it:
+    /// `None` for a name with no dot. Refused where the field is not there
+    /// or not `json`, where a key is empty, and past [`MAX_PATH_KEYS`] keys,
+    /// which no value nests deep enough to answer.
+    pub fn path_of<'a>(&self, name: &'a str) -> Result<Option<(usize, &'a str)>> {
+        let Some((field, keys)) = split_path(name) else {
+            return Ok(None);
+        };
+        let pos = self
+            .field_pos(field)
+            .ok_or_else(|| Error::NotFound(format!("field `{field}`")))?;
+        if self.fields[pos].ty != DataType::Json {
+            return Err(Error::Type(format!(
+                "`{name}` is a path, and `{field}` is {}: a path reads into a json field",
+                self.fields[pos].ty.name()
+            )));
+        }
+        let mut n = 0;
+        for k in keys.split('.') {
+            if k.is_empty() {
+                return Err(Error::Query(format!("`{name}`: a path's keys are names")));
+            }
+            n += 1;
+        }
+        if n > MAX_PATH_KEYS {
+            return Err(Error::Query(format!(
+                "`{name}`: a path names at most {MAX_PATH_KEYS} keys past its field"
+            )));
+        }
+        Ok(Some((pos, keys)))
+    }
+
+    /// The index on a path, by the path's whole name.
+    pub fn path(&self, name: &str) -> Option<&Field> {
+        self.paths.iter().find(|f| f.name == name)
+    }
+
+    /// A field, or an index on a path, by name: what carries an index of
+    /// that name.
+    pub fn indexed(&self, name: &str) -> Option<&Field> {
+        match split_path(name) {
+            None => self.field(name),
+            Some(_) => self.path(name),
+        }
+    }
+
+    /// Puts an index on a path among the others, after those of the fields
+    /// before its own and of its own: the order [`Schema::decode`] gives
+    /// them back in, which keeps a schema read from the file equal to the
+    /// one written.
+    pub fn add_path(&mut self, f: Field) {
+        let field = |n: &str| split_path(n).and_then(|(h, _)| self.field_pos(h));
+        let mine = field(&f.name);
+        let at = self
+            .paths
+            .iter()
+            .position(|p| field(&p.name) > mine)
+            .unwrap_or(self.paths.len());
+        self.paths.insert(at, f);
     }
 
     /// Where the field at `pos` of [`Self::fields`] is in a document: past
@@ -574,40 +672,24 @@ impl Schema {
             }
             encode_type(&mut out, &f.ty);
             out.push(f.required as u8);
-            match &f.index {
-                IndexKind::None => out.push(0),
-                // A unique one is a kind of its own, as a quantized graph is:
-                // a version that knows no `@unique` refuses the file rather
-                // than open it as a plain hash and take the duplicates it
-                // would have refused.
-                IndexKind::Hash { unique } => out.push(if *unique { 8 } else { 1 }),
-                IndexKind::Vector(spec) => {
-                    // A quantized index is a kind of its own, so that a version
-                    // that knows no quantization refuses the file rather than
-                    // reading it as full vectors; every other index is written
-                    // as it always was.
-                    out.push(if spec.quant == Quant::None { 2 } else { 5 });
-                    out.push(spec.metric.code());
-                    put_uvarint(&mut out, spec.m as u64);
-                    put_uvarint(&mut out, spec.ef_construction as u64);
-                    put_uvarint(&mut out, spec.ef_search as u64);
-                    if spec.quant != Quant::None {
-                        out.push(spec.quant.code());
-                    }
+            encode_index(&mut out, &f.index);
+            // The indexes on paths into a json field go with it, each its
+            // keys and its kind. Inside the field rather than after the
+            // fields: a version that knows no json refuses the field's type
+            // before it reaches them, and none can read them as something
+            // else.
+            if f.ty == DataType::Json {
+                let mine: Vec<&Field> = self
+                    .paths
+                    .iter()
+                    .filter(|p| split_path(&p.name).is_some_and(|(h, _)| h == f.name))
+                    .collect();
+                put_uvarint(&mut out, mine.len() as u64);
+                for p in mine {
+                    let keys = split_path(&p.name).map_or("", |(_, k)| k);
+                    encode_str(&mut out, keys);
+                    encode_index(&mut out, &p.index);
                 }
-                IndexKind::Text(spec) => {
-                    // One that indexes characters is a kind of its own, as a
-                    // quantized index is: a version that knows no `chars`
-                    // refuses the file rather than index pairs alone and
-                    // answer a query of one character with nothing.
-                    out.push(if spec.chars { 7 } else { 3 });
-                    put_uvarint(&mut out, spec.k1_pct as u64);
-                    put_uvarint(&mut out, spec.b_pct as u64);
-                    put_uvarint(&mut out, spec.prefix_max as u64);
-                    put_uvarint(&mut out, spec.prefix_min as u64);
-                }
-                IndexKind::Sorted => out.push(4),
-                IndexKind::Inverted => out.push(6),
             }
         }
         out
@@ -617,6 +699,7 @@ impl Schema {
         let name = decode_str(buf, pos)?;
         let n = get_uvarint(buf, pos)? as usize;
         let mut fields = Vec::with_capacity(n.min(buf.len()));
+        let mut paths = Vec::new();
         let mut dropped = Vec::new();
         for at in 0..n {
             let fname = decode_str(buf, pos)?;
@@ -639,44 +722,21 @@ impl Schema {
                 _ => None,
             };
             let ty = decode_type(buf, pos)?;
-            let required = buf[*pos] != 0;
+            let required = *buf
+                .get(*pos)
+                .ok_or_else(|| Error::Corrupt("schema ended early".into()))?
+                != 0;
             *pos += 1;
-            let kind = buf[*pos];
-            *pos += 1;
-            let index = match kind {
-                0 => IndexKind::None,
-                1 | 8 => IndexKind::Hash { unique: kind == 8 },
-                2 | 5 => {
-                    let metric = Metric::from_code(buf[*pos])?;
-                    *pos += 1;
-                    let mut spec = VectorIndexSpec {
-                        metric,
-                        m: get_uvarint(buf, pos)? as usize,
-                        ef_construction: get_uvarint(buf, pos)? as usize,
-                        ef_search: get_uvarint(buf, pos)? as usize,
-                        quant: Quant::None,
-                    };
-                    if kind == 5 {
-                        let c = *buf
-                            .get(*pos)
-                            .ok_or_else(|| Error::Corrupt("schema ended early".into()))?;
-                        *pos += 1;
-                        spec.quant = Quant::from_code(c)
-                            .ok_or_else(|| Error::Corrupt(format!("unknown quantization {c}")))?;
-                    }
-                    IndexKind::Vector(spec.resolved())
+            let index = decode_index(buf, pos)?;
+            if ty == DataType::Json {
+                let n = get_uvarint(buf, pos)? as usize;
+                for _ in 0..n {
+                    let keys = decode_str(buf, pos)?;
+                    let index = decode_index(buf, pos)?;
+                    paths
+                        .push(Field::new(format!("{fname}.{keys}"), DataType::Json).indexed(index));
                 }
-                3 | 7 => IndexKind::Text(TextIndexSpec {
-                    k1_pct: get_uvarint(buf, pos)? as u16,
-                    b_pct: get_uvarint(buf, pos)? as u16,
-                    prefix_max: get_uvarint(buf, pos)? as u8,
-                    prefix_min: get_uvarint(buf, pos)? as u8,
-                    chars: kind == 7,
-                }),
-                4 => IndexKind::Sorted,
-                6 => IndexKind::Inverted,
-                o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
-            };
+            }
             fields.push(Field {
                 name: fname,
                 ty,
@@ -688,7 +748,85 @@ impl Schema {
         Ok(Schema {
             name,
             fields,
+            paths,
             dropped,
         })
     }
+}
+
+/// An index's kind as a schema writes it, behind its field.
+fn encode_index(out: &mut Vec<u8>, index: &IndexKind) {
+    match index {
+        IndexKind::None => out.push(0),
+        // A unique one is a kind of its own, as a quantized graph is: a
+        // version that knows no `@unique` refuses the file rather than open
+        // it as a plain hash and take the duplicates it would have refused.
+        IndexKind::Hash { unique } => out.push(if *unique { 8 } else { 1 }),
+        IndexKind::Vector(spec) => {
+            // A quantized index is a kind of its own, so that a version that
+            // knows no quantization refuses the file rather than reading it
+            // as full vectors; every other index is written as it always
+            // was.
+            out.push(if spec.quant == Quant::None { 2 } else { 5 });
+            out.push(spec.metric.code());
+            put_uvarint(out, spec.m as u64);
+            put_uvarint(out, spec.ef_construction as u64);
+            put_uvarint(out, spec.ef_search as u64);
+            if spec.quant != Quant::None {
+                out.push(spec.quant.code());
+            }
+        }
+        IndexKind::Text(spec) => {
+            // One that indexes characters is a kind of its own, as a
+            // quantized index is: a version that knows no `chars` refuses
+            // the file rather than index pairs alone and answer a query of
+            // one character with nothing.
+            out.push(if spec.chars { 7 } else { 3 });
+            put_uvarint(out, spec.k1_pct as u64);
+            put_uvarint(out, spec.b_pct as u64);
+            put_uvarint(out, spec.prefix_max as u64);
+            put_uvarint(out, spec.prefix_min as u64);
+        }
+        IndexKind::Sorted => out.push(4),
+        IndexKind::Inverted => out.push(6),
+    }
+}
+
+/// An index's kind as [`encode_index`] wrote it.
+fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
+    let ended = || Error::Corrupt("schema ended early".into());
+    let kind = *buf.get(*pos).ok_or_else(ended)?;
+    *pos += 1;
+    Ok(match kind {
+        0 => IndexKind::None,
+        1 | 8 => IndexKind::Hash { unique: kind == 8 },
+        2 | 5 => {
+            let metric = Metric::from_code(*buf.get(*pos).ok_or_else(ended)?)?;
+            *pos += 1;
+            let mut spec = VectorIndexSpec {
+                metric,
+                m: get_uvarint(buf, pos)? as usize,
+                ef_construction: get_uvarint(buf, pos)? as usize,
+                ef_search: get_uvarint(buf, pos)? as usize,
+                quant: Quant::None,
+            };
+            if kind == 5 {
+                let c = *buf.get(*pos).ok_or_else(ended)?;
+                *pos += 1;
+                spec.quant = Quant::from_code(c)
+                    .ok_or_else(|| Error::Corrupt(format!("unknown quantization {c}")))?;
+            }
+            IndexKind::Vector(spec.resolved())
+        }
+        3 | 7 => IndexKind::Text(TextIndexSpec {
+            k1_pct: get_uvarint(buf, pos)? as u16,
+            b_pct: get_uvarint(buf, pos)? as u16,
+            prefix_max: get_uvarint(buf, pos)? as u8,
+            prefix_min: get_uvarint(buf, pos)? as u8,
+            chars: kind == 7,
+        }),
+        4 => IndexKind::Sorted,
+        6 => IndexKind::Inverted,
+        o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
+    })
 }

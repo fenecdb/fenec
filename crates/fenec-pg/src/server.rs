@@ -2639,6 +2639,7 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
         DataType::Vector(_, VecPrec::F32) => binary::OID_VECTOR,
         DataType::Vector(_, VecPrec::F16) => binary::OID_HALFVEC,
         DataType::Sparse(_) => binary::OID_SPARSEVEC,
+        DataType::Json => OID_TEXT,
         // A list of one scalar type is its array, which a driver reads as a
         // list of its own; one of lists or vectors has no array type
         // PostgreSQL would read, and goes as its text.
@@ -2659,6 +2660,7 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
 pub fn to_pg_text(v: &Value) -> Option<String> {
     Some(match v {
         Value::Null => return None,
+        Value::Object(_) => fenec_core::json::to_string(v),
         Value::Bool(b) => (if *b { "t" } else { "f" }).to_string(),
         Value::Int(i) => i.to_string(),
         // PostgreSQL's own output format; client parsers can reject the

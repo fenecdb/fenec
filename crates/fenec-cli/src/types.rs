@@ -124,6 +124,12 @@ fn render(path: &str, name: &str, schemas: &[Schema]) -> String {
              export type Vector = number[] & { readonly __fenec: 'vector' };\n",
         );
     }
+    if used(|t| matches!(t, DataType::Json)) {
+        out.push_str(
+            "/** `json`: any value JSON holds; a path reads into it, `'meta.lang'`. */\n\
+             export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };\n",
+        );
+    }
     if used(|t| {
         matches!(t, DataType::Bytes) || matches!(t, DataType::List(i) if **i == DataType::Bytes)
     }) {
@@ -187,6 +193,9 @@ fn ts_type(t: &DataType) -> String {
         // carries a sparse vector as.
         DataType::Sparse(_) => "Sparse".into(),
         DataType::List(inner) => format!("{}[]", ts_type(inner)),
+        // Any value JSON holds: an object, a list, a number, text, a
+        // boolean or null.
+        DataType::Json => "Json".into(),
     }
 }
 
@@ -243,6 +252,7 @@ mod tests {
                 Field::new("published", DataType::Timestamp),
                 Field::new("embed", DataType::Vector(768, VecPrec::F32))
                     .indexed(IndexKind::Vector(VectorIndexSpec::default())),
+                Field::new("meta", DataType::Json),
             ],
         )
         .unwrap()
@@ -259,6 +269,12 @@ mod tests {
         assert!(out.contains("    year: number | null;"));
         assert!(out.contains("    published: Timestamp | null;"));
         assert!(out.contains("    embed: Vector | null;"));
+        // A json field holds any value JSON does, the type `fenec.d.ts`
+        // declares the same way, so the two pass between each other.
+        assert!(out.contains("    meta: Json | null;"));
+        assert!(out.contains(
+            "export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };"
+        ));
         // `id` is automatic, added by `Row<F>`.
         assert!(!out.contains("id:"));
         // Branded types that are used are written, unused ones are not.

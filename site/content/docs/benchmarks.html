@@ -761,7 +761,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>177 KB brotli</b>.</p>
+the browser pays is <b>185 KB brotli</b>.</p>
 
 <div class="tbl">
 <table>
@@ -771,8 +771,8 @@ the browser pays is <b>177 KB brotli</b>.</p>
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1445 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1315 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1153 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>456 KB</b></td><td class="n"><b>151 KB</b></td><td class="n">180 KB</td></tr>
-<tr><td><code>web/fenec.js</code>, the client</td><td class="n">94 KB</td><td class="n">26 KB</td><td class="n">30 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>481 KB</b></td><td class="n"><b>159 KB</b></td><td class="n">190 KB</td></tr>
+<tr><td><code>web/fenec.js</code>, the client</td><td class="n">95 KB</td><td class="n">26 KB</td><td class="n">30 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -781,7 +781,7 @@ the browser pays is <b>177 KB brotli</b>.</p>
 <details class="deep"><summary>Method and details</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>177 KB brotli</b> for both together. A binary you execute and an image
+<b>185 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -790,7 +790,7 @@ dashes.</p>
   That is the right number for a file compressed once at build time and served
   as a static asset, which is how this site ships the module. A server
   compressing on the fly does not spend that: the same two files come out at
-  180 KB at <code>-q 5</code>, nginx's dynamic default, and 190 KB at
+  207 KB at <code>-q 5</code>, nginx's dynamic default, and 220 KB at
   <code>-q 4</code>. Quoting the best case without naming it would flatter the
   number by 12–19%.</p>
   <p>The on-disk column is not the transfer size and is not trying to be. It is

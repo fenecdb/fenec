@@ -247,6 +247,33 @@ test('near together with where and order', () => {
   assert.deepEqual(p, [2024, [1, 2]]);
 });
 
+test('a path into a json field goes where a field does', () => {
+  const [sql, p] = q()
+    .select('title', 'meta.source.site')
+    .where('meta.lang', '=', 'tr')
+    .where({ 'meta.source.rank': { gte: 2 } })
+    .order('meta.source.rank', 'desc')
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get articles select title, meta.source.site where meta.lang = $1 and meta.source.rank >= $2 order meta.source.rank desc',
+  );
+  assert.deepEqual(p, ['tr', 2]);
+  // A name is still a name: no dot at either end, none twice, no path as a
+  // collection.
+  for (const bad of ['meta.', '.meta', 'meta..lang', 'meta.1x', 'a b']) {
+    assert.throws(() => q().where(bad, 1), FenecError, bad);
+  }
+  assert.throws(() => from('a.b'), FenecError);
+  // An object is a json field's value, bound as a parameter.
+  const [w, wp] = q().toInsert({ meta: { lang: 'tr', at: new Date(0), n: [1, 2] } });
+  assert.equal(w, 'put articles {meta: $1}');
+  assert.deepEqual(wp, [{ lang: 'tr', at: '1970-01-01T00:00:00.000Z', n: [1, 2] }]);
+  const [u] = q().where('id', 1).toUpdate({ 'meta.lang': 'en' });
+  assert.match(u, /^set articles \{meta\.lang: \$1\}/);
+  assert.throws(() => q().toInsert({ meta: new Map() }), FenecError);
+});
+
 test('Float32Array becomes a plain array', () => {
   const [, p] = q().near('embed', new Float32Array([1, 2, 3])).toFenecQL();
   assert.deepEqual(p, [[1, 2, 3]]);
@@ -616,6 +643,43 @@ test('alter collection in the browser, and a file holding one loaded', { skip: w
   fromImage.run('compact');
   assert.deepEqual(answers(fromImage), want);
   for (const d of [db, fromTail, fromImage]) d.close();
+});
+
+test('json fields and paths in the browser, and a file holding them loaded', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection docs (title text, meta json)');
+  await db.from('docs').insert([
+    { title: 'a', meta: { lang: 'tr', source: { site: 'x', rank: 3 } } },
+    { title: 'b', meta: { lang: 'en', source: { site: 'y', rank: 1 }, tags: ['ai'] } },
+    { title: 'c', meta: { lang: 'tr', source: { site: 'z', rank: 7.5 } } },
+    { title: 'd', meta: 'text' },
+  ]);
+  db.run('create index on docs (meta.lang) @hash');
+  db.run('create index on docs (meta.source.rank) @sorted');
+  const answers = async (d) => ({
+    tr: (await d.from('docs').select('title').where('meta.lang', '=', 'tr').rows()).map((r) => r.title),
+    ranked: (await d.from('docs').select('title', 'meta.source.site').where('meta.source.rank', '>=', 2)
+      .order('meta.source.rank', 'desc').rows()),
+    whole: (await d.from('docs').select('meta').where('title', 'b').rows())[0].meta,
+  });
+  const want = {
+    tr: ['a', 'c'],
+    ranked: [{ title: 'c', 'meta.source.site': 'z' }, { title: 'a', 'meta.source.site': 'x' }],
+    whole: { lang: 'en', source: { rank: 1, site: 'y' }, tags: ['ai'] },
+  };
+  assert.deepEqual(await answers(db), want);
+  assert.match(db.rows('explain get docs where meta.lang = "tr"').map((r) => r.plan).join(' '), /hash index on meta\.lang/);
+  // A path set, and the rest of the object kept.
+  await db.from('docs').where('title', 'a').update({ 'meta.source.rank': 4 });
+  assert.deepEqual((await db.from('docs').select('meta').where('title', 'a').rows())[0].meta,
+    { lang: 'tr', source: { rank: 4, site: 'x' } });
+  // A file holding them, loaded: the objects and the indexes come back.
+  const again = await Fenec.open(wasm);
+  again.load(db.snapshot());
+  assert.deepEqual((await answers(again)).tr, ['a', 'c']);
+  assert.equal(again.rows('get docs where meta.source.rank >= 4 count')[0].count, 2);
+  for (const d of [db, again]) d.close();
 });
 
 test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

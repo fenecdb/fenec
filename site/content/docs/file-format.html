@@ -34,7 +34,9 @@ are the kinds:</p>
 <code>[op][doc-id][length][fields]</code>, each field a tagged value. A
 <code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
 indices, each as its distance from the one before, then the weights as
-<code>f32</code>.</p>
+<code>f32</code>. An object, in a <code>json</code> field, is
+<code>[13][count]</code>, then each member's key as a length and its
+bytes and its value tagged, ascending by key.</p>
 
 <div class="note trap">
   <p><b>A record cut short is cut off the file, not only skipped.</b> Left in
@@ -166,7 +168,9 @@ as a field with no name and type tag 12: the documents written before the
 drop hold a value there, which a read passes over, and a document written
 after it a <code>null</code>. A document that ends before a field's place
 holds <code>null</code> there: it was written before the field was
-added.</p>
+added. A <code>json</code> field is type tag 14, and after its index kind
+come the indexes on paths into it: a count, then each one's keys
+(<code>source.rank</code>) and its index kind as a field's is written.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>For every kind but the graph that byte is all the file holds: the hash,
@@ -180,7 +184,10 @@ record kind it does not know.</p>
 
 <p>An older binary meets a type tag it does not know, or a collation code,
 and refuses the file, rather than read the field and order it in another
-order. The collation's weights are not in the file: they are the binary's,
+order — or, meeting a <code>json</code> field, before it reads an object
+(value tag 13) it would have no reading of: <i>unknown type tag 14</i>.
+The value and type tags share their numbers, so 13 and 14 are new to both,
+where 11 and 12 are a collation's and a dropped place's. The collation's weights are not in the file: they are the binary's,
 and a <code>@sorted</code> index over the field is built from the documents
 on open.</p>
 </details>

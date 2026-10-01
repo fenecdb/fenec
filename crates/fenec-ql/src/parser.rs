@@ -3,10 +3,11 @@
 //! Language summary
 //! ```text
 //! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [@index], ... )
-//!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type]
+//!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type] json
 //!        index: @hash @sorted @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //! drop   collection [if exists] <name>
-//! put    <name> { k: v, ... }            -- or [ {...}, {...} ]
+//! put    <name> { k: v, ... }            -- or [ {...}, {...} ]; v may be {..}, a json value
+//! a.b.c                                  -- a path into a json field, where a field goes
 //! get    <name> [select a, b] [where <expr>] [near <field> <vector> [ef N] [exact]]
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
@@ -55,6 +56,10 @@ pub struct Parser {
     i: usize,
     /// Stack depth of the expression currently being built.
     depth: usize,
+    /// Inside an object literal, whose lists keep their numbers as written
+    /// rather than become a vector: only a `json` field holds an object,
+    /// and `[19.99]` in it is two decimals, not an `f32`.
+    exact: bool,
 }
 
 pub fn parse(src: &str) -> Result<Vec<Statement>> {
@@ -62,6 +67,7 @@ pub fn parse(src: &str) -> Result<Vec<Statement>> {
         toks: tokenize(src)?,
         i: 0,
         depth: 0,
+        exact: false,
     };
     let mut out = Vec::new();
     while !p.at_eof() {
@@ -93,6 +99,7 @@ pub fn parse_select_list(src: &str) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
         toks: tokenize(src)?,
         i: 0,
         depth: 0,
+        exact: false,
     };
     let list = p.select_list()?;
     if !p.at_eof() {
@@ -182,7 +189,22 @@ impl Parser {
         }
     }
 
+    /// A name: a collection's, a field's where one is declared or named
+    /// alone. A path is no name, and is refused rather than taken for one.
     fn ident(&mut self) -> Result<String> {
+        match self.next() {
+            Tok::Ident(s) if s.contains('.') => {
+                self.i -= 1;
+                self.err(format!("`{s}` is a path; a name holds no dot"))
+            }
+            Tok::Ident(s) => Ok(s),
+            other => self.err(format!("expected a name, found {}", other.describe())),
+        }
+    }
+
+    /// A field, or a path into a json field (`meta.source.rank`): what a
+    /// `select`, an `order` and a `create index` take.
+    fn path(&mut self) -> Result<String> {
         match self.next() {
             Tok::Ident(s) => Ok(s),
             other => self.err(format!("expected a name, found {}", other.describe())),
@@ -296,7 +318,7 @@ impl Parser {
         self.expect_kw("on")?;
         let collection = self.ident()?;
         self.expect(Tok::LParen)?;
-        let field = self.ident()?;
+        let field = self.path()?;
         self.expect(Tok::RParen)?;
         self.expect(Tok::At)?;
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
@@ -483,6 +505,7 @@ impl Parser {
             "text" | "string" => DataType::Text,
             "bytes" | "blob" => DataType::Bytes,
             "timestamp" | "timestamptz" => DataType::Timestamp,
+            "json" | "jsonb" => DataType::Json,
             "vector" | "vec" => {
                 self.expect(Tok::Lt)?;
                 let dim = self.int()?;
@@ -613,6 +636,9 @@ impl Parser {
         })
     }
 
+    /// `{k: v, ...}`: a document's fields, a `set`'s, or an object's
+    /// members. A key may be a path (`meta.lang: "en"`), which sets a key
+    /// inside a json field.
     fn object(&mut self) -> Result<Vec<(String, Expr)>> {
         self.expect(Tok::LBrace)?;
         let mut pairs = Vec::new();
@@ -670,7 +696,7 @@ impl Parser {
             }
             if self.eat_kw("group") {
                 self.eat_kw("by");
-                sel.group = Some(self.ident()?);
+                sel.group = Some(self.path()?);
                 continue;
             }
             if self.eat_kw("where") {
@@ -790,7 +816,7 @@ impl Parser {
         }
         let mut cols = Vec::new();
         loop {
-            cols.push(self.ident()?);
+            cols.push(self.path()?);
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }
@@ -804,14 +830,14 @@ impl Parser {
     fn order_list(&mut self, out: &mut Vec<Sort>) -> Result<()> {
         self.eat_kw("by");
         loop {
-            let mut field = self.ident()?;
+            let mut field = self.path()?;
             if matches!(self.peek(), Tok::LParen) {
                 self.next();
                 if matches!(self.peek(), Tok::Star) {
                     self.next();
                     field = COUNT_COLUMN.to_string();
                 } else {
-                    field = format!("{}({})", field.to_ascii_lowercase(), self.ident()?);
+                    field = format!("{}({})", field.to_ascii_lowercase(), self.path()?);
                 }
                 self.expect(Tok::RParen)?;
             }
@@ -949,7 +975,7 @@ impl Parser {
         let mut items = Vec::new();
         let mut aggregates = false;
         loop {
-            let name = self.ident()?;
+            let name = self.path()?;
             if matches!(self.peek(), Tok::LParen) {
                 self.next();
                 let arg = if matches!(self.peek(), Tok::Star | Tok::RParen) {
@@ -958,7 +984,7 @@ impl Parser {
                     }
                     None
                 } else {
-                    Some(self.ident()?)
+                    Some(self.path()?)
                 };
                 self.expect(Tok::RParen)?;
                 items.push(match (name.to_ascii_lowercase().as_str(), arg) {
@@ -1177,13 +1203,33 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 Ok(e)
             }
+            // An object, a `json` field's value: constants alone, as in a
+            // list, its keys names or strings, sorted and none twice.
+            Tok::LBrace => {
+                let was = std::mem::replace(&mut self.exact, true);
+                let pairs = self.object();
+                self.exact = was;
+                let mut members = Vec::new();
+                for (k, e) in pairs? {
+                    match e {
+                        Expr::Lit(v) => members.push((k, v)),
+                        _ => return self.err("only constant values can be used inside an object"),
+                    }
+                }
+                match Value::object(members) {
+                    Ok(v) => Ok(Expr::Lit(v)),
+                    Err(e) => self.err(e),
+                }
+            }
             Tok::LBracket => {
                 // A vector written out, numbers alone between the brackets,
                 // is read into its `f32`s at once, as the loop below would
                 // make it: each number through `expr` was most of what a
                 // query holding one took to parse.
-                if let Some(v) = self.numbers_in_brackets() {
-                    return Ok(Expr::Lit(Value::Vector(v)));
+                if !self.exact {
+                    if let Some(v) = self.numbers_in_brackets() {
+                        return Ok(Expr::Lit(Value::Vector(v)));
+                    }
                 }
                 self.next();
                 let mut items = Vec::new();
@@ -1200,7 +1246,8 @@ impl Parser {
                 self.expect(Tok::RBracket)?;
                 // If every element is a constant number, produce a vector
                 // directly, so embedding lists become Value::Vector in one go.
-                if !items.is_empty()
+                if !self.exact
+                    && !items.is_empty()
                     && items
                         .iter()
                         .all(|e| matches!(e, Expr::Lit(Value::Int(_)) | Expr::Lit(Value::Float(_))))
@@ -1295,6 +1342,7 @@ mod tests {
             toks: crate::lexer::tokenize(src)?,
             i: 0,
             depth: 0,
+            exact: false,
         };
         let mut out = Vec::new();
         while !p.at_eof() {
