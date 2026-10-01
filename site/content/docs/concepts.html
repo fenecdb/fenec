@@ -67,7 +67,7 @@ larger than the machine's memory can be opened this way.</p>
   <li><b>Replace a file by rename, never by copying over it.</b> A copy over
     an open file, or a disk read that fails, ends the process.</li>
   <li><b>Opening still takes time in proportion to the file.</b></li>
-  <li><b><code>fenec-pg --no-mmap</code></b> reads the file into memory
+  <li><b><code>fenec-server --no-mmap</code></b> reads the file into memory
     instead, for network file systems.</li>
 </ul>
 
@@ -118,7 +118,7 @@ call: Linux's give a large block back when it is freed, so the process holds
 what the engine counts, while macOS's keeps hundreds of megabytes of them in
 a cache of its own.</p>
 
-<p><code>fenec-pg --no-mmap</code> reads the file into memory instead — a
+<p><code>fenec-server --no-mmap</code> reads the file into memory instead — a
 replicated one, and every tenant of a <code>--dir</code> node, as well — over
 a network file system, where mapping is a bad bet, or to have
 <code>--max-memory</code> cover the data as well as the indexes.</p>
@@ -475,7 +475,7 @@ reason is
 the WebAssembly output — it has to stay small and auditable.</p>
 
 <p>The rule covers <code>fenec-core</code>, <code>fenec-ql</code>,
-<code>fenec-wasm</code>, <code>fenec-http</code>, <code>fenec-pg</code>,
+<code>fenec-wasm</code>, <code>fenec-http</code>, <code>fenec-server</code>,
 <code>fenec-catalog</code>, <code>fenec-import</code> and
 <code>fenec-shard</code>. <code>fenec-core</code> does dev-depend on
 <code>fenec-ql</code>, which Cargo permits through a dev dependency, so tests
@@ -519,7 +519,7 @@ rebuilt.</p>
 
 <p>In a worker, <code>openFile(db, name)</code> keeps it in a file of the
 origin private file system instead, which is the file itself: the bytes
-<code>fenec-pg</code> keeps, so <code>fenec</code> opens a page's file and a
+<code>fenec-server</code> keeps, so <code>fenec</code> opens a page's file and a
 page loads a server's. The same journal feeds it, a statement at a time:
 <code>run</code> appends the writes and flushes the file before it answers,
 0.56 ms a row in Chrome and 0.36 ms in Safari, statement included, and the
@@ -548,7 +548,7 @@ bookkeeping other databases need for concurrent writers.</p>
 
 <div class="note trap">
   <p><b>Two processes opening the same file corrupts it.</b> This is why the
-  HTTP endpoint is a second listener inside <code>fenec-pg</code> and never its
+  HTTP endpoint is a second listener inside <code>fenec-server</code> and never its
   own binary — one process, one file, one sync policy, one shutdown signal.</p>
 </div>
 

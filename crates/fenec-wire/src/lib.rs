@@ -6,7 +6,7 @@
 //!
 //! A crate of its own so that the importer, which reads from PostgreSQL
 //! through the client, sits below the server, which runs the importer's
-//! `--follow` in its own process (`fenec-pg --follow`): in fenec-pg, the
+//! `--follow` in its own process (`fenec-server --follow`): in fenec-server, the
 //! client made the importer depend on the server, and the server could not
 //! depend on it back.
 

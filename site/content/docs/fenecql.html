@@ -1130,7 +1130,7 @@ get events where t >= "2026-01-01" and t < now()
 comparison is parsed.</p>
 
 <p>The representation is always ISO-8601
-(<code>2026-09-19T12:34:56.789Z</code>). On the wire <code>fenec-pg</code>
+(<code>2026-09-19T12:34:56.789Z</code>). On the wire <code>fenec-server</code>
 reports PostgreSQL's own output format
 (<code>2026-09-19 12:34:56.789+00</code>) and the <code>timestamptz</code> OID,
 because client parsers expect the server format. The calendar conversion is

@@ -389,7 +389,7 @@ const SCENES = [
     d: 8,
     draw(c, t) {
       const lanes = [
-        { name: 'fenec-pg', ms: 0.147, col: P.oasis },
+        { name: 'fenec-server', ms: 0.147, col: P.oasis },
         { name: 'PostgreSQL + pgvector', ms: 2.353, col: P.sun },
       ];
       const p = span(t, 0.4, 2.6);
@@ -430,7 +430,7 @@ const SCENES = [
       const k = ease(span(t, 0.2, 0.9));
       box(c, cx - 130, cy - 110, 260, 220, { r: 20, fill: P.panel, stroke: P.sun, alpha: k, line: 2 });
       mark(c, cx, cy - 18, 1.6, k, t);
-      text(c, 'fenec-pg', cx, cy + 82, { size: 22, font: MONO, color: P.hot, align: 'center', alpha: k });
+      text(c, 'fenec-server', cx, cy + 82, { size: 22, font: MONO, color: P.hot, align: 'center', alpha: k });
       const left = ['psql', 'psycopg', 'asyncpg', 'pgx', 'node-postgres', 'tokio-postgres', 'JDBC'];
       const right = ['pgvector for Python', 'pgvector for Go', 'DBeaver', 'DuckDB', 'LangChain', 'LlamaIndex'];
       const draw = (names, side) => names.forEach((n, i) => {
@@ -587,7 +587,7 @@ const SCENES = [
       const k = ease(span(t, 0.2, 0.8));
       // The server.
       box(c, 840, 200, 360, 380, { fill: P.panel, alpha: k });
-      text(c, 'fenec-pg', 870, 240, { size: 20, font: MONO, color: P.hot, alpha: k });
+      text(c, 'fenec-server', 870, 240, { size: 20, font: MONO, color: P.hot, alpha: k });
       // The browser.
       box(c, 80, 180, 560, 420, { r: 16, fill: '#100B20', alpha: k });
       box(c, 80, 180, 560, 46, { r: 16, fill: P.panel2, alpha: k });

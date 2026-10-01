@@ -22,7 +22,7 @@ quote, with the same allowance.
     make size-report                 # the module as it stands
     make size-report BASE=main       # and against main, built in a worktree
     make size-report WHY=flt2dec     # which of fenec's functions pull that in
-    make size-report BIN=fenec-pg    # a native binary's code by crate
+    make size-report BIN=fenec-server    # a native binary's code by crate
 """
 
 import collections
@@ -674,7 +674,7 @@ def report(head, base=None):
 
 
 # A native binary, its package and the profile it ships with.
-BINARIES = {"fenec": ("fenec-cli", "cli"), "fenec-pg": ("fenec-pg", "release"),
+BINARIES = {"fenec": ("fenec-cli", "cli"), "fenec-server": ("fenec-server", "release"),
             "fenec-shard": ("fenec-shard", "release")}
 
 

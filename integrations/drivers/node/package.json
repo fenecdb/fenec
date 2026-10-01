@@ -2,7 +2,7 @@
   "name": "fenecdb-drivers-node",
   "private": true,
   "type": "module",
-  "description": "node-postgres and pgvector-node over fenec-pg's pg wire (integrations/drivers/run-tests.sh)",
+  "description": "node-postgres and pgvector-node over fenec-server's pg wire (integrations/drivers/run-tests.sh)",
   "dependencies": {
     "pg": "^8.13.0",
     "pgvector": "^0.3.0"

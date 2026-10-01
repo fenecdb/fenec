@@ -1,4 +1,4 @@
-// pgvector-go over fenec-pg's pg wire: RegisterTypes finds `vector`,
+// pgvector-go over fenec-server's pg wire: RegisterTypes finds `vector`,
 // `halfvec` and `sparsevec` by name, and pgx then carries them in
 // pgvector's binary format -- parameters, rows and CopyFrom.
 package drivers

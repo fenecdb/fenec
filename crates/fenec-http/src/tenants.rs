@@ -147,7 +147,7 @@ pub struct Tenants {
     max_memory: usize,
     checkpoint: bool,
     /// Whether tenant files are mapped (`fs::open`) or read into memory
-    /// (`fenec-pg --no-mmap`).
+    /// (`fenec-server --no-mmap`).
     mapped: bool,
     /// The router's lease, on a node that takes one (`--lease`).
     lease: Option<Arc<Lease>>,
@@ -187,7 +187,7 @@ impl Tenants {
     }
 
     /// Whether tenant files are mapped, as `fs::open` maps a file, or read
-    /// into memory: `fenec-pg --no-mmap`, which a network file system wants
+    /// into memory: `fenec-server --no-mmap`, which a network file system wants
     /// -- a read error there kills a process reading a mapping -- and which
     /// has `--max-memory` count the data.
     pub fn with_mmap(mut self, on: bool) -> Tenants {
@@ -195,7 +195,7 @@ impl Tenants {
         self
     }
 
-    /// Runs on every database as it is opened -- `fenec-pg` installs its
+    /// Runs on every database as it is opened -- `fenec-server` installs its
     /// plugin here, so a tenant sees the same functions a single file does.
     pub fn with_setup(
         mut self,
@@ -414,7 +414,7 @@ impl Tenants {
         }
         // A replica's file with nothing following for it -- a node started
         // without --replica-of, after a failover left it unpromoted -- is
-        // promoted where it stands, as `fenec-pg --promote` promotes a file.
+        // promoted where it stands, as `fenec-server --promote` promotes a file.
         // It could not be before: it opened refusing writes, and nothing on
         // the running node could make it take them.
         let mut g = crate::held::write_unheld(&t.db);

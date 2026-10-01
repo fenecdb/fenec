@@ -1,10 +1,10 @@
-//! What the wire benches share: fenec-pg started over a file, and its pg
+//! What the wire benches share: fenec-server started over a file, and its pg
 //! wire and HTTP asked by hand (`#[path]`-included by `requests` and
 //! `load`).
 //!
 //! The pg wire is written by hand, text both ways, as psycopg asks. The
 //! `postgres` crate binds and reads in binary, and looks up in `pg_type`
-//! any type it does not know: fenec-pg sends a parameter it has not typed
+//! any type it does not know: fenec-server sends a parameter it has not typed
 //! as OID 0, and the crate's statement for the lookup has its own parameter
 //! come back as 0, which it looks up the same way until the stack runs out.
 
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-/// A connection to fenec-pg's pg wire.
+/// A connection to fenec-server's pg wire.
 pub struct Wire {
     w: TcpStream,
     r: BufReader<TcpStream>,
@@ -129,7 +129,7 @@ impl Wire {
     }
 }
 
-/// A kept-alive connection to fenec-pg's HTTP.
+/// A kept-alive connection to fenec-server's HTTP.
 pub struct Http {
     w: TcpStream,
     r: BufReader<TcpStream>,
@@ -193,7 +193,7 @@ pub fn free_port() -> u16 {
         .port()
 }
 
-/// fenec-pg, killed when dropped.
+/// fenec-server, killed when dropped.
 pub struct Server(Child);
 impl Server {
     /// Its process id, to read its resident set by.
@@ -209,10 +209,10 @@ impl Drop for Server {
     }
 }
 
-/// fenec-pg over `file`, its pg wire on `pg` and HTTP on `http`, answering
+/// fenec-server over `file`, its pg wire on `pg` and HTTP on `http`, answering
 /// both; `target` names the make target that builds it.
 pub fn start_fenec(file: &Path, pg: u16, http: u16, target: &str) -> Server {
-    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/fenec-pg");
+    let bin = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/fenec-server");
     let child = Command::new(&bin)
         .args([
             "--listen",
@@ -230,7 +230,7 @@ pub fn start_fenec(file: &Path, pg: u16, http: u16, target: &str) -> Server {
     while TcpStream::connect(("127.0.0.1", http)).is_err()
         || TcpStream::connect(("127.0.0.1", pg)).is_err()
     {
-        assert!(Instant::now() < until, "fenec-pg did not start");
+        assert!(Instant::now() < until, "fenec-server did not start");
         std::thread::sleep(Duration::from_millis(20));
     }
     server

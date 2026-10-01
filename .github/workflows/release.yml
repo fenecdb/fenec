@@ -67,14 +67,14 @@ jobs:
           for t in ${{ matrix.targets }}; do
             # `fenec` takes the cli profile (panic = abort): a single process
             # with nothing to recover from, and ~12% smaller without the
-            # unwind tables. `fenec-pg` stays on release, where a panicking
+            # unwind tables. `fenec-server` stays on release, where a panicking
             # connection thread unwinds and drops only its own session.
             cargo build --profile cli --target "$t" -p fenec-cli
-            cargo build --release   --target "$t" -p fenec-pg
+            cargo build --release   --target "$t" -p fenec-server
 
             stage="fenec-v${version}-${t}"
             mkdir -p "$stage"
-            cp "target/$t/cli/fenec" "target/$t/release/fenec-pg" "$stage/"
+            cp "target/$t/cli/fenec" "target/$t/release/fenec-server" "$stage/"
             cp LICENSE README.md CONTRIBUTING.md "$stage/"
             tar -czf "dist/${stage}.tar.gz" "$stage"
             rm -rf "$stage"
@@ -136,7 +136,7 @@ jobs:
     env:
       # BuildKit is what the Dockerfile's --mount=type=cache needs.
       DOCKER_BUILDKIT: '1'
-      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-pg
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-server
     steps:
       - uses: actions/checkout@v7
         with:
@@ -173,7 +173,7 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-pg
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fenec-server
     steps:
       - name: Log in to ghcr.io
         run: echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin

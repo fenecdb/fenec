@@ -1,4 +1,4 @@
-// pgjdbc and pgvector-java against fenec-pg. Each check prints its name; a
+// pgjdbc and pgvector-java against fenec-server. Each check prints its name; a
 // failure is counted and the run exits non-zero, as a test runner would.
 import com.pgvector.PGvector;
 import java.sql.*;

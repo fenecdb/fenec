@@ -238,7 +238,7 @@ security should speak TLS itself -- and the zero-dependency rule means
 writing it. That is the largest and riskiest item here, so it is scoped
 tightly and gated hard.
 
-**Scope.** Server side only, TLS 1.3 only, in `fenec-pg` and its HTTP
+**Scope.** Server side only, TLS 1.3 only, in `fenec-server` and its HTTP
 listener; `fenec-wire` and the browser module carry none of it.
 
 - Key exchange: X25519 (RFC 7748), new.

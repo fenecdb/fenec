@@ -7,7 +7,7 @@
 //! tail; linked at the open, they kept the port closed for as long as they
 //! took -- 56.6 s at 100 000 x 768 for a graph never checkpointed.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -43,14 +43,14 @@ impl Drop for Server {
 
 /// Starts the binary on a random port; everything it logs is kept.
 fn start(path: &Path, extra: &[&str]) -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--file"])
         .arg(path)
         .args(extra)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let log = Arc::new(Mutex::new(String::new()));
     let mut port = None;
@@ -58,7 +58,7 @@ fn start(path: &Path, extra: &[&str]) -> Server {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
             panic!(
-                "fenec-pg ended before it listened:\n{}",
+                "fenec-server ended before it listened:\n{}",
                 log.lock().unwrap()
             );
         }

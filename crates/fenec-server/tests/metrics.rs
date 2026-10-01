@@ -1,9 +1,9 @@
-//! `/_metrics` and `--slow-ms` on a running `fenec-pg`: what a pg and an
+//! `/_metrics` and `--slow-ms` on a running `fenec-server`: what a pg and an
 //! HTTP client did, counted apart; a histogram Prometheus can take apart;
 //! the token the scrape needs; and a slow statement in the log with its
 //! text, while a fast one stays out of it.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -34,7 +34,7 @@ fn start(name: &str, extra: &[&str]) -> Server {
     std::fs::create_dir_all(&dir).unwrap();
     let path: PathBuf = dir.join(name);
     let _ = std::fs::remove_file(&path);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
         .args(["--metrics", "127.0.0.1:0", "--http-token", TOKEN])
         .arg("--file")
@@ -43,7 +43,7 @@ fn start(name: &str, extra: &[&str]) -> Server {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let port = |line: &str, after: &str| -> Option<u16> {
         line.split(after)
@@ -59,7 +59,7 @@ fn start(name: &str, extra: &[&str]) -> Server {
     while pg.is_none() || http.is_none() || metrics.is_none() {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it listened:\n{seen}");
+            panic!("fenec-server ended before it listened:\n{seen}");
         }
         seen.push_str(&line);
         if line.contains("postgres://localhost:") {

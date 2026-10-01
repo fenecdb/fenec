@@ -1,4 +1,4 @@
-//! `fenec-pg --follow`: a PostgreSQL table mirrored into the file this
+//! `fenec-server --follow`: a PostgreSQL table mirrored into the file this
 //! server serves, over the pg wire, HTTP and its subscriptions at once.
 //!
 //! `fenec import --follow` is the single writer of the file it keeps, so

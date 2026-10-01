@@ -16,7 +16,7 @@ body:
       label: Which surface?
       options:
         - FenecQL (parser / query execution)
-        - PostgreSQL wire protocol (fenec-pg)
+        - PostgreSQL wire protocol (fenec-server)
         - HTTP / JSON / SSE (fenec-http)
         - Browser / WASM (web/fenec.js, fenec-wasm)
         - CLI (fenec shell, fenec types)

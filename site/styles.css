@@ -878,7 +878,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .steps .code { margin: 0; }
 @media (max-width: 900px) { .steps { grid-template-columns: 1fr; } }
 
-/* fenec-pg against pgvector, one row a measure: ours bright, theirs struck
+/* fenec-server against pgvector, one row a measure: ours bright, theirs struck
    through in the dim colour, so the pair reads left to right. */
 .versus {
   margin: 36px 0 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));

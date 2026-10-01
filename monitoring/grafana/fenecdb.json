@@ -14,7 +14,7 @@
     "from": "now-30m",
     "to": "now"
   },
-  "description": "Statements, latency, data and replication from fenec-pg's /_metrics, and a router's from fenec-shard's.",
+  "description": "Statements, latency, data and replication from fenec-server's /_metrics, and a router's from fenec-shard's.",
   "templating": {
     "list": [
       {

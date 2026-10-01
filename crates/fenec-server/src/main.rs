@@ -1,21 +1,21 @@
-//! `fenec-pg` -- serves fenecdb over the PostgreSQL protocol.
+//! `fenec-server` -- serves fenecdb over the PostgreSQL protocol.
 //!
 //! ```text
-//! fenec-pg [--listen 127.0.0.1:5433] [--file data.fenec] [--password secret]
+//! fenec-server [--listen 127.0.0.1:5433] [--file data.fenec] [--password secret]
 //! psql -h 127.0.0.1 -p 5433 -U fenec
 //! ```
 
 use fenec_core::prelude::*;
 use fenec_http::replication::{self, Follower, Replication};
 use fenec_http::tenants::{Refused, Tenants};
-use fenec_pg::client::{Client, Url};
-use fenec_pg::server::{self, Auth, SyncPolicy};
-use fenec_pg::{Config, PgPlugin, Server};
+use fenec_server::client::{Client, Url};
+use fenec_server::server::{self, Auth, SyncPolicy};
+use fenec_server::{Config, PgPlugin, Server};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const USAGE: &str = "\
-usage: fenec-pg [options]
+usage: fenec-server [options]
 
   -l, --listen <address>    default 127.0.0.1:5433
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
@@ -175,7 +175,7 @@ usage: fenec-pg [options]
                             password options pick the target
 
 The password is also read from the FENECPG_PASSWORD environment variable.
-fenec-pg does not speak TLS: put it behind a TLS terminator such as
+fenec-server does not speak TLS: put it behind a TLS terminator such as
 stunnel/nginx-stream before using it on an open network.
 ";
 
@@ -460,7 +460,7 @@ fn main() {
                 }
             }
             "--help" | "-h" => {
-                fenec_http::log!("fenec-pg {}\n\n{USAGE}", fenec_core::VERSION);
+                fenec_http::log!("fenec-server {}\n\n{USAGE}", fenec_core::VERSION);
                 return;
             }
             other => fail(&format!("unknown option: {other}\n\n{USAGE}")),
@@ -577,7 +577,7 @@ fn main() {
                 slot: follow_slot.unwrap_or(named.slot),
                 publication: follow_publication.unwrap_or(named.publication),
             };
-            Some(fenec_pg::mirror::Mirror {
+            Some(fenec_server::mirror::Mirror {
                 url,
                 table,
                 opts: follow_opts,
@@ -699,7 +699,7 @@ fn main() {
         std::process::exit(1);
     }
     if let Some(m) = &mirror {
-        if let Err(e) = db.install_plugin(&fenec_pg::mirror::GuardPlugin(m.opts.into.clone())) {
+        if let Err(e) = db.install_plugin(&fenec_server::mirror::GuardPlugin(m.opts.into.clone())) {
             fenec_http::log!("could not load the plugin: {e}");
             std::process::exit(1);
         }
@@ -758,7 +758,7 @@ fn main() {
 
     if let Some(m) = mirror {
         let table = m.table.clone();
-        fenec_pg::mirror::start(m, Arc::clone(&shared))
+        fenec_server::mirror::start(m, Arc::clone(&shared))
             .unwrap_or_else(|e| fail(&format!("could not start the follower: {e}")));
         fenec_http::log!("following: {table}");
     }
@@ -889,7 +889,7 @@ fn serve_dir(
             Err(e) => fail(&format!("could not open the pg endpoint: {e}")),
         };
         std::thread::Builder::new()
-            .name("fenec-pg".into())
+            .name("fenec-server".into())
             .spawn(move || {
                 if let Err(e) = server.serve_on(listener) {
                     fenec_http::log!("pg server error: {e}");

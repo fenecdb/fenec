@@ -1,4 +1,4 @@
-// pgx over fenec-pg's pg wire: the binary format pgx asks for every type
+// pgx over fenec-server's pg wire: the binary format pgx asks for every type
 // it knows in, its batches, and its transactions.
 package drivers
 

@@ -1,4 +1,4 @@
-// node-postgres over fenec-pg's pg wire: parameters and typed rows, in the
+// node-postgres over fenec-server's pg wire: parameters and typed rows, in the
 // text format it reads every row in (its parser has no binary mode: with
 // `binary: true` it reads a binary cell as UTF-8, from PostgreSQL too).
 import { test } from 'node:test';
@@ -23,7 +23,7 @@ test('parameters go in and typed rows come back', { skip: !url && 'FENEC_PG_URL 
 
 test('a string is the text it is, for a text field', { skip: !url && 'FENEC_PG_URL is not set' }, async (t) => {
   // node-postgres names no type for a parameter and asks for no Describe
-  // before its Bind: fenec-pg reads each value as the field its place
+  // before its Bind: fenec-server reads each value as the field its place
   // names, where by its look "t" was a boolean and "42" a number.
   const c = new pg.Client({ connectionString: url });
   await c.connect();

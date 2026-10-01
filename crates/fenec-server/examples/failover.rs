@@ -1,12 +1,12 @@
-//! What a failover loses: `cargo run --release -p fenec-pg --example failover -- [TRIALS]`
+//! What a failover loses: `cargo run --release -p fenec-server --example failover -- [TRIALS]`
 //!
-//! Needs `target/release/fenec-pg` (`make replica-bench` builds it). Per
+//! Needs `target/release/fenec-server` (`make replica-bench` builds it). Per
 //! sync policy and trial: a primary and a replica as processes, one client
 //! writing to the primary as fast as it answers, the primary killed with
 //! SIGKILL mid-stream, the replica promoted. Counted: the writes the client
 //! was told succeeded that the promoted replica does not hold.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,8 @@ struct Node {
 
 fn binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    // target/release/examples/failover -> target/release/fenec-pg
-    exe.parent().unwrap().parent().unwrap().join("fenec-pg")
+    // target/release/examples/failover -> target/release/fenec-server
+    exe.parent().unwrap().parent().unwrap().join("fenec-server")
 }
 
 fn start(path: &Path, extra: &[&str]) -> Node {
@@ -41,7 +41,7 @@ fn start(path: &Path, extra: &[&str]) -> Node {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("fenec-pg: run `cargo build --release -p fenec-pg` first");
+        .expect("fenec-server: run `cargo build --release -p fenec-server` first");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let (mut pg, mut http) = (None, None);
     let port = |line: &str, after: &str| -> Option<u16> {
@@ -55,7 +55,7 @@ fn start(path: &Path, extra: &[&str]) -> Node {
     while pg.is_none() || http.is_none() {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it listened");
+            panic!("fenec-server ended before it listened");
         }
         if line.contains("postgres://localhost:") {
             pg = port(&line, "localhost:");

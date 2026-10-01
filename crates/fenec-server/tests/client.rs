@@ -10,9 +10,9 @@
 //! verifying the server; the subject of the tests here is the client.
 
 use fenec_core::prelude::Database;
-use fenec_pg::client::{Client, Url};
-use fenec_pg::server::Auth;
-use fenec_pg::{Config, PgPlugin, Server};
+use fenec_server::client::{Client, Url};
+use fenec_server::server::Auth;
+use fenec_server::{Config, PgPlugin, Server};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, RwLock};

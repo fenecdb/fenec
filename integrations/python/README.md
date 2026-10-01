@@ -1,6 +1,6 @@
 # fenecdb for Python
 
-A client for fenec-pg's HTTP endpoint (`fenec-pg --http <address>`), and
+A client for fenec-server's HTTP endpoint (`fenec-server --http <address>`), and
 vector stores for LangChain and LlamaIndex on top of it.
 
 ```sh
@@ -26,7 +26,7 @@ async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
     await db.batch([("put articles {title: $1}", ["a"]), ("put articles {title: $1}", ["b"])])
 ```
 
-Every write on the server's disk (`fenec-pg --cdc`), for a consumer whose
+Every write on the server's disk (`fenec-server --cdc`), for a consumer whose
 cursor the server keeps -- each batch committed once the loop comes back
 for the next, so each write comes at least once -- and the same handed on
 to another program or a webhook:
@@ -76,5 +76,5 @@ store.similarity_search("how do I compact", k=4, mode="hybrid")
 ```
 
 `./run-tests.sh` runs LangChain's standard vector store suite and the tests
-LlamaIndex's own integrations run against a fenec-pg it builds and starts.
+LlamaIndex's own integrations run against a fenec-server it builds and starts.
 Full reference: https://fenecdb.com/docs/integrations

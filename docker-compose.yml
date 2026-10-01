@@ -15,7 +15,7 @@ services:
     image: fenecdb
     container_name: fenecdb
 
-    # Published only on the host's loopback. fenec-pg speaks no TLS; put a TLS
+    # Published only on the host's loopback. fenec-server speaks no TLS; put a TLS
     # terminator (nginx stream, stunnel) in front of it for an open network.
     ports:
       - "127.0.0.1:5433:5433"

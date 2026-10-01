@@ -170,7 +170,7 @@ it is one the docs measure, and `build.py` checks the sizes it quotes.
 The Developer section plays a recorded session as text: commands typed, output
 a line at a time, chapters to jump between, paused while off screen. The
 transcript is the `<ol class="cast-script">` in `content/index.html`, and every
-line of output in it came from a real `fenec-pg`, `psql` and pgvector-python --
+line of output in it came from a real `fenec-server`, `psql` and pgvector-python --
 re-record it rather than edit an output by hand. Without script the transcript
 is the page.
 

@@ -1,4 +1,4 @@
-"""pgvector-python over fenec-pg's pg wire, with psycopg and with asyncpg:
+"""pgvector-python over fenec-server's pg wire, with psycopg and with asyncpg:
 `register_vector` finds `vector`, `halfvec` and `sparsevec` by name in the
 catalog, and NumPy arrays, `HalfVector` and `SparseVector` go both ways in
 pgvector's binary format -- as they do against PostgreSQL with pgvector."""

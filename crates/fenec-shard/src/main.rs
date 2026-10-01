@@ -1,8 +1,8 @@
-//! `fenec-shard` -- one HTTP front for many `fenec-pg --dir` nodes.
+//! `fenec-shard` -- one HTTP front for many `fenec-server --dir` nodes.
 //!
 //! ```text
-//! fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
-//! fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2
+//! fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
+//! fenec-server --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2
 //! fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec
 //! curl -X PUT localhost:8090/_shard/nodes/n1 -d '{"addr":"127.0.0.1:8081","token":"a1"}'
 //! curl -X PUT localhost:8090/_shard/tenants/acme

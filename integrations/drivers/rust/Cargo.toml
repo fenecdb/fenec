@@ -1,4 +1,4 @@
-# tokio-postgres over fenec-pg's pg wire (integrations/drivers/run-tests.sh):
+# tokio-postgres over fenec-server's pg wire (integrations/drivers/run-tests.sh):
 # it asks every column in binary and sends every parameter as the type
 # `Describe` names -- a vector through pgvector-rust's types. Outside the
 # workspace: the crates take no outside package, and these tests are what a

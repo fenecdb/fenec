@@ -1,4 +1,4 @@
-"""DuckDB over fenec-pg's pg wire, through its own postgres extension: a
+"""DuckDB over fenec-server's pg wire, through its own postgres extension: a
 collection attached as a table and read whole, aggregated, filtered -- the
 conditions pushed down into the COPY it reads with -- and written out as
 Parquet, which is how fenecdb's rows reach the tools that read Parquet."""

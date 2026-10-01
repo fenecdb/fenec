@@ -4,7 +4,7 @@ description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-
 -->
 
 <h1>Monitoring</h1>
-<p class="kicker">fenec-pg counts every statement it answers and serves the
+<p class="kicker">fenec-server counts every statement it answers and serves the
 counts to Prometheus, with a Grafana dashboard ready to load.</p>
 
 <h2>Turn it on</h2>
@@ -14,7 +14,7 @@ counts to Prometheus, with a Grafana dashboard ready to load.</p>
 writes apart, with how long each took.</p>
 
 <pre data-lang="bash"># data over PostgreSQL alone: /_metrics on a listener of its own
-fenec-pg --file data.fenec --listen 0.0.0.0:5433 \
+fenec-server --file data.fenec --listen 0.0.0.0:5433 \
          --metrics 0.0.0.0:9464 --admin-token "$SCRAPE" --slow-ms 100
 
 curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
@@ -95,7 +95,7 @@ in its stride.</p>
 
 <h2>The dashboard</h2>
 
-<p>The repository's <code>monitoring/</code> folder runs fenec-pg with
+<p>The repository's <code>monitoring/</code> folder runs fenec-server with
 Prometheus and Grafana, the dashboard already loaded.</p>
 
 <pre data-lang="bash">FENECPG_PASSWORD=secret FENEC_METRICS_TOKEN=scrape \
@@ -106,7 +106,7 @@ Prometheus and Grafana, the dashboard already loaded.</p>
 <details class="deep"><summary>Details</summary>
 <p><code>monitoring/</code> in the repository holds a Grafana dashboard
 (<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
-file that runs fenec-pg with both, the dashboard already loaded.</p>
+file that runs fenec-server with both, the dashboard already loaded.</p>
 
 <p>It opens on the figures that decide whether anything needs doing — the
 version and uptime, whether the disk has refused a write, statements and
@@ -185,7 +185,7 @@ view — and lists every tenant's, named, to its admin alone.</p>
 refused request, schema change and admin action. Ordinary reads and writes are
 not logged.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --password-file pw --http 0.0.0.0:8080 \
+<pre data-lang="bash">fenec-server --file data.fenec --password-file pw --http 0.0.0.0:8080 \
          --http-token "$TOKEN" --audit /var/log/fenec/audit.log</pre>
 
 <ul>

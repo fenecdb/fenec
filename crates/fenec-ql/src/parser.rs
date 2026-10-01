@@ -34,7 +34,7 @@ use fenec_core::value::{DataType, Value, VecPrec};
 /// Both the parser and the evaluator are recursive: depth is stack depth
 /// directly. Without a limit, `((((...))))` or a long `or` chain overflows
 /// the stack -- and a stack overflow is not a catchable panic but an
-/// `abort` of the process; in `fenec-pg` a single query would take the whole
+/// `abort` of the process; in `fenec-server` a single query would take the whole
 /// server down.
 ///
 /// The cost of the limit was measured (511 levels, worst shape = parentheses):
@@ -46,7 +46,7 @@ use fenec_core::value::{DataType, Value, VecPrec};
 ///
 /// So `thread::spawn`'s 2 MiB default leaves ~2.7x headroom in release and
 /// is *not enough* in a debug build. 512 is therefore not safe on its own:
-/// whoever runs it sizes its stack explicitly (`SESSION_STACK` in `fenec-pg`,
+/// whoever runs it sizes its stack explicitly (`SESSION_STACK` in `fenec-server`,
 /// 8 MiB in tests). The value stayed at 512 because generated `or` chains
 /// easily reach hundreds of terms; a lower ceiling would cut off legitimate
 /// queries.

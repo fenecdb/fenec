@@ -1,4 +1,4 @@
-// pgvector-node over fenec-pg's pg wire: registerTypes finds the types by
+// pgvector-node over fenec-server's pg wire: registerTypes finds the types by
 // name, and node-postgres then reads a vector as an array and a sparse
 // vector as a SparseVector -- from their text, as against PostgreSQL.
 import { test } from 'node:test';

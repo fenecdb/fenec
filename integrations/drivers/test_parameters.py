@@ -1,5 +1,5 @@
 """psycopg sends a string as text with no type named, and runs no
-`Describe` of the statement before its Bind: fenec-pg reads the value as
+`Describe` of the statement before its Bind: fenec-server reads the value as
 the field its place names. Read by its look, "t" was a boolean and "42" a
 number, which a text field refused."""
 

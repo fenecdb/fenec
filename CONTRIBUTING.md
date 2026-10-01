@@ -17,7 +17,7 @@ make serve                                 # the browser demo on :8787
 library, so the Makefile prefers `~/.cargo/bin/cargo`.
 
 `make test` runs Rust first on purpose: `cargo test` is also what builds the
-`fenec-pg` binary, and `web/fenec.sync.test.js` runs against it. Both JS suites
+`fenec-server` binary, and `web/fenec.sync.test.js` runs against it. Both JS suites
 skip themselves when that binary or `web/fenec.wasm` is missing, so run
 `make wasm` first if you want the end-to-end cases to actually execute.
 
@@ -50,7 +50,7 @@ node --test web/fenec.test.js
 ## The rules a change must not break
 
 **Zero dependencies.** `fenec-core`, `fenec-ql`, `fenec-wasm`, `fenec-http`,
-`fenec-pg` and `fenec-import` take no external crates — own codec, own JSON, own
+`fenec-server` and `fenec-import` take no external crates — own codec, own JSON, own
 HNSW, own SCRAM. The WASM output has to stay small and auditable. `fenec-bench`
 is the single exception (`publish = false`); that is where `rusqlite` and
 `postgres` live. A PR that adds a dependency to any other crate needs to argue
@@ -91,7 +91,7 @@ empty.
   that was rejected. Not what the line already says.
 - All prose in the repo — comments, docs, README — is English.
 - `Error` in `fenec-core/src/error.rs` is the single error type: allocation-free
-  variants, no `Box`. `fenec-pg` maps it onto PostgreSQL SQLSTATE codes.
+  variants, no `Box`. `fenec-server` maps it onto PostgreSQL SQLSTATE codes.
 - Unit tests go inline in `#[cfg(test)] mod tests`. Cross-crate and protocol
   tests go in `crates/*/tests/`, one binary a crate: add a new file's `mod`
   line to that crate's `tests/all.rs`, or it is never built. Measurement

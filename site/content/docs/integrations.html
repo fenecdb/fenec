@@ -9,7 +9,7 @@ Vercel AI SDK and React, each tested the way its framework tests its own.</p>
 
 <h2>LangChain</h2>
 
-<p>A LangChain vector store over fenec-pg's HTTP endpoint. Install it, point it
+<p>A LangChain vector store over fenec-server's HTTP endpoint. Install it, point it
 at the server, and use it like any other store.</p>
 
 <pre data-lang="bash">pip install "fenecdb[langchain]"
@@ -78,12 +78,12 @@ themselves.</p>
 <h2 id="langchain-js">LangChain.js</h2>
 
 <p>The same store from JavaScript. It runs over a database in the page, with no
-server, or over fenec-pg's HTTP endpoint.</p>
+server, or over fenec-server's HTTP endpoint.</p>
 
 <pre data-lang="js">import { Fenec, connect } from '@fenecdb/web';
 import { FenecVectorStore } from '@fenecdb/langchain';
 
-// The database in the page -- or behind fenec-pg: connect('http://127.0.0.1:8080')
+// The database in the page -- or behind fenec-server: connect('http://127.0.0.1:8080')
 const db = await Fenec.open('./fenec.wasm');
 const store = new FenecVectorStore(embeddings, {
   client: db,
@@ -112,7 +112,7 @@ over HTTP are two requests.</p>
 
 <h2>LlamaIndex</h2>
 
-<p>A LlamaIndex vector store over fenec-pg's HTTP endpoint, with metadata
+<p>A LlamaIndex vector store over fenec-server's HTTP endpoint, with metadata
 filters, deletion by document, and text and hybrid search.</p>
 
 <pre data-lang="bash">pip install "fenecdb[llama-index]"
@@ -243,11 +243,11 @@ holds its integrations to, against a real fenecdb.</p>
 <table>
 <thead><tr><th>Integration</th><th>Held to</th><th>Run with</th></tr></thead>
 <tbody>
-<tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance, <code>from_texts</code>, the text and hybrid modes and int8 codes besides</td><td rowspan="2"><code>make python-test</code>: fenec-pg built and started here, the tests from a <code>python:3.13</code> container</td></tr>
+<tr><td>LangChain</td><td>LangChain's standard vector store suite (<code>langchain-tests</code>), sync and async, and filters, relevance, <code>from_texts</code>, the text and hybrid modes and int8 codes besides</td><td rowspan="2"><code>make python-test</code>: fenec-server built and started here, the tests from a <code>python:3.13</code> container</td></tr>
 <tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top — and the text search and hybrid modes</td></tr>
-<tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-pg's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
+<tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-server's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
 <tr><td>Vercel AI SDK</td><td>the SDK's own mock models: documents embedded with <code>embedMany</code> and found again with <code>near</code>, kept to a source and fused with the words, and a model that calls the search tool in <code>generateText</code> and answers from what it returned</td><td><code>make ai-sdk-test</code></td></tr>
-<tr><td>React</td><td>a stand-in database for the contract, and a real fenec-pg and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
+<tr><td>React</td><td>a stand-in database for the contract, and a real fenec-server and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
 </tbody>
 </table>
 </div>

@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Npgsql and pgvector's .NET library against a real fenec-pg: what they
+  <!-- Npgsql and pgvector's .NET library against a real fenec-server: what they
        send on their own (the type lookup Npgsql opens every connection
        with, typed parameters, binary rows, a transaction) and vectors as
        pgvector-dotnet's Vector both ways. Run by ../run-tests.sh. -->

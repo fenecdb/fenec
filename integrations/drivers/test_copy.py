@@ -1,4 +1,4 @@
-"""COPY FROM STDIN over fenec-pg's pg wire, as psycopg sends it: rows
+"""COPY FROM STDIN over fenec-server's pg wire, as psycopg sends it: rows
 written one at a time (`write_row`), which psycopg puts in COPY's text
 format, or blocks of text as a file holds them (`write`). A COPY is one
 command: a bad row, or an exception inside the block, lands none of it."""

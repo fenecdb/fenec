@@ -1,5 +1,5 @@
 //! What serving a mirror costs, against the Makefile's PostgreSQL
-//! (`make mirror-bench`, after `make pgvector-up`): a `fenec-pg --follow`
+//! (`make mirror-bench`, after `make pgvector-up`): a `fenec-server --follow`
 //! over a table of it with a `vector(384)` under an HNSW index, as `make
 //! follow-bench` has, served with `--http`.
 //!
@@ -13,11 +13,11 @@
 //!   to catch up.
 //!
 //! ```text
-//! cargo build --release -p fenec-pg
-//! cargo run --release -p fenec-pg --example mirror -- [rows]
+//! cargo build --release -p fenec-server
+//! cargo run --release -p fenec-server --example mirror -- [rows]
 //! ```
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ fn url() -> String {
     std::env::var("FENEC_TEST_PG_URL").unwrap_or_else(|_| URL.into())
 }
 
-/// A `fenec-pg --follow` over `file`, and the HTTP port it listens on.
+/// A `fenec-server --follow` over `file`, and the HTTP port it listens on.
 struct Server {
     child: Child,
     http: u16,
@@ -57,14 +57,14 @@ impl Drop for Server {
     }
 }
 
-/// The `fenec-pg` built beside this example: `target/release/fenec-pg`.
+/// The `fenec-server` built beside this example: `target/release/fenec-server`.
 fn binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let dir = exe.parent().and_then(Path::parent).unwrap();
-    let bin = dir.join("fenec-pg");
+    let bin = dir.join("fenec-server");
     assert!(
         bin.exists(),
-        "build it first: cargo build --release -p fenec-pg"
+        "build it first: cargo build --release -p fenec-server"
     );
     bin
 }
@@ -80,14 +80,14 @@ fn start(file: &Path) -> Server {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let mut http = None;
     let mut seen = String::new();
     loop {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it streamed:\n{seen}");
+            panic!("fenec-server ended before it streamed:\n{seen}");
         }
         seen.push_str(&line);
         if let Some(rest) = line.split("listening on: http://127.0.0.1:").nth(1) {

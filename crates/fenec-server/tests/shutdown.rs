@@ -2,10 +2,10 @@
 //!
 //! These behaviours cannot be exercised *inside* the process: shutdown ends
 //! in `process::exit` and the shutdown flag belongs to the whole process.
-//! So the test runs the `fenec-pg` binary, sends SIGTERM and inspects the file
+//! So the test runs the `fenec-server` binary, sends SIGTERM and inspects the file
 //! left behind -- exactly what `docker stop` does.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -34,7 +34,7 @@ struct Running {
 
 /// Starts the binary on a random port and waits for it to begin listening.
 fn start(path: &Path, extra: &[&str]) -> Running {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .arg("--listen")
         .arg("127.0.0.1:0")
         .arg("--file")
@@ -43,9 +43,9 @@ fn start(path: &Path, extra: &[&str]) -> Running {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
 
-    // "fenec-pg 0.1.0 listening on: postgres://localhost:54321/fenec  [...]"
+    // "fenec-server 0.1.0 listening on: postgres://localhost:54321/fenec  [...]"
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let mut port = None;
     for _ in 0..10 {

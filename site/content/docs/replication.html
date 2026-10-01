@@ -11,15 +11,15 @@ moment.</p>
 <h2>Start a replica</h2>
 
 <p>Give the primary a replication token, then start a second
-<code>fenec-pg</code> on its own file pointed at the primary. The replica
+<code>fenec-server</code> on its own file pointed at the primary. The replica
 serves reads; when the primary is gone, promote it to take writes.</p>
 
 <pre data-lang="bash"># the primary: replicas are fed over its HTTP listener
-fenec-pg --file primary.fenec --http 0.0.0.0:8080 --http-token "$HTTP" \
+fenec-server --file primary.fenec --http 0.0.0.0:8080 --http-token "$HTTP" \
          --replication-token "$REPL" --sync always
 
 # a replica, over a file of its own
-fenec-pg --file replica.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8081 \
+fenec-server --file replica.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8081 \
          --replication-token "$REPL" --replica-of http://primary:8080
 
 # the primary is gone: the replica takes writes from here on
@@ -39,7 +39,7 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
 <p>A primary sends its replicas the writes that have reached its disk, and
 each applies them to a file of its own and serves reads from it.</p>
 
-<p>A replica is a whole <code>fenec-pg</code>: every read works on it over
+<p>A replica is a whole <code>fenec-server</code>: every read works on it over
 PostgreSQL and HTTP, subscriptions included, from its own copy in memory. A
 write gets <code>25006</code> over PostgreSQL, the code a PostgreSQL standby
 answers with, and 403 over HTTP; <code>SHOW transaction_read_only</code> says
@@ -173,7 +173,7 @@ writes is up to you.</p>
 <details class="deep"><summary>Details</summary>
 <p>Either way forks the history where the replica stands and turns writes on.
 A replica's file does not open any other way — started with neither flag,
-<code>fenec-pg</code> refuses and says which to give — because a replica
+<code>fenec-server</code> refuses and says which to give — because a replica
 taking writes without a fork would continue its primary's history with
 writes the primary never made.</p>
 

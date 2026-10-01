@@ -30,7 +30,7 @@ pub const OID_FLOAT8: i32 = 701;
 /// rather than the zoneless `timestamp` (1114).
 pub const OID_TIMESTAMPTZ: i32 = 1184;
 /// A parameter whose type was not resolved. Seeing this, the client sends
-/// the value as text; on the server side fenec-pg's `decode_param` infers it.
+/// the value as text; on the server side fenec-server's `decode_param` infers it.
 pub const OID_UNSPECIFIED: i32 = 0;
 
 pub struct Writer {

@@ -1,4 +1,4 @@
-# The pg gem and pgvector-ruby against fenec-pg. Each check prints its name;
+# The pg gem and pgvector-ruby against fenec-server. Each check prints its name;
 # a failure is counted and the run exits non-zero.
 require "pg"
 require "pgvector"

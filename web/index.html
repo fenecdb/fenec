@@ -268,11 +268,11 @@ async function seed() {
 // The console above is entirely serverless; this panel is optional and only
 // does something once an endpoint is given:
 //
-//   make pg HTTP=127.0.0.1:8080          # the server (see below for CORS)
+//   make server HTTP=127.0.0.1:8080          # the server (see below for CORS)
 //   make serve                           # this page
 //
 // If the server sends no CORS header the browser blocks the request:
-//   fenec-pg --file data.fenec --http 127.0.0.1:8080 --http-cors 'http://localhost:8787'
+//   fenec-server --file data.fenec --http 127.0.0.1:8080 --http-cors 'http://localhost:8787'
 //
 // Try it in two tabs: only one of them opens the stream (leader election),
 // the other receives the same batches over BroadcastChannel.

@@ -297,7 +297,7 @@ impl Value {
             // (json.rs), because `near $1` is evaluated without schema
             // context. If the target field is a list it is converted back
             // here; without this arm `[int]`/`[float]` fields could not be
-            // filled from the browser and fenec-pg paths. Values drop to f32
+            // filled from the browser and fenec-server paths. Values drop to f32
             // at that stage, so `[float]` loses precision one way; `[int]`
             // stays lossless for whole numbers.
             (DataType::List(inner), Value::Vector(v)) => {

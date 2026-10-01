@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- pgjdbc and pgvector-java against a real fenec-pg: what JDBC sends on
+<!-- pgjdbc and pgvector-java against a real fenec-server: what JDBC sends on
      its own (startup, prepared statements with typed parameters, a
      transaction, a batch) and vectors as PGvector both ways. Run by
      ../run-tests.sh in a maven container. -->

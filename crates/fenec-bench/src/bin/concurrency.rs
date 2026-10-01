@@ -22,7 +22,7 @@
 //!
 //! SQLite threads each hold a connection with a 30 s busy timeout, the
 //! usual answer to `SQLITE_BUSY`; fenecdb's share one database behind a
-//! `RwLock`, taken as `fenec-pg` takes it (`fenec_http::held`).
+//! `RwLock`, taken as `fenec-server` takes it (`fenec_http::held`).
 
 use fenec_core::prelude::*;
 use rusqlite::{params, Connection};
@@ -288,7 +288,7 @@ fn main() {
     // A transaction held open 20 ms at a time, as a client between its
     // statements holds one: two writes, the pause between them, and the
     // write lock taken for each statement alone, the block left open
-    // between them, as `fenec-pg` takes it.
+    // between them, as `fenec-server` takes it.
     let hold = Duration::from_millis(20);
     let mut f = fenec_readers(&db, |stop| {
         let put = stmt("put t {k: $1, n: $2}");

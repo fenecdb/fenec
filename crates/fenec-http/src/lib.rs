@@ -13,10 +13,10 @@
 //! The server **shares** the database, it does not own it: it takes an
 //! `Arc<RwLock<Database>>`. fenecdb is single-writer and two processes cannot
 //! write to one file, so the HTTP endpoint is not a separate binary but a
-//! second listener in the same process as `fenec-pg` (`fenec-pg --http`). That
+//! second listener in the same process as `fenec-server` (`fenec-server --http`). That
 //! keeps the sync policy, the checkpoint and the memory ceiling in one place.
 //!
-//! There is no TLS: the same rule as `fenec-pg` applies, and a TLS terminator
+//! There is no TLS: the same rule as `fenec-server` applies, and a TLS terminator
 //! is needed in front of it on an open network.
 //!
 //! With [`Server::with_tenants`] one listener serves many databases, one
@@ -89,7 +89,7 @@ pub struct Config {
     pub max_body: usize,
     /// Silence ceiling while waiting for the next request on a keep-alive connection.
     pub idle_timeout: Option<Duration>,
-    /// `sync` after every write (the equivalent of fenec-pg's `--sync always`).
+    /// `sync` after every write (the equivalent of fenec-server's `--sync always`).
     pub sync_on_write: bool,
     /// How long a write's `Idempotency-Key` and answer are kept.
     pub idempotency_ttl: Duration,
@@ -116,7 +116,7 @@ pub struct Config {
     pub max_import: usize,
     /// JSON Web Tokens and the policy they are held to; see [`access`].
     pub access: Option<Arc<access::Access>>,
-    /// Data footprint ceiling in bytes (0 = off): fenec-pg's `--max-memory`,
+    /// Data footprint ceiling in bytes (0 = off): fenec-server's `--max-memory`,
     /// held on this listener's writes as on its own; see [`over_ceiling`].
     pub max_memory: usize,
 }
@@ -173,7 +173,7 @@ enum Backend {
 impl Server {
     /// Builds the server and attaches itself to the database as a **watcher**:
     /// from then on every write -- whether it comes from HTTP or from
-    /// `fenec-pg` -- wakes the waiting subscriptions. One process, one writer,
+    /// `fenec-server` -- wakes the waiting subscriptions. One process, one writer,
     /// one wake-up point.
     pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
         let hub = Hub::new();
@@ -1189,7 +1189,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
 /// Only a statement that grows the data is stopped: `del` and `compact` are
 /// the way out of a database at the ceiling, and reads are unaffected. It is
 /// measured before the statement, so the overshoot is at most one. One rule
-/// for both listeners: fenec-pg held only its own writes to it, and a client
+/// for both listeners: fenec-server held only its own writes to it, and a client
 /// writing over HTTP never met it.
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
     let grows = matches!(

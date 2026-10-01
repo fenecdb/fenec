@@ -1,4 +1,4 @@
-//! tokio-postgres over fenec-pg's pg wire: typed parameters, typed rows in
+//! tokio-postgres over fenec-server's pg wire: typed parameters, typed rows in
 //! the binary format, a COPY through Execute, and pgvector-rust's types.
 
 use futures_util::{SinkExt, TryStreamExt};

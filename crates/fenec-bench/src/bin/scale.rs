@@ -1,4 +1,4 @@
-//! fenec-pg against PostgreSQL + pgvector at scale, both over the pg wire:
+//! fenec-server against PostgreSQL + pgvector at scale, both over the pg wire:
 //! `make scale-bench`.
 //!
 //! ```text
@@ -13,7 +13,7 @@
 //! COPYs of ROWS rows (50 000; 0, every row in one) through the same client,
 //! the `postgres` crate with pgvector-rust's `Vector`:
 //!
-//!   * fenec-pg, started here over an empty file, its HNSW index kept as
+//!   * fenec-server, started here over an empty file, its HNSW index kept as
 //!     the rows land -- or with `--after` built by a `create index` once
 //!     they are in;
 //!   * PostgreSQL + pgvector, the container `make pgvector-up` starts
@@ -35,20 +35,20 @@
 //! `hnsw.iterative_scan = relaxed_order`, as it advises for a filter); and
 //! at a beam of 100 by C clients (8) for
 //! 10 s, for throughput. PostgreSQL answers from inside Docker's virtual
-//! machine, whose network carries every byte, and fenec-pg on the host, so
+//! machine, whose network carries every byte, and fenec-server on the host, so
 //! the round trip of an empty query is measured for each. The space on
-//! disk is fenec-pg's file and the table with its index. Memory is what
+//! disk is fenec-server's file and the table with its index. Memory is what
 //! each server holds of its own, which the kernel cannot take back without
-//! swapping it out -- fenec-pg's physical footprint, the dirty and
+//! swapping it out -- fenec-server's physical footprint, the dirty and
 //! compressed pages of `vmmap -summary` (macOS; Linux's anonymous resident
 //! pages and swap), and the container's anonymous memory and the shared
 //! memory PostgreSQL's buffers are -- and beside it the pages of their files
 //! each keeps in memory, clean, which the kernel takes back under pressure:
-//! fenec-pg's mapped file's, and the container's page cache; and the most
+//! fenec-server's mapped file's, and the container's page cache; and the most
 //! each held of its own while the rows went in and its index was built
 //! (`Peak`), which a COPY of every row in one shows. Then what
-//! fenec-pg's engine counts it holds (`fenec_memory_bytes`), and each
-//! resident set as its tools count it: fenec-pg's, the pages of its file
+//! fenec-server's engine counts it holds (`fenec_memory_bytes`), and each
+//! resident set as its tools count it: fenec-server's, the pages of its file
 //! it touched included, and what `docker stats` counts of the container.
 
 #[path = "../wire.rs"]
@@ -241,9 +241,9 @@ enum Engine {
 struct Server {
     engine: Engine,
     dsn: String,
-    /// fenec-pg's process, and the file it keeps.
+    /// fenec-server's process, and the file it keeps.
     fenec: Option<(wire::Server, std::path::PathBuf)>,
-    /// fenec-pg's HTTP port, for its `/_metrics`.
+    /// fenec-server's HTTP port, for its `/_metrics`.
     http: u16,
 }
 
@@ -260,7 +260,7 @@ fn vmmap_size(s: &str) -> Option<u64> {
     Some((n * m as f64) as u64)
 }
 
-/// What fenec-pg holds of its own -- the dirty and compressed pages it
+/// What fenec-server holds of its own -- the dirty and compressed pages it
 /// cannot give back, macOS's physical footprint (`vmmap -summary`), or
 /// Linux's anonymous resident pages and swap -- and its mapped file's
 /// resident pages.
@@ -295,7 +295,7 @@ fn footprint(pid: u32) -> Option<(u64, u64)> {
     Some((phys, mapped))
 }
 
-/// The most a server holds of its own while the rows go in: fenec-pg's
+/// The most a server holds of its own while the rows go in: fenec-server's
 /// physical footprint at its peak, which macOS keeps (`vmmap`'s `Physical
 /// footprint (peak)`; Linux's peak resident set, `VmHWM`, whose mapped pages
 /// are few while the rows go in); PostgreSQL's, polled from its container
@@ -338,7 +338,7 @@ impl Peak {
     }
 }
 
-/// fenec-pg's physical footprint at its peak so far; see [`Peak`].
+/// fenec-server's physical footprint at its peak so far; see [`Peak`].
 fn peak_footprint(pid: u32) -> Option<u64> {
     if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
         return status
@@ -376,7 +376,7 @@ fn pg_memory() -> Option<(u64, u64)> {
     Some((anon + shmem, file.saturating_sub(shmem)))
 }
 
-/// One of fenec-pg's `/_metrics` without labels, `fenec_memory_bytes`
+/// One of fenec-server's `/_metrics` without labels, `fenec_memory_bytes`
 /// among them: what the engine counts it holds.
 fn metric(http: u16, name: &str) -> Option<u64> {
     use std::io::{Read, Write};
@@ -425,7 +425,7 @@ impl Server {
         }
     }
 
-    /// Resident memory in bytes: fenec-pg's process, the container's.
+    /// Resident memory in bytes: fenec-server's process, the container's.
     fn memory(&self) -> u64 {
         match &self.fenec {
             Some((s, _)) => {
@@ -466,7 +466,7 @@ impl Server {
         }
     }
 
-    /// Bytes on disk: fenec-pg's file, the table with its index.
+    /// Bytes on disk: fenec-server's file, the table with its index.
     fn disk(&self, c: &mut Client) -> u64 {
         match &self.fenec {
             Some((_, file)) => std::fs::metadata(file).map(|m| m.len()).unwrap_or(0),
@@ -483,7 +483,7 @@ struct Workload<'a> {
     data: &'a Data,
     n: u64,
     dim: usize,
-    /// fenec-pg's index built once the rows are in, rather than as they land.
+    /// fenec-server's index built once the rows are in, rather than as they land.
     after: bool,
     queries: &'a [Vec<f32>],
     truth: &'a Truth,
@@ -494,7 +494,7 @@ struct Workload<'a> {
     copy_rows: u64,
 }
 
-/// fenec-pg killed and started again: waits until no vector is left to link, asks
+/// fenec-server killed and started again: waits until no vector is left to link, asks
 /// every query once unfiltered and once with each filter, as the run did,
 /// and measures its memory.
 fn reopen(server: &Server, w: &Workload, started: Instant) -> Option<(f64, u64, u64, u64, u64)> {
@@ -536,13 +536,13 @@ struct Measured {
     round_trip: f64,
     /// What the server holds of its own, and the pages of its files it
     /// keeps in memory besides, which the kernel takes back under pressure
-    /// ([`footprint`], [`pg_memory`]); and what fenec-pg's engine counts it
+    /// ([`footprint`], [`pg_memory`]); and what fenec-server's engine counts it
     /// holds. Bytes.
     breakdown: Option<(u64, u64, Option<u64>)>,
     /// The most the server held of its own while the rows went in and its
     /// index was built ([`Peak`]).
     peak: Option<u64>,
-    /// fenec-pg killed and started again over its file, its documents in
+    /// fenec-server killed and started again over its file, its documents in
     /// the file rather than written since the open: the seconds until
     /// every vector was linked, and the resident set, footprint, mapped
     /// pages and engine count after every query was asked again.
@@ -656,7 +656,7 @@ fn run(server: &Server, w: &Workload) -> Measured {
     let peak = peak.most();
     eprintln!("  loaded in {load:.1} s, index {build:.1} s more");
     // PostgreSQL's index read into its buffers, as far as they hold it:
-    // fenec-pg holds its graph in memory.
+    // fenec-server holds its graph in memory.
     if server.engine == Engine::Pg {
         c.batch_execute(
             "CREATE EXTENSION IF NOT EXISTS pg_prewarm; SELECT pg_prewarm('items_embed_idx')",
@@ -854,7 +854,7 @@ fn main() {
             fenec: Some((s, file)),
             http,
         };
-        eprintln!("fenec-pg:");
+        eprintln!("fenec-server:");
         let mut r = run(&server, &work);
         // With `--compact`, the memory after a compact, which writes the
         // documents into a new image the stores then read through the map.
@@ -892,7 +892,7 @@ fn main() {
         r.reopened = reopen(&server, &work, t);
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
-        results.push(("fenec-pg", r));
+        results.push(("fenec-server", r));
     }
     if only.as_deref() != Some("fenec") {
         match Client::connect(PG, NoTls) {
@@ -946,14 +946,14 @@ fn main() {
     row("  its files' pages besides", &|r| {
         mb(r.breakdown.map(|b| b.1))
     });
-    row("  what fenec-pg's engine counts", &|r| {
+    row("  what fenec-server's engine counts", &|r| {
         mb(r.breakdown.and_then(|b| b.2))
     });
     row("resident, as counted", &|r| mb(Some(r.memory)));
     if let Some((_, r)) = results.iter().find(|(_, r)| r.compacted.is_some()) {
         let (secs, rss, phys, mapped, engine) = r.compacted.unwrap();
         println!(
-            "\nfenec-pg after a compact of {secs:.1} s: resident {:.0} MB, physical footprint {:.0} MB, \
+            "\nfenec-server after a compact of {secs:.1} s: resident {:.0} MB, physical footprint {:.0} MB, \
              the mapped file's resident pages {:.0} MB, the engine's count {:.0} MB",
             rss as f64 / 1e6,
             phys as f64 / 1e6,
@@ -964,7 +964,7 @@ fn main() {
     if let Some((_, r)) = results.iter().find(|(_, r)| r.reopened.is_some()) {
         let (secs, rss, phys, mapped, engine) = r.reopened.unwrap();
         println!(
-            "\nfenec-pg killed and started again over its file: every vector linked after {secs:.1} s; \
+            "\nfenec-server killed and started again over its file: every vector linked after {secs:.1} s; \
              resident {:.0} MB, physical footprint {:.0} MB, the mapped file's resident pages {:.0} MB, \
              the engine's count {:.0} MB",
             rss as f64 / 1e6,

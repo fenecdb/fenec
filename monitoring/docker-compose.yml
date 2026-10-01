@@ -5,7 +5,7 @@
 #     docker compose -f monitoring/docker-compose.yml up -d
 #   open http://127.0.0.1:3000/d/fenecdb
 #
-# fenec-pg serves /_metrics on a listener of its own (--metrics), so the
+# fenec-server serves /_metrics on a listener of its own (--metrics), so the
 # pg port is the only data port. That listener is on the compose network
 # alone and still takes a token: a non-loopback address wants one.
 

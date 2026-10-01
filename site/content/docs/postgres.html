@@ -12,7 +12,7 @@ PostgreSQL driver you already use, or pgvector's libraries.</p>
 <ol class="steps-doc">
   <li>
     <p>Start the server on a file.</p>
-<pre data-lang="bash">fenec-pg --file data.fenec --listen 127.0.0.1:5433 --password-file pg.pw</pre>
+<pre data-lang="bash">fenec-server --file data.fenec --listen 127.0.0.1:5433 --password-file pg.pw</pre>
   </li>
   <li>
     <p>Connect with psql, or any PostgreSQL client.</p>
@@ -66,7 +66,7 @@ how many rows each stage read — and are described under <a
 href="fenecql.html#explain">Explain</a>.</p>
 
 <p>With <code>--replica-of</code> the process follows another
-<code>fenec-pg</code> as a read replica: it serves every read, refuses every
+<code>fenec-server</code> as a read replica: it serves every read, refuses every
 write with <code>25006</code> as a PostgreSQL standby does, and answers
 <code>SHOW transaction_read_only</code> and <code>pg_is_in_recovery()</code>
 accordingly, which is what libpq's <code>target_session_attrs</code> and
@@ -119,7 +119,7 @@ rows = conn.execute(
     (query_vector,)).fetchall()</pre>
 
 <details class="deep"><summary>Details: what each driver is tested for</summary>
-<p>A driver is held to its own flows against a real <code>fenec-pg</code> —
+<p>A driver is held to its own flows against a real <code>fenec-server</code> —
 <code>make drivers-test</code>, and CI on every change: the queries it sends
 on its own, the formats it reads rows and sends parameters in, its
 transactions and its COPY — and with it pgvector's library for it
@@ -522,7 +522,7 @@ the one named.</p>
 <p>Logins use SCRAM-SHA-256, so the password never crosses the wire. Give a
 dashboard or a report its own login that can only read.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --password-file writer.pw \
+<pre data-lang="bash">fenec-server --file data.fenec --password-file writer.pw \
   --reader reporting --reader-password-file reader.pw</pre>
 
 <div class="note trap">
@@ -640,7 +640,7 @@ half-written checkpoint cannot corrupt anything.</p>
 </table>
 </div>
 
-<pre data-lang="bash">fenec-pg --ping        # exits 0 when the server is up</pre>
+<pre data-lang="bash">fenec-server --ping        # exits 0 when the server is up</pre>
 
 <details class="deep"><summary>Details</summary>
 <p>One thread per connection means unlimited connections would leave the stack
@@ -783,7 +783,7 @@ df.filter("year >= 2024 and g = 'a'").groupBy("g").count().show()</pre>
 <p>DuckDB reads a collection as a table through its own
 <code>postgres</code> extension: the catalog lists it, and each read is
 <code>COPY (SELECT "col", ... FROM "public"."docs" WHERE ...) TO STDOUT
-(FORMAT "binary")</code>, which fenec-pg runs as the <code>get</code> it is.
+(FORMAT "binary")</code>, which fenec-server runs as the <code>get</code> it is.
 The conditions DuckDB pushes down — a column compared with a literal,
 <code>IS [NOT] NULL</code>, <code>IN (...)</code>, joined by
 <code>AND</code> — are read as their columns' types, since DuckDB quotes an
@@ -797,7 +797,7 @@ file in 97 ms, and <code>count</code>, <code>sum</code> and a
 <code>GROUP BY</code> over them in 52 to 90 ms; from Parquet, pandas, Spark
 and the rest read them.</p>
 
-<p>Spark reads a collection through pgjdbc with plain SQL, which fenec-pg
+<p>Spark reads a collection through pgjdbc with plain SQL, which fenec-server
 runs as the <code>get</code> it is: <code>SELECT * FROM docs WHERE
 1=0</code> for the columns, <code>SELECT "n","g" FROM docs WHERE ("n" IS
 NOT NULL) AND ("n" &lt; 10) AND ("g" = 'a')</code> for the rows with the
@@ -837,7 +837,7 @@ Indexes:
 DBeaver's navigator do not ask which collections exist: they send SQL over
 <code>pg_catalog</code> and <code>information_schema</code>, with joins,
 <code>CASE</code>, casts to <code>regclass</code>, correlated subqueries,
-<code>UNION</code> and window functions. <code>fenec-pg</code> runs that SQL
+<code>UNION</code> and window functions. <code>fenec-server</code> runs that SQL
 over a catalog it makes from the schemas each time, so the tools see the
 database as it is.</p>
 
@@ -887,7 +887,7 @@ tokio-postgres by its lookup of an OID it does not know.</p>
 <h2>More</h2>
 
 <ul>
-  <li><b>Mirror a PostgreSQL table.</b> <code>fenec-pg --follow
+  <li><b>Mirror a PostgreSQL table.</b> <code>fenec-server --follow
     postgres://...</code> keeps a copy as the table commits, and serves it.
     See <a href="import.html#serving">Import</a>.</li>
   <li><b>Plugins.</b> Register functions, write hooks and transport adapters,
@@ -906,7 +906,7 @@ SCRAM lives in <code>scram.rs</code> and the client half in
 <code>fenec-wire</code>'s <code>client.rs</code>; both are hand-written, so
 they test each other. See <a href="import.html">Import</a>.</p>
 
-<p><code>fenec-pg --follow postgres://...</code> runs that follower inside
+<p><code>fenec-server --follow postgres://...</code> runs that follower inside
 the server, over the file it serves: a table of PostgreSQL mirrored as it
 commits, and served over this protocol, HTTP and subscriptions at once. The
 mirrored collection refuses every write but the follower's with

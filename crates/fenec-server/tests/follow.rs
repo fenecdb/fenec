@@ -1,14 +1,14 @@
-//! `fenec-pg --follow` against a live PostgreSQL (`make import-test`, which
+//! `fenec-server --follow` against a live PostgreSQL (`make import-test`, which
 //! starts one in Docker): a table's copy and its changes served over the pg
 //! wire and HTTP as they commit, a client's write to the mirror refused, and
 //! a server stopped -- by a signal, or killed outright -- started again over
 //! its file without losing a row.
 //!
-//!     cargo test -p fenec-pg --test all follow:: -- --ignored
+//!     cargo test -p fenec-server --test all follow:: -- --ignored
 
 #![cfg(unix)]
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -147,7 +147,7 @@ fn tmp(tag: &str) -> PathBuf {
 
 /// Starts the server over `file`, following `t`, and waits until it streams.
 fn start(file: &Path, t: &str) -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
         .arg("--file")
         .arg(file)
@@ -155,7 +155,7 @@ fn start(file: &Path, t: &str) -> Server {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let port = |line: &str, after: &str| -> Option<u16> {
         line.split(after)
@@ -171,7 +171,7 @@ fn start(file: &Path, t: &str) -> Server {
     while pg.is_none() || http.is_none() || !streaming {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it streamed:\n{seen}");
+            panic!("fenec-server ended before it streamed:\n{seen}");
         }
         seen.push_str(&line);
         if line.contains("postgres://localhost:") {
@@ -198,7 +198,7 @@ fn start(file: &Path, t: &str) -> Server {
 #[test]
 #[ignore = "needs a PostgreSQL to follow: make import-test"]
 fn a_followed_table_is_served_and_takes_no_other_write() {
-    let t = "fenec_pg_follow_served";
+    let t = "fenec_server_follow_served";
     let mut c = pg();
     table(&mut c, t, 50);
     let file = tmp("served");
@@ -250,7 +250,7 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
 #[test]
 #[ignore = "needs a PostgreSQL to follow: make import-test"]
 fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
-    let t = "fenec_pg_follow_restart";
+    let t = "fenec_server_follow_restart";
     let mut c = pg();
     table(&mut c, t, 20);
     let file = tmp("restart");

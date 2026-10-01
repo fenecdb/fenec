@@ -1,4 +1,4 @@
-//! # fenec-pg
+//! # fenec-server
 //!
 //! fenecdb's PostgreSQL plugin.
 //!
@@ -16,7 +16,7 @@
 //! ```no_run
 //! use std::sync::{Arc, RwLock};
 //! use fenec_core::prelude::*;
-//! use fenec_pg::{Config, PgPlugin, Server};
+//! use fenec_server::{Config, PgPlugin, Server};
 //!
 //! let mut db = Database::new();
 //! db.install_plugin(&PgPlugin).unwrap();
@@ -28,7 +28,7 @@
 pub use fenec_catalog as catalog;
 /// The wire protocol's framing and the client for a real PostgreSQL are
 /// `fenec-wire`'s, which the importer depends on in place of this crate:
-/// the server runs the importer's `--follow` (`fenec-pg --follow`).
+/// the server runs the importer's `--follow` (`fenec-server --follow`).
 pub use fenec_wire::{client, proto};
 pub mod binary;
 pub mod compat;

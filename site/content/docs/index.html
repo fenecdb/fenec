@@ -89,7 +89,7 @@ should live.</p>
 <tbody>
 <tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">192 KB gzip<br><small>the wasm module</small></td></tr>
 <tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1153–1687 KB</td></tr>
-<tr><td>Server</td><td><code>fenec-pg</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">2.88 MB image</td></tr>
+<tr><td>Server</td><td><code>fenec-server</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">2.88 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
 </table>
@@ -118,7 +118,7 @@ a transaction holds the database from its first write to its end.</p>
   <li><b>No JOIN and no subqueries.</b> A query reads one collection, plus
     the children <code>lookup</code> attaches to each of its rows — and,
     chained, the children of those.</li>
-  <li><b>No SQL.</b> <code>fenec-pg</code> is compatible at the transport
+  <li><b>No SQL.</b> <code>fenec-server</code> is compatible at the transport
     layer, not the language.</li>
   <li><b>No schema migration</b> and no multi-writer replication.</li>
   <li><b>No decimal type.</b> <code>float</code> is binary floating point and
@@ -146,7 +146,7 @@ fenec-ql     FenecQL lexer and parser              fenec-wasm   browser ABI
      |                                             fenec-catalog  the pg_catalog tools read
 fenec-http   REST/JSON surface and SSE subscriptions
      |
-fenec-pg     PostgreSQL v3 wire protocol — server and client
+fenec-server     PostgreSQL v3 wire protocol — server and client
      |
 fenec-import SQLite file reader, PostgreSQL COPY source
      |

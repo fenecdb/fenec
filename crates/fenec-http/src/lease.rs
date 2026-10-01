@@ -1,5 +1,5 @@
 //! A node's lease from its router: which tenants the node may write, and
-//! until when (`fenec-pg --lease`, and `fenec-shard --auto-failover` on the
+//! until when (`fenec-server --lease`, and `fenec-shard --auto-failover` on the
 //! router's side).
 //!
 //! The router renews the lease while it reaches the node. A node it cannot

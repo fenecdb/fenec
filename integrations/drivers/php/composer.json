@@ -1,5 +1,5 @@
 {
-    "description": "PDO and pgvector-php against a real fenec-pg; run by ../run-tests.sh",
+    "description": "PDO and pgvector-php against a real fenec-server; run by ../run-tests.sh",
     "require": { "pgvector/pgvector": "^0.2" },
     "config": { "allow-plugins": {} }
 }

@@ -4,7 +4,7 @@ members = [
     "crates/fenec-core",
     "crates/fenec-ql",
     "crates/fenec-wasm",
-    "crates/fenec-pg",
+    "crates/fenec-server",
     "crates/fenec-wire",
     "crates/fenec-catalog",
     "crates/fenec-http",
@@ -34,7 +34,7 @@ fenec-core = { version = "0.1.3", path = "crates/fenec-core", default-features =
 fenec-ql = { version = "0.1.3", path = "crates/fenec-ql" }
 fenec-http = { version = "0.1.3", path = "crates/fenec-http" }
 fenec-catalog = { version = "0.1.3", path = "crates/fenec-catalog" }
-fenec-pg = { version = "0.1.3", path = "crates/fenec-pg" }
+fenec-server = { version = "0.1.3", path = "crates/fenec-server" }
 fenec-wire = { version = "0.1.6", path = "crates/fenec-wire" }
 fenec-import = { version = "0.1.3", path = "crates/fenec-import" }
 
@@ -50,7 +50,7 @@ strip = true
 [profile.test]
 debug = "line-tables-only"
 
-# The catalog fenec-pg answers psql, JDBC and DBeaver from is not on any hot
+# The catalog fenec-server answers psql, JDBC and DBeaver from is not on any hot
 # path -- a tool asks it a handful of queries when it connects -- so it is
 # built for size.
 [profile.release.package.fenec-catalog]
@@ -58,7 +58,7 @@ opt-level = "z"
 
 # Small binary for the `fenec` shell: abort instead of panic unwinding.
 # The shell is a single process with no scenario for recovering from a panic;
-# the unwind tables, meanwhile, take ~12% of the binary. `fenec-pg` does *not*
+# the unwind tables, meanwhile, take ~12% of the binary. `fenec-server` does *not*
 # use this profile: there a panicking connection thread unwinds and only
 # drops its own session, leaving the server up.
 [profile.cli]

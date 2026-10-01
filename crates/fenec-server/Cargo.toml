@@ -1,5 +1,5 @@
 [package]
-name = "fenec-pg"
+name = "fenec-server"
 description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
 version.workspace = true
 edition.workspace = true
@@ -20,7 +20,7 @@ fenec-wire.workspace = true
 fenec-import.workspace = true
 
 [[bin]]
-name = "fenec-pg"
+name = "fenec-server"
 path = "src/main.rs"
 
 [[test]]

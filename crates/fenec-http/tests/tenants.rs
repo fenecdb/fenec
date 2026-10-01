@@ -437,7 +437,7 @@ fn over_the_memory_ceiling_idle_tenants_make_room() {
     assert_eq!(r.text(), r#"[{"id":1,"title":"x"}]"#);
 }
 
-/// With mapping off (`fenec-pg --no-mmap`), a tenant's documents are read
+/// With mapping off (`fenec-server --no-mmap`), a tenant's documents are read
 /// into memory and counted, as a single file's are: the flag reached the
 /// single-file server alone, and a tenant node on a network file system
 /// mapped its files all the same.

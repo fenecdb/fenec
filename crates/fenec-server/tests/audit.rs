@@ -3,9 +3,9 @@
 //! the process's own.
 
 use fenec_core::prelude::Database;
-use fenec_pg::client::{Client, Url};
-use fenec_pg::server::Auth;
-use fenec_pg::{Config, PgPlugin, Server};
+use fenec_server::client::{Client, Url};
+use fenec_server::server::Auth;
+use fenec_server::{Config, PgPlugin, Server};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ fn url(port: u16, password: &str) -> Url {
 
 #[test]
 fn a_failed_login_waits_and_logins_are_logged() {
-    let dir = std::env::temp_dir().join(format!("fenec-pg-audit-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("fenec-server-audit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("audit.log");
     fenec_http::audit::open(&log).unwrap();

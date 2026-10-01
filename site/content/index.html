@@ -106,7 +106,7 @@ description: An embedded document database with full-text and vector search buil
       pgvector.</p>
 
     <figure class="motion rise" data-scenes="race">
-      <canvas role="img" aria-label="fenec-pg answers the nearest ten of a million vectors in 0.147 ms against pgvector's 2.353 ms. Load and index 47.2 s against 117.8 s; eight clients 17 001 queries a second against 2 097; 612 MB on disk against 1 432; 721 MB of memory against 1 132."></canvas>
+      <canvas role="img" aria-label="fenec-server answers the nearest ten of a million vectors in 0.147 ms against pgvector's 2.353 ms. Load and index 47.2 s against 117.8 s; eight clients 17 001 queries a second against 2 097; 612 MB on disk against 1 432; 721 MB of memory against 1 132."></canvas>
     </figure>
     <p class="after rise">Same client, same index settings, 99.1% recall against
       98.3%. <a href="docs/benchmarks.html#scale">Method, hardware and the 768-dim run</a></p>
@@ -168,7 +168,7 @@ description: An embedded document database with full-text and vector search buil
     <p class="lede rise">It speaks the PostgreSQL protocol, with pgvector's types.
       Keep your driver, your vector library and your tools.</p>
     <figure class="motion rise" data-scenes="postgres">
-      <canvas role="img" aria-label="psql, psycopg, asyncpg, pgx, node-postgres, tokio-postgres and JDBC on one side, pgvector's libraries, DBeaver, DuckDB, LangChain and LlamaIndex on the other, all connected to fenec-pg over the PostgreSQL wire protocol."></canvas>
+      <canvas role="img" aria-label="psql, psycopg, asyncpg, pgx, node-postgres, tokio-postgres and JDBC on one side, pgvector's libraries, DBeaver, DuckDB, LangChain and LlamaIndex on the other, all connected to fenec-server over the PostgreSQL wire protocol."></canvas>
     </figure>
 
     <div class="works rise">
@@ -215,7 +215,7 @@ description: An embedded document database with full-text and vector search buil
 
     <div class="cast rise" id="cast">
       <div class="cast-screen">
-        <div class="cast-bar"><span class="cast-title">fenec-pg</span></div>
+        <div class="cast-bar"><span class="cast-title">fenec-server</span></div>
         <pre class="cast-out" aria-live="off" data-bare></pre>
       </div>
       <div class="cast-controls">
@@ -227,11 +227,11 @@ description: An embedded document database with full-text and vector search buil
 
       <ol class="cast-script">
         <li data-title="Start a server">
-<pre data-bare>$ fenec-pg --file app.fenec --listen 0.0.0.0:5433 \
+<pre data-bare>$ fenec-server --file app.fenec --listen 0.0.0.0:5433 \
            --http 127.0.0.1:8080 --password-file pg.pw --cdc
 opened: app.fenec
 fenec-http 0.1.6 listening on: http://127.0.0.1:8080  [no auth]
-fenec-pg 0.1.6 listening on: postgres://localhost:5433/fenec  [password: SCRAM-SHA-256, sync=250 ms]</pre>
+fenec-server 0.1.6 listening on: postgres://localhost:5433/fenec  [password: SCRAM-SHA-256, sync=250 ms]</pre>
         </li>
         <li data-title="Load with psql">
 <pre data-bare>$ psql -h 127.0.0.1 -p 5433 -U fenec

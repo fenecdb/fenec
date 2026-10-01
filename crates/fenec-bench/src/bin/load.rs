@@ -3,7 +3,7 @@
 //!
 //! 100 000 rows of a text, an int and a 128-dim vector, into an empty
 //! collection, with the vector's HNSW index kept as they land and without
-//! one. fenec-pg is started here over an empty file, with its pg wire and
+//! one. fenec-server is started here over an empty file, with its pg wire and
 //! HTTP on loopback:
 //!
 //!   * in process: `put` of 1 000 rows at a time on the `Database` itself,
@@ -19,13 +19,13 @@
 //!   * HTTP: `POST /batch` with 1 000 lines, each a `POST /query` body.
 //!
 //! Then the rows are read back whole by `COPY docs TO STDOUT`, in text and
-//! in binary, through the `postgres` crate's `copy_out`, from fenec-pg and
+//! in binary, through the `postgres` crate's `copy_out`, from fenec-server and
 //! from PostgreSQL.
 //!
 //! PostgreSQL + pgvector, the container `make pgvector-up` starts (skipped
 //! without it), is sent the same rows by `COPY ... FROM STDIN` and by
 //! `INSERT` of 1 000 rows a statement, with `synchronous_commit = off`, as
-//! fenec-pg's writes reach the disk within `--sync 250`; it answers from
+//! fenec-server's writes reach the disk within `--sync 250`; it answers from
 //! inside Docker's virtual machine, whose network carries every byte.
 
 #[path = "../wire.rs"]

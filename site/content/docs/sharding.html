@@ -13,8 +13,8 @@ own, spread the files over nodes, and put <code>fenec-shard</code> in front.</p>
 tenant, and use it through the router.</p>
 
 <pre data-lang="bash"># two nodes, each a directory of tenant files
-fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
-fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2
+fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
+fenec-server --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2
 
 # the router, and its directory of which tenant lives where
 fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --token root
@@ -94,13 +94,13 @@ is a single tenant that outgrows a node. Until then, a tenant has to fit one
 node's memory.</p>
 </details>
 
-<h2>The node: <code>fenec-pg --dir</code></h2>
+<h2>The node: <code>fenec-server --dir</code></h2>
 
-<p>A node is one <code>fenec-pg</code> serving a directory of tenant files
+<p>A node is one <code>fenec-server</code> serving a directory of tenant files
 instead of one file. Over PostgreSQL, the database name you connect to is the
 tenant.</p>
 
-<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
 psql postgres://fenec@127.0.0.1:5433/acme
 </pre>
 
@@ -319,9 +319,9 @@ router makes changes at a time. Failover is never guessed.</p>
 it is written. When the node is lost, one call promotes its tenants on the
 standby.</p>
 
-<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
          --replication-token r1 --sync always
-fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 \
+fenec-server --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 \
          --replication-token r1 --replica-of http://127.0.0.1:8081
 
 curl -X PUT localhost:8090/_shard/nodes/n1 \
@@ -382,7 +382,7 @@ other way round. The router then has each of its tenants follow
 primary's, and follow only when told to — and the writes it took that were
 never sent are gone.</p>
 
-<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
          --replication-token r1 --replica-of http://127.0.0.1:8082
 curl -X PUT localhost:8090/_shard/nodes/n2 \
   -d '{"addr":"127.0.0.1:8082","token":"a2","standby":"n1"}'
@@ -401,9 +401,9 @@ that left it behind, and the node restarted without <code>--replica-of</code>
 tenant its own replica on another node, so every node holds both primaries
 and replicas and a lost node's tenants spread over the rest.</p>
 
-<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 --replication-token r1 --sync always
-fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 --replication-token r1 --sync always
-fenec-pg --dir /data/n3 --http 127.0.0.1:8083 --admin-token a3 --replication-token r1 --sync always
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 --replication-token r1 --sync always
+fenec-server --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 --replication-token r1 --sync always
+fenec-server --dir /data/n3 --http 127.0.0.1:8083 --admin-token a3 --replication-token r1 --sync always
 fenec-shard --replicas
 
 curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
@@ -463,7 +463,7 @@ It works on leases: a node stops writing when its lease runs out, and only
 after that does the router promote its tenants elsewhere, so a tenant never
 has two primaries.</p>
 
-<pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
          --replication-token r1 --sync always --lease
 fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-failover 5
 </pre>

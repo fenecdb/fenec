@@ -1,4 +1,4 @@
-//! `fenec-pg` wire protocol tests.
+//! `fenec-server` wire protocol tests.
 //!
 //! The server is brought up in-process on `127.0.0.1:0`; the client side is
 //! hand-coded here, so the assertions are on the real byte stream (not on
@@ -6,9 +6,9 @@
 
 use fenec_core::engine::Database;
 use fenec_core::value::Value;
-use fenec_pg::crypto::*;
-use fenec_pg::server::{Auth, SyncPolicy};
-use fenec_pg::{Config, PgPlugin, Server};
+use fenec_server::crypto::*;
+use fenec_server::server::{Auth, SyncPolicy};
+use fenec_server::{Config, PgPlugin, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

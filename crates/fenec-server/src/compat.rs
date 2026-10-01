@@ -335,7 +335,7 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
             return Some(Shim::Refuse {
                 code: "0A000",
                 message: format!(
-                    "{} is not supported: fenec-pg sends no notifications; \
+                    "{} is not supported: fenec-server sends no notifications; \
                      subscribe to changes over HTTP with GET /<collection>/changes",
                     first.to_uppercase()
                 ),

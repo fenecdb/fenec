@@ -17,7 +17,7 @@
 //!
 //! The gauges are read under the database's shared lock, which a scrape
 //! holds as briefly as a `count` does. The counters are one set per process
-//! -- `fenec-pg` serves one database, or one directory of tenants, per
+//! -- `fenec-server` serves one database, or one directory of tenants, per
 //! process -- and a tenant node counts its tenants, not what they hold: a
 //! tenant's collection names are not the node's to publish.
 

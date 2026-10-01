@@ -1,10 +1,10 @@
-//! What each statement cost, by its shape, on a running `fenec-pg`:
+//! What each statement cost, by its shape, on a running `fenec-server`:
 //! `GET /_stats/statements` and `pg_stat_statements` over the pg wire. A
 //! statement with its values in the text is counted with the same one run
 //! with other values; the rows it returned or changed and its failures go
 //! with it; the counts need the server's token, and go on `DELETE`.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -31,7 +31,7 @@ fn start() -> Server {
     let dir = std::env::temp_dir().join(format!("fenecpg-statements-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
         .args(["--http-token", TOKEN])
         .arg("--file")
@@ -39,7 +39,7 @@ fn start() -> Server {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let port = |line: &str, after: &str| -> Option<u16> {
         line.split(after)
@@ -55,7 +55,7 @@ fn start() -> Server {
     while pg.is_none() || http.is_none() {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it listened:\n{seen}");
+            panic!("fenec-server ended before it listened:\n{seen}");
         }
         seen.push_str(&line);
         if line.contains("postgres://localhost:") {

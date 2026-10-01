@@ -1,5 +1,5 @@
 <?php
-// PDO (pdo_pgsql) and pgvector-php against fenec-pg. Each check prints its
+// PDO (pdo_pgsql) and pgvector-php against fenec-server. Each check prints its
 // name; a failure is counted and the run exits non-zero.
 require __DIR__ . '/vendor/autoload.php';
 use Pgvector\Vector;

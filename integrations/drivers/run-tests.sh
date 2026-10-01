@@ -1,5 +1,5 @@
 #!/bin/sh
-# PostgreSQL drivers against a real fenec-pg's pg wire: psycopg, asyncpg
+# PostgreSQL drivers against a real fenec-server's pg wire: psycopg, asyncpg
 # and SQLAlchemy from a python:3.13 container, as integrations/python runs
 # the stores, JDBC, PDO and the pg gem from containers of their own, then
 # pgx with the Go, node-postgres with the Node, Npgsql with
@@ -15,13 +15,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 cargo=${CARGO:-cargo}
 [ -x "$HOME/.cargo/bin/cargo" ] && cargo="$HOME/.cargo/bin/cargo"
-"$cargo" build -q -p fenec-pg --manifest-path "$root/Cargo.toml"
+"$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 
 dir=$(mktemp -d)
 port=${FENEC_TEST_PG_PORT:-18182}
 password=driver-tests
 # Outside loopback, so the container reaches it: a password is required there.
-"$root/target/debug/fenec-pg" --listen "0.0.0.0:$port" --file "$dir/drivers.fenec" \
+"$root/target/debug/fenec-server" --listen "0.0.0.0:$port" --file "$dir/drivers.fenec" \
     --password "$password" 2>"$dir/server.log" &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$dir"' EXIT INT TERM

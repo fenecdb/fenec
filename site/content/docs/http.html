@@ -9,10 +9,10 @@ any standard library — no driver needed.</p>
 
 <h2>Start it</h2>
 
-<p>Add <code>--http</code> to <code>fenec-pg</code>. Every collection gets REST
+<p>Add <code>--http</code> to <code>fenec-server</code>. Every collection gets REST
 routes from its schema.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080
 
 curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
 # [{"title":"the rust book","year":2024}]
@@ -31,7 +31,7 @@ the database, so the surface is derived from it.</p>
 
 <div class="note">
   <p><b>Not a separate binary.</b> The HTTP endpoint is a second listener in
-  the same process as <code>fenec-pg</code>. fenecdb has a single writer, and
+  the same process as <code>fenec-server</code>. fenecdb has a single writer, and
   two processes writing one file corrupt it. Being in the same process also
   keeps the sync policy, the checkpoint, the memory ceiling and the shutdown
   signal in one place — <code>--sync always</code> covers HTTP writes too.</p>
@@ -238,13 +238,13 @@ FenecQL gets from position, up to the same 8 levels.</p>
 
 <p><code>lookup</code> is a reserved key here, so a field named
 <code>lookup</code> cannot be filtered over the REST path — the FenecQL and
-<code>fenec-pg</code> paths are unaffected, as with the other reserved
+<code>fenec-server</code> paths are unaffected, as with the other reserved
 names.</p>
 
 <p>A query with a <code>lookup</code> answers with the children nested under
 the collection's name — one object per parent, with an empty array where
 nothing matched, and a chain nests all the way down. The
-<code>fenec-pg</code> side of the same query flattens them into the parent row
+<code>fenec-server</code> side of the same query flattens them into the parent row
 instead, because a PostgreSQL row cannot nest: one row per root-to-leaf path,
 with nulls below the first level that ran out.</p>
 
@@ -341,7 +341,7 @@ limit are refused with <code>507</code>. Reads, deletes and
 <code>compact</code> still work.</p>
 
 <details class="deep"><summary>Details</summary>
-<p>Inside <code>fenec-pg</code> started with <code>--max-memory</code>, the
+<p>Inside <code>fenec-server</code> started with <code>--max-memory</code>, the
 listener holds its writes to the ceiling the pg wire holds its own to: above
 it, a statement that grows the data — a put, a patch, a <code>create
 index</code> — is refused with <code>507</code>, a batch stops there as at an
@@ -390,7 +390,7 @@ requests. The client-side layer built on this stream is
 or a read model — start the server with <code>--cdc</code> and read
 <code>GET /_changes</code>: one JSON line per write.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 --sync 250 --cdc
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080 --sync 250 --cdc
 
 curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
 # Content-Type: application/x-ndjson
@@ -494,7 +494,7 @@ consumer's <code>since</code> and how many writes it is
 <p>Protect the endpoint with a bearer token, and put a TLS terminator in front
 of it on an open network.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 \
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080 \
          --http-cors 'http://localhost:8787' \
          --http-token "$TOKEN" \
          --http-read-only
@@ -505,7 +505,7 @@ of it on an open network.</p>
 <tbody>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>every request needs <code>Authorization: Bearer &lt;value&gt;</code>, compared in constant time</td></tr>
 <tr><td><code>--http-cors &lt;origin&gt;</code></td><td>sets <code>Access-Control-Allow-Origin</code>; without it no CORS header is sent at all</td></tr>
-<tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-pg</code>'s own path is unaffected</td></tr>
+<tr><td><code>--http-read-only</code></td><td>write endpoints return 403; <code>fenec-server</code>'s own path is unaffected</td></tr>
 <tr><td>a replica</td><td>every write returns 403, whatever the flags: its writes come from its primary</td></tr>
 <tr><td>non-loopback address</td><td>refuses to bind without a token, unless <code>--insecure</code> is given</td></tr>
 </tbody>
@@ -513,20 +513,20 @@ of it on an open network.</p>
 </div>
 
 <details class="deep"><summary>Details</summary>
-<p>There is no TLS, the same rule as <code>fenec-pg</code>: on an open network
+<p>There is no TLS, the same rule as <code>fenec-server</code>: on an open network
 it needs a TLS terminator in front. A <code>PATCH</code> or <code>DELETE</code>
 without a filter is refused, and covering a whole collection needs a separate
 <b>path</b> rather than a flag — a key like <code>?all=true</code> would
 collide with a field named <code>all</code>.</p>
 
-<p>Limits are shared with <code>fenec-pg</code> (<code>--max-connections</code>,
+<p>Limits are shared with <code>fenec-server</code> (<code>--max-connections</code>,
 <code>--idle-timeout</code>); the body ceiling is 64 MiB and the header block
 64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
 411, which beats reading half a body. A field whose name matches a clause name
 (<code>select</code>, <code>order</code>, <code>limit</code>,
 <code>offset</code>, <code>count</code>, <code>where</code>,
 <code>group</code>) cannot be filtered
-over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
+over HTTP; the FenecQL and <code>fenec-server</code> paths are unaffected.</p>
 
 <div class="note trap">
   <p><b>A shape alone is not a security boundary.</b> Under the server's own
@@ -562,10 +562,10 @@ held to the rules of a <code>--policy</code> file, collection by collection and
 down to the rows, so a browser can talk to the database directly with a token
 per user:</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
+<pre data-lang="bash">fenec-server --file data.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
          --jwt-secret-file jwt.secret --policy policy.txt
 
-fenec-pg --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456000}'
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456000}'
 </pre>
 
 <ul>
@@ -604,7 +604,7 @@ keys; no restart is needed.</p>
 
 <pre data-lang="bash"># the provider's public keys, as it publishes them
 curl -s https://example.auth0.com/.well-known/jwks.json &gt; jwks.json
-fenec-pg --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt
+fenec-server --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt
 </pre>
 
 <details class="deep"><summary>Details</summary>

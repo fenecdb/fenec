@@ -1,7 +1,7 @@
-//! What one request costs over the wire, fenec-pg against PostgreSQL:
+//! What one request costs over the wire, fenec-server against PostgreSQL:
 //! `make requests-bench`.
 //!
-//! fenec-pg is started here over a file of 10 000 rows, a 128-dim vector
+//! fenec-server is started here over a file of 10 000 rows, a 128-dim vector
 //! each, with its pg wire and HTTP on loopback; PostgreSQL + pgvector is the
 //! container `make pgvector-up` starts, and is skipped without it. Four
 //! requests -- a row by id, a filter with a limit, a `near` top ten and a
@@ -11,12 +11,12 @@
 //!   * over the pg wire's extended protocol, the statement prepared once
 //!     and bound for each request, as a driver does;
 //!   * over its simple protocol, the literals in the text;
-//!   * over HTTP (fenec-pg alone), `POST /query` with the parameters beside
+//!   * over HTTP (fenec-server alone), `POST /query` with the parameters beside
 //!     the text, on a kept-alive connection.
 //!
 //! PostgreSQL answers from inside Docker's virtual machine, so its figures
 //! carry that network: its empty query's round trip is printed beside them.
-//! Its writes commit with `synchronous_commit = off`, as fenec-pg's reach
+//! Its writes commit with `synchronous_commit = off`, as fenec-server's reach
 //! the disk within `--sync 250`.
 
 #[path = "../wire.rs"]
@@ -261,7 +261,7 @@ fn pg_client(url: &str) -> Client {
     client
 }
 
-/// fenec-pg over the pg wire ([`wire::Wire`]), each case's statement
+/// fenec-server over the pg wire ([`wire::Wire`]), each case's statement
 /// parsed once when `extended`.
 struct Pgw {
     c: wire::Wire,
@@ -468,7 +468,7 @@ fn main() {
     println!("{ROWS} rows x {DIM} dims; one client: round trip p50 / p99 in ms; {CLIENTS} clients: requests a second");
     let mut empty = Client::connect(&fenec_url, NoTls).unwrap();
     print!(
-        "empty query's round trip: fenec-pg {:.3} ms",
+        "empty query's round trip: fenec-server {:.3} ms",
         round_trip(&mut empty)
     );
     if pg {
@@ -482,7 +482,7 @@ fn main() {
     println!(
         "{:<28} {:>22} {:>22}",
         "",
-        "fenec-pg",
+        "fenec-server",
         if pg { "PostgreSQL" } else { "" }
     );
     for (proto, label) in [(0, "extended"), (1, "simple"), (2, "HTTP")] {

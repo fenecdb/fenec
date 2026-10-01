@@ -59,7 +59,7 @@ pub enum Answer {
     Taken,
     /// It does not hold the list the grant named: send the list.
     NeedsList,
-    /// It takes no lease (`fenec-pg` without `--lease`).
+    /// It takes no lease (`fenec-server` without `--lease`).
     Refuses,
     /// No answer, or an error.
     Silent,

@@ -1,4 +1,4 @@
-//! A tenant node over the pg wire: `fenec-pg --dir` with `--listen`.
+//! A tenant node over the pg wire: `fenec-server --dir` with `--listen`.
 //!
 //! The database in the startup packet is the tenant, and it is looked up
 //! again for every statement -- so a tenant created after a session opened is
@@ -6,7 +6,7 @@
 //! and one deleted meanwhile is gone. The node is the real binary; the
 //! client is the one `fenec import` connects to PostgreSQL with.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -33,7 +33,7 @@ fn start(name: &str) -> Node {
     let dir = std::env::temp_dir().join(format!("fenecpg-tenants-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
         .args(["--admin-token", ADMIN])
         .arg("--dir")
@@ -41,7 +41,7 @@ fn start(name: &str) -> Node {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let port = |line: &str, after: &str| -> Option<u16> {
         line.split(after)
@@ -57,7 +57,7 @@ fn start(name: &str) -> Node {
     while pg.is_none() || http.is_none() {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it listened:\n{seen}");
+            panic!("fenec-server ended before it listened:\n{seen}");
         }
         seen.push_str(&line);
         if line.contains("postgres://localhost:") {

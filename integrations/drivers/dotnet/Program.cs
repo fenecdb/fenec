@@ -1,4 +1,4 @@
-// Npgsql and pgvector-dotnet against fenec-pg. Each check prints its name;
+// Npgsql and pgvector-dotnet against fenec-server. Each check prints its name;
 // the first that fails ends the run with a non-zero exit, as a test runner
 // would, without one more dependency to restore.
 using Npgsql;

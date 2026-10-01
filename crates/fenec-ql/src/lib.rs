@@ -184,14 +184,14 @@ mod tests {
 
     /// Recursive descent used to overflow the stack on a deep expression. A
     /// stack overflow is not a catchable panic but an `abort` of the process:
-    /// in `fenec-pg` a single query would take the whole server down. The limit
+    /// in `fenec-server` a single query would take the whole server down. The limit
     /// is applied at parse time.
     #[test]
     fn expression_depth_is_bounded() {
         // libtest runs tests on 2 MiB threads and frames are ~10x larger in a
         // debug build: this test would `abort` on that stack -- not a
         // catchable panic but a stack overflow that kills the process. The
-        // budget matches the stack `fenec-pg` gives its sessions (see
+        // budget matches the stack `fenec-server` gives its sessions (see
         // MAX_EXPR_DEPTH).
         std::thread::Builder::new()
             .stack_size(8 << 20)

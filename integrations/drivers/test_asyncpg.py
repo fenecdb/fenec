@@ -1,6 +1,6 @@
-"""asyncpg over fenec-pg's pg wire. asyncpg asks every column in binary
+"""asyncpg over fenec-server's pg wire. asyncpg asks every column in binary
 and sends every parameter as the type `Describe` names for it -- which
-takes a type fenec-pg reports rather than the unspecified OID 0, where
+takes a type fenec-server reports rather than the unspecified OID 0, where
 asyncpg ran a catalog introspection query of its own and failed."""
 
 import asyncio

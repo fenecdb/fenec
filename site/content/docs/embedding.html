@@ -60,7 +60,7 @@ rest: the collection made goes, the one dropped comes back, the index goes.
 <code>rollback_to</code> puts back only what came after the mark, the block
 still open. A <code>compact</code> rewrites the file and runs on its own,
 outside a block. FenecQL has no <code>BEGIN</code> or
-<code>COMMIT</code>: <code>fenec-pg</code> runs a transaction as a block held
+<code>COMMIT</code>: <code>fenec-server</code> runs a transaction as a block held
 open (<a href="postgres.html#transactions">Transactions</a>).</p>
 </details>
 
@@ -72,7 +72,7 @@ a crash. The library never calls it for you.</p>
 <details class="deep"><summary>Details</summary>
 <p>File writes are buffered. If the process crashes before <code>sync</code> is
 called, the last writes are lost. In embedded use nothing calls it for you —
-<code>fenec-pg</code> has the <code>--sync</code> policy and a shutdown hook
+<code>fenec-server</code> has the <code>--sync</code> policy and a shutdown hook
 precisely because the library does not.</p>
 
 <p>A storage error stops writes. Once the sink refuses an append, a
@@ -93,7 +93,7 @@ rebuild took 3.4 s. A process that has to answer before those are linked
 opens with <code>fs::open_serving</code>: the vectors written since go in
 unlinked, <code>near</code> measures each of them until
 <code>Database::link_pending(n)</code> has linked them, and the process
-calls it under its write lock a few at a time, as <code>fenec-pg</code>
+calls it under its write lock a few at a time, as <code>fenec-server</code>
 does. <code>Database::unlinked()</code> says how many are left.</p>
 </details>
 
@@ -137,7 +137,7 @@ time is passed in as a parameter there.</p>
 <details class="deep"><summary>Details</summary>
 <p><code>Error</code> in <code>fenec-core/src/error.rs</code> is the single
 error type across the whole engine: allocation-free variants, no
-<code>Box</code>. <code>fenec-pg</code> maps it onto PostgreSQL SQLSTATE
+<code>Box</code>. <code>fenec-server</code> maps it onto PostgreSQL SQLSTATE
 codes.</p>
 </details>
 

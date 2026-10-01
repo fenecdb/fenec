@@ -1,4 +1,4 @@
-"""COPY TO STDOUT over fenec-pg's pg wire, as psycopg and asyncpg read it:
+"""COPY TO STDOUT over fenec-server's pg wire, as psycopg and asyncpg read it:
 a collection's rows in text, CSV and binary, typed by the client as it
 types PostgreSQL's, a query's rows, and a table's COPY out loaded into
 another's COPY in."""

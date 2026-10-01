@@ -5,7 +5,7 @@
 //!   * write hooks      (`register_hook`) -> trigger-like
 //!   * export adapters                    -> e.g. the PostgreSQL wire protocol
 //!
-//! The core knows nothing about plugins; fenec-pg uses this interface to make
+//! The core knows nothing about plugins; fenec-server uses this interface to make
 //! fenecdb speak like a PostgreSQL server.
 
 use crate::error::{Error, Result};

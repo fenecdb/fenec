@@ -1,5 +1,5 @@
-# Scrapes fenec-pg's /_metrics. The path carries an underscore because a
-# collection may be called `metrics`; the token is the one fenec-pg takes as
+# Scrapes fenec-server's /_metrics. The path carries an underscore because a
+# collection may be called `metrics`; the token is the one fenec-server takes as
 # --admin-token or --http-token, which docker-compose.yml writes to the file.
 global:
   scrape_interval: 15s

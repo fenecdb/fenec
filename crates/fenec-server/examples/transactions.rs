@@ -1,5 +1,5 @@
 //! What a transaction costs over the pg wire, and saves:
-//! `cargo run --release -p fenec-pg --example transactions -- [WRITES]`
+//! `cargo run --release -p fenec-server --example transactions -- [WRITES]`
 //!
 //! A server in this process over a file, one client, per sync policy: a
 //! lone `put` a statement, the same writes a hundred to a transaction, each
@@ -9,9 +9,9 @@
 //! transaction's writes land as one record, with one fsync where its
 //! statements alone took one each.
 
-use fenec_pg::client::{Client, Url};
-use fenec_pg::server::SyncPolicy;
-use fenec_pg::{Config, Server};
+use fenec_server::client::{Client, Url};
+use fenec_server::server::SyncPolicy;
+use fenec_server::{Config, Server};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 

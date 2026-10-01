@@ -30,8 +30,8 @@ cd fenec</pre>
 
 <details class="deep"><summary>Details</summary>
 <p>That produces <code>target/release/fenec</code> (the shell) and
-<code>target/release/fenec-pg</code> (the server). The Rust suite runs first on
-purpose: <code>cargo test</code> builds <code>fenec-pg</code>, and the JS sync
+<code>target/release/fenec-server</code> (the server). The Rust suite runs first on
+purpose: <code>cargo test</code> builds <code>fenec-server</code>, and the JS sync
 tests run against that binary.</p>
 </details>
 
@@ -84,7 +84,7 @@ const near = await db.from('docs').near('embed', queryVector).limit(5).rows();
 
 await persist(db);      // write the snapshot to IndexedDB
 await restore(db);      // read it back next session
-// or, in a worker: a file every statement is flushed into, which fenec-pg opens too
+// or, in a worker: a file every statement is flushed into, which fenec-server opens too
 // const file = await openFile(db, 'notes.fenec');
 </pre>
 
@@ -108,7 +108,7 @@ const db = await Fenec.open(await readFile('./fenec.wasm'));
 <ol class="steps-doc">
   <li>
     <p>Start the server on a file.</p>
-<pre data-lang="bash">./target/release/fenec-pg --listen 127.0.0.1:5433 --file data.fenec</pre>
+<pre data-lang="bash">./target/release/fenec-server --listen 127.0.0.1:5433 --file data.fenec</pre>
   </li>
   <li>
     <p>Connect with psql, or any PostgreSQL client.</p>
@@ -120,7 +120,7 @@ const db = await Fenec.open(await readFile('./fenec.wasm'));
   </li>
   <li>
     <p>Optionally, add an HTTP listener and query it with curl.</p>
-<pre data-lang="bash">./target/release/fenec-pg --file data.fenec --http 127.0.0.1:8080
+<pre data-lang="bash">./target/release/fenec-server --file data.fenec --http 127.0.0.1:8080
 curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</pre>
   </li>
 </ol>
@@ -130,7 +130,7 @@ curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</
 with anything that speaks the PostgreSQL protocol; the language is still
 FenecQL.</p>
 
-<pre data-lang="bash">./target/release/fenec-pg --ping        # 0 means up — a health check
+<pre data-lang="bash">./target/release/fenec-server --ping        # 0 means up — a health check
 </pre>
 
 <p>Passwords, transactions, COPY and drivers are on

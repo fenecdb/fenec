@@ -1,7 +1,7 @@
-//! A primary and a replica as `fenec-pg` processes: what a PostgreSQL client
+//! A primary and a replica as `fenec-server` processes: what a PostgreSQL client
 //! sees of each, a primary killed outright, and the replica promoted.
 
-use fenec_pg::client::{Client, Url};
+use fenec_server::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ struct Node {
 /// Starts the binary with its pg and HTTP listeners on random ports, and
 /// waits until both are listening.
 fn start(path: &Path, extra: &[&str]) -> Node {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
         .arg("--file")
         .arg(path)
@@ -40,7 +40,7 @@ fn start(path: &Path, extra: &[&str]) -> Node {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let (mut pg, mut http) = (None, None);
     let port = |line: &str, after: &str| -> Option<u16> {
@@ -55,7 +55,7 @@ fn start(path: &Path, extra: &[&str]) -> Node {
     while pg.is_none() || http.is_none() {
         let mut line = String::new();
         if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-pg ended before it listened:\n{log}");
+            panic!("fenec-server ended before it listened:\n{log}");
         }
         log.push_str(&line);
         if line.contains("postgres://localhost:") {
@@ -259,7 +259,7 @@ fn a_replicas_file_opens_only_to_follow_or_to_be_promoted() {
     replica.signal(SIGTERM);
 
     // Opened as a plain file, it would take writes on the primary's history.
-    let out = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let out = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--file"])
         .arg(&rf)
         .output()
@@ -301,7 +301,7 @@ fn replication_refuses_what_it_cannot_do() {
             "no TLS",
         ),
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+        let out = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
             .args(["--listen", "127.0.0.1:0", "--file"])
             .arg(&path)
             .args(&args)
@@ -320,13 +320,13 @@ fn replication_refuses_what_it_cannot_do() {
 #[test]
 fn a_server_with_no_stderr_still_stops() {
     let path = tmp("deaf.fenec");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-pg"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
         .args(["--listen", "127.0.0.1:0", "--file"])
         .arg(&path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("could not start fenec-pg");
+        .expect("could not start fenec-server");
     let mut err = BufReader::new(child.stderr.take().unwrap());
     let mut line = String::new();
     while !line.contains("postgres://localhost:") {

@@ -74,7 +74,7 @@ pub fn read_quiet(db: &RwLock<Database>) -> RwLockReadGuard<'_, Database> {
 }
 
 /// A wait for a transaction's next statement or its end: the yield a lock
-/// wait makes, then a sleep, as `fenec-pg` waits for a lock.
+/// wait makes, then a sleep, as `fenec-server` waits for a lock.
 pub fn pause(waited: &mut u32) {
     *waited += 1;
     match *waited < 64 {

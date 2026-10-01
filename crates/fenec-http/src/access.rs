@@ -295,7 +295,7 @@ impl Access {
         self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// A token for `claims`, a JSON object -- what `fenec-pg --mint-token`
+    /// A token for `claims`, a JSON object -- what `fenec-server --mint-token`
     /// prints.
     /// Signed with the first HS256 key, its `kid` named.
     pub fn mint(&self, claims: &str) -> std::result::Result<String, String> {

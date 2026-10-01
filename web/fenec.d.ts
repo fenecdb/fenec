@@ -235,7 +235,7 @@ export declare class Query<
   P = Row<F>,
   L extends readonly string[] = [],
 > {
-  /** Binds the query to an executor (wasm, HTTP, fenec-pg). */
+  /** Binds the query to an executor (wasm, HTTP, fenec-server). */
   bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L>;
 
   select<K extends keyof Row<F> & string>(
@@ -440,7 +440,7 @@ export interface HttpOptions {
 }
 
 /**
- * Remote fenecdb HTTP endpoint (`fenec-pg --http`). The builder generates the
+ * Remote fenecdb HTTP endpoint (`fenec-server --http`). The builder generates the
  * same FenecQL text; only the transport differs.
  */
 export declare class FenecHttp<S extends AnySchema<S> = Schema> {
@@ -574,7 +574,7 @@ export interface FenecFile {
 
 /**
  * Keeps the database in a file of the origin private file system, the bytes
- * fenec-pg keeps on disk: a file holding some is loaded into the database
+ * fenec-server keeps on disk: a file holding some is loaded into the database
  * (which must hold nothing yet), an empty one takes its image, and from then
  * on `run` appends every statement's writes to it and flushes before it
  * answers. Only in a dedicated worker, one at a time a file.
@@ -611,7 +611,7 @@ export interface Shape<F extends Fields = Fields> {
 }
 
 export interface SyncOptions<S extends AnySchema<S> = Schema> {
-  /** Server root (`fenec-pg --http`). */
+  /** Server root (`fenec-server --http`). */
   url: string;
   shapes: Shape<any>[];
   /** An existing local database; otherwise opened from the `wasm` path. */

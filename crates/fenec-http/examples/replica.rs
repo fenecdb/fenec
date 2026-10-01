@@ -75,7 +75,7 @@ fn primary(path: &Path, buffer: usize, sync_on_write: bool) -> Primary {
     Primary { db, addr }
 }
 
-/// Every `every`, what `fenec-pg --sync <ms>` does: hand the writes over
+/// Every `every`, what `fenec-server --sync <ms>` does: hand the writes over
 /// under the lock, fsync without it.
 fn syncer(db: Arc<RwLock<Database>>, every: Duration) {
     std::thread::spawn(move || loop {

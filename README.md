@@ -10,7 +10,7 @@ PostgreSQL protocol, and it has its own query language (**FenecQL**).
 
 **[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
 home page boots the real WebAssembly module and builds an HNSW index in your
-browser, and races fenec-pg against pgvector over a million vectors.
+browser, and races fenec-server against pgvector over a million vectors.
 Source in [`site/`](site/): `make site-serve` runs it locally, `make site-deploy`
 publishes it to Cloudflare Workers.
 
@@ -81,11 +81,11 @@ fewer than five queries and exits, fenecdb's open cost never amortises.
 
 **PostgreSQL + pgvector** for multi-writer systems shared over a network that
 need ACID. On maturity, concurrency and ecosystem the comparison is not even
-worth making — fenecdb is not aiming at that job. That is exactly why `fenec-pg`
+worth making — fenecdb is not aiming at that job. That is exactly why `fenec-server`
 exists: not to *replace* PostgreSQL but to reach fenecdb with the same tools.
 
 The numbers behind the comparison, and the method that produced them, are in
-[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-pg` against
+[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-server` against
 PostgreSQL and pgvector over the same wire, at a million vectors
 ([At scale](https://fenecdb.com/docs/benchmarks#scale)).
 
@@ -120,7 +120,7 @@ const db = await Fenec.open('./fenec.wasm');
 build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
-**PostgreSQL server.** `fenec-pg` answers psql, psycopg, asyncpg, pgx,
+**PostgreSQL server.** `fenec-server` answers psql, psycopg, asyncpg, pgx,
 tokio-postgres, node-postgres, Npgsql, JDBC, PHP's PDO and Ruby's pg
 ([drivers](https://fenecdb.com/docs/postgres#drivers)), and the catalog they
 look around in: `\d`, JDBC's `DatabaseMetaData` and
@@ -132,12 +132,12 @@ client libraries for Python, Go, Node, Rust, .NET, Java, PHP and Ruby work uncha
 them, in text, CSV or binary ([COPY](https://fenecdb.com/docs/postgres#copy)).
 
 ```bash
-make pg PGPASS=secret HTTP=127.0.0.1:8080
+make server PGPASS=secret HTTP=127.0.0.1:8080
 psql -h 127.0.0.1 -p 5432 -U fenec
 ```
 
 The same process carries the HTTP/JSON endpoint — never a second binary, since
-two processes opening one file would corrupt it. A second `fenec-pg` follows
+two processes opening one file would corrupt it. A second `fenec-server` follows
 it as a read replica with `--replica-of`: it is sent the writes on the
 primary's disk, serves reads, refuses writes with `25006`, and is promoted by
 hand; `fenec backup`, `fenec archive` and `fenec restore --to <time>` take a
@@ -152,7 +152,7 @@ into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
 ```bash
-docker pull ghcr.io/fenecdb/fenec-pg:0.1.6     # published, multi-arch
+docker pull ghcr.io/fenecdb/fenec-server:0.1.6     # published, multi-arch
 make docker && make docker-run PGPASS=secret   # or build it yourself
 ```
 

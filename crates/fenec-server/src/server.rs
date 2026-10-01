@@ -230,7 +230,7 @@ type Backends = Arc<Mutex<HashMap<i32, Arc<Backend>>>>;
 // ------------------------------------------------------------------ server
 
 /// What a session runs against: one database, or a directory of tenants
-/// where the startup packet's database name picks one (`fenec-pg --dir`).
+/// where the startup packet's database name picks one (`fenec-server --dir`).
 #[derive(Clone)]
 pub enum Source {
     One(Arc<RwLock<Database>>),
@@ -282,7 +282,7 @@ impl Server {
         Server::over(Source::One(db), cfg)
     }
 
-    /// A server over a directory of tenants (`fenec-pg --dir`): the database
+    /// A server over a directory of tenants (`fenec-server --dir`): the database
     /// name in the startup packet is the tenant. It runs no syncer of its
     /// own -- the registry's owner syncs and closes the files.
     pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
@@ -317,7 +317,7 @@ impl Server {
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is not a loopback address and authentication is off.\n\
-                     fenec-pg does not speak TLS; listening without auth on an \n\
+                     fenec-server does not speak TLS; listening without auth on an \n\
                      open network exposes the whole database to everyone. Use \n\
                      SCRAM with `--password` (or --insecure if deliberate).",
                     self.cfg.addr
@@ -338,7 +338,7 @@ impl Server {
             spawn_syncer(Arc::clone(db), self.cfg.sync, self.cfg.checkpoint_on_exit);
         }
         fenec_http::log!(
-            "fenec-pg {} listening on: postgres://localhost:{}/{}  [{}, sync={}]",
+            "fenec-server {} listening on: postgres://localhost:{}/{}  [{}, sync={}]",
             fenec_core::VERSION,
             listener.local_addr()?.port(),
             match &self.source {
@@ -403,7 +403,7 @@ impl Server {
             // swallows the closure and with it the stream.
             let refused = stream.try_clone().ok();
             let spawned = std::thread::Builder::new()
-                .name("fenec-pg session".to_string())
+                .name("fenec-server session".to_string())
                 .stack_size(SESSION_STACK)
                 .spawn(move || {
                     let _guard = guard;
@@ -457,7 +457,7 @@ fn is_remote(addr: &str) -> bool {
 /// Catches `SIGINT`/`SIGTERM`. The handler only writes an atomic
 /// (signal-safe); the real `sync` happens in the syncer thread.
 ///
-/// Public for `fenec-pg --dir`, which has no pg listener and runs its own
+/// Public for `fenec-server --dir`, which has no pg listener and runs its own
 /// syncer over the tenants.
 pub fn install_signal_handlers() {
     // libc's `signal` function, declared directly so as not to add a
@@ -1893,7 +1893,7 @@ fn session(
         // No TLS: a client connecting remotely should know.
         out.notice(
             "01000",
-            "the connection is not encrypted: fenec-pg does not speak TLS, traffic is plain text",
+            "the connection is not encrypted: fenec-server does not speak TLS, traffic is plain text",
         );
     }
     out.ready(b'I');

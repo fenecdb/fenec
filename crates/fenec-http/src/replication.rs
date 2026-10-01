@@ -537,7 +537,7 @@ pub fn open(path: &str, buffer: usize) -> fenec_core::error::Result<(Database, A
     open_with(path, buffer, true)
 }
 
-/// [`open`], mapped like any other file or -- `mapped` false, `fenec-pg
+/// [`open`], mapped like any other file or -- `mapped` false, `fenec-server
 /// --no-mmap` -- read into memory.
 pub fn open_with(
     path: &str,

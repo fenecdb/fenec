@@ -19,7 +19,7 @@ fenecdb gives a service a database of its own on a shared node, a token that
 reaches only that, and the writes on its disk as a stream of events — which
 is what an outbox table and a relay are usually built for.</p>
 
-<p>A tenant node (<code>fenec-pg --dir</code>) keeps a file per tenant, and
+<p>A tenant node (<code>fenec-server --dir</code>) keeps a file per tenant, and
 a tenant is named by the path, <code>/t/&lt;tenant&gt;/</code>, or over the
 PostgreSQL wire by the database a client connects to — never by the query,
 so one service cannot read another's rows. Give each service its tenant,
@@ -43,7 +43,7 @@ several hosts by itself.</p>
 event a consumer can read. You do not need an outbox table: a transaction's
 rows are announced together.</p>
 
-<pre data-lang="bash">fenec-pg --file orders.fenec --http 127.0.0.1:8080 --cdc
+<pre data-lang="bash">fenec-server --file orders.fenec --http 127.0.0.1:8080 --cdc
 
 # a consumer the server keeps the cursor of, made once
 curl -X POST http://127.0.0.1:8080/_changes/consumers/billing

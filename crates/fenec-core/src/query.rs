@@ -97,7 +97,7 @@ impl Expr {
     /// Extracts the `field = literal` pattern -- for hash index pushdown.
     ///
     /// A bound parameter is resolved as well: `where year = $1` is the usual
-    /// shape coming from the browser and from fenec-pg, and looking only at
+    /// shape coming from the browser and from fenec-server, and looking only at
     /// `Lit` disabled pushdown entirely on those two paths.
     pub fn equality_key<'a>(&'a self, params: &'a [Value]) -> Option<(&'a str, &'a Value)> {
         fn value<'a>(e: &'a Expr, params: &'a [Value]) -> Option<&'a Value> {

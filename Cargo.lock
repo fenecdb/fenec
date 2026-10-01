@@ -202,7 +202,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "fenec-pg"
+name = "fenec-ql"
+version = "0.1.6"
+dependencies = [
+ "fenec-core",
+]
+
+[[package]]
+name = "fenec-server"
 version = "0.1.6"
 dependencies = [
  "fenec-catalog",
@@ -211,13 +218,6 @@ dependencies = [
  "fenec-import",
  "fenec-ql",
  "fenec-wire",
-]
-
-[[package]]
-name = "fenec-ql"
-version = "0.1.6"
-dependencies = [
- "fenec-core",
 ]
 
 [[package]]

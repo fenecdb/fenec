@@ -1,4 +1,4 @@
-"""psycopg and SQLAlchemy over fenec-pg's pg wire. Both make a nested
+"""psycopg and SQLAlchemy over fenec-server's pg wire. Both make a nested
 transaction a savepoint -- psycopg quoting its name, `SAVEPOINT "_pg3_1"`,
 SQLAlchemy not -- and take a failure inside one back to it with
 `ROLLBACK TO`, the transaction going on."""
