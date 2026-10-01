@@ -245,8 +245,25 @@ pub fn statements(text: &str) -> Vec<&str> {
 
 /// `standby` says whether the database is a replica. It is asked only by the
 /// queries that are about it, since it takes the database's read lock.
+/// The text after the comments it opens with. Npgsql sends its type
+/// lookups as one text, two of them opening `-- Load field definitions
+/// ...`: read from the comment, they did not start with `select`, were
+/// taken for FenecQL and refused, and Npgsql could not open a connection.
+fn after_comments(mut s: &str) -> &str {
+    loop {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest.find('\n').map_or("", |i| &rest[i + 1..]);
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.find("*/").map_or("", |i| &rest[i + 2..]);
+        } else {
+            return s;
+        }
+    }
+}
+
 pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shim> {
-    let q = sql.trim().trim_end_matches(';').trim();
+    let q = after_comments(sql).trim().trim_end_matches(';').trim();
     let lower = q.to_ascii_lowercase();
     if is_fenecql(&lower) {
         return None;
@@ -421,6 +438,15 @@ mod tests {
         assert!(as_primary("SHOW server_version", &cfg).is_some());
         assert!(as_primary("select version()", &cfg).is_some());
         assert!(as_primary("SELECT c.oid FROM pg_catalog.pg_class c", &cfg).is_some());
+        // Npgsql's type lookups open with a comment.
+        assert!(matches!(
+            as_primary("-- Load enum fields\nSELECT typ.oid, enumlabel\nFROM pg_enum", &cfg),
+            Some(Shim::Catalog)
+        ));
+        assert!(matches!(
+            as_primary("/* a note */ SELECT oid FROM pg_type", &cfg),
+            Some(Shim::Catalog)
+        ));
     }
 
     /// Transaction control is handed to the session; a notification command
