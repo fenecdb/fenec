@@ -98,7 +98,7 @@ fn schema(indexes: &str) -> Schema {
         "docs",
         vec![
             if indexes.contains('h') {
-                kind.indexed(IndexKind::Hash)
+                kind.indexed(IndexKind::HASH)
             } else {
                 kind
             },

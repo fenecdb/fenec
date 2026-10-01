@@ -7,7 +7,7 @@ measurements, as every feature here does.
 
 | Phase | Feature | Size | Why it fits |
 |---|---|---|---|
-| 1 | `alter` and `@unique` | small | expected of any database; both ride on what exists |
+| 1 | `alter` and `@unique` -- **done** | small | expected of any database; both ride on what exists |
 | 2 | Objects (`json` fields, paths) | medium | the largest gap for a *document* database |
 | 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
 | 4 | TLS 1.3, our own | large | the security story ends at a terminator today |
@@ -26,7 +26,37 @@ they do not truncate.
 
 ---
 
-## Phase 1: `alter` and `@unique`
+## Phase 1: `alter` and `@unique` -- done
+
+Both shipped as designed below, with three changes the code asked for:
+
+- **A dropped place is not a field.** `Schema::fields` stays the fields a
+  document is read and written by, and the places dropped ones held are a
+  list beside it (`Schema::dropped`), written into the schema as nameless
+  fields of type tag 12. A tombstone field in `fields` would have had every
+  listing of a schema -- the catalog, `describe`, the HTTP schema, `fenec
+  types`, the sync layer -- learn to skip it. The store keeps the list and
+  works a field's place out from its position; `read_fields` takes places,
+  worked out once a query, since once a row took a scan of a million rows
+  21.2 -> 21.8 ms.
+- **The end of a payload is told where the skip looks for the next tag
+  anyway** (`codec::skip_field`), not by "the last field the schema had
+  when the record was written", which no record says. A payload cut inside
+  a value is still refused.
+- **A unique index is built by the first write's check after an open, not
+  by the open.** The check asks the index, which builds it from the
+  documents, so it is as exact, and an open that never writes -- a replica,
+  `fenec types` -- never pays for it.
+
+Measured (in memory, a million rows): an add, a rename and a drop take
+0.025, 0.021 and 0.004 ms; five scans 1.7% slower to 1.7% faster (21.2 ->
+21.6 ms, 36.8 -> 36.2, 39.1 -> 39.3), as the same build with the reads
+written as before was, the browser module's 1.70 -> 1.71 ms; a compact
+taking a dropped field out 95 ms against 56. An open with a unique field
+costs what it did (19 ms for a million rows), its first write 259 ms (15
+over 100 000), a put after it 940 ns against 850 under `@hash`, one without
+a unique field 852 against 848. The browser module: `@unique` 0.7 KB
+brotli, `alter` 4.0 KB.
 
 ### `alter`
 

@@ -7,7 +7,7 @@ use fenec_core::schema::{Field, VectorIndexSpec};
 fn snapshot() -> Snapshot {
     let mut db = Database::new();
     let mut title = Field::new("title", DataType::Text);
-    title.index = IndexKind::Hash;
+    title.index = IndexKind::HASH;
     title.required = true;
     let mut n = Field::new("n", DataType::Int);
     n.index = IndexKind::Sorted;
@@ -381,6 +381,86 @@ fn jdbc_primary_keys() {
         &[],
     );
     assert_eq!(text(&a), [["public", "docs", "id", "1", "docs_pkey"]]);
+}
+
+/// A `@unique` field's index is unique to `\d`, JDBC's `getIndexInfo` and
+/// an ORM's introspection: `indisunique`, `CREATE UNIQUE INDEX`, and a
+/// `UNIQUE` constraint beside it as PostgreSQL keeps one.
+#[test]
+fn a_unique_field_shows_a_unique_index_and_constraint() {
+    let mut db = Database::new();
+    let mut email = Field::new("email", DataType::Text);
+    email.index = IndexKind::UNIQUE;
+    let mut tag = Field::new("tag", DataType::Text);
+    tag.index = IndexKind::HASH;
+    db.execute(&Statement::CreateCollection {
+        schema: Schema::new("users", vec![email, tag]).unwrap(),
+        if_not_exists: false,
+    })
+    .unwrap();
+    let s = Snapshot::of(&db, "fenec", "16.0");
+    let oid = text(&run_sql(
+        &s,
+        "SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relname = 'users'",
+        &[],
+    ))[0][0]
+        .clone();
+    let indexes = run_sql(
+        &s,
+        &format!(
+            "SELECT c2.relname, i.indisprimary, i.indisunique, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+  pg_catalog.pg_get_constraintdef(con.oid, true), contype
+FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+  LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x'))
+WHERE c.oid = '{oid}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid
+ORDER BY i.indisprimary DESC, c2.relname;"
+        ),
+        &[],
+    );
+    assert_eq!(
+        text(&indexes),
+        [
+            [
+                "users_pkey",
+                "t",
+                "t",
+                "CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)",
+                "PRIMARY KEY (id)",
+                "p"
+            ],
+            [
+                "users_email_key",
+                "f",
+                "t",
+                "CREATE UNIQUE INDEX users_email_key ON public.users USING hash (email)",
+                "UNIQUE (email)",
+                "u"
+            ],
+            [
+                "users_tag_hash",
+                "f",
+                "f",
+                "CREATE INDEX users_tag_hash ON public.users USING hash (tag)",
+                "-",
+                "-"
+            ],
+        ]
+    );
+    let constraints = run_sql(
+        &s,
+        "SELECT tc.constraint_name, tc.constraint_type, k.column_name
+FROM information_schema.table_constraints tc
+  JOIN information_schema.key_column_usage k ON k.constraint_name = tc.constraint_name
+WHERE tc.table_name = 'users' ORDER BY 1",
+        &[],
+    );
+    assert_eq!(
+        text(&constraints),
+        [
+            ["users_email_key", "UNIQUE", "email"],
+            ["users_pkey", "PRIMARY KEY", "id"]
+        ]
+    );
 }
 
 #[test]

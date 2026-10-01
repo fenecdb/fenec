@@ -217,6 +217,7 @@ impl Parser {
         match kw.as_str() {
             "create" => self.create(),
             "drop" => self.drop(),
+            "alter" => self.alter(),
             "put" | "insert" => self.put(),
             "get" | "select" => self.get(),
             "explain" => {
@@ -299,7 +300,8 @@ impl Parser {
         self.expect(Tok::RParen)?;
         self.expect(Tok::At)?;
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
-            "hash" => IndexKind::Hash,
+            "hash" => IndexKind::HASH,
+            "unique" => IndexKind::UNIQUE,
             "sorted" => IndexKind::Sorted,
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
@@ -334,7 +336,8 @@ impl Parser {
                 self.next();
                 let kind = self.ident()?.to_ascii_lowercase();
                 match kind.as_str() {
-                    "hash" => field = field.indexed(IndexKind::Hash),
+                    "hash" => field = field.indexed(IndexKind::HASH),
+                    "unique" => field = field.indexed(IndexKind::UNIQUE),
                     "sorted" => field = field.indexed(IndexKind::Sorted),
                     "hnsw" | "vector" => {
                         let spec = self.hnsw_args()?;
@@ -534,6 +537,45 @@ impl Parser {
             name: self.ident()?,
             if_exists,
         })
+    }
+
+    /// `alter collection <name> add [field] <field> <type> ... | drop
+    /// [field] <field> | rename [field] <field> to <name>`.
+    fn alter(&mut self) -> Result<Statement> {
+        self.expect_kw("alter")?;
+        self.expect_kw("collection")?;
+        let collection = self.ident()?;
+        let change = match self.ident()?.to_ascii_lowercase().as_str() {
+            "add" => {
+                self.eat_kw("field");
+                Alter::AddField(self.field_def()?)
+            }
+            "drop" => {
+                self.eat_kw("field");
+                Alter::DropField(self.ident()?)
+            }
+            "rename" => {
+                self.eat_kw("field");
+                let from = self.ident()?;
+                self.expect_kw("to")?;
+                Alter::RenameField(from, self.ident()?)
+            }
+            // Every document would be rewritten under the write lock, which
+            // the changes `alter` makes are chosen not to need.
+            "alter" | "modify" | "set" | "change" | "retype" => {
+                return self.err(
+                    "a field's type does not change in place: add a field of the new type, \
+                     `set` it from the old one, and drop the old one",
+                )
+            }
+            other => {
+                return self.err(format!(
+                    "`alter collection` takes `add field`, `drop field` or `rename field`, \
+                     not `{other}`"
+                ))
+            }
+        };
+        Ok(Statement::AlterCollection { collection, change })
     }
 
     fn put(&mut self) -> Result<Statement> {

@@ -3997,3 +3997,115 @@ fn an_insert_of_a_taken_id_is_a_unique_violation() {
     );
     assert!(find(&c.simple("put t {id: 1, name: \"b\"}"), b'E').is_none());
 }
+
+/// A value a `@unique` field holds already is a unique_violation as well,
+/// from a put, an insert or a set, and in a transaction it fails the
+/// transaction as any error does.
+#[test]
+fn a_unique_field_taken_is_a_unique_violation() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection users (email text @unique, name text)");
+    assert!(find(&c.simple("put users {email: \"a@x\"}"), b'E').is_none());
+    assert!(find(&c.simple("put users {email: \"b@x\"}"), b'E').is_none());
+    for sql in [
+        "put users {email: \"a@x\"}",
+        "insert into users {email: \"a@x\"}",
+        "set users {email: \"a@x\"} where email = \"b@x\"",
+    ] {
+        let r = c.simple(sql);
+        assert_eq!(
+            find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+            Some("23505"),
+            "{sql}"
+        );
+    }
+    c.simple("BEGIN");
+    assert!(find(&c.simple("put users {email: \"c@x\"}"), b'E').is_none());
+    let r = c.simple("put users {email: \"c@x\"}");
+    assert_eq!(
+        find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+        Some("23505")
+    );
+    c.simple("ROLLBACK");
+    let n = c.simple("get users count");
+    assert_eq!(find(&n, b'D').unwrap().cells(), vec![Some("2".to_string())]);
+}
+
+/// `alter collection` and the `ALTER TABLE` a migration sends answer
+/// `ALTER TABLE`, the catalog shows the change at once, a transaction's
+/// `ROLLBACK` puts it back, and what fenecdb cannot do in place is refused,
+/// `0A000` where PostgreSQL would have done it.
+#[test]
+fn alter_table_adds_drops_and_renames_a_column() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection orders (customer text, total int)");
+    c.simple("put orders {customer: \"a\", total: 10}");
+    let tag = |r: &[Msg]| find(r, b'C').map(|m| m.tag_text());
+    let columns = |c: &mut Client| {
+        let r = c.simple(
+            "SELECT a.attname FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c \
+             ON c.oid = a.attrelid WHERE c.relname = 'orders' AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum",
+        );
+        r.iter()
+            .filter(|m| m.tag == b'D')
+            .map(|m| m.cells()[0].clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let r = c.simple("alter collection orders add field note text");
+    assert_eq!(tag(&r).as_deref(), Some("ALTER TABLE"), "{r:?}");
+    let r = c.simple(r#"ALTER TABLE "orders" ADD COLUMN "paid_at" timestamp with time zone NULL"#);
+    assert_eq!(tag(&r).as_deref(), Some("ALTER TABLE"), "{r:?}");
+    assert_eq!(
+        columns(&mut c),
+        ["id", "customer", "total", "note", "paid_at"]
+    );
+    let r = c.simple("ALTER TABLE orders RENAME COLUMN total TO amount");
+    assert_eq!(tag(&r).as_deref(), Some("ALTER TABLE"), "{r:?}");
+    let r = c.simple("ALTER TABLE orders DROP COLUMN note");
+    assert_eq!(tag(&r).as_deref(), Some("ALTER TABLE"), "{r:?}");
+    assert_eq!(columns(&mut c), ["id", "customer", "amount", "paid_at"]);
+    let r = c.simple("get orders select customer, amount, paid_at");
+    assert_eq!(
+        find(&r, b'D').unwrap().cells(),
+        vec![Some("a".to_string()), Some("10".to_string()), None]
+    );
+    // Over the extended protocol too, as a driver prepares it.
+    let r = c.extended("ALTER TABLE orders ADD COLUMN qty integer", &[], false);
+    assert_eq!(tag(&r).as_deref(), Some("ALTER TABLE"), "{r:?}");
+    // A transaction's rollback puts it back.
+    c.simple("BEGIN");
+    c.simple("ALTER TABLE orders ADD COLUMN gone bigint");
+    c.simple("put orders {customer: \"b\", gone: 1}");
+    assert!(columns(&mut c).contains(&"gone".to_string()));
+    c.simple("ROLLBACK");
+    assert_eq!(
+        columns(&mut c),
+        ["id", "customer", "amount", "paid_at", "qty"]
+    );
+    let n = c.simple("get orders count");
+    assert_eq!(find(&n, b'D').unwrap().cells(), vec![Some("1".to_string())]);
+    for (sql, code) in [
+        ("ALTER TABLE orders ALTER COLUMN amount TYPE text", "0A000"),
+        (
+            "ALTER TABLE orders ADD COLUMN price numeric(10, 2)",
+            "0A000",
+        ),
+        ("ALTER TABLE orders ADD COLUMN must int NOT NULL", "0A000"),
+        ("ALTER TABLE orders DROP COLUMN nope", "42P01"),
+        ("ALTER TABLE orders ADD COLUMN amount int", "42P07"),
+        (
+            "alter collection orders alter field amount type text",
+            "42601",
+        ),
+    ] {
+        let r = c.simple(sql);
+        assert_eq!(
+            find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+            Some(code),
+            "{sql}: {r:?}"
+        );
+    }
+}

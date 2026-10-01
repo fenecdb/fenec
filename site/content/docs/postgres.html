@@ -25,7 +25,9 @@ PostgreSQL driver you already use, or pgvector's libraries.</p>
 </ol>
 
 <p>The connection is PostgreSQL's; the query language is FenecQL. Tools that
-send plain <code>SELECT a, b FROM t</code> work too.</p>
+send plain <code>SELECT a, b FROM t</code> work too, and so does the
+<code>ALTER TABLE</code> a migration sends to add, drop or rename a
+column.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>fenecdb does not speak SQL. It does work with the connection tooling of the
@@ -36,6 +38,25 @@ so <a href="#pgvector">pgvector's client libraries</a> work unchanged; errors
 map to SQLSTATE codes
 (<code>42P01</code>, <code>42601</code>, <code>42804</code>,
 <code>57014</code>, and <code>25006</code> for a write sent to a replica).</p>
+
+<p><code>ALTER TABLE t ADD [COLUMN] c type</code>, <code>DROP [COLUMN] c</code>
+and <code>RENAME [COLUMN] a TO b</code> — what Django, Rails, Alembic and
+Prisma send — are the <a href="fenecql.html#changing-a-collection"><code>alter
+collection</code></a> they are, and answer <code>ALTER TABLE</code>, as
+<code>alter collection</code> itself does; the catalog shows the change at
+once, and a transaction's <code>ROLLBACK</code> puts it back. A column's
+type is one fenecdb has, by any of PostgreSQL's spellings of it —
+<code>varchar(n)</code> and <code>text</code>, <code>integer</code> and
+<code>bigint</code>, <code>double precision</code>, <code>boolean</code>,
+<code>bytea</code>, <code>timestamp with time zone</code>,
+<code>vector(n)</code>, <code>halfvec(n)</code>, <code>sparsevec(n)</code>,
+an array of one — with <code>NULL</code>, <code>UNIQUE</code> (an
+<code>@unique</code> field) and a <code>COLLATE "und-x-icu"</code> or
+<code>"tr-x-icu"</code>. What would need every row there rewritten or
+given a value — <code>ALTER COLUMN ... TYPE</code>, <code>NOT NULL</code>,
+<code>DEFAULT</code> — a type fenecdb has not, <code>IF [NOT] EXISTS</code>
+and several changes in one statement are refused with <code>0A000</code>
+(<code>feature_not_supported</code>).</p>
 
 <p><code>explain get ...</code> answers the way PostgreSQL's
 <code>EXPLAIN ANALYZE</code> does on the wire: rows of text in one column,
@@ -431,11 +452,12 @@ client stays silent for <code>--idle-in-transaction-timeout</code> seconds —
     every check-in expect.</li>
 </ul>
 
-<p>A <code>create</code>, a <code>drop</code> and a <code>create
-index</code> are writes of the transaction like any other, as in PostgreSQL:
-its <code>ROLLBACK</code>, or a <code>ROLLBACK TO</code> a savepoint before
-one, puts it back — the collection made goes, the one dropped comes back with
-its documents, the index goes — and nobody sees it before the
+<p>A <code>create</code>, a <code>drop</code>, a <code>create
+index</code> and an <code>alter collection</code> are writes of the
+transaction like any other, as in PostgreSQL: its <code>ROLLBACK</code>, or a
+<code>ROLLBACK TO</code> a savepoint before one, puts it back — the
+collection made goes, the one dropped comes back with its documents, the
+index goes, the fields are as they were — and nobody sees it before the
 <code>COMMIT</code>. In a transaction a <code>create index</code> is built
 under the lock the transaction holds; on its own it is built beside the
 database. A <code>compact</code> rewrites the file, which nothing can put
@@ -776,7 +798,12 @@ already reports for it — a vector as <code>vector(N)</code>, a sparse one as
 <code>sparsevec(N)</code>, a list as an array. Each fenecdb index is an index
 with its own access method: <code>hash</code>, <code>btree</code> for
 <code>@sorted</code>, <code>hnsw</code>, <code>bm25</code> for
-<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. It
+<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. An
+<code>@unique</code> field's is a unique <code>hash</code> index named as
+PostgreSQL names a unique constraint's (<code>users_email_key</code>),
+<code>indisunique</code>, with a <code>UNIQUE</code> constraint beside it in
+<code>pg_constraint</code> and <code>information_schema</code>, and a value
+it holds already is refused with <code>23505</code>. It
 is checked against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
 <code>\dt</code>, <code>\di</code>, <code>\dn</code>, <code>\l</code>),
 PgJDBC 42.7's <code>getTables</code>, <code>getColumns</code>,

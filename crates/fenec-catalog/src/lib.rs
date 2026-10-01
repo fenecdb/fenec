@@ -176,11 +176,15 @@ impl Table {
             column: "id".into(),
             ty: DataType::Int,
             primary: true,
+            unique: true,
         }];
         for f in &self.fields {
             let (am, kind) = match &f.index {
                 IndexKind::None => continue,
-                IndexKind::Hash => (AM_HASH, "hash"),
+                IndexKind::Hash { unique: false } => (AM_HASH, "hash"),
+                // Named as PostgreSQL names the index of a `UNIQUE`
+                // constraint, which is what a tool reads it as.
+                IndexKind::Hash { unique: true } => (AM_HASH, "key"),
                 IndexKind::Sorted => (AM_BTREE, "sorted"),
                 IndexKind::Text(_) => (AM_BM25, "text"),
                 IndexKind::Vector(_) => (AM_HNSW, "hnsw"),
@@ -194,7 +198,39 @@ impl Table {
                 column: f.name.clone(),
                 ty: f.ty.clone(),
                 primary: false,
+                unique: f.index.is_unique(),
             });
+        }
+        out
+    }
+
+    /// The constraints: the primary key, then a `UNIQUE` one for each
+    /// `@unique` field, as PostgreSQL keeps one beside each unique index
+    /// a constraint made -- `information_schema` and an ORM's
+    /// introspection read the constraints, `\d` and JDBC's `getIndexInfo`
+    /// the index. `(oid, name, contype, the index's oid, attnum, column)`.
+    fn constraints(&self) -> Vec<(i64, String, &'static str, i64, i64, String)> {
+        let mut out = vec![(
+            self.oid + 512,
+            format!("{}_pkey", self.name),
+            "p",
+            self.oid + 1,
+            1,
+            "id".to_string(),
+        )];
+        for i in self
+            .indexes()
+            .into_iter()
+            .filter(|i| i.unique && !i.primary)
+        {
+            out.push((
+                self.oid + 512 + i.attnum,
+                i.name,
+                "u",
+                i.oid,
+                i.attnum,
+                i.column,
+            ));
         }
         out
     }
@@ -208,6 +244,8 @@ struct Index {
     column: String,
     ty: DataType,
     primary: bool,
+    /// The primary key, or an `@unique` field's.
+    unique: bool,
 }
 
 /// The schemas the catalog is made from, taken under the read lock and
@@ -1237,7 +1275,7 @@ fn pg_index(alias: &str, s: &Snapshot) -> Rel {
                 V::Int(tb.oid),
                 V::Int(1),
                 V::Int(1),
-                V::Bool(i.primary),
+                V::Bool(i.unique),
                 V::Bool(false),
                 V::Bool(i.primary),
                 V::Bool(false),
@@ -1285,21 +1323,20 @@ fn pg_constraint(alias: &str, s: &Snapshot) -> Rel {
         ("conkey", INT2_ARRAY),
         ("confkey", INT2_ARRAY),
     ];
-    let rows = s
-        .tables
-        .iter()
-        .map(|tb| {
-            vec![
-                V::Int(tb.oid + 512),
-                t(format!("{}_pkey", tb.name)),
+    let mut rows = Vec::new();
+    for tb in &s.tables {
+        for (oid, name, contype, index, attnum, _) in tb.constraints() {
+            rows.push(vec![
+                V::Int(oid),
+                t(name),
                 V::Int(PUBLIC),
-                t("p"),
+                t(contype),
                 V::Bool(false),
                 V::Bool(false),
                 V::Bool(true),
                 V::Int(tb.oid),
                 V::Int(0),
-                V::Int(tb.oid + 1),
+                V::Int(index),
                 V::Int(0),
                 V::Int(0),
                 t(" "),
@@ -1308,11 +1345,11 @@ fn pg_constraint(alias: &str, s: &Snapshot) -> Rel {
                 V::Bool(true),
                 V::Int(0),
                 V::Bool(true),
-                V::Array(vec![V::Int(1)]),
+                V::Array(vec![V::Int(attnum)]),
                 nul(),
-            ]
-        })
-        .collect();
+            ]);
+        }
+    }
     rel(alias, &cols, rows)
 }
 
@@ -1427,19 +1464,24 @@ fn information_schema(name: &str, alias: &str, s: &Snapshot) -> Rel {
             ],
             s.tables
                 .iter()
-                .map(|tb| {
-                    vec![
-                        db(),
-                        t("public"),
-                        t(format!("{}_pkey", tb.name)),
-                        db(),
-                        t("public"),
-                        t(&tb.name),
-                        t("PRIMARY KEY"),
-                        t("NO"),
-                        t("NO"),
-                        t("YES"),
-                    ]
+                .flat_map(|tb| {
+                    tb.constraints().into_iter().map(|(_, name, contype, ..)| {
+                        vec![
+                            db(),
+                            t("public"),
+                            t(name),
+                            db(),
+                            t("public"),
+                            t(&tb.name),
+                            t(match contype {
+                                "p" => "PRIMARY KEY",
+                                _ => "UNIQUE",
+                            }),
+                            t("NO"),
+                            t("NO"),
+                            t("YES"),
+                        ]
+                    })
                 })
                 .collect(),
         ),
@@ -1457,17 +1499,21 @@ fn information_schema(name: &str, alias: &str, s: &Snapshot) -> Rel {
             ],
             s.tables
                 .iter()
-                .map(|tb| {
-                    vec![
-                        db(),
-                        t("public"),
-                        t(format!("{}_pkey", tb.name)),
-                        db(),
-                        t("public"),
-                        t(&tb.name),
-                        t("id"),
-                        V::Int(1),
-                    ]
+                .flat_map(|tb| {
+                    tb.constraints()
+                        .into_iter()
+                        .map(|(_, name, _, _, _, column)| {
+                            vec![
+                                db(),
+                                t("public"),
+                                t(name),
+                                db(),
+                                t("public"),
+                                t(&tb.name),
+                                t(column),
+                                V::Int(1),
+                            ]
+                        })
                 })
                 .collect(),
         ),
@@ -1488,7 +1534,7 @@ fn index_def(tb: &Table, i: &Index) -> String {
         AM_INVERTED => "inverted",
         _ => "btree",
     };
-    let unique = if i.primary { "UNIQUE " } else { "" };
+    let unique = if i.unique { "UNIQUE " } else { "" };
     format!(
         "CREATE {unique}INDEX {} ON public.{} USING {am} ({})",
         i.name, tb.name, i.column
@@ -2360,10 +2406,15 @@ fn call(name: &str, args: Vec<V>, ctx: &Ctx) -> Out<V> {
             out
         }
         "pg_get_constraintdef" => {
-            if s.tables.iter().any(|tb| Some(tb.oid + 512) == int(0)) {
-                t("PRIMARY KEY (id)")
-            } else {
-                V::Null
+            let oid = int(0);
+            let found = s
+                .tables
+                .iter()
+                .find_map(|tb| tb.constraints().into_iter().find(|c| Some(c.0) == oid));
+            match found {
+                Some((_, _, "p", ..)) => t("PRIMARY KEY (id)"),
+                Some((.., column)) => t(format!("UNIQUE ({column})")),
+                None => V::Null,
             }
         }
         "pg_encoding_to_char" => t("UTF8"),

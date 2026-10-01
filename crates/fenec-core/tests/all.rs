@@ -5,6 +5,7 @@
 //! without the indexes.
 
 mod aggregate;
+mod alter;
 mod blocks;
 mod changes;
 mod collate;
@@ -29,3 +30,4 @@ mod sorted;
 mod sparse;
 mod spill;
 mod storage;
+mod unique;

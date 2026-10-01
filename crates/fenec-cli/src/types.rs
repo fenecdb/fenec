@@ -193,7 +193,8 @@ fn ts_type(t: &DataType) -> String {
 fn index_note(k: &IndexKind) -> Option<String> {
     match k {
         IndexKind::None => None,
-        IndexKind::Hash => Some(" @hash".into()),
+        IndexKind::Hash { unique: false } => Some(" @hash".into()),
+        IndexKind::Hash { unique: true } => Some(" @unique".into()),
         IndexKind::Sorted => Some(" @sorted".into()),
         IndexKind::Vector(spec) => Some(format!(
             " @hnsw({}, m={}, ef_search={}{})",
@@ -238,7 +239,7 @@ mod tests {
             vec![
                 Field::new("title", DataType::Text).required(),
                 Field::new("tags", DataType::List(Box::new(DataType::Text))),
-                Field::new("year", DataType::Int).indexed(IndexKind::Hash),
+                Field::new("year", DataType::Int).indexed(IndexKind::HASH),
                 Field::new("published", DataType::Timestamp),
                 Field::new("embed", DataType::Vector(768, VecPrec::F32))
                     .indexed(IndexKind::Vector(VectorIndexSpec::default())),

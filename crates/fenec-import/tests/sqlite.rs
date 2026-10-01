@@ -363,7 +363,7 @@ fn large_table_loads_end_to_end() {
     let mut target = Database::new();
     let mut o = Options::new("t");
     o.id = IdSource::Auto;
-    o.indexes.push(("category".into(), IndexKind::Hash));
+    o.indexes.push(("category".into(), IndexKind::HASH));
     let s = load::run(&mut src, &mut target, &o).unwrap();
     assert_eq!(s.rows, 20_000);
     assert_eq!(target.stats()[0].documents, 20_000);

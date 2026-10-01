@@ -616,7 +616,8 @@ segment `append` would put it in (`replay_noting`): framed afresh into a `Vec`
 of its own first and copied again, it was 17 of a 25 ms load, now 9.6;
 the history (kind 8) and a graph a server keeps in the tail (kind 4) are the
 appended records that are not writes; a block (kind 9) holds a record for
-each of its writes: a data record, or a create's, a drop's or an index's.
+each of its writes: a data record, or a create's, a drop's, an index's or
+an alter's (kind 12).
 A head is written in one place (`head`, the counter's `image_head` aside)
 and read in one (`record_at`), and a walk over a file's records is a
 `Walk` -- a load, a repoint and the search for the last graphs each wrote
@@ -886,6 +887,73 @@ HTTP, `23505` over the pg wire, where `Exists` is a collection's `42P07`
 the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
+
+**`@unique` is a `@hash` that asks its bucket before a write.**
+`IndexKind::Hash { unique }`, written as index kind 8 so a binary from
+before refuses the file rather than open it as a plain hash and take the
+duplicates. `put`, `insert` and `set` ask `Collection::unique_clash` after
+the hooks and before anything is written: the bucket the value would go in
+holding another id is `Error::Duplicate` (`23505`, 409), the statement put
+back whole -- and the id `put` handed out for the document handed out
+again, since nothing of it reached the store for the block's mark. A block's
+earlier writes are in the bucket as a write keeps a built index up, so it
+may free a value and take it again; `null` is no value; equality is the
+hash key's, so `-0.0` meets `0.0`. The index is a `Derived` like any hash,
+and the first ask after an open builds it from the documents, which is what
+makes the answer exact: an open costs nothing more (19 ms for an image of a
+million rows either way), the first write 15 ms over 100 000 rows and 259
+ms over a million, and a put after it 940 ns against 850 under `@hash`; a
+collection with no unique field writes as before (848 against 852). `create
+index ... @unique` over a value held twice is refused naming it and two of
+its documents, under the lock or beside the database, where it is asked of
+the index once the writes made meanwhile are in. `Database::apply` builds
+it and asks nothing: the primary did. The catalog shows a unique `hash`
+index named `<t>_<f>_key` and a `UNIQUE` constraint beside it.
+
+**`alter collection` rewrites no document; positions are not places.** A
+document is its values in field order, so a field added goes last and a
+document written before it ends before its place -- `skip_field` skips
+nothing at the end, and the read is `null` (`Schema::read_doc`,
+`Store::read_field`, `read_fields`); a rename is the schema alone; a drop
+leaves the place in `Schema::dropped`, written as a nameless field of type
+tag 12, skipped on read, written as `null`, refused by name, its index
+taken off (`Collection::take_indexes`), until `compact` writes each
+document without it (`strip_dropped`, the kept values' bytes copied: 95
+ms over a million rows in memory against 56 for a compact with none). A
+field's position -- what `field_pos` gives and every reader passes -- is
+its index in `fields`; its place in a payload is past the dropped ones
+before it (`Schema::place`). The store keeps the dropped places
+(`Store::set_dropped`, set wherever the schema changes) and works a
+place out per read for `read_field`; `read_fields` takes places, worked
+out once a query by its callers (`Filter::new`, the aggregate, the
+rebuild): worked out a row, the compare took a million-row scan 21.2 ->
+21.8 ms. Natively the end is told inside the skip's own tag lookup
+(`skip::<true>`); asked in the loop, a scan reading two fields three apart
+took 39.1 -> 40.4 ms; the browser module asks the compare, a second copy of
+the skip being 1.1 KB of it. After both, five scans of a million rows went
+from 1.7% slower to 1.7% faster (21.2 -> 21.6 ms, 36.8 -> 36.2, 39.1 ->
+39.3), as the same build with `read_fields` written as before did (+1.3%
+to +3.1%) -- where the code lands, not what it does -- and the browser's
+1.70 -> 1.71 ms. An alter is record kind 12 -- `[change][field]
+[new name][schema]` (`FieldChange`) -- not a kind-5 record with a change
+byte, which a binary from before would read as an index added; it counts
+one write, rides in a block, and is undone as an index built is
+(`Undo::Altered`: the schema before, a dropped field's indexes to put
+back). The load keeps a graph restored before it under its field's new
+name; a replica applies it through `Collection::alter_fields`, as the
+write path does, checking nothing; `changes_in` reads the documents after
+it by the schema it made. A field added under a dropped one's name is a new
+field: the old values stay in the dropped place. A type change is refused:
+it would rewrite every document under the write lock. A compact over a
+collection holding a dropped place holds the lock (`compact_online`): the
+copies made beside the database are the records as they stand. Over the
+pg wire `sql::alter` reads PostgreSQL's `ALTER TABLE ... ADD/DROP/RENAME
+[COLUMN]` as the `alter collection` it is, a type by any of PostgreSQL's
+spellings fenecdb has one for, and `compat` refuses the rest with `0A000`;
+the answer is tagged `ALTER TABLE`. An add, a rename and a drop take 0.025,
+0.021 and 0.004 ms over a million rows; the browser module grew 12.2 KB,
+4.0 KB brotli -- the reading side, which a file from a server needs, and
+the writing side, which a page's own database does.
 
 **A vector written again is one node** (`VectorIndex::place`,
 `aliases`, `Same`). Written hundreds of times, a node each filled its

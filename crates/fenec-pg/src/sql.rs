@@ -390,6 +390,285 @@ fn ident(t: Tok) -> Option<String> {
     .then_some(w)
 }
 
+/// What a refused `ALTER TABLE` is answered with: its SQLSTATE and why.
+pub type Refusal = (&'static str, String);
+
+/// PostgreSQL's `ALTER TABLE t ADD [COLUMN] c type`, `DROP [COLUMN] c` and
+/// `RENAME [COLUMN] a TO b`, which an ORM's migrations and a migration tool
+/// send, as the FenecQL `alter collection` it is; `None` for a text that is
+/// no `ALTER TABLE`. Only a type fenecdb has, and a change that rewrites no
+/// document: a new type, a `NOT NULL`, a `DEFAULT` -- each a value every
+/// row already there would need -- or several changes at once are refused
+/// (`0A000`), as a name FenecQL cannot write is (`42602`).
+pub fn alter(text: &str) -> Option<std::result::Result<String, Refusal>> {
+    let head = text.trim_start().as_bytes();
+    if !head
+        .get(..5)
+        .is_some_and(|w| w.eq_ignore_ascii_case(b"alter"))
+    {
+        return None;
+    }
+    let mut t = tokens(text);
+    while t.last() == Some(&Tok::Punct(';')) {
+        t.pop();
+    }
+    let word = |w: &str| Tok::Word(w.into());
+    if t.len() < 2 || t[0] != word("alter") || t[1] != word("table") {
+        return None;
+    }
+    Some(alter_table(&t[2..]))
+}
+
+/// The tokens of an `ALTER TABLE`, as its parts are read.
+type Toks<'a> = std::iter::Peekable<std::iter::Cloned<std::slice::Iter<'a, Tok>>>;
+
+/// Takes the word `w` if it is next.
+fn eat(t: &mut Toks<'_>, w: &str) -> bool {
+    let hit = matches!(t.peek(), Some(Tok::Word(x)) if x == w);
+    if hit {
+        t.next();
+    }
+    hit
+}
+
+fn alter_table(t: &[Tok]) -> std::result::Result<String, Refusal> {
+    let refuse = |what: &str| Err(("0A000", format!("ALTER TABLE {what} is not supported")));
+    let mut t = t.iter().cloned().peekable();
+    if eat(&mut t, "if") {
+        return refuse("IF EXISTS");
+    }
+    eat(&mut t, "only");
+    let mut table = name(t.next())?;
+    if t.peek() == Some(&Tok::Punct('.')) {
+        if table != "public" {
+            return Err((
+                "3F000",
+                format!("schema \"{table}\" does not exist; collections are in public"),
+            ));
+        }
+        t.next();
+        table = name(t.next())?;
+    }
+    if t.peek() == Some(&Tok::Punct('*')) {
+        t.next();
+    }
+    let action = match t.next() {
+        Some(Tok::Word(w)) => w,
+        _ => return refuse("without an action"),
+    };
+    let fenecql = match action.as_str() {
+        "add" => {
+            if eat(&mut t, "constraint") {
+                return refuse(
+                    "ADD CONSTRAINT: a unique column is `create index on t (c) @unique` \
+                     in FenecQL",
+                );
+            }
+            eat(&mut t, "column");
+            if eat(&mut t, "if") {
+                return refuse("ADD COLUMN IF NOT EXISTS");
+            }
+            let column = name(t.next())?;
+            let ty = column_type(&mut t)?;
+            let mut extra = String::new();
+            loop {
+                match t.next() {
+                    None => break,
+                    Some(Tok::Word(w)) => match w.as_str() {
+                        // Nullable is what an added field is.
+                        "null" => {}
+                        "unique" => extra.push_str(" @unique"),
+                        "collate" => {
+                            let c = match t.next() {
+                                Some(Tok::Word(c) | Tok::Name(c)) => c,
+                                _ => return refuse("COLLATE without a collation"),
+                            };
+                            match c.as_str() {
+                                "und-x-icu" => extra.push_str(" collate und"),
+                                "tr-x-icu" => extra.push_str(" collate tr"),
+                                _ => {
+                                    return Err((
+                                        "42704",
+                                        format!(
+                                            "collation \"{c}\" does not exist; fenecdb has \
+                                             und-x-icu and tr-x-icu"
+                                        ),
+                                    ))
+                                }
+                            }
+                        }
+                        "not" | "default" => {
+                            return refuse(
+                                "ADD COLUMN with NOT NULL or DEFAULT: the rows already there \
+                                 hold no value for the column, and none is written for them",
+                            )
+                        }
+                        other => {
+                            return refuse(&format!(
+                                "ADD COLUMN with {}",
+                                other.to_ascii_uppercase()
+                            ))
+                        }
+                    },
+                    Some(Tok::Punct(',')) => return refuse("with several actions"),
+                    Some(_) => return refuse("ADD COLUMN with what follows the type"),
+                }
+            }
+            format!("alter collection {table} add field {column} {ty}{extra}")
+        }
+        "drop" => {
+            if eat(&mut t, "constraint") {
+                return refuse("DROP CONSTRAINT");
+            }
+            eat(&mut t, "column");
+            if eat(&mut t, "if") {
+                return refuse("DROP COLUMN IF EXISTS");
+            }
+            let column = name(t.next())?;
+            // Nothing depends on a column: both are what is done anyway.
+            if !eat(&mut t, "cascade") {
+                eat(&mut t, "restrict");
+            }
+            if t.next().is_some() {
+                return refuse("with several actions");
+            }
+            format!("alter collection {table} drop field {column}")
+        }
+        "rename" => {
+            if eat(&mut t, "to") {
+                return refuse("RENAME TO: a collection keeps its name");
+            }
+            if eat(&mut t, "constraint") {
+                return refuse("RENAME CONSTRAINT");
+            }
+            eat(&mut t, "column");
+            let from = name(t.next())?;
+            if !eat(&mut t, "to") {
+                return refuse("RENAME without TO");
+            }
+            let to = name(t.next())?;
+            if t.next().is_some() {
+                return refuse("with what follows RENAME");
+            }
+            format!("alter collection {table} rename field {from} to {to}")
+        }
+        "alter" => {
+            return refuse(
+                "ALTER COLUMN: a column's type, default and nullability do not change in \
+                 place; add a column, update it from the old one, and drop the old one",
+            )
+        }
+        other => return refuse(&other.to_ascii_uppercase()),
+    };
+    Ok(fenecql)
+}
+
+/// A name FenecQL can write, or the refusal of one it cannot.
+fn name(t: Option<Tok>) -> std::result::Result<String, Refusal> {
+    let shown = match &t {
+        Some(Tok::Word(w) | Tok::Name(w)) => w.clone(),
+        _ => String::new(),
+    };
+    t.and_then(ident).ok_or_else(|| {
+        (
+            "42602",
+            format!("invalid name \"{shown}\": fenecdb names are letters, digits and _"),
+        )
+    })
+}
+
+/// `(n)` after a type: a vector's dimension, or a length text does not
+/// keep; empty for one that is no number.
+fn size(t: &mut Toks<'_>) -> Option<String> {
+    if t.peek() != Some(&Tok::Punct('(')) {
+        return None;
+    }
+    t.next();
+    let n = match t.next() {
+        Some(Tok::Word(n)) if n.bytes().all(|b| b.is_ascii_digit()) => n,
+        _ => String::new(),
+    };
+    while !matches!(t.next(), Some(Tok::Punct(')')) | None) {}
+    Some(n)
+}
+
+/// The FenecQL type of a PostgreSQL column type, for the types fenecdb
+/// has: the ones the wire describes its own as, and their spellings.
+fn column_type(t: &mut Toks<'_>) -> std::result::Result<String, Refusal> {
+    let unknown = |ty: &str| {
+        Err((
+            "0A000",
+            format!(
+                "fenecdb has no {ty} type: bool, bigint, double precision, text, bytea, \
+                     timestamptz, vector, halfvec, sparsevec and arrays of them are its types"
+            ),
+        ))
+    };
+    let first = match t.next() {
+        Some(Tok::Word(w) | Tok::Name(w)) => w,
+        _ => return unknown("such"),
+    };
+    let mut ty = match first.as_str() {
+        "text" | "varchar" => {
+            size(t);
+            "text".to_string()
+        }
+        "character" => {
+            if t.peek() != Some(&Tok::Word("varying".into())) {
+                return unknown("character(n)");
+            }
+            t.next();
+            size(t);
+            "text".to_string()
+        }
+        "int" | "integer" | "int2" | "int4" | "int8" | "bigint" | "smallint" => "int".into(),
+        "real" | "float" | "float4" | "float8" => {
+            size(t);
+            "float".into()
+        }
+        "double" => {
+            if t.next() != Some(Tok::Word("precision".into())) {
+                return unknown("double");
+            }
+            "float".into()
+        }
+        "bool" | "boolean" => "bool".into(),
+        "bytea" => "bytes".into(),
+        "timestamptz" => "timestamp".into(),
+        "timestamp" => {
+            size(t);
+            // `with time zone` or `without`: a timestamp is UTC either way.
+            if matches!(t.peek(), Some(Tok::Word(w)) if w == "with" || w == "without") {
+                t.next();
+                for w in ["time", "zone"] {
+                    if t.next() != Some(Tok::Word(w.into())) {
+                        return unknown("timestamp");
+                    }
+                }
+            }
+            "timestamp".into()
+        }
+        "vector" | "halfvec" | "sparsevec" => match size(t).filter(|n| !n.is_empty()) {
+            Some(n) => match first.as_str() {
+                "vector" => format!("vector<{n}>"),
+                "halfvec" => format!("vector<{n}, f16>"),
+                _ => format!("sparse<{n}>"),
+            },
+            None => return unknown(&format!("{first} without a dimension")),
+        },
+        other => return unknown(other),
+    };
+    // `text[]`: a list of them.
+    if t.peek() == Some(&Tok::Punct('[')) {
+        t.next();
+        if t.next() != Some(Tok::Punct(']')) {
+            return unknown("array of a size");
+        }
+        ty = format!("[{ty}]");
+    }
+    Ok(ty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +799,102 @@ mod tests {
         ] {
             assert_eq!(select(other), None, "{other}");
         }
+    }
+
+    /// What Django, Rails, Alembic and Prisma send for a column added,
+    /// dropped or renamed, and what they get.
+    #[test]
+    fn alter_table_is_the_alter_collection_it_is() {
+        for (sql, want) in [
+            (
+                r#"ALTER TABLE "orders" ADD COLUMN "note" varchar(100) NULL"#,
+                "alter collection orders add field note text",
+            ),
+            (
+                r#"ALTER TABLE "orders" ADD "paid_at" timestamp with time zone;"#,
+                "alter collection orders add field paid_at timestamp",
+            ),
+            (
+                "alter table public.orders add column qty integer",
+                "alter collection orders add field qty int",
+            ),
+            (
+                "ALTER TABLE ONLY orders ADD COLUMN email TEXT UNIQUE",
+                "alter collection orders add field email text @unique",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN embedding vector(384)",
+                "alter collection orders add field embedding vector<384>",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN h halfvec(8)",
+                "alter collection orders add field h vector<8, f16>",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN s sparsevec(30522)",
+                "alter collection orders add field s sparse<30522>",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN tags text[]",
+                "alter collection orders add field tags [text]",
+            ),
+            (
+                "ALTER TABLE orders ADD COLUMN w double precision",
+                "alter collection orders add field w float",
+            ),
+            (
+                r#"ALTER TABLE orders ADD COLUMN name text COLLATE "und-x-icu""#,
+                "alter collection orders add field name text collate und",
+            ),
+            (
+                r#"ALTER TABLE "orders" DROP COLUMN "note" CASCADE"#,
+                "alter collection orders drop field note",
+            ),
+            (
+                "ALTER TABLE orders DROP qty",
+                "alter collection orders drop field qty",
+            ),
+            (
+                r#"ALTER TABLE "orders" RENAME COLUMN "total" TO "amount""#,
+                "alter collection orders rename field total to amount",
+            ),
+            (
+                "ALTER TABLE orders RENAME total TO amount",
+                "alter collection orders rename field total to amount",
+            ),
+        ] {
+            assert_eq!(alter(sql), Some(Ok(want.to_string())), "{sql}");
+        }
+        for (sql, code) in [
+            ("ALTER TABLE orders ALTER COLUMN total TYPE text", "0A000"),
+            (
+                "ALTER TABLE orders ALTER COLUMN total SET NOT NULL",
+                "0A000",
+            ),
+            ("ALTER TABLE orders ADD COLUMN n int NOT NULL", "0A000"),
+            ("ALTER TABLE orders ADD COLUMN n int DEFAULT 0", "0A000"),
+            ("ALTER TABLE orders ADD COLUMN n numeric(10, 2)", "0A000"),
+            ("ALTER TABLE orders ADD COLUMN n jsonb", "0A000"),
+            (
+                "ALTER TABLE orders ADD COLUMN n int, ADD COLUMN m int",
+                "0A000",
+            ),
+            ("ALTER TABLE orders ADD COLUMN IF NOT EXISTS n int", "0A000"),
+            ("ALTER TABLE orders RENAME TO purchases", "0A000"),
+            ("ALTER TABLE orders ADD CONSTRAINT c UNIQUE (n)", "0A000"),
+            (r#"ALTER TABLE orders ADD COLUMN "a b" int"#, "42602"),
+            ("ALTER TABLE other.orders DROP COLUMN n", "3F000"),
+            (
+                r#"ALTER TABLE orders ADD COLUMN n text COLLATE "C""#,
+                "42704",
+            ),
+        ] {
+            match alter(sql) {
+                Some(Err((c, _))) => assert_eq!(c, code, "{sql}"),
+                other => panic!("{sql}: {other:?}"),
+            }
+        }
+        assert_eq!(alter("ALTER INDEX x RENAME TO y"), None);
+        assert_eq!(alter("select 1"), None);
     }
 }

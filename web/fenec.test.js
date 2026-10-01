@@ -574,6 +574,50 @@ test('the module made without indexes and the full one open each other\'s files'
   for (const db of [full, small, fromImage, fromTail]) db.close();
 });
 
+test('alter collection in the browser, and a file holding one loaded', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const cat = (...parts) => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    parts.reduce((at, p) => (out.set(p, at), at + p.length), 0);
+    return out;
+  };
+  const db = await Fenec.open(wasm);
+  db.run('create collection o (customer text @hash, total int @sorted, status text)');
+  db.run('put o [{customer: "a", total: 10, status: "open"}, {customer: "b", total: 20}]');
+  const image = db.snapshot();
+  db.journal();
+  db.run('alter collection o add field note text @unique');
+  db.run('alter collection o drop field status');
+  db.run('alter collection o rename field total to amount');
+  db.run('put o {customer: "c", amount: 30, note: "n"}');
+  assert.throws(() => db.run('put o {customer: "d", note: "n"}'), /unique/);
+  const tail = db.drain();
+  const answers = (d) => ({
+    rows: d.rows('get o select customer, amount, note order id'),
+    ranged: d.rows('get o select customer where amount >= 20 order amount').map((r) => r.customer),
+  });
+  const want = {
+    rows: [
+      { customer: 'a', amount: 10, note: null },
+      { customer: 'b', amount: 20, note: null },
+      { customer: 'c', amount: 30, note: 'n' },
+    ],
+    ranged: ['b', 'c'],
+  };
+  assert.deepEqual(answers(db), want);
+  // The image with the alters after it, and an image taken after them.
+  const fromTail = await Fenec.open(wasm);
+  fromTail.load(cat(image, tail.bytes));
+  assert.deepEqual(answers(fromTail), want);
+  const fromImage = await Fenec.open(wasm);
+  fromImage.load(db.snapshot());
+  assert.deepEqual(answers(fromImage), want);
+  // A compact takes the dropped place out and answers the same.
+  fromImage.run('compact');
+  assert.deepEqual(answers(fromImage), want);
+  for (const d of [db, fromTail, fromImage]) d.close();
+});
+
 test('fuse end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

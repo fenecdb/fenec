@@ -377,7 +377,8 @@ fn print_response(r: &Response, took: std::time::Duration) {
                 for f in &s.fields {
                     let ix = match &f.index {
                         IndexKind::None => String::new(),
-                        IndexKind::Hash => "  @hash".into(),
+                        IndexKind::Hash { unique: false } => "  @hash".into(),
+                        IndexKind::Hash { unique: true } => "  @unique".into(),
                         IndexKind::Sorted => "  @sorted".into(),
                         IndexKind::Vector(sp) => format!(
                             "  @hnsw({}, m={}, ef_search={}{})",

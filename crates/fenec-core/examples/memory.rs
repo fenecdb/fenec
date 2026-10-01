@@ -48,7 +48,7 @@ fn main() {
         schema: Schema::new(
             "s",
             vec![
-                Field::new("category", DataType::Text).indexed(IndexKind::Hash),
+                Field::new("category", DataType::Text).indexed(IndexKind::HASH),
                 Field::new("embed", DataType::Vector(dim, VecPrec::F32))
                     .indexed(IndexKind::Vector(VectorIndexSpec::default())),
             ],

@@ -1897,6 +1897,8 @@ async function* sseEvents(res) {
  * `create collection` text from a schema: field name, type, collation and
  * index as is. The collation too: without it the replica's field compared
  * its text by the bytes, and paged and ordered differently from the server.
+ * `@unique` is a plain hash here, as on a replica: a batch lands rows'
+ * last states one at a time, and a value moved between two collided.
  */
 function schemaDDL(schema) {
   const fields = schema.fields.map(
@@ -1904,7 +1906,7 @@ function schemaDDL(schema) {
       `${ident(f.name)} ${f.type}` +
       (f.collate ? ` collate ${collation(f.collate)}` : '') +
       (f.required ? ' required' : '') +
-      (f.index ? ` @${f.index}` : ''),
+      (f.index ? ` @${f.index === 'unique' ? 'hash' : f.index}` : ''),
   );
   return `create collection if not exists ${ident(schema.name, 'collection')} (${fields.join(', ')})`;
 }

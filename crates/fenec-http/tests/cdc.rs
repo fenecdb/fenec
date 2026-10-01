@@ -135,6 +135,38 @@ fn events(body: &str) -> Vec<Event> {
         .collect()
 }
 
+/// An `alter collection` is a change of its own, and the documents after it
+/// are read by the schema it made: a field renamed comes under its new
+/// name, a dropped one not at all.
+#[test]
+fn an_alter_is_a_change_and_the_documents_after_it_read_by_it() {
+    let n = start("alter", replication::DEFAULT_BUFFER);
+    n.run("create collection a (n int, s text)");
+    n.run("put a {n: 1, s: \"x\"}");
+    n.run("alter collection a rename field s to t");
+    n.run("alter collection a drop field n");
+    n.run("put a {t: \"y\"}");
+    let all = n.changes("since=0");
+    assert_eq!(all.status, 200, "{}", all.body);
+    let got = events(&all.body);
+    let ops: Vec<_> = got
+        .iter()
+        .map(|e| (e.0, e.1.as_str(), e.4.as_deref()))
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            (1, "create", None),
+            (2, "put", None),
+            (3, "alter", None),
+            (4, "alter", None),
+            (5, "put", Some("y")),
+        ]
+    );
+    let last = all.body.lines().last().unwrap();
+    assert!(!last.contains("\"n\""), "{last}");
+}
+
 #[test]
 fn every_write_comes_once_in_order_and_a_cursor_inside_a_block_resumes_after_it() {
     let n = start("order", replication::DEFAULT_BUFFER);

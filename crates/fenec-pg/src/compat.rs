@@ -185,7 +185,7 @@ fn is_fenecql(lower: &str) -> bool {
     let second = words.next().unwrap_or("");
     match first {
         "get" | "put" | "del" | "collections" | "describe" | "compact" => true,
-        "create" | "drop" => second == "collection",
+        "create" | "drop" | "alter" => second == "collection",
         "set" | "update" | "insert" | "delete" => lower.contains('{'),
         _ => false,
     }
@@ -310,6 +310,16 @@ pub fn handle(sql: &str, cfg: &Config, standby: &dyn Fn() -> bool) -> Option<Shi
                 "commit" | "end" => Tx::Commit { chain },
                 _ => Tx::Rollback { chain },
             }));
+        }
+        // An `ALTER TABLE` FenecQL has no `alter collection` for -- a type
+        // changed, a default, a column of a type it has not -- is refused
+        // here, `0A000` (feature_not_supported) for what PostgreSQL would
+        // have done; the rest goes on to be read as the `alter collection`
+        // it is (`server::read`).
+        "alter" if second == "table" => {
+            if let Some(Err((code, message))) = crate::sql::alter(q) {
+                return Some(Shim::Refuse { code, message });
+            }
         }
         "set" if second == "transaction" => return Some(Shim::Tx(Tx::Set(Change::of(&words)))),
         "set" if words.starts_with(&["set", "session", "characteristics"]) => {

@@ -16,6 +16,9 @@ is accepted. These are all its statements.</p>
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ... )
 drop collection [if exists] &lt;name&gt;
 create index [if not exists] on &lt;name&gt; (&lt;field&gt;) @index
+alter collection &lt;name&gt; add field &lt;field&gt; &lt;type&gt; [collate und|tr] [@index]
+alter collection &lt;name&gt; drop field &lt;field&gt;
+alter collection &lt;name&gt; rename field &lt;field&gt; to &lt;new name&gt;
 
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
@@ -41,6 +44,10 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     <code>put</code> and it writes over the document with that id.</li>
   <li><b><code>insert</code> never writes over.</b> If an id is taken, the
     whole statement is refused.</li>
+  <li><b><code>alter collection</code> rewrites no document.</b> A field
+    added reads <code>null</code> in the documents already there; a field's
+    type does not change — see <a href="#changing-a-collection">Changing a
+    collection</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -62,7 +69,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <table>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
@@ -370,6 +377,7 @@ create the collection, or add it later with <code>create index</code>.</p>
   title      text,
   body       text @text(k1=0.9, b=0.4, prefix=0),
   year       int @hash,
+  slug       text @unique,
   published  timestamp @sorted,
   embed      vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
 )
@@ -379,6 +387,9 @@ create the collection, or add it later with <code>create index</code>.</p>
   <li><b>One index per field:</b> <code>@hash</code> for equality,
     <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
     text search, <code>@hnsw</code> for nearest neighbours.</li>
+  <li><b><code>@unique</code> is a <code>@hash</code> that refuses a second
+    document</b> holding a value one holds already. <code>null</code> is no
+    value: any number of documents may hold it.</li>
   <li><b>Only filters joined by <code>and</code> use an index.</b> Anything
     under <code>or</code>, and <code>!=</code>, <code>~</code> or
     <code>has</code>, reads every row.</li>
@@ -392,6 +403,7 @@ create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
 create index on products (title) @text(chars)     -- short Chinese or Japanese text
 create index on articles (title) @sorted
+create index on users (email) @unique             -- refused if a value is held twice
 </pre>
 
 <p>A field takes one index. <code>@hash</code> answers equality,
@@ -399,6 +411,32 @@ create index on articles (title) @sorted
 retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
 for <code>int</code>, <code>float</code>, <code>timestamp</code> and
 <code>text</code> — the types with an order.</p>
+
+<p><code>@unique</code> is a <code>@hash</code> index that refuses a
+second document holding a value one holds already: a <code>put</code>, an
+<code>insert</code> or a <code>set</code> that would write one is refused,
+and nothing of the statement is written — <code>409</code> over HTTP,
+<code>23505</code> (<code>unique_violation</code>) over the PostgreSQL
+wire, as a taken id is. It answers equality and a <code>lookup</code> as
+<code>@hash</code> does. A block — a transaction, a <code>/batch</code> —
+is checked against its own earlier writes, so it may free a value and take
+it again, and a document keeping its own value is no second one.
+<code>null</code> is no value, as in SQL: any number of documents hold it.
+Values are one where <code>=</code> finds them one, so <code>-0.0</code>
+and <code>0.0</code> collide. <code>create index ... @unique</code> over
+documents that hold a value twice is refused and names the value and two
+of its documents. A replica takes what its primary took and does not ask
+again; <code>\d</code> shows the index as <code>UNIQUE</code>, with a
+<code>UNIQUE</code> constraint beside it, as PostgreSQL keeps one.</p>
+
+<p>The check asks the bucket the value would go in, so the index has to
+hold every document: the first write after an open builds it, where a
+plain <code>@hash</code> waits for the first read that wants it. An open
+costs what it did — 19 ms for an image of a million rows either way — and
+that first write takes 15 ms over 100 000 rows and 259 ms over a million;
+after it a <code>put</code> takes 940 ns against 850 for the same field
+under <code>@hash</code>, the price of the lookup. A collection with no
+unique field writes as fast as before (848 and 852 ns).</p>
 
 <p>An <code>@hnsw</code> graph holds a vector once. Documents written with
 the same vector — the embedding of an empty chunk, a line of boilerplate,
@@ -485,6 +523,64 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
   million rows read that way a page at a time took 8.6 s and take 110 ms.
   The browser module leaves this out.</p>
 </div>
+</details>
+
+<h2 id="changing-a-collection">Changing a collection</h2>
+
+<p>A collection takes a field, lets one go, or renames one, and none of it
+rewrites a document: it is as quick over a million documents as over
+none.</p>
+
+<pre data-lang="fenecql">alter collection orders add field note text
+alter collection orders add field code text @unique
+alter collection orders drop field note
+alter collection orders rename field total to amount
+</pre>
+
+<ul>
+  <li><b>A field added reads <code>null</code></b> in every document
+    written before it, and cannot be <code>required</code>.</li>
+  <li><b>A field dropped is gone</b> from every read and write, and its
+    index with it. <code>compact</code> gives its space back.</li>
+  <li><b>A type does not change in place.</b> Add a field of the new type,
+    <code>set</code> it from the old one, and drop the old one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A document is its values one after another in field order, so what a
+change costs is what it does to that order. A field added goes last: a
+document written before it ends before the field's place, and reads
+<code>null</code> there. A rename is the schema alone. A field dropped
+leaves its place in the documents written before the drop — skipped on
+read, written as <code>null</code> after it, refused by name everywhere —
+and <code>compact</code> writes every document without it, copying each
+other value as its bytes stand. A field added under a dropped one's name is
+a new field: the old values stay in the dropped place, and the new field
+reads <code>null</code> until it is written. A change of type is the one
+thing that would rewrite every document under the write lock, and is not
+done.</p>
+
+<p>Each is a write as a <code>create index</code> is: one of a block, put
+back by its <code>ROLLBACK</code> with the writes after it, seen by a
+subscriber as a schema change, applied by a replica, carried by the change
+stream (<code>op: "alter"</code>, the documents after it read by the
+schema it made). In the file it is record kind 12, and a dropped place a
+nameless field of type tag 12, both of which a binary from before them
+refuses rather than read the fields after a dropped one a place early. The
+index of a field added is built over the documents there, every one of them
+<code>null</code>; a dropped field's goes, and a renamed one's goes with
+the name, a vector field's graph included.</p>
+
+<p>Measured over a million rows in memory: an add, a rename and a drop take
+0.025, 0.021 and 0.004 ms. Reading a field past where a document ends costs
+nothing a scan can measure: five scans of the million took 21.2 to 39.1 ms
+before the feature and 21.6 to 39.3 after, from 1.7% slower to 1.7% faster
+by the scan — as the same build with the reads written as before was,
+which makes it where the code lands, not what it does — and the browser
+module's scan of 20 000 rows 1.70 ms against 1.71. A <code>compact</code> that takes
+a dropped field out took 95 ms against 56 for one with none to take: it
+writes each document again rather than copy it. On a server it holds the
+write lock, where a compact otherwise runs beside the database.</p>
 </details>
 
 <h2 id="quantized">Quantized vector indexes</h2>

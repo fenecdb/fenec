@@ -408,6 +408,16 @@ impl Database {
                         ix.add(hash_key(&v), id);
                     }
                 }
+                // Asked of the index as it stands once the writes made
+                // meanwhile are in: one of them may be the second holder.
+                if let (true, Some((v, a, b))) = (copy.kind.is_unique(), ix.shared()) {
+                    return Err(Error::Duplicate(format!(
+                        "`{}.{}` cannot be unique: documents {a} and {b} both hold {}",
+                        copy.collection,
+                        copy.field,
+                        crate::json::to_string(&v)
+                    )));
+                }
                 c.hashes.insert(copy.field.clone(), Derived::new(ix));
             }
             Built::Text(mut ix) => {
@@ -453,6 +463,18 @@ impl Database {
             "index built on `{}.{}`",
             copy.collection, copy.field
         )))
+    }
+
+    /// Whether a collection `compact` would take -- the one named, or every
+    /// one -- holds the places of a dropped field.
+    fn drops_in(&self, which: Option<&str>) -> Result<bool> {
+        Ok(match which {
+            Some(n) => !self.collection(n)?.schema.dropped.is_empty(),
+            None => self
+                .collections
+                .values()
+                .any(|c| !c.schema.dropped.is_empty()),
+        })
     }
 
     fn begin_compact(&self, which: Option<&str>) -> Result<Vec<Part>> {
@@ -866,7 +888,7 @@ impl IndexCopy {
                 ix.insert_batch(&items);
                 Built::Vector(ix)
             }
-            IndexKind::Hash => {
+            IndexKind::Hash { .. } => {
                 let mut ix = HashIndex::default();
                 for (id, v) in &self.values {
                     if let Some(v) = v {
@@ -937,6 +959,16 @@ fn compact_online(
     which: Option<&str>,
     during: &mut dyn FnMut(),
 ) -> Result<Response> {
+    // A dropped field's places are taken out of each document, which the
+    // copies made beside the database -- the records as they stand -- do
+    // not do: that compact holds the lock, as one in a shell does.
+    {
+        let mut g = write(db);
+        if g.drops_in(which)? {
+            g.may_write(true)?;
+            return g.compact(which, true);
+        }
+    }
     // A mapped database copies no record: the graphs holding tombstones are
     // rebuilt here, beside it, and the rewrite -- the live records streamed
     // from the old file into the new one, 2.1 s for 1 GB -- is left to the

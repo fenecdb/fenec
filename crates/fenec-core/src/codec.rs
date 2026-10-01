@@ -31,6 +31,12 @@ pub const TAG_SPARSE: u8 = 10;
 /// tr`). A version that knows no collation meets an unknown type tag and
 /// refuses the file, rather than read the field in byte order.
 pub const TAG_COLLATED: u8 = 11;
+/// Never a value's either: a schema writes it, nameless, where a dropped
+/// field's values still are in the documents written before the drop
+/// (`Schema::dropped`). A version that knows no drop meets an unknown type
+/// tag and refuses the file, rather than read every later field one place
+/// early.
+pub const TAG_DROPPED: u8 = 12;
 
 // ------------------------------------------------------- half precision
 //
@@ -301,9 +307,35 @@ pub fn decode_value(buf: &[u8], pos: &mut usize) -> Result<Value> {
 /// Skips over a value without decoding it. Lets projection move past the
 /// fields it does not read without allocating.
 pub fn skip_value(buf: &[u8], pos: &mut usize) -> Result<()> {
-    let tag = *buf
-        .get(*pos)
-        .ok_or_else(|| Error::Corrupt("missing value tag".into()))?;
+    skip::<false>(buf, pos)
+}
+
+/// [`skip_value`] for a document's field, which skips nothing where the
+/// payload has ended: a field added after the document was written is not
+/// in it, and reads as `null` (`Schema::read_doc`). The end is told where
+/// the tag is looked for anyway -- asked in the loop that skips, as a
+/// compare a field more, it took a scan of a million rows by two fields
+/// three apart 39.1 -> 40.4 ms -- and a list's items are skipped strictly:
+/// one cut short is damage, not a field added. The browser module asks the
+/// compare instead: a second copy of the skip was 1.1 KB of it, and its
+/// scan of 20 000 rows took as long either way (`make wasm-speed`).
+pub fn skip_field(buf: &[u8], pos: &mut usize) -> Result<()> {
+    if cfg!(target_arch = "wasm32") {
+        if *pos == buf.len() {
+            return Ok(());
+        }
+        return skip::<false>(buf, pos);
+    }
+    skip::<true>(buf, pos)
+}
+
+#[inline]
+fn skip<const FIELD: bool>(buf: &[u8], pos: &mut usize) -> Result<()> {
+    let tag = match buf.get(*pos) {
+        Some(&t) => t,
+        None if FIELD => return Ok(()),
+        None => return Err(Error::Corrupt("missing value tag".into())),
+    };
     *pos += 1;
     match tag {
         TAG_NULL => Ok(()),
