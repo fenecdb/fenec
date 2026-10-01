@@ -408,6 +408,16 @@ impl Database {
                         ix.add(hash_key(&v), id);
                     }
                 }
+                // Asked of the index as it stands once the writes made
+                // meanwhile are in: one of them may be the second holder.
+                if let (true, Some((v, a, b))) = (copy.kind.is_unique(), ix.shared()) {
+                    return Err(Error::Duplicate(format!(
+                        "`{}.{}` cannot be unique: documents {a} and {b} both hold {}",
+                        copy.collection,
+                        copy.field,
+                        crate::json::to_string(&v)
+                    )));
+                }
                 c.hashes.insert(copy.field.clone(), Derived::new(ix));
             }
             Built::Text(mut ix) => {
@@ -866,7 +876,7 @@ impl IndexCopy {
                 ix.insert_batch(&items);
                 Built::Vector(ix)
             }
-            IndexKind::Hash => {
+            IndexKind::Hash { .. } => {
                 let mut ix = HashIndex::default();
                 for (id, v) in &self.values {
                     if let Some(v) = v {

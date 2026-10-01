@@ -257,7 +257,8 @@ pub fn response_to_string(r: &Response) -> String {
                         &mut out,
                         match &f.index {
                             crate::schema::IndexKind::None => "none".to_string(),
-                            crate::schema::IndexKind::Hash => "hash".to_string(),
+                            crate::schema::IndexKind::Hash { unique: false } => "hash".to_string(),
+                            crate::schema::IndexKind::Hash { unique: true } => "unique".to_string(),
                             crate::schema::IndexKind::Sorted => "sorted".to_string(),
                             crate::schema::IndexKind::Inverted => "inverted".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {

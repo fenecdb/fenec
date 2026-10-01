@@ -77,7 +77,7 @@ fn main() {
         schema: Schema::new(
             "bench",
             vec![
-                Field::new("category", DataType::Text).indexed(IndexKind::Hash),
+                Field::new("category", DataType::Text).indexed(IndexKind::HASH),
                 Field::new("score", DataType::Int),
                 Field::new("embed", DataType::Vector(dim, prec)).indexed(IndexKind::Vector(
                     VectorIndexSpec {

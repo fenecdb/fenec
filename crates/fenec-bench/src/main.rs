@@ -177,7 +177,7 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
     db.execute(&Statement::CreateIndex {
         collection: "docs".into(),
         field: "category".into(),
-        kind: IndexKind::Hash,
+        kind: IndexKind::HASH,
         if_not_exists: false,
     })
     .unwrap();

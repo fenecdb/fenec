@@ -1141,3 +1141,32 @@ fn a_post_and_an_insert_refuse_a_taken_id() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(get(h.port, "/n").body.contains("\"e\""));
 }
+
+/// A value a `@unique` field holds already is 409 as a taken id is, from a
+/// `POST` and a `put` over `/query` alike, and the schema says `unique`.
+#[test]
+fn a_unique_field_taken_is_a_conflict() {
+    let h = start_with(Config::default(), Database::new());
+    call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"create collection u (email text @unique)"}"#),
+    );
+    assert_eq!(
+        call(h.port, "POST", "/u", Some(r#"{"email": "a@x"}"#)).status,
+        201
+    );
+    let r = call(h.port, "POST", "/u", Some(r#"{"email": "a@x"}"#));
+    assert_eq!(r.status, 409, "{}", r.body);
+    let r = call(
+        h.port,
+        "POST",
+        "/query",
+        Some(r#"{"query":"put u {email: \"a@x\"}"}"#),
+    );
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert_eq!(rows(&get(h.port, "/u").body), 1);
+    let r = call(h.port, "POST", "/query", Some(r#"{"query":"describe u"}"#));
+    assert!(r.body.contains("\"unique\""), "{}", r.body);
+}

@@ -1022,6 +1022,19 @@ impl HashIndex {
     pub fn memory_bytes(&self) -> usize {
         self.map.capacity() * (std::mem::size_of::<(Vec<u8>, Vec<DocId>)>() + 1) + self.heap
     }
+
+    /// A value two documents or more hold, `null` aside, and two of them:
+    /// what `create index ... @unique` over the documents there is refused
+    /// for, naming it.
+    fn shared(&self) -> Option<(Value, DocId, DocId)> {
+        let null = hash_key(&Value::Null);
+        let (key, ids) = self
+            .map
+            .iter()
+            .find(|(k, ids)| ids.len() > 1 && **k != null)?;
+        let v = crate::codec::decode_value(key, &mut 0).ok()?;
+        Some((v, ids[0], ids[1]))
+    }
 }
 
 /// Field name -> index, in the order the fields were indexed: a `Vec`
@@ -1211,7 +1224,7 @@ impl Collection {
                         VectorIndex::with_precision(*dim, *spec, *prec),
                     );
                 }
-                (IndexKind::Hash, _) => {
+                (IndexKind::Hash { .. }, _) => {
                     hashes.insert(f.name.clone(), Derived::new(HashIndex::default()));
                 }
                 #[cfg(feature = "text")]
@@ -1266,7 +1279,7 @@ impl Collection {
                         VectorIndex::with_precision(*dim, *spec, *prec),
                     );
                 }
-                (IndexKind::Hash, _) => {
+                (IndexKind::Hash { .. }, _) => {
                     self.hashes.insert(f.name.clone(), Derived::unbuilt());
                 }
                 #[cfg(feature = "text")]
@@ -1293,6 +1306,38 @@ impl Collection {
             return Ok(None);
         };
         d.or_build(|| hash_of(&self.store, pos)).map(Some)
+    }
+
+    /// The refusal of `doc` where an `@unique` field of it holds a value
+    /// another document holds: asked by `put`, `insert` and `set` before
+    /// anything is written, against the bucket the value would be filed
+    /// under -- the block's own earlier writes are in it, as a write keeps
+    /// a built index up, and the first ask after an open builds it from
+    /// the documents, so the answer is exact. `null` is no value, and a
+    /// document keeping its own value is not a second one. A field without
+    /// `@unique` costs the look at its index kind.
+    fn unique_clash(&self, doc: &Document) -> Result<()> {
+        for f in &self.schema.fields {
+            if !f.index.is_unique() {
+                continue;
+            }
+            let Some(v) = doc.get(&f.name).filter(|v| !matches!(v, Value::Null)) else {
+                continue;
+            };
+            let Some(ix) = self.hash(&f.name)? else {
+                continue;
+            };
+            let bucket = ix.get(&hash_key(v));
+            if let Some(other) = bucket.and_then(|b| b.iter().find(|&&d| d != doc.id)) {
+                return Err(Error::Duplicate(format!(
+                    "`{}.{}` is unique, and document {other} holds {} already",
+                    self.schema.name,
+                    f.name,
+                    crate::json::to_string(v)
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The full-text index on `field`, built as [`Self::hash`] is.
@@ -4647,6 +4692,11 @@ impl Database {
         }
         let c = self.collections.get_mut(collection).unwrap();
         build_index(c, pos)?;
+        // Over documents that hold a value twice, a unique index is refused
+        // -- the statement put back, the index with it -- and names one.
+        if kind.is_unique() {
+            refuse_shared(c, pos)?;
+        }
 
         let encoded = c.schema.encode();
         self.wal(REC_ALTER, cid, &encoded)?;
@@ -4739,8 +4789,17 @@ impl Database {
             } else {
                 WriteOp::Insert
             };
-            for h in &hooks {
-                h.before_write(&schema, op, &mut doc)?;
+            // Before anything is written, as a taken id is refused above --
+            // and the id handed out above handed out again, as a block put
+            // back hands its ids out again: nothing of this document is in
+            // the store for the block's mark to take back.
+            let checked = hooks
+                .iter()
+                .try_for_each(|h| h.before_write(&schema, op, &mut doc))
+                .and_then(|_| c.unique_clash(&doc));
+            if let Err(e) = checked {
+                c.store.rewind(mark);
+                return Err(e);
             }
             // Drop the old index entries when overwriting.
             let old = match op {
@@ -6643,6 +6702,9 @@ impl Database {
             for h in &hooks {
                 h.before_write(&schema, WriteOp::Update, &mut doc)?;
             }
+            // An update makes a duplicate as a put does: `set email = "a"`
+            // over two documents is refused at the second.
+            c.unique_clash(&doc)?;
             let old = c.store.read(&schema, id)?;
             if let Some(old) = &old {
                 c.unindex_doc(old, Some(&doc));
@@ -6841,6 +6903,21 @@ fn hash_of(store: &Store, pos: usize) -> Result<HashIndex> {
     Ok(ix)
 }
 
+/// The refusal of a unique index over the field at `pos` whose documents
+/// hold a value twice.
+fn refuse_shared(c: &Collection, pos: usize) -> Result<()> {
+    let field = &c.schema.fields[pos].name;
+    let shared = c.hash(field)?.and_then(HashIndex::shared);
+    match shared {
+        Some((v, a, b)) => Err(Error::Duplicate(format!(
+            "`{}.{field}` cannot be unique: documents {a} and {b} both hold {}",
+            c.schema.name,
+            crate::json::to_string(&v)
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The full-text index of the field at `pos`, as [`hash_of`].
 fn text_of(store: &Store, pos: usize, spec: crate::schema::TextIndexSpec) -> Result<TextIndex> {
     let mut ix = TextIndex::new(spec);
@@ -6903,7 +6980,7 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
     let field = c.schema.fields[pos].name.clone();
     match c.schema.fields[pos].index.clone() {
         IndexKind::Vector(spec) => build_graph(c, pos, spec)?,
-        IndexKind::Hash => {
+        IndexKind::Hash { .. } => {
             let ix = Derived::new(hash_of(&c.store, pos)?);
             c.hashes.insert(field, ix);
         }

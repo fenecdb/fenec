@@ -507,7 +507,8 @@ fn print_plan(plan: &map::Plan, columns: &[fenec_import::Column], target: &str, 
 
 fn index_name(kind: &IndexKind) -> String {
     match kind {
-        IndexKind::Hash => "@hash".into(),
+        IndexKind::Hash { unique: false } => "@hash".into(),
+        IndexKind::Hash { unique: true } => "@unique".into(),
         IndexKind::Sorted => "@sorted".into(),
         IndexKind::Vector(s) => format!(
             "@hnsw({}, m={}, ef_construction={}, ef_search={}{})",

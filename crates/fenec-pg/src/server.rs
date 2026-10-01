@@ -3924,7 +3924,8 @@ fn run_locked(
                                     Some(f.ty.name()),
                                     Some(match &f.index {
                                         IndexKind::None => "-".to_string(),
-                                        IndexKind::Hash => "hash".to_string(),
+                                        IndexKind::Hash { unique: false } => "hash".to_string(),
+                                        IndexKind::Hash { unique: true } => "unique".to_string(),
                                         IndexKind::Sorted => "sorted".to_string(),
                                         IndexKind::Vector(sp) => format!(
                                             "hnsw({}, m={}{})",

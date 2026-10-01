@@ -250,7 +250,7 @@ fn a_schema_change_meanwhile_is_reported_rather_than_built_over() {
     let g = db.read().unwrap();
     let schema = &g.collection("c").unwrap().schema;
     assert_eq!(schema.field("n").unwrap().index, IndexKind::None);
-    assert_eq!(schema.field("tag").unwrap().index, IndexKind::Hash);
+    assert_eq!(schema.field("tag").unwrap().index, IndexKind::HASH);
     drop(g);
 
     let compact = fenec_ql::parse_one("compact c").unwrap();

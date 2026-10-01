@@ -776,7 +776,12 @@ already reports for it — a vector as <code>vector(N)</code>, a sparse one as
 <code>sparsevec(N)</code>, a list as an array. Each fenecdb index is an index
 with its own access method: <code>hash</code>, <code>btree</code> for
 <code>@sorted</code>, <code>hnsw</code>, <code>bm25</code> for
-<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. It
+<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. An
+<code>@unique</code> field's is a unique <code>hash</code> index named as
+PostgreSQL names a unique constraint's (<code>users_email_key</code>),
+<code>indisunique</code>, with a <code>UNIQUE</code> constraint beside it in
+<code>pg_constraint</code> and <code>information_schema</code>, and a value
+it holds already is refused with <code>23505</code>. It
 is checked against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
 <code>\dt</code>, <code>\di</code>, <code>\dn</code>, <code>\l</code>),
 PgJDBC 42.7's <code>getTables</code>, <code>getColumns</code>,

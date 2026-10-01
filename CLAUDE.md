@@ -887,6 +887,28 @@ the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
 
+**`@unique` is a `@hash` that asks its bucket before a write.**
+`IndexKind::Hash { unique }`, written as index kind 8 so a binary from
+before refuses the file rather than open it as a plain hash and take the
+duplicates. `put`, `insert` and `set` ask `Collection::unique_clash` after
+the hooks and before anything is written: the bucket the value would go in
+holding another id is `Error::Duplicate` (`23505`, 409), the statement put
+back whole -- and the id `put` handed out for the document handed out
+again, since nothing of it reached the store for the block's mark. A block's
+earlier writes are in the bucket as a write keeps a built index up, so it
+may free a value and take it again; `null` is no value; equality is the
+hash key's, so `-0.0` meets `0.0`. The index is a `Derived` like any hash,
+and the first ask after an open builds it from the documents, which is what
+makes the answer exact: an open costs nothing more (19 ms for an image of a
+million rows either way), the first write 15 ms over 100 000 rows and 259
+ms over a million, and a put after it 940 ns against 850 under `@hash`; a
+collection with no unique field writes as before (848 against 852). `create
+index ... @unique` over a value held twice is refused naming it and two of
+its documents, under the lock or beside the database, where it is asked of
+the index once the writes made meanwhile are in. `Database::apply` builds
+it and asks nothing: the primary did. The catalog shows a unique `hash`
+index named `<t>_<f>_key` and a `UNIQUE` constraint beside it.
+
 **A vector written again is one node** (`VectorIndex::place`,
 `aliases`, `Same`). Written hundreds of times, a node each filled its
 neighbours' lists with copies -- the diversity rule takes a candidate at

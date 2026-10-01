@@ -3997,3 +3997,37 @@ fn an_insert_of_a_taken_id_is_a_unique_violation() {
     );
     assert!(find(&c.simple("put t {id: 1, name: \"b\"}"), b'E').is_none());
 }
+
+/// A value a `@unique` field holds already is a unique_violation as well,
+/// from a put, an insert or a set, and in a transaction it fails the
+/// transaction as any error does.
+#[test]
+fn a_unique_field_taken_is_a_unique_violation() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection users (email text @unique, name text)");
+    assert!(find(&c.simple("put users {email: \"a@x\"}"), b'E').is_none());
+    assert!(find(&c.simple("put users {email: \"b@x\"}"), b'E').is_none());
+    for sql in [
+        "put users {email: \"a@x\"}",
+        "insert into users {email: \"a@x\"}",
+        "set users {email: \"a@x\"} where email = \"b@x\"",
+    ] {
+        let r = c.simple(sql);
+        assert_eq!(
+            find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+            Some("23505"),
+            "{sql}"
+        );
+    }
+    c.simple("BEGIN");
+    assert!(find(&c.simple("put users {email: \"c@x\"}"), b'E').is_none());
+    let r = c.simple("put users {email: \"c@x\"}");
+    assert_eq!(
+        find(&r, b'E').and_then(|e| e.sqlstate()).as_deref(),
+        Some("23505")
+    );
+    c.simple("ROLLBACK");
+    let n = c.simple("get users count");
+    assert_eq!(find(&n, b'D').unwrap().cells(), vec![Some("2".to_string())]);
+}

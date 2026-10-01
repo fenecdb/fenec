@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn index_on_missing_field_fails_in_plan() {
         let mut o = Options::new("m");
-        o.indexes.push(("nosuch".into(), IndexKind::Hash));
+        o.indexes.push(("nosuch".into(), IndexKind::HASH));
         assert!(plan(&cols(), &o).is_err());
     }
 

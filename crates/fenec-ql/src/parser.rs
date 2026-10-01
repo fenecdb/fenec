@@ -299,7 +299,8 @@ impl Parser {
         self.expect(Tok::RParen)?;
         self.expect(Tok::At)?;
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
-            "hash" => IndexKind::Hash,
+            "hash" => IndexKind::HASH,
+            "unique" => IndexKind::UNIQUE,
             "sorted" => IndexKind::Sorted,
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
@@ -334,7 +335,8 @@ impl Parser {
                 self.next();
                 let kind = self.ident()?.to_ascii_lowercase();
                 match kind.as_str() {
-                    "hash" => field = field.indexed(IndexKind::Hash),
+                    "hash" => field = field.indexed(IndexKind::HASH),
+                    "unique" => field = field.indexed(IndexKind::UNIQUE),
                     "sorted" => field = field.indexed(IndexKind::Sorted),
                     "hnsw" | "vector" => {
                         let spec = self.hnsw_args()?;

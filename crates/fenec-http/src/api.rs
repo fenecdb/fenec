@@ -1064,7 +1064,8 @@ fn schemas_json(list: &[Schema]) -> String {
             out.push_str(",\"index\":");
             match &f.index {
                 IndexKind::None => out.push_str("null"),
-                IndexKind::Hash => json::escape_into(&mut out, "hash"),
+                IndexKind::Hash { unique: false } => json::escape_into(&mut out, "hash"),
+                IndexKind::Hash { unique: true } => json::escape_into(&mut out, "unique"),
                 IndexKind::Sorted => json::escape_into(&mut out, "sorted"),
                 IndexKind::Vector(spec) => json::escape_into(
                     &mut out,

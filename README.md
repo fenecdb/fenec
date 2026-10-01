@@ -168,7 +168,7 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch or a transaction landing whole |
 | **Transactions** | `BEGIN`, `SAVEPOINT`, `ROLLBACK TO`, `COMMIT` over the PostgreSQL wire; `COPY` in and out |
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` |
-| **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted` |
+| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted` |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
 | **Retrieval** | `near` (HNSW; exact by dot product over a `sparse<N>` such as SPLADE's), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |

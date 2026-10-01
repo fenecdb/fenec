@@ -43,13 +43,30 @@ mod tests {
             schema.field("tags").unwrap().ty,
             DataType::List(Box::new(DataType::Text))
         );
-        assert_eq!(schema.field("year").unwrap().index, IndexKind::Hash);
+        assert_eq!(schema.field("year").unwrap().index, IndexKind::HASH);
         let IndexKind::Vector(spec) = schema.field("embed").unwrap().index else {
             panic!()
         };
         assert_eq!(spec.metric, Metric::Cosine);
         assert_eq!(spec.m, 32);
         assert_eq!(spec.ef_search, 100);
+    }
+
+    #[test]
+    fn unique_is_a_field_index_and_a_create_index() {
+        let s =
+            parse_one("create collection u (email text @unique, n int required @hash)").unwrap();
+        let Statement::CreateCollection { schema, .. } = s else {
+            panic!()
+        };
+        assert_eq!(schema.field("email").unwrap().index, IndexKind::UNIQUE);
+        assert_eq!(schema.field("n").unwrap().index, IndexKind::HASH);
+        let Statement::CreateIndex { kind, .. } =
+            parse_one("create index on u (email) @UNIQUE").unwrap()
+        else {
+            panic!()
+        };
+        assert!(kind.is_unique());
     }
 
     #[test]

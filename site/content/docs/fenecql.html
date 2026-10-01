@@ -62,7 +62,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <table>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
@@ -370,6 +370,7 @@ create the collection, or add it later with <code>create index</code>.</p>
   title      text,
   body       text @text(k1=0.9, b=0.4, prefix=0),
   year       int @hash,
+  slug       text @unique,
   published  timestamp @sorted,
   embed      vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
 )
@@ -379,6 +380,9 @@ create the collection, or add it later with <code>create index</code>.</p>
   <li><b>One index per field:</b> <code>@hash</code> for equality,
     <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
     text search, <code>@hnsw</code> for nearest neighbours.</li>
+  <li><b><code>@unique</code> is a <code>@hash</code> that refuses a second
+    document</b> holding a value one holds already. <code>null</code> is no
+    value: any number of documents may hold it.</li>
   <li><b>Only filters joined by <code>and</code> use an index.</b> Anything
     under <code>or</code>, and <code>!=</code>, <code>~</code> or
     <code>has</code>, reads every row.</li>
@@ -392,6 +396,7 @@ create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
 create index on products (title) @text(chars)     -- short Chinese or Japanese text
 create index on articles (title) @sorted
+create index on users (email) @unique             -- refused if a value is held twice
 </pre>
 
 <p>A field takes one index. <code>@hash</code> answers equality,
@@ -399,6 +404,32 @@ create index on articles (title) @sorted
 retrieval, <code>@hnsw</code> nearest neighbours. <code>@sorted</code> is
 for <code>int</code>, <code>float</code>, <code>timestamp</code> and
 <code>text</code> — the types with an order.</p>
+
+<p><code>@unique</code> is a <code>@hash</code> index that refuses a
+second document holding a value one holds already: a <code>put</code>, an
+<code>insert</code> or a <code>set</code> that would write one is refused,
+and nothing of the statement is written — <code>409</code> over HTTP,
+<code>23505</code> (<code>unique_violation</code>) over the PostgreSQL
+wire, as a taken id is. It answers equality and a <code>lookup</code> as
+<code>@hash</code> does. A block — a transaction, a <code>/batch</code> —
+is checked against its own earlier writes, so it may free a value and take
+it again, and a document keeping its own value is no second one.
+<code>null</code> is no value, as in SQL: any number of documents hold it.
+Values are one where <code>=</code> finds them one, so <code>-0.0</code>
+and <code>0.0</code> collide. <code>create index ... @unique</code> over
+documents that hold a value twice is refused and names the value and two
+of its documents. A replica takes what its primary took and does not ask
+again; <code>\d</code> shows the index as <code>UNIQUE</code>, with a
+<code>UNIQUE</code> constraint beside it, as PostgreSQL keeps one.</p>
+
+<p>The check asks the bucket the value would go in, so the index has to
+hold every document: the first write after an open builds it, where a
+plain <code>@hash</code> waits for the first read that wants it. An open
+costs what it did — 19 ms for an image of a million rows either way — and
+that first write takes 15 ms over 100 000 rows and 259 ms over a million;
+after it a <code>put</code> takes 940 ns against 850 for the same field
+under <code>@hash</code>, the price of the lookup. A collection with no
+unique field writes as fast as before (848 and 852 ns).</p>
 
 <p>An <code>@hnsw</code> graph holds a vector once. Documents written with
 the same vector — the embedding of an empty chunk, a line of boilerplate,

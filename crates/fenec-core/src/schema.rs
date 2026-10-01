@@ -270,8 +270,14 @@ impl TextIndexSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexKind {
     None,
-    /// Hash index for equality lookups.
-    Hash,
+    /// Hash index for equality lookups. `unique` (`@unique`) refuses a
+    /// second document holding a value one already holds, `null` aside: an
+    /// index that only finds documents could be told nothing new, so the
+    /// write path asks the bucket it would file the value under
+    /// (`Database::unique_clash`).
+    Hash {
+        unique: bool,
+    },
     /// Approximate nearest neighbour index (HNSW).
     Vector(VectorIndexSpec),
     /// Inverted index with BM25 scoring, behind `match`.
@@ -285,6 +291,16 @@ pub enum IndexKind {
 }
 
 impl IndexKind {
+    /// `@hash`.
+    pub const HASH: IndexKind = IndexKind::Hash { unique: false };
+    /// `@unique`.
+    pub const UNIQUE: IndexKind = IndexKind::Hash { unique: true };
+
+    /// Whether it refuses a second document holding a value (`@unique`).
+    pub fn is_unique(&self) -> bool {
+        matches!(self, IndexKind::Hash { unique: true })
+    }
+
     /// The kind with a vector index's `ef_search` settled
     /// ([`VectorIndexSpec::resolved`]).
     pub fn resolved(&self) -> IndexKind {
@@ -473,7 +489,11 @@ impl Schema {
             out.push(f.required as u8);
             match &f.index {
                 IndexKind::None => out.push(0),
-                IndexKind::Hash => out.push(1),
+                // A unique one is a kind of its own, as a quantized graph is:
+                // a version that knows no `@unique` refuses the file rather
+                // than open it as a plain hash and take the duplicates it
+                // would have refused.
+                IndexKind::Hash { unique } => out.push(if *unique { 8 } else { 1 }),
                 IndexKind::Vector(spec) => {
                     // A quantized index is a kind of its own, so that a version
                     // that knows no quantization refuses the file rather than
@@ -532,7 +552,7 @@ impl Schema {
             *pos += 1;
             let index = match kind {
                 0 => IndexKind::None,
-                1 => IndexKind::Hash,
+                1 | 8 => IndexKind::Hash { unique: kind == 8 },
                 2 | 5 => {
                     let metric = Metric::from_code(buf[*pos])?;
                     *pos += 1;

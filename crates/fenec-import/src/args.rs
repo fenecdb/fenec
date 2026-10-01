@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn index_flag_parses() {
-        assert_eq!(parse_index("k@hash").unwrap().1, IndexKind::Hash);
+        assert_eq!(parse_index("k@hash").unwrap().1, IndexKind::HASH);
 
         let (name, IndexKind::Vector(v)) = parse_index("embed@hnsw").unwrap() else {
             panic!()
