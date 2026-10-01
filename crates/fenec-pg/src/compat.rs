@@ -440,7 +440,10 @@ mod tests {
         assert!(as_primary("SELECT c.oid FROM pg_catalog.pg_class c", &cfg).is_some());
         // Npgsql's type lookups open with a comment.
         assert!(matches!(
-            as_primary("-- Load enum fields\nSELECT typ.oid, enumlabel\nFROM pg_enum", &cfg),
+            as_primary(
+                "-- Load enum fields\nSELECT typ.oid, enumlabel\nFROM pg_enum",
+                &cfg
+            ),
             Some(Shim::Catalog)
         ));
         assert!(matches!(
