@@ -601,3 +601,31 @@ fn asyncpg_introspects_a_type_it_does_not_know() {
     assert_eq!(rows[0][2], "text");
     assert_eq!(rows[1][2], "_text");
 }
+
+/// The pg gem for Ruby learns every type by joining `pg_type` to `pg_proc`
+/// on `typinput`; JDBC tells an array by `typinput = 'array_in'`, Npgsql by
+/// `proname = 'array_recv'`. All three name the same functions.
+#[test]
+fn a_type_names_its_functions_in_pg_proc() {
+    let s = snapshot();
+    let joined = text(&run_sql(
+        &s,
+        "SELECT t.typname, ti.proname AS typinput FROM pg_type AS t \
+         JOIN pg_proc AS ti ON ti.oid = t.typinput WHERE t.typname = 'bool'",
+        &[],
+    ));
+    assert_eq!(joined, vec![vec!["bool".to_string(), "boolin".to_string()]]);
+    let arrays = text(&run_sql(
+        &s,
+        "SELECT count(*) FROM pg_type WHERE typinput = 'array_in'",
+        &[],
+    ));
+    assert_ne!(arrays[0][0], "0", "JDBC's array check finds the arrays");
+    let recv = text(&run_sql(
+        &s,
+        "SELECT t.typname FROM pg_type AS t JOIN pg_proc AS p ON p.oid = t.typreceive \
+         WHERE p.proname = 'array_recv' AND t.typname = '_text'",
+        &[],
+    ));
+    assert_eq!(recv, vec![vec!["_text".to_string()]]);
+}

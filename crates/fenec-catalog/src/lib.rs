@@ -118,6 +118,7 @@ enum Reg {
     Class,
     Type,
     Namespace,
+    Proc,
 }
 
 /// A value in a catalog query.
@@ -335,7 +336,10 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
 }
 
 /// `pg_type`'s rows: (oid, name, length, category, element, array, collation).
-const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 33] = [
+/// `inet`, `json` and `numeric` hold no field of fenecdb's, but the pg gem
+/// for Ruby builds its parameter encoders from them -- IPAddr, Hash and
+/// BigDecimal -- and refuses a connection's type map without them.
+const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 39] = [
     (BOOL, "bool", 1, "B", 0, BOOL_ARRAY, 0),
     (BYTEA, "bytea", -1, "U", 0, BYTEA_ARRAY, 0),
     (CHAR, "char", 1, "Z", 0, 1002, 0),
@@ -377,6 +381,12 @@ const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 33] = [
     (VECTOR, "vector", -1, "U", 0, 0, 0),
     (HALFVEC, "halfvec", -1, "U", 0, 0, 0),
     (SPARSEVEC, "sparsevec", -1, "U", 0, 0, 0),
+    (869, "inet", -1, "I", 0, 1041, 0),
+    (1041, "_inet", -1, "A", 869, 0, 0),
+    (114, "json", -1, "U", 0, 199, 0),
+    (199, "_json", -1, "A", 114, 0, 0),
+    (1700, "numeric", -1, "N", 0, 1231, 0),
+    (1231, "_numeric", -1, "A", 1700, 0, 0),
 ];
 
 /// `format_type`: the name `\d` prints.
@@ -425,6 +435,74 @@ fn format_type(oid: i64, typmod: i64) -> Option<String> {
             base(*elem as i64).map(|b| format!("{b}[]"))
         }
     }
+}
+
+/// The functions `pg_type` names for each type -- its input, output,
+/// receive and send -- as the rows of `pg_proc`, an array's being the
+/// shared `array_in` and its kin as in PostgreSQL. The pg gem for Ruby
+/// learns every type by `pg_type JOIN pg_proc ON pg_proc.oid =
+/// pg_type.typinput`: with the functions held as text and no `pg_proc`, the
+/// join found nothing and pgvector-ruby's type map could not be built.
+/// Their oids are their places in this list, from `PROC_BASE`.
+const PROC_BASE: i64 = 60_000;
+
+fn type_procs(name: &str) -> [String; 4] {
+    match name.starts_with('_') {
+        true => ["array_in", "array_out", "array_recv", "array_send"].map(str::to_string),
+        false => ["in", "out", "recv", "send"].map(|k| format!("{name}{k}")),
+    }
+}
+
+fn procs() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, name, ..) in TYPES.iter() {
+        for p in type_procs(name) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn proc_oid(name: &str) -> Option<i64> {
+    let name = name.rsplit('.').next().unwrap_or(name).trim_matches('"');
+    procs()
+        .iter()
+        .position(|p| p == name)
+        .map(|i| PROC_BASE + i as i64)
+}
+
+fn proc_name(oid: i64) -> Option<String> {
+    procs()
+        .into_iter()
+        .nth(usize::try_from(oid - PROC_BASE).ok()?)
+}
+
+fn pg_proc_table(alias: &str) -> Rel {
+    let cols = [
+        ("oid", OID),
+        ("proname", NAME),
+        ("pronamespace", OID),
+        ("proowner", OID),
+        ("prokind", CHAR),
+        ("pronargs", INT2),
+    ];
+    let rows = procs()
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            vec![
+                V::Int(PROC_BASE + i as i64),
+                V::Text(name),
+                V::Int(PG_CATALOG),
+                V::Int(ROLE),
+                t("f"),
+                V::Int(1),
+            ]
+        })
+        .collect();
+    rel(alias, &cols, rows)
 }
 
 fn type_by_name(name: &str) -> Option<i64> {
@@ -544,6 +622,7 @@ fn catalog_table(schema: Option<&str>, name: &str, alias: &str, s: &Snapshot) ->
         "pg_stat_statements" => pg_stat_statements(alias, s),
         "pg_attribute" => pg_attribute(alias, s),
         "pg_type" => pg_type_table(alias),
+        "pg_proc" => pg_proc_table(alias),
         "pg_index" => pg_index(alias, s),
         "pg_constraint" => pg_constraint(alias, s),
         "pg_am" => rel(
@@ -1085,9 +1164,11 @@ fn pg_type_table(alias: &str) -> Rel {
         ("typcollation", OID),
         ("typdefault", TEXT),
     ];
+    let proc = |name: &str| proc_oid(name).map_or(V::Null, |o| V::Reg(Reg::Proc, o));
     let rows = TYPES
         .iter()
         .map(|(oid, name, len, cat, elem, array, coll)| {
+            let procs = type_procs(name);
             vec![
                 V::Int(*oid as i64),
                 t(*name),
@@ -1103,16 +1184,13 @@ fn pg_type_table(alias: &str) -> Rel {
                 V::Int(0),
                 V::Int(*elem as i64),
                 V::Int(*array as i64),
-                // JDBC tells an array type by `typinput = array_in`; the
+                // JDBC tells an array type by `typinput = array_in`, and
+                // Npgsql by `proname = 'array_recv'` through `pg_proc`; the
                 // vector types are category A without being arrays.
-                t(if name.starts_with('_') {
-                    "array_in".to_string()
-                } else {
-                    format!("{name}in")
-                }),
-                t(format!("{name}out")),
-                t(format!("{name}recv")),
-                t(format!("{name}send")),
+                proc(&procs[0]),
+                proc(&procs[1]),
+                proc(&procs[2]),
+                proc(&procs[3]),
                 t("i"),
                 t(if *len > 0 { "p" } else { "x" }),
                 V::Bool(false),
@@ -1526,6 +1604,7 @@ fn compare(a: &V, b: &V, s: &Snapshot) -> Option<Ordering> {
                     Reg::Class => s.relation_oid(t)?,
                     Reg::Type => type_by_name(t)?,
                     Reg::Namespace => namespace_oid(t)?,
+                    Reg::Proc => proc_oid(t)?,
                 },
             };
             let mine = as_int(if matches!(a, V::Reg(..)) { a } else { b })?;
@@ -1646,6 +1725,7 @@ fn render_named(v: &V, s: &Snapshot) -> Option<String> {
         V::Reg(Reg::Namespace, oid) => {
             Some(namespace_name(*oid).map_or_else(|| oid.to_string(), str::to_string))
         }
+        V::Reg(Reg::Proc, oid) => Some(proc_name(*oid).unwrap_or_else(|| oid.to_string())),
         V::Array(items) if items.iter().any(|i| matches!(i, V::Reg(..))) => render(&V::Array(
             items
                 .iter()
@@ -2768,15 +2848,38 @@ fn joined(sel: &Select, outer: Option<&Scope>, ctx: &Ctx) -> Out<(Vec<Rel>, Vec<
                     slots: &[],
                     outer,
                 };
-                let mut key = Vec::with_capacity(keys.len());
+                // A row goes in under every key it equals: a reference
+                // (`regproc`, `regclass` ...) by its oid and by its name,
+                // since `typinput = 'array_in'` names what `ti.oid =
+                // t.typinput` numbers. Under its oid alone, JDBC's array
+                // check found no row.
+                let mut keyset: Vec<Vec<String>> = vec![Vec::with_capacity(keys.len())];
                 for (_, mine) in &keys {
-                    match hash_key(&eval(mine, &scope, ctx)?) {
-                        Some(part) => key.push(part),
+                    let v = eval(mine, &scope, ctx)?;
+                    let Some(part) = hash_key(&v) else {
                         // A null equals nothing.
-                        None => continue 'rows,
+                        continue 'rows;
+                    };
+                    let named = match &v {
+                        V::Reg(..) => render_named(&v, ctx.snap).filter(|n| *n != part),
+                        _ => None,
+                    };
+                    let mut grown = Vec::with_capacity(keyset.len() * 2);
+                    for k in keyset {
+                        if let Some(n) = &named {
+                            let mut alt = k.clone();
+                            alt.push(n.clone());
+                            grown.push(alt);
+                        }
+                        let mut k = k;
+                        k.push(part.clone());
+                        grown.push(k);
                     }
+                    keyset = grown;
                 }
-                ix.entry(key).or_default().push(ri);
+                for key in keyset {
+                    ix.entry(key).or_default().push(ri);
+                }
             }
             Some(ix)
         };

@@ -1,7 +1,8 @@
 #!/bin/sh
 # PostgreSQL drivers against a real fenec-pg's pg wire: psycopg, asyncpg
 # and SQLAlchemy from a python:3.13 container, as integrations/python runs
-# the stores, then pgx with the Go, node-postgres with the Node, Npgsql with
+# the stores, JDBC, PDO and the pg gem from containers of their own, then
+# pgx with the Go, node-postgres with the Node, Npgsql with
 # the .NET and tokio-postgres with the Rust on the machine -- each with pgvector's
 # library for it. What a driver sends on its own -- a savepoint for a nested
 # transaction, the queries a dialect opens a connection with, the rows of a
@@ -37,6 +38,20 @@ docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway 
     "mkdir /work && cp /src/*.py /src/requirements.txt /work && cd /work &&
      pip install -q --root-user-action=ignore --disable-pip-version-check -r requirements.txt &&
      python -m pytest -q -p no:cacheprovider $*"
+
+# Java (pgjdbc, pgvector-java), PHP (PDO, pgvector-php) and Ruby (pg,
+# pgvector-ruby) from their own containers, as the Python ones run: a
+# runner need not carry the toolchains, and every machine runs the same.
+docker run --rm -v "$here/java:/src:ro" --add-host=host.docker.internal:host-gateway \
+    -e FENEC_PG_JDBC="jdbc:postgresql://host.docker.internal:$port/fenec?user=fenec&password=$password" \
+    maven:3.9-eclipse-temurin-21 sh -c "cp -r /src /work && cd /work && mvn -q -B compile exec:java"
+docker run --rm -v "$here/php:/src:ro" --add-host=host.docker.internal:host-gateway \
+    -e FENEC_PG_PDO="pgsql:host=host.docker.internal;port=$port;dbname=fenec" -e FENEC_PG_PASSWORD="$password" \
+    composer:2 sh -c "apk add -q postgresql-dev >/dev/null && docker-php-ext-install -j4 pdo_pgsql >/dev/null 2>&1 &&
+     cp -r /src /work && cd /work && composer install -q --no-interaction && php drivers.php"
+docker run --rm -v "$here/ruby:/src:ro" --add-host=host.docker.internal:host-gateway \
+    -e FENEC_PG="host=host.docker.internal port=$port user=fenec password=$password dbname=fenec" \
+    ruby:3.3 sh -c "cp -r /src /work && cd /work && bundle install --quiet >/dev/null && bundle exec ruby drivers.rb"
 
 url="postgres://fenec:$password@127.0.0.1:$port/fenec"
 missing() {
