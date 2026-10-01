@@ -1084,6 +1084,27 @@ details.deep p, details.deep li { font-size: 15.5px; }
    the cards beside it already say what it shows: it is left out, and so is
    the work of drawing it (site.js loads scenes only as they come into view). */
 @media (max-width: 600px) {
-  .motion, .motion-head { display: none; }
+  .motion { display: none; }
   .steps-doc > li { padding-left: 34px; }
 }
+
+/* Scrollbars in the night's colours, thin: the system's own showed as a
+   white bar beside the docs sidebar on Windows and Linux. */
+html { scrollbar-color: var(--rule-hot) transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--rule-hot) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--rule-hot); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--sun); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Under the docs' dune band the page starts in the band's last colour and
+   fades into the night, so the band's foot leaves no edge. */
+.docs .shell { background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 360px); }
+
+/* The claim in two lines on a wide screen: the text column takes more of
+   the row and the type steps down a little, so "that fits in a browser
+   tab." holds on one line. A phone wraps it as it falls. */
+.hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+.has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
+@media (max-width: 940px) { .hero-say br.wide { display: none; } }
