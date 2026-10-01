@@ -16,6 +16,7 @@ mod filtered;
 mod fuse;
 mod handover;
 mod insert;
+mod json;
 mod lookup;
 mod maintenance;
 mod mapped;

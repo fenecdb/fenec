@@ -850,6 +850,50 @@ impl Store {
         }
     }
 
+    /// The value at `keys` (`source.rank`) inside the `json` field at
+    /// `field_pos`: `null` where the path leads nowhere or the document
+    /// ends before the field, `None` when there is no such document.
+    pub fn read_path(&self, id: DocId, field_pos: usize, keys: &str) -> Result<Option<Value>> {
+        let mut v = [Value::Null];
+        Ok(self
+            .read_paths(id, &[(field_pos, keys)], &mut v)?
+            .then(|| std::mem::replace(&mut v[0], Value::Null)))
+    }
+
+    /// The values at `paths` -- each a json field's position and the keys
+    /// past it -- into `out`, from one look-up of the document: the fields
+    /// before each skipped once, and two paths into one field reading it
+    /// from where the first found it. A text lands in the text its slot
+    /// held, as [`Self::read_fields`] has it. `false` when there is no such
+    /// document.
+    pub fn read_paths(
+        &self,
+        id: DocId,
+        paths: &[(usize, &str)],
+        out: &mut [Value],
+    ) -> Result<bool> {
+        let Some(loc) = self.index.get(id) else {
+            return Ok(false);
+        };
+        let buf = self.payload(loc)?;
+        let (mut at, mut pos) = (0usize, 0usize);
+        for (slot, &(field, keys)) in out.iter_mut().zip(paths) {
+            let want = self.place(field);
+            if want < at {
+                (at, pos) = (0, 0);
+            }
+            while at < want {
+                crate::codec::skip_field(buf, &mut pos)?;
+                at += 1;
+            }
+            match pos < buf.len() {
+                true => crate::codec::decode_path_into(buf, pos, keys, slot)?,
+                false => *slot = Value::Null,
+            }
+        }
+        Ok(true)
+    }
+
     /// Decodes the values at `places` -- ascending, each a field's place in
     /// the payload as [`Schema::place`] gives it -- into `out`, in one pass
     /// over the document that skips the others: an aggregate reads two or
@@ -866,7 +910,8 @@ impl Store {
             return Ok(false);
         };
         let buf = self.payload(loc)?;
-        out.truncate(places.len());
+        // Slots past the places are the caller's -- a filter keeps its
+        // paths' values there -- and are left as they are.
         let mut pos = 0usize;
         let mut at = 0usize;
         for (i, &want) in places.iter().enumerate() {

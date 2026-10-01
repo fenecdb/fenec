@@ -327,18 +327,65 @@ fn with_vectors(mut params: Vec<Value>, mut bytes: &[u8]) -> Result<Vec<Value>> 
     }
 }
 
+/// Whether the parameter at `at` was handed over as `f32`s ([`with_vectors`]).
+fn apart(mut bytes: &[u8], at: usize) -> bool {
+    while let Some((&[a0, a1, a2, a3, n0, n1, n2, n3], rest)) = bytes.split_first_chunk() {
+        if u32::from_le_bytes([a0, a1, a2, a3]) as usize == at {
+            return true;
+        }
+        let n = u32::from_le_bytes([n0, n1, n2, n3]) as usize;
+        bytes = rest.get(n.saturating_mul(4)..).unwrap_or_default();
+    }
+    false
+}
+
 fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
-    let params = match json::parse_params(params_src).and_then(|p| with_vectors(p, vectors)) {
+    let mut params = match json::parse_params(params_src).and_then(|p| with_vectors(p, vectors)) {
         Ok(p) => p,
         Err(e) => return json::error_to_string(&e),
     };
-    let stmts = match parse(sql) {
+    let mut stmts = match parse(sql) {
         Ok(s) => s,
         Err(e) => return json::error_to_string(&e),
     };
     // A note left by anything before is not these statements'.
     collate::take_missing();
+    // The places of those to send as JSON, written as the answer lists them.
+    let mut as_json = String::new();
     let res = with_db(handle, |db| {
+        // A list of numbers a json field is handed, or a path compared
+        // with, read again as written: from the text, from the parameters'
+        // JSON, and from neither where it came over as `f32`s -- the page
+        // is told which to send as JSON (`"exact"`), before anything runs.
+        let vectored = stmts.iter().any(|s| s.reads_vectors())
+            || params.iter().any(fenec_core::query::holds_vector);
+        if vectored {
+            let (mut text, mut exact) = (false, false);
+            for s in &stmts {
+                let need = db.exactly(s);
+                text |= need.text;
+                for i in need.params {
+                    exact = true;
+                    if apart(vectors, i) {
+                        if !as_json.is_empty() {
+                            as_json.push(',');
+                        }
+                        as_json.push_str(&i.to_string());
+                    }
+                }
+            }
+            if !as_json.is_empty() {
+                return Err((Error::Query(String::new()), 0));
+            }
+            if text {
+                stmts = fenec_ql::parse_exact(sql).map_err(|e| (e, 0))?;
+            }
+            if exact {
+                params = json::parse_params_exact(params_src)
+                    .and_then(|p| with_vectors(p, vectors))
+                    .map_err(|e| (e, 0))?;
+            }
+        }
         // The statements are one block: their writes -- a create, a drop or
         // a create index among them, as a page setting itself up sends --
         // land together or not at all, and one refused for collation data
@@ -367,6 +414,11 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
     });
     match res {
         None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        // The places to send as JSON, for the page to send them so.
+        Some(Err(_)) if !as_json.is_empty() => format!(
+            "{{\"kind\":\"error\",\"message\":\"a json field is handed a list of numbers \
+             sent over as f32s\",\"exact\":[{as_json}]}}"
+        ),
         Some(Err((e, ran))) => refused(&e, ran),
         Some(Ok(r)) => json::response_to_string(&r),
     }

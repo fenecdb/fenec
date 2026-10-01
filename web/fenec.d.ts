@@ -20,6 +20,19 @@ export type Vector = number[] & { readonly __fenec: 'vector' };
 export type Sparse = string & { readonly __fenec: 'sparse' };
 /** A `bytes` field: an array of bytes in JSON. */
 export type Bytes = number[] & { readonly __fenec: 'bytes' };
+/** A `json` field: any value JSON holds. A path reads into it, `'meta.lang'`. */
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+/**
+ * A path into one of `F`'s json fields, `'meta.lang'` or
+ * `'meta.source.rank'`: what `where`, `select` and `order` take beside a
+ * field, reading a `Json` value -- `null` where the path leads nowhere.
+ */
+export type JsonPath<F extends Fields> = {
+  [K in keyof F & string]: { [key: string]: Json } extends NonNullable<F[K]>
+    ? `${K}.${string}`
+    : never;
+}[keyof F & string];
 
 /** A collection's read shape; `fenec types` generates these. */
 export type Fields = Record<string, unknown>;
@@ -238,6 +251,10 @@ export declare class Query<
     ...cols: (K | A)[]
   ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L>;
   select(): Query<F, Row<F>, L>;
+  /** Fields and paths into json fields, each path answering under its text. */
+  select<C extends (keyof Row<F> & string) | JsonPath<F>>(
+    ...cols: C[]
+  ): Query<F, { [N in C]: N extends keyof Row<F> ? Row<F>[N] : Json }, L>;
 
   /** `group field`: one row per value, for a select list that aggregates. */
   group(field: keyof Row<F> & string): Query<F, P, L>;
@@ -262,6 +279,10 @@ export declare class Query<
     op: Op,
     value: Writable<Row<F>[K]> | null,
   ): Query<F, P, L>;
+  /** A path into a json field: `where('meta.lang', '=', 'tr')`. */
+  where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L>;
+  where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L>;
+  where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L>;
 
   orWhere(cond: Where<F> | Cond<F>): Query<F, P, L>;
   orWhere<K extends keyof Row<F> & string>(
@@ -339,7 +360,7 @@ export declare class Query<
    * `{ collate: 'tr' }` as Turkish does, rather than by its bytes.
    */
   order(
-    field: (keyof Row<F> & string) | Aggregate<F>,
+    field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F>,
     dir?: 'asc' | 'desc',
     opts?: { collate?: Collation },
   ): Query<F, P, L>;

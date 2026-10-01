@@ -10,8 +10,14 @@ use fenec_core::codec::{f16_from_f32, f32_from_f16};
 use fenec_core::prelude::Value;
 
 pub use crate::catalog::{
-    HALFVEC as OID_HALFVEC, SPARSEVEC as OID_SPARSEVEC, VECTOR as OID_VECTOR,
+    HALFVEC as OID_HALFVEC, JSONB as OID_JSONB, SPARSEVEC as OID_SPARSEVEC, VECTOR as OID_VECTOR,
 };
+
+/// `json`, whose binary form is its text.
+pub const OID_JSON: i32 = 114;
+/// The version byte `jsonb_send` writes before the text, and the only one
+/// `jsonb_recv` reads.
+const JSONB_VERSION: u8 = 1;
 
 pub const OID_CHAR: i32 = 18;
 pub const OID_NAME: i32 = 19;
@@ -85,6 +91,13 @@ fn refused(oid: i32) -> String {
 pub fn value(oid: i32, v: &Value) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(match (oid, v) {
         (_, Value::Null) => return Ok(None),
+        // `jsonb_send`: a version byte, then the text.
+        (OID_JSONB, v) => {
+            let mut out = vec![JSONB_VERSION];
+            out.extend_from_slice(fenec_core::json::to_string(v).as_bytes());
+            out
+        }
+        (OID_JSON, v) => fenec_core::json::to_string(v).into_bytes(),
         (oid, Value::List(items)) if element_of(oid).is_some() => {
             array(element_of(oid).unwrap_or(OID_TEXT), items)?
         }
@@ -147,7 +160,8 @@ fn array(elem: i32, items: &[Value]) -> Result<Vec<u8>, String> {
 pub fn text(oid: i32, s: &str) -> Result<Vec<u8>, String> {
     let bad = || format!("`{s}` is not a value of type {oid}");
     Ok(match oid {
-        OID_TEXT | OID_VARCHAR | OID_NAME | OID_BPCHAR => s.as_bytes().to_vec(),
+        OID_TEXT | OID_VARCHAR | OID_NAME | OID_BPCHAR | OID_JSON => s.as_bytes().to_vec(),
+        OID_JSONB => [&[JSONB_VERSION][..], s.as_bytes()].concat(),
         OID_BOOL => match s {
             "t" | "true" => vec![1],
             "f" | "false" => vec![0],
@@ -183,6 +197,36 @@ pub fn text(oid: i32, s: &str) -> Result<Vec<u8>, String> {
         },
         other => return Err(refused(other)),
     })
+}
+
+/// A `json` or `jsonb` parameter or cell in its binary form as the value it
+/// holds -- `jsonb_recv` reads a version byte of 1 and then the text --
+/// `None` where it is neither.
+pub fn json(raw: &[u8], oid: i32) -> Option<Result<Value, (&'static str, String)>> {
+    let text = match oid {
+        OID_JSONB => match raw.split_first() {
+            Some((&JSONB_VERSION, rest)) => rest,
+            _ => {
+                return Some(Err((
+                    "22P03",
+                    "unsupported jsonb version number".to_string(),
+                )))
+            }
+        },
+        OID_JSON => raw,
+        _ => return None,
+    };
+    let bad = |why: String| {
+        (
+            "22P02",
+            format!("invalid input syntax for type json: {why}"),
+        )
+    };
+    Some(
+        std::str::from_utf8(text)
+            .map_err(|_| bad("not UTF-8".into()))
+            .and_then(|s| fenec_core::json::parse_json(s).map_err(|e| bad(e.to_string()))),
+    )
 }
 
 /// pgvector's `vector_send`: the dimension and a word it leaves 0, 16 bits
@@ -325,6 +369,17 @@ mod tests {
         let sent = v(OID_SPARSEVEC, sp.clone());
         assert_eq!(sent[..12], [0, 0, 0, 5, 0, 0, 0, 2, 0, 0, 0, 0]);
         assert_eq!(vector(&sent, OID_SPARSEVEC), Some(Ok(sp)));
+        // jsonb: a version byte and the text, read back the same way.
+        let obj = fenec_core::json::parse(r#"{"a":[1,2.5],"b":"x"}"#).unwrap();
+        let sent = v(OID_JSONB, obj.clone());
+        assert_eq!(sent, [&[1][..], br#"{"a":[1,2.5],"b":"x"}"#].concat());
+        assert_eq!(json(&sent, OID_JSONB), Some(Ok(obj.clone())));
+        assert_eq!(v(OID_JSONB, Value::Text("t".into())), b"\x01\"t\"");
+        assert_eq!(
+            json(br#"[1,2]"#, OID_JSON),
+            Some(Ok(fenec_core::json::parse_json("[1,2]").unwrap()))
+        );
+        assert!(matches!(json(b"\x02{}", OID_JSONB), Some(Err(_))));
         // The format counts dimensions in 16 bits.
         assert!(value(OID_VECTOR, &Value::Vector(vec![0.0; 70_000])).is_err());
         assert_eq!(value(OID_INT8, &Value::Null).unwrap(), None);

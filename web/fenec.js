@@ -147,9 +147,16 @@ export class Fenec {
    * @returns {{kind:string, ...}} `{columns, rows}` for row results
    */
   run(sql, params = []) {
+    return this.#run(sql, params, null);
+  }
+
+  /** `run`, the parameters at `asJson` sent as JSON rather than apart. */
+  #run(sql, params, asJson) {
+    // A typed array sent as JSON goes as the numbers it holds.
+    if (asJson) params = params.map((p, i) => (asJson.includes(i) && ArrayBuffer.isView(p) ? Array.from(p) : p));
     // A module from before vectors went over as f32s takes five arguments,
     // and would read the JSON's `null` where each vector goes.
-    const [json, vectors] = this.#wasm.fenec_query.length > 5 ? vectorsApart(params) : [params, null];
+    const [json, vectors] = this.#wasm.fenec_query.length > 5 ? vectorsApart(params, asJson) : [params, null];
     const [sp, sl] = this.#write(sql);
     const [pp, pl] = this.#write(JSON.stringify(json));
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
@@ -165,6 +172,10 @@ export class Fenec {
     // may follow ones in the same text that wrote.
     kept.get(this)?.flush();
     const res = JSON.parse(out);
+    // A json field takes a list of numbers as written, not as the f32s it
+    // went over apart as: the module names those, before running anything,
+    // and they go again as JSON.
+    if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact);
     if (res.kind === 'error') {
       const e = new FenecError(res.message);
       // Refused for collation data the module has not been handed: which,
@@ -513,6 +524,9 @@ const OPS = {
 // letter or `_`, then letters/digits/`_`). Names cannot be parameterised,
 // so this is exactly where the injection boundary sits.
 const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
+// A field, or a path into a json field: names joined by dots, as the lexer
+// reads `meta.source.rank` -- where a query reads, orders or writes a field.
+const PATH = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*(\.[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*)*$/u;
 
 /**
  * The `order` spec of a `lookup`: `'created'`, or `[['created','desc'], ...]`,
@@ -522,10 +536,10 @@ const IDENT = /^[\p{Alphabetic}_][\p{Alphabetic}\p{N}_]*$/u;
  */
 function orderKeys(spec) {
   if (spec === undefined || spec === null) return [];
-  if (typeof spec === 'string') return [{ field: ident(spec), asc: true, collate: null }];
+  if (typeof spec === 'string') return [{ field: path(spec), asc: true, collate: null }];
   return spec.map((k) => {
     const [field, dir = 'asc', opts = {}] = [k].flat();
-    return { field: ident(field), asc: direction(dir), collate: collation(opts.collate) };
+    return { field: path(field), asc: direction(dir), collate: collation(opts.collate) };
   });
 }
 
@@ -561,6 +575,14 @@ function ident(name, what = 'field') {
   return name;
 }
 
+/** A field's name, or a path into a json field: `'meta.lang'`. */
+function path(name) {
+  if (typeof name !== 'string' || !PATH.test(name)) {
+    throw new FenecError(`invalid field name: ${JSON.stringify(name)}`);
+  }
+  return name;
+}
+
 /**
  * A select-list item: a field, or an aggregate spelled as FenecQL spells it
  * -- `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- which answers
@@ -570,7 +592,7 @@ const AGGREGATE = /^(count)\(\*?\)$|^(sum|avg|min|max)\(([A-Za-z_][A-Za-z0-9_]*)
 
 function column(name) {
   const m = typeof name === 'string' ? AGGREGATE.exec(name.trim()) : null;
-  if (!m) return { text: ident(name), aggregate: false };
+  if (!m) return { text: path(name), aggregate: false };
   const text = m[1] ? 'count(*)' : `${m[2].toLowerCase()}(${m[3]})`;
   return { text, aggregate: true };
 }
@@ -597,7 +619,16 @@ function normalize(v, what = 'value') {
   if (v instanceof Date) return v.toISOString();
   if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v);
   if (Array.isArray(v)) return v.map((x) => normalize(x, what));
-  throw new FenecError(`an object cannot be used as a fenecdb value (${what})`);
+  // A plain object is a json field's value, each member as a value is.
+  const proto = Object.getPrototypeOf(v);
+  if (proto === Object.prototype || proto === null) {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) {
+      if (x !== undefined) out[k] = normalize(x, what);
+    }
+    return out;
+  }
+  throw new FenecError(`this object cannot be used as a fenecdb value (${what})`);
 }
 
 // Whether this machine's typed arrays are little-endian, as the module
@@ -611,12 +642,15 @@ const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
  * its length, then its values, and the JSON holds `null` where it goes.
  * Written out as text and read back, a page of 200 768-dim vectors spent
  * most of its time on the digits, both sides of the call. A `-0` goes over
- * as `0`, as JSON writes it, so either way stores the same vector.
+ * as `0`, as JSON writes it, so either way stores the same vector. Those
+ * at `asJson` stay in the JSON: a json field keeps a list's numbers as
+ * written, which the module asks for by their places.
  */
-function vectorsApart(params) {
+function vectorsApart(params, asJson = null) {
   const found = [];
   let size = 0;
   params.forEach((p, i) => {
+    if (asJson?.includes(i)) return;
     const list = Array.isArray(p) || (ArrayBuffer.isView(p) && !(p instanceof DataView)) ? p : null;
     if (!LITTLE || !list || list.length === 0) return;
     for (let k = 0; k < list.length; k++) {
@@ -695,7 +729,7 @@ function toCond(x) {
 /** `{ year: {gte: 2024}, tags: {has: 'rust'} }` -> an `and` tree */
 function objectCond(obj) {
   const items = Object.entries(obj).map(([field, spec]) =>
-    fieldCond(ident(field), spec),
+    fieldCond(path(field), spec),
   );
   if (items.length === 0) return { t: 'and', items: [] };
   return items.length === 1 ? items[0] : { t: 'and', items };
@@ -989,7 +1023,7 @@ export class Query {
       project:
         select === null || select.includes('*')
           ? null
-          : select.map((c) => ident(c)),
+          : select.map((c) => path(c)),
       cond: opts.where === undefined ? [] : [condOf([opts.where])],
       required: !!opts.required,
       order: orderKeys(opts.order),
@@ -1297,11 +1331,11 @@ export class Query {
 /** Turns the `where` arguments into a single condition. */
 function condOf(args) {
   if (args.length === 1) return toCond(args[0]);
-  if (args.length === 2) return fieldCond(ident(args[0]), args[1]);
+  if (args.length === 2) return fieldCond(path(args[0]), args[1]);
   if (args.length === 3) {
     const op = OPS[args[1]];
     if (!op) throw new FenecError(`unknown operator \`${args[1]}\``);
-    const field = ident(args[0]);
+    const field = path(args[0]);
     return op === 'in' ? inCond(field, args[2]) : cmp(field, op, args[2]);
   }
   throw new FenecError('where(field, op, value) | where(field, value) | where(object)');
@@ -1318,7 +1352,7 @@ function renderDoc(doc, bind) {
   if (!isSpec(doc)) throw new FenecError('expected a document object');
   const pairs = Object.entries(doc)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${ident(k)}: ${bind(v, k)}`);
+    .map(([k, v]) => `${path(k)}: ${bind(v, k)}`);
   if (pairs.length === 0) throw new FenecError('cannot write an empty document');
   return `{${pairs.join(', ')}}`;
 }

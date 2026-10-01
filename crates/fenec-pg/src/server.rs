@@ -1364,10 +1364,10 @@ fn copy_out(
                 }
             } else {
                 cells.clear();
-                for (name, _) in &target.columns {
+                for (name, ty) in &target.columns {
                     cells.push(match name.as_str() {
                         "id" => Some(row.id.to_string()),
-                        _ => values.next().and_then(to_pg_text),
+                        _ => values.next().and_then(|v| cell_text(pg_oid(ty), v)),
                     });
                 }
                 copy::line(&spec.format, &cells, &mut line);
@@ -1536,7 +1536,7 @@ fn copy_query_out(
                 }
             }
         } else {
-            let mut cells: Vec<Option<String>> = row.values.iter().map(to_pg_text).collect();
+            let mut cells = text_cells(&cols, &row.values);
             if let Some(score) = score {
                 cells.push(score.map(|s| format!("{s}")));
             }
@@ -2639,6 +2639,7 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
         DataType::Vector(_, VecPrec::F32) => binary::OID_VECTOR,
         DataType::Vector(_, VecPrec::F16) => binary::OID_HALFVEC,
         DataType::Sparse(_) => binary::OID_SPARSEVEC,
+        DataType::Json => binary::OID_JSONB,
         // A list of one scalar type is its array, which a driver reads as a
         // list of its own; one of lists or vectors has no array type
         // PostgreSQL would read, and goes as its text.
@@ -2655,10 +2656,33 @@ pub(crate) fn pg_oid(ty: &DataType) -> i32 {
     }
 }
 
+/// A cell of a column of type `oid` as text: a `jsonb` column's value --
+/// a text, a number, a list as much as an object -- as its JSON, every
+/// other as [`to_pg_text`] writes it. A text in a json field goes as
+/// `"tr"`, as PostgreSQL's `->` gives it, and a list as `[1,2]`, not as an
+/// array's `{1,2}`.
+pub(crate) fn cell_text(oid: i32, v: &Value) -> Option<String> {
+    match (oid, v) {
+        (_, Value::Null) => None,
+        (binary::OID_JSONB | binary::OID_JSON, v) => Some(fenec_core::json::to_string(v)),
+        (_, v) => to_pg_text(v),
+    }
+}
+
+/// The text cells of a row whose columns are `cols`.
+fn text_cells(cols: &[(String, i32)], values: &[Value]) -> Vec<Option<String>> {
+    let mut out = Vec::with_capacity(values.len() + 1);
+    for (i, v) in values.iter().enumerate() {
+        out.push(cell_text(cols.get(i).map_or(OID_TEXT, |c| c.1), v));
+    }
+    out
+}
+
 /// Converts a fenecdb value into PostgreSQL's text representation.
 pub fn to_pg_text(v: &Value) -> Option<String> {
     Some(match v {
         Value::Null => return None,
+        Value::Object(_) => fenec_core::json::to_string(v),
         Value::Bool(b) => (if *b { "t" } else { "f" }).to_string(),
         Value::Int(i) => i.to_string(),
         // PostgreSQL's own output format; client parsers can reject the
@@ -2772,6 +2796,21 @@ fn schema_columns() -> Vec<(String, i32)> {
     ]
 }
 
+/// The type a column named `c` goes as: its field's, `id`'s, a path's into
+/// a json field `jsonb`, as the value it reads is.
+fn column_oid(schema: &fenec_core::schema::Schema, c: &str) -> i32 {
+    if c == "id" {
+        return OID_INT8;
+    }
+    if let Some(f) = schema.field(c) {
+        return pg_oid(&f.ty);
+    }
+    match schema.path_of(c) {
+        Ok(Some(_)) => binary::OID_JSONB,
+        _ => OID_TEXT,
+    }
+}
+
 /// The column list of a `Select` -- from the schema, without running the query.
 fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<(String, i32)>> {
     let coll = db.collection(&sel.collection).ok()?;
@@ -2803,11 +2842,7 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
     let mut cols: Vec<(String, i32)> = projection_columns(&coll.schema, &sel.project)
         .into_iter()
         .map(|c| {
-            let oid = coll
-                .schema
-                .field(&c)
-                .map(|f| pg_oid(&f.ty))
-                .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
+            let oid = column_oid(&coll.schema, &c);
             (c, oid)
         })
         .collect();
@@ -2827,11 +2862,7 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
                 projection_columns(&child.schema, &step.project)
                     .into_iter()
                     .map(|c| {
-                        let oid = child
-                            .schema
-                            .field(&c)
-                            .map(|f| pg_oid(&f.ty))
-                            .unwrap_or(if c == "id" { OID_INT8 } else { OID_TEXT });
+                        let oid = column_oid(&child.schema, &c);
                         (format!("{}.{}", step.collection, c), oid)
                     }),
             );
@@ -2897,7 +2928,7 @@ fn binary_row(
     for (i, v) in values.iter().enumerate() {
         cells.push(match binary::binary_at(formats, i) {
             true => binary::value(cols.get(i).map_or(OID_TEXT, |c| c.1), v)?,
-            false => to_pg_text(v).map(String::into_bytes),
+            false => cell_text(cols.get(i).map_or(OID_TEXT, |c| c.1), v).map(String::into_bytes),
         });
     }
     if let Some(score) = score {
@@ -3671,6 +3702,23 @@ fn run_locked(
             }
         },
     };
+    // A list of numbers a json field is handed, or a path compared with, is
+    // read again as written: a vector's `f32`s are not the numbers sent,
+    // and the field refuses them (`Database::exactly`). Only a statement
+    // holding such a list asks the schema.
+    let exact;
+    let stmts: &[Statement] = match stmts.iter().any(Statement::reads_vectors)
+        && lock.read(db, |d| stmts.iter().any(|s| d.exactly(s).text))
+    {
+        true => match fenec_ql::parse_exact(trimmed) {
+            Ok(s) => {
+                exact = s;
+                &exact
+            }
+            Err(_) => stmts,
+        },
+        false => stmts,
+    };
     if tx.open {
         tx.ran = true;
     }
@@ -3873,8 +3921,7 @@ fn run_locked(
                         let binary = binary::any_binary(formats);
                         for row in &rs.rows {
                             if !binary {
-                                let mut cells: Vec<Option<String>> =
-                                    row.values.iter().map(to_pg_text).collect();
+                                let mut cells = text_cells(&cols, &row.values);
                                 if with_score {
                                     cells.push(row.score.map(|s| format!("{s}")));
                                 }

@@ -1042,6 +1042,9 @@ fn binary(b: &[u8], ty: &DataType) -> Result<Value, String> {
     if let Some(v) = crate::binary::vector(b, oid) {
         return v.map_err(|(_, why)| why);
     }
+    if let Some(v) = crate::binary::json(b, oid) {
+        return v.map_err(|(_, why)| why);
+    }
     if matches!(ty, DataType::Vector(..) | DataType::Sparse(_)) {
         return match b.contains(&0) {
             true => Err("not a vector in its binary format".into()),
@@ -1129,6 +1132,9 @@ pub fn value(s: &str, ty: &DataType) -> Result<Value, String> {
                 .collect::<Result<_, _>>()?,
         ),
         DataType::Timestamp | DataType::Sparse(_) => Value::Text(t.to_string()),
+        // A jsonb cell is its JSON text, every number as written.
+        DataType::Json => fenec_core::json::parse_json(t)
+            .map_err(|e| format!("invalid input syntax for type json: {e}"))?,
     })
 }
 

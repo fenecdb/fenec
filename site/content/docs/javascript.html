@@ -294,7 +294,16 @@ table lists everything else a query can carry.</p>
 <pre data-lang="js">.where('year', '>=', 2024)                   // field, operator, value
 .where('category', 'book')                   // two arguments means equality
 .where({ year: { gte: 2024 }, tags: { has: 'rust' } })
+.where('meta.lang', '=', 'tr')               // a path into a json field
 </pre>
+
+<p>A path into a <a href="fenecql.html#json"><code>json</code> field</a>
+goes wherever a field does — <code>where</code>, <code>select</code>,
+<code>order</code>, and the keys of <code>update</code>, which sets one key
+inside the field — and a plain object is a <code>json</code> field's value:
+<code>insert({ meta: { lang: 'tr' } })</code>. <code>fenec types</code>
+writes a <code>json</code> field as <code>Json</code>, and the builder's
+types take <code>'meta.lang'</code> as a path of it.</p>
 
 <div class="tbl">
 <table>
@@ -402,7 +411,11 @@ of finite numbers, which the module reads as a vector either way — goes into
 the module as its <code>f32</code>s beside the JSON rather than as text:
 200 768-dim vectors are put in 4.4 ms, against 21.9 written out as digits
 and read back. The vector stored is the same, <code>-0</code> as
-<code>0</code> as JSON writes it; over HTTP a parameter is JSON.</p>
+<code>0</code> as JSON writes it; over HTTP a parameter is JSON. Where such
+a parameter is given a <code>json</code> field, or compared with a path
+into one, the module names it before running anything and <code>run</code>
+sends it again as JSON, so a plain array keeps its numbers as written and a
+<code>Float32Array</code> goes as the numbers it holds.</p>
 </details>
 
 <h2>Independent of the transport</h2>

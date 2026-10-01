@@ -15,7 +15,7 @@ is accepted. These are all its statements.</p>
 
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ... )
 drop collection [if exists] &lt;name&gt;
-create index [if not exists] on &lt;name&gt; (&lt;field&gt;) @index
+create index [if not exists] on &lt;name&gt; (&lt;field&gt; | &lt;path&gt;) @index
 alter collection &lt;name&gt; add field &lt;field&gt; &lt;type&gt; [collate und|tr] [@index]
 alter collection &lt;name&gt; drop field &lt;field&gt;
 alter collection &lt;name&gt; rename field &lt;field&gt; to &lt;new name&gt;
@@ -33,10 +33,12 @@ get &lt;name&gt; select [&lt;key&gt;,] count(*), sum(f), ... [where &lt;expr&gt;
            [group &lt;key&gt; [order &lt;column&gt; [desc]] [limit N] [offset N]]
 explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
-set &lt;name&gt; { field: value } [where &lt;expr&gt;]
+set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]
 del &lt;name&gt; [where &lt;expr&gt;]
 
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
+
+-- a path, meta.source.rank, reads into a json field wherever a field is read
 </pre>
 
 <ul>
@@ -68,7 +70,8 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <div class="tbl">
 <table>
 <tbody>
-<tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code></td></tr>
+<tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code> <code>json</code></td></tr>
+<tr><td><b>Paths</b></td><td><code>meta.source.rank</code> reads into a <code>json</code> field in <code>where</code>, <code>select</code>, <code>order</code> and <code>set</code>, and takes <code>@hash</code>, <code>@unique</code> and <code>@sorted</code> — see <a href="#json">Objects and paths</a></td></tr>
 <tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
@@ -80,7 +83,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> in the select list, whole or per <code>group</code> — see <a href="#aggregates">Aggregates</a></td></tr>
-<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels — see <a href="limits.html">Limits</a></td></tr>
+<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -386,7 +389,10 @@ create the collection, or add it later with <code>create index</code>.</p>
 <ul>
   <li><b>One index per field:</b> <code>@hash</code> for equality,
     <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
-    text search, <code>@hnsw</code> for nearest neighbours.</li>
+    text search, <code>@hnsw</code> for nearest neighbours. A path into a
+    <code>json</code> field takes <code>@hash</code>, <code>@unique</code>
+    or <code>@sorted</code> of its own (<a href="#json">Objects and
+    paths</a>).</li>
   <li><b><code>@unique</code> is a <code>@hash</code> that refuses a second
     document</b> holding a value one holds already. <code>null</code> is no
     value: any number of documents may hold it.</li>
@@ -581,6 +587,115 @@ module's scan of 20 000 rows 1.70 ms against 1.71. A <code>compact</code> that t
 a dropped field out took 95 ms against 56 for one with none to take: it
 writes each document again rather than copy it. On a server it holds the
 write lock, where a compact otherwise runs beside the database.</p>
+</details>
+
+<h2 id="json">Objects and paths</h2>
+
+<p>A <code>json</code> field holds any value JSON does — an object, a list,
+a number, text, <code>true</code>, <code>false</code> or
+<code>null</code> — with no type declared for what is inside. A path
+reads into it wherever a field is read.</p>
+
+<pre data-lang="fenecql">create collection docs (title text, meta json)
+put docs {title: "a", meta: {lang: "tr", source: {site: "x", rank: 3}}}
+
+get docs where meta.lang = "tr" and meta.source.rank &gt;= 2
+get docs select title, meta.source.site order meta.source.rank desc
+set docs {meta.lang: "en"} where title = "a"
+
+create index on docs (meta.lang) @hash
+create index on docs (meta.source.rank) @sorted
+</pre>
+
+<ul>
+  <li><b>A path that leads nowhere is <code>null</code></b>: a key a
+    document does not have, or a value on the way that is not an
+    object.</li>
+  <li><b>A path takes <code>@hash</code>, <code>@unique</code> and
+    <code>@sorted</code></b>, and they answer what the scan would, row for
+    row.</li>
+  <li><b><code>set</code> with a path changes one key</b> and keeps the
+    rest of the object; it makes the object where there is none.</li>
+  <li><b>Typed fields are unchanged.</b> An <code>int</code> or a
+    <code>text</code> field still refuses an object.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>An object's keys are kept sorted and unique: a key given twice — in
+FenecQL, in a JSON body, in a pg parameter — refuses the write rather than
+keep one of them, since which one a reader keeps differs from reader to
+reader. Its numbers are kept as written, an integer an integer and
+<code>19.99</code> the decimal it is, everywhere one comes in: FenecQL, a
+parameter over HTTP, over the pg wire and in the browser, a JSON body, a
+COPY cell. A list of numbers alone is read the quick way, into the
+<code>f32</code>s of the vector it nearly always is; where it is given a
+<code>json</code> field, or compared with a path into one, the statement's
+text or the parameter's JSON is read again as written, so
+<code>[0.1, 12345678901]</code> is kept as those two numbers. A vector that
+was never text — a <code>Float32Array</code> handed to the browser module,
+a vector built through the Rust API — is refused there rather than kept as
+numbers it was not given. A timestamp becomes its ISO text, as JSON writes
+one; bytes, a sparse vector and a number that is not finite have no JSON
+and are refused. A value nests at most 64 levels, and a path
+names at most 64 keys past its field: past either a write or a query is
+refused, never cut.</p>
+
+<p>A path is a field's name, a dot, and keys, each a name as a field's is
+(<code>meta.source.rank</code>); a key with a space or a dash in it cannot
+be named, and is reached by reading the whole field. It works in every
+comparison, <code>in</code>, <code>has</code>, <code>~</code> and
+<code>is null</code>, in <code>select</code> — answering under the path's
+text as its column's name — in <code>order</code>, and in
+<code>set</code> and <code>put</code>, which set the one key inside the
+field. A filter binds a path once a query, as it binds a field, and walks
+its keys over each row's bytes, passing the members before the key without
+decoding them. An aggregate and <code>group</code> read a field, not a
+path; a <code>lookup</code>'s keys are fields too. Comparisons are the
+ones every value already has: <code>3</code> equals <code>3.0</code>,
+every number orders below every text, text below a list and a list below
+an object, and <code>null</code> is equal only to <code>null</code>.</p>
+
+<p>An index on a path is a field of its own beside the fields, named by the
+path, and its kind is the field's: <code>@hash</code> keys a value as a
+typed field's does, a whole float filed as the int it equals so that
+<code>3</code> and <code>3.0</code> share a bucket; an equality or an
+<code>in</code> reaches it with null, a boolean, text and a number an
+<code>f64</code> holds exactly, and anything else — an int past
+2<sup>53</sup>, which equals floats near it that no bucket holds — is
+answered by the scan. <code>@unique</code> refuses a value held twice as a
+field's does, <code>3</code> and <code>3.0</code> the same value.
+<code>@sorted</code> orders the numbers as <code>f64</code>s and the text by
+its bytes, every number before every text; a value it has no place for —
+<code>true</code> or <code>false</code>, a list, an object, an int past
+2<sup>53</sup> — is held apart, and while the index holds one it answers
+nothing and the scan does: a wrong order is never what an index costs.
+<code>tests/json.rs</code> holds both to a twin collection without them,
+every filter, order and page, through writes and a reopen. Text, vector
+and sparse indexes stay on the fields that declare their type. On a server
+an index on a path is built under the write lock, as it reads one value a
+row: 11 ms for <code>@hash</code> and 21 for <code>@sorted</code> over
+100 000 documents.</p>
+
+<p>Renaming a <code>json</code> field renames the paths into it, indexes
+and all, and dropping it drops them. In the file a <code>json</code> field
+is type tag 14 and an object value tag 13 — not 11 or 12, which a schema
+writes for a collation and a dropped place — and each index on a path is
+written inside its field's entry, its keys and its kind: a binary from
+before them refuses the file (<i>unknown type tag 14</i>) rather than read
+it. The indexes are derived, as every hash and ordered index is: rebuilt
+from the documents by the first read after an open.</p>
+
+<p>Measured over 100 000 documents of a <code>title</code>, a
+<code>year</code>, a <code>price</code> and a <code>meta</code> object of
+three keys: <code>where meta.lang = "tr"</code> scans in 5.7 ms where the
+same comparison of a text field takes 4.2; <code>meta.source.rank &gt;=
+990</code> in 7.2; both together in 10.4; the first 20 by
+<code>meta.source.rank</code> in 7.3. With <code>@hash</code> and
+<code>@sorted</code> on the two paths: 0.025, 0.009, 0.12 and 0.010 ms. A
+scan of a collection with no <code>json</code> field takes what it took
+before them (3.47 against 3.38 ms by two numbers, 4.17 against 4.21 by a
+text, 3.06 against 3.08 by <code>~</code>, 2.72 against 2.60 for an
+ordered page), and the browser module's filter 1.67 against 1.66.</p>
 </details>
 
 <h2 id="quantized">Quantized vector indexes</h2>

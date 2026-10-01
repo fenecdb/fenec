@@ -20,8 +20,10 @@ behaviour worth knowing before it surprises you.</p>
   <li><b>Indexes live in memory.</b> The data stays in the mapped file; the
     indexes are restored or rebuilt on open (<a href="#memory-and-scale">Memory
     and scale</a>).</li>
-  <li><b>Flat documents.</b> Fields and lists of values; no objects nested
-    inside a row (below).</li>
+  <li><b>Typed fields, and <code>json</code> where a shape is not
+    fixed.</b> A <code>json</code> field holds objects, lists and scalars,
+    and a path (<code>meta.lang</code>) reads into it
+    (<a href="/docs/fenecql#json">Objects and paths</a>).</li>
   <li><b>No TLS.</b> Put a TLS terminator in front of any port off the
     machine (<a href="/docs/postgres">PostgreSQL server</a>).</li>
 </ul>
@@ -29,11 +31,13 @@ behaviour worth knowing before it surprises you.</p>
 <p>Deliberately not done: JOIN, SQL as the query language, several writers to
 one file, multi-writer replication, a field's type changed in place (it
 would rewrite every document under the write lock). Not done yet, and
-planned: nested objects, subqueries, expiry and TLS, in the repository's
+planned: subqueries, expiry and TLS, in the repository's
 <code>ROADMAP.md</code>. A unique field is
-<a href="/docs/fenecql#indexes"><code>@unique</code></a>, and a field is
+<a href="/docs/fenecql#indexes"><code>@unique</code></a>, a field is
 added, dropped or renamed with
-<a href="/docs/fenecql#changing-a-collection"><code>alter collection</code></a>.</p>
+<a href="/docs/fenecql#changing-a-collection"><code>alter collection</code></a>,
+and nested objects are a <a href="/docs/fenecql#json"><code>json</code>
+field</a>.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>These are consequences of the design, hard-coded ceilings, and behaviours
@@ -63,8 +67,12 @@ model, and the other would be a different database.</p>
     for money. The answer is an <code>int</code> in cents.</li>
   <li><b>No UUID type.</b> <code>text @hash</code> is functionally
     enough.</li>
-  <li><b>No nested objects.</b> A list is homogeneous and an object value is
-    refused on purpose. A field you want to filter on should be a field.</li>
+  <li><b>Objects only in a <code>json</code> field.</b> A typed field still
+    refuses one, and a list of a type holds that type alone. A
+    <code>json</code> field holds any value JSON does; a path filters,
+    orders and is indexed (<code>@hash</code>, <code>@unique</code>,
+    <code>@sorted</code>), but an aggregate and <code>group</code> read a
+    field, and text, vector and sparse indexes stay on typed fields.</li>
 </ul>
 </details>
 
@@ -72,7 +80,7 @@ model, and the other would be a different database.</p>
 
 <p>Ceilings baked into the code. Exceeding any of the first four makes the
 query <b>error</b>, because a silently cut result is a wrong answer believed
-right.</p>
+right; so does going past the two <code>json</code> depths.</p>
 
 <div class="tbl">
 <table>
@@ -82,6 +90,8 @@ right.</p>
 <tr><td><code>rerank</code> candidates, <code>fuse</code> candidates a side</td><td class="n"><b>10 000</b></td><td>a query error when exceeded; never fewer than <code>limit + offset</code></td></tr>
 <tr><td>expression depth</td><td class="n"><b>512 levels</b></td><td>parentheses <i>and</i> <code>and</code>/<code>or</code> chains count</td></tr>
 <tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
+<tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut</td></tr>
+<tr><td>path length</td><td class="n"><b>64 keys</b></td><td>past its field (<code>meta.a.b</code> is two); a query error, since no value nests deeper</td></tr>
 <tr><td>session stack (<code>fenec-pg</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
 <tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
 <tr><td>document payload, segment offset</td><td class="n">4 GiB</td><td>the location record is a <code>u32</code></td></tr>

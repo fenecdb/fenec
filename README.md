@@ -4,7 +4,7 @@
 
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, transactions, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 180 KB of
+written in Rust with no dependencies. It runs inside a web page as 192 KB of
 gzipped WebAssembly, in a Rust process, or as a server that speaks the
 PostgreSQL protocol, and it has its own query language (**FenecQL**).
 
@@ -116,7 +116,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-180 KB of gzipped WebAssembly and a 30 KB gzipped client — no wasm-bindgen, no
+192 KB of gzipped WebAssembly and a 30 KB gzipped client — no wasm-bindgen, no
 build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
@@ -168,8 +168,8 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch or a transaction landing whole |
 | **Schema** | `alter collection` adds, drops and renames a field without rewriting a document — and over the pg wire, the `ALTER TABLE` a migration sends |
 | **Transactions** | `BEGIN`, `SAVEPOINT`, `ROLLBACK TO`, `COMMIT` over the PostgreSQL wire; `COPY` in and out |
-| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` |
-| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted` |
+| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`, and `jsonb` over the pg wire) |
+| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
 | **Retrieval** | `near` (HNSW; exact by dot product over a `sparse<N>` such as SPLADE's), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
@@ -182,14 +182,14 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 180 KB gzip wasm + 30 KB gzip client · 1153–1687 KB binary · 2.88 MB container image |
+| **Runtime size** | 192 KB gzip wasm + 30 KB gzip client · 1153–1687 KB binary · 2.88 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
 What it deliberately does **not** do — no second writer (a transaction holds the
 database from its first write to its end), no JOIN, no subqueries,
-no change of a field's type in place, no multi-writer replication, no nested
-objects, no decimal type, no TLS (a terminator goes in front) — is listed
+no change of a field's type in place, no multi-writer replication, no decimal
+type, no TLS (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
 ceiling baked into the code. Relations are `lookup`, which attaches a
 collection's matching documents to the row they belong to with a `limit` that

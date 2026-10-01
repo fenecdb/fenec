@@ -65,6 +65,9 @@ pub(crate) enum Kind {
     Vector,
     /// A PostgreSQL array `{1,2,3}`.
     Array(Box<Kind>),
+    /// `json` and `jsonb`: their text, read as JSON, every number as
+    /// written.
+    Json,
 }
 
 /// The fenecdb type and decoder for an OID.
@@ -167,14 +170,8 @@ pub(crate) fn map_oid(f: &FieldDesc, oids: &VectorOids) -> (Column, Kind) {
             ),
             Kind::Text,
         ),
-        JSON | JSONB => (
-            Column::unsupported(
-                name,
-                if f.oid == JSON { "json" } else { "jsonb" },
-                "fenecdb has no nested objects; a field to filter on has to be its own column",
-            ),
-            Kind::Text,
-        ),
+        JSON => (col(DataType::Json, "json"), Kind::Json),
+        JSONB => (col(DataType::Json, "jsonb"), Kind::Json),
         other => (
             Column::unsupported(name, format!("oid {other}"), "unrecognised PostgreSQL type"),
             Kind::Text,
@@ -292,6 +289,7 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
             Value::Float(v)
         }
         Kind::Text => Value::Text(text(raw)),
+        Kind::Json => fenec_core::json::parse_json(&text(raw)).map_err(|_| bad("JSON"))?,
         Kind::Bytea => Value::Bytes(hex_bytea(raw).ok_or_else(|| bad("a bytea"))?),
         Kind::Vector => {
             let s = text(raw);
@@ -594,9 +592,17 @@ mod tests {
             ty(TEXT_ARRAY),
             Some(DataType::List(Box::new(DataType::Text)))
         );
+        // A json column is a json field, its paths read into as PostgreSQL's
+        // `->` reads them.
+        assert_eq!(ty(JSONB), Some(DataType::Json));
+        assert_eq!(ty(JSON), Some(DataType::Json));
+        assert_eq!(
+            parse_cell(br#"{"a": [1, 19.99]}"#, &Kind::Json, "meta").unwrap(),
+            fenec_core::json::parse_json(r#"{"a":[1,19.99]}"#).unwrap()
+        );
+        assert!(parse_cell(b"{", &Kind::Json, "meta").is_err());
         // The ones with no counterpart require `--cast`.
         assert_eq!(ty(NUMERIC), None);
-        assert_eq!(ty(JSONB), None);
         assert_eq!(ty(9999), None);
     }
 

@@ -248,7 +248,7 @@ fn lookup_level(name: &str, parent: &Schema, child: &Schema, req: &Request) -> R
             "limit" => l.limit = Some(number(raw, "limit")?),
             "offset" => l.offset = number(raw, "offset")?,
             "required" => l.required = truthy(raw),
-            "where" => parts.push(parse_expr(name, raw)?),
+            "where" => parts.push(parse_expr(child, raw)?),
             other => parts.push(condition(child, other, raw)?),
         }
     }
@@ -313,24 +313,32 @@ fn order(schema: &Schema, raw: &str) -> Result<Vec<Sort>> {
         if part.is_empty() {
             continue;
         }
-        // No name holds a dot -- an aggregate's parentheses neither -- so
-        // everything after the first one is a modifier.
-        let mut words = part.split('.');
-        let name = words.next().unwrap_or_default();
+        // A field's name holds no dot, but a path into a json field does
+        // (`meta.source.rank.desc`): the modifiers are the words after the
+        // first that name a direction or a collation, read from the end, and
+        // the name what is before them -- a field, which no dot follows
+        // but a modifier's, or a path into a json field.
+        let mut words: Vec<&str> = part.split('.').collect();
         let (mut asc, mut collate) = (true, None);
-        for w in words {
+        while words.len() > 1 {
+            let w = words[words.len() - 1];
             match w {
                 "asc" => asc = true,
                 "desc" => asc = false,
-                w => {
-                    collate = Some(Collation::named(w).ok_or_else(|| {
-                        Error::Query(format!(
+                w => match Collation::named(w) {
+                    Some(c) => collate = Some(c),
+                    None if schema.path_of(&words.join(".")).ok().flatten().is_some() => break,
+                    None => {
+                        return Err(Error::Query(format!(
                             "`order`: `{w}` in `{part}` is not asc, desc or a collation (tr)"
-                        ))
-                    })?)
-                }
+                        )))
+                    }
+                },
             }
+            words.pop();
         }
+        let joined = words.join(".");
+        let name = joined.as_str();
         let name = if let Some((f, rest)) = name.split_once('(') {
             // The function's name folds as FenecQL folds it; the field's does not.
             match (f.to_ascii_lowercase().as_str(), rest) {
@@ -386,7 +394,7 @@ fn filter_with(
         }
         if reserved.contains(&key.as_str()) {
             if key == "where" {
-                parts.push(parse_expr(&schema.name, raw)?);
+                parts.push(parse_expr(schema, raw)?);
             }
             continue;
         }
@@ -400,9 +408,17 @@ fn filter_with(
 /// `where=` is a free FenecQL expression, so that conditions which do not fit
 /// the query-string pattern (function calls, `or` groups) can be expressed
 /// too. Only the condition part is taken; no other clause is accepted.
-fn parse_expr(collection: &str, raw: &str) -> Result<Expr> {
-    let stmt = fenec_ql::parse_one(&format!("get {collection} where {raw}"))
-        .map_err(|e| Error::Query(format!("`where` could not be parsed: {e}")))?;
+/// A list of numbers a json field's path is compared with is read as
+/// written (`exactly_for`), as a statement's text is.
+fn parse_expr(schema: &Schema, raw: &str) -> Result<Expr> {
+    let text = format!("get {} where {raw}", schema.name);
+    let parsed = fenec_ql::parse_one(&text).and_then(|stmt| {
+        match stmt.reads_vectors() && fenec_core::engine::exactly_for(schema, &stmt).text {
+            true => fenec_ql::parse_exact(&text).map(|mut s| s.remove(0)),
+            false => Ok(stmt),
+        }
+    });
+    let stmt = parsed.map_err(|e| Error::Query(format!("`where` could not be parsed: {e}")))?;
     let Statement::Select(sel) = stmt else {
         return Err(Error::Query(
             "`where` must be a condition expression".into(),
@@ -531,6 +547,14 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
                 "`{name}` is a vector: it cannot be filtered in the query string, use `POST /<collection>/near`"
             )))
         }
+        // A json value has no type to read the text by: a number, `true`,
+        // `false`, `null` or a quoted string as JSON reads it, and any other
+        // text as itself -- `?meta.lang=tr`, `?meta.rank=gte.2`.
+        DataType::Json => match fenec_core::json::parse(raw) {
+            Ok(v @ (Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_))) => v,
+            Ok(Value::Text(t)) if raw.starts_with('"') => Value::Text(t),
+            _ => Value::Text(raw.to_string()),
+        },
     };
     Ok(v)
 }
@@ -539,6 +563,10 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
 fn field<'a>(schema: &'a Schema, name: &str) -> Result<&'a DataType> {
     if name == "id" {
         return Ok(&DataType::Int);
+    }
+    // A path into a json field: `?meta.lang=tr`.
+    if let Ok(Some(_)) = schema.path_of(name) {
+        return Ok(&DataType::Json);
     }
     schema
         .field(name)
@@ -552,8 +580,17 @@ fn body_str(req: &Request) -> Result<&str> {
     std::str::from_utf8(&req.body).map_err(|_| Error::Query("the body is not UTF-8".into()))
 }
 
+/// The collection's json fields, whose members a body's reader keeps every
+/// number of (`json::parse_documents_json`).
+fn json_fields(schema: &Schema) -> Vec<&str> {
+    (schema.fields.iter())
+        .filter(|f| f.ty == DataType::Json)
+        .map(|f| f.name.as_str())
+        .collect()
+}
+
 fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
-    let docs = json::parse_documents(body_str(req)?)?;
+    let docs = json::parse_documents_json(body_str(req)?, &json_fields(schema))?;
     if docs.is_empty() {
         return Err(Error::Query("empty body: no document to write".into()));
     }
@@ -571,7 +608,11 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
 }
 
 fn document(schema: &Schema, req: &Request) -> Result<Vec<(String, Expr)>> {
-    check_fields(schema, json::parse_object(body_str(req)?)?)
+    let mut docs = json::parse_documents_json(body_str(req)?, &json_fields(schema))?;
+    if docs.len() != 1 {
+        return Err(Error::Query("expected a JSON object".into()));
+    }
+    check_fields(schema, docs.remove(0))
 }
 
 /// Field names are validated against the schema: the engine validates them
@@ -580,7 +621,8 @@ fn document(schema: &Schema, req: &Request) -> Result<Vec<(String, Expr)>> {
 fn check_fields(schema: &Schema, doc: Vec<(String, Value)>) -> Result<Vec<(String, Expr)>> {
     let mut out = Vec::with_capacity(doc.len());
     for (k, v) in doc {
-        if k != "id" && schema.field(&k).is_none() {
+        // A path names a key inside a json field: `{"meta.lang": "en"}`.
+        if k != "id" && schema.field(&k).is_none() && !matches!(schema.path_of(&k), Ok(Some(_))) {
             return Err(Error::Query(format!(
                 "collection `{}` has no field `{k}`",
                 schema.name
@@ -653,8 +695,8 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     };
 
     // `"match": "words"` makes it hybrid: BM25 over the text field ranks
-    // too, and the two rankings are fused. Flat keys, since a JSON body
-    // here holds no nested objects.
+    // too, and the two rankings are fused. Flat keys, as the rest of the
+    // body's are.
     match get("match") {
         None | Some(Value::Null) => {}
         Some(Value::Text(q)) => {
@@ -698,7 +740,7 @@ fn near_from_body(schema: &Schema, req: &Request) -> Result<Select> {
     // are present they are `and`ed.
     let mut filter = filter_from_query(schema, req)?;
     if let Some(Value::Text(expr)) = get("where") {
-        let parsed = parse_expr(&schema.name, expr)?;
+        let parsed = parse_expr(schema, expr)?;
         filter = Some(match filter {
             Some(f) => Expr::And(Box::new(f), Box::new(parsed)),
             None => parsed,
@@ -839,6 +881,83 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
         Some(other) => vec![other.clone()],
     };
     Ok((parsed(&sql)?, params))
+}
+
+/// The statement and parameters of a `POST /query` body as a json field
+/// needs them: a list of numbers it is handed, or a path is compared with,
+/// read again as written, from the statement's text or the parameters'
+/// JSON -- read the quick way, into a vector's `f32`s, the field refuses it
+/// (`Database::exactly`). A statement with no such list, and parameters
+/// holding none, are handed back as they came, the database not looked at.
+pub fn exactly(
+    db: &std::sync::RwLock<Database>,
+    body: &str,
+    stmt: Arc<Statement>,
+    params: Vec<Value>,
+) -> Result<(Arc<Statement>, Vec<Value>)> {
+    if !vectored(&stmt, &params) {
+        return Ok((stmt, params));
+    }
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    exactly_in(&g, body, stmt, params)
+}
+
+/// [`exactly`] for each line of a `POST /batch` body, the database looked
+/// at once.
+pub fn exactly_batch(
+    db: &std::sync::RwLock<Database>,
+    body: &str,
+    stmts: Vec<(Statement, Vec<Value>)>,
+) -> Result<Vec<(Statement, Vec<Value>)>> {
+    if !stmts.iter().any(|(s, p)| vectored(s, p)) {
+        return Ok(stmts);
+    }
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    let lines = body.lines().filter(|l| !l.trim().is_empty());
+    let mut out = Vec::with_capacity(stmts.len());
+    for (line, (stmt, params)) in lines.zip(stmts) {
+        let (stmt, params) = exactly_in(&g, line, Arc::new(stmt), params)?;
+        out.push((Arc::unwrap_or_clone(stmt), params));
+    }
+    Ok(out)
+}
+
+/// Whether a list of numbers is among a statement's literals or its
+/// parameters: where none is, no json field is handed a vector.
+fn vectored(stmt: &Statement, params: &[Value]) -> bool {
+    stmt.reads_vectors() || params.iter().any(fenec_core::query::holds_vector)
+}
+
+fn exactly_in(
+    db: &Database,
+    body: &str,
+    stmt: Arc<Statement>,
+    params: Vec<Value>,
+) -> Result<(Arc<Statement>, Vec<Value>)> {
+    let need = db.exactly(&stmt);
+    if !need.is_needed() {
+        return Ok((stmt, params));
+    }
+    let obj = json::parse_object_listing_exact(body, "params")?;
+    let get = |name: &str| obj.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    let stmt = match (need.text, get("query").or_else(|| get("sql"))) {
+        (true, Some(Value::Text(sql))) => Arc::new(
+            fenec_ql::parse_exact(sql)
+                .and_then(|mut s| match s.len() {
+                    1 => Ok(s.remove(0)),
+                    n => Err(Error::Query(format!(
+                        "expected a single statement, found {n}"
+                    ))),
+                })
+                .map_err(|e| Error::Query(e.to_string()))?,
+        ),
+        _ => stmt,
+    };
+    let params = match get("params") {
+        Some(Value::List(items)) if !need.params.is_empty() => items.clone(),
+        _ => params,
+    };
+    Ok((stmt, params))
 }
 
 /// Shards of the statements parsed, by their text's hash: a client sends

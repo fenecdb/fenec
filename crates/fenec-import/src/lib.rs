@@ -38,7 +38,7 @@ pub struct Column {
     /// The column name in the source.
     pub name: String,
     /// The inferred fenecdb type. `None` means there is no safe counterpart
-    /// (`numeric`, `json`) and `--cast` becomes mandatory.
+    /// (`numeric`) and `--cast` becomes mandatory.
     pub ty: Option<DataType>,
     /// The source type, verbatim: `INTEGER`, `numeric`, `vector(384)`.
     /// Only for the plan output and error text.

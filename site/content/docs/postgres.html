@@ -50,7 +50,7 @@ type is one fenecdb has, by any of PostgreSQL's spellings of it —
 <code>bigint</code>, <code>double precision</code>, <code>boolean</code>,
 <code>bytea</code>, <code>timestamp with time zone</code>,
 <code>vector(n)</code>, <code>halfvec(n)</code>, <code>sparsevec(n)</code>,
-an array of one — with <code>NULL</code>, <code>UNIQUE</code> (an
+<code>jsonb</code> and <code>json</code>, an array of one — with <code>NULL</code>, <code>UNIQUE</code> (an
 <code>@unique</code> field) and a <code>COLLATE "und-x-icu"</code> or
 <code>"tr-x-icu"</code>. What would need every row there rewritten or
 given a value — <code>ALTER COLUMN ... TYPE</code>, <code>NOT NULL</code>,
@@ -205,6 +205,55 @@ psycopg 3, reading answers it did not expect, fails with <i>cannot exit
 pipeline mode while busy</i>. What ran <i>before</i> the error in the
 pipeline is put back as well: a pipeline is one block up to its
 <code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
+</details>
+
+<h2 id="jsonb">JSON as jsonb</h2>
+
+<p>A <a href="fenecql.html#json"><code>json</code> field</a> is PostgreSQL's
+<code>jsonb</code> to every driver: psycopg and asyncpg read it as the dicts
+and lists it holds, pgx into a map or a struct, and each sends its own JSON
+values back. A path is a column of <code>jsonb</code> too.</p>
+
+<pre data-lang="python">from psycopg.types.json import Jsonb
+
+conn.execute("create collection docs (title text, meta json)")
+conn.execute("put docs {title: %s, meta: %s}", ("a", Jsonb({"lang": "tr", "rank": 3})))
+conn.execute("get docs select meta, meta.lang where meta.rank &gt;= %s", (2,)).fetchone()
+# ({'lang': 'tr', 'rank': 3}, 'tr')
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>A <code>json</code> field and a path into one are described as
+<code>jsonb</code> (OID 3802). A cell is the value's JSON text — a text in
+it quoted, <code>"tr"</code>, as PostgreSQL's <code>-&gt;</code> gives it,
+and a list <code>[1,2]</code> rather than an array's <code>{1,2}</code> —
+and where <code>Bind</code> asks for binary, as asyncpg and pgx do, the
+version byte <code>jsonb_send</code> writes, 1, then the text. A parameter
+given for a <code>json</code> field or compared with a path is described as
+<code>jsonb</code>, as PostgreSQL types <code>meta-&gt;'lang'</code>, so
+pgx sends a number there as one; it is read in text as JSON — a string a
+driver sends with no type named, which is no JSON, is read by its look, as
+any such parameter is — and in binary after its version byte, one of
+another version refused (<code>22P03</code>). A <code>json</code> parameter
+(OID 114) is read the same, without the byte. Without a codec asyncpg hands
+<code>jsonb</code> over as its text both ways, as it does from PostgreSQL;
+<code>set_type_codec('jsonb', encoder=json.dumps, decoder=json.loads,
+schema='pg_catalog')</code> makes it the values themselves. pgx scanning a
+path into a <code>string</code> gets its JSON, <code>"tr"</code>, as from
+PostgreSQL; into <code>any</code>, the text.</p>
+
+<p><code>COPY</code> reads a <code>jsonb</code> cell as its JSON text and
+writes it the same way, in text and CSV, and in a binary COPY as
+<code>jsonb_send</code> writes it: <code>copy_records_to_table</code> and
+pgx's <code>CopyFrom</code> send that form. Every number in it keeps its
+digits. <code>ALTER TABLE ... ADD COLUMN meta jsonb</code> adds a
+<code>json</code> field, and the catalog shows the column as
+<code>jsonb</code>, which <code>\d</code> prints. An index on a path is not
+in <code>pg_index</code>, which names columns and not paths into them.
+<code>make drivers-test</code> holds psycopg (text and binary cursors,
+<code>Jsonb</code>, <code>COPY</code> both ways), asyncpg (with and without
+a codec, <code>copy_records_to_table</code>) and pgx (binary rows and
+parameters, <code>CopyFrom</code>) to it.</p>
 </details>
 
 <h2 id="pgvector">Vectors with pgvector's libraries</h2>
@@ -795,7 +844,8 @@ database as it is.</p>
 <p>A collection is a table in <code>public</code>, its <code>id</code> the
 first column and the primary key, each field a column of the type the wire
 already reports for it — a vector as <code>vector(N)</code>, a sparse one as
-<code>sparsevec(N)</code>, a list as an array. Each fenecdb index is an index
+<code>sparsevec(N)</code>, a <code>json</code> field as <code>jsonb</code>, a
+list as an array. Each fenecdb index is an index
 with its own access method: <code>hash</code>, <code>btree</code> for
 <code>@sorted</code>, <code>hnsw</code>, <code>bm25</code> for
 <code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. An

@@ -600,7 +600,8 @@ fn column_type(t: &mut Toks<'_>) -> std::result::Result<String, Refusal> {
             "0A000",
             format!(
                 "fenecdb has no {ty} type: bool, bigint, double precision, text, bytea, \
-                     timestamptz, vector, halfvec, sparsevec and arrays of them are its types"
+                     timestamptz, vector, halfvec, sparsevec, jsonb and arrays of them are its \
+                     types"
             ),
         ))
     };
@@ -635,6 +636,8 @@ fn column_type(t: &mut Toks<'_>) -> std::result::Result<String, Refusal> {
         "bool" | "boolean" => "bool".into(),
         "bytea" => "bytes".into(),
         "timestamptz" => "timestamp".into(),
+        // A `json` field is jsonb on the wire; `json` is taken for it too.
+        "jsonb" | "json" => "json".into(),
         "timestamp" => {
             size(t);
             // `with time zone` or `without`: a timestamp is UTC either way.
@@ -839,6 +842,10 @@ mod tests {
                 "alter collection orders add field tags [text]",
             ),
             (
+                "ALTER TABLE orders ADD COLUMN meta jsonb",
+                "alter collection orders add field meta json",
+            ),
+            (
                 "ALTER TABLE orders ADD COLUMN w double precision",
                 "alter collection orders add field w float",
             ),
@@ -874,7 +881,7 @@ mod tests {
             ("ALTER TABLE orders ADD COLUMN n int NOT NULL", "0A000"),
             ("ALTER TABLE orders ADD COLUMN n int DEFAULT 0", "0A000"),
             ("ALTER TABLE orders ADD COLUMN n numeric(10, 2)", "0A000"),
-            ("ALTER TABLE orders ADD COLUMN n jsonb", "0A000"),
+            ("ALTER TABLE orders ADD COLUMN n xml", "0A000"),
             (
                 "ALTER TABLE orders ADD COLUMN n int, ADD COLUMN m int",
                 "0A000",

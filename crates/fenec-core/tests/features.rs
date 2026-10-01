@@ -95,3 +95,33 @@ fn what_needs_a_missing_index_is_refused() {
         3
     );
 }
+
+/// A path's ordered index is declared in the file as a field's is: a build
+/// without `sorted` opens it, answers its comparisons and its order by the
+/// scan, and refuses to make one.
+#[test]
+fn a_path_declaring_an_ordered_index_is_scanned() {
+    let mut db = Database::new();
+    let mut schema = Schema::new("j", vec![Field::new("meta", DataType::Json)]).unwrap();
+    schema.add_path(Field::new("meta.n", DataType::Json).indexed(IndexKind::Sorted));
+    db.execute(&Statement::CreateCollection {
+        schema,
+        if_not_exists: false,
+    })
+    .unwrap();
+    run(
+        &mut db,
+        "put j [{meta: {n: 3}}, {meta: {n: 1}}, {meta: {n: 2.5}}]",
+    )
+    .unwrap();
+    let mut back = Database::new();
+    back.load(&db.snapshot()).expect("the image opens");
+    for d in [&mut db, &mut back] {
+        let r = run(d, "get j select id where meta.n >= 2 order meta.n desc").unwrap();
+        assert_eq!(ints(&r, 0), [1, 3]);
+    }
+    let e = run(&mut back, "create index on j (meta.m) @sorted")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("`sorted`"), "{e}");
+}

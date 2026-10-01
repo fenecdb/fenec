@@ -167,7 +167,16 @@ fn numbers_at(src: &str, b: &[u8], mut i: usize) -> Option<(Vec<f32>, usize)> {
     }
 }
 
+/// One body natively for each way, the flag a constant in each; the browser
+/// module keeps one, the flag read at run time: [`tokenize`] is there only
+/// for a list a json field is given (`fenec_ql::parse_exact`), and a copy
+/// of its own was 2.9 KB of the module.
 fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
+    lex_with(src, VECTORS)
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
     // Walked a byte at a time, a character read whole only where one
     // outside ASCII stands. Collected into a `Vec<char>` first, and each
     // number copied into a `String` of its own to parse, a query holding a
@@ -195,6 +204,8 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
             }
         }
     };
+    // Braces open: a document's are the first, an object literal's inside.
+    let mut braces = 0usize;
     let next_is = |i: usize, want: u8| b.get(i) == Some(&want);
     let digit_at = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
 
@@ -218,10 +229,12 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
         let tok = match c {
             '{' => {
                 i += 1;
+                braces += 1;
                 Tok::LBrace
             }
             '}' => {
                 i += 1;
+                braces = braces.saturating_sub(1);
                 Tok::RBrace
             }
             '(' => {
@@ -232,7 +245,9 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
                 i += 1;
                 Tok::RParen
             }
-            '[' if VECTORS => {
+            // Not inside an object literal, two braces down: only a json
+            // field holds one, and its numbers stay as they are written.
+            '[' if vectors && braces < 2 => {
                 let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in"));
                 match !after_in {
                     true => match numbers_at(src, b, i) {
@@ -430,12 +445,26 @@ fn lex<const VECTORS: bool>(src: &str) -> Result<Vec<Token>> {
             c if c.is_alphabetic() || c == '_' => {
                 let s = i;
                 i += len;
-                while i < b.len() {
-                    let (c, l) = at(i);
-                    if !(c.is_alphanumeric() || c == '_') {
+                loop {
+                    while i < b.len() {
+                        let (c, l) = at(i);
+                        if !(c.is_alphanumeric() || c == '_') {
+                            break;
+                        }
+                        i += l;
+                    }
+                    // `meta.source.rank`: a dot between two names is a path,
+                    // one token, which the parser takes where a field goes.
+                    // A dot was read only inside a number before, so no text
+                    // that parsed reads differently.
+                    let next = match b.get(i) {
+                        Some(b'.') if i + 1 < b.len() => at(i + 1).0,
+                        _ => break,
+                    };
+                    if !(next.is_alphabetic() || next == '_') {
                         break;
                     }
-                    i += l;
+                    i += 1;
                 }
                 Tok::Ident(src.get(s..i).unwrap_or_default().to_string())
             }
@@ -465,6 +494,18 @@ mod tests {
         assert!(matches!(t[0].tok, Tok::Ident(ref s) if s == "get"));
         assert!(t.iter().any(|t| t.tok == Tok::Ge));
         assert!(t.iter().any(|t| t.tok == Tok::Tilde));
+    }
+
+    #[test]
+    fn a_dot_between_names_is_one_path() {
+        let t = tokenize("where meta.source.rank >= 2.5 and x.y_1 = a.").unwrap_err();
+        assert!(t.to_string().contains('.'), "{t}");
+        let t = tokenize("where meta.source.rank >= 2.5 and x.y_1 = a").unwrap();
+        assert_eq!(t[1].tok, Tok::Ident("meta.source.rank".into()));
+        assert_eq!(t[3].tok, Tok::Float(2.5));
+        assert_eq!(t[5].tok, Tok::Ident("x.y_1".into()));
+        // Not before a digit: `a.5` is no path.
+        assert!(tokenize("a.5").is_err());
     }
 
     #[test]
@@ -675,8 +716,15 @@ mod tests {
                 }
                 c if c.is_alphabetic() || c == '_' => {
                     let s = i;
-                    while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_') {
-                        i += 1;
+                    loop {
+                        while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_') {
+                            i += 1;
+                        }
+                        // A path, `meta.lang`, since paths were read.
+                        match (b.get(i), b.get(i + 1)) {
+                            (Some('.'), Some(&n)) if n.is_alphabetic() || n == '_' => i += 1,
+                            _ => break,
+                        }
                     }
                     Tok::Ident(b[s..i].iter().collect())
                 }

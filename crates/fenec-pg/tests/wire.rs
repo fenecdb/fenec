@@ -4109,3 +4109,138 @@ fn alter_table_adds_drops_and_renames_a_column() {
         );
     }
 }
+
+/// A `json` field is PostgreSQL's `jsonb`: described as 3802, its cells its
+/// JSON text -- a text in it quoted, as `->` gives one, a list `[..]` not an
+/// array's `{..}` -- in binary a version byte of 1 and the text, as
+/// `jsonb_send` writes it; a path the same. A parameter in its place is
+/// described as jsonb and read in either format, and COPY carries the text
+/// both ways.
+#[test]
+fn a_json_field_goes_as_jsonb() {
+    let h = trust_server();
+    let mut c = Client::connect(h.port, "fenec", None).unwrap();
+    c.simple("create collection d (title text, meta json)");
+    let r = c.simple(
+        r#"put d [{title: "a", meta: {lang: "tr", source: {rank: 3, site: "x"}}}, {title: "b", meta: [1, 2.5]}, {title: "c"}]"#,
+    );
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+
+    let r = c.simple("get d select meta, meta.lang, meta.source.rank order id");
+    assert_eq!(find(&r, b'T').unwrap().type_oids(), [3802, 3802, 3802]);
+    let rows: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    let s = |x: &str| Some(x.to_string());
+    assert_eq!(
+        rows,
+        [
+            vec![
+                s(r#"{"lang":"tr","source":{"rank":3,"site":"x"}}"#),
+                s(r#""tr""#),
+                s("3")
+            ],
+            vec![s("[1,2.5]"), None, None],
+            vec![None, None, None],
+        ]
+    );
+
+    // In binary: the version byte, then the text.
+    let r = c.with_formats("get d select meta.lang where title = $1", &["a"], &[1]);
+    assert_eq!(
+        find(&r, b'D').unwrap().raw_cells(),
+        [Some(b"\x01\"tr\"".to_vec())]
+    );
+
+    // A parameter in a json field's place is jsonb, and one compared with
+    // a path, as PostgreSQL types `meta->'lang'`; a string sent as text
+    // with no type named is read by its look.
+    assert_eq!(c.parameter_types("put d {meta: $1}", &[]), [3802]);
+    assert_eq!(c.parameter_types("get d where meta.lang = $1", &[]), [3802]);
+    let r = c.extended("get d select title where meta.lang = $1", &["tr"], false);
+    assert_eq!(find(&r, b'D').unwrap().cells(), [s("a")]);
+    let r = c.extended(
+        "put d {title: $1, meta: $2}",
+        &["t", r#"{"n": [19.99, 12345678901]}"#],
+        false,
+    );
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    c.parameter_types("put d {title: \"u\", meta: $1}", &[3802]);
+    let r = c.run_binary(&[b"\x01{\"k\": true}".to_vec()]);
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    c.parameter_types("put d {title: \"v\", meta: $1}", &[3802]);
+    let r = c.run_binary(&[b"\x02{}".to_vec()]);
+    assert!(outcome(&r).starts_with("22P03"), "{}", outcome(&r));
+    assert_eq!(
+        rows_of(
+            &mut c,
+            "get d select meta where title = \"t\" or title = \"u\" order id"
+        ),
+        [
+            vec![s(r#"{"n":[19.99,12345678901]}"#)],
+            vec![s(r#"{"k":true}"#)]
+        ]
+    );
+
+    // COPY: a cell is the JSON text, in and out.
+    let r = c.copy(
+        "COPY d (title, meta) FROM STDIN",
+        &[b"w\t{\"a\": {\"b\": [1, \"x\"]}}\nx\t\\N\n"],
+        None,
+    );
+    assert_eq!(outcome(&r), "COPY 2");
+    let r = c.simple("COPY (get d select title, meta where title = \"w\") TO STDOUT");
+    assert_eq!(copied_out(&r), b"w\t{\"a\":{\"b\":[1,\"x\"]}}\n");
+    let r = c.simple("COPY d (title, meta) TO STDOUT");
+    let text = String::from_utf8(copied_out(&r)).unwrap();
+    assert!(
+        text.contains("a\t{\"lang\":\"tr\",\"source\":{\"rank\":3,\"site\":\"x\"}}\n"),
+        "{text}"
+    );
+    assert!(text.contains("x\t\\N\n"), "{text}");
+
+    // A list of numbers is kept as written, in a statement's text -- read
+    // into a vector's f32s, 12345678901 was 12345679000 -- and as a
+    // parameter, and a path compared with one finds it.
+    let many = "[0.1,12345678901,3.141592653589793,19.99]";
+    let r = c.simple(&format!("put d {{title: \"m\", meta: {many}}}"));
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    let r = c.extended("put d {title: $1, meta: $2}", &["n", many], false);
+    assert!(find(&r, b'E').is_none(), "{}", outcome(&r));
+    assert_eq!(
+        rows_of(
+            &mut c,
+            "get d select meta where title = \"m\" or title = \"n\""
+        ),
+        [vec![s(many)], vec![s(many)]]
+    );
+    let r = c.extended(
+        "get d select title where meta = $1 order title",
+        &[many],
+        false,
+    );
+    let titles: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(titles, [vec![s("m")], vec![s("n")]]);
+    let r = c.simple(&format!(
+        "get d select title where meta = {many} order title"
+    ));
+    let titles: Vec<_> = r
+        .iter()
+        .filter(|m| m.tag == b'D')
+        .map(|m| m.cells())
+        .collect();
+    assert_eq!(titles, [vec![s("m")], vec![s("n")]]);
+
+    // The catalog shows it so.
+    let r = c.simple(
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid WHERE c.relname = 'd' AND a.attname = 'meta'",
+    );
+    assert_eq!(find(&r, b'D').unwrap().cells(), [s("jsonb")]);
+}

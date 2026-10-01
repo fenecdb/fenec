@@ -16,6 +16,7 @@ import {
   raw,
   restore,
   sync,
+  type Json,
   type Row,
   type Sparse,
   type Timestamp,
@@ -31,6 +32,7 @@ type Article = {
   published: Timestamp;
   embed: Vector;
   splade: Sparse | null;
+  meta: Json | null;
 };
 type Review = { product_id: number; stars: number; text: string };
 type Schema = { articles: Article; reviews: Review };
@@ -62,6 +64,19 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('articles').match('year', 'x');
 
   await db.from('articles').where('tags', 'has', 'rust').where('year', 'in', [2023, 2024]).count();
+  // A path into a json field, where a field goes.
+  const tr = await db
+    .from('articles')
+    .select('title', 'meta.source.site')
+    .where('meta.lang', '=', 'tr')
+    .where('meta.source.rank', { gte: 2 })
+    .order('meta.source.rank', 'desc')
+    .rows();
+  expect<{ title: string; 'meta.source.site': Json }[]>(tr);
+  await db.from('articles').where('meta.lang', 'in', ['tr', 'en']).count();
+  await db.from('articles').insert({ title: 'j', meta: { lang: 'tr', source: { rank: 3 } } });
+  // @ts-expect-error -- `title` is text, which no path reads into
+  db.from('articles').where('title.x', 1);
   await db.from('articles').where(or({ year: 2024 }, not({ title: 'x' }), and(raw('year > $1', 2020)))).first();
   await db.from('articles').order('title', 'asc', { collate: 'tr' }).offset(10).explain();
 

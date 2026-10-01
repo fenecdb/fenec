@@ -16,13 +16,12 @@ mod stop;
 mod types;
 
 use fenec_core::prelude::*;
-use fenec_ql::parse;
 use std::io::{self, BufRead, IsTerminal, Write};
 
 const HELP: &str = r#"
 FenecQL summary
   create collection <name> ( <field> <type> [@hash|@sorted|@text|@hnsw(metric, m=.., ef_search=..)], ... )
-  create index [if not exists] on <name> (<field>) @hash|@sorted|@text|@hnsw(..)
+  create index [if not exists] on <name> (<field>|<path>) @hash|@sorted|@text|@hnsw(..)
   drop collection [if exists] <name>
   put <name> { field: value, ... }        -- or [ {...}, {...} ]
   get <name> [select a,b] [where <expr>] [near <field> <vector> [ef N] [exact]]
@@ -34,7 +33,8 @@ FenecQL summary
   del <name> [where <expr>]
   collections | describe <name> | compact [<name>]
 
-Types     bool  int  float  text  bytes  vector<N>  [type]
+Types     bool  int  float  text  bytes  vector<N>  [type]  json
+Paths     meta.source.rank reads into a json field, where a field goes
 Operators = != < <= > >=   ~ (text contains)   has (list contains)   in [..]
           and  or  not  is null  is not null
 "#;
@@ -347,7 +347,8 @@ fn human(n: usize) -> String {
 }
 
 fn run(db: &mut Database, src: &str) -> bool {
-    let stmts = match parse(src) {
+    // A list of numbers for a json field read as written.
+    let stmts = match fenec_ql::parse_for(db, src) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -487,5 +488,6 @@ fn cell(v: &Value) -> String {
             items.iter().map(cell).collect::<Vec<_>>().join(", ")
         ),
         Value::Sparse(dim, e) => format!("<{} of {dim} non-zero>", e.len()),
+        Value::Object(_) => fenec_core::json::to_string(v),
     }
 }

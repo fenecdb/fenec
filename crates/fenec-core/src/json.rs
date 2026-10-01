@@ -102,8 +102,20 @@ pub fn value_into(out: &mut String, v: &Value) {
             }
             out.push(']');
         }
+        Value::Object(members) => {
+            out.push('{');
+            for (i, (k, v)) in members.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                escape_into(out, k);
+                out.push(':');
+                value_into(out, v);
+            }
+            out.push('}');
+        }
         // pgvector's text form, as a string: the one form every transport
-        // takes back, and JSON has no object a value can be.
+        // takes back.
         Value::Sparse(dim, entries) => {
             out.push('"');
             crate::sparse::format_into(out, *dim, entries);
@@ -244,8 +256,12 @@ pub fn response_to_string(r: &Response) -> String {
                 out.push_str("{\"name\":");
                 escape_into(&mut out, &s.name);
                 out.push_str(",\"fields\":[");
-                for (j, f) in s.fields.iter().enumerate() {
-                    if j > 0 {
+                // The indexes on paths into json fields after the fields,
+                // under `paths`, and only where there are any.
+                for (j, f) in s.fields.iter().chain(&s.paths).enumerate() {
+                    if j == s.fields.len() {
+                        out.push_str("],\"paths\":[");
+                    } else if j > 0 {
                         out.push(',');
                     }
                     out.push_str("{\"name\":");
@@ -311,6 +327,31 @@ pub fn parse(src: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// A `json` field's value from its JSON text, every number as it is
+/// written: a list of numbers alone is a list here, not the vector [`parse`]
+/// makes of one at the top. What jsonb carries over the pg wire, a COPY's
+/// cell, and a document's member for a json field (`parse_documents_json`).
+pub fn parse_json(src: &str) -> Result<Value> {
+    let mut i = 0;
+    let v = parse_exact_at(src, &mut i, 0)?;
+    skip_ws(src, &mut i);
+    if i != src.len() {
+        return Err(Error::Query("trailing characters after JSON".into()));
+    }
+    Ok(v)
+}
+
+/// [`parse_value_at`], an array at the top of the value read as a list.
+fn parse_exact_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
+    skip_ws(s, i);
+    match s.as_bytes().get(*i) {
+        Some(b'[') if depth < crate::value::MAX_JSON_DEPTH => {
+            Ok(Value::List(parse_array_at(s, i, depth + 1, false)?))
+        }
+        _ => parse_value_at(s, i, depth),
+    }
+}
+
 /// The character starting at byte `i`.
 fn char_at(s: &str, i: usize) -> Option<char> {
     s.get(i..).and_then(|t| t.chars().next())
@@ -334,11 +375,29 @@ fn skip_ws(s: &str, i: &mut usize) {
 }
 
 fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
+    parse_value_at(s, i, 0)
+}
+
+/// A value at `depth` containers down: an array of numbers alone is a
+/// vector at the top of a value (`depth` 0), as an embedding travels, and
+/// a list of numbers below it -- inside an object, which only a `json`
+/// field holds, or another array -- each number as it was written, an
+/// integer an integer: read into `f32`s there, `[19.99]` in a document's
+/// metadata came back as 19.989999771118164. Past
+/// [`crate::value::MAX_JSON_DEPTH`] it is refused, where the recursion
+/// would otherwise take the stack down with a deep enough text.
+fn parse_value_at(s: &str, i: &mut usize, depth: usize) -> Result<Value> {
     skip_ws(s, i);
     let b = s.as_bytes();
     let c = *b
         .get(*i)
         .ok_or_else(|| Error::Query("unexpected end of JSON".into()))?;
+    if matches!(c, b'[' | b'{') && depth >= crate::value::MAX_JSON_DEPTH {
+        return Err(Error::Query(format!(
+            "JSON nested deeper than {} levels",
+            crate::value::MAX_JSON_DEPTH
+        )));
+    }
     match c {
         b'n' => {
             expect_word(s, i, "null")?;
@@ -354,6 +413,9 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
         }
         b'"' => Ok(Value::Text(parse_string(s, i)?)),
         b'[' => {
+            if depth > 0 {
+                return Ok(Value::List(parse_array_at(s, i, depth + 1, false)?));
+            }
             // Numbers alone are a vector, read straight into its `f32`s --
             // natively: a page's vectors come into the browser module as
             // `f32`s already (`vectorsApart`), and there the reader was 474
@@ -362,7 +424,7 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
             if let Some(v) = numbers(s, i) {
                 return Ok(Value::Vector(v));
             }
-            let items = parse_array(s, i)?;
+            let items = parse_array_at(s, i, depth + 1, false)?;
             // If every item is a number, read it as a vector (embedding transfer)
             if !items.is_empty()
                 && items
@@ -375,13 +437,10 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
             }
             Ok(Value::List(items))
         }
-        b'{' => {
-            // Objects are not supported as list-of-pairs nor silently skipped:
-            // the fenecdb value model has no object. Error out so it is visible.
-            Err(Error::Query(
-                "a JSON object is not supported as a fenecdb value".into(),
-            ))
-        }
+        // An object is a value of a `json` field: its members sorted, a key
+        // given twice refused (`Value::object`).
+        b'{' => Value::object(parse_members(s, i, "", &[], depth + 1)?)
+            .map_err(|e| Error::Query(e.to_string())),
         b'-' | b'0'..=b'9' => {
             let (text, is_float) = number_at(s, i);
             if is_float {
@@ -389,9 +448,15 @@ fn parse_value(s: &str, i: &mut usize) -> Result<Value> {
                     .map(Value::Float)
                     .ok_or_else(|| Error::Query(format!("invalid number `{text}`")))
             } else {
-                text.parse::<i64>()
-                    .map(Value::Int)
-                    .map_err(|_| Error::Query(format!("invalid number `{text}`")))
+                // A whole number past an `i64` is the `f64` it says, as the
+                // writer writes a float that large without an exponent:
+                // refused, `1e300` written out did not read back.
+                match text.parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => crate::num::parse_f64(text)
+                        .map(Value::Float)
+                        .ok_or_else(|| Error::Query(format!("invalid number `{text}`"))),
+                }
             }
         }
         _ => {
@@ -470,8 +535,12 @@ fn numbers(s: &str, i: &mut usize) -> Option<Vec<f32>> {
 }
 
 /// Parses an array starting at `[` element by element; it does *not* apply
-/// the vector shortcut. That shortcut only makes sense in value position.
-fn parse_array(s: &str, i: &mut usize) -> Result<Vec<Value>> {
+/// the vector shortcut to the array itself. Its elements are `depth`
+/// containers down -- at 0 values of their own, a query's parameters or a
+/// listed member, each read as at the top: `[[0.1, 0.2], 7]` hands a vector
+/// and an integer -- and each read as [`parse_json`] reads a value when
+/// `exact`.
+fn parse_array_at(s: &str, i: &mut usize, depth: usize, exact: bool) -> Result<Vec<Value>> {
     let b = s.as_bytes();
     *i += 1; // `[`
     let mut items = Vec::new();
@@ -481,7 +550,10 @@ fn parse_array(s: &str, i: &mut usize) -> Result<Vec<Value>> {
             *i += 1;
             break;
         }
-        items.push(parse_value(s, i)?);
+        items.push(match exact {
+            true => parse_exact_at(s, i, depth)?,
+            false => parse_value_at(s, i, depth)?,
+        });
         skip_ws(s, i);
         match b.get(*i) {
             Some(b',') => *i += 1,
@@ -548,10 +620,9 @@ fn parse_string(s: &str, i: &mut usize) -> Result<String> {
 
 /// Parses a JSON object into field-value pairs.
 ///
-/// `parse` rejects an object as a *value* -- the fenecdb value model has no
-/// object. But a **document** is an object: the HTTP body and internal
-/// imports come through this entry. A nested object is still rejected,
-/// because it cannot be a field value.
+/// A **document** is an object: the HTTP body and internal imports come
+/// through this entry, each member a field. A member that is an object is
+/// a value for a `json` field, which the schema then takes or refuses.
 pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
     parse_object_listing(src, "")
 }
@@ -562,9 +633,20 @@ pub fn parse_object(src: &str) -> Result<Vec<(String, Value)>> {
 /// that list -- read as a vector, `[123456789]` handed the query the `f32`
 /// 123456792, and `[19.99]` 19.989999771118164.
 pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[])
+}
+
+/// [`parse_object_listing`], the listed member's elements read as
+/// [`parse_json`] reads a value: a list of numbers alone as written, where
+/// a json field is given one (`Database::exactly`).
+pub fn parse_object_listing_exact(src: &str, list: &str) -> Result<Vec<(String, Value)>> {
+    listing(src, list, &[list])
+}
+
+fn listing(src: &str, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
     let s = src.trim();
     let mut i = 0;
-    let out = parse_object_at(s, &mut i, list)?;
+    let out = document(s, &mut i, list, json)?;
     skip_ws(s, &mut i);
     if i != s.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -574,6 +656,14 @@ pub fn parse_object_listing(src: &str, list: &str) -> Result<Vec<(String, Value)
 
 /// Object or array of objects -> list of documents.
 pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
+    parse_documents_json(src, &[])
+}
+
+/// [`parse_documents`], the members named in `json` -- a collection's json
+/// fields -- read as [`parse_json`] reads a value: their numbers as written,
+/// where any other member's array of numbers alone is the vector an
+/// embedding travels as.
+pub fn parse_documents_json(src: &str, json: &[&str]) -> Result<Vec<Vec<(String, Value)>>> {
     let s = src.trim();
     let b = s.as_bytes();
     let mut i = 0;
@@ -588,7 +678,7 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
                     i += 1;
                     break;
                 }
-                docs.push(parse_object_at(s, &mut i, "")?);
+                docs.push(document(s, &mut i, "", json)?);
                 skip_ws(s, &mut i);
                 match b.get(i) {
                     Some(b',') => i += 1,
@@ -601,7 +691,7 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
             }
             docs
         }
-        Some(b'{') => vec![parse_object_at(s, &mut i, "")?],
+        Some(b'{') => vec![document(s, &mut i, "", json)?],
         _ => {
             return Err(Error::Query(
                 "expected a JSON object or array of objects".into(),
@@ -615,7 +705,31 @@ pub fn parse_documents(src: &str) -> Result<Vec<Vec<(String, Value)>>> {
     Ok(out)
 }
 
-fn parse_object_at(s: &str, i: &mut usize, list: &str) -> Result<Vec<(String, Value)>> {
+/// A document at `i`: the member named `list` a parameter list, and those
+/// named in `json` read as [`parse_json`] reads a value.
+fn document(s: &str, i: &mut usize, list: &str, json: &[&str]) -> Result<Vec<(String, Value)>> {
+    let out = parse_members(s, i, list, json, 0)?;
+    // A repeated key is not silently overwritten: which one wins depends
+    // on the parser, and that is an invisible difference. Asked here of a
+    // document's fields, in the order they came; an object's members are
+    // asked as it is sorted (`Value::object`).
+    for (n, (k, _)) in out.iter().enumerate() {
+        if out[..n].iter().any(|(x, _)| x == k) {
+            return Err(Error::Query(format!("field `{k}` was given twice")));
+        }
+    }
+    Ok(out)
+}
+
+/// The members of the object at `i`, in the order written, each value
+/// `depth` containers down -- a document's fields at 0.
+fn parse_members(
+    s: &str,
+    i: &mut usize,
+    list: &str,
+    json: &[&str],
+    depth: usize,
+) -> Result<Vec<(String, Value)>> {
     let b = s.as_bytes();
     skip_ws(s, i);
     if b.get(*i) != Some(&b'{') {
@@ -641,15 +755,15 @@ fn parse_object_at(s: &str, i: &mut usize, list: &str) -> Result<Vec<(String, Va
         }
         *i += 1;
         skip_ws(s, i);
-        let value = match key == list && b.get(*i) == Some(&b'[') {
-            true => Value::List(parse_array(s, i)?),
-            false => parse_value(s, i)?,
+        // A listed member keeps its elements' types, a parameter list's;
+        // a json field's, every number.
+        let value = if depth == 0 && key == list && b.get(*i) == Some(&b'[') {
+            Value::List(parse_array_at(s, i, 0, json.contains(&list))?)
+        } else if depth == 0 && json.contains(&key.as_str()) {
+            parse_exact_at(s, i, 0)?
+        } else {
+            parse_value_at(s, i, depth)?
         };
-        // A repeated key is not silently overwritten: which one wins depends
-        // on the parser, and that is an invisible difference.
-        if out.iter().any(|(k, _)| k == &key) {
-            return Err(Error::Query(format!("field `{key}` was given twice")));
-        }
         out.push((key, value));
         skip_ws(s, i);
         match b.get(*i) {
@@ -676,6 +790,17 @@ fn parse_object_at(s: &str, i: &mut usize, list: &str) -> Result<Vec<(String, Va
 /// `year in [$1, $2]` returned no rows at all. The shortcut stays valid
 /// inside nested arrays, so embedding transfer is unaffected.
 pub fn parse_params(src: &str) -> Result<Vec<Value>> {
+    params(src, false)
+}
+
+/// [`parse_params`], each read as [`parse_json`] reads a value: a list of
+/// numbers alone as written, where a json field is given one
+/// (`Database::exactly`).
+pub fn parse_params_exact(src: &str) -> Result<Vec<Value>> {
+    params(src, true)
+}
+
+fn params(src: &str, exact: bool) -> Result<Vec<Value>> {
     let t = src.trim();
     if t.is_empty() {
         return Ok(Vec::new());
@@ -684,9 +809,12 @@ pub fn parse_params(src: &str) -> Result<Vec<Value>> {
     skip_ws(t, &mut i);
     if t.as_bytes().get(i) != Some(&b'[') {
         // A single value is accepted too.
-        return Ok(vec![parse(t)?]);
+        return Ok(vec![match exact {
+            true => parse_json(t)?,
+            false => parse(t)?,
+        }]);
     }
-    let items = parse_array(t, &mut i)?;
+    let items = parse_array_at(t, &mut i, 0, exact)?;
     skip_ws(t, &mut i);
     if i != t.len() {
         return Err(Error::Query("trailing characters after JSON".into()));
@@ -704,7 +832,7 @@ mod tests {
     fn a_value_at_a_time(s: &str) -> Result<Value> {
         let mut i = 0;
         skip_ws(s, &mut i);
-        let items = parse_array(s, &mut i)?;
+        let items = parse_array_at(s, &mut i, 0, false)?;
         skip_ws(s, &mut i);
         if i != s.len() {
             return Err(Error::Query("trailing characters after JSON".into()));
@@ -932,8 +1060,20 @@ mod tests {
         assert_eq!(parse_documents(r#"{"a": 1}"#).unwrap().len(), 1);
         assert_eq!(parse_documents("[]").unwrap().len(), 0);
 
-        // A nested object cannot be a field value.
-        assert!(parse_object(r#"{"a": {"b": 1}}"#).is_err());
+        // A nested object is a `json` field's value, its members sorted and
+        // its lists exact; a key twice in it is refused.
+        let d = parse_object(r#"{"a": {"z": [1, 2.5], "b": {"c": null}}}"#).unwrap();
+        assert_eq!(
+            d[0].1,
+            Value::Object(vec![
+                ("b".into(), Value::Object(vec![("c".into(), Value::Null)])),
+                (
+                    "z".into(),
+                    Value::List(vec![Value::Int(1), Value::Float(2.5)])
+                ),
+            ])
+        );
+        assert!(parse_object(r#"{"a": {"b": 1, "b": 2}}"#).is_err());
         // A repeated key does not silently pick a winner.
         assert!(parse_object(r#"{"a": 1, "a": 2}"#).is_err());
         assert!(parse_object("[]").is_err());
@@ -942,6 +1082,56 @@ mod tests {
     }
 
     /// A query body's parameters are a list whose elements keep their types.
+    #[test]
+    fn an_object_goes_out_as_it_came_in() {
+        let text = r#"{"a":[1,2.5,"x",[true]],"b":{"c":null,"d":-7},"e":0.1}"#;
+        let v = parse(text).unwrap();
+        assert_eq!(to_string(&v), text);
+        // Sorted by key on the way in, whatever order it was written in.
+        assert_eq!(
+            to_string(&parse(r#"{"b":1,"a":2}"#).unwrap()),
+            r#"{"a":2,"b":1}"#
+        );
+    }
+
+    #[test]
+    fn exact_parameters_keep_their_digits() {
+        let text = "[[0.1, 12345678901, 3], 7, {\"a\": [1.5]}]";
+        assert_eq!(
+            parse_params(text).unwrap()[0],
+            Value::Vector(vec![0.1, 12345678901.0, 3.0])
+        );
+        assert_eq!(
+            parse_params_exact(text).unwrap(),
+            vec![
+                parse_json("[0.1, 12345678901, 3]").unwrap(),
+                Value::Int(7),
+                parse_json(r#"{"a": [1.5]}"#).unwrap()
+            ]
+        );
+        assert_eq!(
+            parse_params_exact("[0.1, 2]").unwrap(),
+            vec![Value::Float(0.1), Value::Int(2)]
+        );
+        let body = r#"{"query": "q", "params": [[19.99, 1]]}"#;
+        assert_eq!(
+            parse_object_listing_exact(body, "params").unwrap()[1].1,
+            Value::List(vec![Value::List(vec![Value::Float(19.99), Value::Int(1)])])
+        );
+    }
+
+    #[test]
+    fn json_nests_no_deeper_than_the_limit() {
+        let deep = |n: usize| "[".repeat(n) + &"]".repeat(n);
+        assert!(parse(&deep(crate::value::MAX_JSON_DEPTH)).is_ok());
+        assert!(parse(&deep(crate::value::MAX_JSON_DEPTH + 1)).is_err());
+        let objs = |n: usize| r#"{"a":"#.repeat(n) + "1" + &"}".repeat(n);
+        assert!(parse(&objs(crate::value::MAX_JSON_DEPTH)).is_ok());
+        assert!(parse(&objs(crate::value::MAX_JSON_DEPTH + 1)).is_err());
+        // Deep enough to take the stack down, it is refused instead.
+        assert!(parse(&deep(100_000)).is_err());
+    }
+
     #[test]
     fn a_listed_member_keeps_its_numbers() {
         let body = r#"{"params": [123456789, 19.99], "v": [1, 2]}"#;

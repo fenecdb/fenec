@@ -60,7 +60,14 @@ fn field(schema: Option<&Schema>, name: &str) -> Option<DataType> {
     if name == "id" {
         return Some(DataType::Int);
     }
-    schema?.field(name).map(|f| f.ty.clone())
+    // A path's value is jsonb, as PostgreSQL types `meta->'lang'`: pgx
+    // refused to send a number in a place described as text. A string
+    // sent as text with no type named is still read by its look.
+    let schema = schema?;
+    if let Ok(Some(_)) = schema.path_of(name) {
+        return Some(DataType::Json);
+    }
+    schema.field(name).map(|f| f.ty.clone())
 }
 
 fn filter(schema: Option<&Schema>, e: &Expr, out: &mut [Option<DataType>]) {
@@ -202,6 +209,9 @@ pub fn decode(
     }
     if let Some(elem) = binary::element_of(oid) {
         return Ok(array(raw, elem).unwrap_or_else(|| decode_param(raw, true)));
+    }
+    if let Some(v) = binary::json(raw, oid) {
+        return v;
     }
     if matches!(oid, OID_VECTOR | OID_HALFVEC | OID_SPARSEVEC) {
         return match binary::vector(raw, oid) {

@@ -40,6 +40,10 @@ pub enum DataType {
     Sparse(usize),
     /// Homogeneous list (of scalar types).
     List(Box<DataType>),
+    /// Any value JSON can hold -- an object, a list, a number, text, a
+    /// boolean or null -- untyped inside: `meta json`. A path reads into it
+    /// (`meta.source.rank`), and `@hash` and `@sorted` take one.
+    Json,
 }
 
 impl DataType {
@@ -55,6 +59,7 @@ impl DataType {
             DataType::Vector(d, VecPrec::F16) => format!("vector<{d}, f16>"),
             DataType::Sparse(d) => format!("sparse<{d}>"),
             DataType::List(inner) => format!("[{}]", inner.name()),
+            DataType::Json => "json".into(),
         }
     }
 }
@@ -82,7 +87,27 @@ pub enum Value {
     /// index, the indices counted from 0. One `Vec` of pairs rather than two,
     /// so a `Value` stays the size it was.
     Sparse(u32, Vec<(u32, f32)>),
+    /// A JSON object, in a `json` field: its members ascending by key, no
+    /// key twice ([`Value::object`]) -- so a key is found by a binary
+    /// search, two equal objects encode alike, and a hash index files them
+    /// as one.
+    Object(Vec<(String, Value)>),
 }
+
+/// How deep a `json` value nests: an object or a list in one, 64 levels
+/// down. A limit on the stack rather than on the data -- the codec, the
+/// JSON reader and writer and the comparisons recurse a level at a time --
+/// and past it a write is refused, never cut. MongoDB stops a document at
+/// 100 levels; metadata is a handful.
+pub const MAX_JSON_DEPTH: usize = 64;
+
+/// How many keys a path may name past its field (`meta.a.b` names two):
+/// no value nests deeper, so a longer one could only ever read `null`, and
+/// it is refused rather than answered so.
+pub const MAX_PATH_KEYS: usize = MAX_JSON_DEPTH;
+
+/// `null`, to hand out by reference where a path leads nowhere.
+pub static NULL: Value = Value::Null;
 
 impl Value {
     pub fn type_name(&self) -> &'static str {
@@ -97,7 +122,98 @@ impl Value {
             Value::Vector(_) => "vector",
             Value::List(_) => "list",
             Value::Sparse(..) => "sparse",
+            Value::Object(_) => "object",
         }
+    }
+
+    /// An object from its members: sorted by key, a key given twice
+    /// refused rather than one of them kept -- which one a reader keeps
+    /// differs from reader to reader, and the difference would be silent.
+    pub fn object(members: Vec<(String, Value)>) -> Result<Value> {
+        let twice = |k: &str| Error::Type(format!("key `{k}` was given twice"));
+        // Natively the standard library's sort. The browser module puts
+        // each member where a binary search finds its place: a copy of the
+        // sort for these pairs, or a merge of our own, was 4.1 and 1.2 KB of
+        // it, and an object's members are a handful, mostly in order.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut members = members;
+            members.sort_by(|a, b| a.0.cmp(&b.0));
+            if let Some(w) = members.windows(2).find(|w| w[0].0 == w[1].0) {
+                return Err(twice(&w[0].0));
+            }
+            Ok(Value::Object(members))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut out: Vec<(String, Value)> = Vec::with_capacity(members.len());
+            for m in members {
+                match out.binary_search_by(|(k, _)| k.as_str().cmp(&m.0)) {
+                    Ok(_) => return Err(twice(&m.0)),
+                    Err(at) => out.insert(at, m),
+                }
+            }
+            Ok(Value::Object(out))
+        }
+    }
+
+    /// The member `key` of an object, by binary search; `None` for a key it
+    /// does not hold and for anything that is not an object.
+    pub fn member(&self, key: &str) -> Option<&Value> {
+        match self {
+            Value::Object(m) => m
+                .binary_search_by(|(k, _)| k.as_str().cmp(key))
+                .ok()
+                .map(|i| &m[i].1),
+            _ => None,
+        }
+    }
+
+    /// The value at `keys` (`source.rank`) inside this one, `null` where the
+    /// path leads nowhere: a key missing, or a value on the way that is not
+    /// an object.
+    pub fn at_path(&self, keys: &str) -> &Value {
+        let mut v = self;
+        for k in keys.split('.') {
+            match v.member(k) {
+                Some(x) => v = x,
+                None => return &NULL,
+            }
+        }
+        v
+    }
+
+    /// Sets the value at `keys` inside this one -- the value of the field
+    /// `field` -- an object made where the path finds `null` or nothing:
+    /// `set docs {meta.lang: "en"}`. A value on the way that is not an
+    /// object is refused rather than replaced.
+    pub fn set_path(&mut self, field: &str, keys: &str, value: Value) -> Result<()> {
+        let mut v = self;
+        let mut walked = field.len();
+        let path = format!("{field}.{keys}");
+        for k in keys.split('.') {
+            if v.is_null() {
+                *v = Value::Object(Vec::new());
+            }
+            let Value::Object(m) = v else {
+                return Err(Error::Type(format!(
+                    "`{}` holds {}, not an object: `{path}` cannot be set in it",
+                    path.get(..walked).unwrap_or_default(),
+                    v.type_name()
+                )));
+            };
+            walked += k.len() + 1;
+            let at = match m.binary_search_by(|(x, _)| x.as_str().cmp(k)) {
+                Ok(at) => at,
+                Err(at) => {
+                    m.insert(at, (k.to_string(), Value::Null));
+                    at
+                }
+            };
+            v = &mut m[at].1;
+        }
+        *v = value;
+        Ok(())
     }
 
     pub fn is_null(&self) -> bool {
@@ -198,6 +314,7 @@ impl Value {
                 }
                 Ok(Value::List(out))
             }
+            (DataType::Json, v) => json_value(v, 0),
             (t, v) => Err(Error::Type(format!(
                 "expected {}, found {}",
                 t.name(),
@@ -219,6 +336,7 @@ impl Value {
             Value::Vector(_) => 4,
             Value::List(_) => 5,
             Value::Sparse(..) => 6,
+            Value::Object(_) => 7,
         }
     }
 
@@ -275,6 +393,17 @@ impl Value {
                 }
                 a.len().cmp(&b.len()).then(da.cmp(db))
             }
+            // Member by member, each its key and then its value, as a list
+            // goes element by element.
+            (Value::Object(a), Value::Object(b)) => {
+                for (x, y) in a.iter().zip(b.iter()) {
+                    let o = x.0.cmp(&y.0).then_with(|| x.1.cmp_value(&y.1));
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
             (Value::Vector(a), Value::Vector(b)) => {
                 for (x, y) in a.iter().zip(b.iter()) {
                     let o = x.partial_cmp(y).unwrap_or(Ordering::Equal);
@@ -292,6 +421,66 @@ impl Value {
             },
         }
     }
+}
+
+/// `v` as a `json` field holds it: what JSON can say, nested no deeper
+/// than [`MAX_JSON_DEPTH`]. A timestamp becomes its ISO text, as JSON
+/// writes one. Bytes, a sparse vector, a number that is not finite and a
+/// vector -- `f32`s, not the numbers they were read from -- are refused.
+fn json_value(v: Value, depth: usize) -> Result<Value> {
+    let deeper = || {
+        Error::Type(format!(
+            "a json value nests at most {MAX_JSON_DEPTH} levels deep"
+        ))
+    };
+    Ok(match v {
+        Value::Float(f) if !f.is_finite() => {
+            return Err(Error::Type("a json number is finite".into()));
+        }
+        Value::Timestamp(ms) => Value::Text(crate::time::format_iso(ms)),
+        // A vector holds the `f32`s a list of numbers was read into, not
+        // the numbers written -- `0.1` is 0.10000000149011612 there, and
+        // 12345678901 is 12345679000 -- so a json field, which keeps what
+        // it is given, refuses one rather than keep another number. The
+        // readers of text hand a json field the list as written instead
+        // (`Database::exactly`).
+        Value::Vector(_) => {
+            return Err(Error::Type(
+                "a json field keeps numbers as they were written, and a vector holds the \
+                 f32s a list of them was read into: give the list as text, or as JSON"
+                    .into(),
+            ))
+        }
+        Value::List(items) => {
+            if depth >= MAX_JSON_DEPTH {
+                return Err(deeper());
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(json_value(it, depth + 1)?);
+            }
+            Value::List(out)
+        }
+        Value::Object(members) => {
+            if depth >= MAX_JSON_DEPTH {
+                return Err(deeper());
+            }
+            let mut out = Vec::with_capacity(members.len());
+            for (k, v) in members {
+                out.push((k, json_value(v, depth + 1)?));
+            }
+            // Sorted, and a key twice refused, however it was made: one built
+            // in Rust may be neither, and a member is found by binary search.
+            Value::object(out)?
+        }
+        Value::Bytes(_) | Value::Sparse(..) => {
+            return Err(Error::Type(format!(
+                "json holds no {}: objects, lists, numbers, text, booleans and null",
+                v.type_name()
+            )))
+        }
+        v => v,
+    })
 }
 
 fn check_sparse_dim(d: u32, e: Vec<(u32, f32)>, dim: usize) -> Result<Value> {
@@ -324,6 +513,16 @@ pub struct Document {
 impl Document {
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.fields.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    }
+
+    /// [`Self::get`], a path (`meta.source.rank`) read into its field:
+    /// `null` where it leads nowhere, `None` only where the field is not
+    /// the document's. What a path index keeps up as a write lands.
+    pub fn at(&self, name: &str) -> Option<&Value> {
+        match name.split_once('.') {
+            None => self.get(name),
+            Some((field, keys)) => self.get(field).map(|v| v.at_path(keys)),
+        }
     }
 
     pub fn set(&mut self, name: &str, value: Value) {

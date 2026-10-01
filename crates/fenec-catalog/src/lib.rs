@@ -63,6 +63,9 @@ const TIMESTAMPTZ_ARRAY: i32 = 1185;
 /// `bit`, which no field is, but which pgvector-python's `register_vector`
 /// takes for granted, as every PostgreSQL has it.
 const BIT: i32 = 1560;
+/// A `json` field's type: PostgreSQL's `jsonb`, and its array.
+pub const JSONB: i32 = 3802;
+const JSONB_ARRAY: i32 = 3807;
 const BIT_ARRAY: i32 = 1561;
 const REGCLASS: i32 = 2205;
 const REGTYPE: i32 = 2206;
@@ -359,6 +362,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
         DataType::Vector(n, VecPrec::F32) => (VECTOR, *n as i64, 0),
         DataType::Vector(n, VecPrec::F16) => (HALFVEC, *n as i64, 0),
         DataType::Sparse(n) => (SPARSEVEC, *n as i64, 0),
+        DataType::Json => (JSONB, -1, 0),
         DataType::List(inner) => {
             let oid = match **inner {
                 DataType::Bool => BOOL_ARRAY,
@@ -377,7 +381,7 @@ fn pg_type(ty: &DataType) -> (i32, i64, i64) {
 /// `inet`, `json` and `numeric` hold no field of fenecdb's, but the pg gem
 /// for Ruby builds its parameter encoders from them -- IPAddr, Hash and
 /// BigDecimal -- and refuses a connection's type map without them.
-const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 39] = [
+const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 41] = [
     (BOOL, "bool", 1, "B", 0, BOOL_ARRAY, 0),
     (BYTEA, "bytea", -1, "U", 0, BYTEA_ARRAY, 0),
     (CHAR, "char", 1, "Z", 0, 1002, 0),
@@ -423,6 +427,8 @@ const TYPES: [(i32, &str, i64, &str, i32, i32, i64); 39] = [
     (1041, "_inet", -1, "A", 869, 0, 0),
     (114, "json", -1, "U", 0, 199, 0),
     (199, "_json", -1, "A", 114, 0, 0),
+    (JSONB, "jsonb", -1, "U", 0, JSONB_ARRAY, 0),
+    (JSONB_ARRAY, "_jsonb", -1, "A", JSONB, 0, 0),
     (1700, "numeric", -1, "N", 0, 1231, 0),
     (1231, "_numeric", -1, "A", 1700, 0, 0),
 ];
@@ -449,6 +455,7 @@ fn format_type(oid: i64, typmod: i64) -> Option<String> {
             INT2VECTOR => "int2vector",
             OIDVECTOR => "oidvector",
             BIT => "bit",
+            JSONB => "jsonb",
             _ => return None,
         })
     };
