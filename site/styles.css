@@ -1115,3 +1115,14 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 .hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
 .has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
 @media (max-width: 940px) { .hero-say br.wide { display: none; } }
+
+/* The home page's first screen holds the four ways in: the hero stops a
+   card's height short of the window (header 66 px, cards about 190), so
+   they are on screen and clickable without a scroll. The dune band shrinks
+   with it. */
+.home .hero:not(.lost) {
+  --fold: clamp(520px, calc(100svh - 66px - 200px), 820px);
+  --dune-h: clamp(150px, 22svh, 260px);
+  padding-bottom: clamp(110px, 13vw, 190px);
+}
+@media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }
