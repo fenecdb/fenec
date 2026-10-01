@@ -257,7 +257,7 @@ const SCENES = [
   {
     key: 'tab',
     title: 'A database inside the browser tab',
-    sub: '175 KB of gzipped WebAssembly. No server, no dependencies.',
+    sub: '180 KB of gzipped WebAssembly. No server, no dependencies.',
     d: 7,
     draw(c, t) {
       const x = 120, y = 170, w = 700, h = 430;
@@ -284,7 +284,7 @@ const SCENES = [
       dot(c, ex, ey, 70, P.sun, 0.08 * e);
       mark(c, ex, ey - 6, 1.5 * (0.85 + 0.15 * e), e, t);
       text(c, 'fenec.wasm', ex, ey + 74, { size: 18, font: MONO, color: P.hot, align: 'center', alpha: e });
-      text(c, '175 KB gzipped', ex, ey + 100, { size: 16, font: MONO, color: P.dim, align: 'center', alpha: e });
+      text(c, '180 KB gzipped', ex, ey + 100, { size: 16, font: MONO, color: P.dim, align: 'center', alpha: e });
       // Rows going in, and the search lighting the results.
       for (let i = 0; i < 6; i++) {
         const p = span(t, 2 + i * 0.12, 2.8 + i * 0.12);

@@ -957,6 +957,12 @@ pub enum Statement {
         kind: crate::schema::IndexKind,
         if_not_exists: bool,
     },
+    /// `alter collection <name> add field | drop field | rename field`: the
+    /// fields change, and no document is rewritten for it (`Alter`).
+    AlterCollection {
+        collection: String,
+        change: Alter,
+    },
     Put {
         collection: String,
         /// Field-expression pairs per document. Supplying `id` makes it an upsert.
@@ -982,6 +988,20 @@ pub enum Statement {
     ListCollections,
     Describe(String),
     Compact(Option<String>),
+}
+
+/// What `alter collection` changes. A document is a run of values in field
+/// order, so each change is one no document has to be rewritten for: a
+/// field added goes last, and a document written before it ends before its
+/// place, which reads as `null`; a field dropped leaves its place, skipped
+/// on read and written as `null` until a `compact`; a rename is the schema
+/// alone. A change of type would be every document rewritten under the
+/// write lock, and is not one of them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Alter {
+    AddField(crate::schema::Field),
+    DropField(String),
+    RenameField(String, String),
 }
 
 impl Statement {

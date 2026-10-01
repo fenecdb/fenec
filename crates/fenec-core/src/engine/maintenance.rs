@@ -465,6 +465,18 @@ impl Database {
         )))
     }
 
+    /// Whether a collection `compact` would take -- the one named, or every
+    /// one -- holds the places of a dropped field.
+    fn drops_in(&self, which: Option<&str>) -> Result<bool> {
+        Ok(match which {
+            Some(n) => !self.collection(n)?.schema.dropped.is_empty(),
+            None => self
+                .collections
+                .values()
+                .any(|c| !c.schema.dropped.is_empty()),
+        })
+    }
+
     fn begin_compact(&self, which: Option<&str>) -> Result<Vec<Part>> {
         self.may_write(true)?;
         let targets: Vec<String> = match which {
@@ -947,6 +959,16 @@ fn compact_online(
     which: Option<&str>,
     during: &mut dyn FnMut(),
 ) -> Result<Response> {
+    // A dropped field's places are taken out of each document, which the
+    // copies made beside the database -- the records as they stand -- do
+    // not do: that compact holds the lock, as one in a shell does.
+    {
+        let mut g = write(db);
+        if g.drops_in(which)? {
+            g.may_write(true)?;
+            return g.compact(which, true);
+        }
+    }
     // A mapped database copies no record: the graphs holding tombstones are
     // rebuilt here, beside it, and the rewrite -- the live records streamed
     // from the old file into the new one, 2.1 s for 1 GB -- is left to the

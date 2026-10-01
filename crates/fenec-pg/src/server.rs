@@ -2846,11 +2846,15 @@ fn select_columns(db: &Database, sel: &fenec_core::query::Select) -> Option<Vec<
 }
 
 /// `text` read as FenecQL, or as the plain `SELECT` of columns from one
-/// collection it may be ([`sql::select`]); FenecQL's error otherwise.
+/// collection it may be ([`sql::select`]), or the `ALTER TABLE` a
+/// migration sends ([`sql::alter`]); FenecQL's error otherwise.
 fn read(text: &str) -> fenec_core::error::Result<Vec<Statement>> {
     parse(text).or_else(|e| match sql::select(text) {
         Some(q) => parse(&q),
-        None => Err(e),
+        None => match sql::alter(text) {
+            Some(Ok(q)) => parse(&q),
+            _ => Err(e),
+        },
     })
 }
 
@@ -3906,6 +3910,7 @@ fn run_locked(
                         let tag = match stmt {
                             Statement::CreateCollection { .. } => "CREATE TABLE",
                             Statement::DropCollection { .. } => "DROP TABLE",
+                            Statement::AlterCollection { .. } => "ALTER TABLE",
                             Statement::Compact(_) => "VACUUM",
                             _ => "OK",
                         };

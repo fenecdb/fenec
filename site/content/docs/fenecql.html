@@ -16,6 +16,9 @@ is accepted. These are all its statements.</p>
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ... )
 drop collection [if exists] &lt;name&gt;
 create index [if not exists] on &lt;name&gt; (&lt;field&gt;) @index
+alter collection &lt;name&gt; add field &lt;field&gt; &lt;type&gt; [collate und|tr] [@index]
+alter collection &lt;name&gt; drop field &lt;field&gt;
+alter collection &lt;name&gt; rename field &lt;field&gt; to &lt;new name&gt;
 
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
@@ -41,6 +44,10 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     <code>put</code> and it writes over the document with that id.</li>
   <li><b><code>insert</code> never writes over.</b> If an id is taken, the
     whole statement is refused.</li>
+  <li><b><code>alter collection</code> rewrites no document.</b> A field
+    added reads <code>null</code> in the documents already there; a field's
+    type does not change — see <a href="#changing-a-collection">Changing a
+    collection</a>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -516,6 +523,64 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
   million rows read that way a page at a time took 8.6 s and take 110 ms.
   The browser module leaves this out.</p>
 </div>
+</details>
+
+<h2 id="changing-a-collection">Changing a collection</h2>
+
+<p>A collection takes a field, lets one go, or renames one, and none of it
+rewrites a document: it is as quick over a million documents as over
+none.</p>
+
+<pre data-lang="fenecql">alter collection orders add field note text
+alter collection orders add field code text @unique
+alter collection orders drop field note
+alter collection orders rename field total to amount
+</pre>
+
+<ul>
+  <li><b>A field added reads <code>null</code></b> in every document
+    written before it, and cannot be <code>required</code>.</li>
+  <li><b>A field dropped is gone</b> from every read and write, and its
+    index with it. <code>compact</code> gives its space back.</li>
+  <li><b>A type does not change in place.</b> Add a field of the new type,
+    <code>set</code> it from the old one, and drop the old one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A document is its values one after another in field order, so what a
+change costs is what it does to that order. A field added goes last: a
+document written before it ends before the field's place, and reads
+<code>null</code> there. A rename is the schema alone. A field dropped
+leaves its place in the documents written before the drop — skipped on
+read, written as <code>null</code> after it, refused by name everywhere —
+and <code>compact</code> writes every document without it, copying each
+other value as its bytes stand. A field added under a dropped one's name is
+a new field: the old values stay in the dropped place, and the new field
+reads <code>null</code> until it is written. A change of type is the one
+thing that would rewrite every document under the write lock, and is not
+done.</p>
+
+<p>Each is a write as a <code>create index</code> is: one of a block, put
+back by its <code>ROLLBACK</code> with the writes after it, seen by a
+subscriber as a schema change, applied by a replica, carried by the change
+stream (<code>op: "alter"</code>, the documents after it read by the
+schema it made). In the file it is record kind 12, and a dropped place a
+nameless field of type tag 12, both of which a binary from before them
+refuses rather than read the fields after a dropped one a place early. The
+index of a field added is built over the documents there, every one of them
+<code>null</code>; a dropped field's goes, and a renamed one's goes with
+the name, a vector field's graph included.</p>
+
+<p>Measured over a million rows in memory: an add, a rename and a drop take
+0.025, 0.021 and 0.004 ms. Reading a field past where a document ends costs
+nothing a scan can measure: five scans of the million took 21.2 to 39.1 ms
+before the feature and 21.6 to 39.3 after, from 1.7% slower to 1.7% faster
+by the scan — as the same build with the reads written as before was,
+which makes it where the code lands, not what it does — and the browser
+module's scan of 20 000 rows 1.70 ms against 1.71. A <code>compact</code> that takes
+a dropped field out took 95 ms against 56 for one with none to take: it
+writes each document again rather than copy it. On a server it holds the
+write lock, where a compact otherwise runs beside the database.</p>
 </details>
 
 <h2 id="quantized">Quantized vector indexes</h2>

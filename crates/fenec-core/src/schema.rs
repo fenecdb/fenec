@@ -412,7 +412,31 @@ pub fn collatable(t: &DataType) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     pub name: String,
+    /// The fields a document holds, in the order it holds them -- the
+    /// positions every reader of a field passes the store.
     pub fields: Vec<Field>,
+    /// Where a dropped field's value still is in the documents written
+    /// before its drop, ascending: a document is a run of values in field
+    /// order, so `alter ... drop field` leaves the place, skipped on read
+    /// and written as `null`, rather than rewrite every document under the
+    /// write lock. `compact` writes the documents without them and empties
+    /// this. Every field after one sits a place further in the documents
+    /// than in `fields` ([`Schema::place`]).
+    pub dropped: Vec<usize>,
+}
+
+/// Where the field at `pos` is in a document, past the `dropped` places
+/// before it (ascending): what the store and the schema both work out.
+#[inline]
+pub fn place(dropped: &[usize], pos: usize) -> usize {
+    let mut at = pos;
+    for &d in dropped {
+        if d > at {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 impl Schema {
@@ -440,7 +464,60 @@ impl Schema {
             f.index.check(&f.name, &f.ty)?;
             seen.push(f.name.clone());
         }
-        Ok(Schema { name, fields })
+        Ok(Schema {
+            name,
+            fields,
+            dropped: Vec::new(),
+        })
+    }
+
+    /// Where the field at `pos` of [`Self::fields`] is in a document: past
+    /// every dropped place before it.
+    pub fn place(&self, pos: usize) -> usize {
+        place(&self.dropped, pos)
+    }
+
+    /// The places a document holds: its fields and the dropped ones.
+    pub fn width(&self) -> usize {
+        self.fields.len() + self.dropped.len()
+    }
+
+    /// The values of a document's payload as its fields', a dropped place
+    /// passed over and a field the payload ends before -- one added after
+    /// it was written -- `null`.
+    pub fn read_doc(&self, id: crate::value::DocId, buf: &[u8]) -> Result<crate::value::Document> {
+        let mut fields = Vec::with_capacity(self.fields.len());
+        let (mut pos, mut at) = (0, 0);
+        for (i, f) in self.fields.iter().enumerate() {
+            let want = self.place(i);
+            while at < want {
+                skip_field(buf, &mut pos)?;
+                at += 1;
+            }
+            let v = match pos < buf.len() {
+                true => decode_value(buf, &mut pos)?,
+                false => crate::value::Value::Null,
+            };
+            at += 1;
+            fields.push((f.name.clone(), v));
+        }
+        Ok(crate::value::Document { id, fields })
+    }
+
+    /// A payload without its dropped places: what `compact` writes. Each
+    /// value kept is copied as its bytes stand.
+    pub fn without_dropped(&self, buf: &[u8]) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(buf.len());
+        let (mut pos, mut at) = (0, 0);
+        while pos < buf.len() {
+            let from = pos;
+            skip_value(buf, &mut pos)?;
+            if !self.dropped.contains(&at) {
+                out.extend_from_slice(&buf[from..pos]);
+            }
+            at += 1;
+        }
+        Ok(out)
     }
 
     pub fn field(&self, name: &str) -> Option<&Field> {
@@ -478,8 +555,18 @@ impl Schema {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         encode_str(&mut out, &self.name);
-        put_uvarint(&mut out, self.fields.len() as u64);
-        for f in &self.fields {
+        put_uvarint(&mut out, self.width() as u64);
+        let mut fields = self.fields.iter();
+        for at in 0..self.width() {
+            // A dropped place where it stands, nameless, behind a type tag
+            // of its own: a version that knows no drop refuses the file
+            // rather than read every field after it one place early.
+            if self.dropped.contains(&at) {
+                encode_str(&mut out, "");
+                out.push(TAG_DROPPED);
+                continue;
+            }
+            let Some(f) = fields.next() else { break };
             encode_str(&mut out, &f.name);
             if let Some(c) = f.collate {
                 out.push(TAG_COLLATED);
@@ -529,9 +616,15 @@ impl Schema {
     pub fn decode(buf: &[u8], pos: &mut usize) -> Result<Schema> {
         let name = decode_str(buf, pos)?;
         let n = get_uvarint(buf, pos)? as usize;
-        let mut fields = Vec::with_capacity(n);
-        for _ in 0..n {
+        let mut fields = Vec::with_capacity(n.min(buf.len()));
+        let mut dropped = Vec::new();
+        for at in 0..n {
             let fname = decode_str(buf, pos)?;
+            if buf.get(*pos) == Some(&TAG_DROPPED) {
+                *pos += 1;
+                dropped.push(at);
+                continue;
+            }
             let collate = match buf.get(*pos) {
                 Some(&TAG_COLLATED) => {
                     let c = *buf
@@ -592,6 +685,10 @@ impl Schema {
                 collate,
             });
         }
-        Ok(Schema { name, fields })
+        Ok(Schema {
+            name,
+            fields,
+            dropped,
+        })
     }
 }

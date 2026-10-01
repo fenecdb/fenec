@@ -18,6 +18,9 @@ are the kinds:</p>
   [7][collection-id][length][next-id]      id counter (optional),
                            [index]         an image's, and its data's index
   [5][collection-id][length][schema]       schema change (index)
+  [12][collection-id][length][change]      a field added, dropped or renamed,
+                           [field][name]   the field and its new name,
+                           [schema]        and the schema after it
   [2][collection-id][length]               drop collection (empty body)
   [3][collection-id][length][records]      data
   [4][collection-id][length][field][graph] HNSW graph (optional)
@@ -157,7 +160,13 @@ stored; every other index is built from the documents after an open.</p>
 
 <p>A field ordered in a collation (<code>name text collate tr</code>) is
 written with type tag 11 and the collation's code in front of its type: 1
-for <code>tr</code>, 2 for <code>und</code>.</p>
+for <code>tr</code>, 2 for <code>und</code>. A dropped field's place
+(<code>alter collection ... drop field</code>) is written where it stands
+as a field with no name and type tag 12: the documents written before the
+drop hold a value there, which a read passes over, and a document written
+after it a <code>null</code>. A document that ends before a field's place
+holds <code>null</code> there: it was written before the field was
+added.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>For every kind but the graph that byte is all the file holds: the hash,

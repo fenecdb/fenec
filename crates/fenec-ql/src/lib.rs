@@ -70,6 +70,33 @@ mod tests {
     }
 
     #[test]
+    fn alter_adds_drops_and_renames() {
+        use fenec_core::query::Alter;
+        let alter = |q: &str| match parse_one(q).unwrap() {
+            Statement::AlterCollection { collection, change } => (collection, change),
+            s => panic!("{s:?}"),
+        };
+        let (c, change) = alter("alter collection orders add field note text @hash");
+        assert_eq!(c, "orders");
+        let Alter::AddField(f) = change else { panic!() };
+        assert_eq!((f.name.as_str(), f.index), ("note", IndexKind::HASH));
+        assert_eq!(
+            alter("ALTER COLLECTION orders ADD n int").1,
+            Alter::AddField(fenec_core::schema::Field::new("n", DataType::Int))
+        );
+        assert_eq!(
+            alter("alter collection orders drop field note").1,
+            Alter::DropField("note".into())
+        );
+        assert_eq!(
+            alter("alter collection orders rename field total to amount").1,
+            Alter::RenameField("total".into(), "amount".into())
+        );
+        assert!(parse_one("alter collection orders rename total amount").is_err());
+        assert!(parse_one("alter table orders add field x int").is_err());
+    }
+
+    #[test]
     fn put_batch() {
         let s = parse_one(r#"put docs [ {title: "a"}, {title: "b", embed: [0.1, 0.2]} ]"#).unwrap();
         let Statement::Put { docs, .. } = s else {

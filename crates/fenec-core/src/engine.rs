@@ -144,6 +144,65 @@ const REC_SPILL: u8 = 10;
 /// it would have been ([`Sink::land`], [`landed_block`]).
 const REC_LAND: u8 = 11;
 
+/// A collection's fields changed (`alter collection`): `[12][collection]
+/// [length][change][field][new name][schema]` -- which change, the field it
+/// is of, the name a rename gives it (empty otherwise), and the schema
+/// after it. A record of its own rather than an `REC_ALTER` with a change
+/// byte: a version before it reads every kind-5 record as an index added,
+/// and would have taken a field moved for one; this one it refuses. Undone
+/// in a block as an index built is ([`Undo::Altered`]).
+const REC_FIELDS: u8 = 12;
+const FIELD_ADD: u8 = 1;
+const FIELD_DROP: u8 = 2;
+const FIELD_RENAME: u8 = 3;
+
+/// A [`REC_FIELDS`] record's body, read.
+struct FieldChange {
+    op: u8,
+    field: String,
+    to: String,
+    schema: Schema,
+}
+
+impl FieldChange {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = vec![self.op];
+        crate::codec::encode_str(&mut out, &self.field);
+        crate::codec::encode_str(&mut out, &self.to);
+        out.extend_from_slice(&self.schema.encode());
+        out
+    }
+
+    fn decode(body: &[u8]) -> Result<FieldChange> {
+        let op = *body
+            .first()
+            .ok_or_else(|| Error::Corrupt("an alter record cut short".into()))?;
+        if !matches!(op, FIELD_ADD | FIELD_DROP | FIELD_RENAME) {
+            return Err(Error::Corrupt(format!("unknown field change {op}")));
+        }
+        let mut p = 1;
+        let field = crate::codec::decode_str(body, &mut p)?;
+        let to = crate::codec::decode_str(body, &mut p)?;
+        let schema = Schema::decode(body, &mut p)?;
+        Ok(FieldChange {
+            op,
+            field,
+            to,
+            schema,
+        })
+    }
+}
+
+/// The schema a schema change's record holds: a create's or an index's
+/// whole, an alter's after its change.
+#[cfg(not(target_arch = "wasm32"))]
+fn schema_in(kind: u8, body: &[u8]) -> Result<Schema> {
+    match kind {
+        REC_FIELDS => FieldChange::decode(body).map(|c| c.schema),
+        _ => Schema::decode(body, &mut 0),
+    }
+}
+
 /// The spills a land names, by where their bodies are in the file and how
 /// long they are, and the records after them.
 type LandParts<'a> = (Vec<(u64, u64)>, &'a [u8]);
@@ -204,7 +263,7 @@ pub fn writes_in(record: &[u8]) -> Result<u64> {
             })?;
             Ok(n)
         }
-        Some(&(REC_CREATE | REC_DROP | REC_ALTER)) => Ok(1),
+        Some(&(REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS)) => Ok(1),
         // The land's own records; the spills' are counted where it is
         // loaded, since it never travels.
         Some(&REC_LAND) => {
@@ -256,7 +315,8 @@ pub enum ChangeKind {
     Put(DocId, Option<Document>),
     Del(DocId),
     Create(Schema),
-    /// An index made or dropped: the fields stay where they were.
+    /// An index made, or a field added, dropped or renamed: the schema
+    /// after it, which the documents after it are read by.
     Alter(Schema),
     Drop,
 }
@@ -278,7 +338,7 @@ impl ChangeWalk<'_> {
             let what = match kind {
                 REC_DROP => ChangeKind::Drop,
                 _ => {
-                    let schema = Schema::decode(body, &mut 0)?;
+                    let schema = schema_in(kind, body)?;
                     self.known.insert(cid, schema.clone());
                     match kind {
                         REC_CREATE => ChangeKind::Create(schema),
@@ -304,17 +364,7 @@ impl ChangeWalk<'_> {
             p += plen;
             let schema = self.known.get(&cid);
             let what = match (op, schema) {
-                (OP_PUT, Some(schema)) => {
-                    let mut at = 0;
-                    let mut fields = Vec::with_capacity(schema.fields.len());
-                    for f in &schema.fields {
-                        fields.push((
-                            f.name.clone(),
-                            crate::codec::decode_value(payload, &mut at)?,
-                        ));
-                    }
-                    ChangeKind::Put(id, Some(Document { id, fields }))
-                }
+                (OP_PUT, Some(schema)) => ChangeKind::Put(id, Some(schema.read_doc(id, payload)?)),
                 (OP_PUT, None) => ChangeKind::Put(id, None),
                 _ => ChangeKind::Del(id),
             };
@@ -346,7 +396,10 @@ fn each_inner(body: &[u8], f: &mut Inner<'_>) -> Result<()> {
     let mut pos = 0;
     while pos < body.len() {
         let r = record_at(body, &mut pos)?;
-        if !matches!(r.kind, REC_DATA | REC_CREATE | REC_DROP | REC_ALTER) {
+        if !matches!(
+            r.kind,
+            REC_DATA | REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS
+        ) {
             return Err(Error::Corrupt(
                 "a block holds a record that is no write".into(),
             ));
@@ -551,6 +604,41 @@ enum Undo {
     Dropped(Box<Collection>, usize),
     /// An index built over a collection's field: it goes.
     Indexed(u32, usize),
+    /// A collection's fields changed: the schema before, and the indexes
+    /// a dropped field took with it, to put back.
+    Altered(u32, Box<Altered>),
+}
+
+/// What [`Undo::Altered`] puts back.
+struct Altered {
+    before: Schema,
+    op: u8,
+    field: String,
+    to: String,
+    taken: Taken,
+}
+
+/// The indexes of one field, taken off a collection by a drop or a rename
+/// and put back under the name they go by after it.
+#[derive(Default)]
+struct Taken {
+    vector: Option<VectorIndex>,
+    hash: Option<Derived<HashIndex>>,
+    text: Option<Derived<TextIndex>>,
+    sorted: Option<Derived<SortedIndex>>,
+    sparse: Option<Derived<SparseIndex>>,
+}
+
+/// Puts `ix` among a collection's ordered or sparse indexes where `field`
+/// stands in the schema: the order they are kept in, which keeps the choice
+/// between two ranges the same as after an open.
+fn in_schema_order<T>(list: &mut Vec<(String, T)>, schema: &Schema, field: &str, ix: T) {
+    let pos = schema.field_pos(field);
+    let at = list
+        .iter()
+        .position(|(n, _)| schema.field_pos(n) > pos)
+        .unwrap_or(list.len());
+    list.insert(at, (field.to_string(), ix));
 }
 
 impl Block {
@@ -680,6 +768,7 @@ fn whole_record(bytes: &[u8], at: usize) -> Result<bool> {
             | REC_DATA
             | REC_GRAPH
             | REC_ALTER
+            | REC_FIELDS
             | REC_NEXTID
             | REC_HISTORY
             | REC_BLOCK
@@ -717,6 +806,7 @@ fn last_graphs(bytes: &[u8]) -> Result<Vec<(u32, String, usize)>> {
                 | REC_DATA
                 | REC_GRAPH
                 | REC_ALTER
+                | REC_FIELDS
                 | REC_NEXTID
                 | REC_HISTORY
                 | REC_BLOCK
@@ -1243,10 +1333,12 @@ impl Collection {
                 _ => {}
             }
         }
+        let mut store = Store::new();
+        store.set_dropped(&schema.dropped);
         Collection {
             id,
             schema,
-            store: Store::new(),
+            store,
             vectors,
             hashes,
             texts,
@@ -1306,6 +1398,75 @@ impl Collection {
             return Ok(None);
         };
         d.or_build(|| hash_of(&self.store, pos)).map(Some)
+    }
+
+    /// Takes `field`'s indexes off the collection, whichever it has.
+    fn take_indexes(&mut self, field: &str) -> Taken {
+        let sorted = self.sorted.iter().position(|(n, _)| n == field);
+        let sparse = self.sparse.iter().position(|(n, _)| n == field);
+        Taken {
+            vector: self.vectors.remove(field),
+            hash: self.hashes.remove(field),
+            text: self.texts.remove(field),
+            sorted: sorted.map(|i| self.sorted.remove(i).1),
+            sparse: sparse.map(|i| self.sparse.remove(i).1),
+        }
+    }
+
+    /// Puts indexes [`Self::take_indexes`] took under `field`, the schema
+    /// already naming it.
+    fn put_indexes(&mut self, field: &str, t: Taken) {
+        if let Some(ix) = t.vector {
+            self.vectors.insert(field.to_string(), ix);
+        }
+        if let Some(ix) = t.hash {
+            self.hashes.insert(field.to_string(), ix);
+        }
+        if let Some(ix) = t.text {
+            self.texts.insert(field.to_string(), ix);
+        }
+        if let Some(ix) = t.sorted {
+            in_schema_order(&mut self.sorted, &self.schema, field, ix);
+        }
+        if let Some(ix) = t.sparse {
+            in_schema_order(&mut self.sparse, &self.schema, field, ix);
+        }
+    }
+
+    /// The fields changed as `ch` says -- the schema after it in place, and
+    /// the store reading by its places -- and the indexes of a field
+    /// dropped taken off, those of one renamed moved to its name: what an
+    /// `alter collection` does, and a replica's apply of one. A field added
+    /// has its index built by the caller, after this, which cannot fail.
+    fn alter_fields(&mut self, ch: &FieldChange) -> Taken {
+        let taken = match ch.op {
+            FIELD_ADD => Taken::default(),
+            _ => self.take_indexes(&ch.field),
+        };
+        self.schema = ch.schema.clone();
+        self.store.set_dropped(&self.schema.dropped);
+        if ch.op == FIELD_RENAME {
+            self.put_indexes(&ch.to, taken);
+            return Taken::default();
+        }
+        taken
+    }
+
+    /// The documents written again without the places of dropped fields,
+    /// which `compact` takes out: the bytes of every value kept copied as
+    /// they stand, into a fresh store -- in memory until the rewrite that
+    /// follows points it at the new file.
+    fn strip_dropped(&mut self) -> Result<()> {
+        let mut fresh = Store::new();
+        fresh.raise_next_id(self.store.next_id());
+        fresh.reserve(self.store.len());
+        for id in self.store.iter_ids() {
+            let payload = self.store.raw(id)?.unwrap_or_default();
+            fresh.append(OP_PUT, id, &self.schema.without_dropped(payload)?);
+        }
+        self.store = fresh;
+        self.schema.dropped.clear();
+        Ok(())
     }
 
     /// The refusal of `doc` where an `@unique` field of it holds a value
@@ -2574,8 +2735,9 @@ impl Database {
                 _ => {}
             }
         }
-        for (name, store) in fresh {
+        for (name, mut store) in fresh {
             if let Some(c) = self.collections.get_mut(&name) {
+                store.set_dropped(&c.schema.dropped);
                 c.store = store;
             }
         }
@@ -2882,7 +3044,7 @@ impl Database {
             let tail = r.at >= body_end;
             if matches!(
                 r.kind,
-                REC_CREATE | REC_DROP | REC_ALTER | REC_DATA | REC_BLOCK
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_DATA | REC_BLOCK
             ) {
                 spills.clear();
             }
@@ -2895,7 +3057,7 @@ impl Database {
                 .filter(|(cid, _)| r.kind == REC_DATA && *cid == r.cid && !tail)
                 .map(|(_, ix)| ix);
             match r.kind {
-                REC_CREATE | REC_DROP | REC_ALTER => {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS => {
                     seq_seen += tail as u64;
                     self.load_schema(r.kind, r.cid, r.body, &mut by_id, &mut restored)?;
                 }
@@ -3083,6 +3245,40 @@ impl Database {
             }
             return Ok(());
         }
+        if kind == REC_FIELDS {
+            let ch = FieldChange::decode(body)?;
+            let Some(name) = by_id.get(&cid) else {
+                return Ok(());
+            };
+            let Some(c) = self.collections.get_mut(name) else {
+                return Ok(());
+            };
+            // The graphs restored before it stay, under the name their
+            // field has after it -- the documents are the same ones -- and
+            // a dropped field's goes with it.
+            let mut kept = Vec::new();
+            for (n, f, _) in restored.iter_mut() {
+                if n != name || (ch.op == FIELD_DROP && *f == ch.field) {
+                    continue;
+                }
+                let after = match ch.op == FIELD_RENAME && *f == ch.field {
+                    true => ch.to.clone(),
+                    false => f.clone(),
+                };
+                if let Some(ix) = c.vectors.remove(f.as_str()) {
+                    kept.push((after.clone(), ix));
+                }
+                *f = after;
+            }
+            c.schema = ch.schema;
+            c.store.set_dropped(&c.schema.dropped);
+            c.reset_index_structures();
+            forget(restored, name, &|f| kept.iter().any(|(k, _)| k == f));
+            for (f, ix) in kept {
+                c.vectors.insert(f, ix);
+            }
+            return Ok(());
+        }
         let schema = Schema::decode(body, &mut 0)?;
         if kind == REC_CREATE {
             // Made again under its name: no graph restored before is this
@@ -3105,6 +3301,7 @@ impl Database {
         // The field layout must not have changed: stored documents are
         // encoded positionally.
         let same_layout = c.schema.fields.len() == schema.fields.len()
+            && c.schema.dropped == schema.dropped
             && c.schema
                 .fields
                 .iter()
@@ -3417,10 +3614,16 @@ impl Database {
                 }
             }
             let slot = |p: usize| positions.iter().position(|&q| q == p).unwrap_or(0);
+            // Pushed in a loop: collected, a `map` over the positions was
+            // 0.3 KB of the browser module.
+            let mut places = Vec::with_capacity(positions.len());
+            for &p in &positions {
+                places.push(schema.place(p));
+            }
             // One field has one index, so each value is taken by one of them.
             let mut vals = Vec::with_capacity(positions.len());
             for id in ids {
-                if !store.read_fields(id, &positions, &mut vals)? {
+                if !store.read_fields(id, &places, &mut vals)? {
                     continue;
                 }
                 for (p, _, rows) in sorted_ix.iter_mut() {
@@ -3690,7 +3893,9 @@ impl Database {
         while pos < records.len() && d.go {
             let r = record_at(records, &mut pos)?;
             match r.kind {
-                REC_CREATE | REC_DROP | REC_ALTER | REC_DATA => d.record(r.kind, r.cid, r.body)?,
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS | REC_DATA => {
+                    d.record(r.kind, r.cid, r.body)?
+                }
                 REC_BLOCK => each_inner(r.body, &mut |kind, cid, inner| match d.go {
                     true => d.record(kind, cid, inner),
                     false => Ok(()),
@@ -3720,7 +3925,7 @@ impl Database {
                 self.index_batch(batch);
             }
             match rec {
-                REC_CREATE | REC_DROP | REC_ALTER => {
+                REC_CREATE | REC_DROP | REC_ALTER | REC_FIELDS => {
                     self.apply_schema(rec, cid, body, &mut notes)?
                 }
                 REC_DATA => self.apply_frames(cid, body, batch, &mut notes)?,
@@ -3783,6 +3988,18 @@ impl Database {
             self.order.retain(|n| *n != name);
             return Ok(());
         }
+        // A field added, dropped or renamed, as the primary did it: the
+        // primary checked the change, and the replica takes it.
+        if kind == REC_FIELDS {
+            let ch = FieldChange::decode(body)?;
+            let name = self.named(cid).ok_or_else(|| missing(cid))?;
+            let c = self.collections.get_mut(&name).unwrap();
+            c.alter_fields(&ch);
+            if let (FIELD_ADD, Some(pos)) = (ch.op, c.schema.field_pos(&ch.field)) {
+                build_index(c, pos)?;
+            }
+            return Ok(());
+        }
         let schema = Schema::decode(body, &mut 0)?;
         if kind == REC_CREATE {
             if self.collections.contains_key(&schema.name) || self.named(cid).is_some() {
@@ -3800,6 +4017,7 @@ impl Database {
         let name = self.named(cid).ok_or_else(|| missing(cid))?;
         let c = self.collections.get_mut(&name).unwrap();
         let same_layout = c.schema.fields.len() == schema.fields.len()
+            && c.schema.dropped == schema.dropped
             && c.schema
                 .fields
                 .iter()
@@ -4312,17 +4530,34 @@ impl Database {
                 Undo::Indexed(cid, pos) => {
                     if let Some(name) = self.named(cid) {
                         let c = self.collections.get_mut(&name).unwrap();
-                        let f = &c.schema.fields[pos].name;
-                        c.vectors.remove(f);
-                        c.hashes.remove(f);
-                        c.texts.remove(f);
-                        if let Some(i) = c.sorted.iter().position(|(n, _)| n == f) {
-                            c.sorted.remove(i);
-                        }
-                        if let Some(i) = c.sparse.iter().position(|(n, _)| n == f) {
-                            c.sparse.remove(i);
-                        }
+                        let f = c.schema.fields[pos].name.clone();
+                        drop(c.take_indexes(&f));
                         c.schema.fields[pos].index = IndexKind::None;
+                    }
+                }
+                // The schema as it was, then the indexes: a field added has
+                // its index taken off, a dropped one's put back, and a
+                // renamed one's moved back to the name it had.
+                Undo::Altered(cid, a) => {
+                    if let Some(name) = self.named(cid) {
+                        let c = self.collections.get_mut(&name).unwrap();
+                        let Altered {
+                            before,
+                            op,
+                            field,
+                            to,
+                            taken,
+                        } = *a;
+                        c.store.set_dropped(&before.dropped);
+                        c.schema = before;
+                        match op {
+                            FIELD_ADD => drop(c.take_indexes(&field)),
+                            FIELD_DROP => c.put_indexes(&field, taken),
+                            _ => {
+                                let t = c.take_indexes(&to);
+                                c.put_indexes(&field, t);
+                            }
+                        }
                     }
                 }
             }
@@ -4586,6 +4821,9 @@ impl Database {
                 if_not_exists,
             } => self.create_collection(schema.clone(), *if_not_exists),
             Statement::DropCollection { name, if_exists } => self.drop_collection(name, *if_exists),
+            Statement::AlterCollection { collection, change } => {
+                self.alter_collection(collection, change)
+            }
             Statement::CreateIndex {
                 collection,
                 field,
@@ -4663,6 +4901,102 @@ impl Database {
             None if if_exists => Ok(Response::Ok(format!("no collection `{name}`"))),
             None => Err(Error::NotFound(format!("collection `{name}`"))),
         }
+    }
+
+    /// Adds, drops or renames a field, rewriting no document: a field added
+    /// goes last, where a document written before it ends, and reads as
+    /// `null` there; a field dropped leaves its place, skipped on read and
+    /// written as `null`, for `compact` to take out, and its index goes with
+    /// it; a rename is the schema alone. Undone in a block as an index built
+    /// is ([`Undo::Altered`]).
+    fn alter_collection(&mut self, collection: &str, change: &Alter) -> Result<Response> {
+        // The vectors the block's `put`s left waiting are linked first:
+        // they wait under their field's name, which a rename or a drop
+        // takes away.
+        if DEFERS {
+            self.link_waiting(1);
+        }
+        let c = self.collection(collection)?;
+        let mut schema = c.schema.clone();
+        let no_field = |f: &str| Error::NotFound(format!("field `{f}` in `{collection}`"));
+        let (op, field, to) = match change {
+            Alter::AddField(f) => {
+                if let Some(feature) = missing_feature(&f.index) {
+                    return Err(not_built("the index", feature));
+                }
+                if f.required {
+                    return Err(Error::Query(format!(
+                        "`{}` cannot be required: the documents `{collection}` holds have no \
+                         value for it",
+                        f.name
+                    )));
+                }
+                // The checks a `create collection` makes of its fields: a
+                // name taken or reserved, a collation or an index the type
+                // cannot have.
+                let mut fields = schema.fields.clone();
+                fields.push(f.clone());
+                // A `String`, as the parser hands it one: a `&str` was a
+                // second copy of `Schema::new`, 0.6 KB of the browser module.
+                schema.fields = Schema::new(collection.to_string(), fields)?.fields;
+                (FIELD_ADD, f.name.clone(), String::new())
+            }
+            Alter::DropField(name) => {
+                let pos = schema.field_pos(name).ok_or_else(|| no_field(name))?;
+                if schema.fields.len() == 1 {
+                    return Err(Error::Query(format!(
+                        "`{name}` is the only field of `{collection}`, which keeps one at least"
+                    )));
+                }
+                let place = schema.place(pos);
+                schema.fields.remove(pos);
+                let at = schema.dropped.partition_point(|&d| d < place);
+                schema.dropped.insert(at, place);
+                (FIELD_DROP, name.clone(), String::new())
+            }
+            Alter::RenameField(from, to) => {
+                let pos = schema.field_pos(from).ok_or_else(|| no_field(from))?;
+                // A name taken or reserved, as `create collection` refuses.
+                let mut fields = schema.fields.clone();
+                fields[pos].name = to.clone();
+                schema.fields = Schema::new(collection.to_string(), fields)?.fields;
+                (FIELD_RENAME, from.clone(), to.clone())
+            }
+        };
+        let ch = FieldChange {
+            op,
+            field,
+            to,
+            schema,
+        };
+        let c = self.collections.get_mut(collection).unwrap();
+        let (cid, before) = (c.id, c.schema.clone());
+        let taken = c.alter_fields(&ch);
+        // Before the index of a field added is built, which a block that
+        // does not land -- or a build that fails -- puts back with it.
+        if let Some(b) = &mut self.block {
+            b.was.push(Undo::Altered(
+                cid,
+                Box::new(Altered {
+                    before,
+                    op,
+                    field: ch.field.clone(),
+                    to: ch.to.clone(),
+                    taken,
+                }),
+            ));
+        }
+        let c = self.collections.get_mut(collection).unwrap();
+        if let (FIELD_ADD, Some(pos)) = (op, c.schema.field_pos(&ch.field)) {
+            build_index(c, pos)?;
+        }
+        self.wal(REC_FIELDS, cid, &ch.encode())?;
+        self.note(cid, SCHEMA_MARK);
+        Ok(Response::Ok(match op {
+            FIELD_ADD => format!("field `{}` added to `{collection}`", ch.field),
+            FIELD_DROP => format!("field `{}` dropped from `{collection}`", ch.field),
+            _ => format!("field `{}` renamed to `{}`", ch.field, ch.to),
+        }))
     }
 
     /// Builds an index on an existing field and fills it from the current
@@ -6541,8 +6875,12 @@ impl Database {
         }
         let mut row = Vec::with_capacity(positions.len());
         let mut key = Vec::new();
+        let mut places = Vec::with_capacity(positions.len());
+        for &p in &positions {
+            places.push(c.schema.place(p));
+        }
         for &id in &ids {
-            if !c.store.read_fields(id, &positions, &mut row)? {
+            if !c.store.read_fields(id, &places, &mut row)? {
                 continue;
             }
             let at = match group {
@@ -6803,10 +7141,16 @@ impl Database {
         let mapped = self.mapped;
         #[cfg(target_arch = "wasm32")]
         let mapped = false;
-        if !mapped {
-            for name in &targets {
-                let c = self.collections.get_mut(name).unwrap();
-                c.store.compact()?;
+        // A dropped field's places are taken out of every document, which
+        // compacts the store besides; over a mapped file the documents come
+        // into memory for it, until the rewrite below points them at the new
+        // file.
+        for name in &targets {
+            let c = self.collections.get_mut(name).unwrap();
+            match c.schema.dropped.is_empty() {
+                false => c.strip_dropped()?,
+                true if !mapped => c.store.compact()?,
+                true => {}
             }
         }
         // A compact drops dead records and moves the live ones; the
@@ -7439,8 +7783,9 @@ fn past_tombstones(
 struct Filter<'q> {
     c: &'q Collection,
     root: Test<'q>,
-    /// The fields the filter reads, ascending, and for each field position
-    /// where its value lands among them.
+    /// The places in a document of the fields the filter reads, ascending
+    /// (`Schema::place`), and for each field position where its value lands
+    /// among them.
     positions: Vec<usize>,
     index_of: Vec<usize>,
     vals: std::cell::RefCell<Vec<Value>>,
@@ -7479,8 +7824,11 @@ impl<'q> Filter<'q> {
         let mut positions = Vec::new();
         let root = Filter::bind(c, f, ctx, &mut positions);
         let mut index_of = vec![usize::MAX; c.schema.fields.len()];
-        for (i, &p) in positions.iter().enumerate() {
-            index_of[p] = i;
+        for (i, p) in positions.iter_mut().enumerate() {
+            index_of[*p] = i;
+            // Its place in the payload, past a dropped field's, once a
+            // query rather than once a row.
+            *p = c.schema.place(*p);
         }
         Filter {
             c,

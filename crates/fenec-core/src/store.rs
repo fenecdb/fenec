@@ -522,6 +522,11 @@ pub struct Store {
     /// Bytes held by deleted/overwritten records (compaction threshold).
     dead_bytes: usize,
     total_bytes: usize,
+    /// The collection's dropped places (`Schema::dropped`): a field's
+    /// position, as every reader passes it, is a place further in the
+    /// payload for each before it. Kept here, set wherever the schema
+    /// changes, so that a read of one field takes no schema.
+    dropped: Vec<usize>,
 }
 
 impl Default for Store {
@@ -539,6 +544,23 @@ impl Store {
             next_id: 1,
             dead_bytes: 0,
             total_bytes: 0,
+            dropped: Vec::new(),
+        }
+    }
+
+    /// The schema's dropped places, which every read by position passes
+    /// over ([`Self::dropped`]).
+    pub fn set_dropped(&mut self, dropped: &[usize]) {
+        self.dropped.clear();
+        self.dropped.extend_from_slice(dropped);
+    }
+
+    /// Where the field at `pos` is in a payload.
+    #[inline]
+    fn place(&self, pos: usize) -> usize {
+        match self.dropped.is_empty() {
+            true => pos,
+            false => crate::schema::place(&self.dropped, pos),
         }
     }
 
@@ -684,13 +706,21 @@ impl Store {
         self.segments.last_mut().unwrap()
     }
 
-    /// Encodes a document in schema field order.
+    /// Encodes a document in schema field order, a dropped place a `null`.
     pub fn encode_doc(schema: &Schema, doc: &Document) -> Vec<u8> {
         let mut payload = Vec::with_capacity(64);
-        for f in &schema.fields {
+        let mut at = 0;
+        for (i, f) in schema.fields.iter().enumerate() {
+            // The dropped places before this field's: none, most of the
+            // time, and the loop not entered.
+            while at < schema.place(i) {
+                payload.push(crate::codec::TAG_NULL);
+                at += 1;
+            }
             let v = doc.get(&f.name).cloned().unwrap_or(Value::Null);
             // The field type is passed along: `vector<N, f16>` halves in the record.
             encode_value_as(&mut payload, &v, Some(&f.ty));
+            at += 1;
         }
         payload
     }
@@ -791,55 +821,60 @@ impl Store {
         }
     }
 
-    /// Decodes the whole document.
+    /// Decodes the whole document: a dropped place passed over, and a
+    /// field the payload ends before -- added after it was written -- read
+    /// as `null` ([`Schema::read_doc`]).
     pub fn read(&self, schema: &Schema, id: DocId) -> Result<Option<Document>> {
         let Some(loc) = self.index.get(id) else {
             return Ok(None);
         };
-        let buf = self.payload(loc)?;
-        let mut pos = 0;
-        let mut fields = Vec::with_capacity(schema.fields.len());
-        for f in &schema.fields {
-            fields.push((f.name.clone(), decode_value(buf, &mut pos)?));
-        }
-        Ok(Some(Document { id, fields }))
+        schema.read_doc(id, self.payload(loc)?).map(Some)
     }
 
     /// Decodes a single field; the fields before it are skipped without
-    /// allocating. Filter evaluation and projection use this path.
+    /// allocating. Filter evaluation and projection use this path. A
+    /// payload that ends before it holds `null` there: the field was added
+    /// after the document was written, which no document is rewritten for.
     pub fn read_field(&self, id: DocId, field_pos: usize) -> Result<Option<Value>> {
         let Some(loc) = self.index.get(id) else {
             return Ok(None);
         };
         let buf = self.payload(loc)?;
         let mut pos = 0;
-        for _ in 0..field_pos {
-            skip_value(buf, &mut pos)?;
+        for _ in 0..self.place(field_pos) {
+            crate::codec::skip_field(buf, &mut pos)?;
         }
-        Ok(Some(decode_value(buf, &mut pos)?))
+        match pos < buf.len() {
+            true => Ok(Some(decode_value(buf, &mut pos)?)),
+            false => Ok(Some(Value::Null)),
+        }
     }
 
-    /// Decodes the fields at `positions` -- ascending -- into `out`, in one
-    /// pass over the document that skips the others: an aggregate reads two
-    /// or three fields of every row, and a `read_field` each would skip the
+    /// Decodes the values at `places` -- ascending, each a field's place in
+    /// the payload as [`Schema::place`] gives it -- into `out`, in one pass
+    /// over the document that skips the others: an aggregate reads two or
+    /// three fields of every row, and a `read_field` each would skip the
     /// fields before them once per field. A text lands in the text `out`
     /// held there, if it did. `false` when there is no such document.
-    pub fn read_fields(
-        &self,
-        id: DocId,
-        positions: &[usize],
-        out: &mut Vec<Value>,
-    ) -> Result<bool> {
+    ///
+    /// Places rather than positions: worked out once a query by the caller,
+    /// not once a row here -- the compare that tells a collection with no
+    /// dropped field took a scan of a million rows by one condition 21.2 ->
+    /// 21.8 ms.
+    pub fn read_fields(&self, id: DocId, places: &[usize], out: &mut Vec<Value>) -> Result<bool> {
         let Some(loc) = self.index.get(id) else {
             return Ok(false);
         };
         let buf = self.payload(loc)?;
-        out.truncate(positions.len());
+        out.truncate(places.len());
         let mut pos = 0usize;
         let mut at = 0usize;
-        for (i, &want) in positions.iter().enumerate() {
+        for (i, &want) in places.iter().enumerate() {
+            // Past the payload's end nothing is skipped: a field added
+            // after the document was written is not in it, and reads as
+            // `null` below.
             while at < want {
-                skip_value(buf, &mut pos)?;
+                crate::codec::skip_field(buf, &mut pos)?;
                 at += 1;
             }
             // A text into the text the slot held: a scan reads a field of
@@ -850,6 +885,8 @@ impl Store {
                     pos += 1;
                     crate::codec::decode_text_into(buf, &mut pos, s)?;
                 }
+                (None, Some(slot)) => *slot = Value::Null,
+                (None, None) => out.push(Value::Null),
                 (_, Some(slot)) => *slot = decode_value(buf, &mut pos)?,
                 (_, None) => out.push(decode_value(buf, &mut pos)?),
             }
@@ -871,8 +908,8 @@ impl Store {
         };
         let buf = self.payload(loc)?;
         let mut pos = 0usize;
-        for _ in 0..field_pos {
-            crate::codec::skip_value(buf, &mut pos)?;
+        for _ in 0..self.place(field_pos) {
+            crate::codec::skip_field(buf, &mut pos)?;
         }
         Ok(Some(&buf[pos.min(buf.len())..]))
     }
@@ -1371,6 +1408,7 @@ impl Store {
     pub fn compacted(&self) -> Result<Store> {
         let mut fresh = Store::new();
         fresh.next_id = self.next_id;
+        fresh.dropped.clone_from(&self.dropped);
         let ids = self.index.ids();
         fresh.reserve(ids.len());
         for id in ids {
@@ -1508,6 +1546,70 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// A field added after a document was written reads `null` where its
+    /// payload ends, by every way a field is read; a dropped place is
+    /// passed over by all of them, and a payload cut inside a value is
+    /// still refused.
+    #[test]
+    fn a_payload_ends_early_and_a_dropped_place_is_passed_over() {
+        let mut st = Store::new();
+        let mut doc = Document::default();
+        doc.set("a", Value::Text("x".into()));
+        doc.set("b", Value::Int(7));
+        st.append(OP_PUT, 1, &Store::encode_doc(&schema(), &doc));
+        // `b` dropped, then `c` added: `a` at 0, a dropped place at 1, `c`
+        // at 2, where the payload has ended.
+        let mut later = schema();
+        later.fields.remove(1);
+        later.dropped = vec![1];
+        later.fields.push(Field::new("c", DataType::Int));
+        st.set_dropped(&later.dropped);
+        let read = st.read(&later, 1).unwrap().unwrap();
+        assert_eq!(read.get("a"), Some(&Value::Text("x".into())));
+        assert_eq!(read.get("c"), Some(&Value::Null));
+        assert_eq!(st.read_field(1, 1).unwrap(), Some(Value::Null));
+        assert_eq!(st.read_field(1, 0).unwrap(), Some(Value::Text("x".into())));
+        let mut out = Vec::new();
+        let places: Vec<usize> = (0..2).map(|p| later.place(p)).collect();
+        assert_eq!(places, [0, 2]);
+        assert!(st.read_fields(1, &places, &mut out).unwrap());
+        assert_eq!(out, [Value::Text("x".into()), Value::Null]);
+        // Written now, the dropped place is a null and `c` is where it reads.
+        let mut doc = Document::default();
+        doc.set("a", Value::Text("y".into()));
+        doc.set("c", Value::Int(3));
+        let payload = Store::encode_doc(&later, &doc);
+        assert_eq!(payload[3], crate::codec::TAG_NULL);
+        st.append(OP_PUT, 2, &payload);
+        assert_eq!(st.read_field(2, 1).unwrap(), Some(Value::Int(3)));
+        assert_eq!(
+            later.read_doc(2, &payload).unwrap().get("c"),
+            Some(&Value::Int(3))
+        );
+        // Taken out, the place is gone and the values stand.
+        let stripped = later.without_dropped(st.raw(1).unwrap().unwrap()).unwrap();
+        let mut compacted = later.clone();
+        compacted.dropped.clear();
+        assert_eq!(
+            compacted.read_doc(1, &stripped).unwrap(),
+            later.read_doc(1, st.raw(1).unwrap().unwrap()).unwrap()
+        );
+        // A payload cut inside a value is no field added after it.
+        let cut = &payload[..payload.len() - 1];
+        assert!(later.read_doc(2, cut).is_err());
+    }
+
+    #[test]
+    fn a_schema_writes_its_dropped_places_and_reads_them_back() {
+        let mut s = schema();
+        s.fields.remove(0);
+        s.dropped = vec![0];
+        s.fields.push(Field::new("c", DataType::Text));
+        let bytes = s.encode();
+        assert_eq!(Schema::decode(&bytes, &mut 0).unwrap(), s);
+        assert_eq!((s.place(0), s.place(1), s.width()), (1, 2, 3));
     }
 
     #[test]
