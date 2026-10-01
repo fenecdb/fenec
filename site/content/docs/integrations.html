@@ -1,17 +1,16 @@
 <!--
 title: Integrations — fenecdb
-description: LangChain and LlamaIndex vector stores over fenec-pg's HTTP endpoint, a LangChain.js one over a database in the page or the endpoint, retrieval for the Vercel AI SDK, and useLiveQuery for React over a synced replica.
+description: Vector stores for LangChain, LlamaIndex and LangChain.js, retrieval for the Vercel AI SDK, and useLiveQuery for React.
 -->
 
 <h1>Integrations</h1>
-<p class="kicker">A vector store for LangChain and one for LlamaIndex, over
-fenec-pg's HTTP endpoint; one for LangChain.js, over a database in the page
-or the same endpoint; retrieval and a search tool for the Vercel AI SDK;
-and <code>useLiveQuery</code> for React, over a replica the sync layer
-keeps. Each passes the tests its framework holds its
-own integrations to.</p>
+<p class="kicker">Use fenecdb from LangChain, LlamaIndex, LangChain.js, the
+Vercel AI SDK and React, each tested the way its framework tests its own.</p>
 
 <h2>LangChain</h2>
+
+<p>A LangChain vector store over fenec-pg's HTTP endpoint. Install it, point it
+at the server, and use it like any other store.</p>
 
 <pre data-lang="bash">pip install "fenecdb[langchain]"
 </pre>
@@ -28,6 +27,14 @@ store.similarity_search("how do I compact", k=4, filter={"source": "ops"})
 retriever = store.as_retriever(search_kwargs={"k": 8})
 </pre>
 
+<ul>
+  <li><b>Filter only on declared fields:</b> list them in
+    <code>metadata_fields</code>.</li>
+  <li><b>Keyword and hybrid search:</b> pass <code>full_text=True</code>, then
+    <code>mode="text"</code> or <code>"hybrid"</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A document is a row: its id, its text, its metadata as JSON and its vector
 under <code>@hnsw</code>, in a collection created on the first write, once the
 embedding's size is known. Adding an id that is already there replaces it —
@@ -66,8 +73,12 @@ scores are BM25's and the fusion's, not similarities. <code>quant</code>,
 <code>"int8"</code> or <code>"bit"</code> (<code>cosine</code> only), keeps the
 graph over codes, and <code>near</code> still orders by the vectors
 themselves.</p>
+</details>
 
 <h2 id="langchain-js">LangChain.js</h2>
+
+<p>The same store from JavaScript. It runs over a database in the page, with no
+server, or over fenec-pg's HTTP endpoint.</p>
 
 <pre data-lang="js">import { Fenec, connect } from '@fenecdb/web';
 import { FenecVectorStore } from '@fenecdb/langchain';
@@ -85,6 +96,7 @@ await store.similaritySearch('how do I compact', 4, { source: 'handbook' });
 await store.search('compact', 4, { mode: 'hybrid' });
 const retriever = store.asRetriever({ k: 4 });</pre>
 
+<details class="deep"><summary>Details</summary>
 <p>The Python store's collection, from JavaScript: a document is a row of
 its id, text, metadata as JSON and vector under <code>@hnsw</code>, made on
 the first write; <code>metadataFields</code> get columns of their own under
@@ -96,8 +108,12 @@ is anything with <code>run(sql, params)</code>: a <code>Fenec</code> keeps
 the whole RAG index in the page, no server, and a <code>FenecHttp</code> the
 server's. Writing an id already there replaces it — two statements, which
 over HTTP are two requests.</p>
+</details>
 
 <h2>LlamaIndex</h2>
+
+<p>A LlamaIndex vector store over fenec-pg's HTTP endpoint, with metadata
+filters, deletion by document, and text and hybrid search.</p>
 
 <pre data-lang="bash">pip install "fenecdb[llama-index]"
 </pre>
@@ -113,6 +129,12 @@ index = VectorStoreIndex.from_documents(
 index.as_retriever(similarity_top_k=4).retrieve("how do I compact")
 </pre>
 
+<ul>
+  <li><b>Hybrid search:</b> pass <code>full_text=True</code> and query with
+    <code>vector_store_query_mode="hybrid"</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A node is a row with its document's id beside it, so
 <code>index.delete_ref_doc(...)</code> is one <code>del</code> over a hashed
 field. Filters take <code>==</code>, <code>!=</code>, <code>&lt;</code>,
@@ -134,8 +156,13 @@ is not read. <code>quant</code> is taken as the LangChain store takes it.</p>
 <pre data-lang="python">store = FenecVectorStore("handbook", url=..., token=..., full_text=True)
 retriever = index.as_retriever(similarity_top_k=4, vector_store_query_mode="hybrid")
 </pre>
+</details>
 
 <h2 id="ai-sdk">Vercel AI SDK</h2>
+
+<p>Three functions to copy from <code>integrations/ai-sdk/rag.js</code>:
+<code>index</code> your documents, <code>retrieve</code> for a question, and
+<code>searchTool</code> for a model to call.</p>
 
 <pre data-lang="js">import { generateText, stepCountIs } from 'ai';
 import { openai } from '@ai-sdk/openai';
@@ -153,6 +180,7 @@ const { text } = await generateText({
   prompt: 'How do I compact the database?',
 });</pre>
 
+<details class="deep"><summary>Details</summary>
 <p>The AI SDK has no vector store interface to implement — it has embedding
 models and <code>tool</code> — so the integration is a file of three
 functions to copy, <code>integrations/ai-sdk/rag.js</code>:
@@ -165,8 +193,13 @@ documents, their text under <code>@text</code> and their vectors under
 <code>searchTool</code> is a <code>tool</code> a model calls with a query.
 It takes a <code>Fenec</code>, so the index lives in the page or a Worker,
 or a <code>FenecHttp</code> for the server's.</p>
+</details>
 
 <h2>React</h2>
+
+<p><code>useLiveQuery</code> renders a query over the local replica and
+runs it again after every change to the replica. No render waits on the
+network.</p>
 
 <pre data-lang="js">import { sync } from './fenec.js';
 import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
@@ -182,6 +215,12 @@ function Open() {
 &lt;FenecProvider db={db}&gt;&lt;Open /&gt;&lt;/FenecProvider&gt;
 </pre>
 
+<ul>
+  <li><b>It is <code>undefined</code></b> until the first answer.</li>
+  <li><b>A failing query throws</b> to the nearest error boundary.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>The rows come from the local replica, so no render waits on the network:
 the sync layer runs the query again after every local change — a write of
 this tab's, or one the server streamed in from another client — and the
@@ -193,8 +232,12 @@ else; the rows of the query it asked before are not handed out as this one's.
 A query that fails throws while rendering, to the nearest error boundary. It
 lives in <code>integrations/react</code>, with React as its one peer
 dependency.</p>
+</details>
 
 <h2>Their tests</h2>
+
+<p>Each integration runs its framework's own tests, or the ones its framework
+holds its integrations to, against a real fenecdb.</p>
 
 <div class="tbl">
 <table>
@@ -209,8 +252,10 @@ dependency.</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p>LangChain's suite writes the same documents twice under the same ids, and
 that is how it found a bug in the graph: a node whose every candidate
 neighbour had been deleted was linked to nothing, so a collection deleted and
 written again answered <code>near</code> with nothing. It is fixed in the
 engine, with the test that shows it.</p>
+</details>

@@ -1,12 +1,16 @@
 <!--
 title: File format — fenecdb
-description: One file, replayed in a single pass. Record kinds, why the length is always written, and why the change counter and the id counter exist.
+description: The layout of a fenecdb file — its record kinds, their bodies, and why each exception to the plain layout exists.
 -->
 
 <h1>File format</h1>
-<p class="kicker">One file, replayed in a single pass. Every record is
-<code>[kind][collection-id][length][body]</code>, and the reasons for each
-exception are worth knowing before you touch the reader.</p>
+<p class="kicker">A fenecdb file is a header followed by records, and an
+open reads it from start to end in one pass.</p>
+
+<h2>Records</h2>
+
+<p>Every record is <code>[kind][collection-id][length][body]</code>. These
+are the kinds:</p>
 
 <pre data-lang="text">"FENECDB\x01"
   [6][u64 counter][u64 body length]        change counter (optional)
@@ -23,14 +27,11 @@ exception are worth knowing before you touch the reader.</p>
   [11][0][length][spills][records]         a block that spilled, landing
 </pre>
 
-<p>Records inside a data block are <code>[op][doc-id][length][fields]</code>,
-each field a tagged value. A <code>sparse&lt;N&gt;</code> one is
-<code>[10][N][count]</code>, then the indices, each as its distance from the
-one before — a SPLADE vector's sit close together, and a small gap takes a
-byte — then the weights as <code>f32</code>.
-A crash in the middle of an append leaves the last record cut short, in its
-header or its body: the open loads everything before it and cuts it off the
-file, so there is no separate recovery step after a crash.</p>
+<p>Inside a data record, each document is
+<code>[op][doc-id][length][fields]</code>, each field a tagged value. A
+<code>sparse&lt;N&gt;</code> field is <code>[10][N][count]</code>, then the
+indices, each as its distance from the one before, then the weights as
+<code>f32</code>.</p>
 
 <div class="note trap">
   <p><b>A record cut short is cut off the file, not only skipped.</b> Left in
@@ -45,8 +46,33 @@ file, so there is no separate recovery step after a crash.</p>
   stops opening.</p>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>The reasons for each exception to the plain layout are worth knowing
+before you touch the reader; the sections below give them.</p>
+
+<p>A sparse vector's indices are written as gaps because a SPLADE vector's
+sit close together, and a small gap takes a byte.</p>
+
+<p>A crash in the middle of an append leaves the last record cut short, in its
+header or its body: the open loads everything before it and cuts it off the
+file, so there is no separate recovery step after a crash.</p>
+</details>
+
 <h2>The graph record</h2>
 
+<p>Kind 4 holds an HNSW graph's links, so an open does not have to build the
+graph again. It is derived data: if it does not match the documents, it is
+ignored and the graph rebuilt, so it can never lose data.</p>
+
+<ul>
+  <li><b>It stores links, not vectors</b> — except a tombstone's vector.</li>
+  <li><b>The last one wins,</b> and the writes after it are applied on
+    top.</li>
+  <li><b>Versions 5 and 6</b> are a checkpoint with nodes waiting to be
+    linked, and a server's record in the tail.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>It is derived data, not a cache. On open, the version, the dimension, the
 precision and the link bounds are validated, and the live nodes against the
 documents: every one's document has to hold a vector, and every document
@@ -105,34 +131,56 @@ vectors whole. A tombstone's vector is its code: the signs, the centre's
 number in a byte and two f32s. A bit graph written before the centres, with
 the vectors' own signs and code 2, is built again on open; a binary from
 before them does not know 3, and builds its own.</p>
+</details>
 
 <h2>Indexes in the schema</h2>
 
-<p>A schema names each field's index by a kind byte: 0 none, 1
-<code>@hash</code>, 2 <code>@hnsw</code> with its parameters, 3
-<code>@text</code> with its parameters, 4 <code>@sorted</code>, 5
-<code>@hnsw</code> over codes (<code>quant=</code>), 6 <code>@inverted</code>,
-7 <code>@text</code> indexing characters as well (<code>chars</code>) with the
-parameters kind 3 has. For every kind but the graph that byte is all the file
-holds: the hash, text, ordered and inverted indexes are built from the
-documents by the first statement that reads each after an open, so there is
-nothing of theirs to validate or to go stale --
-and a binary that splits text another way, as one before runs of characters
-did, builds its own text index from the same documents. An old binary cannot open a file whose
-schema uses a newer kind and reports <code>unknown index kind 4</code>, the
-same refusal as for a record kind it does not know.</p>
+<p>A schema names each field's index by a kind byte. Only the graph is
+stored; every other index is built from the documents after an open.</p>
 
-<p>A field whose text orders in a collation (<code>name text collate
-tr</code>) is written with type tag 11 and the collation's code in front of
-its type: 1 for <code>tr</code>, 2 for <code>und</code>. An older binary meets
-a type tag it does not know, or a collation code, and refuses the file,
-rather than read the field and order it in another order. The collation's
-weights are not in the file: they are the binary's, and a
-<code>@sorted</code> index over the field is built from the documents on
-open.</p>
+<div class="tbl">
+<table>
+<thead><tr><th class="n">kind</th><th>index</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td>none</td></tr>
+<tr><td class="n">1</td><td><code>@hash</code></td></tr>
+<tr><td class="n">2</td><td><code>@hnsw</code> with its parameters</td></tr>
+<tr><td class="n">3</td><td><code>@text</code> with its parameters</td></tr>
+<tr><td class="n">4</td><td><code>@sorted</code></td></tr>
+<tr><td class="n">5</td><td><code>@hnsw</code> over codes (<code>quant=</code>)</td></tr>
+<tr><td class="n">6</td><td><code>@inverted</code></td></tr>
+<tr><td class="n">7</td><td><code>@text</code> indexing characters as well (<code>chars</code>), with the parameters kind 3 has</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A field ordered in a collation (<code>name text collate tr</code>) is
+written with type tag 11 and the collation's code in front of its type: 1
+for <code>tr</code>, 2 for <code>und</code>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>For every kind but the graph that byte is all the file holds: the hash,
+text, ordered and inverted indexes are built from the documents by the first
+statement that reads each after an open, so there is nothing of theirs to
+validate or to go stale — and a binary that splits text another way, as one
+before runs of characters did, builds its own text index from the same
+documents. An old binary cannot open a file whose schema uses a newer kind
+and reports <code>unknown index kind 4</code>, the same refusal as for a
+record kind it does not know.</p>
+
+<p>An older binary meets a type tag it does not know, or a collation code,
+and refuses the file, rather than read the field and order it in another
+order. The collation's weights are not in the file: they are the binary's,
+and a <code>@sorted</code> index over the field is built from the documents
+on open.</p>
+</details>
 
 <h2>The change counter, and why it is at the front</h2>
 
+<p>Kind 6 holds the change counter. It sits at the front of the file and is
+fixed width; its body length marks where the image's own records end.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Record kind 6 sits at the front of the file and is fixed width. Both are
 deliberate.</p>
 
@@ -150,9 +198,15 @@ record after it was written <i>after</i> the checkpoint and carries the counter
 forward. Old files without the record load fine — the counter is then counted
 from the records. The reverse does not hold: an old binary cannot open a new
 file and reports <code>unknown record kind 6</code>.</p>
+</details>
 
 <h2>A statement's writes are one record</h2>
 
+<p>All the writes of one statement, <code>/batch</code> or transaction are
+appended as one record, so a crash keeps all of them or none. Within one
+collection that is a data record (kind 3); otherwise a block (kind 9).</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Every write is a block: the documents a <code>put</code>, a
 <code>set</code> or a <code>del</code> writes, the statements of a
 <code>/batch</code>, of a text sent over the pg wire or of a transaction.
@@ -173,9 +227,15 @@ record: a block of five writes is numbered by its last, and whatever counts
 records by their numbers — a replica, an archive — counts them that way. A
 restore to a change inside a block stops before it, since the database never
 stood there.</p>
+</details>
 
 <h2>A large block spills before it lands</h2>
 
+<p>A block past 16 MB is written to the file in parts as it goes (kind 10,
+a spill), then landed by a record that names those parts (kind 11). A spill
+no land names is ignored.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Held back until it lands, a block's frames were in memory twice — in the
 record being built and in the stores — so a <code>COPY</code> of 250 000
 768-dim rows in one command peaked 1.57 GB over what it left. Once a block's
@@ -189,11 +249,16 @@ the ones a file ends with are cut off, as a record cut short is. The land
 never travels: a replica and an archive are sent the block as the one kind 9
 record it would have been. A binary from before spills refuses kinds 10 and
 11 as unknown.</p>
+</details>
 
 <h2>The history record is not a write</h2>
 
-<p>Record kind 8 says which history the writes belong to, for
-<a href="/docs/replication">replication</a>: a list of
+<p>Kind 8 records which <a href="/docs/replication">replication</a> history
+the writes belong to. It is the one record that must not move the change
+counter.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Record kind 8 says which history the writes belong to: a list of
 <code>(id, from change)</code> pairs, one per fork, and whether the file is a
 replica's. A replica is fed a primary's writes by their number on the change
 counter, so this is the one record that must not move the counter — a
@@ -201,9 +266,15 @@ replica would be numbered one change off its primary. It is appended when a
 history forks or a replica follows one, and written into every image while
 it is set; a file that never had a replica holds none. An old binary cannot
 open a file with one and reports <code>unknown record kind 8</code>.</p>
+</details>
 
 <h2>The id counter exists because of compact</h2>
 
+<p>Kind 7 keeps a collection's next document id, so a <code>compact</code>
+can never hand a deleted id out again. In an image it also carries an index
+of the data record after it, which makes opening faster.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>A document id is normally derived from the records: a replay takes one more
 than the largest id it saw. Compaction throws tombstones away, so that
 derivation falls short — the highest deleted id disappears from the image
@@ -226,8 +297,11 @@ starts: a chain of cache misses that was 5.5 ms of a 14.2 ms open at
 record — another length, ids out of order, a payload past its end — is
 passed over and the record walked. Every reader of the record, older ones
 included, reads the counter and nothing after it.</p>
+</details>
 
 <h2>Crates and layout</h2>
+
+<p>Where each part of the format and the engine lives in the source.</p>
 
 <pre data-lang="text">crates/
   fenec-core/   storage, HNSW, plan executor, plugin registry, JSON,
@@ -245,6 +319,10 @@ web/            fenec.js (builder + sync layer), fenec.d.ts,
 
 <h2>Maintenance operations</h2>
 
+<p>Four operations read or rewrite the whole file. A rewrite goes to a side
+file that is renamed into place, so a crash cannot leave it half
+written.</p>
+
 <div class="tbl">
 <table>
 <thead><tr><th>Operation</th><th>What it does</th><th>Peak memory</th></tr></thead>
@@ -257,6 +335,7 @@ web/            fenec.js (builder + sync layer), fenec.d.ts,
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p>A graph holding tombstones is rebuilt by <code>compact</code> from the live
 vectors: nothing else takes a tombstone out, and every write that changes a
 document's vector, or deletes it, leaves one. A graph without them is kept
@@ -271,3 +350,4 @@ file rather than cut off as a crash's torn tail is. A server's
 meanwhile go into it as a data record at the end of the image, and its header
 takes the counter as it stands when it is renamed into place. A side file left
 by a crash is written over by the next compact, and can be deleted.</p>
+</details>

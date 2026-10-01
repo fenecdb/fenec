@@ -79,7 +79,12 @@ site/
   build.py        the generator
   template.html   the page shell; {{placeholders}} are filled per page
   styles.css      the whole design system
-  site.js         the scene, the live console, the race, docs navigation
+  site.js         the sky, the live console, the scenes, the screencast, docs navigation
+  fennec.js       the mark: one table of points and edges
+  scene.js        the hero in WebGL: documents gathering into an index
+  motion.js       each section's scenes, drawn from their time alone
+  mark.svg        the mark, written by `node site/fennec.js`: the favicon
+  mark-detail.svg the same with its running light: header and footer
   engine-worker.js  the engine off the main thread: home console, playground
   content/
     index.html    the home page
@@ -123,10 +128,58 @@ write your own `id="..."` when another page already links to it.
 - Every number needs its method nearby. The repo is careful about this and the
   site has to be too, or it stops being trustworthy.
 
+## The mark
+
+The logo is a fennec's head drawn as a graph -- points joined by edges, as an
+index over vectors is -- in amber lines, with no fill, no dots at the joints
+and no name beside it. As the page opens a teal light runs out from the tip
+of the right ear through every edge, wave by wave, the way a search spreads
+through a graph, and is gone in under a second; hovering the mark runs it
+again. Each edge is a `pathLength="1"` path with a CSS `stroke-dashoffset`
+animation and its own delay (`FLOW` in `fennec.js`), so it costs no script,
+and it is hidden under reduced motion.
+
+`fennec.js` is the one table it is drawn from: `node site/fennec.js` writes
+`mark-detail.svg` (with the light; the header and the footer inline it) and
+`mark.svg` (thicker lines, no light: the favicon), and `motion.js` draws the
+same lines, and runs the same light once, on its canvases.
+
+## The hero
+
+Documents gathering into an index: each star leaves its place for one of three
+neighbourhoods, the edges light as both ends arrive, and now and then a query enters from a star beside the cloud
+and walks the edges greedily to its nearest, as a search walks an HNSW graph.
+`scene.js`, plain WebGL: three.js was measured for the same scene at 100 KB
+brotli after tree-shaking. It loads on the home page alone, after the first
+paint, and not where `saveData` is set.
+
+## Moving pictures
+
+Each section shows its feature working, on a canvas between its heading and
+its detail: rows becoming points and a query walking the graph to them, the
+race against pgvector, a request passing the checks, clients connecting over
+the wire, replicas and tenants failing over, the tab keeping its own copy and
+redrawing live. `motion.js` draws any moment of a scene from the scene's time
+alone, so a section loops its scenes while in view, stops when it is not, and
+steps between them on a click; under reduced motion each shows its last frame.
+It loads as the first such section comes near, 8 KB gzipped. Every number in
+it is one the docs measure, and `build.py` checks the sizes it quotes.
+
+## The screencast
+
+The Developer section plays a recorded session as text: commands typed, output
+a line at a time, chapters to jump between, paused while off screen. The
+transcript is the `<ol class="cast-script">` in `content/index.html`, and every
+line of output in it came from a real `fenec-pg`, `psql` and pgvector-python --
+re-record it rather than edit an output by hand. Without script the transcript
+is the page.
+
 ## Motion, and what it costs
 
 `prefers-reduced-motion` is honoured throughout: the sky canvases stop, the
-headline appears whole, the race jumps to its finish, and nothing translates.
+hero's index is drawn once, whole, the mark's light is hidden, the
+headline appears whole, each scene shows its last frame, the screencast
+waits to be played, and nothing translates.
 
 Two things were measured and fixed, and are worth not reintroducing:
 

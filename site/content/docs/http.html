@@ -1,17 +1,20 @@
 <!--
 title: HTTP endpoint — fenecdb
-description: A REST/JSON surface derived from the schema, vector search over POST, raw FenecQL, NDJSON batches and an SSE subscription stream.
+description: Query and write fenecdb over plain HTTP and JSON — REST routes from the schema, vector search, raw FenecQL, batches, live subscriptions and a change stream.
 -->
 
 <h1>HTTP endpoint</h1>
-<p class="kicker">For clients that want no driver at all: <code>fetch</code>,
-<code>curl</code>, or any language's standard library. The schema is already in
-the database, so the surface is derived from it.</p>
+<p class="kicker">Talk to fenecdb with <code>fetch</code>, <code>curl</code> or
+any standard library — no driver needed.</p>
+
+<h2>Start it</h2>
+
+<p>Add <code>--http</code> to <code>fenec-pg</code>. Every collection gets REST
+routes from its schema.</p>
 
 <pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080
-</pre>
 
-<pre data-lang="bash">curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
+curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&tags=has.rust&order=year.desc&limit=10'
 # [{"title":"the rust book","year":2024}]
 
 curl 'http://127.0.0.1:8080/articles?year=gte.2024&count'
@@ -21,6 +24,11 @@ curl -X POST http://127.0.0.1:8080/articles -d '{"title":"new","year":2025}'
 # {"inserted":1}
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>For clients that want no driver at all: <code>fetch</code>,
+<code>curl</code>, or any language's standard library. The schema is already in
+the database, so the surface is derived from it.</p>
+
 <div class="note">
   <p><b>Not a separate binary.</b> The HTTP endpoint is a second listener in
   the same process as <code>fenec-pg</code>. fenecdb has a single writer, and
@@ -28,6 +36,7 @@ curl -X POST http://127.0.0.1:8080/articles -d '{"title":"new","year":2025}'
   keeps the sync policy, the checkpoint, the memory ceiling and the shutdown
   signal in one place — <code>--sync always</code> covers HTTP writes too.</p>
 </div>
+</details>
 
 <h2>Routes</h2>
 
@@ -54,6 +63,7 @@ GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>With <code>--replication-token</code>, <code>/_replication</code> is taken
 as well: the stream a replica is fed, its status, and a replica's promotion —
 see <a href="/docs/replication">Replication</a>. It asks for that token
@@ -66,8 +76,13 @@ admin token — see <a href="/docs/monitoring">Monitoring</a>. The underscore
 keeps it out of the way of a collection called <code>metrics</code>; a
 collection called <code>_metrics</code> cannot be read over
 <code>GET</code>.</p>
+</details>
 
 <h2>Filters</h2>
+
+<p>Filter in the query string as <code>field=operator.value</code>, for example
+<code>?year=gte.2024</code>. For anything the pattern cannot say, use
+<code>?where=</code> with FenecQL.</p>
 
 <div class="tbl">
 <table>
@@ -83,19 +98,18 @@ collection called <code>_metrics</code> cannot be read over
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p>Values are parsed by the field's type: <code>?year=gte.2024</code> is an
 int, <code>?published=gte.2024-01-01</code> is a timestamp. An unknown field
 returns 404. <code>where=</code> exists for what the pattern cannot hold —
 <code>or</code> groups and function calls.</p>
+</details>
 
 <h2>Vector search</h2>
 
-<p><code>near</code> is a <code>POST</code> rather than a query parameter
-because a 768-dimension embedding does not fit in a query string. Squeezing it
-into the URL — base64, truncation — is unreadable and runs into proxy and
-server URL ceilings. PostgREST's model does not cover fenecdb's headline
-feature, so <code>near</code> gets its own endpoint, and it takes a filter in
-the body.</p>
+<p>Send the vector in a <code>POST</code> body to
+<code>/&lt;name&gt;/near</code>, with an optional filter. Add
+<code>"match"</code> to mix in keyword search.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/articles/near -d '{
   "vector": [0.1, 0.2, 0.3],
@@ -105,6 +119,21 @@ the body.</p>
 }'
 # [{"title":"the rust book","_score":0.97}]
 </pre>
+
+<ul>
+  <li><b><code>field</code></b> can be left out when the collection has one
+    vector field.</li>
+  <li><b>Query-string filters</b> are combined with the body's
+    <code>where</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>near</code> is a <code>POST</code> rather than a query parameter
+because a 768-dimension embedding does not fit in a query string. Squeezing it
+into the URL — base64, truncation — is unreadable and runs into proxy and
+server URL ceilings. PostgREST's model does not cover fenecdb's headline
+feature, so <code>near</code> gets its own endpoint, and it takes a filter in
+the body.</p>
 
 <p>If the collection has a single vector field, <code>field</code> can be left
 out. Filters in the query string are <code>and</code>ed with the
@@ -132,17 +161,24 @@ many candidates each side ranks.</p>
   "limit": 10
 }'
 </pre>
+</details>
 
 <h2>Raw FenecQL</h2>
 
-<p>When the REST shape does not fit, send the language itself. Parameters stay
-parameters.</p>
+<p>When the REST routes do not fit, send FenecQL to <code>/query</code>.
+Parameters stay parameters.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
   -d '{"query":"get articles where year >= $1 limit 10","params":[2024]}'
 </pre>
 
+<ul>
+  <li><b>From Python:</b> <code>pip install fenecdb</code> gives a client
+    with no dependencies.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>From Python, <code>pip install fenecdb</code> — the standard library
 alone — makes the same calls, blocking or in an event loop:</p>
 
@@ -161,14 +197,25 @@ after another over it, so requests side by side take a client each.
 as a consumer, and <code>python -m fenecdb.relay</code> hands it on to
 another program or a webhook: see <a href="/docs/microservices">Services
 and events</a>.</p>
+</details>
 
 <h2>Embedding a collection</h2>
+
+<p>Use <code>lookup</code> to nest matching rows of another collection under
+each row, such as each product's latest reviews.</p>
 
 <pre data-lang="bash">curl 'http://127.0.0.1:8080/products?limit=20&amp;select=name\
 &amp;lookup=reviews&amp;reviews.on=product_id&amp;reviews.stars=gte.4\
 &amp;reviews.order=created.desc&amp;reviews.limit=3'
 # [{"name":"Kahve","reviews":[{...},{...},{...}]}, ...]</pre>
 
+<ul>
+  <li><b>Prefix the child's options</b> with its name:
+    <code>reviews.on</code>, <code>reviews.limit</code>.</li>
+  <li><b>Chain levels</b> with a comma: <code>lookup=orders,lines</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>lookup=&lt;name&gt;</code> names the collection once; every key prefixed
 with it configures the clause — <code>on</code> (required, the child's field
 holding the key), <code>parent</code>, <code>select</code>,
@@ -204,16 +251,22 @@ with nulls below the first level that ran out.</p>
   -H 'content-type: application/json' \
   -d '{"query":"get products limit 20 lookup reviews on product_id limit 3"}'
 # [{"id":1,"name":"Kahve","reviews":[{"id":1,"stars":5,"body":"guzel"}]}, ...]</pre>
+</details>
 
 <h2>Batches</h2>
 
-<p><code>POST /batch</code> takes one query body per line as NDJSON. The
-statements run in order under a single write lock, as one block: their writes
-land in the file as one record, or none of them do. The first error puts back
-what the statements before it did, and the answer says so:</p>
+<p><code>POST /batch</code> runs several statements, one per line, as a single
+all-or-nothing write. If one fails, the ones before it are undone and the
+answer says so.</p>
 
 <pre data-lang="json">{"error":"collection `tasks` has no field `nofield`","completed":0}
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>POST /batch</code> takes one query body per line as NDJSON. The
+statements run in order under a single write lock, as one block: their writes
+land in the file as one record, or none of them do. The first error puts back
+what the statements before it did, and the answer says so.</p>
 
 <p>No other writer slips in between, a read in the batch sees the writes
 before it, and a subscriber is woken once, for all of them. A
@@ -231,20 +284,31 @@ deliberately does not accept nested objects, so
 <code>{"statements":[{...}]}</code> could not be parsed anyway. Instead of
 writing a second parser, the boundary was put at the end of a line — by the
 escaping rules no JSON encoder can write a bare newline into the body.</p>
+</details>
 
 <h2 id="idempotency">Retrying a write</h2>
 
-<p>A <code>put</code> with no id makes a row each time it runs, so a client
-that sends a write again after a timeout or a dropped connection — not
-knowing whether the first landed — may write it twice. Send an
-<code>Idempotency-Key</code> with it, one per write, and a request sent again
-with the key is answered as the first was, with
-<code>Idempotent-Replayed: true</code>, and not made again:</p>
+<p>Send an <code>Idempotency-Key</code> header with a write, and retrying it
+after a timeout cannot write it twice: a repeat gets the first answer back.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
   -H 'Idempotency-Key: 5f0c2d6e-order-1142' \
   -d '{"query":"put orders {customer: $1, total: $2}","params":[7, 129.5]}'
 </pre>
+
+<ul>
+  <li><b>One key per write.</b> The same key with a different request is
+    refused (422).</li>
+  <li><b>A failed write keeps no key</b>, so a retry runs it again.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A <code>put</code> with no id makes a row each time it runs, so a client
+that sends a write again after a timeout or a dropped connection — not
+knowing whether the first landed — may write it twice. Send an
+<code>Idempotency-Key</code> with it, one per write, and a request sent again
+with the key is answered as the first was, with
+<code>Idempotent-Replayed: true</code>, and not made again.</p>
 
 <ul>
   <li>The key and the answer are kept in the same block as the write, under
@@ -267,9 +331,15 @@ with the key is answered as the first was, with
 
 <p>A write without a key costs what it did; with one, 16 200 single puts a
 second over HTTP against 18 300 without.</p>
+</details>
 
 <h2>The data ceiling</h2>
 
+<p>With <code>--max-memory</code>, writes that would grow the data past the
+limit are refused with <code>507</code>. Reads, deletes and
+<code>compact</code> still work.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Inside <code>fenec-pg</code> started with <code>--max-memory</code>, the
 listener holds its writes to the ceiling the pg wire holds its own to: above
 it, a statement that grows the data — a put, a patch, a <code>create
@@ -277,16 +347,28 @@ index</code> — is refused with <code>507</code>, a batch stops there as at an
 error, and reads, deletes and <code>compact</code> go on, since they are the
 way out. The rule and why it is there are under
 <a href="postgres.html">PostgreSQL server</a>.</p>
+</details>
 
 <h2>Subscriptions</h2>
 
-<p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: a seed
-carrying the current shape, then incremental diffs. No driver needed.</p>
+<p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: first
+the rows matching your filter, then each change to them as it happens.</p>
 
 <pre data-lang="bash">curl -N 'http://127.0.0.1:8080/articles/changes?year=gte.2024'
 # event: seed
 # data: {"seq":12,"rows":[...]}
 </pre>
+
+<ul>
+  <li><b>Limited separately</b> from ordinary requests:
+    <code>--http-max-streams</code>, 64 by default.</li>
+  <li><b>In the browser,</b> <a href="sync.html">Sync</a> builds on this
+    stream.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>GET /&lt;name&gt;/changes</code> is a server-sent events stream: a seed
+carrying the current shape, then incremental diffs. No driver needed.</p>
 
 <p>A subscription does not poll. <code>fenec-core</code> has no waiting
 primitive at all — there are no threads in wasm — it only reports that the
@@ -299,14 +381,13 @@ separately from ordinary requests (<code>--http-max-streams</code>, default
 64). Sharing one ceiling would let 100 subscribers shut the server to plain
 requests. The client-side layer built on this stream is
 <a href="sync.html">Sync</a>.</p>
+</details>
 
 <h2 id="changes">Change data capture</h2>
 
-<p>A subscription keeps a query's rows up to date, and a client that falls
-behind its ring of ids is sent the rows again. A service that must see every
-write — to index it elsewhere, send it on to Kafka, or keep a read model —
-reads <code>GET /_changes</code> instead: the writes on disk, documents and
-all, one JSON object a line, from any write the server still keeps.</p>
+<p>To see every write exactly as it happened — to feed a search index, Kafka
+or a read model — start the server with <code>--cdc</code> and read
+<code>GET /_changes</code>: one JSON line per write.</p>
 
 <pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 --sync 250 --cdc
 
@@ -320,6 +401,19 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
 # {"seq":4,"at":1790784252173,"collection":"a","op":"put","id":1,"doc":{"id":1,"n":1,"t":"z"}}
 # {"seq":5,"at":1790784252187,"collection":"a","op":"del","id":2}
 </pre>
+
+<ul>
+  <li><b>Send <code>Fenec-Next</code> back as the next <code>since</code></b>
+    and nothing is missed or seen twice.</li>
+  <li><b>Only writes already on disk</b> are handed out.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A subscription keeps a query's rows up to date, and a client that falls
+behind its ring of ids is sent the rows again. A service that must see every
+write — to index it elsewhere, send it on to Kafka, or keep a read model —
+reads <code>GET /_changes</code> instead: the writes on disk, documents and
+all, one JSON object a line, from any write the server still keeps.</p>
 
 <ul>
   <li><code>seq</code> is the change counter's number for the write, and
@@ -349,19 +443,38 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
   and is refused (403).</li>
 </ul>
 
-<h3>Consumers</h3>
+<p><code>--cdc</code> keeps the feed a primary keeps for its replicas and
+feeds none; with <code>--replication-token</code> it is kept already, and a
+tenant node's tenants have theirs at <code>/t/&lt;tenant&gt;/_changes</code>.
+It needs <code>--file</code> and a <code>--sync</code> other than
+<code>off</code>. Keeping it cost nothing measurable: 16 400 single puts a
+second over HTTP either way, and 9 000 rows of 128 dimensions read back at
+283 000 a second.</p>
+</details>
 
-<p>A consumer that keeps no state of its own can have the server keep where
-it is, as a Kafka consumer group keeps its committed offset. Made with a
-<code>POST</code> — at the last write on disk unless the body names a
-<code>since</code> — it reads with <code>?consumer=</code> from where it
-stands, and moves once it has done with what it read:</p>
+<h2 id="consumers">Consumers</h2>
+
+<p>A consumer with no storage of its own can let the server remember its
+place, like a Kafka consumer group: create it, read from it, then commit how
+far it got.</p>
 
 <pre data-lang="bash">curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index
 curl -i 'http://127.0.0.1:8080/_changes?consumer=search-index&amp;wait=10000'
 # Fenec-Next: 42 -- index the lines, then:
 curl -X POST http://127.0.0.1:8080/_changes/consumers/search-index -d '{"since": 42}'
 </pre>
+
+<ul>
+  <li><b>At least once:</b> a crash between reading and committing means
+    those writes come again.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A consumer that keeps no state of its own can have the server keep where
+it is, as a Kafka consumer group keeps its committed offset. Made with a
+<code>POST</code> — at the last write on disk unless the body names a
+<code>since</code> — it reads with <code>?consumer=</code> from where it
+stands, and moves once it has done with what it read.</p>
 
 <p>So a consumer has each write at least once, and a write again after a
 crash between reading it and committing. The cursors are rows of a
@@ -373,16 +486,18 @@ which would miss what is written between two reads; a commit past the last
 write on disk is 409. <code>GET /_changes/consumers</code> lists each
 consumer's <code>since</code> and how many writes it is
 <code>behind</code>.</p>
-
-<p><code>--cdc</code> keeps the feed a primary keeps for its replicas and
-feeds none; with <code>--replication-token</code> it is kept already, and a
-tenant node's tenants have theirs at <code>/t/&lt;tenant&gt;/_changes</code>.
-It needs <code>--file</code> and a <code>--sync</code> other than
-<code>off</code>. Keeping it cost nothing measurable: 16 400 single puts a
-second over HTTP either way, and 9 000 rows of 128 dimensions read back at
-283 000 a second.</p>
+</details>
 
 <h2>Security</h2>
+
+<p>Protect the endpoint with a bearer token, and put a TLS terminator in front
+of it on an open network.</p>
+
+<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 \
+         --http-cors 'http://localhost:8787' \
+         --http-token "$TOKEN" \
+         --http-read-only
+</pre>
 
 <div class="tbl">
 <table>
@@ -396,6 +511,7 @@ second over HTTP either way, and 9 000 rows of 128 dimensions read back at
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p>There is no TLS, the same rule as <code>fenec-pg</code>: on an open network
 it needs a TLS terminator in front. A <code>PATCH</code> or <code>DELETE</code>
 without a filter is refused, and covering a whole collection needs a separate
@@ -416,20 +532,13 @@ over HTTP; the FenecQL and <code>fenec-pg</code> paths are unaffected.</p>
   token, which ids changed is visible to a subscriber even when the rows are
   not. Rows are hidden by a scoped token, below.</p>
 </div>
-
-<pre data-lang="bash">fenec-pg --file data.fenec --http 127.0.0.1:8080 \
-         --http-cors 'http://localhost:8787' \
-         --http-token "$TOKEN" \
-         --http-read-only
-</pre>
+</details>
 
 <h2>Scoped access</h2>
 
-<p><code>--http-token</code> is everything or nothing. With
-<code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each
-held to the rules of a <code>--policy</code> file, collection by collection and
-down to the rows, so a browser can talk to the database directly with a token
-per user:</p>
+<p>Give each user a JSON Web Token, and a policy file decides which
+collections and which rows that token can read or write. A browser can then
+talk to the database directly.</p>
 
 <pre data-lang="text"># collection   access       rows                                role
 notes          read,write   where owner = $jwt.sub
@@ -437,6 +546,20 @@ posts          read         where published = true or author = $jwt.sub
 posts          write        where author = $jwt.sub
 *              read                                             for dashboard
 </pre>
+
+<ul>
+  <li><b>Reads</b> only see the rows the rule allows.</li>
+  <li><b>Writes</b> must stay inside the rule, or get 403.</li>
+  <li><b>The server's own <code>--http-token</code></b> still has full
+    access.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--http-token</code> is everything or nothing. With
+<code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each
+held to the rules of a <code>--policy</code> file, collection by collection and
+down to the rows, so a browser can talk to the database directly with a token
+per user:</p>
 
 <pre data-lang="bash">fenec-pg --file data.fenec --http 0.0.0.0:8080 --http-token "$ROOT" \
          --jwt-secret-file jwt.secret --policy policy.txt
@@ -470,14 +593,20 @@ fenec-pg --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":1893456
 
 <p>The server's own <code>--http-token</code> keeps full access alongside, and
 the PostgreSQL listener is not affected: it has its own password.</p>
+</details>
 
-<h3 id="jwt-keys">Keys, rotation and identity providers</h3>
+<h2 id="jwt-keys">Keys, rotation and identity providers</h2>
+
+<p>To accept tokens from Auth0, Clerk, Firebase or another identity provider,
+give <code>--jwt-keys</code> its published key file. Edit the file to rotate
+keys; no restart is needed.</p>
 
 <pre data-lang="bash"># the provider's public keys, as it publishes them
 curl -s https://example.auth0.com/.well-known/jwks.json &gt; jwks.json
 fenec-pg --file data.fenec --http 0.0.0.0:8080 --jwt-keys jwks.json --policy policy.txt
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p><code>--jwt-keys</code> takes a JWKS file, <code>{"keys": [...]}</code>, in
 place of a secret. An <code>oct</code> key verifies HS256 tokens and needs at
 least 32 bytes. An <code>RSA</code> key of at least 2048 bits verifies RS256
@@ -508,3 +637,4 @@ later requests with it skip the check. The server keeps up to 4 096 tokens,
 and the kept tokens are dropped whenever the keys change. Checking a token
 from that cache takes 0.3 µs for HS256 and 0.5 µs for RS256. Checking a new one takes 2.9 µs for HS256 and
 38 µs for RS256 over 2048 bits (Apple M1).</p>
+</details>

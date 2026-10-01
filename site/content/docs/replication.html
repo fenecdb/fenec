@@ -1,13 +1,18 @@
 <!--
 title: Replication — fenecdb
-description: A primary streams the writes on its disk to read replicas, each applying them to a file of its own. Positions, histories and promotion, what a failover loses, backups and restoring to a moment, and what it costs.
+description: Read replicas that follow a primary's writes, promotion when the primary is gone, and backups you can restore to any moment.
 -->
 
 <h1>Replication</h1>
-<p class="kicker">A primary sends its replicas the writes that have reached
-its disk, and each applies them to a file of its own and serves reads from
-it. A replica refuses writes until it is promoted, by hand; what a failover
-can lose is what the primary's sync policy had not yet put on disk.</p>
+<p class="kicker">Keep read replicas of a server, promote one when the
+primary is gone, and back up every write so you can restore to any
+moment.</p>
+
+<h2>Start a replica</h2>
+
+<p>Give the primary a replication token, then start a second
+<code>fenec-pg</code> on its own file pointed at the primary. The replica
+serves reads; when the primary is gone, promote it to take writes.</p>
 
 <pre data-lang="bash"># the primary: replicas are fed over its HTTP listener
 fenec-pg --file primary.fenec --http 0.0.0.0:8080 --http-token "$HTTP" \
@@ -22,6 +27,18 @@ curl -X POST replica:8081/_replication/promote -H "Authorization: Bearer $REPL"
 # {"promoted":true,"seq":41873,"history":"5f0e2c9a81b44d17"}
 </pre>
 
+<ul>
+  <li><b>Every read works on a replica,</b> over PostgreSQL and HTTP,
+    subscriptions included.</li>
+  <li><b>Writes are refused</b> until it is promoted, by hand.</li>
+  <li><b>A failover can lose</b> only what the primary's <code>--sync</code>
+    had not yet put on disk.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A primary sends its replicas the writes that have reached its disk, and
+each applies them to a file of its own and serves reads from it.</p>
+
 <p>A replica is a whole <code>fenec-pg</code>: every read works on it over
 PostgreSQL and HTTP, subscriptions included, from its own copy in memory. A
 write gets <code>25006</code> over PostgreSQL, the code a PostgreSQL standby
@@ -29,9 +46,22 @@ answers with, and 403 over HTTP; <code>SHOW transaction_read_only</code> says
 <code>on</code> and <code>pg_is_in_recovery()</code> says true, which is how
 libpq's <code>target_session_attrs</code> and JDBC's
 <code>targetServerType</code> tell it from the primary.</p>
+</details>
 
 <h2>What is sent</h2>
 
+<p>A replica is sent the primary's writes in order and applies each one to
+its own file. Only writes already on the primary's disk are sent.</p>
+
+<ul>
+  <li><b>A restarted replica</b> asks only for what it missed.</li>
+  <li><b>A replica far behind</b> (past 64 MiB of writes) is sent a whole
+    copy of the database instead.</li>
+  <li><b><code>--sync off</code> is refused</b> on a server with a
+    replication token.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A fenecdb file is already a log: an image, then every write appended as a
 record. A replica is sent those records, whole and in order, and applies each
 the way the write path made it — the document, and the upkeep of every index
@@ -50,23 +80,14 @@ primary's <code>--sync</code>: under <code>always</code> a write goes out right
 after its own fsync, under <code>250</code> up to 250 ms later. Under
 <code>off</code> nothing is on disk before shutdown, so a server with a
 replication token refuses to start with it.</p>
+</details>
 
 <h2>Positions and histories</h2>
 
-<p>Every write moves the change counter by one, on the primary and on each
-replica alike, so a replica's position is its own counter and a subscriber's
-cursor means the same change on either. A block — the writes of one statement,
-a <code>/batch</code> or a transaction — is one record numbered by its last
-write, and is sent and applied whole: a replica never stands inside one.
-A replica of a replica is fed exactly as its primary was.</p>
-
-<p>Numbers alone stop being enough once a history forks. A replica promoted
-after its primary died writes its own change 1 001; the old primary, or a
-second replica that had got further along, may hold a different 1 001.
-Streaming the new primary's 1 002 on top of that would go unnoticed. So each
-fork gets a fresh id and remembers the change where it left its parent, as
-PostgreSQL numbers its timelines, and a replica is continued only from a
-position the primary's own history passed through:</p>
+<p>A replica's position is a change number that means the same on the
+primary and on every replica. After a promotion the history forks, and a
+replica is only continued from a point the new primary also passed
+through; otherwise it is sent a fresh copy.</p>
 
 <div class="tbl">
 <table>
@@ -82,12 +103,50 @@ position the primary's own history passed through:</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>Every write moves the change counter by one, on the primary and on each
+replica alike, so a replica's position is its own counter and a subscriber's
+cursor means the same change on either. A block — the writes of one statement,
+a <code>/batch</code> or a transaction — is one record numbered by its last
+write, and is sent and applied whole: a replica never stands inside one.
+A replica of a replica is fed exactly as its primary was.</p>
+
+<p>Numbers alone stop being enough once a history forks. A replica promoted
+after its primary died writes its own change 1 001; the old primary, or a
+second replica that had got further along, may hold a different 1 001.
+Streaming the new primary's 1 002 on top of that would go unnoticed. So each
+fork gets a fresh id and remembers the change where it left its parent, as
+PostgreSQL numbers its timelines, and a replica is continued only from a
+position the primary's own history passed through, as the table above
+shows.</p>
+
 <p>The history lives in the file (<a href="/docs/file-format">record kind
 8</a>), and the first time a primary serves replicas it draws an id of its
 own — the root history is every database's, so it names none.</p>
+</details>
 
 <h2 id="read-your-writes">Reading your own writes</h2>
 
+<p>A replica can be a moment behind, so a read sent right after a write may
+miss it. Send the number a write's answer carries in
+<code>Fenec-Seq</code> as <code>Fenec-After</code>, and the replica waits
+until it has that write.</p>
+
+<pre data-lang="bash">curl -i -X POST http://primary:8080/query -d '{"query":"put carts {user: 7}"}'
+# Fenec-Seq: 1042
+
+curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
+  -d '{"query":"get carts where user = 7"}'
+</pre>
+
+<ul>
+  <li><b>It waits 5 seconds</b> unless <code>Fenec-Wait</code> says otherwise
+    (in milliseconds, 30 s at most), then answers 504.</li>
+  <li><b>The Python client</b> keeps the number for you:
+    <code>client.seq</code>, sent with <code>query(..., after=...)</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A replica is behind its primary by the time a write takes to reach it —
 0.2 ms at the median under <code>--sync always</code>, up to the sync
 interval otherwise — so a client that writes on the primary and reads on a
@@ -97,43 +156,38 @@ sent to a replica with <code>Fenec-After: &lt;that number&gt;</code> is
 served once the replica holds it, and answered 504 with where the replica
 stands if it does not within the wait — never from before the write.</p>
 
-<pre data-lang="bash">curl -i -X POST http://primary:8080/query -d '{"query":"put carts {user: 7}"}'
-# Fenec-Seq: 1042
-
-curl -H 'Fenec-After: 1042' -X POST http://replica:8080/query \
-  -d '{"query":"get carts where user = 7"}'
-</pre>
-
 <p>The wait is 5 seconds unless <code>Fenec-Wait</code> gives it in
 milliseconds, 30 seconds at most, and a replica waits on the same
-<code>Condvar</code> its subscriptions do, so nothing polls. The Python
-client keeps the last write's number (<code>client.seq</code>) and sends it
-with <code>query(..., after=...)</code>. Writing the header costs the
-server nothing measurable; a client that parses every header, as Python's
-<code>http.client</code> does, reads one more.</p>
+<code>Condvar</code> its subscriptions do, so nothing polls. Writing the
+header costs the server nothing measurable; a client that parses every
+header, as Python's <code>http.client</code> does, reads one more.</p>
+</details>
 
 <h2>Promotion</h2>
 
-<p>By hand, one of two ways: <code>POST /_replication/promote</code> on the
-replica's HTTP listener, or restarting it over its file with
-<code>--promote</code> in place of <code>--replica-of</code>. Either forks the
-history where the replica stands and turns writes on. A replica's file does
-not open any other way — started with neither flag, <code>fenec-pg</code>
-refuses and says which to give — because a replica taking writes without a
-fork would continue its primary's history with writes the primary never
-made.</p>
+<p>Promote a replica by hand: <code>POST /_replication/promote</code> on its
+HTTP listener, or restart it over its file with <code>--promote</code> in
+place of <code>--replica-of</code>. Keeping the old primary from taking more
+writes is up to you.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Either way forks the history where the replica stands and turns writes on.
+A replica's file does not open any other way — started with neither flag,
+<code>fenec-pg</code> refuses and says which to give — because a replica
+taking writes without a fork would continue its primary's history with
+writes the primary never made.</p>
 
 <p>Making sure the old primary takes no more writes is the operator's part, as
 it is with PostgreSQL: nothing here fences it. Brought back, it rejoins under
 the new primary with <code>--replica-of</code>, and is sent an image if it
 wrote past the fork.</p>
+</details>
 
 <h2>What a failover loses</h2>
 
-<p>A primary killed with <code>SIGKILL</code> while one client writes to it as
-fast as it answers, the replica promoted half a second later, ten times per
-policy; counted are the writes the client was told succeeded that the promoted
-replica does not hold (<code>make replica-bench</code>, macOS, loopback):</p>
+<p>With <code>--sync always</code> on the primary, no acknowledged write was
+lost in ten failovers. With the default <code>--sync 250</code>, a failover
+loses up to the last 250 ms of writes.</p>
 
 <div class="tbl">
 <table>
@@ -145,6 +199,13 @@ replica does not hold (<code>make replica-bench</code>, macOS, loopback):</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>How it was measured: a primary killed with <code>SIGKILL</code> while one
+client writes to it as fast as it answers, the replica promoted half a second
+later, ten times per policy; counted are the writes the client was told
+succeeded that the promoted replica does not hold (<code>make
+replica-bench</code>, macOS, loopback).</p>
+
 <p>Under <code>250</code> the loss is the policy's own: those writes were
 answered before any fsync and were not on the primary's disk either. Under
 <code>always</code> a write is answered after its fsync and sent right after,
@@ -152,12 +213,13 @@ so what can be lost is a write whose answer went out in the fraction of a
 millisecond before it was sent — none of the ten failovers caught one. No
 failover left the replica holding a write the client had not been answered
 for.</p>
+</details>
 
 <h2>What it costs</h2>
 
-<p>Primary and replica in one process over loopback, each over its own file;
-lag is from a write's answer on the primary to the write being readable on the
-replica, over 1 000 writes:</p>
+<p>A write is readable on a replica 0.2 ms after the primary answered it
+under <code>--sync always</code>, and within the sync interval otherwise. A
+replica keeps up with a bulk load.</p>
 
 <div class="tbl">
 <table>
@@ -168,6 +230,11 @@ replica, over 1 000 writes:</p>
 </tbody>
 </table>
 </div>
+
+<details class="deep"><summary>Details</summary>
+<p>How it was measured: primary and replica in one process over loopback, each
+over its own file; lag is from a write's answer on the primary to the write
+being readable on the replica, over 1 000 writes.</p>
 
 <p>A replica keeps up with a bulk load: 100 000 documents of 128 dimensions
 with an HNSW index, which the primary wrote in 23.4 s in statements of 1 000,
@@ -180,12 +247,13 @@ image it sends; a replica holds the database in memory as a primary does. The
 replica's HNSW graph is built from the same vectors in the same order, but not
 in the same batches, so an approximate <code>near</code> can rank a close call
 the other way on the two; everything else answers identically.</p>
+</details>
 
 <h2>Backups and restoring to a moment</h2>
 
-<p>The same stream written to a directory instead of applied is an archive:
-base images, and every write after them with the time the primary appended
-it. The <code>fenec</code> command line writes and reads one:</p>
+<p>An archive is the replication stream written to a directory: base images
+and every write after them, timestamped. From it, <code>fenec restore</code>
+rebuilds the database as it stood at any moment or change.</p>
 
 <pre data-lang="bash"># the running database, taken whole: a file that opens as a database of its own
 fenec backup http://primary:8080 nightly.fenec --token "$REPL"
@@ -201,6 +269,20 @@ fenec verify /backups/archive
 fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z
 fenec restore /backups/archive before.fenec --to-change 41873
 </pre>
+
+<ul>
+  <li><b><code>--to</code></b> stops at a moment; <b><code>--to-change</code></b>
+    after a change number.</li>
+  <li><b><code>--keep</code></b> (or <code>fenec prune</code>) deletes what no
+    restore within that window needs.</li>
+  <li><b><code>fenec verify</code></b> says from when to when the archive can
+    restore.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The same stream written to a directory instead of applied is an archive:
+base images, and every write after them with the time the primary appended
+it. The <code>fenec</code> command line writes and reads one.</p>
 
 <p>A restore takes the latest image at or before the point asked for and
 appends the archived writes after it up to there — a fenecdb file is an image
@@ -246,12 +328,12 @@ in a record cut short, and a restore to the end opens. It prints from when
 to when the archive can restore, names any gap — changes in no segment
 between two images, where a restore to the end passes but a restore to a
 moment inside cannot — and exits 1 when no restore can be made.</p>
+</details>
 
-<h3 id="object-storage">In object storage</h3>
+<h2 id="object-storage">In object storage</h2>
 
-<p>fenecdb speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
-archive goes there the way any directory does: a sync tool beside the
-archiver.</p>
+<p>To keep an archive in S3, R2 or GCS, run a sync tool beside the archiver;
+fenecdb has no object-storage client of its own.</p>
 
 <pre data-lang="bash">rclone sync /backups/archive r2:backups/archive      # every few minutes
 aws s3 sync /backups/archive s3://backups/archive --delete
@@ -259,6 +341,11 @@ aws s3 sync /backups/archive s3://backups/archive --delete
 # to restore: bring it back, check it, restore it
 rclone sync r2:backups/archive ./archive && fenec verify ./archive
 fenec restore ./archive before.fenec --to 2026-09-22T10:14:59Z</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>fenecdb speaks no TLS, and S3, R2 and GCS speak only HTTPS, so an
+archive goes there the way any directory does: a sync tool beside the
+archiver.</p>
 
 <p>Every file but the segment being written is written once: a segment is
 closed and fsynced before the next begins, and an image is written beside
@@ -270,9 +357,24 @@ archive a file at a time while writes and images go on, and every copy
 verifies and restores to a prefix of what the primary wrote.
 <code>--delete</code>, or <code>rclone sync</code>'s own, carries a prune
 over to the copy; without it the copy keeps everything.</p>
+</details>
 
-<h3 id="sealed">Sealed archives and backups</h3>
+<h2 id="sealed">Sealed archives and backups</h2>
 
+<p>Give a key file and every archive file and backup is encrypted and
+tamper-checked. Keep the key apart from the archive: without it nothing can
+be restored.</p>
+
+<pre data-lang="bash">fenec key /secrets/archive.key          # 64 hex digits, readable by its owner alone
+fenec archive http://primary:8080 /backups/archive --key-file /secrets/archive.key
+fenec verify /backups/archive --key-file /secrets/archive.key
+fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z \
+  --key-file /secrets/archive.key
+
+fenec backup http://primary:8080 today.sealed --key-file /secrets/archive.key
+fenec restore today.sealed today.fenec --key-file /secrets/archive.key</pre>
+
+<details class="deep"><summary>Details</summary>
 <p>A copy in a bucket or on another disk is out of reach of the machine's
 disk encryption. With a key every file of an archive — its images, its
 segments, its history — and a backup file are sealed: encrypted and
@@ -284,36 +386,32 @@ something else. A segment is sealed a frame for each batch of writes the
 primary sends, so a crash cuts off at most the frame being written, as it
 cut a record short before.</p>
 
-<pre data-lang="bash">fenec key /secrets/archive.key          # 64 hex digits, readable by its owner alone
-fenec archive http://primary:8080 /backups/archive --key-file /secrets/archive.key
-fenec verify /backups/archive --key-file /secrets/archive.key
-fenec restore /backups/archive before.fenec --to 2026-09-22T10:14:59Z \
-  --key-file /secrets/archive.key
-
-fenec backup http://primary:8080 today.sealed --key-file /secrets/archive.key
-fenec restore today.sealed today.fenec --key-file /secrets/archive.key</pre>
-
-<p>Keep the key apart from the archive: without it nothing can be
-restored. An archive is sealed or it is not; a file of the other kind in
+<p>An archive is sealed or it is not; a file of the other kind in
 it is refused. <code>FENEC_KEY_FILE</code> names the key file too. Sealing
 and opening run at about 400 MB/s on one core, where writing the archive
 waits on the network and the disk. The database file itself stays plain:
 it is mapped and read where it lies, which encryption would take away —
 encrypt the disk it is on (LUKS, FileVault, an encrypted cloud volume).</p>
+</details>
 
 <h2>Endpoints</h2>
+
+<p>Three endpoints, all on the HTTP listener and all wanting the replication
+token, not the <code>--http-token</code>.</p>
 
 <pre data-lang="http">GET  /_replication?since=&lt;change&gt;&amp;history=&lt;id&gt;   the stream a replica is fed
 GET  /_replication/status                          role, position, replicas, lag
 POST /_replication/promote                         a replica's promotion
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>All three want <code>Authorization: Bearer &lt;replication token&gt;</code>,
 not the <code>--http-token</code>: the token is for replicas and for whoever
 promotes them. The status of a replica names its primary and says whether it
 is connected, how many writes it is <code>behind</code> the primary's disk,
 and how long ago it last heard from it; a primary's lists the replicas it is
 feeding and how far each has been sent.</p>
+</details>
 
 <h2>Flags</h2>
 

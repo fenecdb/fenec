@@ -1,12 +1,17 @@
 <!--
 title: Import — fenecdb
-description: Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes. Schema derivation, vector columns, type mapping and filtering.
+description: Build a collection from SQLite or a live PostgreSQL table in one command, and keep it following the table's changes.
 -->
 
 <h1>Import</h1>
-<p class="kicker">One command turns an existing database into a fenecdb
-collection: it derives the schema, recognises vector columns and follows the
-bulk-load-then-index order by itself.</p>
+<p class="kicker">One command turns a SQLite file or a PostgreSQL table into a
+fenecdb collection, vectors and index included.</p>
+
+<h2>Import a table</h2>
+
+<p>Name the source, the table and the collection to make. The schema is worked
+out for you, vector columns are recognised, and the index is built after the
+rows are in.</p>
 
 <pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
     --vector embed:384 --index "embed@hnsw(cosine)"
@@ -15,10 +20,16 @@ fenec import postgres://user@host:5432/database --table docs \
     --into articles --index "embed@hnsw(cosine)"
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>The import derives the schema, recognises vector columns and follows the
+bulk-load-then-index order by itself. Every option is in
+<code>fenec import --help</code>.</p>
+</details>
+
 <h2>Look before you write</h2>
 
-<p><code>--dry-run</code> prints the derived schema and any warnings, and
-writes nothing.</p>
+<p><code>--dry-run</code> prints the schema it would make, and any warnings,
+and writes nothing.</p>
 
 <pre data-lang="text">$ fenec import data.sqlite --table docs --into articles --vector embed:3 --dry-run
 source   data.sqlite -> docs
@@ -35,31 +46,47 @@ create collection articles (
 create index on articles (embed) @hnsw(cosine, m=16, ef_construction=200, ef_search=100)
 </pre>
 
-<p><code>--count</code> also prints how many rows will be read. It is a
-separate flag because counting means a full scan: SQLite keeps the row count
-nowhere and <code>count(*)</code> in PostgreSQL reads the table from the start.
-Silently reading everything twice would be a bad default.</p>
+<ul>
+  <li><b><code>--count</code></b> also prints how many rows will be read.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--count</code> is a separate flag because counting means a full scan:
+SQLite keeps the row count nowhere and <code>count(*)</code> in PostgreSQL
+reads the table from the start. Silently reading everything twice would be a
+bad default.</p>
+</details>
 
 <h2>Sources</h2>
 
-<h3>SQLite</h3>
+<p>A SQLite file is read directly, and a PostgreSQL server is read over the
+network. Nothing else needs to be installed for either.</p>
 
-<p>The file format is read directly — neither the <code>sqlite3</code> library
-nor the binary is needed. <code>INTEGER PRIMARY KEY</code> becomes the document
-id, <code>--vector field:N</code> turns little-endian <code>f32</code> BLOBs
-into <code>vector&lt;N&gt;</code>, and untyped columns are resolved from the
-first 1000 rows.</p>
+<ul>
+  <li><b>SQLite:</b> no <code>sqlite3</code> library or binary needed.</li>
+  <li><b>PostgreSQL:</b> no <code>psql</code> or <code>pg_dump</code> needed;
+    pgvector's columns are recognised.</li>
+</ul>
 
-<h3>PostgreSQL</h3>
+<details class="deep"><summary>Details</summary>
+<p><b>SQLite.</b> The file format is read directly — neither the
+<code>sqlite3</code> library nor the binary is needed. <code>INTEGER PRIMARY
+KEY</code> becomes the document id, <code>--vector field:N</code> turns
+little-endian <code>f32</code> BLOBs into <code>vector&lt;N&gt;</code>, and
+untyped columns are resolved from the first 1000 rows.</p>
 
-<p>It connects to the live server and streams
+<p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
 <code>pg_dump</code>. Authentication is SCRAM-SHA-256, using
 <code>fenec-pg</code>'s own crypto in the client direction. pgvector's
 <code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns
 are recognised along with their dimensions.</p>
+</details>
 
 <h2>Type mapping</h2>
+
+<p>Each source type becomes the nearest fenecdb type. Types with no exact
+match are refused until you say what to do with <code>--cast</code>.</p>
 
 <div class="tbl">
 <table>
@@ -81,23 +108,36 @@ are recognised along with their dimensions.</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p>Types without an equivalent are not silently rounded: say what you want with
 <code>--cast &lt;field&gt;=&lt;type&gt;</code>. On PostgreSQL,
 <code>--cast price=text</code> preserves a decimal exactly. In SQLite a
 <code>decimal</code> is already stored as an <code>int</code> or a
 <code>float</code> at the source, so the exact value is gone before the import
 starts.</p>
+</details>
 
 <h2>Filtering</h2>
 
-<p><code>--where</code> is a <b>FenecQL expression</b> and behaves identically
-on both sources: it is applied after the row becomes a document and before it
-is written. The field names are the target schema's — the same expression you
-would later write with <code>get</code>.</p>
+<p><code>--where</code> keeps only the rows that match a FenecQL expression,
+written with the new collection's field names. It works the same on both
+sources.</p>
 
 <pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
     --where 'category = "book" and score >= 10 and tags has "rust"'
 </pre>
+
+<ul>
+  <li><b><code>--source-where</code></b> (PostgreSQL only) filters on the
+    server in SQL, so skipped rows never travel.</li>
+  <li><b><code>--limit</code></b> counts rows that pass the filter.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--where</code> is a <b>FenecQL expression</b> and behaves identically
+on both sources: it is applied after the row becomes a document and before it
+is written. The field names are the target schema's — the same expression you
+would later write with <code>get</code>.</p>
 
 <p>On PostgreSQL there is also <code>--source-where</code>, which goes into the
 <code>SELECT</code> inside the <code>COPY</code> so non-matching rows never
@@ -115,13 +155,13 @@ the source. Both can be used together.</p>
   afterwards would yield fewer rows than asked for. <code>--limit</code> always
   counts rows that <i>pass</i> the filter.</p>
 </div>
+</details>
 
 <h2 id="following">Following changes</h2>
 
-<p>With <code>--follow</code> the import does not end at the copy: it keeps
-applying the table's inserts, updates, deletes and truncates as they commit,
-until it is interrupted. Run the same command again and it picks up where it
-stopped, without a second copy.</p>
+<p>With <code>--follow</code> the import keeps running after the copy,
+applying the PostgreSQL table's changes as they commit. Run the same command
+again and it picks up where it stopped.</p>
 
 <pre data-lang="bash">fenec import postgres://app@db:5432/app --table docs --into articles \
     --index "embed@hnsw(cosine)" --follow
@@ -131,6 +171,21 @@ copying  there is none yet
 following docs: ctrl-c stops, and the same command resumes
 42 transactions, 57 changes, at 0/1B0E7F0
 </pre>
+
+<ul>
+  <li><b>The server needs <code>wal_level = logical</code></b> and the table
+    an integer key; nothing is installed on it.</li>
+  <li><b>Nothing is lost or applied twice</b> when the connection drops or the
+    follower is killed.</li>
+  <li><b>Drop the slot when you stop for good,</b> or PostgreSQL keeps its log
+    for it.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>With <code>--follow</code> the import does not end at the copy: it keeps
+applying the table's inserts, updates, deletes and truncates as they commit,
+until it is interrupted. Run the same command again and it picks up where it
+stopped, without a second copy.</p>
 
 <p>It reads a logical replication slot through PostgreSQL's own
 <code>pgoutput</code>, so nothing is installed on the server. The
@@ -187,19 +242,18 @@ follow-bench</code>):</p>
 
 <p>The follower is the file's only writer, as every fenecdb file has exactly
 one: stop it to open the mirror elsewhere, or serve the mirror from the
-server that follows (below). A column added to the table after the copy is
-reported and left out. A column the collection needs that is dropped from
-the table stops the follower. <code>--source-where</code> and
-<code>--limit</code> do not combine with it: the first narrows the copy but
-not the stream, and a mirror keeps every row.</p>
+server that follows (<a href="#serving">below</a>). A column added to the
+table after the copy is reported and left out. A column the collection needs
+that is dropped from the table stops the follower.
+<code>--source-where</code> and <code>--limit</code> do not combine with it:
+the first narrows the copy but not the stream, and a mirror keeps every
+row.</p>
+</details>
 
-<h3 id="serving">Serving the mirror as it follows</h3>
+<h2 id="serving">Serving the mirror as it follows</h2>
 
-<p>A second process over the follower's file corrupts it, so serving the
-mirror took a copy of it and a process of its own. <code>fenec-pg
---follow</code> runs the follower inside the server instead, over the file
-the server serves: the table is served over the pg wire, HTTP and
-subscriptions as it follows, with no second copy.</p>
+<p><code>fenec-pg --follow</code> runs the follower inside the server, so the
+table is served over PostgreSQL, HTTP and subscriptions while it follows.</p>
 
 <pre data-lang="bash">fenec-pg --file articles.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8080 \
     --follow postgres://app@db:5432/app --follow-table docs --follow-into articles \
@@ -209,6 +263,20 @@ follow: copying docs: there is none yet
 follow: docs copied, 100000 rows in 3.1s
 follow: docs: streaming its changes
 </pre>
+
+<ul>
+  <li><b>Import options take a <code>--follow-</code> prefix:</b>
+    <code>--follow-index</code>, <code>--follow-cast</code> and so on.</li>
+  <li><b>The mirrored collection is read-only</b> to clients
+    (<code>25006</code>); the rest of the file takes writes.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A second process over the follower's file corrupts it, so serving the
+mirror took a copy of it and a process of its own. <code>fenec-pg
+--follow</code> runs the follower inside the server instead, over the file
+the server serves: the table is served over the pg wire, HTTP and
+subscriptions as it follows, with no second copy.</p>
 
 <p>Every option of <code>fenec import</code> that says how a row becomes a
 document — <code>--index</code>, <code>--vector</code>, <code>--cast</code>,
@@ -247,18 +315,21 @@ under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
 machine. Killed while the table took a row a transaction, the server was up
 again in 98 ms and held every one of the table's 16 295 rows 880 ms after it
 started. The follower adds 178 KB to <code>fenec-pg</code>.</p>
+</details>
 
 <h2>Speed and testing</h2>
 
-<p>100 000 rows × 3 dimensions, index build included: about 3.1 s from either
-source. Every option is in <code>fenec import --help</code>.</p>
+<p>100 000 rows × 3 dimensions, index build included, take about 3.1 s from
+either source.</p>
 
 <pre data-lang="bash">make import-test        # the PostgreSQL arm and --follow — needs Docker
 cargo test -p fenec-import --test all -- --ignored pg:: follow::
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
 for 242 KB of it. <code>--no-default-features</code> removes it, and
 <code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (130 KB);
 with the <code>cli</code> profile as well, the binary drops from 1687 KB to 1153 KB
 (<code>make small</code>).</p>
+</details>

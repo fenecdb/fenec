@@ -1,12 +1,16 @@
 <!--
 title: Sync — fenecdb
-description: A local replica that reads without the network, writes optimistically and reconciles by business key. Shapes, live queries, multi-tab leadership and the change horizon.
+description: A local replica that reads without the network, writes optimistically and catches up from the server's change stream.
 -->
 
 <h1>Sync</h1>
-<p class="kicker">A copy on the client, changes streaming from the server,
-optimistic writes. In fenecdb that is not a library — it is an endpoint and a
-transport, because the same engine already runs on both sides.</p>
+<p class="kicker">Keep a copy of your data in the browser that reads without
+the network, writes instantly and stays up to date with the server.</p>
+
+<h2>Start a replica</h2>
+
+<p>Call <code>sync</code> with the server and the rows you want. Then query it
+with the same builder you use anywhere else.</p>
 
 <pre data-lang="js">import { sync } from './fenec.js';
 
@@ -26,19 +30,36 @@ const stop = db.live(db.from('tasks').order('priority', 'desc'), draw);
 await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>A copy on the client, changes streaming from the server, optimistic
+writes. In fenecdb that is not a library — it is an endpoint and a transport,
+because the same engine already runs on both sides.</p>
+
 <p>The query code does not change. <code>db.from(...)</code> is the same
 builder producing the same FenecQL; the only difference is where it is
 bound.</p>
+</details>
 
 <h2>The stream carries state, not transactions</h2>
 
+<p>The server sends the current state of each row that changed, not a log of
+every write. That is what a replica needs; it is not an audit log.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>The classic route is a transaction log: every write is an event and the
 subscriber replays them. fenecdb sends the current state of what changed
 instead — the stream is a <i>clock</i>, not a record. That is right for a
 replica and wrong for anyone who wanted an audit log.</p>
+</details>
 
 <h2>A shape is a set, not a window</h2>
 
+<p>A shape picks the rows of one collection the client keeps, by a filter the
+server applies. It cannot be "the latest 100": <code>order</code>,
+<code>limit</code>, <code>offset</code> and <code>count</code> are
+refused.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>The whole database is in memory and the WASM32 address space is 4 GB, so a
 client cannot pull an entire collection. A subscription is a subset and the
 filter is applied on the server.</p>
@@ -60,9 +81,26 @@ surface.</p>
 
 <p><b>One collection per shape.</b> The seed has to mean "this is the whole of
 this collection", or the cleanup step becomes ambiguous.</p>
+</details>
 
 <h2>Optimistic writes</h2>
 
+<p>A write shows up locally at once, then goes to the server. If the server
+refuses it, the local change is undone.</p>
+
+<pre data-lang="js">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
+await db.from('tasks').where('title', 'new').first();  // already here
+await p;                                               // server ack
+</pre>
+
+<ul>
+  <li><b>Inserts need a <code>key</code>,</b> a <code>text @hash</code> field,
+    to match the local row with the server's. Without one, an insert waits
+    for the server.</li>
+  <li><b>Updates and deletes need no key:</b> they work by id.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A write is three steps and the order matters: first gather what undoes the
 local change, then apply it locally, then send it to the server. If the server
 refuses, the local side rolls back fully — no network needed, the undo is
@@ -74,18 +112,12 @@ already in hand.</p>
 promise. A single microtask in between would have broken the "visible
 instantly" promise.</p>
 
-<pre data-lang="js">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
-await db.from('tasks').where('title', 'new').first();  // already here
-await p;                                               // server ack
-</pre>
-
-<h3>Reconciliation by key</h3>
-
-<p>The id space belongs to the server and the client cannot know it in advance,
-so an optimistic row gets a temporary id starting at 2<sup>52</sup> — far from
-the server's range and below <code>Number.MAX_SAFE_INTEGER</code>. What matches
-the two is a <b>business key</b>: when a row with the same <code>key</code>
-arrives from the subscription, the temporary one is dropped.</p>
+<p><b>Reconciliation by key.</b> The id space belongs to the server and the
+client cannot know it in advance, so an optimistic row gets a temporary id
+starting at 2<sup>52</sup> — far from the server's range and below
+<code>Number.MAX_SAFE_INTEGER</code>. What matches the two is a <b>business
+key</b>: when a row with the same <code>key</code> arrives from the
+subscription, the temporary one is dropped.</p>
 
 <div class="note">
   <p><b>An insert into a keyless shape is not applied optimistically.</b> With
@@ -96,9 +128,15 @@ arrives from the subscription, the temporary one is dropped.</p>
 
 <p>Update and delete need no key: they work by id, and reading the previous
 state is enough.</p>
+</details>
 
 <h2>Live queries</h2>
 
+<p><code>db.live(query, fn)</code> runs the query again whenever a collection
+it reads changes, and hands <code>fn</code> the new rows. Running it again on
+the local copy takes under a millisecond.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>There is no incremental maintenance and none is needed. The local side is an
 indexed database, so re-running the query from scratch is already under a
 millisecond — the differential dataflow that a <code>Map</code>-backed
@@ -113,8 +151,13 @@ disabled for fenecdb's headline feature.</p>
 collections changed, the live queries bound to them re-run, and all of it
 coalesces into one frame. Anything finer, like intersecting id sets, would cost
 more than the local query itself.</p>
+</details>
 
 <h2>Batches</h2>
+
+<p><code>db.batch</code> sends several writes in one request. They land on the
+server together or not at all, and on failure the local copy is put back
+too.</p>
 
 <pre data-lang="js">await db.batch(async (t) => {
   await t.from('tasks').insert({ title: 'a', status: 'open' });
@@ -122,6 +165,7 @@ more than the local query itself.</p>
 });
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>The batch is one block on the server: its statements run in order under a
 single write lock, and their writes land together, as one record, or not at
 all. The gain is one round trip instead of N, no other writer slipping in
@@ -130,9 +174,19 @@ between, and nothing half done.</p>
 <p><b>Both sides roll back.</b> A batch that fails lands nothing on the
 server, and the local side puts back exactly what it applied optimistically,
 so the two stay one state.</p>
+</details>
 
 <h2>Multiple tabs share one stream</h2>
 
+<p>Open tabs elect one leader that holds the connection to the server and
+passes changes to the others. Each tab still sends its own writes.</p>
+
+<ul>
+  <li><b>Turn it off</b> with <code>leader: false</code>; without
+    <code>navigator.locks</code>, as in Node, it is off already.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>Every tab has its own wasm instance. If each opened its own subscription
 there would be N copies and N connections, so a single <b>leader</b> is elected
 with <code>navigator.locks</code>; the others receive the same batches over
@@ -143,18 +197,20 @@ apply path is identical — only the transport differs.</p>
 to the server, so leadership concerns only the <i>read</i> stream: a leader
 dying does not stop writes, the lock passes to the next tab and it continues
 from its own cursor.</p>
-
-<p>Turn it off with <code>leader: false</code>. Without
-<code>navigator.locks</code>, as in Node, it is off already.</p>
+</details>
 
 <h2>Dropped connections and the horizon</h2>
 
-<p>A client returns with <code>?since=&lt;cursor&gt;</code> and asks for no
-seed. If the cursor has fallen behind the ring, the server reseeds by itself
-rather than silently sending incomplete events.</p>
+<p>A client that reconnects gets only what changed since it left. If it was
+away too long, the server sends it a fresh copy instead.</p>
 
 <pre data-lang="bash">--changes &lt;n&gt;    entries in the ring (default 4096, 24 bytes per entry)
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p>A client returns with <code>?since=&lt;cursor&gt;</code> and asks for no
+seed. If the cursor has fallen behind the ring, the server reseeds by itself
+rather than silently sending incomplete events.</p>
 
 <p>That number is directly <b>how far behind a subscriber may fall</b>. At 100
 writes per second, 4096 entries is roughly a 40 second window. With
@@ -166,17 +222,34 @@ past the horizon.</p>
 loaded from a file has no history, only its present state. A cursor standing
 exactly there, after a quiet restart, gets an empty response; anything behind
 it is reseeded.</p>
+</details>
 
 <h2>Cost</h2>
 
+<p>The server's change ring is about 96 KB at the default size, and
+subscriptions do not poll.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>At the default <code>--changes 4096</code> the ring is about 96 KB and costs
 one push per entry on the write path. Subscriptions do not poll — see
 <a href="http.html#subscriptions">the HTTP endpoint</a> for why — and are
 counted separately from ordinary requests under
 <code>--http-max-streams</code>.</p>
+</details>
 
 <h2>Limits</h2>
 
+<p>A few things sync does not do, or does differently from what you might
+expect.</p>
+
+<ul>
+  <li><b>A shape is not a security boundary</b> on its own; use a per-user
+    token with scoped access.</li>
+  <li><b><code>bytes</code> fields cannot be synced.</b></li>
+  <li><b>The server has the last word</b> over the local copy.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>A shape alone is not a security boundary.</b> Under the server's own
     token, a changed id that does not match the shape is sent as a deletion:
@@ -196,8 +269,13 @@ counted separately from ordinary requests under
     A rolled-back local state is overwritten by the server's in the next
     batch.</li>
 </ul>
+</details>
 
 <h2>Persisting the replica</h2>
+
+<p>Add <code>persist</code> to keep the copy and its place in the stream in
+IndexedDB, so a reopened tab starts from there instead of downloading
+everything again.</p>
 
 <pre data-lang="js">const db = await sync({
   url: 'https://api.example.com',

@@ -1,14 +1,26 @@
 <!--
 title: How it works — fenecdb
-description: Segments, the offset index, HNSW with a filter, half precision, and why fenecdb has no page cache and exactly one writer.
+description: The design decisions under fenecdb — no page cache, a mapped file, vectors in the language, one writer — and what each one costs.
 -->
 
 <h1>How it works</h1>
-<p class="kicker">Six decisions carry the whole engine. Each one bought
-something and cost something, and both halves are written down here.</p>
+<p class="kicker">A handful of design decisions carry the whole engine, and
+this page gives what each one bought and what it cost.</p>
 
 <h2>No page cache</h2>
 
+<p>fenecdb keeps no cache of its own between the disk and your queries. The
+bytes on disk are already in the form a query reads, so there is nothing to
+copy in, evict or warm up.</p>
+
+<ul>
+  <li><b>Writes only append.</b> Old data is never changed in place.</li>
+  <li><b>Reads decode in place.</b> A read takes just the field it needs.</li>
+  <li><b><code>compact</code> reclaims space</b> from deleted and overwritten
+    rows.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>Classic databases cut the disk into pages and copy those pages into a cache
 in user space. The eviction policy, dirty-page tracking, checkpoints and most
 of the locking cost all follow from that one structure.</p>
@@ -29,17 +41,16 @@ of the locking cost all follow from that one structure.</p>
 
 <p>No eviction policy, no dirty pages, no warm-up. Dead bytes are reclaimed by
 <code>compact</code>.</p>
+</details>
 
-<h3 id="the-file-is-mapped">The file is mapped</h3>
+<h2 id="the-file-is-mapped">The file is mapped</h2>
 
-<p>Because the format on disk is the format in memory, the file can be the
-memory: <code>fs::open</code> maps it where the target maps files, and a
-document is decoded from the pages the operating system brings in — and can
-drop again. What the process holds is what it derived from the documents: the
-offset index, the hash, ordered and text indexes, the graph, and the
-documents written since the open until they amount to 16 MB. One file of 1
-GB, 2.3 million rows with a hash and an ordered index (<code>make
-open-bench</code>):</p>
+<p>The operating system maps the file into memory, so the documents stay in
+the file and the process holds only the indexes built from them. A file
+larger than the machine's memory can be opened this way.</p>
+
+<p>One file of 1 GB, 2.3 million rows with a hash and an ordered index
+(<code>make open-bench</code>):</p>
 
 <div class="tbl">
 <table>
@@ -51,6 +62,22 @@ open-bench</code>):</p>
 </tbody>
 </table>
 </div>
+
+<ul>
+  <li><b>Replace a file by rename, never by copying over it.</b> A copy over
+    an open file, or a disk read that fails, ends the process.</li>
+  <li><b>Opening still takes time in proportion to the file.</b></li>
+  <li><b><code>fenec-pg --no-mmap</code></b> reads the file into memory
+    instead, for network file systems.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Because the format on disk is the format in memory, the file can be the
+memory: <code>fs::open</code> maps it where the target maps files, and a
+document is decoded from the pages the operating system brings in — and can
+drop again. What the process holds is what it derived from the documents: the
+offset index, the hash, ordered and text indexes, the graph, and the
+documents written since the open until they amount to 16 MB.</p>
 
 <p>A 10 GB file of 23 million rows opens on an 8 GB machine this way, which
 reading it cannot: that would want about 20 GB. The trade is the one every
@@ -95,16 +122,18 @@ a cache of its own.</p>
 replicated one, and every tenant of a <code>--dir</code> node, as well — over
 a network file system, where mapping is a bad bet, or to have
 <code>--max-memory</code> cover the data as well as the indexes.</p>
+</details>
 
 <h2>Vectors are first-class</h2>
 
-<p><code>vector&lt;N&gt;</code> is a type, <code>@hnsw</code> is an index,
-<code>near</code> is a clause. Not a plugin — the language itself.</p>
+<p>Vectors are part of the language, not a plugin: <code>vector&lt;N&gt;</code>
+is a type, <code>@hnsw</code> an index and <code>near</code> a clause.</p>
 
 <pre data-lang="fenecql">get articles where year >= 2024 near embed $1 ef 200 limit 10
 get articles near embed $1 exact limit 10        -- exact scan, for verification
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <ul>
   <li>HNSW is written in-house. Every vector lives in one contiguous arena.</li>
   <li>Under the cosine metric vectors are normalised inside the index, so the
@@ -120,9 +149,25 @@ get articles near embed $1 exact limit 10        -- exact scan, for verification
     vectors</b>: the vectors are already in the document records, and the
     expensive part is the build.</li>
 </ul>
+</details>
 
-<h3>A filter and a vector together</h3>
+<h2 id="a-filter-and-a-vector-together">A filter and a vector together</h2>
 
+<p>A <code>near</code> with a <code>where</code> always fills its page with
+rows that pass the filter, however the filter and the vectors relate. An index
+on the filtered field makes a selective filter fast.</p>
+
+<pre data-lang="fenecql">get articles where year >= 2020 near embed $1 limit 10</pre>
+
+<ul>
+  <li><b>A filter matching many rows is cheap:</b> 1.1 ms for 23% of
+    200 000 rows.</li>
+  <li><b>A filter matching few rows is read in full</b> — 17.9 ms for 1% —
+    unless an index narrows it: 0.16 ms over <code>@sorted</code>.</li>
+  <li><b><code>explain</code></b> says which path ran.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>The filter's rows are found first, but only as far as the plan needs
 them. An index hands them over directly — a <code>@hash</code> equality, a
 <code>@sorted</code> range. Otherwise they are probed: rows are tested in
@@ -163,20 +208,17 @@ page. A short answer is walked again with the beam wider by the tombstones,
 since no more than all of them can be in it — or, where a walk that wide
 would cost more than reading every vector, searched exactly. Either way the
 page is full, and <code>explain</code> says which ran.</p>
+</details>
 
-<h3>Half precision</h3>
+<h2 id="half-precision">Half precision</h2>
 
-<p>Precision is part of the type, not of the index — the same choice pgvector
-makes with <code>halfvec</code>. That shrinks the record and the arena
-together; as an index option only the arena would shrink, and in the browser
-the file image is in memory too.</p>
+<p>Store vectors in 16-bit floats to halve their size on disk and in memory,
+for a slightly slower search and almost no recall loss.</p>
 
 <pre data-lang="fenecql">create collection docs (embed vector&lt;768, f16&gt; @hnsw(cosine))
 </pre>
 
-<p>The runtime representation does not change: values are <code>f32</code>
-everywhere and conversion happens only at the storage boundary. Same data,
-100 000 × 128:</p>
+<p>Same data, 100 000 × 128:</p>
 
 <div class="tbl">
 <table>
@@ -191,6 +233,15 @@ everywhere and conversion happens only at the storage boundary. Same data,
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>Precision is part of the type, not of the index — the same choice pgvector
+makes with <code>halfvec</code>. That shrinks the record and the arena
+together; as an index option only the arena would shrink, and in the browser
+the file image is in memory too.</p>
+
+<p>The runtime representation does not change: values are <code>f32</code>
+everywhere and conversion happens only at the storage boundary.</p>
+
 <p>The cost is arithmetic: distance over an f16 arena unpacks inside the loop.
 Two things were measured and fixed. The expansion has to be branchless — the
 first version called the exact conversion in <code>codec</code>, whose
@@ -204,16 +255,30 @@ about 3 GB as <code>f32</code> and about 1.5 GB as <code>f16</code>. In
 WASM32's 4 GB address space that is the difference between fitting and not.
 Embedding model output sits comfortably inside the f16 range (±65 504, roughly
 three decimal digits) and the measured recall loss is 0.3 points.</p>
+</details>
 
-<h3 id="quantized-indexes">Quantized indexes</h3>
+<h2 id="quantized-indexes">Quantized indexes</h2>
 
-<p>Half precision shrinks the record and the arena together. A quantized
-index leaves the record alone and shrinks the arena further, by holding codes
-instead of vectors: a byte a component with <code>quant=int8</code>, a bit a
-component with <code>quant=bit</code>.</p>
+<p>A quantized index keeps a small code for each vector instead of the vector
+itself: a byte a component with <code>quant=int8</code>, a bit a component
+with <code>quant=bit</code>. The index shrinks a lot, and the scores stay
+exact because the final order comes from the real vectors.</p>
 
 <pre data-lang="fenecql">create collection docs (embed vector&lt;768, f16&gt; @hnsw(cosine, quant=int8))
 </pre>
+
+<ul>
+  <li><b><code>int8</code></b> halves the index and keeps the recall of full
+    vectors on every set measured.</li>
+  <li><b><code>bit</code></b> makes the index about a fifteenth the size, and
+    is the fastest — but how well it works depends on your vectors, so measure
+    it on them.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Half precision shrinks the record and the arena together. A quantized
+index leaves the record alone and shrinks the arena further, by holding codes
+instead of vectors.</p>
 
 <p>A code only estimates a distance, so it is used for what an estimate is
 good for: walking the graph to the right neighbourhood. The candidates the
@@ -304,28 +369,21 @@ order of the vector kernels: natively LLVM vectorises them, and in the
 browser they add in the same order, so a graph over codes is the same graph
 in both. A bit code's popcounts are whole numbers, exact everywhere, and
 the few floats they are scaled by are taken in one order.</p>
+</details>
 
-<h3 id="sparse-vectors">Sparse vectors</h3>
+<h2 id="sparse-vectors">Sparse vectors</h2>
 
-<p>A learned sparse model weighs a text's vocabulary: SPLADE gives each of
-BERT's 30 522 word pieces a weight, and all but a couple of hundred come out
-zero. It learns which words a text is about, including ones it never uses —
-an abstract on damage to cerebral white matter is weighted for
-<code>disability</code> as well as the <code>disabilities</code> it says.
-<code>sparse&lt;N&gt;</code> holds such a vector by its non-zero entries, and
-<code>@inverted</code> indexes it the way <code>@text</code> indexes words: a
-list per dimension of the documents with a weight there.</p>
+<p>A sparse vector weighs the words a text is about, including related words
+it never uses. <code>sparse&lt;N&gt;</code> stores one, and
+<code>@inverted</code> indexes it so that <code>near</code> returns the exact
+top results.</p>
 
 <pre data-lang="fenecql">create collection passages (body text @text, splade sparse&lt;30522&gt; @inverted)
 get passages near splade $1 limit 10
 </pre>
 
-<p><code>near</code> over it scores by dot product and sums the query's lists
-a list at a time — or walks them with MaxScore, the pruning <code>match</code>
-uses, where they hold few documents in a wide span of ids — so what comes back
-is the exact top ten rather than an estimate of it; only documents sharing a
-dimension with the query are ranked. Encoded with SPLADE++ and scored on BEIR (<code>make
-beir</code>, <a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
+<p>Encoded with SPLADE++ and scored on BEIR (<code>make beir</code>,
+<a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
 
 <div class="tbl">
 <table>
@@ -339,6 +397,22 @@ beir</code>, <a href="benchmarks.html#retrieval-quality">Benchmarks</a>):</p>
 </tbody>
 </table>
 </div>
+
+<details class="deep"><summary>Details</summary>
+<p>A learned sparse model weighs a text's vocabulary: SPLADE gives each of
+BERT's 30 522 word pieces a weight, and all but a couple of hundred come out
+zero. It learns which words a text is about, including ones it never uses —
+an abstract on damage to cerebral white matter is weighted for
+<code>disability</code> as well as the <code>disabilities</code> it says.
+<code>sparse&lt;N&gt;</code> holds such a vector by its non-zero entries, and
+<code>@inverted</code> indexes it the way <code>@text</code> indexes words: a
+list per dimension of the documents with a weight there.</p>
+
+<p><code>near</code> over it scores by dot product and sums the query's lists
+a list at a time — or walks them with MaxScore, the pruning <code>match</code>
+uses, where they hold few documents in a wide span of ids — so what comes back
+is the exact top ten rather than an estimate of it; only documents sharing a
+dimension with the query are ranked.</p>
 
 <p>On SciFact, where a claim shares its words with the evidence, SPLADE alone
 scores what BM25 and the dense vectors do fused, with one index. On FiQA,
@@ -363,24 +437,36 @@ file.</p>
   per block of a list, to let the walk skip blocks, did not pay: the stretch
   every list could skip together was short.</p>
 </div>
+</details>
 
 <h2 id="bulk-load-first-index-after">Bulk load first, index after</h2>
 
-<p>Writing the index during the load makes every insert a graph mutation.
-Building it afterwards turns the write path into a pure append and builds the
-graph in one parallel pass.</p>
+<p>When you load a lot of data, create the vector index after the rows are
+in. The load is then a plain append, and the graph is built in one parallel
+pass.</p>
 
 <pre data-lang="fenecql">create collection docs (title text, embed vector&lt;768&gt;)
 put docs [ ... 100 000 documents ... ]
 create index on docs (embed) @hnsw(cosine)
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>Writing the index during the load makes every insert a graph mutation.
+Building it afterwards turns the write path into a pure append and builds the
+graph in one parallel pass.</p>
+
 <p>This is already the recommended order for SQLite and PostgreSQL. In fenecdb
 <code>create index</code> exists for exactly this reason, and the comparison in
 <a href="benchmarks.html">Benchmarks</a> uses that order for all three engines.</p>
+</details>
 
 <h2>Zero dependencies</h2>
 
+<p>The core is written against Rust's standard library alone, with no
+outside packages. That keeps the WebAssembly module small and every line of
+it auditable.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>The core uses <code>std</code> and nothing else: its own binary codec, its
 own JSON, its own HNSW, its own lexer and parser, its own SCRAM, even its own
 decimal-to-<code>f64</code> — <code>str::parse</code> reaches for a 12 KB table
@@ -398,9 +484,22 @@ can be written as real queries.</p>
 <p><b>What it costs.</b> Every bug is ours, and so is every protocol detail.
 The server and client halves of SCRAM are both hand-written, which at least
 means they test each other.</p>
+</details>
 
 <h2>Straight into the browser</h2>
 
+<p>The same engine runs in the page as a WebAssembly module, loaded by one
+dependency-free JavaScript file. A database can be kept in IndexedDB or in a
+file a server can open.</p>
+
+<ul>
+  <li><b><code>persist</code> / <code>restore</code></b> keep it in
+    IndexedDB, saving only what changed.</li>
+  <li><b><code>openFile</code></b>, in a worker, keeps it as a real fenecdb
+    file in the origin private file system.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>fenec-wasm</code> exposes a C ABI and there is no
 <code>wasm-bindgen</code>. The glue is about 352 lines of JavaScript inside
 <code>web/fenec.js</code>, alongside the query builder, the HTTP client and the
@@ -433,9 +532,27 @@ crash leaves one of the two whole.</p>
   must not enter that target. <code>now()</code> errors there too —
   wasm32-unknown-unknown has no clock, so time is passed in as a parameter.</p>
 </div>
+</details>
 
 <h2>Single writer</h2>
 
+<p>Many readers can work at once, but only one write runs at a time. Every
+write lands whole or not at all, which is what lets fenecdb do without the
+bookkeeping other databases need for concurrent writers.</p>
+
+<ul>
+  <li><b>A statement, a batch or a transaction</b> lands as one unit: a crash
+    keeps all of it or none.</li>
+  <li><b>Keep transactions short:</b> other writes wait while one is open.</li>
+</ul>
+
+<div class="note trap">
+  <p><b>Two processes opening the same file corrupts it.</b> This is why the
+  HTTP endpoint is a second listener inside <code>fenec-pg</code> and never its
+  own binary — one process, one file, one sync policy, one shutdown signal.</p>
+</div>
+
+<details class="deep"><summary>Details</summary>
 <p>Reads take a shared lock (<code>Database::query</code>), writes take the
 exclusive one (<code>execute_with</code>). A transaction over the pg wire is
 a block held open: it takes the exclusive lock at its first write and holds
@@ -465,27 +582,26 @@ and the same data under pgvector is elsewhere: pgvector's HNSW index keeps its
 own copy of every vector, while this graph stores only the links
 (<a href="benchmarks.html">Benchmarks</a>).</p>
 
-<div class="note trap">
-  <p><b>Two processes opening the same file corrupts it.</b> This is why the
-  HTTP endpoint is a second listener inside <code>fenec-pg</code> and never its
-  own binary — one process, one file, one sync policy, one shutdown signal.</p>
-</div>
-
 <p>Concurrency still exists on the read side. HNSW search buffers are kept
 thread-locally so the same index can be searched in parallel; eight concurrent
 full scans on eight cores measured a 4.3× speed-up.</p>
+</details>
 
 <h2>The replica is an endpoint, not a library</h2>
 
+<p>A page can keep a local copy of part of the server's data and query it with
+no network round trip. The server says what changed, and the copy follows.</p>
+
+<pre data-lang="js">const db = await sync({ url, shapes: [{ collection: 'tasks', key: 'key' }] });
+await db.from('tasks').where('priority', '>=', 3).rows();   // local, no network
+</pre>
+
+<details class="deep"><summary>Details</summary>
 <p>Because the same engine runs in the browser and on the server, the
 local-copy architecture needed no new layer — only two things: the server being
 able to say "these changed", and the client being able to choose where to bind
 a query. <code>bind()</code> already existed, and the first was sitting in the
 file format, because the file is already a change log.</p>
-
-<pre data-lang="js">const db = await sync({ url, shapes: [{ collection: 'tasks', key: 'key' }] });
-await db.from('tasks').where('priority', '>=', 3).rows();   // local, no network
-</pre>
 
 <p>It is TanStack DB's model with two differences. There is <b>no incremental
 dataflow</b>: there a collection is a <code>Map</code>, and re-running a filter
@@ -493,3 +609,4 @@ on every keystroke over a large set is unacceptable — here the local side is
 indexed and the query is already under a millisecond. And <b>a shape is
 mandatory</b>: the whole database is in memory, so the client cannot pull all
 of it. Details in <a href="sync.html">Sync</a>.</p>
+</details>

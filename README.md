@@ -2,13 +2,15 @@
 
 [![ci](https://github.com/fenecdb/fenec/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenec/actions/workflows/ci.yml)
 
-Minimal, vector-native, browser-resident embedded database. Written in Rust,
-compiles to WebAssembly, has its own query language (**FenecQL**) and speaks the
-PostgreSQL protocol.
+An embedded document database with full-text and vector search built in.
+Documents, indexes, aggregates, transactions, BM25 and HNSW in one engine,
+written in Rust with no dependencies. It runs inside a web page as 175 KB of
+gzipped WebAssembly, in a Rust process, or as a server that speaks the
+PostgreSQL protocol, and it has its own query language (**FenecQL**).
 
 **[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
 home page boots the real WebAssembly module and builds an HNSW index in your
-browser, then races the result against the measured SQLite and pgvector numbers.
+browser, and races fenec-pg against pgvector over a million vectors.
 Source in [`site/`](site/): `make site-serve` runs it locally, `make site-deploy`
 publishes it to Cloudflare Workers.
 
@@ -65,15 +67,16 @@ const rows = await db.from('articles')
 
 ## Which one, when
 
-**fenecdb** makes sense when vector search has to be first-class and when the
-database should run on the user's machine — especially in the browser: local
-semantic search, offline RAG, in-browser agent memory, embedded
-recommendation. The scale limit is **the file image fitting in memory**: not
+**fenecdb** makes sense when the database should run beside the code that uses
+it — in the browser, in the process, or as one small server — and search
+belongs in it rather than in a second system: an app that keeps its data
+offline, local and semantic search, RAG and agent memory, a service with a
+file per tenant. The scale limit is **the file image fitting in memory**: not
 just the vector arena, all of the records are in memory
 ([Limits](https://fenecdb.com/docs/limits)).
 
-**SQLite** when you need relational data, transactional safety, JOINs and a
-mature toolchain. Also in very short-lived processes: for a tool that runs
+**SQLite** when you need relational data, SQL with JOINs, several writers to
+one file and a mature toolchain. Also in very short-lived processes: for a tool that runs
 fewer than five queries and exits, fenecdb's open cost never amortises.
 
 **PostgreSQL + pgvector** for multi-writer systems shared over a network that
@@ -113,10 +116,9 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-444 KB of WebAssembly — 172 KB brotli (`-q 11`) over the wire, client included — no
-wasm-bindgen, no build step. The module alone is 146 KB of that, and 107 KB built
-without the four indexes for a page that uses none of them (`make wasm FEATURES=none`,
-or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
+175 KB of gzipped WebAssembly and a 30 KB gzipped client — no wasm-bindgen, no
+build step — and smaller built without the four indexes for a page that uses
+none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, asyncpg, pgx,
 tokio-postgres, node-postgres and JDBC
@@ -163,6 +165,8 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 
 | | |
 |---|---|
+| **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch or a transaction landing whole |
+| **Transactions** | `BEGIN`, `SAVEPOINT`, `ROLLBACK TO`, `COMMIT` over the PostgreSQL wire; `COPY` in and out |
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` |
 | **Indexes** | `@hash`, `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted` |
 | **Metrics** | `cosine` `l2` `dot` |
@@ -174,15 +178,17 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) |
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
-| **Access** | a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) |
+| **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
+| **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 444 KB wasm + 94 KB client (172 KB brotli served) · 1153–1687 KB binary · 2.88 MB container image |
+| **Runtime size** | 175 KB gzip wasm + 30 KB gzip client · 1153–1687 KB binary · 2.88 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
 What it deliberately does **not** do — no second writer (a transaction holds the
 database from its first write to its end), no JOIN, no subqueries,
-no schema migration, no multi-writer replication, no decimal type — is listed
+no schema migration, no multi-writer replication, no nested objects, no
+decimal type, no TLS (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
 ceiling baked into the code. Relations are `lookup`, which attaches a
 collection's matching documents to the row they belong to with a `limit` that

@@ -1,14 +1,17 @@
 <!--
 title: FenecQL — fenecdb
-description: The complete FenecQL reference: statements, types, indexes, operators, parameters, time handling and the vector clause.
+description: The FenecQL reference: statements, types, indexes, operators, parameters, time and the vector, text and lookup clauses.
 -->
 
 <h1>FenecQL</h1>
-<p class="kicker">A small query language with vectors in the core. It is not
-SQL and does not try to be, though the familiar <code>select … from</code> word
-order is accepted.</p>
+<p class="kicker">The query language you use to create collections, write
+documents and search them by vector, by text or by filter.</p>
 
 <h2>Statements</h2>
+
+<p>FenecQL is a small language with vectors in the core. It is not SQL and
+does not try to be, though the familiar <code>select … from</code> word order
+is accepted. These are all its statements.</p>
 
 <pre data-lang="fenecql">create collection [if not exists] &lt;name&gt; ( &lt;field&gt; &lt;type&gt; [required] [collate und|tr] [@index], ... )
 drop collection [if exists] &lt;name&gt;
@@ -33,6 +36,14 @@ del &lt;name&gt; [where &lt;expr&gt;]
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 </pre>
 
+<ul>
+  <li><b>Every document gets an <code>id</code></b> on its own. Give one in a
+    <code>put</code> and it writes over the document with that id.</li>
+  <li><b><code>insert</code> never writes over.</b> If an id is taken, the
+    whole statement is refused.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents
 and never writes over one: a document naming an id that is taken refuses the
@@ -41,8 +52,11 @@ statement, and nothing of it is written — <code>409</code> over HTTP,
 as PostgreSQL's <code>INSERT</code> answers. Without an <code>id</code> the
 two are the same. A retried write that must not be made twice either way
 sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
+</details>
 
 <h2>Reference</h2>
+
+<p>Types, indexes, operators and functions at a glance.</p>
 
 <div class="tbl">
 <table>
@@ -66,11 +80,22 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 
 <h2>The vector clause</h2>
 
+<p><code>near</code> finds the documents whose vector is closest to the one
+you pass. Add a <code>where</code> to search only the rows that match.</p>
+
 <pre data-lang="fenecql">get articles near embed $1 limit 10
 get articles where year >= 2024 near embed $1 ef 200 limit 10
 get articles near embed $1 exact limit 10
 </pre>
 
+<ul>
+  <li><b><code>ef</code> trades speed for accuracy</b> for one query.</li>
+  <li><b><code>exact</code> checks every vector</b>, which is how you measure
+    recall.</li>
+  <li><b>Each row gets a <code>_score</code></b> column.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>ef</code> raises the search beam for this query only, trading latency
 for recall. <code>exact</code> replaces the ANN walk with a full scan, which is
 how you verify recall against ground truth. A query that uses
@@ -85,14 +110,29 @@ ANN would measure anyway, and the planner picks between searching that set
 exactly and running the ANN with each candidate tested against the filter.
 The mechanism, and the fallback that keeps it correct, is in <a
 href="concepts.html#a-filter-and-a-vector-together">How it works</a>.</p>
+</details>
 
 <h2>The text clause</h2>
+
+<p><code>match</code> ranks documents by how well their text matches your
+words. <code>rerank</code> then reorders the best of them by vector
+distance.</p>
 
 <pre data-lang="fenecql">get articles match body $1 limit 10
 get articles where year >= 2024 match body $1 limit 10
 get articles match body $1 rerank embed $2 candidates 500 limit 10
 </pre>
 
+<ul>
+  <li><b><code>match</code> needs a <code>@text</code> index</b> and adds a
+    <code>_score</code> column.</li>
+  <li><b><code>rerank</code> needs no vector index.</b> It reads the vectors
+    of the matched rows directly.</li>
+  <li><b>Reranking cannot find what the words missed.</b> For that, use <a
+    href="#hybrid">hybrid search</a>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>match</code> ranks by BM25 over a <code>@text</code> index and adds a
 <code>_score</code> column. Like <code>near</code> it decides the ordering, so
 it combines with neither <code>order</code> nor <code>near</code> — unless
@@ -117,14 +157,25 @@ all. <code>candidates</code> sets how many of the matched rows are rescored
   each while scoring under 2% of the corpus. If the lexical stage cannot find
   the answer at all, no amount of reranking will.</p>
 </div>
+</details>
 
 <h2 id="hybrid">Hybrid search</h2>
+
+<p><code>fuse</code> combines a text search and a vector search into one
+ranking. Use it when some answers share your words and others only your
+meaning.</p>
 
 <pre data-lang="fenecql">get articles match body $1 near embed $2 fuse limit 10
 get articles where year >= 2024 match body $1 near embed $2 fuse limit 10
 get articles match body $1 near embed $2 fuse k 60 candidates 50 limit 10
 </pre>
 
+<ul>
+  <li><b>It adds ranks, not scores</b>, so there is no weight to tune.</li>
+  <li><b>It needs an <code>@hnsw</code> index</b> for the vector side.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>fuse</code> lets <code>match</code> and <code>near</code> rank the
 same query together. Each side takes its own first <code>candidates</code> —
 20 unless given, never fewer than <code>limit + offset</code> — with the
@@ -151,9 +202,26 @@ the <code>@hnsw</code> graph <code>near</code> walks.</p>
   the middle of both lists starts to outvote the top of one, and at 100 a side
   the two scores fall to 0.688 and 0.359.</p>
 </div>
+</details>
 
 <h2>The lookup clause</h2>
 
+<p><code>lookup</code> attaches matching documents from another collection to
+each row — reviews to their products, say. A <code>limit</code> after it counts
+children per parent.</p>
+
+<pre data-lang="fenecql">get products limit 20 lookup reviews on product_id order created desc limit 3
+</pre>
+
+<ul>
+  <li><b>Clauses after <code>lookup</code> apply to the child
+    collection</b>; clauses before it apply to the parent.</li>
+  <li><b>The child's key needs <code>id</code> or a <code>@hash</code>
+    index.</b></li>
+  <li><b><code>required</code> keeps only parents that have a match.</b></li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <pre data-lang="fenecql">get products lookup reviews on product_id
 get products limit 20 lookup reviews on product_id order created desc limit 3
 get products where price &gt;= 10000 select name
@@ -291,8 +359,12 @@ transports carry.</p>
   against <b>0.415 ms</b> for two <code>/batch</code> trips — measured on
   loopback, where the extra trip costs almost nothing and still doubles it.</p>
 </div>
+</details>
 
 <h2>Indexes</h2>
+
+<p>An index makes one kind of question fast. Declare it on a field when you
+create the collection, or add it later with <code>create index</code>.</p>
 
 <pre data-lang="fenecql">create collection articles (
   title      text,
@@ -301,8 +373,21 @@ transports carry.</p>
   published  timestamp @sorted,
   embed      vector&lt;768&gt; @hnsw(cosine, m=16, ef_construction=200)
 )
+</pre>
 
-create index on articles (embed) @hnsw(cosine)
+<ul>
+  <li><b>One index per field:</b> <code>@hash</code> for equality,
+    <code>@sorted</code> for ranges and order, <code>@text</code> for ranked
+    text search, <code>@hnsw</code> for nearest neighbours.</li>
+  <li><b>Only filters joined by <code>and</code> use an index.</b> Anything
+    under <code>or</code>, and <code>!=</code>, <code>~</code> or
+    <code>has</code>, reads every row.</li>
+  <li><b>For Turkish, Chinese or Japanese text</b>, see <code>prefix</code>
+    and <code>chars</code> below.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">create index on articles (embed) @hnsw(cosine)
 create index on articles (body) @text
 create index on articles (body) @text(prefix=6)   -- for an inflected language
 create index on products (title) @text(chars)     -- short Chinese or Japanese text
@@ -400,13 +485,24 @@ over those sets takes 0.09 to 0.66 ms at the median.</p>
   million rows read that way a page at a time took 8.6 s and take 110 ms.
   The browser module leaves this out.</p>
 </div>
+</details>
 
-<h3 id="quantized">Quantized vector indexes</h3>
+<h2 id="quantized">Quantized vector indexes</h2>
+
+<p><code>quant=</code> makes a vector index smaller by storing a compact code
+for each vector. Scores stay exact, because the final order uses the full
+vectors.</p>
 
 <pre data-lang="fenecql">create collection articles (embed vector&lt;768&gt; @hnsw(cosine, quant=int8))
 create index on articles (embed) @hnsw(cosine, quant=bit)
 </pre>
 
+<ul>
+  <li><b><code>int8</code></b> is a quarter of the size; <b><code>bit</code></b>
+    about a thirtieth, and cosine only.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>quant=</code> sets what the index holds of each vector:
 <code>int8</code> a byte a component, a quarter of <code>f32</code>, and
 <code>bit</code> a bit a component, about a thirtieth: the signs of how far
@@ -421,8 +517,13 @@ A filtered set small enough to search without the walk is ranked by its codes
 the same way, and <code>exact</code> reads every vector. Bit codes take a
 wider beam: <code>ef_search</code> is 200 there unless it is named. What they save and what they cost is in
 <a href="concepts.html#quantized-indexes">How it works</a>.</p>
+</details>
 
-<h3 id="sparse">Sparse vectors</h3>
+<h2 id="sparse">Sparse vectors</h2>
+
+<p><code>sparse&lt;N&gt;</code> stores the output of a learned sparse model
+such as SPLADE. <code>near</code> over it finds the documents with the
+largest dot product, exactly.</p>
 
 <pre data-lang="fenecql">create collection passages (body text @text, splade sparse&lt;30522&gt; @inverted)
 put passages {body: "...", splade: "{1037:0.84,2003:1.27,7592:2.1}/30522"}
@@ -430,6 +531,13 @@ get passages near splade $1 limit 10
 get passages match body $1 near splade $2 fuse limit 10
 </pre>
 
+<ul>
+  <li><b>It is written as pgvector's <code>sparsevec</code></b>:
+    <code>{index:value,...}/N</code>, indices from 1.</li>
+  <li><b>Index it with <code>@inverted</code>.</b></li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>sparse&lt;N&gt;</code> holds a vector of <code>N</code> dimensions by
 its non-zero entries alone: what a learned sparse model such as SPLADE gives a
 text, a weight for a few dozen or hundred of its vocabulary's 30 522 words. It
@@ -443,12 +551,27 @@ pruning <code>match</code> uses — and ranks only documents sharing at least on
 dimension with the query. A filter is tested as the lists are merged;
 <code>exact</code> scores every document instead, and <code>fuse</code> takes a
 sparse <code>near</code> as it takes a dense one.</p>
+</details>
 
-<h3>Ordered indexes</h3>
+<h2>Ordered indexes</h2>
+
+<p><code>@sorted</code> makes ranges, counts over a range and
+<code>order … limit</code> fast. It always gives the same rows as reading
+every row would.</p>
 
 <pre data-lang="fenecql">get articles order published desc limit 20
 get articles where published >= "2026-09-01" order published desc limit 20
-get articles where title >= "k" and title < "l" count
+</pre>
+
+<ul>
+  <li><b>It costs memory and write time</b>: about 20 bytes a row for a
+    number, plus the text for <code>text</code>.</li>
+  <li><b>It is rebuilt after an open</b> by the first query that needs it; it
+    is never written to the file.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">get articles where title >= "k" and title < "l" count
 get articles where published >= "2026-01-01" near embed $1 limit 10
 </pre>
 
@@ -497,8 +620,13 @@ than gathering and sorting that many ids.</p>
   that reads it after an open, like the hash and text indexes — it is never
   written to the file.</p>
 </div>
+</details>
 
 <h2 id="collation">Collation</h2>
+
+<p>Text sorts by its bytes unless you ask otherwise, which is wrong in every
+language. <code>collate und</code> sorts it the way people expect in any
+language, and <code>collate tr</code> in Turkish order.</p>
 
 <pre data-lang="fenecql">get people order name collate und limit 20
 get people order city collate tr desc, name collate tr
@@ -508,6 +636,25 @@ create collection people (name text collate und @sorted, city text)
 get people where name &gt; $1 order name limit 20   -- the page after $1
 </pre>
 
+<div class="tbl">
+<table>
+<thead><tr><th><code>order name</code></th><th><code>order name collate und</code></th><th><code>order name collate tr</code></th></tr></thead>
+<tbody>
+<tr><td>Irmak, Zeynep, cem, Çağla, İlker, ılgaz</td><td>Çağla, cem, İlker, Irmak, ılgaz, Zeynep</td><td>cem, Çağla, ılgaz, Irmak, İlker, Zeynep</td></tr>
+<tr><td>Zoë, anna, Ζωή, 山田, Борис, Émile</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>Name it on one key</b> in <code>order</code>, or <b>declare it on a
+    field</b> so every comparison of that field uses it.</li>
+  <li><b>Equality still compares bytes.</b></li>
+  <li><b>In the browser</b>, data for scripts other than Latin is fetched when
+    first needed.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>Text is ordered by its bytes unless a key says otherwise, and the bytes are
 wrong in every language: every capitalised word comes before every lowercase
 one, an accented letter lands after <code>z</code>, and every script past
@@ -522,16 +669,6 @@ PostgreSQL's <code>tr-x-icu</code>: <code>ç</code> after <code>c</code>,
 with <code>I</code> as its capital and <code>İ</code> as the capital of
 <code>i</code>, <code>ö</code>, <code>ş</code> and <code>ü</code> after
 <code>o</code>, <code>s</code> and <code>u</code>.</p>
-
-<div class="tbl">
-<table>
-<thead><tr><th><code>order name</code></th><th><code>order name collate und</code></th><th><code>order name collate tr</code></th></tr></thead>
-<tbody>
-<tr><td>Irmak, Zeynep, cem, Çağla, İlker, ılgaz</td><td>Çağla, cem, İlker, Irmak, ılgaz, Zeynep</td><td>cem, Çağla, ılgaz, Irmak, İlker, Zeynep</td></tr>
-<tr><td>Zoë, anna, Ζωή, 山田, Борис, Émile</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td><td>anna, Émile, Zoë, Ζωή, Борис, 山田</td></tr>
-</tbody>
-</table>
-</div>
 
 <p>It compares a level at a time over the whole string, as ICU does: the
 letters, then their accents (<code>kar</code> &lt; <code>kâr</code> &lt;
@@ -640,14 +777,28 @@ other chunk together is 145 KB, 67 KB gzip, 61 KB brotli. Their words are
 written as differences, which gzip and brotli take a third off: plain they
 were 102 and 90 KB. The Latin chunk alone comes out 0.3 KB larger under
 gzip that way, 0.9 KB under brotli, and 2.9 KB smaller in the module.</p>
+</details>
 
 <h2 id="aggregates">Aggregates</h2>
+
+<p>Put <code>count(*)</code>, <code>sum</code>, <code>avg</code>,
+<code>min</code> or <code>max</code> in the select list to get totals. Add
+<code>group &lt;field&gt;</code> for one row per value of that field.</p>
 
 <pre data-lang="fenecql">get orders select count(*), sum(total), avg(total), min(at), max(at)
 get orders select status, count(*), avg(total) where year = 2026 group status
 get orders select customer, sum(total) group customer order sum(total) desc limit 10
 </pre>
 
+<ul>
+  <li><b>Nulls are skipped</b>, as in SQL, by everything but
+    <code>count(*)</code>.</li>
+  <li><b>Groups can be ordered and paged</b> by any column of the list.</li>
+  <li><b>Aggregates do not combine</b> with <code>near</code>,
+    <code>match</code> or <code>lookup</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A select list with an aggregate in it folds the rows the query finds —
 through the same indexes any <code>where</code> reaches — into one row, or,
 with <code>group &lt;field&gt;</code>, one row per value of that field. Each
@@ -685,13 +836,12 @@ same rows; the whole set's count, sum, minimum and
 maximum, 37 ms; the same groups over the tenth a <code>@sorted</code> range
 found, 9.3 ms. The rows are read, not an index: a filter narrows them, nothing
 precomputes the totals.</p>
+</details>
 
 <h2>Explain</h2>
 
-<p><code>explain</code> in front of a <code>get</code> runs the query and
-answers with the path it took instead of its rows: one row a step, in the
-order the steps ran, in a single <code>plan</code> column. The last row is
-the size of the answer.</p>
+<p>Put <code>explain</code> in front of a <code>get</code> to see how the
+query ran: which index it used and how many rows each step read.</p>
 
 <pre data-lang="fenecql">explain get events where cat = "c7" order created desc limit 20
 
@@ -700,8 +850,21 @@ order: the ordered index on created not walked, an equality names fewer rows
 filter: the hash index on cat, 9753 rows, which is the answer
 order: created desc, every key read, 9753 matches, the first 20 put in order
 rows: 20
+</pre>
 
-explain get events where cat ~ "c77" order created desc limit 20
+<ul>
+  <li><b>It runs the query</b>, because some choices depend on the data.</li>
+  <li><b>The wording is for reading</b>, not parsing; it may change between
+    versions.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>explain</code> in front of a <code>get</code> runs the query and
+answers with the path it took instead of its rows: one row a step, in the
+order the steps ran, in a single <code>plan</code> column. The last row is
+the size of the answer.</p>
+
+<pre data-lang="fenecql">explain get events where cat ~ "c77" order created desc limit 20
 
 plan
 order: walked the ordered index on created desc, 2153 rows tested, 20 kept
@@ -738,17 +901,22 @@ the rows with the <code>EXPLAIN</code> tag, <code>POST /query</code> returns
 them as JSON, and the JavaScript builder has <code>.explain()</code>, which
 resolves to the lines. The steps are for reading, not parsing — their wording
 may change between versions.</p>
+</details>
 
 <h2>Time</h2>
 
-<p><code>timestamp</code> holds UTC epoch milliseconds as an
-<code>i64</code>. Writes accept both text and numbers; a text literal in a
-comparison is parsed.</p>
+<p>A <code>timestamp</code> field takes an ISO-8601 date or epoch
+milliseconds, and always comes back as ISO-8601 in UTC.</p>
 
 <pre data-lang="fenecql">put events {name: "login", t: "2026-09-19T12:34:56Z"}
 put events {name: "logout", t: 1758285296000}        -- epoch ms
 get events where t >= "2026-01-01" and t < now()
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>timestamp</code> holds UTC epoch milliseconds as an
+<code>i64</code>. Writes accept both text and numbers; a text literal in a
+comparison is parsed.</p>
 
 <p>The representation is always ISO-8601
 (<code>2026-09-19T12:34:56.789Z</code>). On the wire <code>fenec-pg</code>
@@ -761,6 +929,7 @@ dependency.</p>
 <p>It exists as a separate type rather than an alias over <code>int</code>
 because <code>ResultSet</code> does not carry the schema, so an alias would
 show every client a raw number.</p>
+</details>
 
 <h2>Bulk loading</h2>
 
@@ -773,6 +942,8 @@ create index on docs (embed) @hnsw(cosine)
 </pre>
 
 <h2>Worked examples</h2>
+
+<p>Common queries, ready to adapt.</p>
 
 <h3>A hybrid query</h3>
 
@@ -807,8 +978,12 @@ describe articles
 compact articles
 </pre>
 
+<p><code>compact</code> drops deleted data and rewrites the file.</p>
+
+<details class="deep"><summary>Details</summary>
 <p><code>compact</code> drops the dead records and rewrites the file. The
 indexes stand — the documents are the same ones, and every index is keyed by
 id — except a vector graph holding tombstones, which is rebuilt: nothing else
 takes a deleted or rewritten document's node out of it. See
 <a href="limits.html#index-build-open-and-maintenance">Limits</a>.</p>
+</details>

@@ -4,14 +4,37 @@ description: What fenecdb deliberately does not do, every ceiling baked into the
 -->
 
 <h1>Limits</h1>
-<p class="kicker">Nothing on this page is a roadmap item. These are
-consequences of the design, hard-coded ceilings, and behaviours it is cheaper
-to read about than to discover.</p>
+<p class="kicker">What fenecdb does not do, the ceilings in its code, and the
+behaviour worth knowing before it surprises you.</p>
 
 <h2>Out of scope</h2>
 
-<p>Deliberately not done: transactions, JOIN, subqueries, schema migration,
-multi-writer replication, SQL.</p>
+<p>Before you choose it, at a glance:</p>
+
+<ul>
+  <li><b>FenecQL, not SQL.</b> <code>select a from t</code> works; JOINs do
+    not. <code>lookup</code> covers related rows (below).</li>
+  <li><b>One writer per file.</b> Readers run beside it, and a transaction
+    holds the writer from its first write to its end. Scale out with a file
+    per tenant (<a href="/docs/sharding">Tenants and sharding</a>).</li>
+  <li><b>Indexes live in memory.</b> The data stays in the mapped file; the
+    indexes are restored or rebuilt on open (<a href="#memory-and-scale">Memory
+    and scale</a>).</li>
+  <li><b>Flat documents.</b> Fields and lists of values; no objects nested
+    inside a row (below).</li>
+  <li><b>No TLS.</b> Put a TLS terminator in front of any port off the
+    machine (<a href="/docs/postgres">PostgreSQL server</a>).</li>
+</ul>
+
+<p>Deliberately not done: JOIN, SQL as the query language, several writers to
+one file, multi-writer replication. Not done yet, and planned: schema
+changes, a unique constraint on a field, nested objects, subqueries, expiry
+and TLS, in the repository's <code>ROADMAP.md</code>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>These are consequences of the design, hard-coded ceilings, and behaviours
+it is cheaper to read about than to discover. The few that are planned say
+so.</p>
 
 <p>Relations are <a href="/docs/fenecql#the-lookup-clause"><code>lookup</code></a>
 rather than JOIN: it attaches a collection's matching documents to the row they
@@ -39,6 +62,7 @@ model, and the other would be a different database.</p>
   <li><b>No nested objects.</b> A list is homogeneous and an object value is
     refused on purpose. A field you want to filter on should be a field.</li>
 </ul>
+</details>
 
 <h2>Fixed limits</h2>
 
@@ -76,6 +100,20 @@ right.</p>
 
 <h2>Memory and scale</h2>
 
+<p>The documents stay in the file and the indexes are held in memory, so a
+server's memory follows its indexes, not its data. The largest of them is
+usually the vectors.</p>
+
+<ul>
+  <li><b>A 1 GB file</b> of 2.3 million rows with two indexes holds 188 MB
+    mapped.</li>
+  <li><b>One million 768-dim vectors</b> take about 3 GB, 1.5 GB as
+    <code>f16</code>, 772 MB as int8 codes and 105 MB as bit codes.</li>
+  <li><b>Set <code>--max-memory</code> to a third</b> of the container's
+    memory.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><b>The documents stay in the file and the indexes are in memory.</b> The
 file is mapped (<a href="concepts.html#the-file-is-mapped">The file is
 mapped</a>), so a document is read from the pages the operating system holds
@@ -144,9 +182,24 @@ from "the database fits one machine" to "each tenant does" — a single tenant
 larger than a node is still out of reach. A single file has
 <a href="/docs/replication">read replicas</a>, but a tenant node does not yet,
 so a node that is down takes its tenants with it.</p>
+</details>
 
 <h2 id="index-build-open-and-maintenance">Index build, open and maintenance</h2>
 
+<p>Indexes are rebuilt or restored when a file opens, and the vector graph is
+saved to the file at checkpoints, never on each write. A crash or a skipped checkpoint costs
+time at the next open, never data.</p>
+
+<ul>
+  <li><b>A server answers while it relinks</b> vectors written since the last
+    checkpoint, and keeps its graphs in the file as they change.</li>
+  <li><b>A server builds an index or compacts beside the database,</b> so
+    reads and writes wait milliseconds, not the whole build.</li>
+  <li><b>Deleted or changed vectors stay in the graph</b> until
+    <code>compact</code>, slowing <code>near</code> a little.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>The graph is derived data and is written only during
     <code>snapshot</code>, <code>compact</code> and <code>checkpoint</code></b>
@@ -228,9 +281,24 @@ so a node that is down takes its tenants with it.</p>
     <code>sync</code> or <code>checkpoint</code>, the last writes can be lost.
     In embedded use calling <code>sync</code> is the caller's job.</li>
 </ul>
+</details>
 
 <h2>Query behaviour</h2>
 
+<p>Which filters use an index, what <code>order</code> and
+<code>near</code> cost, and the few ways a query behaves differently from
+what you might expect.</p>
+
+<ul>
+  <li><b>Only an <code>and</code> chain of equalities and ranges reaches an
+    index;</b> <code>!=</code>, <code>~</code> and anything under
+    <code>or</code> scan every row.</li>
+  <li><b><code>order</code> reads every match</b> unless it is over one
+    <code>@sorted</code> field with a <code>limit</code>.</li>
+  <li><b><code>put</code> does not check that a vector is finite.</b></li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b><code>near</code> over a <code>sparse&lt;N&gt;</code> field ranks
     only the documents sharing a dimension with the query</b>, by dot product
@@ -322,9 +390,20 @@ so a node that is down takes its tenants with it.</p>
     has no clock and the call errors. Pass the time as a parameter with
     <code>Date.now()</code>.</li>
 </ul>
+</details>
 
 <h2>fenec-pg</h2>
 
+<p>The PostgreSQL server speaks the protocol, but not every part of it, and
+it has no encryption of its own.</p>
+
+<ul>
+  <li><b>No TLS:</b> put a TLS terminator in front off the machine.</li>
+  <li><b>A transaction holds every other write</b> until it ends.</li>
+  <li><b>Too many connections are refused,</b> not queued.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>No TLS.</b> The password is protected by SCRAM but the data flows in
     the clear. Non-loopback plus unauthenticated listening is refused without
@@ -372,16 +451,32 @@ so a node that is down takes its tenants with it.</p>
     catalog</a>). It is only a catalog: a collection is still queried in
     FenecQL.</li>
 </ul>
+</details>
 
 <h2>fenec-http</h2>
 
+<p>The HTTP endpoint runs inside <code>fenec-pg</code> and keeps to a plain
+subset of HTTP.</p>
+
+<ul>
+  <li><b>No TLS.</b> Without a token it binds only to the local
+    machine.</li>
+  <li><b>Bodies up to 64 MiB,</b> no chunked uploads, and paging by
+    <code>limit</code> and <code>offset</code>.</li>
+  <li><b>Subscriptions are one-way</b> server-sent events, not
+    WebSockets.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>Not a separate process.</b> It opens as a second listener via
     <code>fenec-pg --http</code>; there is no standalone binary, because two
     processes opening the same file would corrupt it.</li>
   <li>No TLS. Without a token it will not bind a non-loopback address. The
-    token is a single shared secret: no user separation, no scopes, no
-    expiry.</li>
+    server's own token, <code>--http-token</code>, is a single shared secret
+    with full access; per-user access with scopes and expiry is a JSON Web
+    Token held to a policy (<a href="/docs/http#scoped-access">Scoped
+    access</a>).</li>
   <li><code>Transfer-Encoding: chunked</code> is unsupported (411). The body is
     capped at 64 MiB and the header block at 64 KiB; above that, 413 or
     431.</li>
@@ -416,9 +511,23 @@ so a node that is down takes its tenants with it.</p>
     batch — a <code>create</code>, a <code>drop</code> or a <code>create
     index</code> among its statements — lands whole or not at all.</li>
 </ul>
+</details>
 
 <h2>Import</h2>
 
+<p><code>fenec import</code> copies one table into one collection, from
+SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
+
+<ul>
+  <li><b>Checkpoint a SQLite file's WAL first;</b> one with an unprocessed
+    WAL is not read.</li>
+  <li><b>A vector with a NaN or an infinity stops the import</b> at that
+    row.</li>
+  <li><b><code>--follow</code> needs <code>wal_level = logical</code></b> and
+    an integer key.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li>One table becomes one collection. JOINs and multi-table migration are out
     of scope — there is no JOIN in fenecdb anyway.</li>
@@ -448,3 +557,4 @@ so a node that is down takes its tenants with it.</p>
   <li>A column added to the followed table after the copy is left out; one
     the collection needs that is dropped from it stops the follower.</li>
 </ul>
+</details>

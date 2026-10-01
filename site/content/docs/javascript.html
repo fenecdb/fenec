@@ -1,15 +1,17 @@
 <!--
 title: JavaScript client — fenecdb
-description: The browser client, the immutable query builder, transport binding, and TypeScript types generated from the live schema.
+description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, and type it from the live schema.
 -->
 
 <h1>JavaScript</h1>
-<p class="kicker"><code>web/fenec.js</code> is one dependency-free ES module:
-the WebAssembly glue, the query builder, the HTTP client and the sync layer.
-Copy two files — and the <code>collate/</code> directory beside the module,
-for text in a collation — and you are done.</p>
+<p class="kicker">One dependency-free ES module runs fenecdb in the page:
+open a database, query it, and keep it between visits.</p>
 
 <h2>Opening a database</h2>
+
+<p>Copy <code>fenec.js</code> and <code>fenec.wasm</code> next to your page,
+open the module, and run FenecQL or the query builder. <code>persist</code>
+keeps the database in IndexedDB and <code>restore</code> reads it back.</p>
 
 <pre data-lang="js">import { Fenec, persist, restore } from './fenec.js';
 
@@ -19,16 +21,37 @@ db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
 db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
 
 const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);
+const titles = await db.from('docs').select('title').limit(10).rows();   // the builder
 
 await persist(db);     // into IndexedDB: the image once, then only the writes since
 await restore(db);     // read it back
 </pre>
 
+<ul>
+  <li><b><code>db.run()</code> is synchronous;</b> the builder's endpoints
+    return promises.</li>
+  <li><b>Text in a collation</b> also needs the <code>collate/</code>
+    directory beside the module (<a href="#collation">below</a>).</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>web/fenec.js</code> is one dependency-free ES module: the
+WebAssembly glue, the query builder, the HTTP client and the sync layer.
+Copy two files — and the <code>collate/</code> directory beside the module,
+for text in a collation — and you are done.</p>
+
 <p><code>db.run()</code> is synchronous because raw FenecQL is a single wasm
 call. The builder's endpoints return promises, because a builder has to pick
 its transport first.</p>
+</details>
 
 <h2 id="keeping">Keeping a database</h2>
+
+<p>In a dedicated worker, <code>openFile</code> keeps the database in a file
+of the origin private file system — the same file <code>fenec-pg</code>
+keeps — and each write is flushed before <code>run</code> returns.
+<code>persist</code> and <code>restore</code> keep the same bytes in
+IndexedDB, and work anywhere a page runs.</p>
 
 <pre data-lang="js">// in a dedicated worker
 import { Fenec, openFile } from './fenec.js';
@@ -39,6 +62,16 @@ db.run('put notes {text: $1}', ['in the file before run returns']);
 const bytes = file.bytes();                        // what fenec and fenec-pg open
 </pre>
 
+<ul>
+  <li><b>The file is portable:</b> download it and <code>fenec
+    notes.fenec</code> opens it, and a server's file loads in a page.</li>
+  <li><b>One owner at a time:</b> a second worker or tab that opens the file
+    is refused.</li>
+  <li><b>A crash leaves a whole file:</b> the next <code>openFile</code> holds
+    every write <code>run</code> answered.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>openFile</code> keeps the database in a file of the origin private
 file system, byte for byte the file <code>fenec-pg</code> keeps on disk:
 download it and <code>fenec notes.fenec</code> opens it, and a server's file
@@ -79,8 +112,13 @@ flushed before every answer. Over 32.4 MB (61 000 rows with a
 <p>The file's row includes its statement, 0.03 ms in Chrome and 0.10 ms in
 Safari, its vector handed over as <code>f32</code>s, and its flush. Firefox
 was not measured.</p>
+</details>
 
-<h3 id="sealed">Sealed in IndexedDB</h3>
+<h2 id="sealed">Sealed in IndexedDB</h2>
+
+<p>Pass a WebCrypto AES-GCM key and <code>persist</code> encrypts what it
+stores; <code>restore</code> then needs the same key. Where the key comes
+from is up to the page — never keep it in IndexedDB beside the data.</p>
 
 <pre data-lang="js">// A key from a passphrase, never stored: the page asks for it again.
 const salt = new TextEncoder().encode('myapp:' + userId);
@@ -93,6 +131,7 @@ await persist(db, 'notes', { cryptoKey });   // the image and each chunk sealed
 await restore(db, 'notes', { cryptoKey });   // another key, or none, is refused
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>With a <code>cryptoKey</code> (AES-GCM, from WebCrypto) the image and
 every chunk are sealed before they reach IndexedDB, each with a random nonce
 and a tag over the key it is stored under and its place. A chunk moved,
@@ -108,8 +147,14 @@ Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file
 <code>fenec-pg</code> opens. The disk's own encryption covers it.</p>
+</details>
 
 <h2 id="collation">Collation data</h2>
+
+<p>Text ordered with <code>collate und</code> or <code>collate tr</code>
+needs each script's sorting data. The module carries Latin and fetches the
+rest from <code>collate/</code> beside it the first time a page needs
+them.</p>
 
 <pre data-lang="js">const db = await Fenec.open('./fenec.wasm');            // collate/ beside it
 db.run('create collection people (name text collate und @sorted)');
@@ -121,6 +166,14 @@ await db.collation('cyrillic', 'arabic');   // ahead of the first statement that
 await db.collation('all');                  // every script's: 145 KB, 67 KB gzip, 61 KB brotli
 </pre>
 
+<ul>
+  <li><b><code>db.query()</code> and the builder</b> fetch what is missing
+    and run the statement again.</li>
+  <li><b><code>db.run()</code></b> cannot wait, so it throws a
+    <code>FenecError</code> naming the chunks to load.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p><code>collate und</code> and <code>collate tr</code> need the weights of
 the scripts they compare (<a href="fenecql.html#collation">Collation</a>).
 The module carries the Latin ones and is handed the others as a page first
@@ -142,20 +195,18 @@ out of order without it — and the sync layer fetches what its seed, the
 changes it is sent and its optimistic writes need
 (<code>sync({ collation })</code> says where from). A chunk of another
 version's tables is refused: its ranks would mean something else.</p>
+</details>
 
 <h2 id="features">A smaller module</h2>
+
+<p>A page that does not use every index can load a module built without the
+rest. The release ships <code>fenec-lite.wasm</code>, built without any,
+beside <code>fenec.wasm</code>.</p>
 
 <pre data-lang="bash">make wasm                          # every index: 142 KB brotli
 make wasm FEATURES="text sorted"   # no vector or sparse search: 120 KB
 make wasm FEATURES=none            # none of the four: 107 KB
 </pre>
-
-<p>The module carries four indexes, and a page that uses fewer can load one
-built without the rest. The release's <code>fenec-web</code> bundle carries
-<code>fenec-lite.wasm</code>, built without any, beside
-<code>fenec.wasm</code>; another set is a <code>make wasm</code> away. What
-each set weighs is in <a
-href="benchmarks.html#module-features">Benchmarks</a>.</p>
 
 <div class="tbl">
 <table>
@@ -169,6 +220,14 @@ href="benchmarks.html#module-features">Benchmarks</a>.</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>The module carries four indexes, and a page that uses fewer can load one
+built without the rest. The release's <code>fenec-web</code> bundle carries
+<code>fenec-lite.wasm</code>, built without any, beside
+<code>fenec.wasm</code>; another set is a <code>make wasm</code> away. What
+each set weighs is in <a
+href="benchmarks.html#module-features">Benchmarks</a>.</p>
+
 <p>Everything else is in every build: documents, filters,
 <code>order</code>, aggregates, <code>lookup</code>, collations, the change
 feed, persistence and the sync layer.</p>
@@ -180,9 +239,32 @@ index</code> of its kind, throws a <code>FenecError</code> naming the
 feature. A module that has the index builds it when it loads what the
 other wrote, so a page can hand a store to the other module and take it
 back.</p>
+</details>
 
 <h2>The query builder</h2>
 
+<p>The builder writes FenecQL for you, with every value passed as a
+parameter. Each call returns a new query, so a base query can be shared and
+extended with optional filters.</p>
+
+<pre data-lang="js">const rows = await db.from('articles')
+  .select('title', 'year')
+  .where('year', '>=', 2024)
+  .where('tags', 'has', 'rust')
+  .near('embed', queryVector, { ef: 128 })
+  .limit(10)
+  .rows();
+</pre>
+
+<ul>
+  <li><b>Each <code>where</code> is <code>and</code>ed</b> with the ones
+    before it.</li>
+  <li><b>Queries are immutable,</b> so <code>if (year) q = q.where(...)</code>
+    branches safely.</li>
+  <li><b>No npm, no build step,</b> and no second schema definition.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>FenecQL reads well, but on the application side the job is still building a
 string — and every interface with conditional filters ends up here:</p>
 
@@ -194,15 +276,6 @@ if (year) q += ` and year >= ${year}`;    // quote escaping and $n by hand
 queries and type safety. The builder gives both, without npm, a build step, or
 a second schema definition.</p>
 
-<pre data-lang="js">const rows = await db.from('articles')
-  .select('title', 'year')
-  .where('year', '>=', 2024)
-  .where('tags', 'has', 'rust')
-  .near('embed', queryVector, { ef: 128 })
-  .limit(10)
-  .rows();
-</pre>
-
 <p>Every <code>where</code> is <code>and</code>ed with the previous one, and the
 query object is <b>immutable</b> — so a body can be shared and branched:</p>
 
@@ -211,11 +284,12 @@ if (year) q = q.where('year', '>=', year);
 if (tag)  q = q.where('tags', 'has', tag);
 const rows = await q.limit(20).rows();
 </pre>
+</details>
 
-<h3>Filters</h3>
+<h2>Filters</h2>
 
-<p>Three spellings compile to the same thing. Use whichever reads better at the
-call site.</p>
+<p>A filter can be written three ways, which all build the same query. The
+table lists everything else a query can carry.</p>
 
 <pre data-lang="js">.where('year', '>=', 2024)                   // field, operator, value
 .where('category', 'book')                   // two arguments means equality
@@ -238,6 +312,9 @@ call site.</p>
 </tbody>
 </table>
 </div>
+
+<details class="deep"><summary>Details: lookup, or, not and raw</summary>
+<p>Use whichever spelling reads better at the call site.</p>
 
 <p><code>lookup</code> hangs another collection's matching documents off each
 row. Everything in its options object binds to that collection, so
@@ -292,20 +369,29 @@ explicitly and the parenthesising is left to the builder:</p>
 <p><code>raw</code> covers what the builder cannot express, which in practice
 today means function calls. Its <code>?</code> placeholders bind to parameters
 in order, so the escape hatch does not become string concatenation either.</p>
+</details>
 
-<h3>Seeing what it produces</h3>
+<h2>Seeing what it produces</h2>
 
-<p>Nothing is hidden. <code>toFenecQL()</code> returns exactly the text and
-parameters that will run — loggable, testable, runnable by hand.</p>
+<p><code>toFenecQL()</code> returns exactly the text and parameters that will
+run, so you can log it, test it or run it by hand.</p>
 
 <pre data-lang="js">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
 // ['get articles where year >= $1 limit 10', [2024]]
 </pre>
 
-<p>Every leaf value is bound to a parameter and text is never embedded into the
-query, which leaves a single injection boundary: <b>names</b>. Collection and
-field names cannot be parameterised, so they are validated against FenecQL's
-identifier rule and anything that does not fit errors out.</p>
+<ul>
+  <li><b>Values are always parameters,</b> never pasted into the text.</li>
+  <li><b>Collection and field names</b> are checked against FenecQL's
+    identifier rule; anything else throws.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Nothing is hidden. Every leaf value is bound to a parameter and text is
+never embedded into the query, which leaves a single injection boundary:
+<b>names</b>. Collection and field names cannot be parameterised, so they are
+validated against FenecQL's identifier rule and anything that does not fit
+errors out.</p>
 
 <pre data-lang="js">db.from('articles').where('title', '"; del articles; --')
 // get articles where title = $1     ← a value, not text
@@ -317,12 +403,13 @@ the module as its <code>f32</code>s beside the JSON rather than as text:
 200 768-dim vectors are put in 4.4 ms, against 21.9 written out as digits
 and read back. The vector stored is the same, <code>-0</code> as
 <code>0</code> as JSON writes it; over HTTP a parameter is JSON.</p>
+</details>
 
-<h3>Independent of the transport</h3>
+<h2>Independent of the transport</h2>
 
-<p><code>from()</code> builds a query on its own and <code>bind()</code> plugs
-it into an executor, so the same query code runs unchanged against wasm, a
-<code>fenec-pg</code> server, or an HTTP endpoint.</p>
+<p>The same query code runs against the module in the page, a
+<code>fenec-pg</code> server or an HTTP endpoint: build it with
+<code>from()</code>, then <code>bind()</code> it to where it should run.</p>
 
 <pre data-lang="js">import { from, connect } from './fenec.js';
 
@@ -333,14 +420,17 @@ await q.bind(connect('http://localhost:8080')).rows();  // remote server
 q.toFenecQL();                                          // or just the text
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p><code>connect()</code> returns the same builder; the FenecQL it produces
 goes to <code>POST /query</code> as is. See <a href="http.html">HTTP
 endpoint</a>.</p>
+</details>
 
 <h2>TypeScript</h2>
 
-<p>The schema is not written a second time — it is generated from the live
-file, so the two cannot drift apart.</p>
+<p>Generate types from your database file, and queries are checked against
+its real schema: unknown fields, wrong value types and unselected fields are
+compile errors.</p>
 
 <pre data-lang="bash">fenec types data.fenec > web/fenec-schema.d.ts     # or: make types FILE=data.fenec
 </pre>
@@ -353,6 +443,10 @@ const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
 const rows = await db.from('articles').select('title', 'year').rows();
 //    rows: { title: string; year: number | null }[]
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The schema is not written a second time — it is generated from the live
+file, so the two cannot drift apart.</p>
 
 <div class="tbl">
 <table>
@@ -390,8 +484,12 @@ from('articles').where('year', '>=', 2024);   // completes like db.from
 and <code>fenec-schema.d.ts</code> is generated. There is no link between them:
 the <code>Timestamp</code>, <code>Vector</code> and <code>Bytes</code> brands
 are structural, so the generated file stands alone and imports nothing.</p>
+</details>
 
 <h2>What the builder will not do</h2>
+
+<p>The builder adds nothing FenecQL lacks, and refuses a few things that are
+easy to get wrong.</p>
 
 <ul>
   <li><b>No aggregate FenecQL lacks.</b> Aggregates go in
@@ -413,6 +511,8 @@ are structural, so the generated file stands alone and imports nothing.</p>
     <code>.lookup(name, opts)</code> builds it like any other clause.</li>
 </ul>
 
+<details class="deep"><summary>Details: the tests</summary>
 <p>The tests run with <code>node --test web/fenec.test.js</code> and are part
 of <code>make test</code>. When <code>web/fenec.wasm</code> is present, an
 end-to-end test that actually parses the generated text runs too.</p>
+</details>

@@ -1,16 +1,23 @@
 <!--
 title: Services and events — fenecdb
-description: A database per service, a token per service, and every write on disk as an event: the change stream in place of an outbox, its consumers, handing it on to Kafka, delivery at least once, and starting over after falling behind.
+description: Give each service its own database and token, and follow its writes as a stream of events in place of an outbox table.
 -->
 
 <h1>Services and events</h1>
-<p class="kicker">Each service keeps its own data and tells the others what
-changed. fenecdb gives a service a database of its own on a shared node,
-a token that reaches only that, and the writes on its disk as a stream of
-events — which is what an outbox table and a relay are usually built
-for.</p>
+<p class="kicker">Give each service a database of its own, and let other
+services follow its writes as events.</p>
 
 <h2>A database per service</h2>
+
+<p>Run one tenant node and give each service its own tenant: a separate file
+that no other service can read. A token then decides which collections and
+rows each caller may touch.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Each service keeps its own data and tells the others what changed.
+fenecdb gives a service a database of its own on a shared node, a token that
+reaches only that, and the writes on its disk as a stream of events — which
+is what an outbox table and a relay are usually built for.</p>
 
 <p>A tenant node (<code>fenec-pg --dir</code>) keeps a file per tenant, and
 a tenant is named by the path, <code>/t/&lt;tenant&gt;/</code>, or over the
@@ -28,9 +35,21 @@ PostgreSQL wire as the reader, which writes nothing
 (<a href="/docs/postgres#authentication">Authentication</a>); a PostgreSQL driver that
 knows <code>target_session_attrs=read-write</code> finds the primary among
 several hosts by itself.</p>
+</details>
 
 <h2>Every write as an event</h2>
 
+<p>Turn on <code>--cdc</code> and every write that reaches disk becomes an
+event a consumer can read. You do not need an outbox table: a transaction's
+rows are announced together.</p>
+
+<pre data-lang="bash">fenec-pg --file orders.fenec --http 127.0.0.1:8080 --cdc
+
+# a consumer the server keeps the cursor of, made once
+curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
+</pre>
+
+<details class="deep"><summary>Details</summary>
 <p>An outbox table exists because a service must change its data and
 announce the change together, or not at all. A fenecdb transaction, a
 <code>/batch</code> or a pipeline is one record on disk, so the rows it
@@ -41,11 +60,7 @@ its own outbox. Where the event should say something the rows do not —
 a command, an intent — write it into a collection of its own in the same
 transaction, and it comes in the same record.</p>
 
-<pre data-lang="bash">fenec-pg --file orders.fenec --http 127.0.0.1:8080 --cdc
-
-# a consumer the server keeps the cursor of, made once
-curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
-</pre>
+<p>A consumer in Python:</p>
 
 <pre data-lang="python">from fenecdb import Client
 
@@ -55,23 +70,35 @@ for batch in db.follow("billing"):        # committed when the loop comes back
         if change["collection"] == "orders" and change["op"] == "put":
             bill(change["doc"])           # an exception: the batch is read again
 </pre>
+</details>
 
 <h2>On to Kafka, or anywhere</h2>
 
-<p><code>python -m fenecdb.relay</code> reads a consumer's writes and hands
-them on — to standard output, one JSON object a line, or to a webhook —
-and moves the cursor only once they are out. Kafka takes them through any
-tool that writes lines to a topic:</p>
+<p>The relay passes a consumer's events on, as JSON lines or to a webhook.
+Pipe the lines into Kafka with any tool that writes to a topic.</p>
 
 <pre data-lang="bash">python -m fenecdb.relay http://127.0.0.1:8080 --consumer kafka \
   | kcat -P -b broker:9092 -t orders
+</pre>
 
-python -m fenecdb.relay http://127.0.0.1:8080 --consumer search \
+<details class="deep"><summary>Details</summary>
+<p><code>python -m fenecdb.relay</code> reads a consumer's writes and hands
+them on — to standard output, one JSON object a line, or to a webhook —
+and moves the cursor only once they are out. Kafka takes them through any
+tool that writes lines to a topic, as above; a webhook:</p>
+
+<pre data-lang="bash">python -m fenecdb.relay http://127.0.0.1:8080 --consumer search \
   --to https://indexer.internal/hook
 </pre>
+</details>
 
 <h2>Delivery and replay</h2>
 
+<p>Each event arrives at least once, in order within one database. Make your
+handler safe to run twice; a consumer that falls too far behind starts over
+from a fresh read.</p>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>At least once.</b> A consumer that crashes between reading and
   committing reads those writes again. Key what you do by
@@ -101,11 +128,17 @@ python -m fenecdb.relay http://127.0.0.1:8080 --consumer search \
   answered as before rather than made twice
   (<a href="/docs/http#idempotency">Retrying a write</a>).</li>
 </ul>
+</details>
 
 <h2>What it is not</h2>
 
+<p>It is not a message broker. To keep events for a long time or share them
+with many teams, relay them into one.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>A consumer reads one database's writes; there are no topics,
 partitions or retention of their own, and a server keeps its writes in
 memory up to the buffer. For fan-out to many teams, a long history or
 events that outlive the database, relay them into a broker and let it
 keep them.</p>
+</details>

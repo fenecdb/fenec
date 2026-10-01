@@ -87,7 +87,8 @@ NAV = [
 KEYWORDS = {
     "fenecql": """create drop collection index if not exists get put set del select
         from where near order limit offset count ef exact asc desc and or in has is
-        null true false collections describe compact begin commit on""".split(),
+        null true false collections describe compact begin commit on match fuse
+        lookup group insert set del rerank""".split(),
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),
@@ -313,15 +314,19 @@ def prev_next(active, base):
 NOISE_KB = 0.3
 COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all"}
 CLAIMS = [
-    ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB wasm", "kb", 0),
+    ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB gzip wasm", "kb_gz", 0),
+    ("README.md", r"gzip wasm \+ (\d+) KB gzip client", "kb_client_gz", 0),
     ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
-    ("README.md", r"(\d+) KB of WebAssembly —", "kb", 0),
-    ("site/content/index.html", r"compiles to (\d+) KB of WebAssembly", "kb", 0),
-    ("site/content/index.html", r"(\d+) KB of WebAssembly with no", "kb", 0),
-    ("site/content/index.html", r"WebAssembly output is (\d+) KB", "kb", 0),
-    ("site/content/playground.html", r"the same (\d+) KB WebAssembly module", "kb", 0),
-    ("site/content/docs/index.html", r"(\d+) KB wasm", "kb", 0),
-    ("site/content/docs/index.html", r"(\d+) KB brotli, with the client", "kb_br_all", 0),
+    ("README.md", r"(\d+) KB of gzipped WebAssembly and", "kb_gz", 0),
+    ("README.md", r"as (\d+) KB of\s+gzipped WebAssembly", "kb_gz", 0),
+    ("README.md", r"and a (\d+) KB gzipped client", "kb_client_gz", 0),
+    # The site quotes what a visitor downloads: the module gzipped.
+    ("site/content/index.html", r"compiles to (\d+) KB of gzipped WebAssembly", "kb_gz", 0),
+    ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),
+    ("site/content/playground.html", r"\((\d+) KB\s+gzipped\)", "kb_gz", 0),
+    ("site/content/docs/index.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
+    ("site/motion.js", r"(\d+) KB of gzipped WebAssembly\. No server", "kb_gz", 0),
+    ("site/motion.js", r"'(\d+) KB gzipped'", "kb_gz", 0),
     ("site/content/docs/benchmarks.html",
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
     ("site/content/docs/benchmarks.html",
@@ -337,7 +342,6 @@ CLAIMS = [
      "kb_client_br", 0),
     ("site/content/docs/benchmarks.html",
      r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
-    ("README.md", r"(\d+) KB brotli \(`-q 11`\) over the wire", "kb_br_all", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
@@ -570,6 +574,17 @@ def llms_texts():
     return "".join(index), "".join(full)
 
 
+# The fennec, written out of `fennec.js` by `node site/fennec.js`. Inlined,
+# so the header draws it with the first paint rather than after a request.
+def _mark(name, cls):
+    body = open(os.path.join(ROOT, name), encoding="utf-8").read().strip()
+    return body.replace("<svg ", f'<svg class="{cls}" ', 1)
+
+
+MARK = _mark("mark-detail.svg", "mark")
+MARK_DETAIL = _mark("mark-detail.svg", "mark mark-detail")
+
+
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -646,9 +661,21 @@ def build():
                                 f"Fenec.open('./{engine['fenec.wasm']}'{collation})")
     worker_name = emit("engine-worker.js", worker)
 
+    # The mark's table, then the hero scene that imports it, then the page
+    # script that imports the scene: each named by its hash, inside out.
+    mark_js = emit("fennec.js", open(os.path.join(ROOT, "fennec.js"), encoding="utf-8").read())
+    scene = open(os.path.join(ROOT, "scene.js"), encoding="utf-8").read()
+    scene_js = emit("scene.js", scene.replace("'./fennec.js'", f"'./{mark_js}'"))
+    motion = open(os.path.join(ROOT, "motion.js"), encoding="utf-8").read()
+    motion_js = emit("motion.js", motion.replace("'./fennec.js'", f"'./{mark_js}'"))
+
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("./engine-worker.js", "./" + worker_name)
+    script = script.replace("'./scene.js'", f"'./{scene_js}'")
+    script = script.replace("'./motion.js'", f"'./{motion_js}'")
     emit("site.js", script)
+
+    shutil.copy(os.path.join(ROOT, "mark.svg"), os.path.join(OUT, "favicon.svg"))
 
     emit("styles.css", open(os.path.join(ROOT, "styles.css"), encoding="utf-8").read())
 
@@ -693,6 +720,7 @@ def build():
         else:
             shell = f'<main id="content">{body}</main>'
         page = page.replace("{{content}}", shell)
+        page = page.replace("{{mark}}", MARK).replace("{{mark_detail}}", MARK_DETAIL)
 
         for plain, hashed in assets.items():
             page = page.replace(plain, hashed)
