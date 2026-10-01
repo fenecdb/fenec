@@ -1100,7 +1100,14 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 
 /* Under the docs' dune band the page starts in the band's last colour and
    fades into the night, so the band's foot leaves no edge. */
-.docs .shell { background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 360px); }
+/* Drawn the width of the window, not of the shell: held to the shell's
+   1 400 px, its edges showed as a box on a wide screen. */
+.docs .shell { position: relative; }
+.docs .shell::before {
+  content: ""; position: absolute; top: 0; left: 50%; width: 100vw; height: 360px;
+  transform: translateX(-50%); z-index: -1; pointer-events: none;
+  background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 100%);
+}
 
 /* The claim in two lines on a wide screen: the text column takes more of
    the row and the type steps down a little, so "that fits in a browser
@@ -1108,3 +1115,14 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 .hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
 .has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
 @media (max-width: 940px) { .hero-say br.wide { display: none; } }
+
+/* The home page's first screen holds the four ways in: the hero stops a
+   card's height short of the window (header 66 px, cards about 190), so
+   they are on screen and clickable without a scroll. The dune band shrinks
+   with it. */
+.home .hero:not(.lost) {
+  --fold: clamp(520px, calc(100svh - 66px - 200px), 820px);
+  --dune-h: clamp(150px, 22svh, 260px);
+  padding-bottom: clamp(110px, 13vw, 190px);
+}
+@media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }

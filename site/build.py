@@ -701,7 +701,12 @@ def build():
         page = page.replace("{{description}}", html.escape(meta.get("description", "")))
         page = page.replace("{{base}}", base)
         page = page.replace("{{repo}}", REPO_URL)
-        page = page.replace("{{nav_docs}}", ' aria-current="page"' if is_docs else "")
+        # One header link is current: Benchmarks for its page, Docs for the
+        # rest of the docs, Playground for its own.
+        here = ' aria-current="page"'
+        page = page.replace("{{nav_bench}}", here if key == "docs/benchmarks" else "")
+        page = page.replace("{{nav_docs}}", here if is_docs and key != "docs/benchmarks" else "")
+        page = page.replace("{{nav_playground}}", here if key == "playground" else "")
         if is_docs:
             # The dune field carries over the top of every docs page, so the
             # reference does not read as a different site from the front door.
