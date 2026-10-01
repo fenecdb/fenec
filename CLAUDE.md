@@ -26,7 +26,7 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
-make drivers-test  # psycopg, asyncpg, SQLAlchemy (Docker), pgx, node-postgres, Npgsql, tokio-postgres over the pg wire, pgvector's library for each
+make drivers-test  # psycopg, asyncpg, SQLAlchemy (Docker), pgx, node-postgres, Npgsql, tokio-postgres, JDBC, PDO, Ruby pg over the pg wire, pgvector's library for each
 make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)

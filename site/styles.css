@@ -1126,3 +1126,16 @@ html { scrollbar-color: var(--rule-hot) transparent; }
   padding-bottom: clamp(110px, 13vw, 190px);
 }
 @media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }
+
+/* The header is one surface on every page: opaque, the night's own colour,
+   with the rule under it. Half see-through, it showed whatever scrolled
+   beneath -- the docs' dune band, the playground's glow -- a different
+   header on each page, cut at its edge. */
+.top {
+  background: rgba(7,10,24,.96);
+  backdrop-filter: none;
+}
+/* The sidebar scrolls up and down only: a long name wraps rather than
+   push a horizontal scrollbar under it. */
+.side { overflow-x: hidden; }
+.side a { overflow-wrap: anywhere; }
