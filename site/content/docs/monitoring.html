@@ -1,14 +1,17 @@
 <!--
 title: Monitoring — fenecdb
-description: /_metrics in Prometheus's text format, a Grafana dashboard ready to load, and a log of the statements over --slow-ms.
+description: Prometheus metrics at /_metrics, a ready Grafana dashboard, a slow-statement log, per-statement counts and an audit log.
 -->
 
 <h1>Monitoring</h1>
-<p class="kicker">fenec-pg counts every statement it answers — over PostgreSQL
-and over HTTP, reads and writes apart, with how long each took — and serves
-the counts at <code>/_metrics</code> in Prometheus's text format. A Grafana
-dashboard comes with it, and <code>--slow-ms</code> logs every statement over
-a threshold with its text.</p>
+<p class="kicker">fenec-pg counts every statement it answers and serves the
+counts to Prometheus, with a Grafana dashboard ready to load.</p>
+
+<h2>Turn it on</h2>
+
+<p>Give <code>--metrics</code> an address and a token, and point Prometheus at
+<code>/_metrics</code> there. Counts cover PostgreSQL and HTTP, reads and
+writes apart, with how long each took.</p>
 
 <pre data-lang="bash"># data over PostgreSQL alone: /_metrics on a listener of its own
 fenec-pg --file data.fenec --listen 0.0.0.0:5433 \
@@ -21,6 +24,14 @@ curl -H "Authorization: Bearer $SCRAPE" http://127.0.0.1:9464/_metrics
 # ...
 </pre>
 
+<ul>
+  <li><b>With <code>--http</code></b>, the HTTP listener serves
+    <code>/_metrics</code> too.</li>
+  <li><b>A scrape needs a token:</b> the server's (<code>--http-token</code>)
+    or the admin one (<code>--admin-token</code>).</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>With <code>--http</code> the HTTP listener serves <code>/_metrics</code>
 as well, and a <code>--dir</code> node serves it there. The path carries an
 underscore, as <code>/_admin</code> and <code>/_replication</code> do: a
@@ -34,15 +45,13 @@ server is open, and so are its metrics. A JWT is not taken: a user held to a
 policy must not learn the other collections' names from a scrape. A
 <code>--metrics</code> address outside loopback wants one of the two tokens,
 as the HTTP listener does, or <code>--insecure</code>.</p>
+</details>
 
 <h2>What is counted</h2>
 
-<p>A statement is timed from its arrival to its answer: the wait for the lock
-is in it, and under <code>--sync always</code> the wait for the disk, since
-that is the latency a client sees. Over PostgreSQL a statement is a query
-string; over HTTP it is a request, and <code>/batch</code> is one however
-many statements it carries. A statement that took the write lock is a write,
-so a <code>get</code> sent through <code>POST /query</code> is a read.</p>
+<p>Each statement is counted as a read or a write, by transport, with its
+latency as the client saw it. Collections, memory, replication and tenants
+are reported as gauges.</p>
 
 <div class="tbl">
 <table>
@@ -69,22 +78,35 @@ so a <code>get</code> sent through <code>POST /query</code> is a read.</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>A statement is timed from its arrival to its answer: the wait for the lock
+is in it, and under <code>--sync always</code> the wait for the disk, since
+that is the latency a client sees. Over PostgreSQL a statement is a query
+string; over HTTP it is a request, and <code>/batch</code> is one however
+many statements it carries. A statement that took the write lock is a write,
+so a <code>get</code> sent through <code>POST /query</code> is a read.</p>
+
 <p>A tenant node counts its tenants and not what they hold: a tenant's
 collection names are not the node's to publish, and a label per tenant would
 be as many series as there are customers. The statement counters are one set
 per process, and start again at zero with it, which <code>rate()</code> takes
 in its stride.</p>
+</details>
 
 <h2>The dashboard</h2>
 
-<p><code>monitoring/</code> in the repository holds a Grafana dashboard
-(<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
-file that runs fenec-pg with both, the dashboard already loaded:</p>
+<p>The repository's <code>monitoring/</code> folder runs fenec-pg with
+Prometheus and Grafana, the dashboard already loaded.</p>
 
 <pre data-lang="bash">FENECPG_PASSWORD=secret FENEC_METRICS_TOKEN=scrape \
   docker compose -f monitoring/docker-compose.yml up -d
 # Grafana: http://127.0.0.1:3000/d/fenecdb     Prometheus: http://127.0.0.1:9090
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>monitoring/</code> in the repository holds a Grafana dashboard
+(<code>grafana/fenecdb.json</code>), a Prometheus configuration and a compose
+file that runs fenec-pg with both, the dashboard already loaded.</p>
 
 <p>It opens on the figures that decide whether anything needs doing — the
 version and uptime, whether the disk has refused a write, statements and
@@ -93,8 +115,8 @@ kind with their p50 and p99, errors, and slow statements a minute; documents,
 writes a second and each collection's dead share, the one that says when to
 <code>compact</code>; replication; tenants; and a router's requests, its
 latency beside its nodes', the nodes it could not reach, the tenants on each
-node and its moves. The instance variable picks one server or all of them. Imported on its own, the dashboard asks for a
-Prometheus data source.</p>
+node and its moves. The instance variable picks one server or all of them.
+Imported on its own, the dashboard asks for a Prometheus data source.</p>
 
 <pre data-lang="text"># the p99 of reads over PostgreSQL, over five minutes
 histogram_quantile(0.99, sum by (le) (rate(fenec_statement_duration_seconds_bucket{transport="pg",kind="read"}[5m])))
@@ -104,15 +126,18 @@ fenec_storage_failed == 1
 fenec_replica_behind > 10000
 fenec_dead_bytes / (fenec_data_bytes + fenec_dead_bytes) > 0.5
 </pre>
+</details>
 
 <h2>Slow statements</h2>
 
-<p><code>--slow-ms 100</code> writes every statement that took 100 ms or
-longer to the log, pg and HTTP alike, with the same timing the histogram
-has:</p>
+<p><code>--slow-ms 100</code> logs every statement that took 100 ms or
+longer, over PostgreSQL and HTTP alike.</p>
 
 <pre data-lang="text">slow statement: 312.4 ms, pg read: get people select name order name collate tr
 slow statement: 148.9 ms, http write: POST /batch {"query":"put orders {person: 7, total: 4200}"} {"query":...</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The log line uses the same timing the histogram has.</p>
 
 <p>A parameter's value is not logged, only how many there were: a value bound
 as <code>$1</code> stays out of the log, a literal written into the text does
@@ -120,14 +145,20 @@ not. Over HTTP the line is the method and the target, and for
 <code>/query</code> and <code>/batch</code> the body that holds the
 statements. A line is cut at 1 000 bytes, so a bulk <code>put</code> of a
 megabyte shows what it was without being all of it.</p>
+</details>
 
 <h2 id="statements">What each statement cost</h2>
+
+<p>Statements are also grouped by shape — the same text with other values is
+one line — with call counts, times, rows and failures. Read them over HTTP or
+as PostgreSQL's <code>pg_stat_statements</code>.</p>
 
 <pre data-lang="bash">curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/_stats/statements
 psql -c "select query, calls, mean_exec_time, rows from pg_stat_statements order by total_exec_time desc limit 10"
 curl -X DELETE -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/_stats/statements
 </pre>
 
+<details class="deep"><summary>Details</summary>
 <p>Every statement is also counted by its shape — its text with each literal
 and parameter written <code>$1</code>, <code>$2</code>… and a list of literals
 alone, a vector's components, as one — so the same statement run with other
@@ -146,12 +177,25 @@ data without a JWT's scope, or the admin token: a shape names every
 collection. A tenant node keeps each tenant's apart —
 <code>/t/&lt;tenant&gt;/_stats/statements</code> and its own connection's
 view — and lists every tenant's, named, to its admin alone.</p>
+</details>
 
 <h2 id="audit">The audit log</h2>
+
+<p><code>--audit &lt;path&gt;</code> appends a JSON line for every login,
+refused request, schema change and admin action. Ordinary reads and writes are
+not logged.</p>
 
 <pre data-lang="bash">fenec-pg --file data.fenec --password-file pw --http 0.0.0.0:8080 \
          --http-token "$TOKEN" --audit /var/log/fenec/audit.log</pre>
 
+<ul>
+  <li><b>Failed logins are slowed down,</b> from 100 ms doubling to 5 s per
+    address (<code>--auth-delay</code>).</li>
+  <li><b>No literal reaches the log:</b> a schema change is logged by its
+    shape.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <pre data-lang="json">{"at":"2026-10-01T09:30:12.041Z","event":"login","proto":"pg","peer":"10.0.0.7:53112","user":"app","database":"fenec","reader":false}
 {"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"pg","peer":"10.0.0.7:53112","user":"app","statement":"create collection notes (title text)","failed":false}
 {"at":"2026-10-01T09:31:40.902Z","event":"login_failed","proto":"pg","peer":"198.51.100.4:40022","as":"postgres","database":"fenec","reason":"password verification failed"}
@@ -191,8 +235,13 @@ request with a good token or password waits for nothing, and clears its
 address's count. Behind a reverse proxy every client has the proxy's
 address, so the proxy's own rate limit is the one that counts there.
 <code>--auth-delay 0</code> turns the wait off.</p>
+</details>
 
 <h2 id="router">The router</h2>
+
+<p><code>fenec-shard</code> serves its own <code>/_metrics</code>, behind its
+<code>--token</code>: requests, the time its nodes took, failed nodes and
+tenant moves. No label names a tenant.</p>
 
 <pre data-lang="bash">curl -H "Authorization: Bearer $SHARD_TOKEN" http://127.0.0.1:8090/_metrics
 # fenec_router_requests_total{route="tenant",code="2xx"} 48120
@@ -200,14 +249,6 @@ address, so the proxy's own rate limit is the one that counts there.
 # fenec_router_upstream_errors_total{node="n2"} 3
 # ...
 </pre>
-
-<p><code>fenec-shard</code> serves <code>/_metrics</code> on its own listener,
-behind its <code>--token</code> as <code>/_shard/</code> is: a scrape names the
-nodes. It counts what it answered and what the nodes took over it; what a
-tenant's statements did is its node's to count, and no label names a tenant.
-A request is timed from its arrival to its answer, the node's time included —
-a subscription to its head, since the stream lasts as long as its client
-stays; a standby router's replication stream is counted and not timed.</p>
 
 <div class="tbl">
 <table>
@@ -231,6 +272,15 @@ stays; a standby router's replication stream is counted and not timed.</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p><code>fenec-shard</code> serves <code>/_metrics</code> on its own listener,
+behind its <code>--token</code> as <code>/_shard/</code> is: a scrape names the
+nodes. It counts what it answered and what the nodes took over it; what a
+tenant's statements did is its node's to count, and no label names a tenant.
+A request is timed from its arrival to its answer, the node's time included —
+a subscription to its head, since the stream lasts as long as its client
+stays; a standby router's replication stream is counted and not timed.</p>
+
 <pre data-lang="text"># what the router adds, at the median, over five minutes
 histogram_quantile(0.5, sum by (le) (rate(fenec_router_request_duration_seconds_bucket{route="tenant"}[5m])))
   - histogram_quantile(0.5, sum by (le) (rate(fenec_router_upstream_duration_seconds_bucket[5m])))
@@ -241,9 +291,14 @@ fenec_router_tenants_moving > 0
 increase(fenec_router_auto_failovers_total[5m]) > 0
 fenec_router_node_failed_over > 0
 </pre>
+</details>
 
 <h2>What it costs</h2>
 
+<p>Counting is close to free: a few nanoseconds a statement, and counting
+one by its shape takes a fraction of the time parsing it does.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Counting a statement is a handful of relaxed atomic adds, into counters a
 thread each: 6.7 ns a statement with eight threads counting at once. Into one
 shared set of counters the same eight cost 720 ns each, the cache line moving
@@ -262,3 +317,4 @@ parsing it takes. It grows with the text: 5.6 µs for a <code>near</code> with
 1 000 bytes kept of it, so two statements alike that far are one line: shaped
 whole, a <code>put</code> of 1 000 rows of 128-dim vectors spent 1.7 ms of
 its 12.6 there.</p>
+</details>

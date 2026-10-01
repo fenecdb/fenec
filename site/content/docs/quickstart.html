@@ -1,23 +1,25 @@
 <!--
 title: Quickstart — fenecdb
-description: Build fenecdb, open a file, create a collection with a vector index, and run your first near query — in the shell, in the browser, or against a server.
+description: Build fenecdb and run your first vector query — in the browser, against a server, or in the shell.
 -->
 
 <h1>Quickstart</h1>
-<p class="kicker">From a clone to a vector query. Pick the surface you actually
-want: a shell, a browser page, or a server.</p>
+<p class="kicker">Go from a fresh clone to your first vector query, in the
+browser or on a server.</p>
 
 <h2>Build</h2>
 
+<ol class="steps-doc">
+  <li>
+    <p>Clone the repository.</p>
 <pre data-lang="bash">git clone https://github.com/fenecdb/fenec
-cd fenec
-make test      # 705 Rust tests, 103 JS tests
-</pre>
-
-<p>That produces <code>target/release/fenec</code> (the shell) and
-<code>target/release/fenec-pg</code> (the server). The Rust suite runs first on
-purpose: <code>cargo test</code> builds <code>fenec-pg</code>, and the JS sync
-tests run against that binary.</p>
+cd fenec</pre>
+  </li>
+  <li>
+    <p>Build and run the tests.</p>
+<pre data-lang="bash">make test      # 705 Rust tests, 103 JS tests</pre>
+  </li>
+</ol>
 
 <div class="note">
   <p><b>The wasm32 target comes from rustup.</b> Homebrew's <code>cargo</code>
@@ -26,51 +28,44 @@ tests run against that binary.</p>
   <code>rustup target add wasm32-unknown-unknown</code> first.</p>
 </div>
 
-<h2>In the shell</h2>
-
-<pre data-lang="bash">./target/release/fenec data.fenec              # interactive
-./target/release/fenec data.fenec -c 'get docs limit 5'
-echo 'get docs' | ./target/release/fenec data.fenec
-</pre>
-
-<p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
-<code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
-<code>.quit</code>.</p>
-
-<p>A first collection, a bulk load, then the index — that order matters, and
-the reason is in <a href="concepts.html#bulk-load-first-index-after">How it
-works</a>.</p>
-
-<pre data-lang="fenecql">create collection notes (
-  body   text,
-  topic  int @hash,
-  posted timestamp,
-  embed  vector&lt;384&gt;
-)
-
-put notes {body: "hnsw is a navigable small world graph", topic: 3, embed: $1}
-put notes [ ... 100 000 more ... ]
-
-create index on notes (embed) @hnsw(cosine)
-
-get notes select body
-  where topic = 3
-  near embed $1
-  limit 10
-</pre>
-
-<p>When a file with a vector index is closed from an interactive or piped
-session, a checkpoint is written so the graph is not rebuilt on the next open.
-A one-shot <code>-c</code> call does not write one.</p>
+<details class="deep"><summary>Details</summary>
+<p>That produces <code>target/release/fenec</code> (the shell) and
+<code>target/release/fenec-pg</code> (the server). The Rust suite runs first on
+purpose: <code>cargo test</code> builds <code>fenec-pg</code>, and the JS sync
+tests run against that binary.</p>
+</details>
 
 <h2>In the browser</h2>
 
-<pre data-lang="bash">make serve                    # builds the wasm, serves http://localhost:8787
-make serve PORT=3000
-</pre>
+<ol class="steps-doc">
+  <li>
+    <p>Build the module and open the console at <code>http://localhost:8787</code>.</p>
+<pre data-lang="bash">make serve                    # or: make serve PORT=3000</pre>
+  </li>
+  <li>
+    <p>For your own page, take the two files it needs.</p>
+<pre data-lang="bash">cp web/fenec.js web/fenec.wasm my-page/</pre>
+  </li>
+  <li>
+    <p>Open a database, write a row, and search.</p>
+<pre data-lang="js" data-label="index.html">import { Fenec } from './fenec.js';
 
-<p><code>web/index.html</code> is a full console: a FenecQL editor, a sample
-data generator, live statistics and IndexedDB persistence.</p>
+const db = await Fenec.open('./fenec.wasm');
+db.run('create collection docs (title text, embed vector<384> @hnsw(cosine))');
+db.run('put docs {title: $1, embed: $2}', ['hello', embedding]);
+const { rows } = db.run('get docs near embed $1 limit 5', [queryVector]);</pre>
+  </li>
+  <li>
+    <p>Serve the page over HTTP — it does not open from <code>file://</code>.</p>
+<pre data-lang="bash">python3 -m http.server</pre>
+  </li>
+</ol>
+
+<details class="deep"><summary>Details</summary>
+<p><code>make serve</code> builds the wasm and serves
+<code>http://localhost:8787</code>. <code>web/index.html</code> is a full
+console: a FenecQL editor, a sample data generator, live statistics and
+IndexedDB persistence.</p>
 
 <p>For your own page you need exactly two files, <code>fenec.js</code> and
 <code>fenec.wasm</code>. No npm, no bundler, no build step.</p>
@@ -106,48 +101,126 @@ relative path — so hand it the bytes:</p>
 <pre data-lang="js">import { readFile } from 'node:fs/promises';
 const db = await Fenec.open(await readFile('./fenec.wasm'));
 </pre>
+</details>
 
 <h2>As a server</h2>
 
-<pre data-lang="bash">./target/release/fenec-pg --listen 127.0.0.1:5433 --file data.fenec
+<ol class="steps-doc">
+  <li>
+    <p>Start the server on a file.</p>
+<pre data-lang="bash">./target/release/fenec-pg --listen 127.0.0.1:5433 --file data.fenec</pre>
+  </li>
+  <li>
+    <p>Connect with psql, or any PostgreSQL client.</p>
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec</pre>
+  </li>
+  <li>
+    <p>Run a query. The language is FenecQL.</p>
+<pre data-lang="fenecql">get articles select title near embed '[0.1, 0.2]' limit 5;</pre>
+  </li>
+  <li>
+    <p>Optionally, add an HTTP listener and query it with curl.</p>
+<pre data-lang="bash">./target/release/fenec-pg --file data.fenec --http 127.0.0.1:8080
+curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</pre>
+  </li>
+</ol>
 
-# the HTTP/JSON endpoint is a second listener in the same process
-./target/release/fenec-pg --file data.fenec --http 127.0.0.1:8080
+<details class="deep"><summary>Details</summary>
+<p>The HTTP/JSON endpoint is a second listener in the same process. Connect
+with anything that speaks the PostgreSQL protocol; the language is still
+FenecQL.</p>
 
-./target/release/fenec-pg --ping        # 0 means up — a health check
+<pre data-lang="bash">./target/release/fenec-pg --ping        # 0 means up — a health check
 </pre>
 
-<p>Then connect with anything that speaks the PostgreSQL protocol. The language
-is still FenecQL:</p>
+<p>Passwords, transactions, COPY and drivers are on
+<a href="postgres.html">PostgreSQL server</a>.</p>
+</details>
 
-<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec
-# fenec=# get articles select title near embed '[0.1, 0.2]' limit 5;
+<h2>In the shell</h2>
 
-curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'
+<ol class="steps-doc">
+  <li>
+    <p>Open a file in the shell.</p>
+<pre data-lang="bash">./target/release/fenec data.fenec</pre>
+  </li>
+  <li>
+    <p>Create a collection.</p>
+<pre data-lang="fenecql">create collection notes (
+  body   text,
+  topic  int @hash,
+  posted timestamp,
+  embed  vector&lt;384&gt;
+)</pre>
+  </li>
+  <li>
+    <p>Load your rows.</p>
+<pre data-lang="fenecql">put notes {body: "hnsw is a navigable small world graph", topic: 3, embed: $1}
+put notes [ ... 100 000 more ... ]</pre>
+  </li>
+  <li>
+    <p>Build the vector index after the load, not before.</p>
+<pre data-lang="fenecql">create index on notes (embed) @hnsw(cosine)</pre>
+  </li>
+  <li>
+    <p>Query.</p>
+<pre data-lang="fenecql">get notes select body
+  where topic = 3
+  near embed $1
+  limit 10</pre>
+  </li>
+</ol>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="bash">./target/release/fenec data.fenec              # interactive
+./target/release/fenec data.fenec -c 'get docs limit 5'
+echo 'get docs' | ./target/release/fenec data.fenec
 </pre>
+
+<p>Inside the shell: <code>.help</code> <code>.tables</code> <code>.stats</code>
+<code>.functions</code> <code>.save &lt;path&gt;</code> <code>.checkpoint</code>
+<code>.quit</code>.</p>
+
+<p>A first collection, a bulk load, then the index — that order matters, and
+the reason is in <a href="concepts.html#bulk-load-first-index-after">How it
+works</a>.</p>
+
+<p>When a file with a vector index is closed from an interactive or piped
+session, a checkpoint is written so the graph is not rebuilt on the next open.
+A one-shot <code>-c</code> call does not write one.</p>
+</details>
 
 <h2>Bring your own data</h2>
 
+<p><code>fenec import</code> copies a SQLite file or a PostgreSQL table into a
+collection, schema and vector index included.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
+    --vector embed:384 --index "embed@hnsw(cosine)"</pre>
+
+<details class="deep"><summary>Details</summary>
 <p><code>fenec import</code> derives the schema, recognises vector columns and
 follows the bulk-load-then-index order by itself.</p>
 
-<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
-    --vector embed:384 --index "embed@hnsw(cosine)"
-
-fenec import postgres://user@host:5432/database --table docs \
+<pre data-lang="bash">fenec import postgres://user@host:5432/database --table docs \
     --into articles --index "embed@hnsw(cosine)"
 </pre>
 
 <p><code>--dry-run</code> prints the derived schema and any warnings without
 writing anything. Full flag list in <a href="import.html">Import</a>.</p>
+</details>
 
 <h2>Generate TypeScript from the file</h2>
 
-<p>The schema is already in the database, so it is not written a second time in
-TypeScript — it is generated, and the two cannot drift.</p>
+<p>Generate TypeScript types from the schema already in your file, so your
+code and the database cannot drift apart.</p>
 
 <pre data-lang="bash">./target/release/fenec types data.fenec > web/fenec-schema.d.ts
 </pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The schema is already in the database, so it is not written a second time in
+TypeScript — it is generated, and the two cannot drift.</p>
 
 <pre data-lang="js">import { Fenec } from './fenec.js';
 import type { FenecSchema } from './fenec-schema.js';
@@ -156,9 +229,13 @@ const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
 const rows = await db.from('articles').select('title', 'year').rows();
 //    rows: { title: string; year: number | null }[]
 </pre>
+</details>
 
 <h2>Make targets worth knowing</h2>
 
+<p>The Makefile wraps the commands you will run most.</p>
+
+<details class="deep"><summary>Details</summary>
 <div class="tbl">
 <table>
 <thead><tr><th>Command</th><th>What it does</th></tr></thead>
@@ -175,3 +252,4 @@ const rows = await db.from('articles').select('title', 'year').rows();
 </tbody>
 </table>
 </div>
+</details>

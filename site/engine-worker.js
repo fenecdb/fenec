@@ -165,19 +165,26 @@ async function demo() {
   const probes = Array.from({ length: PROBES }, () =>
     jitter(centres[Math.floor(rand() * CLUSTERS)], 0.55, rand));
 
+  // The panel replays the last few queries, each with its own time and how
+  // many of its ten an exact scan agrees with: what is shown is what ran.
+  const SHOWN = 6;
   const times = [];
-  let hit = 0, total = 0, last = null;
+  const shown = [];
+  let hit = 0, total = 0;
   for (let i = 0; i < PROBES; i++) {
     const t = performance.now();
     const ann = db.run('get notes select body near embed $1 limit 10', [probes[i]]);
-    times.push(performance.now() - t);
-    if (i % 5 === 0) {
+    const ms = performance.now() - t;
+    times.push(ms);
+    const replayed = i >= PROBES - SHOWN;
+    let found = null;
+    if (i % 5 === 0 || replayed) {
       const exact = db.run('get notes select body near embed $1 exact limit 10', [probes[i]]);
       const truth = new Set(exact.rows.map((r) => r.body));
-      hit += ann.rows.filter((r) => truth.has(r.body)).length;
-      total += truth.size;
+      found = ann.rows.filter((r) => truth.has(r.body)).length;
+      if (i % 5 === 0) { hit += found; total += truth.size; }
     }
-    last = { probe: probes[i], rows: ann.rows };
+    if (replayed) shown.push({ probe: probes[i], rows: ann.rows, ms, found });
   }
   times.sort((a, b) => a - b);
   const p50 = times[Math.floor(times.length / 2)];
@@ -186,11 +193,15 @@ async function demo() {
   post('stat', { k: 'query', v: p50.toFixed(3), unit: 'ms' });
   post('stat', { k: 'recall', v: recall.toFixed(recall === 100 ? 0 : 1), unit: '%' });
 
-  const q = place(project(last.probe), box, true);
-  const idx = last.rows
-    .map((r) => Number(String(r.body).replace('note ', '')))
-    .filter((i) => Number.isInteger(i) && i >= 0 && i < N);
-  post('query', { x: q.x, y: q.y, idx });
+  post('queries', {
+    list: shown.map(({ probe, rows, ms, found }) => {
+      const q = place(project(probe), box, true);
+      const idx = rows
+        .map((r) => Number(String(r.body).replace('note ', '')))
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < N);
+      return { x: q.x, y: q.y, idx, ms, found };
+    }),
+  });
 
   post('log', { html: '' });
   post('log', { html: `<i>recall@10 against an exact scan: </i><b>${recall.toFixed(recall === 100 ? 0 : 1)}%</b>` });

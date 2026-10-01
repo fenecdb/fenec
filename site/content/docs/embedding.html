@@ -1,12 +1,16 @@
 <!--
 title: Embedded Rust — fenecdb
-description: Use fenec-core as a library: opening a file, executing parsed statements, durability, and the plugin registry.
+description: Use fenec-core as a Rust library inside your own program: opening a file, running statements, durability and plugins.
 -->
 
 <h1>Embedded Rust</h1>
-<p class="kicker"><code>fenec-core</code> is a plain Rust library with no
-dependencies. Parsing is <code>fenec-ql</code>; everything else is the
-engine.</p>
+<p class="kicker">Use fenecdb as a Rust library inside your own
+program.</p>
+
+<h2>Open a file and query it</h2>
+
+<p>Open a file with <code>fenec_core</code>, parse a query with
+<code>fenec_ql</code>, and run it.</p>
 
 <pre data-lang="rust">use fenec_core::prelude::*;
 use fenec_ql::parse;
@@ -17,8 +21,31 @@ for stmt in parse("get docs near embed $1 limit 5")? {
 }
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p><code>fenec-core</code> is a plain Rust library with no dependencies.
+Parsing is <code>fenec-ql</code>; everything else is the engine.</p>
+</details>
+
 <h2>Reads and writes take different locks</h2>
 
+<p>Reads run side by side; writes run one at a time. Several statements run as
+one block land together, or none of them does.</p>
+
+<pre data-lang="rust">let stmts: Vec&lt;Statement&gt; = parse("put orders {total: 12}; set stock {n: 4} where id = 7")?;
+let block: Vec&lt;(&amp;Statement, &amp;[Value])&gt; = stmts.iter().map(|s| (s, &amp;[][..])).collect();
+match db.execute_block(&amp;block) {
+    Ok(answers) =&gt; { /* both landed, as one record */ }
+    Err((at, e)) =&gt; { /* statement `at` failed: neither landed */ }
+}
+</pre>
+
+<div class="note trap">
+  <p><b>One process per file.</b> Two processes opening the same file and
+  writing it corrupt it. There is no lock file and no advisory locking — the
+  single-writer rule is yours to keep.</p>
+</div>
+
+<details class="deep"><summary>Details</summary>
 <p><code>Database::query</code> takes a shared lock and
 <code>execute_with</code> the exclusive one. Every write is a block: what a
 statement writes lands in the file as one record, or — a hook's refusal, a
@@ -35,23 +62,14 @@ still open. A <code>compact</code> rewrites the file and runs on its own,
 outside a block. FenecQL has no <code>BEGIN</code> or
 <code>COMMIT</code>: <code>fenec-pg</code> runs a transaction as a block held
 open (<a href="postgres.html#transactions">Transactions</a>).</p>
-
-<pre data-lang="rust">let stmts: Vec&lt;Statement&gt; = parse("put orders {total: 12}; set stock {n: 4} where id = 7")?;
-let block: Vec&lt;(&amp;Statement, &amp;[Value])&gt; = stmts.iter().map(|s| (s, &amp;[][..])).collect();
-match db.execute_block(&amp;block) {
-    Ok(answers) =&gt; { /* both landed, as one record */ }
-    Err((at, e)) =&gt; { /* statement `at` failed: neither landed */ }
-}
-</pre>
-
-<div class="note trap">
-  <p><b>One process per file.</b> Two processes opening the same file and
-  writing it corrupt it. There is no lock file and no advisory locking — the
-  single-writer rule is yours to keep.</p>
-</div>
+</details>
 
 <h2>Durability is the caller's job</h2>
 
+<p>Call <code>sync</code> yourself: until you do, recent writes can be lost in
+a crash. The library never calls it for you.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>File writes are buffered. If the process crashes before <code>sync</code> is
 called, the last writes are lost. In embedded use nothing calls it for you —
 <code>fenec-pg</code> has the <code>--sync</code> policy and a shutdown hook
@@ -77,17 +95,25 @@ unlinked, <code>near</code> measures each of them until
 <code>Database::link_pending(n)</code> has linked them, and the process
 calls it under its write lock a few at a time, as <code>fenec-pg</code>
 does. <code>Database::unlinked()</code> says how many are left.</p>
+</details>
 
 <h2>Measuring the footprint</h2>
 
+<p><code>Database::memory_bytes()</code> tells you, for free, how much memory
+the engine's data takes. The process as a whole uses more.</p>
+
+<details class="deep"><summary>Details</summary>
 <p><code>Database::memory_bytes()</code> sums the segment bytes, offset
 indexes, vector arenas, graph links and every other index from counters
 they keep as they change, so it costs nothing to ask. It is not RSS —
 allocator slack, HNSW build buffers, upper-level neighbour allocations and the
 2–3× transient peaks all sit outside it. Measured ratios are in
 <a href="limits.html#memory-and-scale">Limits</a>.</p>
+</details>
 
 <h2>Features</h2>
+
+<p>Two parts of the library are left out of a wasm build.</p>
 
 <div class="tbl">
 <table>
@@ -99,27 +125,41 @@ allocator slack, HNSW build buffers, upper-level neighbour allocations and the
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
 <p><code>now()</code> errors on wasm32-unknown-unknown, which has no clock;
 time is passed in as a parameter there.</p>
+</details>
 
 <h2>Errors</h2>
 
+<p>Every call returns the same error type, <code>Error</code>.</p>
+
+<details class="deep"><summary>Details</summary>
 <p><code>Error</code> in <code>fenec-core/src/error.rs</code> is the single
 error type across the whole engine: allocation-free variants, no
 <code>Box</code>. <code>fenec-pg</code> maps it onto PostgreSQL SQLSTATE
 codes.</p>
+</details>
 
 <h2>Plugins</h2>
 
-<p>The registry takes after PostgreSQL's extension model. Scalar functions,
-write hooks in the shape of triggers, and transport adapters can all be
-registered.</p>
+<p>Add your own functions and write hooks to the engine by installing a
+plugin.</p>
 
 <pre data-lang="rust">db.install_plugin(&PgPlugin)?;   // pg_version(), pg_typeof(), to_pgvector()
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>The registry takes after PostgreSQL's extension model. Scalar functions,
+write hooks in the shape of triggers, and transport adapters can all be
+registered.</p>
+</details>
+
 <h2>Module map</h2>
 
+<p>Where each part of the engine lives in <code>fenec-core</code>.</p>
+
+<details class="deep"><summary>Details</summary>
 <div class="tbl">
 <table>
 <tbody>
@@ -135,3 +175,4 @@ registered.</p>
 </tbody>
 </table>
 </div>
+</details>

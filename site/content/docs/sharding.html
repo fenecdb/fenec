@@ -1,13 +1,16 @@
 <!--
 title: Tenants and sharding — fenecdb
-description: One file per tenant, many tenants per node, and a router that knows which node holds which. Placement, moving a tenant, what clients see meanwhile, and what the router costs.
+description: Split data by tenant, one file each, across many nodes behind a router that knows which node holds which.
 -->
 
 <h1>Tenants and sharding</h1>
-<p class="kicker">A single fenecdb is bounded by one machine's memory and one
-writer. Past that, the data is split by tenant: each tenant is a file of its
-own, a node holds many of them, and <code>fenec-shard</code> knows which node
-holds which.</p>
+<p class="kicker">When one machine is not enough, give each tenant a file of its
+own, spread the files over nodes, and put <code>fenec-shard</code> in front.</p>
+
+<h2>Get started</h2>
+
+<p>Start two nodes and a router, tell the router about the nodes, create a
+tenant, and use it through the router.</p>
 
 <pre data-lang="bash"># two nodes, each a directory of tenant files
 fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
@@ -28,15 +31,32 @@ curl -X POST localhost:8090/t/acme/notes -d '{"title":"hello"}'
 curl localhost:8090/t/acme/notes
 </pre>
 
+<ul>
+  <li><b>Same API.</b> Under <code>/t/&lt;tenant&gt;</code> everything works as
+    on a single database; a client only changes its base URL.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A single fenecdb is bounded by one machine's memory and one writer. Past
+that, the data is split by tenant: each tenant is a file of its own, a node
+holds many of them, and <code>fenec-shard</code> knows which node holds
+which.</p>
+
 <p>Below <code>/t/&lt;tenant&gt;</code> the surface is exactly the
 <a href="/docs/http">HTTP endpoint</a> of a single database — routes,
 <code>/query</code>, <code>/batch</code>, subscriptions. A client changes its
 base URL and nothing else; the <a href="/docs/sync">sync layer</a> included:</p>
 
 <pre data-lang="js">const db = await sync({ url: 'http://127.0.0.1:8090/t/acme', shapes: [...] });</pre>
+</details>
 
 <h2>A file per tenant</h2>
 
+<p>Each tenant is its own file, chosen by the request path and never by the
+query. Tenants cannot see each other's rows, and ids, change numbers, search
+ranking and <code>lookup</code> all stay per tenant.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>The tenant is picked by the request path, never by the query text, so
 nothing rewrites a query to add <code>tenant = ...</code>. Two tenants sharing a
 collection would then read each other's rows. A file each keeps them apart by
@@ -54,9 +74,15 @@ have had to solve:</p>
   <li><b><code>lookup</code></b> never crosses a file, so it stays one bucket
     probe per parent.</li>
 </ul>
+</details>
 
 <h2>Why tenants and not hash partitioning</h2>
 
+<p>A tenant lives whole on one node, so every query runs where all its data is
+and means what it means on a single database. The cost: one tenant has to fit
+in one node's memory.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>With a tenant whole on one node, every query runs where all of its data is:
 <code>near</code>, <code>match</code>, <code>order</code>, <code>count</code>
 and <code>lookup</code> keep their single-database meaning, and the router never
@@ -66,18 +92,32 @@ anything, because per-node IDF gives scores that do not compare and a merged
 order that is quietly wrong. That is a different feature, and the case for it
 is a single tenant that outgrows a node. Until then, a tenant has to fit one
 node's memory.</p>
+</details>
 
 <h2>The node: <code>fenec-pg --dir</code></h2>
 
-<p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
-files instead of one file. It is still one process per directory — the
-single-writer rule is per file, and one process owning all of them is what keeps
-it. <code>--http</code> is required; <code>--listen</code> opens the PostgreSQL
-wire as well, where the database in the startup packet is the tenant:</p>
+<p>A node is one <code>fenec-pg</code> serving a directory of tenant files
+instead of one file. Over PostgreSQL, the database name you connect to is the
+tenant.</p>
 
 <pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
 psql postgres://fenec@127.0.0.1:5433/acme
 </pre>
+
+<ul>
+  <li><b>Opened on first use, closed when idle</b>
+    (<code>--idle-close</code>, 300 s by default).</li>
+  <li><b>Unknown tenants are 404.</b> A request never creates one.</li>
+  <li><b><code>/_admin/</code></b> is how the router drives the node; it needs
+    <code>--admin-token</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
+files instead of one file. It is still one process per directory — the
+single-writer rule is per file, and one process owning all of them is what keeps
+it. <code>--http</code> is required; <code>--listen</code> opens the PostgreSQL
+wire as well, where the database in the startup packet is the tenant.</p>
 
 <p>A session is bound to its tenant for its lifetime, and the tenant is looked
 up again for every statement — so one created after the session opened is
@@ -134,9 +174,20 @@ is refused rather than installed, and the file appears by rename, never
 half-written. Tenant names are <code>[a-z0-9_-]</code>, 1 to 64 characters:
 they become file names, and that set means the same thing on every file
 system.</p>
+</details>
 
 <h2>The router: <code>fenec-shard</code></h2>
 
+<p>The router looks up which node holds a tenant and passes the request there
+unchanged. Its only state is a small directory of nodes and tenants, managed
+under <code>/_shard/</code>.</p>
+
+<ul>
+  <li><b>New tenants go to the node with the least data on disk</b>, unless
+    you name one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>The router reads a request's head and body, looks the tenant up, and forwards
 it byte for byte — the original target, not a re-encoding of it. An answer with
 a length is read and passed back on a kept-alive connection; one without is a
@@ -168,13 +219,25 @@ does not return them.</p>
 
 <p>Placement goes by disk rather than memory: memory counts only the open
 tenants, and which ones are open depends on who asked last.</p>
+</details>
 
 <h2>Moving a tenant</h2>
+
+<p>Move a tenant to another node with one call. Reads keep working throughout;
+writes are asked to retry for the moment the copy takes.</p>
 
 <pre data-lang="bash">curl -X POST localhost:8090/_shard/tenants/acme/move -H 'Authorization: Bearer root' \
      -d '{"to":"n2"}'
 # {"tenant":"acme","from":"n1","to":"n2","bytes":58685634,"ms":267,"source_removed":true}</pre>
 
+<ul>
+  <li><b>Writes during a move</b> get 503 with <code>Retry-After: 1</code>.</li>
+  <li><b>Subscribers reconnect</b> and, if they were caught up, carry on
+    without a reseed.</li>
+  <li><b>A failed move</b> puts everything back on the source.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <ol>
   <li>The directory marks the tenant <code>moving</code>; it is still routed to
     the source.</li>
@@ -198,9 +261,14 @@ router that stops mid-move comes back with the tenant still served from the
 source and marked <code>moving</code>; moving it again replaces whatever copy the
 interrupted attempt left on the target, which is stale by definition, since the
 directory never pointed at it.</p>
+</details>
 
 <h2>What it costs</h2>
 
+<p>The router adds about 21 µs a request on one machine: one extra round trip.
+Moving a 58.7 MB tenant took under 0.3 s.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Node and router in one process on loopback, one keep-alive client, 5 000
 requests after 500 of warm-up (<code>make shard-bench</code>):</p>
 
@@ -219,9 +287,14 @@ network the extra hop is whatever that network charges for one. Moving a tenant
 of 100 000 × 128 with an HNSW index — a 58.7 MB image — took 188–267 ms end to
 end over three runs, and the first query on the target about 70 ms, most of it
 opening the file: the graph travels in the image, so nothing is rebuilt.</p>
+</details>
 
 <h2>What it does not do</h2>
 
+<p>No queries across tenants, no tenant bigger than a node, and only one
+router makes changes at a time. Failover is never guessed.</p>
+
+<details class="deep"><summary>Details</summary>
 <ul>
   <li><b>Failover is decided on a lease, not a guess.</b> A router cannot
     tell a node that is gone from one it cannot reach, and guessing would
@@ -238,12 +311,13 @@ opening the file: the graph travels in the image, so nothing is rebuilt.</p>
     places, moves and deletes; promoting the standby is a decision someone
     makes, not a vote the routers hold.</li>
 </ul>
+</details>
 
 <h2>Replicas of tenants</h2>
 
-<p>Every tenant file has a feed of its own, so a node's tenants are followed
-by another node's — the standby — tenant by tenant, through
-<code>/t/&lt;tenant&gt;/_replication</code>:</p>
+<p>Pair a node with a standby node, and every tenant on it is copied there as
+it is written. When the node is lost, one call promotes its tenants on the
+standby.</p>
 
 <pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
          --replication-token r1 --sync always
@@ -253,6 +327,17 @@ fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 \
 curl -X PUT localhost:8090/_shard/nodes/n1 \
   -d '{"addr":"127.0.0.1:8081","token":"a1","standby":"n2"}'
 </pre>
+
+<ul>
+  <li><b>Failover:</b> <code>POST /_shard/nodes/&lt;n&gt;/failover</code>.</li>
+  <li><b>Use <code>--sync always</code> on the primary</b> so a failover
+    loses no write.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Every tenant file has a feed of its own, so a node's tenants are followed
+by another node's — the standby — tenant by tenant, through
+<code>/t/&lt;tenant&gt;/_replication</code>.</p>
 
 <p>The router creates a tenant on both, so the replica has a file to follow
 into, and deletes it from both; a move takes the replica with it. Recording a
@@ -308,15 +393,13 @@ curl -X PUT localhost:8090/_shard/nodes/n2 \
 that left it behind, and the node restarted without <code>--replica-of</code>
 — refuses writes, says so in the log, and is promoted where it stands with
 <code>POST /_admin/tenants/&lt;t&gt;/promote</code>.</p>
+</details>
 
-<h3 id="replicas-of-their-own">Replicas of their own</h3>
+<h2 id="replicas-of-their-own">Replicas of their own</h2>
 
-<p>A standby waits idle, and takes every tenant of its node at once when the
-node goes. With <code>--replicas</code> the router gives each tenant a
-replica of its own instead, on another node in no pair: the one holding the
-fewest replicas of that tenant's node, then the fewest tenants and replicas
-altogether. Each node's tenants then follow on all the others, and every
-node holds primaries and replicas both.</p>
+<p>Instead of an idle standby, <code>fenec-shard --replicas</code> gives each
+tenant its own replica on another node, so every node holds both primaries
+and replicas and a lost node's tenants spread over the rest.</p>
 
 <pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 --replication-token r1 --sync always
 fenec-pg --dir /data/n2 --http 127.0.0.1:8082 --admin-token a2 --replication-token r1 --sync always
@@ -326,6 +409,19 @@ fenec-shard --replicas
 curl -X PUT localhost:8090/_shard/tenants/acme -d '{"node":"n1"}'
 {"tenant":"acme","node":"n1","replica_on":"n2"}
 </pre>
+
+<ul>
+  <li><b>After a failover</b>, <code>POST /_shard/replicas</code> gives every
+    tenant without a replica a new one.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A standby waits idle, and takes every tenant of its node at once when the
+node goes. With <code>--replicas</code> the router gives each tenant a
+replica of its own instead, on another node in no pair: the one holding the
+fewest replicas of that tenant's node, then the fewest tenants and replicas
+altogether. Each node's tenants then follow on all the others, and every
+node holds primaries and replicas both.</p>
 
 <p>The replica's node is told which node to follow
 (<code>POST /_admin/tenants/acme/follow</code> with
@@ -358,20 +454,34 @@ onto each of the other two, and the repair after it gave 20 tenants a
 replica in 176 ms, all on the returning node's copies. Placed by the fewest
 altogether alone, every tenant of one node followed on the same other: a
 tie went by name each time, and its failover put them all there.</p>
+</details>
 
-<h3 id="automatic-failover">Automatic failover</h3>
+<h2 id="automatic-failover">Automatic failover</h2>
 
-<p>With <code>fenec-shard --auto-failover &lt;s&gt;</code> the router fails a
-node over on its own. It leases each node the tenants it places there for
-that long, renews the lease every third of it while the node answers, and
-fails over a node that has gone a tenth past its lease unrenewed. A node
-started with <code>--lease</code> writes a tenant only while its lease names
-the tenant and has not lapsed, and starts with none:</p>
+<p>With <code>--auto-failover</code> the router fails a node over by itself.
+It works on leases: a node stops writing when its lease runs out, and only
+after that does the router promote its tenants elsewhere, so a tenant never
+has two primaries.</p>
 
 <pre data-lang="bash">fenec-pg --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
          --replication-token r1 --sync always --lease
 fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replicas --auto-failover 5
 </pre>
+
+<ul>
+  <li><b>Nodes need <code>--lease</code></b>; a node without it is never
+    failed over automatically.</li>
+  <li><b>With a 5-second lease</b>, a lost node's tenants cannot be written
+    for 5.5 to 7.2 s.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>With <code>fenec-shard --auto-failover &lt;s&gt;</code> the router fails a
+node over on its own. It leases each node the tenants it places there for
+that long, renews the lease every third of it while the node answers, and
+fails over a node that has gone a tenth past its lease unrenewed. A node
+started with <code>--lease</code> writes a tenant only while its lease names
+the tenant and has not lapsed, and starts with none.</p>
 
 <p>The router still cannot tell a node that is gone from one cut off from it
 while its own clients reach it, and it does not have to. A node that hears
@@ -404,17 +514,28 @@ ms after — its last renewal came a third of a lease before — and its 10
 tenants took writes on their replicas again 1.29 to 1.33 s after, the lease
 and a tenth, the next round and 49 ms of promotions. With a lease of five
 seconds, a node lost costs its tenants' writes 5.5 to 7.2 s.</p>
+</details>
 
 <h2>A standby router</h2>
 
-<p>The directory is a fenecdb file, so it replicates the way any other does.
-A second router follows it and forwards from the same placements; the
-primary is the one that changes it.</p>
+<p>A second router can follow the first one's directory and forward requests
+too. Only the primary router makes changes; promote the standby when the
+primary is gone.</p>
 
 <pre data-lang="bash">fenec-shard --listen 127.0.0.1:8090 --directory shard.fenec --replication-token r1
 fenec-shard --listen 127.0.0.1:8091 --directory standby.fenec --replication-token r1 \
             --replica-of http://127.0.0.1:8090
 </pre>
+
+<ul>
+  <li><b>Promote:</b> <code>POST /_replication/promote</code> on the
+    standby.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The directory is a fenecdb file, so it replicates the way any other does.
+A second router follows it and forwards from the same placements; the
+primary is the one that changes it.</p>
 
 <p>Both forward <code>/t/&lt;tenant&gt;/...</code>; the standby's
 <code>/_shard/</code> answers reads and refuses changes with 409, since its
@@ -438,9 +559,14 @@ change ring, as a subscription's rows do: the placements it put or deleted
 since the last one, 4 µs at 100 000 tenants, where reading every map again
 took 38 ms under the router's write lock. An image adopted, or more changes
 than the ring holds, and the maps are read again whole.</p>
+</details>
 
 <h2>Tokens</h2>
 
+<p>There are three tokens: one for data, one per node for the router, and one
+for managing the router.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>Three, each for a different job. Data requests carry whatever the nodes'
 <code>--http-token</code> expects, and the router passes
 <code>Authorization</code> through untouched. Each node has its own
@@ -448,3 +574,4 @@ than the ring holds, and the maps are read again whole.</p>
 <code>--token</code> guards <code>/_shard/</code>; like the nodes, it refuses to
 listen on a non-loopback address without one unless given
 <code>--insecure</code>.</p>
+</details>

@@ -1,16 +1,17 @@
 <!--
 title: Serverless and Cloudflare — fenecdb
-description: The engine inside a Cloudflare Worker, a tenant's database in a Durable Object kept in its storage, what a cold start costs, what an object holds, and when a function should talk to a server instead.
+description: Run fenecdb inside a Cloudflare Worker with a database per Durable Object, or have the function talk to a server instead.
 -->
 
 <h1>Serverless and Cloudflare</h1>
-<p class="kicker">The browser module runs wherever V8 runs a WebAssembly
-module, a Cloudflare Worker among them. A Durable Object gives it what a
-file gives a server: one writer, and storage that outlives the process. So
-one object holds one database, as a tenant is one file on a
-<code>fenec-pg</code> node.</p>
+<p class="kicker">Run fenecdb inside a Cloudflare Worker, with one small
+database for each Durable Object.</p>
 
 <h2 id="models">Two ways to use it</h2>
+
+<p>Either the engine runs inside the function, one database per Durable
+Object, or the function sends its queries to a <code>fenec-pg</code> server.
+Inside is faster; a server holds more data and more writers.</p>
 
 <div class="tbl">
 <table>
@@ -25,12 +26,23 @@ one object holds one database, as a tenant is one file on a
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>The browser module runs wherever V8 runs a WebAssembly module, a
+Cloudflare Worker among them. A Durable Object gives it what a file gives a
+server: one writer, and storage that outlives the process. So one object
+holds one database, as a tenant is one file on a <code>fenec-pg</code>
+node.</p>
+
 <p>The second needs nothing new: <code>Fenec.connect(url)</code>, the
 Python <code>Client</code> or any pg driver, and a function's connections
 are HTTP requests, so there is no pool to exhaust. The rest of this page is
 the first.</p>
+</details>
 
 <h2 id="worker">A database a Durable Object</h2>
+
+<p>The object opens the engine on its first request, restores its database
+from storage, and saves after every write, before it answers.</p>
 
 <pre data-lang="js">import { DurableObject } from 'cloudflare:workers';
 import { Fenec } from '@fenecdb/web';
@@ -67,6 +79,7 @@ export default {
   },
 };</pre>
 
+<details class="deep"><summary>Details</summary>
 <p>A Worker imports a <code>.wasm</code> file compiled, and cannot compile
 bytes at run time; <code>Fenec.open</code> takes the module so.
 <code>integrations/cloudflare/example</code> is this Worker with a tenant
@@ -74,9 +87,14 @@ from the path, <code>POST /t/&lt;tenant&gt;/query</code>, and its test runs
 it under <code>wrangler dev</code> — workerd, as Cloudflare runs it — then
 stops and starts it over the same storage and reads the rows, a
 <code>near</code>'s answer and each tenant's own database back.</p>
+</details>
 
 <h2 id="storage">What the storage holds</h2>
 
+<p><code>persist</code> saves a full image once, then only the new writes. If
+storage stops part way through, the last whole database is still there.</p>
+
+<details class="deep"><summary>Details</summary>
 <p><code>persist</code> keeps what a file would hold: an image the first
 time, then only the writes since the last call — the engine's journal, as
 <code>persist</code> in the browser takes it for IndexedDB — until they
@@ -90,20 +108,13 @@ Object combines a call's puts into one atomic write besides; this does not
 lean on it, and a test stops the storage after every number of puts, an
 image's and an append's, and restores the last whole database each
 time.</p>
+</details>
 
 <h2 id="cold-start">A cold start</h2>
 
-<p>An object evicted, or a deploy, starts the next request with no
-database in memory: the module instantiated, the image and the writes
-after it read out of storage and loaded. The graphs the image holds are
-restored as they were; the writes after it are applied as the write path
-would, their vectors linked into the graph one after another — the browser
-module has one thread. So a <code>checkpoint</code> — a new image now, the
-writes since folded into it — once the writes stop, from an alarm, is what
-keeps a start short. The first <code>near</code> after a restart, against
-the ones after it, under <code>wrangler dev</code> on an M1 (<code>make
-cloudflare-bench</code>, median of five restarts; rows of a text, an int and
-a 128-dim vector, 1 000 a request, each kept before it was answered):</p>
+<p>After an eviction or a deploy, the first request has to load the database
+again. Run a <code>checkpoint</code> from an alarm once writes stop, and that
+first query stays fast.</p>
 
 <div class="tbl">
 <table>
@@ -116,12 +127,43 @@ a 128-dim vector, 1 000 a request, each kept before it was answered):</p>
 </table>
 </div>
 
+<details class="deep"><summary>Details</summary>
+<p>An object evicted, or a deploy, starts the next request with no
+database in memory: the module instantiated, the image and the writes
+after it read out of storage and loaded. The graphs the image holds are
+restored as they were; the writes after it are applied as the write path
+would, their vectors linked into the graph one after another — the browser
+module has one thread. So a <code>checkpoint</code> — a new image now, the
+writes since folded into it — once the writes stop, from an alarm, is what
+keeps a start short. The first <code>near</code> after a restart, against
+the ones after it, under <code>wrangler dev</code> on an M1 (<code>make
+cloudflare-bench</code>, median of five restarts; rows of a text, an int and
+a 128-dim vector, 1 000 a request, each kept before it was answered) are in the table above.</p>
+
 <p>A request's round trip through <code>wrangler dev</code> is in every
 figure. The rows went in at 3 000 to 5 700 a second, a request of
 1 000 at a time with its vectors linked and kept before the answer.</p>
+</details>
 
 <h2 id="limits">Limits</h2>
 
+<p>An object holds about 60 000 rows of 128 dimensions, or 12 000 of 768. For
+more, use a <code>fenec-pg</code> server or spread a tenant over more
+objects.</p>
+
+<ul>
+  <li><b>One writer an object.</b> Writes to one tenant go one after another,
+  as on a server; tenants write side by side.</li>
+  <li><b>Bundle collation data.</b> Collation data for scripts the module does
+  not carry is fetched from a URL by default; in a Worker, pass
+  <code>{collation: name =&gt; ...}</code> to <code>Fenec.open</code> and hand
+  the chunks from your bundle.</li>
+  <li><b>Not on npm yet.</b> <code>@fenecdb/cloudflare</code> is built and
+  installed by CI with the other packages; it is not yet published to
+  npm.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>A Worker's isolate has 128 MB, the WebAssembly memory in it, and
 <code>wrangler dev</code> does not hold a Worker to it: the figures above
 reach past it. What the module holds, measured in Node on the same module
@@ -160,13 +202,4 @@ about 60 000 rows of 128 dimensions and 12 000 of 768, however many a
 request brings; past that, a
 <code>fenec-pg</code> node and <code>Fenec.connect</code>, or a tenant's
 data spread over more objects.</p>
-
-<ul>
-  <li>One writer an object: writes to one tenant go one after another, as
-  on a server; tenants write side by side.</li>
-  <li>Collation data for scripts the module does not carry is fetched from
-  a URL by default; in a Worker, pass <code>{collation: name =&gt; ...}</code>
-  to <code>Fenec.open</code> and hand the chunks from your bundle.</li>
-  <li><code>@fenecdb/cloudflare</code> is built and installed by CI with
-  the other packages; it is not yet published to npm.</li>
-</ul>
+</details>

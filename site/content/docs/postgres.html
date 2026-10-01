@@ -1,20 +1,33 @@
 <!--
 title: PostgreSQL server — fenecdb
-description: fenec-pg speaks the PostgreSQL v3 wire protocol. Sessions, authentication, durability policy, checkpoints, cancellation, COPY, the catalog tools read, and running it in a container.
+description: Run fenecdb as a server and connect with psql, your PostgreSQL driver and pgvector's libraries. Transactions, COPY, security, durability and containers.
 -->
 
 <h1>PostgreSQL server</h1>
-<p class="kicker"><code>fenec-pg</code> speaks the PostgreSQL v3 wire protocol,
-so psql, psycopg, asyncpg, pgx, tokio-postgres, node-postgres, JDBC and
-pgbouncer all connect. What is compatible is the transport, not the
-language.</p>
+<p class="kicker">Run fenecdb as a server, then connect with psql, the
+PostgreSQL driver you already use, or pgvector's libraries.</p>
 
-<pre data-lang="bash">fenec-pg --listen 127.0.0.1:5433 --file data.fenec
+<h2>Start and connect</h2>
 
-psql -h 127.0.0.1 -p 5433 -U fenec
-# fenec=# get articles select title near embed '[0.1, 0.2]' limit 5;
-</pre>
+<ol class="steps-doc">
+  <li>
+    <p>Start the server on a file.</p>
+<pre data-lang="bash">fenec-pg --file data.fenec --listen 127.0.0.1:5433 --password-file pg.pw</pre>
+  </li>
+  <li>
+    <p>Connect with psql, or any PostgreSQL client.</p>
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec</pre>
+  </li>
+  <li>
+    <p>Run a query.</p>
+<pre data-lang="fenecql">get articles select title near embed '[0.1, 0.2]' limit 5</pre>
+  </li>
+</ol>
 
+<p>The connection is PostgreSQL's; the query language is FenecQL. Tools that
+send plain <code>SELECT a, b FROM t</code> work too.</p>
+
+<details class="deep"><summary>Details</summary>
 <p>fenecdb does not speak SQL. It does work with the connection tooling of the
 PostgreSQL ecosystem: vectors are pgvector's types, in its text representation
 (<code>[1,2,3]</code>, and <code>{1:0.5,3:0.25}/30522</code> for a sparse
@@ -48,8 +61,40 @@ session on <code>acme.fenec</code>. That mode, its <code>--admin-token</code>
 and <code>--idle-close</code>, and the router in front of it are on
 <a href="/docs/sharding">Tenants and sharding</a>.</p>
 
-<h2 id="drivers">Drivers</h2>
+<p>One thread per connection. Read-only statements run at the same time under
+a shared lock; writes take the exclusive one. HNSW search buffers are
+thread-local, so the same index can be searched in parallel — eight
+concurrent full scans on eight cores measured 4.3×.</p>
+</details>
 
+<h2 id="drivers">Connect from your language</h2>
+
+<p>Each of these runs against a real server on every change to fenecdb.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Language</th><th>Driver</th><th>Vectors with</th></tr></thead>
+<tbody>
+<tr><td>Python</td><td>psycopg 3, asyncpg, SQLAlchemy</td><td>pgvector-python</td></tr>
+<tr><td>Go</td><td>pgx</td><td>pgvector-go</td></tr>
+<tr><td>Node</td><td>node-postgres</td><td>pgvector-node</td></tr>
+<tr><td>Rust</td><td>tokio-postgres</td><td>pgvector-rust</td></tr>
+<tr><td>Java</td><td>JDBC (pgjdbc)</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre data-lang="python" data-label="search.py">import psycopg
+from pgvector.psycopg import register_vector
+
+conn = psycopg.connect("host=127.0.0.1 port=5433 user=fenec password=...")
+register_vector(conn)
+
+rows = conn.execute(
+    'get docs select title where lang = "tr" near embed %s limit 3',
+    (query_vector,)).fetchall()</pre>
+
+<details class="deep"><summary>Details: what each driver is tested for</summary>
 <p>A driver is held to its own flows against a real <code>fenec-pg</code> —
 <code>make drivers-test</code>, and CI on every change: the queries it sends
 on its own, the formats it reads rows and sends parameters in, its
@@ -82,15 +127,212 @@ as a quoted literal, so <code>n = '2'</code> compares an int field with the
 text <code>2</code>, which FenecQL does not resolve to the field's type as
 PostgreSQL resolves an untyped literal: use pgx's default mode.</p>
 
-<h2>Sessions</h2>
+<p><b>Parameters and binary rows.</b> <code>Describe</code> is answered
+without running the query: the parameter count comes from the largest
+<code>$n</code> in the statement, and the columns and type OIDs from the
+schema — with <code>near</code> or <code>match</code>, <code>_score</code> is
+reported too. A parameter's type is the one its place names — the field it is
+given for or compared with, <code>id</code>'s, the field's type for the vector
+of a <code>near</code> or a <code>rerank</code>, the text of a
+<code>match</code> — and <code>text</code> where nothing names one; a type the
+client names in <code>Parse</code> is kept. A driver told the types sends its
+values as them, tokio-postgres and asyncpg in binary, and they are read by
+them. A value sent as text is read as the field its place names, as COPY
+reads a cell of it — a text field's as the text it is, so <code>"t"</code>
+and <code>"42"</code> stay text — and by its look where no field is named:
+psycopg and node-postgres name no type for a string and ask for no
+<code>Describe</code>, and the places are found at the statement's first
+<code>Bind</code>. <code>RowDescription</code> goes exactly once, on
+<code>Execute</code> when <code>Describe</code> is skipped.</p>
 
-<p>One thread per connection. Read-only statements run at the same time under a
-shared lock; writes take the exclusive one. HNSW search buffers are
-thread-local, so the same index can be searched in parallel — eight concurrent
-full scans on eight cores measured 4.3×.</p>
+<p>A column goes in the binary format when <code>Bind</code> asks for it —
+as tokio-postgres and asyncpg ask for every column, and pgx for every type
+it knows: <code>bigint</code>, <code>double precision</code>,
+<code>boolean</code>, <code>bytea</code> and <code>timestamptz</code> as their
+types send them, a vector as pgvector sends one, and a text as its text.</p>
+
+<p>A list is PostgreSQL's array of its element's type — <code>[text]</code>
+is <code>text[]</code>, <code>[int]</code> <code>bigint[]</code>,
+<code>[float]</code> <code>double precision[]</code>, and
+<code>boolean[]</code>, <code>bytea[]</code> and <code>timestamptz[]</code>
+the same way — in <code>array_out</code>'s text, an element quoted where it
+is empty, says <code>NULL</code> or holds a brace, a comma, a quote, a
+backslash or a space, and in <code>array_send</code>'s binary form where a
+client asks for it; a parameter in its place is described as the array, and
+taken in either form. So psycopg and asyncpg read a list field as a Python
+list, pgx scans it into a slice, node-postgres into an array and
+tokio-postgres into a <code>Vec</code>, and each binds its own as a list —
+described as <code>text</code>, it was the string <code>{a,b}</code> to all
+of them. A list of lists or of vectors, which PostgreSQL has no array for,
+still goes as <code>text</code>. The catalog's columns go in binary as well,
+but for an array, which is refused (<code>0A000</code>) rather than sent in
+a form the client would misread.</p>
+
+<p>An error drops every message after it up to the next <code>Sync</code>,
+as PostgreSQL does, and is sent at once rather than at the
+<code>Sync</code>. A pipelining client — libpq's pipeline mode, pgx's
+batches, JDBC's — writes off what it queued behind a failure, so none of it
+runs: run anyway, a write the client counted as aborted would be made, and
+psycopg 3, reading answers it did not expect, fails with <i>cannot exit
+pipeline mode while busy</i>. What ran <i>before</i> the error in the
+pipeline is put back as well: a pipeline is one block up to its
+<code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
+</details>
+
+<h2 id="pgvector">Vectors with pgvector's libraries</h2>
+
+<p>A vector field is pgvector's <code>vector</code> type, so pgvector's client
+libraries register it and send NumPy arrays, Go slices and Rust vectors as
+they do against PostgreSQL. Half-precision and sparse vectors are
+<code>halfvec</code> and <code>sparsevec</code>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>A vector field is pgvector's <code>vector</code>, a <code>vector&lt;N,
+f16&gt;</code> its <code>halfvec</code> and a sparse vector its
+<code>sparsevec</code>: the catalog names them so, in <code>public</code>
+where <code>CREATE EXTENSION vector</code> puts them, and a column and a
+parameter are described with their OIDs. pgvector's client libraries find the
+types by name and register their codecs, and read and write vectors in
+pgvector's binary format — the dimension, then each component's
+<code>float4</code> or <code>float2</code>, and for a sparse vector its
+indices from 0 and its weights — as they do against PostgreSQL with
+pgvector:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>library</th><th>registered with</th><th>what goes</th></tr></thead>
+<tbody>
+<tr><td>pgvector-python, psycopg 3</td><td><code>register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, a binary <code>COPY</code> with <code>set_types</code></td></tr>
+<tr><td>pgvector-python, asyncpg</td><td><code>await register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, <code>copy_records_to_table</code></td></tr>
+<tr><td>pgvector-go, pgx</td><td><code>pgxvec.RegisterTypes</code></td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, batches, <code>CopyFrom</code></td></tr>
+<tr><td>pgvector-node, node-postgres</td><td><code>registerTypes(client)</code></td><td>a vector read as an array, written with <code>toSql</code></td></tr>
+<tr><td>pgvector-rust, tokio-postgres</td><td>none: the types are named</td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, a <code>BinaryCopyInWriter</code> of the type found by name</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>In binary a vector costs no text to write or parse: through tokio-postgres
+a page of 1 000 768-dimension vectors reads in 5.5 ms, against 31.4 ms as
+text. A client with no codec for the type reads a vector as its text, as
+before — psycopg, asyncpg, pgx and node-postgres give a string — and sends
+one as text. tokio-postgres does not: like any type it has no Rust type for,
+it refuses a <code>&amp;str</code> for a <code>vector</code> parameter and a
+<code>String</code> for a <code>vector</code> column, as it does against
+pgvector, so it takes pgvector-rust's types. A vector holding a NaN or an
+infinity is refused (<code>22000</code>), as pgvector refuses it.</p>
+</details>
+
+<h2 id="copy">Load and export with COPY</h2>
+
+<p>Bulk-load rows the way you would into PostgreSQL. Text, CSV and binary all
+work, and a bad row cancels the whole load.</p>
+
+<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
+  -c "\copy docs (title, year, embed) from 'docs.csv' with (format csv, header)"
+# COPY 30000
+
+psql -h 127.0.0.1 -p 5433 -U fenec \
+  -c "\copy docs (title, year) to 'docs.csv' with (format csv, header)"
+# COPY 30000</pre>
+
+<details class="deep"><summary>Details</summary>
+<p><code>COPY docs [(col, ...)] FROM STDIN</code> loads rows the way a
+PostgreSQL client loads a table: psql's <code>\copy</code>, psycopg's
+<code>cursor.copy</code>, JDBC's <code>CopyManager</code>, the
+<code>postgres</code> crate's <code>copy_in</code>, asyncpg's
+<code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> all work,
+in the text format, in CSV with its options (<code>HEADER</code>,
+<code>DELIMITER</code>, <code>NULL</code>, <code>QUOTE</code>,
+<code>ESCAPE</code>), and in PostgreSQL's binary format, each cell as its
+column's type sends it. asyncpg and pgx learn those types first by asking
+for <code>SELECT</code> the columns <code>FROM</code> the collection, which
+is read as the <code>get</code> it is — as is any plain <code>SELECT</code>
+of columns, or <code>*</code>, from one collection, with a
+<code>LIMIT</code> or none.</p>
+
+<p>Without a column list the columns are <code>id</code> and then every field
+in the order the schema declares them, as <code>\d</code> lists them; a
+<code>NULL</code> or missing <code>id</code> is handed out as a
+<code>put</code>'s would be. Each cell is read as its field's type: a vector
+as pgvector writes one, <code>[1,2,3]</code>, or as an array,
+<code>{1,2,3}</code>; a list as an array, <code>{a,b}</code>, or JSON; a
+sparse vector as <code>{1:0.5}/30522</code>; <code>bytes</code> as
+<code>\x</code> and hexadecimal digits; a timestamp in any form a
+<code>put</code> takes.</p>
+
+<p>A COPY is one command, as in PostgreSQL. Its rows go in as puts of 10 000
+— each links its vectors on every core — into one block, so a bad row, a
+cancel or the client's <code>CopyFail</code> puts back every row, and in a
+transaction the rows are the transaction's writes. Past its first put the
+COPY holds the database as a transaction does, and a client that stops
+sending for longer than <code>--idle-in-transaction-timeout</code> has its
+rows put back. An error names the line and the column
+(<code>COPY docs, line 3, column year: invalid input syntax for type
+bigint: "n/a"</code>, <code>22P02</code>; a row of too few or too many cells,
+<code>22P04</code>) and is sent at once; what the client still streams is
+dropped.</p>
+
+<p>Refused with <code>0A000</code>, before a row is sent: a file or a
+program on the server's side (<code>\copy</code> sends the file from the
+client), and a COPY among other statements in one query. In binary an int, a
+float, a timestamp and a vector are read without parsing text: pgx's
+<code>CopyFrom</code> of the same 100 000 rows loads at 600 000 rows/s
+without an index with pgvector-go's <code>Vector</code>, and at 243 000 with
+each vector written as text. 100 000 rows of a text, an int and a 128-dim
+vector load at 17 600 rows/s with the HNSW graph kept as they land and
+171 000 without, against 17 200 and 152 000 sent a <code>put</code> a row in
+a transaction, as a driver's <code>executemany</code> sends them, and 434 and
+62 000 into PostgreSQL with pgvector by its own <code>COPY</code>
+(<a href="benchmarks.html#loading">Loading rows</a>).</p>
+
+<p><code>COPY docs [(col, ...)] TO STDOUT</code> reads a collection out the
+way a client reads a table: psql's <code>\copy ... to</code>, psycopg's
+<code>cursor.copy</code>, asyncpg's <code>copy_from_table</code>, pgx's
+<code>CopyTo</code> and the <code>postgres</code> crate's
+<code>copy_out</code>. Every row goes, in id order, in the text format or CSV
+with the same options — each value as its PostgreSQL text, escaped or quoted
+so that <code>COPY ... FROM</code> reads the same row back — or in the binary
+format, each cell as a binary query's row sends it: a list as its element's
+array, a vector as pgvector's.</p>
+
+<p>The rows are read a page of 1 000 at a time, each page under a read lock
+of its own and written to the client with none held, so a slow client keeps
+no writer waiting and only a page is in memory. A row goes out once, as it
+stood when its page was read; a transaction that holds the database — one
+that wrote, or a serializable one — reads it as it stands throughout.
+<code>COPY (get ...) TO STDOUT</code> reads a FenecQL <code>get</code>'s rows
+out instead, as the <code>get</code> answers them: its order and page, a
+<code>near</code>'s <code>_score</code>, a <code>lookup</code> widened into
+the row, run whole as it would be on its own. Anything but one
+<code>get</code> in the parentheses is refused (<code>0A000</code>).
+The same 100 000 rows of a text, an int and a 128-dim vector read out at
+157 000 rows/s in text and 1 540 000 in binary, against PostgreSQL's 156 000
+and 747 000 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
+</details>
 
 <h2 id="transactions">Transactions</h2>
 
+<p>Group writes so they land together, or not at all. Savepoints work, so
+psycopg's nested blocks and SQLAlchemy's <code>begin_nested()</code> do
+too.</p>
+
+<pre data-lang="fenecql">BEGIN;
+put orders {customer: "ada", total: 40};
+SAVEPOINT s;
+set stock {count: 9} where id = 3;
+ROLLBACK TO s;      -- undoes only the set
+COMMIT;</pre>
+
+<ul>
+  <li><b>Keep them short.</b> There is one writer: while a transaction that
+    has written is open, other writes wait.</li>
+  <li><b>An idle transaction is closed</b> after 10 seconds, and its writes
+    undone (<code>--idle-in-transaction-timeout</code>).</li>
+  <li><b>A failed statement fails the transaction,</b> as in PostgreSQL, until
+    <code>ROLLBACK</code> or <code>ROLLBACK TO</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>Between <code>BEGIN</code> and <code>COMMIT</code> a session's writes are
 one block: <code>COMMIT</code> lands them in the file as one record, and
 <code>ROLLBACK</code> puts them back — as do a statement that fails, a client
@@ -123,16 +365,13 @@ READ</code>, takes the lock at its first statement instead, so nothing it
 read changes before it ends; <code>BEGIN READ ONLY</code> refuses a write
 with <code>25006</code>.</p>
 
-<div class="note trap">
-  <p><b>A transaction that has written holds every other session's
-  writes,</b> and the reads beside one that changed a graph. Keep it short,
-  and have the client send <code>COMMIT</code> rather than work between
-  statements. One whose client stays silent for
-  <code>--idle-in-transaction-timeout</code> seconds — 10 by default, 0 for
-  never — is put back and its session closed with <code>25P03</code>, as
-  PostgreSQL's <code>idle_in_transaction_session_timeout</code> closes
-  one.</p>
-</div>
+<p>A transaction that has written holds every other session's writes, and
+the reads beside one that changed a graph. Keep it short, and have the client
+send <code>COMMIT</code> rather than work between statements. One whose
+client stays silent for <code>--idle-in-transaction-timeout</code> seconds —
+10 by default, 0 for never — is put back and its session closed with
+<code>25P03</code>, as PostgreSQL's
+<code>idle_in_transaction_session_timeout</code> closes one.</p>
 
 <p>As in PostgreSQL:</p>
 
@@ -194,51 +433,75 @@ is refused (<code>25001</code>). Two-phase commit is refused
 (<code>0A000</code>): taken for the <code>COMMIT</code> or the
 <code>ROLLBACK</code> it begins with, it would end a transaction other than
 the one named.</p>
+</details>
 
-<h2>Resource ceilings</h2>
+<h2 id="authentication">Security</h2>
 
-<p>One thread per connection means unlimited connections would leave the stack
-memory ceiling to the client.</p>
+<p>Logins use SCRAM-SHA-256, so the password never crosses the wire. Give a
+dashboard or a report its own login that can only read.</p>
 
-<div class="tbl">
-<table>
-<thead><tr><th>Flag</th><th>Default</th><th>Behaviour above the ceiling</th></tr></thead>
-<tbody>
-<tr><td><code>--max-connections</code></td><td class="n">100</td><td><code>53300</code>, PostgreSQL's <i>sorry, too many clients already</i></td></tr>
-<tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td><code>57P05</code> on a session that has gone quiet</td></tr>
-<tr><td><code>--idle-in-transaction-timeout &lt;s&gt;</code></td><td class="n">10</td><td><code>25P03</code>, and the transaction put back, on a session gone quiet holding the database</td></tr>
-<tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>the length is read before the body, so an oversized body is never allocated</td></tr>
-<tr><td>startup packet</td><td class="n">10 000 B</td><td>the same as PostgreSQL; the only allocation before authentication</td></tr>
-<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td><code>53200</code> on statements that grow the data, <code>507</code> over HTTP</td></tr>
-</tbody>
-</table>
+<pre data-lang="bash">fenec-pg --file data.fenec --password-file writer.pw \
+  --reader reporting --reader-password-file reader.pw</pre>
+
+<div class="note trap">
+  <p><b>There is no TLS yet.</b> On a network, put a TLS terminator such as
+  stunnel or <code>nginx stream</code> in front.</p>
 </div>
 
-<p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
-statements that <b>grow</b> the data are rejected — over this protocol and
-over the HTTP listener alike — while reads,
-<code>del</code> and <code>compact</code> keep working — hitting a ceiling with
-no way out would be no better than a cgroup OOM. The point is to bring the OOM
-forward: nobody warns you about a process felled by <code>SIGKILL</code>, and
-both the last sync and the checkpoint are lost with it. The measurement happens
-<i>before</i> the statement, so the overshoot is at most one statement, whose
-body <code>--max-message</code> bounds as well.</p>
+<details class="deep"><summary>Details</summary>
+<p>With <code>--password</code>, the default is <b>SCRAM-SHA-256</b> (RFC
+7677): the password never crosses the wire and the exchange cannot be replayed.
+<code>--auth cleartext</code> exists for clients that cannot speak it, and
+<code>--user</code> restricts the user name. Pass the password with
+<code>--password-file</code> or the <code>FENECPG_PASSWORD</code> environment
+variable — <code>argv</code> shows up in <code>ps</code> output.</p>
+
+<p>A reporting tool, a dashboard or a service that only reads can log in as a
+reader: <code>--reader &lt;name&gt;</code> with a password of its own
+(<code>--reader-password</code>, <code>--reader-password-file</code> or
+<code>FENECPG_READER_PASSWORD</code>), by the same method as the writer's.
+Every write of its session is refused with <code>25006</code> — out of a
+transaction or in one, by <code>COPY FROM</code>, as an index or a
+<code>compact</code> — whatever it sets, <code>BEGIN READ WRITE</code> and
+<code>default_transaction_read_only</code> included. It needs
+<code>--password</code>, since without one every user writes. Over HTTP the
+same is a JSON Web Token's policy granting <code>read</code>
+(<a href="/docs/http#scoped-access">Scoped access</a>).
+<code>psql 'host=127.0.0.1 port=5433 user=reporting dbname=fenec'</code>
+logs in as it.</p>
+
+<p>A failed login waits before it is answered, twice as long for each
+failure from the same address within a minute, and <code>--audit</code> logs
+logins, failed ones and schema changes (<a href="/docs/monitoring#audit">The
+audit log</a>).</p>
+
+<p><code>SSLRequest</code> is refused with <code>N</code>, and a client
+connecting remotely gets a <code>NoticeResponse</code> saying the connection
+is unencrypted. Listening on a non-loopback address without authentication
+is refused outright; it can be opened deliberately with
+<code>--insecure</code>.</p>
+</details>
 
 <h2>Durability</h2>
 
-<p>Writes accumulate in a 1 MB buffer. <code>--sync</code> decides when they
-reach the disk.</p>
+<p>Choose how often writes reach the disk with <code>--sync</code>.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th><code>--sync</code></th><th>Meaning</th><th>Cost</th></tr></thead>
+<thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
 <tbody>
-<tr><td><code>always</code></td><td>every write statement waits for an <code>fsync</code>; writes arriving together share one</td><td class="n">~3.7 ms a write alone</td></tr>
-<tr><td><code>250</code> (default)</td><td>periodic; at most one interval is at risk</td><td class="n">negligible</td></tr>
-<tr><td><code>off</code></td><td>on shutdown only</td><td class="n">none</td></tr>
+<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most that much.</td></tr>
+<tr><td><code>always</code></td><td>Each write waits until it is on disk.</td></tr>
+<tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
 </tbody>
 </table>
 </div>
+
+<details class="deep"><summary>Details</summary>
+<p>Writes accumulate in a 1 MB buffer. Under <code>always</code> every write
+statement waits for an <code>fsync</code>, about 3.7 ms a write alone, and
+writes arriving together share one; <code>250</code> costs next to nothing;
+<code>off</code> nothing.</p>
 
 <p>Under <code>always</code> the <code>fsync</code> runs after the write has
 let go of the exclusive lock, and the bytes reach the file there too. Readers
@@ -268,35 +531,68 @@ reads go on answering from memory. The sync is not retried: after a failed
 <code>fsync</code> the kernel may already have dropped the pages, so a retry
 that succeeds would prove nothing.</p>
 
-<h3>The shutdown checkpoint</h3>
-
-<p>After the sync, if a vector index exists, a checkpoint is written: the HNSW
-graph lands in the file and the next open does not rebuild it — 9 ms instead
-of 3.4 s at 100 000 × 128. Vectors still waiting to be linked after a crash
-(below) are written as waiting, and linked after the next open.</p>
-
-<p>The cost is that shutdown takes longer on a large database: the image is
-written into the new file as it is produced, so it is a copy on disk rather
-than one in memory. <code>--no-checkpoint</code> turns it off.</p>
-
-<p>The order is deliberate. The sync comes first, so even if the process is
+<p><b>The shutdown checkpoint.</b> After the sync, if a vector index exists,
+a checkpoint is written: the HNSW graph lands in the file and the next open
+does not rebuild it — 9 ms instead of 3.4 s at 100 000 × 128. Vectors still
+waiting to be linked after a crash are written as waiting, and linked after
+the next open. The cost is that shutdown takes longer on a large database:
+the image is written into the new file as it is produced, so it is a copy on
+disk rather than one in memory. <code>--no-checkpoint</code> turns it off.
+The order is deliberate. The sync comes first, so even if the process is
 killed while the checkpoint is being written, the data is already on disk and
 only the graph is lost. The rewrite goes to a side file and is renamed, so a
 half-written checkpoint cannot corrupt anything.</p>
+</details>
 
-<h2>Health checks</h2>
+<h2>Limits and health checks</h2>
 
-<pre data-lang="bash">fenec-pg --ping        # 0 means up
-</pre>
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
+<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
+<tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">off</td><td>Closes a quiet session.</td></tr>
+<tr><td><code>--max-message &lt;MiB&gt;</code></td><td class="n">64</td><td>Refuses a larger message.</td></tr>
+</tbody>
+</table>
+</div>
 
-<p>It connects, authenticates and exits — the same depth as
+<pre data-lang="bash">fenec-pg --ping        # exits 0 when the server is up</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>One thread per connection means unlimited connections would leave the stack
+memory ceiling to the client. Past <code>--max-connections</code> a client
+gets <code>53300</code>, PostgreSQL's <i>sorry, too many clients
+already</i>; <code>--idle-timeout</code> closes a quiet session with
+<code>57P05</code>; <code>--idle-in-transaction-timeout</code> (10 s)
+answers <code>25P03</code> and puts the transaction back; a message's length
+is read before its body, so an oversized body is never allocated; the startup
+packet is capped at 10 000 bytes, as in PostgreSQL, the only allocation before
+authentication.</p>
+
+<p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
+statements that <b>grow</b> the data are rejected with <code>53200</code> —
+<code>507</code> over the HTTP listener — while reads, <code>del</code> and
+<code>compact</code> keep working: hitting a ceiling with no way out would be
+no better than a cgroup OOM. The point is to bring the OOM forward: nobody
+warns you about a process felled by <code>SIGKILL</code>, and both the last
+sync and the checkpoint are lost with it. The measurement happens
+<i>before</i> the statement, so the overshoot is at most one statement, whose
+body <code>--max-message</code> bounds as well.</p>
+
+<p><code>--ping</code> connects, authenticates and exits — the same depth as
 <code>pg_isready</code>, and it deliberately runs no query. Every query takes
 the database lock first, so during a long <code>compact</code> the probe would
-wait too and a healthy server would look dead. Measured at roughly 100 ms.</p>
-
-<p>Because the listener binds <i>after</i> the file is opened, "healthy" also
+wait too and a healthy server would look dead. Measured at roughly 100 ms.
+Because the listener binds <i>after</i> the file is opened, "healthy" also
 means "the index is ready" — a start period has to be long enough to cover the
 graph build.</p>
+
+<p><code>CancelRequest</code> is a real cancellation: the pending lock is
+released and the query returns <code>57014</code> at about 1 ms, with the
+connection still usable. A cancel arriving while idle, or one carrying the
+wrong secret key, is ignored.</p>
 
 <p>What the server is doing is at <code>/_metrics</code>, in Prometheus's
 text format: <code>--metrics &lt;address&gt;</code> opens a listener for it
@@ -304,193 +600,89 @@ alone, for a server whose data goes over PostgreSQL only, and
 <code>--slow-ms &lt;ms&gt;</code> logs every statement at least that slow
 with its text. The metrics, a Grafana dashboard and the log are in
 <a href="/docs/monitoring">Monitoring</a>.</p>
+</details>
 
-<h2>Query cancellation</h2>
+<h2>Run it in a container</h2>
 
-<p><code>CancelRequest</code> is a real cancellation: the pending lock is
-released and the query returns <code>57014</code> at about 1 ms, with the
-connection still usable. A cancel arriving while idle, or one carrying the
-wrong secret key, is ignored.</p>
+<p>The image is under 3 MB: the binary and nothing else.</p>
 
-<h2>Authentication</h2>
+<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
+  -p 127.0.0.1:5433:5433 -p 127.0.0.1:8080:8080 \
+  -e FENECPG_PASSWORD=secret fenecdb \
+  --listen 0.0.0.0:5433 --file /data/data.fenec --sync 250 \
+  --http 0.0.0.0:8080 --http-token a-token</pre>
 
-<p>With <code>--password</code>, the default is <b>SCRAM-SHA-256</b> (RFC
-7677): the password never crosses the wire and the exchange cannot be replayed.
-<code>--auth cleartext</code> exists for clients that cannot speak it, and
-<code>--user</code> restricts the user name.</p>
+<ul>
+  <li><b>Set a password.</b> Without one it refuses to listen beyond
+    localhost.</li>
+  <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
+    a <code>StatefulSet</code> with one replica.</li>
+  <li><b>Write every flag out</b> when you override the command, or the data
+    file is dropped.</li>
+</ul>
 
-<p>Pass the password with <code>--password-file</code> or the
-<code>FENECPG_PASSWORD</code> environment variable —
-<code>argv</code> shows up in <code>ps</code> output.</p>
+<details class="deep"><summary>Details</summary>
+<p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
+<code>scratch</code>. There are no dependencies and the binary runs its own
+health check, so the runtime image holds nothing but the binary — no shell, no
+package manager, no libc. The image is <b>2.88 MB</b> on amd64 and 2.51 MB
+on arm64 — since no target is written in, both come out of the same file.
+<code>make docker</code> builds it, <code>make docker-run PGPASS=secret</code>
+runs it on 127.0.0.1:5433 with a named volume, and
+<code>FENECPG_PASSWORD=secret docker compose up -d</code> starts the compose
+file's.</p>
 
-<p>A reporting tool, a dashboard or a service that only reads can log in as a
-reader: <code>--reader &lt;name&gt;</code> with a password of its own
-(<code>--reader-password</code>, <code>--reader-password-file</code> or
-<code>FENECPG_READER_PASSWORD</code>), by the same method as the writer's.
-Every write of its session is refused with <code>25006</code> — out of a
-transaction or in one, by <code>COPY FROM</code>, as an index or a
-<code>compact</code> — whatever it sets, <code>BEGIN READ WRITE</code> and
-<code>default_transaction_read_only</code> included. It needs
-<code>--password</code>, since without one every user writes. Over HTTP the
-same is a JSON Web Token's policy granting <code>read</code>
-(<a href="/docs/http#scoped-access">Scoped access</a>).</p>
+<p><b>A password is mandatory.</b> The default <code>CMD</code> listens on
+<code>0.0.0.0</code>, and with authentication off a non-loopback bind errors
+out and exits. Give <code>FENECPG_PASSWORD</code>, a Docker secret works
+too, or add <code>--insecure</code> deliberately.</p>
 
-<p>A failed login waits before it is answered, twice as long for each
-failure from the same address within a minute, and <code>--audit</code> logs
-logins, failed ones and schema changes (<a href="/docs/monitoring#audit">The
-audit log</a>).</p>
+<p><b>The memory limit comes from the data.</b> With no page cache there is
+no knob to tune: the file is mapped and what the process holds is the
+indexes, which is what <code>--max-memory</code> counts. Below that the
+cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
+one sync interval is lost. Set <code>--max-memory</code> to a third of the
+container limit to bring that forward.</p>
 
-<pre data-lang="bash">fenec-pg --file data.fenec --password-file writer.pw \
-  --reader reporting --reader-password-file reader.pw
-psql 'host=127.0.0.1 port=5433 user=reporting dbname=fenec'
-</pre>
+<p><b>The restart cost depends on how it stopped.</b>
+<code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
+written, so the next open takes 9 ms. After <code>kill -9</code> or a
+cgroup OOM the graph of the last checkpoint is restored, and the vectors
+written since it go in unlinked: the server answers once the documents
+are read, and links them on a thread beside its queries,
+<code>near</code> measuring each of them until then. The only checkpoint
+the server writes on its own is the one at shutdown, but it appends its
+graphs to the file as they change — a graph that changed in 10 000 nodes,
+once the file has grown by three times its record, logged as
+<code>1 graph written into the file</code>, with writes held off for
+the 5 ms that takes at 100 000 × 768 — so what waits is what came
+after the last of them: at 100 000 × 768 at most 10 000 vectors, linked
+in 2.6 s with <code>near</code> at 1.56 ms p50 meanwhile. With no graph
+in the file every vector waits: at 100 000 × 768 never checkpointed the
+first <code>near</code> was answered 1.23 s after the start, against
+67.7 s when the open linked them first, and linking takes 19 s, 30 s with
+two clients each sending a <code>near</code> every 20 ms, which take
+11.2 ms p50 and 33 ms p99 meanwhile. <code>fenec_vectors_unlinked</code>
+counts down to 0.</p>
 
-<div class="note trap">
-  <p><b>There is no TLS.</b> <code>SSLRequest</code> is refused with
-  <code>N</code>, and a client connecting remotely gets a
-  <code>NoticeResponse</code> saying the connection is unencrypted. Listening
-  on a non-loopback address without authentication is refused outright; it can
-  be opened deliberately with <code>--insecure</code>. On an open network, put
-  it behind a TLS terminator such as stunnel or <code>nginx stream</code>.</p>
-</div>
+<p>Overriding <code>CMD</code> drops <code>--file</code>, and the container
+comes up with an in-memory database. There is no shell in the image, so
+<code>docker exec ... sh</code> does not work; what is left is
+<code>docker logs</code> and <code>docker run --rm fenecdb --help</code>.</p>
 
-<h2>Extended protocol</h2>
+<p>Two containers loading the same file into memory and writing it corrupt
+it. On Kubernetes that means a <code>StatefulSet</code> rather than a
+<code>Deployment</code>, <code>replicas: 1</code>, <code>strategy:
+Recreate</code> and a <code>ReadWriteOnce</code> volume — a rolling update
+keeps two pods up together for a moment. There is a connection ceiling but no
+pool: an excess connection does not wait, it gets <code>53300</code>. Put
+pgbouncer in front to queue.</p>
+</details>
 
-<p><code>Describe</code> is answered without running the query: the parameter
-count comes from the largest <code>$n</code> in the statement, and the columns
-and type OIDs from the schema — with <code>near</code> or <code>match</code>,
-<code>_score</code> is reported too. A parameter's type is the one its place
-names — the field it is given for or compared with, <code>id</code>'s, the
-field's type for the vector of a <code>near</code> or a <code>rerank</code>,
-the text of a <code>match</code> — and <code>text</code> where nothing names
-one; a type the client names in
-<code>Parse</code> is kept. A driver told the types sends its values as
-them, tokio-postgres and asyncpg in binary, and they are read by them. A
-value sent as text is read as the field its place names, as COPY reads a
-cell of it — a text field's as the text it is, so <code>"t"</code> and
-<code>"42"</code> stay text — and by its look where no field is named:
-psycopg and node-postgres name no type for a string and ask for no
-<code>Describe</code>, and the places are found at the statement's first
-<code>Bind</code>.
-<code>RowDescription</code> goes exactly once, on <code>Execute</code> when
-<code>Describe</code> is skipped.</p>
+<h2>Use it from data tools</h2>
 
-<p>A column goes in the binary format when <code>Bind</code> asks for it —
-as tokio-postgres and asyncpg ask for every column, and pgx for every type
-it knows: <code>bigint</code>, <code>double precision</code>,
-<code>boolean</code>, <code>bytea</code> and <code>timestamptz</code> as their
-types send them, a vector as pgvector sends one, and a text as its text.</p>
-
-<p>A list is PostgreSQL's array of its element's type — <code>[text]</code>
-is <code>text[]</code>, <code>[int]</code> <code>bigint[]</code>,
-<code>[float]</code> <code>double precision[]</code>, and
-<code>boolean[]</code>, <code>bytea[]</code> and <code>timestamptz[]</code>
-the same way — in <code>array_out</code>'s text, an element quoted where it
-is empty, says <code>NULL</code> or holds a brace, a comma, a quote, a
-backslash or a space, and in <code>array_send</code>'s binary form where a
-client asks for it; a parameter in its place is described as the array, and
-taken in either form. So psycopg and asyncpg read a list field as a Python
-list, pgx scans it into a slice, node-postgres into an array and
-tokio-postgres into a <code>Vec</code>, and each binds its own as a list —
-described as <code>text</code>, it was the string <code>{a,b}</code> to all
-of them. A list of lists or of vectors, which PostgreSQL has no array for,
-still goes as <code>text</code>. The catalog's columns go in binary as well,
-but for an array, which is refused (<code>0A000</code>) rather than sent in
-a form the client would misread.</p>
-
-<p>An error drops every message after it up to the next <code>Sync</code>,
-as PostgreSQL does, and is sent at once rather than at the
-<code>Sync</code>. A pipelining client — libpq's pipeline mode, pgx's
-batches, JDBC's — writes off what it queued behind a failure, so none of it
-runs: run anyway, a write the client counted as aborted would be made, and
-psycopg 3, reading answers it did not expect, fails with <i>cannot exit
-pipeline mode while busy</i>. What ran <i>before</i> the error in the
-pipeline is put back as well: a pipeline is one block up to its
-<code>Sync</code> (<a href="#transactions">Transactions</a>).</p>
-
-<h2 id="copy">Loading and reading rows out: COPY</h2>
-
-<p><code>COPY docs [(col, ...)] FROM STDIN</code> loads rows the way a
-PostgreSQL client loads a table: psql's <code>\copy</code>, psycopg's
-<code>cursor.copy</code>, JDBC's <code>CopyManager</code>, the
-<code>postgres</code> crate's <code>copy_in</code>, asyncpg's
-<code>copy_records_to_table</code> and pgx's <code>CopyFrom</code> all work,
-in the text format, in CSV with its options (<code>HEADER</code>,
-<code>DELIMITER</code>, <code>NULL</code>, <code>QUOTE</code>,
-<code>ESCAPE</code>), and in PostgreSQL's binary format, each cell as its
-column's type sends it. asyncpg and pgx learn those types first by asking
-for <code>SELECT</code> the columns <code>FROM</code> the collection, which
-is read as the <code>get</code> it is — as is any plain <code>SELECT</code>
-of columns, or <code>*</code>, from one collection, with a
-<code>LIMIT</code> or none.</p>
-
-<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
-  -c "\copy docs (title, year, embed) from 'docs.csv' with (format csv, header)"
-# COPY 30000</pre>
-
-<p>Without a column list the columns are <code>id</code> and then every field
-in the order the schema declares them, as <code>\d</code> lists them; a
-<code>NULL</code> or missing <code>id</code> is handed out as a
-<code>put</code>'s would be. Each cell is read as its field's type: a vector
-as pgvector writes one, <code>[1,2,3]</code>, or as an array,
-<code>{1,2,3}</code>; a list as an array, <code>{a,b}</code>, or JSON; a
-sparse vector as <code>{1:0.5}/30522</code>; <code>bytes</code> as
-<code>\x</code> and hexadecimal digits; a timestamp in any form a
-<code>put</code> takes.</p>
-
-<p>A COPY is one command, as in PostgreSQL. Its rows go in as puts of 10 000
-— each links its vectors on every core — into one block, so a bad row, a
-cancel or the client's <code>CopyFail</code> puts back every row, and in a
-transaction the rows are the transaction's writes. Past its first put the
-COPY holds the database as a transaction does, and a client that stops
-sending for longer than <code>--idle-in-transaction-timeout</code> has its
-rows put back. An error names the line and the column
-(<code>COPY docs, line 3, column year: invalid input syntax for type
-bigint: "n/a"</code>, <code>22P02</code>; a row of too few or too many cells,
-<code>22P04</code>) and is sent at once; what the client still streams is
-dropped.</p>
-
-<p>Refused with <code>0A000</code>, before a row is sent: a file or a
-program on the server's side (<code>\copy</code> sends the file from the
-client), and a COPY among other statements in one query. In binary an int, a float, a timestamp and
-a vector are read without parsing text: pgx's <code>CopyFrom</code> of the
-same 100 000 rows loads at 600 000 rows/s without an index with
-pgvector-go's <code>Vector</code>, and at 243 000 with each vector written
-as text.
-100 000 rows of a text, an int and a 128-dim vector load at 17 600 rows/s with
-the HNSW graph kept as they land and 171 000 without, against 17 200 and
-152 000 sent a <code>put</code> a row in a transaction, as a driver's
-<code>executemany</code> sends them, and 434 and 62 000 into PostgreSQL with
-pgvector by its own <code>COPY</code>
-(<a href="benchmarks.html#loading">Loading rows</a>).</p>
-
-<p><code>COPY docs [(col, ...)] TO STDOUT</code> reads a collection out the
-way a client reads a table: psql's <code>\copy ... to</code>, psycopg's
-<code>cursor.copy</code>, asyncpg's <code>copy_from_table</code>, pgx's
-<code>CopyTo</code> and the <code>postgres</code> crate's
-<code>copy_out</code>. Every row goes, in id order, in the text format or CSV
-with the same options — each value as its PostgreSQL text, escaped or quoted
-so that <code>COPY ... FROM</code> reads the same row back — or in the binary
-format, each cell as a binary query's row sends it: a list as its element's
-array, a vector as pgvector's.</p>
-
-<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec \
-  -c "\copy docs (title, year) to 'docs.csv' with (format csv, header)"
-# COPY 30000</pre>
-
-<p>The rows are read a page of 1 000 at a time, each page under a read lock
-of its own and written to the client with none held, so a slow client keeps
-no writer waiting and only a page is in memory. A row goes out once, as it
-stood when its page was read; a transaction that holds the database — one
-that wrote, or a serializable one — reads it as it stands throughout.
-<code>COPY (get ...) TO STDOUT</code> reads a FenecQL <code>get</code>'s rows
-out instead, as the <code>get</code> answers them: its order and page, a
-<code>near</code>'s <code>_score</code>, a <code>lookup</code> widened into
-the row, run whole as it would be on its own. Anything but one
-<code>get</code> in the parentheses is refused (<code>0A000</code>).
-The same 100 000 rows of a text, an int and a 128-dim vector read out at
-157 000 rows/s in text and 1 540 000 in binary, against PostgreSQL's 156 000
-and 747 000 (<a href="benchmarks.html#loading">Loading rows</a>).</p>
+<p>DBeaver and psql's <code>\d</code> see your collections as tables. DuckDB
+and Spark read them for analysis.</p>
 
 <h3 id="duckdb">DuckDB, and Parquet through it</h3>
 
@@ -499,6 +691,13 @@ ATTACH 'host=127.0.0.1 port=5433 user=fenec dbname=fenec' AS f (TYPE postgres, R
 SELECT g, count(*), avg(x) FROM f.public.docs WHERE year = 2024 GROUP BY g;
 COPY (SELECT * FROM f.public.docs) TO 'docs.parquet' (FORMAT parquet);</pre>
 
+<h3 id="spark">Spark, through JDBC</h3>
+
+<pre data-lang="python">df = spark.read.jdbc("jdbc:postgresql://127.0.0.1:5433/fenec", "docs",
+                     properties={"user": "fenec", "driver": "org.postgresql.Driver"})
+df.filter("year >= 2024 and g = 'a'").groupBy("g").count().show()</pre>
+
+<details class="deep"><summary>Details</summary>
 <p>DuckDB reads a collection as a table through its own
 <code>postgres</code> extension: the catalog lists it, and each read is
 <code>COPY (SELECT "col", ... FROM "public"."docs" WHERE ...) TO STDOUT
@@ -516,12 +715,6 @@ file in 97 ms, and <code>count</code>, <code>sum</code> and a
 <code>GROUP BY</code> over them in 52 to 90 ms; from Parquet, pandas, Spark
 and the rest read them.</p>
 
-<h3 id="spark">Spark, through JDBC</h3>
-
-<pre data-lang="python">df = spark.read.jdbc("jdbc:postgresql://127.0.0.1:5433/fenec", "docs",
-                     properties={"user": "fenec", "driver": "org.postgresql.Driver"})
-df.filter("year >= 2024 and g = 'a'").groupBy("g").count().show()</pre>
-
 <p>Spark reads a collection through pgjdbc with plain SQL, which fenec-pg
 runs as the <code>get</code> it is: <code>SELECT * FROM docs WHERE
 1=0</code> for the columns, <code>SELECT "n","g" FROM docs WHERE ("n" IS
@@ -530,57 +723,15 @@ conditions it pushed down — each in parentheses, a number bare and text
 quoted, read so — and <code>SELECT 1 FROM docs</code> for
 <code>count()</code>, answered with as many rows of the constant as rows
 match, <code>Describe</code> naming the column first as pgjdbc asks it. The
-aggregation is Spark's. For a large table, DuckDB's Parquet
-(<a href="#duckdb">above</a>) is the faster road in.</p>
-
-<h2 id="pgvector">pgvector's clients</h2>
-
-<p>A vector field is pgvector's <code>vector</code>, a <code>vector&lt;N,
-f16&gt;</code> its <code>halfvec</code> and a sparse vector its
-<code>sparsevec</code>: the catalog names them so, in <code>public</code>
-where <code>CREATE EXTENSION vector</code> puts them, and a column and a
-parameter are described with their OIDs. pgvector's client libraries find the
-types by name and register their codecs, and read and write vectors in
-pgvector's binary format — the dimension, then each component's
-<code>float4</code> or <code>float2</code>, and for a sparse vector its
-indices from 0 and its weights — as they do against PostgreSQL with
-pgvector:</p>
-
-<div class="tbl">
-<table>
-<thead><tr><th>library</th><th>registered with</th><th>what goes</th></tr></thead>
-<tbody>
-<tr><td>pgvector-python, psycopg 3</td><td><code>register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, a binary <code>COPY</code> with <code>set_types</code></td></tr>
-<tr><td>pgvector-python, asyncpg</td><td><code>await register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, <code>copy_records_to_table</code></td></tr>
-<tr><td>pgvector-go, pgx</td><td><code>pgxvec.RegisterTypes</code></td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, batches, <code>CopyFrom</code></td></tr>
-<tr><td>pgvector-node, node-postgres</td><td><code>registerTypes(client)</code></td><td>a vector read as an array, written with <code>toSql</code></td></tr>
-<tr><td>pgvector-rust, tokio-postgres</td><td>none: the types are named</td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, a <code>BinaryCopyInWriter</code> of the type found by name</td></tr>
-</tbody>
-</table>
-</div>
-
-<p>Each is held to these flows beside its driver
-(<a href="#drivers">Drivers</a>).</p>
-
-<p>In binary a vector costs no text to write or parse: through tokio-postgres
-a page of 1 000 768-dimension vectors reads in 5.5 ms, against 31.4 ms as
-text. A client with no codec for the type reads a vector as its text, as
-before — psycopg, asyncpg, pgx and node-postgres give a string — and sends
-one as text. tokio-postgres does not: like any type it has no Rust type for,
-it refuses a <code>&amp;str</code> for a <code>vector</code> parameter and a
-<code>String</code> for a <code>vector</code> column, as it does against
-pgvector, so it takes pgvector-rust's types. A vector holding a NaN or an
-infinity is refused (<code>22000</code>), as pgvector refuses it.</p>
+aggregation is Spark's. For a large table, DuckDB's Parquet is the faster
+road in.</p>
+</details>
 
 <h2 id="catalog">The catalog</h2>
 
-<p>psql's <code>\d</code>, JDBC's <code>DatabaseMetaData</code> and
-DBeaver's navigator do not ask which collections exist: they send SQL over
-<code>pg_catalog</code> and <code>information_schema</code>, with joins,
-<code>CASE</code>, casts to <code>regclass</code>, correlated subqueries,
-<code>UNION</code> and window functions. <code>fenec-pg</code> runs that SQL
-over a catalog it makes from the schemas each time, so the tools see the
-database as it is:</p>
+<p>Tools look around through PostgreSQL's catalog, and fenecdb answers it from
+your schemas: each collection is a table in <code>public</code>, each index
+an index.</p>
 
 <pre data-lang="text">fenec=# \d docs
                         Table "public.docs"
@@ -599,14 +750,23 @@ Indexes:
     "docs_title_hash" hash (title)
 </pre>
 
+<details class="deep"><summary>Details</summary>
+<p>psql's <code>\d</code>, JDBC's <code>DatabaseMetaData</code> and
+DBeaver's navigator do not ask which collections exist: they send SQL over
+<code>pg_catalog</code> and <code>information_schema</code>, with joins,
+<code>CASE</code>, casts to <code>regclass</code>, correlated subqueries,
+<code>UNION</code> and window functions. <code>fenec-pg</code> runs that SQL
+over a catalog it makes from the schemas each time, so the tools see the
+database as it is.</p>
+
 <p>A collection is a table in <code>public</code>, its <code>id</code> the
 first column and the primary key, each field a column of the type the wire
 already reports for it — a vector as <code>vector(N)</code>, a sparse one as
 <code>sparsevec(N)</code>, a list as an array. Each fenecdb index is an index
 with its own access method: <code>hash</code>, <code>btree</code> for
 <code>@sorted</code>, <code>hnsw</code>, <code>bm25</code> for
-<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. It is checked
-against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
+<code>@text</code>, and <code>inverted</code> for <code>@inverted</code>. It
+is checked against psql 17's own queries (<code>\d</code>, <code>\d+</code>,
 <code>\dt</code>, <code>\di</code>, <code>\dn</code>, <code>\l</code>),
 PgJDBC 42.7's <code>getTables</code>, <code>getColumns</code>,
 <code>getPrimaryKeys</code> and <code>getIndexInfo</code>, and the SQL
@@ -634,17 +794,29 @@ pgvector-python's <code>register_vector</code> calls for <code>vector</code>,
 PostgreSQL has; pgvector-go by <code>to_regtype('vector')::oid</code>; pgx's
 <code>LoadType</code> by <code>$1::text::regtype::oid</code>; and
 tokio-postgres by its lookup of an OID it does not know.</p>
+</details>
 
-<h2>Both directions</h2>
+<h2>More</h2>
 
+<ul>
+  <li><b>Mirror a PostgreSQL table.</b> <code>fenec-pg --follow
+    postgres://...</code> keeps a copy as the table commits, and serves it.
+    See <a href="import.html#serving">Import</a>.</li>
+  <li><b>Plugins.</b> Register functions, write hooks and transport adapters,
+    after PostgreSQL's extension model:
+    <code>db.install_plugin(&amp;PgPlugin)?</code> adds
+    <code>pg_version()</code>, <code>pg_typeof()</code> and
+    <code>to_pgvector()</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
 <p>The same protocol code runs the other way round. <code>fenec import</code>
 connects to a real PostgreSQL server and streams
 <code>COPY ... TO STDOUT</code>, and with <code>--follow</code> reads a
 logical replication slot through <code>pgoutput</code>. The server half of
-SCRAM lives in
-<code>scram.rs</code> and the client half in <code>fenec-wire</code>'s
-<code>client.rs</code>; both are hand-written, so they test each other. See
-<a href="import.html">Import</a>.</p>
+SCRAM lives in <code>scram.rs</code> and the client half in
+<code>fenec-wire</code>'s <code>client.rs</code>; both are hand-written, so
+they test each other. See <a href="import.html">Import</a>.</p>
 
 <p><code>fenec-pg --follow postgres://...</code> runs that follower inside
 the server, over the file it serves: a table of PostgreSQL mirrored as it
@@ -652,88 +824,4 @@ commits, and served over this protocol, HTTP and subscriptions at once. The
 mirrored collection refuses every write but the follower's with
 <code>25006</code>. See <a href="import.html#serving">Serving the mirror as it
 follows</a>.</p>
-
-<h2>Plugins</h2>
-
-<p>The plugin system takes after PostgreSQL's extension model: scalar
-functions, write hooks and transport adapters can be registered.</p>
-
-<pre data-lang="rust">db.install_plugin(&PgPlugin)?;   // pg_version(), pg_typeof(), to_pgvector()
-</pre>
-
-<h2>Containers</h2>
-
-<p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
-<code>scratch</code>. There are no dependencies and the binary runs its own
-health check, so the runtime image holds nothing but the binary — no shell, no
-package manager, no libc. The image is <b>2.88 MB</b> on amd64 and 2.51 MB on arm64 — since no target
-is written in, both come out of the same file.</p>
-
-<pre data-lang="bash">make docker                     # build the image
-make docker-run PGPASS=secret   # 127.0.0.1:5433, named volume
-
-FENECPG_PASSWORD=secret docker compose up -d
-</pre>
-
-<p>Three things behave differently in a container:</p>
-
-<ul>
-  <li><b>A password is mandatory.</b> The default <code>CMD</code> listens on
-    <code>0.0.0.0</code>, and with authentication off a non-loopback bind errors
-    out and exits. Give <code>FENECPG_PASSWORD</code>, a Docker secret works
-    too, or add <code>--insecure</code> deliberately.</li>
-  <li><b>The memory limit comes from the data.</b> With no page cache there is
-    no knob to tune: the file is mapped and what the process holds is the
-    indexes, which is what <code>--max-memory</code> counts. Below that the
-    cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
-    one sync interval is lost. Set <code>--max-memory</code> to a third of the
-    container limit to bring that forward.</li>
-  <li><b>The restart cost depends on how it stopped.</b>
-    <code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
-    written, so the next open takes 9 ms. After <code>kill -9</code> or a
-    cgroup OOM the graph of the last checkpoint is restored, and the vectors
-    written since it go in unlinked: the server answers once the documents
-    are read, and links them on a thread beside its queries,
-    <code>near</code> measuring each of them until then. The only checkpoint
-    the server writes on its own is the one at shutdown, but it appends its
-    graphs to the file as they change — a graph that changed in 10 000 nodes,
-    once the file has grown by three times its record, logged as
-    <code>1 graph written into the file</code>, with writes held off for
-    the 5 ms that takes at 100 000 × 768 — so what waits is what came
-    after the last of them: at 100 000 × 768 at most 10 000 vectors, linked
-    in 2.6 s with <code>near</code> at 1.56 ms p50 meanwhile. With no graph
-    in the file every vector waits: at 100 000 × 768 never checkpointed the
-    first <code>near</code> was answered 1.23 s after the start, against
-    67.7 s when the open linked them first, and linking takes 19 s, 30 s with
-    two clients each sending a <code>near</code> every 20 ms, which take
-    11.2 ms p50 and 33 ms p99 meanwhile. <code>fenec_vectors_unlinked</code>
-    counts down to 0.</li>
-</ul>
-
-<div class="note trap">
-  <p><b>Every default has to be written out by hand.</b> Overriding
-  <code>CMD</code> drops <code>--file</code> and the container comes up with an
-  in-memory database.</p>
-</div>
-
-<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
-  -p 127.0.0.1:5433:5433 -p 127.0.0.1:8080:8080 \
-  -e FENECPG_PASSWORD=secret fenecdb \
-  --listen 0.0.0.0:5433 --file /data/data.fenec --sync 250 \
-  --http 0.0.0.0:8080 --http-token a-token
-</pre>
-
-<p>There is no shell in the image, so <code>docker exec ... sh</code> does not
-work; what is left is <code>docker logs</code> and
-<code>docker run --rm fenecdb --help</code>.</p>
-
-<div class="note trap">
-  <p><b>A single instance, always.</b> Two containers loading the same file
-  into memory and writing it corrupt it. On Kubernetes that means a
-  <code>StatefulSet</code> rather than a <code>Deployment</code>,
-  <code>replicas: 1</code>, <code>strategy: Recreate</code> and a
-  <code>ReadWriteOnce</code> volume — a rolling update keeps two pods up
-  together for a moment. There is a connection ceiling but no pool: an excess
-  connection does not wait, it gets <code>53300</code>. Put pgbouncer in front
-  to queue.</p>
-</div>
+</details>
