@@ -1100,7 +1100,14 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 
 /* Under the docs' dune band the page starts in the band's last colour and
    fades into the night, so the band's foot leaves no edge. */
-.docs .shell { background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 360px); }
+/* Drawn the width of the window, not of the shell: held to the shell's
+   1 400 px, its edges showed as a box on a wide screen. */
+.docs .shell { position: relative; }
+.docs .shell::before {
+  content: ""; position: absolute; top: 0; left: 50%; width: 100vw; height: 360px;
+  transform: translateX(-50%); z-index: -1; pointer-events: none;
+  background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 100%);
+}
 
 /* The claim in two lines on a wide screen: the text column takes more of
    the row and the type steps down a little, so "that fits in a browser
