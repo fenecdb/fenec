@@ -1084,6 +1084,6 @@ details.deep p, details.deep li { font-size: 15.5px; }
    the cards beside it already say what it shows: it is left out, and so is
    the work of drawing it (site.js loads scenes only as they come into view). */
 @media (max-width: 600px) {
-  .motion, .motion-head { display: none; }
+  .motion { display: none; }
   .steps-doc > li { padding-left: 34px; }
 }

@@ -71,6 +71,10 @@ description: An embedded document database with full-text and vector search buil
     <p class="lede rise">A document database first. Search by words and by
       meaning is built in, not bolted on.</p>
 
+    <figure class="motion rise" data-scenes="vectors near filter">
+      <canvas role="img" aria-label="Rows become points in space; a query walks the graph between them to its nearest, and a filter narrows the walk to the rows that match."></canvas>
+    </figure>
+
     <ul class="caps rise">
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg><b>Documents</b><span>Records with typed fields. Add, change and remove them in one line.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 12h7M4 18h4"/><path d="M18 5v14M15 16l3 3 3-3"/></svg><b>Indexes</b><span>Instant lookups and range queries on the fields you choose.</span></li>
@@ -84,10 +88,6 @@ description: An embedded document database with full-text and vector search buil
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>Backups</b><span>Encrypted, continuous, restored to any moment.</span></li>
     </ul>
 
-    <h3 class="sub rise motion-head">Search, shown</h3>
-    <figure class="motion rise" data-scenes="vectors near filter">
-      <canvas role="img" aria-label="Rows become points in space; a query walks the graph between them to its nearest, and a filter narrows the walk to the rows that match."></canvas>
-    </figure>
     <p class="after rise">Run all of it in a web page, in Rust, from
       <code>psql</code> or over HTTP. <a href="docs/fenecql.html">The whole query
       language</a> fits on one page.</p>
