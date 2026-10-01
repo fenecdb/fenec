@@ -1,0 +1,211 @@
+# Roadmap: the general-database gaps
+
+fenecdb is positioned as an embedded document database with full-text and
+vector search built in. Against that, four gaps are worth closing, and three
+are not. This is the plan for the four; each phase ships on its own, with its
+measurements, as every feature here does.
+
+| Phase | Feature | Size | Why it fits |
+|---|---|---|---|
+| 1 | `alter` and `@unique` | small | expected of any database; both ride on what exists |
+| 2 | Objects (`json` fields, paths) | medium | the largest gap for a *document* database |
+| 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
+| 4 | TLS 1.3, our own | large | the security story ends at a terminator today |
+
+Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
+are the design; SQL is spoken where tools need it, over the catalog), several
+writers to one file or MVCC (the single writer is what removes the WAL, the
+row headers and the visibility map; scale is a file per tenant), multi-writer
+replication. A `decimal` type is wanted but waits behind these.
+
+The rules every phase keeps: zero dependencies in the crates; the browser
+module grows only by what a feature costs it, measured; a feature the browser
+build leaves out opens a file that uses it (`off.rs`); a binary from before a
+new record kind or tag refuses the file rather than misread it; limits error,
+they do not truncate.
+
+---
+
+## Phase 1: `alter` and `@unique`
+
+### `alter`
+
+```
+alter collection orders add field note text
+alter collection orders drop field note
+alter collection orders rename field total to amount
+```
+
+Documents are stored positionally (`Store::read_fields` walks the tagged
+values in schema order), which decides what each change costs:
+
+- **add** appends a field at the end. No document is rewritten: a payload
+  that ends before a position reads as `null` there. `read_fields`,
+  `decode_value`'s callers and the filter binding (`Filter`) learn that an
+  exhausted payload is nulls, not corruption -- today `skip_value` at the end
+  of a payload is `Error::Corrupt`, so the check moves to "past the last
+  field the schema had when the record was written" vs. "truly short".
+- **rename** is the schema alone: positions do not move.
+- **drop** marks the position dropped in the schema (a tombstone field: no
+  name, skipped on read, refused on write). `compact` rewrites documents
+  without it and removes the tombstone. An index on the field is dropped
+  with it.
+- **type changes** are out: a rewrite of every document under the write lock
+  is what `alter` should never be.
+
+On disk: `REC_ALTER` (kind 5) today carries an index added; it gains an
+operation byte (add / drop / rename) and is undone in a block like a create
+index (`Undo`). A binary from before reads a kind-5 record it does not know
+as an index -- so the new operations get a record kind of their own (12),
+which an old binary refuses. Over the pg wire it answers `ALTER TABLE`, as a
+create answers `CREATE TABLE`, and the catalog shows the field at once.
+
+Cost to watch: the null-padding check sits on every row read. Measured
+against the scan benchmarks (`make bench`), it must not move a scan.
+
+### `@unique`
+
+```
+create collection users (email text @unique, name text)
+```
+
+A `@hash` index that refuses a second document with the same value:
+`IndexKind::Hash` gains a `unique` flag (schema index byte, a new value so an
+old binary refuses it). Checked in the write path where `insert` checks ids
+today -- `put`, `set`, and in a block against the block's own writes, which
+the hash already holds -- and refused with `Error::Duplicate` (`23505`,
+`409`), the statement put back whole. `null` is not a value: two nulls do not
+collide, as in SQL. `create index ... @unique` over existing data fails if
+duplicates exist and names one. Replicas apply, never check: the primary
+already did.
+
+The hash index is derived and built lazily on first read (`Derived`); a
+unique one has to be built before the first write after an open, so the
+check is exact. That is an open-time cost for collections that declare it,
+measured with `make open-bench`.
+
+---
+
+## Phase 2: objects
+
+```
+create collection docs (title text, meta json)
+put docs {title: "a", meta: {lang: "tr", source: {site: "x", rank: 3}}}
+get docs where meta.lang = "tr" and meta.source.rank >= 2
+create index on docs (meta.lang) @hash
+```
+
+`limits.html` refuses object values today ("a field you want to filter on
+should be a field"). A document database is expected to hold them, and the
+integrations already flatten metadata into fields to get around it.
+
+- **Value and codec.** `Value::Object(Vec<(String, Value)>)`, keys sorted
+  and unique, under a new tag (12) so an old binary refuses it. A `json`
+  field holds any value -- object, list, scalar -- untyped inside; typed
+  fields stay as they are. Encoding is the same tagged form as a list, a key
+  before each value.
+- **Paths.** `Expr::Path(field, keys)` in the parser; the lexer learns a
+  `.` between names (today a dot is only read inside a number). A path that does not exist in a document is `null`.
+  `Filter` binds a path as it binds a field: the field's position once, then
+  the keys walked per row.
+- **Indexes on a path.** `@hash` and `@sorted` take a path; the index reads
+  the value at the path. Text, vector and sparse indexes stay on top-level
+  fields.
+- **Transports.** JSON is native. Over the pg wire a `json` field is `jsonb`
+  (OID 3802), sent as text and in jsonb's binary form (a version byte and the
+  text), which psycopg, asyncpg and pgx decode. `COPY` reads and writes it as
+  JSON text.
+- **Integrations.** The LangChain and LlamaIndex stores move metadata into
+  one `json` field and filter on paths; their framework suites are the test.
+- **Browser cost.** Measured with `make wasm-sizes`; the path walk is a few
+  hundred bytes, the codec branch less.
+
+---
+
+## Phase 3: subqueries and expiry
+
+### `in (get ...)`
+
+```
+get orders where customer in (get customers select id where country = "TR")
+```
+
+The reverse of `lookup`: filter by rows of another collection. Uncorrelated
+only -- the inner `get` runs once, before the outer one, and its single
+column becomes the set an `in [..]` is answered with today (one bucket per
+element on a `@hash` field or `id`, a scan otherwise). The set is capped
+(100 000 values) and a larger one is a query error, never a cut set. Scoped
+tokens AND their filter into the inner `get` too (`scoped()`), or it reads
+what the token may not.
+
+### `@ttl`
+
+```
+create collection sessions (user text @hash, seen timestamp @ttl(30m))
+```
+
+A timestamp field whose rows expire that long after its value. Two parts:
+
+- **Reads are exact at once.** A query over the collection adds
+  `seen > now - ttl` to its filter, so an expired row is never returned even
+  before it is deleted. In the browser `now` is passed in, as every time is
+  there.
+- **Deletes happen on the primary.** The server's sweeper -- beside the graph
+  keeper, a pass a minute -- deletes a range of the `@sorted` index at a time
+  as ordinary writes, so replicas, `/_changes` and archives see them as any
+  delete. A replica never sweeps. `_idempotency` already does this by hand
+  and becomes the first user.
+
+---
+
+## Phase 4: TLS 1.3, our own
+
+Today `SSLRequest` is answered `N`, and a port off the machine needs a
+terminator (stunnel, nginx `stream`, Caddy). A database whose pitch includes
+security should speak TLS itself -- and the zero-dependency rule means
+writing it. That is the largest and riskiest item here, so it is scoped
+tightly and gated hard.
+
+**Scope.** Server side only, TLS 1.3 only, in `fenec-pg` and its HTTP
+listener; `fenec-wire` and the browser module carry none of it.
+
+- Key exchange: X25519 (RFC 7748), new.
+- Ciphers: `TLS_CHACHA20_POLY1305_SHA256` -- ChaCha20-Poly1305 exists
+  (`crypto.rs`, RFC 8439 vectors) -- and `TLS_AES_128_GCM_SHA256`, which some
+  clients require; AES in constant time without tables is bitsliced, the
+  slower half of this phase.
+- Key schedule: HKDF over the existing SHA-256 and HMAC.
+- Certificates: ECDSA P-256 signing, so a Let's Encrypt certificate works
+  (an RSA key's PKCS#1 v1.5 / PSS signing as a second step, constant time
+  with blinding). The server reads its chain and key from PEM and sends the
+  chain as it is; it parses no certificate but its own key.
+- pg wire: `SSLRequest` answered `S`, then the handshake on the socket;
+  PostgreSQL 17's direct TLS (`sslnegotiation=direct`) as well.
+- `--tls-cert`, `--tls-key`, read again on change as `--jwt-keys` is, so a
+  renewed certificate needs no restart.
+
+**Out of scope.** Client-side TLS (replication, the router reaching nodes,
+`--follow` reaching PostgreSQL) needs certificate-chain validation, a second
+project; inter-node links stay plain behind a private network until then.
+No TLS 1.2, no client certificates, no session tickets in the first cut
+(resumption only costs a full handshake).
+
+**Gates before it ships.** RFC 8448's example handshakes byte for byte;
+X25519 and P-256 against their RFC and Wycheproof vectors; a fuzz target on
+every parser the handshake reaches; interop in CI with `psql
+sslmode=require`, `openssl s_client`, curl, Go's `crypto/tls`, Java's JSSE
+(JDBC) and Node; constant-time review of every secret-dependent path; and a
+note in `SECURITY.md` that the TLS stack is our own, so a reader can choose
+a terminator instead.
+
+---
+
+## Order and what each phase is measured by
+
+1. `alter` and `@unique` -- scan and open benchmarks unchanged; browser size.
+2. Objects -- path filters against a field-for-field twin collection, as
+   `tests/sorted.rs` holds `@sorted` to the scan; the integrations' suites.
+3. Subqueries and expiry -- the inner set against the same query written by
+   hand; expiry exact before and after a sweep.
+4. TLS -- the gates above; handshake latency and throughput against a
+   terminator in front of the same server.
