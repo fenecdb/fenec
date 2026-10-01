@@ -143,13 +143,10 @@ impl Database {
     }
 
     /// [`Self::spill`], once the open block's frames amount to `spill_at`
-    /// bytes and it may spill: not while it is parked, nor once a savepoint
-    /// was taken in it.
+    /// bytes and it may spill: not once a spill could not be made.
     pub(super) fn spill_when_due(&mut self) -> Result<()> {
         let due = self.block.as_ref().is_some_and(|b| {
-            b.frames.len() - HEAD_ROOM >= self.spill_at as usize
-                && !b.parked
-                && !b.unspillable.load(Relaxed)
+            b.frames.len() - HEAD_ROOM >= self.spill_at as usize && !b.unspillable
         });
         if due && self.mapped && self.failed.is_none() {
             self.spill()?;
@@ -200,7 +197,7 @@ impl Database {
         for &cid in &cids {
             if let Some(c) = self.collections.values().find(|c| c.id == cid) {
                 if !c.store.would_hand_over(&lens(cid, &self.landed)) {
-                    b.unspillable.store(true, Relaxed);
+                    b.unspillable = true;
                     return Ok(());
                 }
             }
@@ -216,7 +213,7 @@ impl Database {
         let Some(base) = self.storage(r)? else {
             // Nothing to take them in from: the spill is dead, and the block
             // holds its frames as it did.
-            b.unspillable.store(true, Relaxed);
+            b.unspillable = true;
             return Ok(());
         };
         // A collection the block dropped keeps the notes of what landed

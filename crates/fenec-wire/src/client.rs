@@ -1,12 +1,11 @@
 //! PostgreSQL v3 wire protocol -- client side.
 //!
-//! The `server` module makes fenecdb look like PostgreSQL; this module does
-//! the opposite and connects to a real PostgreSQL server. The subset needed
-//! for import: connect, authenticate, simple query and `COPY ... TO STDOUT`
-//! -- and for `--follow`, a logical replication stream ([`WalStream`]).
+//! Connects to a real PostgreSQL server. The subset needed for import:
+//! connect, authenticate (SCRAM-SHA-256, the client half, or a cleartext
+//! password), simple query and `COPY ... TO STDOUT` -- and for `--follow`,
+//! a logical replication stream ([`WalStream`]).
 //!
-//! Framing comes from [`crate::proto`], crypto from [`crate::crypto`]. The
-//! server half of SCRAM is in fenec-server's `scram`; this is the client half.
+//! Framing comes from [`crate::proto`], crypto from [`crate::crypto`].
 //!
 //! No TLS is spoken. The password is protected by SCRAM but the data flows
 //! in plain text; on an open network it has to go behind a tunnel.

@@ -11,3 +11,4 @@ mod cdc;
 mod changes;
 mod idempotency;
 mod replication;
+mod server;

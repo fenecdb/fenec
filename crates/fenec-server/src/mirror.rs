@@ -1,5 +1,5 @@
 //! `fenec-server --follow`: a PostgreSQL table mirrored into the file this
-//! server serves, over the pg wire, HTTP and its subscriptions at once.
+//! server serves, over HTTP and its subscriptions at once.
 //!
 //! `fenec import --follow` is the single writer of the file it keeps, so
 //! serving its mirror took a second process over a copy of it: two
@@ -104,7 +104,7 @@ pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
         .name("fenec-follow".into())
         .spawn(move || {
             FOLLOWER.with(|f| f.set(true));
-            let stop = crate::server::shutdown_flag();
+            let stop = crate::durability::shutdown_flag();
             let mut report = reporter(&m);
             match follow::run(&m.url, &m.table, &db, &m.opts, &m.follow, stop, &mut report) {
                 Ok(()) => {
@@ -116,7 +116,7 @@ pub fn start(m: Mirror, db: Arc<RwLock<Database>>) -> std::io::Result<()> {
                 }
             }
         })?;
-    crate::server::before_shutdown(move || {
+    crate::durability::before_shutdown(move || {
         let _ = stopped.recv_timeout(STOP_WAIT);
     });
     Ok(())
@@ -200,7 +200,7 @@ mod tests {
     }
 
     /// The mirrored collection takes the follower's writes and deletes and
-    /// refuses anyone else's, as a replica refuses one (25006); the rest of
+    /// refuses anyone else's, as a replica refuses one; the rest of
     /// the file is written as ever.
     #[test]
     fn the_mirror_takes_the_followers_writes_alone() {

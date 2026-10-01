@@ -142,17 +142,16 @@ serve: wasm
 	@echo ""
 	@cd web && python3 -m http.server $(PORT)
 
-## PostgreSQL protocol server (for a password: make server PGPASS=secret)
-## For the HTTP/JSON endpoint: make server HTTP=127.0.0.1:8080
+## The server over ./data.fenec, HTTP on 127.0.0.1:8080 unless HTTP=addr
+## names another (a token: make server TOKEN=secret)
 server:
-	$(CARGO) run --release -p fenec-server -- --listen 127.0.0.1:5433 --file data.fenec \
-	  --sync 250 $(if $(PGPASS),--password $(PGPASS),) $(if $(HTTP),--http $(HTTP),)
+	$(CARGO) run --release -p fenec-server -- --http $(or $(HTTP),127.0.0.1:8080) --file data.fenec \
+	  --sync 250 $(if $(TOKEN),--http-token $(TOKEN),)
 
 ## A tenant node: one file per tenant under ./tenants, HTTP only.
 ## make node HTTP=127.0.0.1:8081 ADMIN=secret
 node:
 	$(CARGO) run --release -p fenec-server -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
-	  $(if $(PG),--listen $(PG),) \
 	  --admin-token $(or $(ADMIN),$(error ADMIN=<token> is required)) --sync 250
 
 ## The router in front of the nodes; the directory lives in ./shard.fenec.
@@ -311,21 +310,21 @@ pgvector-down:
 docker:
 	docker build -t fenecdb .
 
-## Starts the container: make docker-run PGPASS=secret
+## Starts the container: make docker-run TOKEN=secret
 ## The memory limit must be at least 3x the data file (compact peak).
 docker-run: docker
-	@test -n "$(PGPASS)" || (echo "password required: make docker-run PGPASS=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo "token required: make docker-run TOKEN=secret"; exit 1)
 	docker run -d --name fenecdb --restart unless-stopped \
-	  -p 127.0.0.1:5433:5433 -v fenecdata:/data \
-	  -e FENECPG_PASSWORD=$(PGPASS) --memory 1g --memory-swap 1g fenecdb
-	@echo "postgres://fenec@127.0.0.1:5433"
+	  -p 127.0.0.1:8080:8080 -v fenecdata:/data \
+	  -e FENEC_HTTP_TOKEN=$(TOKEN) --memory 1g --memory-swap 1g fenecdb
+	@echo "http://127.0.0.1:8080"
 
-## Writes the graph to the file. fenec-server writes no checkpoint on shutdown:
-## without this call every restart rebuilds the HNSW index from scratch.
+## Compacts the running container's file: what deletes and rewrites left
+## dead goes, and every graph holding tombstones is built again.
 docker-compact:
-	@test -n "$(PGPASS)" || (echo "password required: make docker-compact PGPASS=secret"; exit 1)
-	docker run --rm --network container:fenecdb -e PGPASSWORD=$(PGPASS) \
-	  postgres:16-alpine psql -h 127.0.0.1 -p 5433 -U fenec -c 'compact'
+	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=secret"; exit 1)
+	curl -fsS -H 'Authorization: Bearer $(TOKEN)' -d '{"query": "compact"}' \
+	  http://127.0.0.1:8080/query
 
 docker-down:
 	-docker rm -f fenecdb

@@ -34,8 +34,8 @@ const port = () =>
 /** fenec-server over a file of its own, its HTTP endpoint up; `stop()` ends it. */
 async function server() {
   const dir = await mkdtemp(join(tmpdir(), 'fenecdb-langchain-'));
-  const [pg, http] = [await port(), await port()];
-  const child = spawn(binary, ['--listen', `127.0.0.1:${pg}`, '--http', `127.0.0.1:${http}`, '--file', join(dir, 'db.fenec')], {
+  const http = await port();
+  const child = spawn(binary, ['--http', `127.0.0.1:${http}`, '--file', join(dir, 'db.fenec')], {
     stdio: 'ignore',
   });
   const url = `http://127.0.0.1:${http}`;

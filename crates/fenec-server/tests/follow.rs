@@ -1,18 +1,16 @@
-//! `fenec-server --follow` against a live PostgreSQL (`make import-test`, which
-//! starts one in Docker): a table's copy and its changes served over the pg
-//! wire and HTTP as they commit, a client's write to the mirror refused, and
-//! a server stopped -- by a signal, or killed outright -- started again over
+//! `fenec-server --follow` against a live PostgreSQL (`make import-test`,
+//! which starts one in Docker): a table's copy and its changes served over
+//! HTTP as they commit, a client's write to the mirror refused, and a
+//! server stopped -- by a signal, or killed outright -- started again over
 //! its file without losing a row.
 //!
 //!     cargo test -p fenec-server --test all follow:: -- --ignored
 
 #![cfg(unix)]
 
-use fenec_server::client::{Client, Url};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use crate::support::{count, Server};
+use fenec_wire::client::{Client, Url};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,12 +21,9 @@ fn source_text() -> String {
     std::env::var("FENEC_TEST_PG_URL").unwrap_or_else(|_| URL.into())
 }
 
-fn source() -> Url {
-    Url::parse(&source_text()).unwrap()
-}
-
 fn pg() -> Client {
-    Client::connect(&source()).expect("no PostgreSQL to follow (make pgvector-up)")
+    Client::connect(&Url::parse(&source_text()).unwrap())
+        .expect("no PostgreSQL to follow (make pgvector-up)")
 }
 
 /// A table of `rows` rows, with no slot or publication left from before:
@@ -51,95 +46,39 @@ fn forget(c: &mut Client, t: &str) {
     let _ = c.query(&format!("drop table if exists {t}"));
 }
 
-struct Server {
-    child: Child,
-    pg: u16,
-    http: u16,
+fn rows(s: &Server, t: &str) -> u64 {
+    count(&s.http().run(&format!("get {t} count"))) as u64
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+/// Waits until a row of the mirror has `title`.
+fn shows(s: &Server, t: &str, title: &str) {
+    let q = format!("get {t} where title = \"{title}\" count");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while count(&s.http().run(&q)) != 1 {
+        assert!(
+            Instant::now() < deadline,
+            "no row of {t} has title `{title}`"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-impl Server {
-    fn client(&self) -> Client {
-        Client::connect(&Url {
-            user: "fenec".into(),
-            password: None,
-            host: "127.0.0.1".into(),
-            port: self.pg,
-            database: "fenec".into(),
-        })
-        .unwrap()
-    }
-
-    fn http(&self, method: &str, path: &str, body: &str) -> (u16, String) {
-        let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        write!(
-            s,
-            "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
-        let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
-        let body = out
-            .split_once("\r\n\r\n")
-            .map_or("", |(_, b)| b)
-            .to_string();
-        (out[9..12].parse().unwrap(), body)
-    }
-
-    fn count(&self, t: &str) -> u64 {
-        let rows = self.client().query(&format!("get {t} count")).unwrap().rows;
-        rows[0][0].as_deref().unwrap().parse().unwrap()
-    }
-
-    /// Waits until a row of the mirror has `title`.
-    fn shows(&self, t: &str, title: &str) {
-        let q = format!("get {t} where title = \"{title}\" count");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let rows = self.client().query(&q).unwrap().rows;
-            if rows[0][0].as_deref() == Some("1") {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no row of {t} has title `{title}`"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Waits until the mirror holds `n` rows.
-    fn holds(&self, t: &str, n: u64) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while self.count(t) != n {
-            assert!(
-                Instant::now() < deadline,
-                "the mirror of {t} stayed at {}",
-                self.count(t)
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Asks it to stop, as a supervisor does, and waits until it has.
-    fn stop(mut self) {
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status();
-        let _ = self.child.wait();
+/// Waits until the mirror holds `n` rows.
+fn holds(s: &Server, t: &str, n: u64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while rows(s, t) != n {
+        assert!(
+            Instant::now() < deadline,
+            "the mirror of {t} stayed at {}",
+            rows(s, t)
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fenecpg-follow-{tag}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("fenec-server-follow-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("mirror.fenec")
@@ -147,52 +86,21 @@ fn tmp(tag: &str) -> PathBuf {
 
 /// Starts the server over `file`, following `t`, and waits until it streams.
 fn start(file: &Path, t: &str) -> Server {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
-        .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
-        .arg("--file")
-        .arg(file)
-        .args(["--follow", &source_text(), "--follow-table", t])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("could not start fenec-server");
-    let mut err = BufReader::new(child.stderr.take().unwrap());
-    let port = |line: &str, after: &str| -> Option<u16> {
-        line.split(after)
-            .nth(1)?
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .ok()
-    };
-    let (mut pg, mut http, mut streaming) = (None, None, false);
-    let mut seen = String::new();
-    while pg.is_none() || http.is_none() || !streaming {
-        let mut line = String::new();
-        if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-server ended before it streamed:\n{seen}");
-        }
-        seen.push_str(&line);
-        if line.contains("postgres://localhost:") {
-            pg = port(&line, "localhost:");
-        } else if line.contains("listening on: http://127.0.0.1:") {
-            http = port(&line, "127.0.0.1:");
-        } else if line.contains("streaming its changes") {
-            streaming = true;
-        }
-    }
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        while err.read_line(&mut line).unwrap_or(0) > 0 {
-            line.clear();
-        }
-    });
-    Server {
-        child,
-        pg: pg.unwrap(),
-        http: http.unwrap(),
-    }
+    let source = source_text();
+    let s = crate::support::start(&[
+        "--file",
+        file.to_str().unwrap(),
+        "--follow",
+        &source,
+        "--follow-table",
+        t,
+    ]);
+    assert!(
+        s.logged("streaming its changes", Duration::from_secs(60)),
+        "fenec-server never streamed:\n{}",
+        s.log.lock().unwrap()
+    );
+    s
 }
 
 #[test]
@@ -203,10 +111,10 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
     table(&mut c, t, 50);
     let file = tmp("served");
     let s = start(&file, t);
-    assert_eq!(s.count(t), 50);
+    assert_eq!(rows(&s, t), 50);
 
-    // A change committed there is served here, over either wire: each in
-    // its own transaction, and applied in their order.
+    // A change committed there is served here: each in its own
+    // transaction, and applied in their order.
     c.query(&format!("insert into {t} values (51, 'new')"))
         .unwrap();
     c.query(&format!("update {t} set title = 'changed' where id = 7"))
@@ -214,34 +122,26 @@ fn a_followed_table_is_served_and_takes_no_other_write() {
     c.query(&format!("delete from {t} where id = 8")).unwrap();
     c.query(&format!("insert into {t} values (52, 'last')"))
         .unwrap();
-    s.shows(t, "last");
-    assert_eq!(s.count(t), 51);
-    let (status, body) = s.http(
-        "POST",
-        "/query",
-        &format!(r#"{{"query":"get {t} where id = 7"}}"#),
-    );
-    assert_eq!(status, 200, "{body}");
+    shows(&s, t, "last");
+    assert_eq!(rows(&s, t), 51);
+    let body = s.http().run(&format!("get {t} where id = 7"));
     assert!(body.contains("changed"), "{body}");
 
     // The mirror is the follower's to write; the rest of the file is not.
-    let err = s
-        .client()
+    let (status, body) = s
+        .http()
         .query(&format!("put {t} {{id: 99, title: \"mine\"}}"))
         .unwrap_err();
-    assert!(
-        err.to_string().contains("mirrors a PostgreSQL table"),
-        "{err}"
-    );
-    let (status, _) = s.http(
-        "POST",
-        "/query",
-        &format!(r#"{{"query":"del {t} where id = 1"}}"#),
-    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("mirrors a PostgreSQL table"), "{body}");
+    let (status, _) = s
+        .http()
+        .query(&format!("del {t} where id = 1"))
+        .unwrap_err();
     assert_eq!(status, 403);
-    s.client().query("create collection notes (n int)").unwrap();
-    s.client().query("put notes {n: 1}").unwrap();
-    assert_eq!(s.count(t), 51);
+    s.http().run("create collection notes (n int)");
+    s.http().run("put notes {n: 1}");
+    assert_eq!(rows(&s, t), 51);
 
     drop(s);
     forget(&mut c, t);
@@ -258,14 +158,14 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
     // Stopped by a signal: its last changes on disk and confirmed, and the
     // ones committed while it was down taken in when it is back.
     let s = start(&file, t);
-    s.holds(t, 20);
-    s.stop();
+    holds(&s, t, 20);
+    let _ = s.terminate();
     c.query(&format!(
         "insert into {t} select g, 'down ' || g from generate_series(21, 40) g"
     ))
     .unwrap();
     let s = start(&file, t);
-    s.holds(t, 40);
+    holds(&s, t, 40);
 
     // Killed outright while the table is written to: what it applied and
     // did not confirm comes again, and changes nothing.
@@ -289,7 +189,7 @@ fn a_server_stopped_or_killed_goes_on_without_losing_a_row() {
     done.store(true, Ordering::Relaxed);
     writer.join().unwrap();
     let s = start(&file, t);
-    s.holds(t, written.load(Ordering::Relaxed));
+    holds(&s, t, written.load(Ordering::Relaxed));
 
     drop(s);
     forget(&mut c, t);

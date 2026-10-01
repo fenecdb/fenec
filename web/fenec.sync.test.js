@@ -82,7 +82,7 @@ async function listening(path, args, name) {
 async function server(extra = []) {
   const { url, close } = await listening(
     bin,
-    ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', ...extra],
+    ['--http', '127.0.0.1:0', ...extra],
     'fenec-http',
   );
 

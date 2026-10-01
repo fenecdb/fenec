@@ -1,8 +1,9 @@
 [package]
 name = "fenec-wire"
-description = "The PostgreSQL v3 wire protocol for fenecdb: its framing, and a client"
+description = "A PostgreSQL v3 wire protocol client for fenecdb's import and --follow"
 version.workspace = true
 edition.workspace = true
+autotests = false
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -14,3 +15,7 @@ categories.workspace = true
 # hashing is fenec-http's.
 fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-http.workspace = true
+
+[[test]]
+name = "all"
+path = "tests/all.rs"

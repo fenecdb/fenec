@@ -16,7 +16,7 @@ dir=$(mktemp -d)
 port=${FENEC_TEST_PORT:-18181}
 token=python-tests
 # Outside loopback, so the container reaches it: a token is required there.
-"$root/target/debug/fenec-server" --listen 127.0.0.1:0 --file "$dir/python.fenec" \
+"$root/target/debug/fenec-server" --file "$dir/python.fenec" \
     --http "0.0.0.0:$port" --http-token "$token" --cdc 2>"$dir/server.log" &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$dir"' EXIT INT TERM

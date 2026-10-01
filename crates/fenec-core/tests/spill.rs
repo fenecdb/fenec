@@ -1,8 +1,8 @@
 //! A block that outgrows its bound spills its frames into the file before it
 //! lands (`Database::spill`), and the stores read them from there: the block
 //! is held once, and only up to the bound. Nothing else may change. It lands
-//! whole or not at all -- a rollback, a savepoint taken back to and a crash
-//! leave none of it -- it reopens as it answered, and a replica is sent it
+//! whole or not at all -- a rollback and a crash leave none
+//! of it -- it reopens as it answered, and a replica is sent it
 //! as the one block it would have been. Each is held to a twin that never
 //! spills.
 
@@ -276,62 +276,6 @@ fn a_crash_after_spills_loses_the_block_alone() {
     same(&a, &b);
     assert_eq!(std::fs::metadata(&a_path).unwrap().len(), before);
     drop(a);
-    let _ = std::fs::remove_file(&a_path);
-    let _ = std::fs::remove_file(&b_path);
-}
-
-/// A savepoint stops the spills -- its marks are where the stores stood in
-/// memory -- and a block taken back to one lands as its twin's does,
-/// spilled before it or not.
-#[test]
-fn a_savepoint_is_taken_back_to_across_the_spills_before_it() {
-    let (a_path, mut a, b_path, mut b) = twins("savepoint");
-    for db in [&mut a, &mut b] {
-        db.begin().unwrap();
-        for i in 0..300 {
-            put_doc(db, i);
-        }
-        let sp = db.savepoint();
-        for i in 300..600 {
-            put_doc(db, i);
-        }
-        run(db, "del docs where n < 50");
-        db.rollback_to(&sp).unwrap();
-        for i in 600..700 {
-            put_doc(db, i);
-        }
-        db.commit().unwrap();
-    }
-    same(&a, &b);
-    drop((a, b));
-    same(
-        &open_mapped(&a_path).unwrap(),
-        &open_mapped(&b_path).unwrap(),
-    );
-    let _ = std::fs::remove_file(&a_path);
-    let _ = std::fs::remove_file(&b_path);
-}
-
-/// A block that spilled is not put back for a reader: written again, its
-/// writes would be read into memory again.
-#[test]
-fn a_block_that_spilled_is_not_parked() {
-    let (a_path, mut a, b_path, mut b) = twins("park");
-    run(&mut a, "create collection plain (s text)");
-    run(&mut b, "create collection plain (s text)");
-    for db in [&mut a, &mut b] {
-        db.begin().unwrap();
-        for i in 0..200 {
-            exec(
-                db,
-                "put plain {s: $1}",
-                &[Value::Text(format!("{i} {}", "p".repeat(60)))],
-            );
-        }
-        db.leave_block();
-    }
-    assert!(!a.park());
-    assert!(b.park());
     let _ = std::fs::remove_file(&a_path);
     let _ = std::fs::remove_file(&b_path);
 }

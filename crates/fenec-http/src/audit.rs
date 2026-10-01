@@ -1,28 +1,28 @@
-//! The audit log, and the wait after a failed login.
+//! The audit log, and the wait after a refused token.
 //!
-//! `--audit <path>` appends a JSON line an event to the file: a login over
-//! the pg wire and one refused, an HTTP request refused for its token (401),
-//! a request to `/_admin/` or `/_shard/` that changes something, and a
-//! statement that changes the schema -- `create`, `drop`, `alter`,
-//! `compact`, a SQL `CREATE TABLE` -- by its shape, the literals left out as
-//! `/_stats/statements` leaves them. Each line says when, over what, from
-//! where and as whom:
+//! `--audit <path>` appends a JSON line an event to the file: an HTTP
+//! request refused for its token (401), a request to `/_admin/` or
+//! `/_shard/` that changes something, and a statement that changes the
+//! schema -- `create`, `drop`, `alter`, `compact` -- by its shape, the
+//! literals left out as `/_stats/statements` leaves them. Each line says
+//! when, over what and from where:
 //!
 //! ```text
-//! {"at":"2026-10-01T09:30:12.041Z","event":"login","proto":"pg","peer":"10.0.0.7:53112","user":"app","database":"acme"}
-//! {"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"pg","peer":"10.0.0.7:53112","user":"app","statement":"create collection notes (title text)","failed":false}
+//! {"at":"2026-10-01T09:30:12.041Z","event":"refused","proto":"http","peer":"10.0.0.7:53112","method":"POST","path":"/query"}
+//! {"at":"2026-10-01T09:30:12.310Z","event":"schema","proto":"http","peer":"10.0.0.7:53112","statement":"create collection notes (title text)","failed":false}
 //! ```
 //!
-//! Nothing on a read or a write's path writes to it: a line is a login, a
-//! refusal or a schema change. The lines are written as they come and not
-//! synced -- the log of a crash may lose its last lines, never the data's.
+//! Nothing on a read or a write's path writes to it: a line is a refusal,
+//! an admin request or a schema change. The lines are written as they come
+//! and not synced -- the log of a crash may lose its last lines, never the
+//! data's.
 //!
-//! **A failed login waits** before it is answered, as PostgreSQL's
-//! `auth_delay` has it: `--auth-delay` (100 ms) after the first failure from
-//! an address within a minute, twice as long after each one more, 5 s at
-//! most. A password guessed over the pg wire went from as many tries as the
-//! round trips allow to about one every five seconds an address, and a
-//! client that gets it right is not slowed at all.
+//! **A refusal waits** before it is answered, as PostgreSQL's `auth_delay`
+//! has it for a password: `--auth-delay` (100 ms) after the first failure
+//! from an address within a minute, twice as long after each one more, 5 s
+//! at most. A token guessed went from as many tries as the round trips
+//! allow to about one every five seconds an address, and a client whose
+//! token is right is not slowed at all.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -69,7 +69,6 @@ pub fn on() -> bool {
 struct Who {
     proto: &'static str,
     peer: Option<std::net::SocketAddr>,
-    user: Option<String>,
 }
 
 thread_local! {
@@ -79,18 +78,7 @@ thread_local! {
 
 /// The connection this thread serves.
 pub fn connection(proto: &'static str, peer: Option<std::net::SocketAddr>) {
-    WHO.with(|w| {
-        *w.borrow_mut() = Who {
-            proto,
-            peer,
-            user: None,
-        }
-    });
-}
-
-/// Who the connection logged in as.
-pub fn user(name: &str) {
-    WHO.with(|w| w.borrow_mut().user = Some(name.to_string()));
+    WHO.with(|w| *w.borrow_mut() = Who { proto, peer });
 }
 
 /// A value of an event's line.
@@ -124,9 +112,6 @@ pub fn event(name: &str, fields: &[(&str, Field)]) {
         if let Some(p) = w.peer {
             text(&mut line, "peer", &p.to_string());
         }
-        if let Some(u) = &w.user {
-            text(&mut line, "user", u);
-        }
     });
     for (k, v) in fields {
         match v {
@@ -154,7 +139,7 @@ pub fn statement(tenant: Option<&str>, shape: &str, failed: bool) {
     }
     for one in shape.split(';') {
         let word = one.split_whitespace().next().unwrap_or("");
-        if ["create", "drop", "alter", "compact", "vacuum", "truncate"]
+        if ["create", "drop", "alter", "compact"]
             .iter()
             .any(|w| word.eq_ignore_ascii_case(w))
         {
@@ -169,7 +154,7 @@ pub fn statement(tenant: Option<&str>, shape: &str, failed: bool) {
 }
 
 /// An HTTP request answered with `status`: refused for its token (401), it
-/// waits as a failed login does and is logged; one that changes a node's
+/// waits and is logged; one that changes a node's
 /// tenants or a router's placement is logged. A request with a token that
 /// is not refused starts its address's count again.
 pub fn http(req: &crate::http::Request, status: u16, peer: Option<std::net::SocketAddr>) {
@@ -210,8 +195,8 @@ fn failures() -> &'static Mutex<Failures> {
     F.get_or_init(Default::default)
 }
 
-/// How long to wait before answering a failed login from `peer`, the
-/// failure counted.
+/// How long to wait before answering a refusal to `peer`, the failure
+/// counted.
 pub fn failed(peer: Option<IpAddr>) -> Duration {
     let base = DELAY_MS.load(Ordering::Relaxed);
     let Some(ip) = peer.filter(|_| base > 0) else {
@@ -233,7 +218,7 @@ pub fn failed(peer: Option<IpAddr>) -> Duration {
     Duration::from_millis(doubled).min(MOST)
 }
 
-/// A login from `peer` went through: its count starts again.
+/// A token from `peer` was taken: its count starts again.
 pub fn succeeded(peer: Option<IpAddr>) {
     if let Some(ip) = peer.filter(|_| FAILING.load(Ordering::Relaxed) > 0) {
         let mut map = failures().lock().unwrap_or_else(|e| e.into_inner());

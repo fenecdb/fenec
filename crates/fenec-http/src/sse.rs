@@ -177,7 +177,7 @@ pub fn serve(
     // Parsing needs the schema, and the schema needs a read lock. The lock is
     // released immediately: held for the whole stream it would stop all writes.
     let sub = {
-        let guard = crate::held::read_landed(db);
+        let guard = crate::held::read(db);
         api::subscription(&guard, req).and_then(|mut sub| {
             if let Some(scope) = who.scope() {
                 sub.filter = scope.restrict(&sub.collection, sub.filter.take())?;
@@ -237,7 +237,7 @@ pub fn serve(
             return;
         }
         let step = {
-            let guard = crate::held::read_landed(db);
+            let guard = crate::held::read(db);
             guard.changes_since(
                 &sub.collection,
                 cursor,
@@ -302,7 +302,7 @@ fn seed(
     seen: &mut Option<std::collections::HashSet<DocId>>,
 ) -> std::io::Result<u64> {
     let (rows, seq) = {
-        let guard = crate::held::read_landed(db);
+        let guard = crate::held::read(db);
         let stmt = Statement::Select(api::seed_select(sub));
         match guard.query(&stmt, &[]) {
             Ok(Response::Rows(rs)) => {

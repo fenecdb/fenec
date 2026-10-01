@@ -1,115 +1,25 @@
-//! The shutdown path -- against a real process.
+//! The shutdown path and the syncer -- against a real process.
 //!
 //! These behaviours cannot be exercised *inside* the process: shutdown ends
 //! in `process::exit` and the shutdown flag belongs to the whole process.
-//! So the test runs the `fenec-server` binary, sends SIGTERM and inspects the file
-//! left behind -- exactly what `docker stop` does.
+//! So the test runs the `fenec-server` binary, sends SIGTERM and inspects
+//! the file left behind -- exactly what `docker stop` does.
 
-use fenec_server::client::{Client, Url};
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Stdio};
-
-// libc's `kill`; `server.rs` declares `signal` the same way (to avoid
-// adding a dependency).
-extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-const SIGTERM: i32 = 15;
-const SIGKILL: i32 = 9;
-
-fn tmp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fenecpg-shutdown-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
-    let _ = std::fs::remove_file(&path);
-    path
-}
-
-struct Running {
-    child: Child,
-    port: u16,
-    err: BufReader<ChildStderr>,
-}
-
-/// Starts the binary on a random port and waits for it to begin listening.
-fn start(path: &Path, extra: &[&str]) -> Running {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
-        .arg("--listen")
-        .arg("127.0.0.1:0")
-        .arg("--file")
-        .arg(path)
-        .args(extra)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("could not start fenec-server");
-
-    // "fenec-server 0.1.0 listening on: postgres://localhost:54321/fenec  [...]"
-    let mut err = BufReader::new(child.stderr.take().unwrap());
-    let mut port = None;
-    for _ in 0..10 {
-        let mut line = String::new();
-        if err.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        if let Some(rest) = line.split("localhost:").nth(1) {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            port = digits.parse().ok();
-            break;
-        }
-    }
-    let port = port.expect("the listening port was not found in stderr");
-    Running { child, port, err }
-}
-
-impl Running {
-    fn client(&self) -> Client {
-        Client::connect(&Url {
-            user: "fenec".into(),
-            password: None,
-            host: "127.0.0.1".into(),
-            port: self.port,
-            database: "fenec".into(),
-        })
-        .expect("could not connect")
-    }
-
-    /// Sends SIGTERM and waits for the process to end; exit code + stderr.
-    fn terminate(self) -> (i32, String) {
-        self.signal(SIGTERM)
-    }
-
-    fn signal(mut self, sig: i32) -> (i32, String) {
-        unsafe { kill(self.child.id() as i32, sig) };
-        let status = self.child.wait().expect("could not wait for the process");
-        let mut rest = String::new();
-        self.err.read_to_string(&mut rest).unwrap_or_default();
-        (status.code().unwrap_or(-1), rest)
-    }
-}
-
-fn documents(path: &Path, collection: &str) -> usize {
-    let db = fenec_core::fs::open(path).expect("could not reopen the file");
-    db.stats()
-        .iter()
-        .find(|s| s.name == collection)
-        .map(|s| s.documents)
-        .unwrap_or(0)
-}
+use crate::support::{documents, json_string, start, tmp, SIGKILL};
+use std::time::{Duration, Instant};
 
 /// `--sync off`: nothing reaches the disk except on shutdown. So every row
 /// found in the file went through the shutdown path -- a write lost between
 /// `sync` and `exit` shows up as missing here.
 #[test]
 fn sigterm_flushes_pending_writes() {
-    let path = tmp("drain.fenec");
-    let server = start(&path, &["--sync", "off"]);
+    let path = tmp("shutdown", "drain.fenec");
+    let server = start(&["--file", path.to_str().unwrap(), "--sync", "off"]);
 
-    let mut c = server.client();
-    c.query("create collection t (name text)").unwrap();
-    c.query(r#"put t {name: "one"}"#).unwrap();
-    c.query(r#"put t {name: "two"}"#).unwrap();
+    let mut c = server.http();
+    c.run("create collection t (name text)");
+    c.run(r#"put t {name: "one"}"#);
+    c.run(r#"put t {name: "two"}"#);
 
     let before = std::fs::metadata(&path).unwrap().len();
     let (code, log) = server.terminate();
@@ -127,46 +37,55 @@ fn sigterm_flushes_pending_writes() {
     assert_eq!(documents(&path, "t"), 2, "a write was lost");
 }
 
-/// A transaction open at a SIGTERM is put back, not landed, and the
-/// shutdown does not wait on the client holding it: the session looks up
-/// from its wait for the client to let go of the lock.
+/// `--sync <ms>`: the syncer pushes what was written to disk within its
+/// interval, with no shutdown and no further write.
 #[test]
-fn sigterm_puts_an_open_transaction_back() {
-    let path = tmp("open-tx.fenec");
-    let server = start(&path, &["--sync", "off"]);
-    let mut c = server.client();
-    c.query("create collection t (name text)").unwrap();
-    c.query(r#"put t {name: "landed"}"#).unwrap();
-    c.query("BEGIN").unwrap();
-    c.query(r#"put t {name: "open"}"#).unwrap();
+fn interval_sync_flushes_in_background() {
+    let path = tmp("shutdown", "interval.fenec");
+    let server = start(&["--file", path.to_str().unwrap(), "--sync", "50"]);
+    let mut c = server.http();
+    c.run("create collection t (name text)");
+    c.run(r#"put t {name: "delayed"}"#);
 
-    let started = std::time::Instant::now();
-    let (code, log) = server.terminate();
-    assert_eq!(code, 0, "expected a clean exit\n{log}");
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "the shutdown waited on the open transaction\n{log}"
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while documents(&path, "t") == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        documents(&path, "t"),
+        1,
+        "the periodic syncer did not push the write to disk"
     );
-    assert_eq!(documents(&path, "t"), 1, "the open transaction landed");
 }
 
-/// Killed, a server holds every transaction it landed, whole, and nothing
-/// of the one open: its writes reach the file only when it lands.
+/// Killed, a server holds every batch it answered, whole, and nothing of
+/// one cut short: a batch's writes reach the file as one record, after
+/// its last statement ran.
 #[test]
-fn a_killed_server_holds_what_landed_and_nothing_open() {
-    let path = tmp("killed-tx.fenec");
-    let server = start(&path, &["--sync", "always"]);
-    let mut c = server.client();
-    c.query("create collection t (name text)").unwrap();
-    c.query("create collection u (n int)").unwrap();
-    c.query("BEGIN").unwrap();
-    c.query(r#"put t {name: "a"}"#).unwrap();
-    c.query("put u {n: 1}").unwrap();
-    c.query(r#"put t {name: "b"}"#).unwrap();
-    c.query("COMMIT").unwrap();
-    c.query("BEGIN").unwrap();
-    c.query(r#"put t {name: "open"}"#).unwrap();
-    c.query("put u {n: 2}").unwrap();
+fn a_killed_server_holds_every_batch_it_answered_whole() {
+    let path = tmp("shutdown", "killed-batch.fenec");
+    let server = start(&["--file", path.to_str().unwrap(), "--sync", "always"]);
+    let mut c = server.http();
+    c.run("create collection t (name text)");
+    c.run("create collection u (n int)");
+    let line = |q: &str| format!("{{\"query\": {}}}", json_string(q));
+    let batch = [
+        line(r#"put t {name: "a"}"#),
+        line("put u {n: 1}"),
+        line(r#"put t {name: "b"}"#),
+    ]
+    .join("\n");
+    let a = c.ask("POST", "/batch", &batch);
+    assert_eq!(a.status, 200, "{}", a.body);
+    // One that fails at its last statement leaves nothing.
+    let failed = [
+        line(r#"put t {name: "never"}"#),
+        line("put u {n: 2}"),
+        line("put nowhere {n: 3}"),
+    ]
+    .join("\n");
+    let a = c.ask("POST", "/batch", &failed);
+    assert_ne!(a.status, 200, "{}", a.body);
 
     let (code, _) = server.signal(SIGKILL);
     assert_ne!(code, 0, "the server was not killed");
@@ -190,16 +109,20 @@ fn checkpoint_on_exit_writes_the_graph() {
 
     let mut size = [0u64; 2];
     for (i, extra) in [Vec::new(), vec!["--no-checkpoint"]].iter().enumerate() {
-        let path = tmp(if i == 0 {
-            "cp-on.fenec"
-        } else {
-            "cp-off.fenec"
-        });
-        let server = start(&path, extra);
-        let mut c = server.client();
-        c.query("create collection t (name text, e vector<4> @hnsw(cosine))")
-            .unwrap();
-        c.query(&put).unwrap();
+        let path = tmp(
+            "shutdown",
+            if i == 0 {
+                "cp-on.fenec"
+            } else {
+                "cp-off.fenec"
+            },
+        );
+        let mut args = vec!["--file", path.to_str().unwrap()];
+        args.extend(extra);
+        let server = start(&args);
+        let mut c = server.http();
+        c.run("create collection t (name text, e vector<4> @hnsw(cosine))");
+        c.run(&put);
 
         let (code, log) = server.terminate();
         assert_eq!(code, 0, "expected a clean exit\n{log}");
@@ -220,4 +143,23 @@ fn checkpoint_on_exit_writes_the_graph() {
         size[0],
         size[1]
     );
+}
+
+/// `--ping` asks `GET /_health` at the `--http` address: 0 while a server
+/// answers there, 1 once none does.
+#[test]
+fn ping_asks_the_http_listener() {
+    let server = start(&[]);
+    let addr = format!("127.0.0.1:{}", server.port);
+    let ping = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_fenec-server"))
+            .args(["--ping", "--http", &addr])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+    };
+    assert_eq!(ping(), Some(0));
+    let _ = server.terminate();
+    assert_eq!(ping(), Some(1));
 }

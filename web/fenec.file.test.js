@@ -377,7 +377,7 @@ process.on('exit', () => {
 
 /** `fenec-server --http` over `file`; reads the address off stderr. */
 async function serve(file) {
-  const proc = spawn(bin, ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', '--sync', 'always', '--file', file], {
+  const proc = spawn(bin, ['--http', '127.0.0.1:0', '--sync', 'always', '--file', file], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   alive.add(proc);

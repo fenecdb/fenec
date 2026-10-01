@@ -1,29 +1,26 @@
-//! `fenec-server` -- serves fenecdb over the PostgreSQL protocol.
+//! `fenec-server` -- serves a fenecdb file, or a directory of them, over HTTP.
 //!
 //! ```text
-//! fenec-server [--listen 127.0.0.1:5433] [--file data.fenec] [--password secret]
-//! psql -h 127.0.0.1 -p 5433 -U fenec
+//! fenec-server [--http 127.0.0.1:8080] [--file data.fenec] [--http-token secret]
+//! curl -d '{"q": "list"}' http://127.0.0.1:8080/query
 //! ```
 
 use fenec_core::prelude::*;
 use fenec_http::replication::{self, Follower, Replication};
 use fenec_http::tenants::{Refused, Tenants};
-use fenec_server::client::{Client, Url};
-use fenec_server::server::{self, Auth, SyncPolicy};
-use fenec_server::{Config, PgPlugin, Server};
+use fenec_server::durability::{self, SyncPolicy};
+use std::io::{Read, Write};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const USAGE: &str = "\
 usage: fenec-server [options]
 
-  -l, --listen <address>    default 127.0.0.1:5433
   -f, --file <path>         persistent fenecdb file (in-memory when absent)
-      --dir <path>          one file per tenant in this directory, served over
-                            HTTP under /t/<tenant>/. Needs --http. With
-                            --listen it serves the pg wire as well, where the
-                            database in the startup packet is the tenant
-                            (psql postgres://host:port/acme)
+      --http <address>      where the HTTP/JSON endpoint listens
+                            default: 127.0.0.1:8080
+      --dir <path>          one file per tenant in this directory, served
+                            under /t/<tenant>/
       --admin-token <value> token for /_admin/ (--dir only): create, delete,
                             freeze and move tenants. Without it, off
       --idle-close <s>      close a tenant untouched for this long  default: 300
@@ -38,17 +35,6 @@ usage: fenec-server [options]
                             instead over a network file system, or to have
                             --max-memory cover the data as well
 
-  -W, --password <password> turn on password authentication
-      --password-file <path> read the password from a file (argv shows up in `ps`)
-      --reader <name>       a user that logs in with --reader-password and
-                            writes nothing: every write of its session is
-                            refused (25006), whatever it sets
-      --reader-password <password>, --reader-password-file <path>
-                            the reader's password, by the same method as
-                            --password's. Also read from FENECPG_READER_PASSWORD
-      --auth <method>       scram | cleartext        default: scram
-  -U, --user <name>         accept only this user name
-
       --sync <policy>       off | always | <ms>      default: 250
                             writes are buffered; this policy decides when
                             they reach the disk
@@ -59,28 +45,20 @@ usage: fenec-server [options]
                             shutdown and peaks memory at ~3x the file
       --max-connections <n> ceiling on concurrent connections (0 = unlimited)
                             default: 100. Every connection is a thread
-      --idle-timeout <s>    close a session silent for this long (0 = off)
-      --idle-in-transaction-timeout <s>  put back a transaction whose
-                            client stays silent this long after it wrote,
-                            and close its session (25P03; 0 = never)
-                            default: 10. From its first write to its end
-                            a transaction holds the database: every other
-                            session waits on it
-      --max-message <MiB>   ceiling of a single protocol message  default: 64
+      --idle-timeout <s>    close a keep-alive connection silent for this
+                            long (0 = never)  default: 60
       --max-memory <MiB>    data footprint ceiling (0 = off, the default).
-                            Above it, writes stop with 53200; reads, `del`
+                            Above it, writes stop with 507; reads, `del`
                             and `compact` keep working. A third of the
                             container memory limit is a good start:
                             `compact` peaks at ~3x the file. With --dir it
                             covers the open tenants together, and opening one
                             more over it closes the idle ones first
-      --insecure            allow listening without auth on a non-loopback address
+      --insecure            allow listening without a token on a non-loopback
+                            address
 
-      --http <address>      also open the HTTP/JSON endpoint (e.g. 127.0.0.1:8080).
-                            A second listener in the same process: one process
-                            writes one file, and the sync and checkpoint
-                            policies are shared
-      --http-token <value>  require `Authorization: Bearer <value>` for HTTP
+      --http-token <value>  require `Authorization: Bearer <value>`. Also read
+                            from FENEC_HTTP_TOKEN: argv shows up in `ps`
       --jwt-secret <value>  also take HS256 JSON Web Tokens signed with this,
                             each held to --policy: which collections, which
                             rows (`where owner = $jwt.sub`). Also read from
@@ -100,7 +78,7 @@ usage: fenec-server [options]
                             and exit
       --http-cors <origin>  `Access-Control-Allow-Origin` (e.g. * or
                             https://example.com). Without it, no CORS header
-      --http-read-only      turn off writes over HTTP (the pg path is unaffected)
+      --http-read-only      turn off writes
       --idempotency-ttl <s>  how long a write's Idempotency-Key and answer
                             are kept, in seconds. default: 86400
       --http-max-streams <n>  ceiling on concurrent subscriptions (0 = unlimited)
@@ -116,31 +94,28 @@ usage: fenec-server [options]
                             24 bytes per entry
 
       --slow-ms <ms>        log every statement that takes this long or longer,
-                            with its text: pg and HTTP alike, from its arrival
-                            to its answer. Off by default
-      --audit <path>        append a JSON line to this file for each login,
-                            each login and HTTP request refused, each change
-                            of the schema and each admin request. Off by
-                            default
-      --auth-delay <ms>     how long a failed login waits before it is
-                            answered, doubled for each failure from the same
+                            with its text, from its arrival to its answer.
+                            Off by default
+      --audit <path>        append a JSON line to this file for each request
+                            refused for its token, each change of the schema
+                            and each admin request. Off by default
+      --auth-delay <ms>     how long a refused token waits before it is
+                            answered, doubled for each refusal from the same
                             address within a minute, 5 s at most. 0 turns it
                             off. default: 100
-      --metrics <address>   serve /_metrics, and nothing else, here -- for a
-                            server with no --http. With --http, the HTTP
-                            listener serves it too. Readable with
+      --metrics <address>   also serve /_metrics, and nothing else, here --
+                            an address apart from the data's. Readable with
                             --http-token or --admin-token; a non-loopback
                             address wants one of them (or --insecure)
 
-      --replication-token <value>  turn replication on: /_replication on the
-                            HTTP listener feeds replicas the writes on this
-                            file's disk, reports status, and promotes a
-                            replica. With --dir every tenant has one of its
-                            own under /t/<tenant>/_replication. Refuses
-                            --sync off. Also read from
-                            FENEC_REPLICATION_TOKEN
+      --replication-token <value>  turn replication on: /_replication feeds
+                            replicas the writes on this file's disk, reports
+                            status, and promotes a replica. With --dir every
+                            tenant has one of its own under
+                            /t/<tenant>/_replication. Refuses --sync off.
+                            Also read from FENEC_REPLICATION_TOKEN
       --replica-of <url>    follow the primary at http://host:port and take
-                            no write of its own (25006). With --dir it
+                            no write of its own (403). With --dir it
                             follows that node's tenant of the same name, and
                             a failover promotes them one at a time
                             (POST /_admin/tenants/<t>/promote)
@@ -149,17 +124,17 @@ usage: fenec-server [options]
                             --replica-of or this
       --replication-buffer <MiB>  writes kept for replicas that fall behind
                             default: 64. One further behind is sent an image
-      --cdc                 keep the writes on disk for GET /_changes on the
-                            HTTP listener (change data capture), as many as
-                            --replication-buffer holds, with no replicas.
-                            With --replication-token it is on already
+      --cdc                 keep the writes on disk for GET /_changes (change
+                            data capture), as many as --replication-buffer
+                            holds, with no replicas. With --replication-token
+                            it is on already
 
       --follow <url>        mirror a table of the PostgreSQL server at
                             postgres://user@host/db into --file, and serve it:
                             its copy when there is no whole one, then its
                             changes as they commit, through a logical
                             replication slot. The collection takes no write
-                            but the follower's (25006)
+                            but the follower's
       --follow-table <name> the table (required with --follow)
       --follow-into <name>  the collection  default: the table's name
       --follow-slot <name>, --follow-publication <name>
@@ -170,13 +145,11 @@ usage: fenec-server [options]
                             rows become documents, the copy's and the
                             changes' alike
 
-      --ping                connect to the server and exit: 0 = up, 1 = not.
-                            For health checks; `--listen`, `--user` and the
-                            password options pick the target
+      --ping                ask the server at --http for GET /_health and
+                            exit: 0 = up, 1 = not. For health checks
 
-The password is also read from the FENECPG_PASSWORD environment variable.
 fenec-server does not speak TLS: put it behind a TLS terminator such as
-stunnel/nginx-stream before using it on an open network.
+nginx or Caddy before using it on an open network.
 ";
 
 fn fail(msg: &str) -> ! {
@@ -184,42 +157,31 @@ fn fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
-/// Health check: connects, authenticates, waits for `ReadyForQuery` and
-/// closes -- the same depth as `pg_isready`.
-///
-/// It deliberately runs no query: every query takes the database lock first,
-/// so during a long `compact` the probe would wait too and a healthy server
-/// would look dead.
-fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
-    let (host, port) = match addr.rsplit_once(':') {
-        Some((h, p)) => match p.parse::<u16>() {
-            Ok(p) => (h.trim_matches(['[', ']']), p),
-            Err(_) => {
-                fenec_http::log!("could not parse the port in the address: {addr}");
-                return 1;
-            }
-        },
-        None => {
-            fenec_http::log!("the address must be in `host:port` form: {addr}");
-            return 1;
+/// Health check: `GET /_health` on the HTTP listener, which answers with no
+/// token and takes no lock -- during a long `compact` a probe that queried
+/// would wait too, and a healthy server would look dead.
+fn health_check(addr: &str) -> i32 {
+    // A server listening on every address answers on loopback as well.
+    let addr = match addr.rsplit_once(':') {
+        Some(("0.0.0.0" | "", port)) => format!("127.0.0.1:{port}"),
+        Some(("[::]", port)) => format!("[::1]:{port}"),
+        _ => addr.to_string(),
+    };
+    let asked = (|| -> std::io::Result<String> {
+        let mut s = std::net::TcpStream::connect(&addr)?;
+        s.set_read_timeout(Some(Duration::from_secs(3)))?;
+        s.write_all(b"GET /_health HTTP/1.1\r\nHost: fenec\r\nConnection: close\r\n\r\n")?;
+        let mut out = String::new();
+        s.read_to_string(&mut out)?;
+        Ok(out)
+    })();
+    match asked {
+        Ok(out) if out.starts_with("HTTP/1.1 200") => 0,
+        Ok(out) => {
+            let line = out.lines().next().unwrap_or("no answer");
+            fenec_http::log!("ping failed: {line}");
+            1
         }
-    };
-    // If the listen address is 0.0.0.0 / [::] we do not connect there; the
-    // server is listening on loopback as well.
-    let host = match host {
-        "0.0.0.0" | "" => "127.0.0.1",
-        "::" => "::1",
-        h => h,
-    };
-    let url = Url {
-        user: user.unwrap_or("fenec").to_string(),
-        password: password.map(String::from),
-        host: host.to_string(),
-        port,
-        database: "fenec".into(),
-    };
-    match Client::connect(&url) {
-        Ok(_) => 0,
         Err(e) => {
             fenec_http::log!("ping failed: {e}");
             1
@@ -228,19 +190,13 @@ fn health_check(addr: &str, user: Option<&str>, password: Option<&str>) -> i32 {
 }
 
 fn main() {
-    let mut cfg = Config::default();
+    let mut sync = SyncPolicy::Interval(Duration::from_millis(250));
+    let mut checkpoint = true;
     let mut file: Option<String> = None;
     let mut dir: Option<String> = None;
     let mut mmap = true;
     let mut lease = false;
-    // `--dir` opens the pg listener only when an address was named: a node
-    // that serves tenants over HTTP alone should not take the default port.
-    let mut listen_given = false;
     let mut idle_close = Duration::from_secs(300);
-    let mut password: Option<String> = std::env::var("FENECPG_PASSWORD").ok();
-    let mut reader: Option<String> = None;
-    let mut reader_password: Option<String> = std::env::var("FENECPG_READER_PASSWORD").ok();
-    let mut method = "scram".to_string();
     let mut ping = false;
     let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
     let mut replica_of: Option<String> = None;
@@ -260,9 +216,13 @@ fn main() {
     let mut follow_named = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut http: Option<String> = None;
     let mut metrics: Option<String> = None;
-    let mut http_cfg = fenec_http::Config::default();
+    let mut http_cfg = fenec_http::Config {
+        token: std::env::var("FENEC_HTTP_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty()),
+        ..fenec_http::Config::default()
+    };
 
     let mut i = 0;
     let next = |i: &mut usize, flag: &str| -> String {
@@ -274,11 +234,8 @@ fn main() {
     };
     while i < args.len() {
         match args[i].as_str() {
-            "--listen" | "-l" => {
-                cfg.addr = next(&mut i, "--listen");
-                listen_given = true;
-            }
             "--file" | "-f" => file = Some(next(&mut i, "--file")),
+            "--http" => http_cfg.addr = next(&mut i, "--http"),
             "--dir" => dir = Some(next(&mut i, "--dir")),
             "--admin-token" => http_cfg.admin_token = Some(next(&mut i, "--admin-token")),
             "--idle-close" => {
@@ -288,33 +245,14 @@ fn main() {
                     .unwrap_or_else(|_| fail(&format!("--idle-close expects seconds, got `{v}`")));
                 idle_close = Duration::from_secs(secs);
             }
-            "--password" | "-W" => password = Some(next(&mut i, "--password")),
-            "--reader" => reader = Some(next(&mut i, "--reader")),
-            "--reader-password" => reader_password = Some(next(&mut i, "--reader-password")),
-            "--reader-password-file" => {
-                let path = next(&mut i, "--reader-password-file");
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => reader_password = Some(s.trim_end_matches(['\n', '\r']).to_string()),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
-            "--password-file" => {
-                let path = next(&mut i, "--password-file");
-                match std::fs::read_to_string(&path) {
-                    Ok(s) => password = Some(s.trim_end_matches(['\n', '\r']).to_string()),
-                    Err(e) => fail(&format!("could not read {path}: {e}")),
-                }
-            }
-            "--auth" => method = next(&mut i, "--auth"),
-            "--user" | "-U" => cfg.user = Some(next(&mut i, "--user")),
             "--sync" => match SyncPolicy::parse(&next(&mut i, "--sync")) {
-                Ok(p) => cfg.sync = p,
+                Ok(p) => sync = p,
                 Err(e) => fail(&e),
             },
-            "--no-checkpoint" => cfg.checkpoint_on_exit = false,
+            "--no-checkpoint" => checkpoint = false,
             "--max-connections" => {
                 let v = next(&mut i, "--max-connections");
-                cfg.max_connections = v.parse().unwrap_or_else(|_| {
+                http_cfg.max_connections = v.parse().unwrap_or_else(|_| {
                     fail(&format!("--max-connections expects a number, got `{v}`"))
                 })
             }
@@ -323,35 +261,15 @@ fn main() {
                 let secs: u64 = v.parse().unwrap_or_else(|_| {
                     fail(&format!("--idle-timeout expects seconds, got `{v}`"))
                 });
-                cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
-            }
-            "--idle-in-transaction-timeout" => {
-                let v = next(&mut i, "--idle-in-transaction-timeout");
-                let secs: u64 = v.parse().unwrap_or_else(|_| {
-                    fail(&format!(
-                        "--idle-in-transaction-timeout expects seconds, got `{v}`"
-                    ))
-                });
-                cfg.idle_in_transaction = (secs > 0).then(|| Duration::from_secs(secs));
+                http_cfg.idle_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
             "--max-memory" => {
                 let v = next(&mut i, "--max-memory");
                 let mib: usize = v
                     .parse()
                     .unwrap_or_else(|_| fail(&format!("--max-memory expects MiB, got `{v}`")));
-                cfg.max_memory = mib << 20;
+                http_cfg.max_memory = mib << 20;
             }
-            "--max-message" => {
-                let v = next(&mut i, "--max-message");
-                let mib: usize = v
-                    .parse()
-                    .unwrap_or_else(|_| fail(&format!("--max-message expects MiB, got `{v}`")));
-                if mib == 0 {
-                    fail("--max-message cannot be zero");
-                }
-                cfg.max_message = mib << 20;
-            }
-            "--http" => http = Some(next(&mut i, "--http")),
             "--metrics" => metrics = Some(next(&mut i, "--metrics")),
             "--audit" => {
                 let path = next(&mut i, "--audit");
@@ -442,7 +360,7 @@ fn main() {
             "--ping" => ping = true,
             "--no-mmap" => mmap = false,
             "--lease" => lease = true,
-            "--insecure" => cfg.insecure = true,
+            "--insecure" => http_cfg.insecure = true,
             "--follow" => follow_url = Some(next(&mut i, "--follow")),
             "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
             "--follow-into" => follow_into = Some(next(&mut i, "--follow-into")),
@@ -502,11 +420,7 @@ fn main() {
     }
 
     if ping {
-        std::process::exit(health_check(
-            &cfg.addr,
-            cfg.user.as_deref(),
-            password.as_deref(),
-        ));
+        std::process::exit(health_check(&http_cfg.addr));
     }
 
     let replicating = replication_token.as_deref().is_some_and(|t| !t.is_empty());
@@ -519,23 +433,17 @@ fn main() {
     if (replicating || promote) && file.is_none() && dir.is_none() {
         fail("replication works on a file or a directory of them: give --file or --dir");
     }
-    if replicating && cfg.sync == SyncPolicy::Off {
+    if replicating && sync == SyncPolicy::Off {
         fail(
             "--sync off puts nothing on disk before shutdown, and a replica is sent only \
              what is on the primary's disk: use --sync always or --sync <ms>",
         );
     }
-    if replicating && replica_of.is_none() && http.is_none() {
-        fail("replicas are fed over HTTP: give --http <address>");
-    }
     if cdc && file.is_none() {
         fail("--cdc keeps a file's writes: give --file (a --dir node's tenants have theirs with --replication-token)");
     }
-    if cdc && cfg.sync == SyncPolicy::Off {
+    if cdc && sync == SyncPolicy::Off {
         fail("--sync off puts nothing on disk before shutdown, and /_changes hands over only what is on disk: use --sync always or --sync <ms>");
-    }
-    if cdc && http.is_none() {
-        fail("/_changes is served over HTTP: give --http <address>");
     }
     if lease && dir.is_none() {
         fail("--lease is a tenant node's, whose router grants it: give --dir");
@@ -586,32 +494,9 @@ fn main() {
         }
     };
 
-    cfg.auth = match &password {
-        Some(pw) if pw.is_empty() => fail("the password cannot be empty"),
-        Some(pw) => match Auth::parse(&method, pw) {
-            Ok(a) => a,
-            Err(e) => fail(&e),
-        },
-        None => Auth::Trust,
-    };
-    cfg.reader = match (reader, reader_password) {
-        (None, _) => None,
-        (Some(_), _) if password.is_none() => {
-            fail("--reader needs --password: without one every user writes")
-        }
-        (Some(name), _) if Some(&name) == cfg.user.as_ref() => {
-            fail("--reader names another user than --user")
-        }
-        (Some(_), None) => fail("--reader needs --reader-password or --reader-password-file"),
-        (Some(_), Some(pw)) if pw.is_empty() => fail("the reader's password cannot be empty"),
-        (Some(_), Some(pw)) if Some(&pw) == password.as_ref() => {
-            fail("the reader's password is the writer's: pick another")
-        }
-        (Some(name), Some(pw)) => match Auth::parse(&method, &pw) {
-            Ok(a) => Some((name, a)),
-            Err(e) => fail(&e),
-        },
-    };
+    // `--sync always` must hold for every write, and so must `--max-memory`;
+    // both are the HTTP endpoint's to apply, as it takes every write.
+    http_cfg.sync_on_write = sync == SyncPolicy::Always;
 
     if let Some(dir) = dir {
         if promote {
@@ -620,43 +505,24 @@ fn main() {
                  POST /_admin/tenants/<tenant>/promote",
             );
         }
-        if replica_of.is_some() && !replicating {
-            fail("--replica-of needs --replication-token: the node it follows asks for it");
-        }
         if file.is_some() {
             fail(
                 "--dir and --file are exclusive: one serves a file, the other a directory of them",
             );
         }
-        let Some(addr) = http else {
-            fail("--dir serves tenants over HTTP: give --http <address>");
-        };
         if metrics.is_some() {
             fail("with --dir the HTTP listener serves /_metrics: --metrics is for a --file server");
         }
-        http_cfg.addr = addr;
-        http_cfg.insecure = cfg.insecure;
-        http_cfg.max_connections = cfg.max_connections;
-        http_cfg.idle_timeout = cfg.idle_timeout;
-        http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
-        http_cfg.max_memory = cfg.max_memory;
         let repl = replication_token.filter(|_| replicating).map(|token| {
             fenec_http::tenants::Replicated {
                 token,
                 buffer: replication_buffer,
                 upstream: replica_of.clone(),
-                sync_on_write: cfg.sync == SyncPolicy::Always,
+                sync_on_write: sync == SyncPolicy::Always,
             }
         });
         serve_dir(
-            &dir,
-            http_cfg,
-            cfg,
-            idle_close,
-            listen_given,
-            mmap,
-            lease,
-            repl,
+            &dir, http_cfg, sync, checkpoint, idle_close, mmap, lease, repl,
         );
     }
 
@@ -683,21 +549,16 @@ fn main() {
             }
         }
         None => {
-            if cfg.sync != SyncPolicy::Off {
-                // Syncing makes no sense for an in-memory database.
-                cfg.sync = SyncPolicy::Off;
-            }
-            // Nor does a checkpoint: there is no file to write to, but the
-            // image would still be built in memory.
-            cfg.checkpoint_on_exit = false;
+            // Syncing makes no sense for an in-memory database, nor does a
+            // checkpoint: there is no file to write to, but the image would
+            // still be built in memory.
+            sync = SyncPolicy::Off;
+            http_cfg.sync_on_write = false;
+            checkpoint = false;
             Database::new()
         }
     };
 
-    if let Err(e) = db.install_plugin(&PgPlugin) {
-        fenec_http::log!("could not load the plugin: {e}");
-        std::process::exit(1);
-    }
     if let Some(m) = &mirror {
         if let Err(e) = db.install_plugin(&fenec_server::mirror::GuardPlugin(m.opts.into.clone())) {
             fenec_http::log!("could not load the plugin: {e}");
@@ -737,7 +598,7 @@ fn main() {
             replication_token.clone().unwrap_or_default(),
             Arc::clone(&shared),
             feed.clone(),
-            cfg.sync == SyncPolicy::Always,
+            sync == SyncPolicy::Always,
         )
         .unwrap_or_else(|e| fail(&e));
         f.start("fenec-replica".into())
@@ -752,9 +613,10 @@ fn main() {
         None => None,
     };
 
-    // Before the HTTP thread announces its listener, as `Server::serve_on`
-    // does before its own: the flag a signal sets waits for the syncer.
-    server::install_signal_handlers();
+    // Before the HTTP thread announces its listener: once the line is out a
+    // supervisor may send SIGTERM, and the flag it sets waits for the
+    // syncer below.
+    durability::install_signal_handlers();
 
     if let Some(m) = mirror {
         let table = m.table.clone();
@@ -770,8 +632,8 @@ fn main() {
             addr,
             token: http_cfg.token.clone(),
             admin_token: http_cfg.admin_token.clone(),
-            insecure: cfg.insecure,
-            idle_timeout: cfg.idle_timeout,
+            insecure: http_cfg.insecure,
+            idle_timeout: http_cfg.idle_timeout,
             ..fenec_http::Config::default()
         };
         let server = fenec_http::Server::metrics_only(Arc::clone(&shared), repl.clone(), mcfg);
@@ -788,57 +650,47 @@ fn main() {
             .unwrap_or_else(|e| fail(&format!("could not start the metrics thread: {e}")));
     }
 
-    // The HTTP endpoint shares the same database: as a separate binary it
-    // would open the same file from two processes and corrupt it (fenecdb is
-    // single-writer).
-    if let Some(addr) = http {
-        http_cfg.addr = addr;
-        http_cfg.insecure = cfg.insecure;
-        http_cfg.max_connections = cfg.max_connections;
-        http_cfg.idle_timeout = cfg.idle_timeout;
-        // `--sync always` must hold for HTTP writes too, and so must
-        // `--max-memory`.
-        http_cfg.sync_on_write = cfg.sync == SyncPolicy::Always;
-        http_cfg.max_memory = cfg.max_memory;
-        let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
-        if let Some(repl) = repl {
-            http_server = http_server.with_replication(repl);
+    let mut http_server = fenec_http::Server::new(Arc::clone(&shared), http_cfg);
+    if let Some(repl) = repl {
+        http_server = http_server.with_replication(repl);
+    }
+    let listener = match http_server.bind() {
+        Ok(l) => l,
+        Err(e) => {
+            fenec_http::log!("could not open the HTTP endpoint: {e}");
+            std::process::exit(1);
         }
-        let listener = match http_server.bind() {
-            Ok(l) => l,
-            Err(e) => {
-                fenec_http::log!("could not open the HTTP endpoint: {e}");
+    };
+    fenec_http::log!(
+        "fenec-server {}: {}  [sync={}]",
+        fenec_core::VERSION,
+        file.as_deref().unwrap_or("in memory"),
+        sync.describe()
+    );
+    std::thread::Builder::new()
+        .name("fenec-http".into())
+        .spawn(move || {
+            if let Err(e) = http_server.serve_on(listener) {
+                fenec_http::log!("HTTP server error: {e}");
                 std::process::exit(1);
             }
-        };
-        std::thread::Builder::new()
-            .name("fenec-http".into())
-            .spawn(move || {
-                if let Err(e) = http_server.serve_on(listener) {
-                    fenec_http::log!("HTTP server error: {e}");
-                }
-            })
-            .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
-    }
+        })
+        .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    let server = Server::new(shared, cfg);
-    if let Err(e) = server.serve() {
-        fenec_http::log!("server error: {e}");
-        std::process::exit(1);
-    }
+    durability::run_syncer(shared, sync, checkpoint);
 }
 
 /// `--dir`: the HTTP listener over a directory of tenants, and on this
-/// thread the syncer that a single file gets from the pg server -- periodic
-/// sync, idle close, and on the shutdown signal a final sync and checkpoint
-/// of every open tenant.
+/// thread the syncer a single file gets from [`durability::run_syncer`] --
+/// periodic sync, idle close, and on the shutdown signal a final sync and
+/// checkpoint of every open tenant.
 #[allow(clippy::too_many_arguments)]
 fn serve_dir(
     dir: &str,
     http_cfg: fenec_http::Config,
-    cfg: Config,
+    sync: SyncPolicy,
+    checkpoint: bool,
     idle_close: Duration,
-    pg: bool,
     mmap: bool,
     lease: bool,
     repl: Option<fenec_http::tenants::Replicated>,
@@ -848,10 +700,9 @@ fn serve_dir(
         Err(e) => fail(&format!("could not use {dir}: {e}")),
     };
     let mut tenants = tenants
-        .with_setup(|db| db.install_plugin(&PgPlugin))
         .with_change_capacity(http_cfg.change_capacity)
-        .with_max_memory(cfg.max_memory)
-        .with_checkpoint(cfg.checkpoint_on_exit)
+        .with_max_memory(http_cfg.max_memory)
+        .with_checkpoint(checkpoint)
         .with_mmap(mmap);
     let follows = repl.as_ref().and_then(|r| r.upstream.clone());
     if let Some(r) = repl {
@@ -877,36 +728,14 @@ fn serve_dir(
         fenec_http::log!("tenant `{name}` did not open ({status}): {msg}");
     }
 
-    // The pg listener, when an address was named: there the database in the
-    // startup packet is the tenant (`psql postgres://host:port/acme`). It
-    // runs no syncer -- the loop below is this node's, over every open
-    // tenant -- and the same --password guards it as guards a file server.
-    let sync = cfg.sync;
-    if pg {
-        let server = Server::with_tenants(Arc::clone(&tenants), cfg);
-        let listener = match server.bind() {
-            Ok(l) => l,
-            Err(e) => fail(&format!("could not open the pg endpoint: {e}")),
-        };
-        std::thread::Builder::new()
-            .name("fenec-server".into())
-            .spawn(move || {
-                if let Err(e) = server.serve_on(listener) {
-                    fenec_http::log!("pg server error: {e}");
-                    std::process::exit(1);
-                }
-            })
-            .unwrap_or_else(|e| fail(&format!("could not start the pg thread: {e}")));
-    }
-
     let http_server = fenec_http::Server::with_tenants(Arc::clone(&tenants), http_cfg);
     let listener = match http_server.bind() {
         Ok(l) => l,
         Err(e) => fail(&format!("could not open the HTTP endpoint: {e}")),
     };
-    // Before the thread that announces the listener, for the reason
-    // `Server::serve_on` gives: once the line is out, SIGTERM must sync.
-    server::install_signal_handlers();
+    // Before the thread that announces the listener: once the line is out,
+    // SIGTERM must sync.
+    durability::install_signal_handlers();
     std::thread::Builder::new()
         .name("fenec-http".into())
         .spawn(move || {
@@ -917,13 +746,10 @@ fn serve_dir(
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
-    let tick = match sync {
-        SyncPolicy::Interval(d) if !d.is_zero() => d,
-        _ => Duration::from_millis(200),
-    };
+    let tick = sync.tick();
     loop {
         std::thread::sleep(tick);
-        if server::shutdown_requested() {
+        if durability::shutdown_requested() {
             // The write locks come back held: nothing is accepted between
             // the last sync and exit.
             let open = tenants.shutdown();

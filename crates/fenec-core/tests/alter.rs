@@ -551,19 +551,6 @@ fn a_block_puts_every_change_back() {
 }
 
 #[test]
-fn a_block_holding_an_alter_is_not_parked() {
-    let mut db = Database::new();
-    orders(&mut db);
-    db.begin().unwrap();
-    ok(&mut db, "alter collection orders add field note text");
-    db.leave_block();
-    // Readers wait for it, as for any schema change.
-    assert!(!db.park());
-    db.rejoin_block();
-    db.rollback();
-}
-
-#[test]
 fn a_replica_applies_each_change_and_reopens_with_it() {
     let tap = Tap::new();
     let mut primary = tap.database();

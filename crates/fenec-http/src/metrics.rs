@@ -3,8 +3,7 @@
 //!
 //! A statement is counted from its arrival to its answer -- the wait for the
 //! lock and, under `--sync always`, for the disk included, since that is the
-//! latency a client sees -- by transport (`pg`, `http`) and by whether it
-//! wrote. The counters are process-wide atomics, spread over shards a
+//! latency a client sees -- by whether it wrote. The counters are process-wide atomics, spread over shards a
 //! thread each: every connection is a thread, and eight of them counting
 //! into one set of counters cost a statement 720 ns in a tight loop, where
 //! one alone costs 6.4 ns -- the cache line went from core to core. With a
@@ -31,22 +30,6 @@ use std::fmt::{Display, Write as _};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Where a statement came in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    Pg = 0,
-    Http = 1,
-}
-
-impl Transport {
-    fn name(self) -> &'static str {
-        match self {
-            Transport::Pg => "pg",
-            Transport::Http => "http",
-        }
-    }
-}
 
 /// Upper bounds of the latency buckets, in microseconds: 100 µs, where a
 /// point read over HTTP lands, to 10 s, where a full rebuild does.
@@ -118,7 +101,7 @@ pub fn histogram(out: &mut Text, name: &str, labels: &[(&str, &str)], shards: &[
     out.sample(&format!("{name}_count"), labels, count);
 }
 
-/// One transport's statements of one kind.
+/// The statements of one kind.
 struct Series {
     timings: Timings,
     errors: AtomicU64,
@@ -138,20 +121,20 @@ const ROW: [Series; 2] = [SERIES; 2];
 /// of 64 at once).
 #[repr(align(128))]
 struct Shard {
-    /// `[transport][wrote]`.
-    statements: [[Series; 2]; 2],
-    slow: [AtomicU64; 2],
+    /// `[wrote]`.
+    statements: [Series; 2],
+    slow: AtomicU64,
 }
 
 #[allow(clippy::declare_interior_mutable_const)]
 const SHARD: Shard = Shard {
-    statements: [ROW; 2],
-    slow: [ZERO; 2],
+    statements: ROW,
+    slow: ZERO,
 };
 
 static SHARDS: [Shard; SHARD_COUNT] = [SHARD; SHARD_COUNT];
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
-static CONNECTIONS: [AtomicI64; 2] = [AtomicI64::new(0), AtomicI64::new(0)];
+static CONNECTIONS: AtomicI64 = AtomicI64::new(0);
 /// `--slow-ms` in microseconds; 0 is off.
 static SLOW_MICROS: AtomicU64 = AtomicU64::new(0);
 static STARTED: OnceLock<u64> = OnceLock::new();
@@ -200,10 +183,10 @@ fn now_secs() -> u64 {
 
 /// Counts a statement that took `took`, and logs it when it is slow. `text`
 /// is asked for only then.
-pub fn record(t: Transport, took: Duration, failed: bool, text: impl FnOnce() -> String) {
+pub fn record(took: Duration, failed: bool, text: impl FnOnce() -> String) {
     let wrote = WROTE.with(|w| w.replace(false));
     let shard = &SHARDS[shard()];
-    let s = &shard.statements[t as usize][wrote as usize];
+    let s = &shard.statements[wrote as usize];
     let micros = took.as_micros().min(u64::MAX as u128) as u64;
     s.timings.add(took);
     if failed {
@@ -211,7 +194,7 @@ pub fn record(t: Transport, took: Duration, failed: bool, text: impl FnOnce() ->
     }
     let slow = SLOW_MICROS.load(Ordering::Relaxed);
     if slow > 0 && micros >= slow {
-        shard.slow[t as usize].fetch_add(1, Ordering::Relaxed);
+        shard.slow.fetch_add(1, Ordering::Relaxed);
         let mut text = text();
         // A statement can be a bulk `put` of megabytes; the log wants what
         // it was, not all of it.
@@ -224,9 +207,8 @@ pub fn record(t: Transport, took: Duration, failed: bool, text: impl FnOnce() ->
             text.push_str("...");
         }
         crate::log!(
-            "slow statement: {:.1} ms, {} {}{}: {}",
+            "slow statement: {:.1} ms, {}{}: {}",
             micros as f64 / 1000.0,
-            t.name(),
             if wrote { "write" } else { "read" },
             if failed { ", failed" } else { "" },
             text.replace('\n', " ")
@@ -235,18 +217,18 @@ pub fn record(t: Transport, took: Duration, failed: bool, text: impl FnOnce() ->
 }
 
 /// A connection, counted open for as long as this lives.
-pub struct Connection(Transport);
+pub struct Connection(());
 
 impl Connection {
-    pub fn open(t: Transport) -> Connection {
-        CONNECTIONS[t as usize].fetch_add(1, Ordering::Relaxed);
-        Connection(t)
+    pub fn open() -> Connection {
+        CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+        Connection(())
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        CONNECTIONS[self.0 as usize].fetch_sub(1, Ordering::Relaxed);
+        CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -328,65 +310,52 @@ fn render(source: Source) -> String {
     let mut out = Text::new();
     head(&mut out);
 
-    let kinds = |t: usize, w: usize| {
-        [
-            ("transport", [Transport::Pg, Transport::Http][t].name()),
-            ("kind", ["read", "write"][w]),
-        ]
-    };
+    let kinds = |w: usize| [("kind", ["read", "write"][w])];
     out.family(
         "fenec_statements_total",
         "counter",
-        "Statements answered, by transport and by whether they wrote.",
+        "Statements answered, by whether they wrote.",
     );
-    each(|t, w| {
-        let n = sum(t, w, |s| &s.timings.count);
-        out.sample("fenec_statements_total", &kinds(t, w), n)
-    });
+    for w in 0..2 {
+        let n = sum(w, |s| &s.timings.count);
+        out.sample("fenec_statements_total", &kinds(w), n)
+    }
     out.family(
         "fenec_statement_errors_total",
         "counter",
         "Statements answered with an error, the client's or the server's.",
     );
-    each(|t, w| {
-        let n = sum(t, w, |s| &s.errors);
-        out.sample("fenec_statement_errors_total", &kinds(t, w), n)
-    });
+    for w in 0..2 {
+        let n = sum(w, |s| &s.errors);
+        out.sample("fenec_statement_errors_total", &kinds(w), n)
+    }
     out.family(
         "fenec_statement_duration_seconds",
         "histogram",
         "From a statement's arrival to its answer: lock waits and, under --sync always, the disk included.",
     );
-    each(|t, w| {
-        let shards: Vec<&Timings> = SHARDS.iter().map(|s| &s.statements[t][w].timings).collect();
+    for w in 0..2 {
+        let shards: Vec<&Timings> = SHARDS.iter().map(|s| &s.statements[w].timings).collect();
         histogram(
             &mut out,
             "fenec_statement_duration_seconds",
-            &kinds(t, w),
+            &kinds(w),
             &shards,
         );
-    });
+    }
     out.family(
         "fenec_slow_statements_total",
         "counter",
         "Statements over --slow-ms, each also logged with its text.",
     );
-    for t in 0..2 {
-        let n: u64 = SHARDS.iter().map(|s| load(&s.slow[t])).sum();
-        out.sample(
-            "fenec_slow_statements_total",
-            &[("transport", [Transport::Pg, Transport::Http][t].name())],
-            n,
-        );
-    }
+    let slow: u64 = SHARDS.iter().map(|s| load(&s.slow)).sum();
+    out.sample("fenec_slow_statements_total", &[], slow);
     out.family("fenec_connections", "gauge", "Connections open now.");
-    for (t, n) in CONNECTIONS.iter().enumerate() {
-        out.sample(
-            "fenec_connections",
-            &[("transport", [Transport::Pg, Transport::Http][t].name())],
-            n.load(Ordering::Relaxed),
-        );
-    }
+    out.sample(
+        "fenec_connections",
+        &[],
+        CONNECTIONS.load(Ordering::Relaxed),
+    );
 
     match source {
         Source::Single { db, repl } => {
@@ -475,23 +444,12 @@ fn unlinked(out: &mut Text, n: usize) {
     out.sample("fenec_vectors_unlinked", &[], n);
 }
 
-fn each(mut f: impl FnMut(usize, usize)) {
-    for t in 0..2 {
-        for w in 0..2 {
-            f(t, w);
-        }
-    }
-}
-
-/// One counter of `[transport][wrote]`, over every shard. Shards are read
+/// One counter of `[wrote]`, over every shard. Shards are read
 /// one after another while statements go on, so a total can be a statement
 /// short of a bucket read a moment later -- as any scrape of a running
 /// server can be.
-fn sum(t: usize, w: usize, field: impl Fn(&Series) -> &AtomicU64) -> u64 {
-    SHARDS
-        .iter()
-        .map(|s| load(field(&s.statements[t][w])))
-        .sum()
+fn sum(w: usize, field: impl Fn(&Series) -> &AtomicU64) -> u64 {
+    SHARDS.iter().map(|s| load(field(&s.statements[w]))).sum()
 }
 
 fn load(n: &AtomicU64) -> u64 {

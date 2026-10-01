@@ -1,6 +1,6 @@
 [package]
 name = "fenec-server"
-description = "PostgreSQL plugin for fenecdb: a v3 wire protocol server"
+description = "The fenecdb server: a file or a directory of tenants over HTTP, replicated, archived and followed"
 version.workspace = true
 edition.workspace = true
 autotests = false
@@ -12,12 +12,14 @@ categories.workspace = true
 
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
-fenec-ql.workspace = true
 fenec-http.workspace = true
-fenec-catalog.workspace = true
-fenec-wire.workspace = true
 # `--follow`: a PostgreSQL table mirrored into the file this server serves.
 fenec-import.workspace = true
+
+[dev-dependencies]
+fenec-ql.workspace = true
+# `tests/follow.rs` writes to the PostgreSQL it follows.
+fenec-wire.workspace = true
 
 [[bin]]
 name = "fenec-server"
@@ -28,11 +30,6 @@ name = "all"
 path = "tests/all.rs"
 
 # Apart: reads the process's own counts.
-# Apart: the audit log and the count of failures are the process's own.
-[[test]]
-name = "audit"
-path = "tests/audit.rs"
-
 [[test]]
 name = "metrics"
 path = "tests/metrics.rs"

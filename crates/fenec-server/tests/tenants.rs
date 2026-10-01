@@ -1,362 +1,204 @@
-//! A tenant node over the pg wire: `fenec-server --dir` with `--listen`.
+//! A tenant node: `fenec-server --dir`, the real binary.
 //!
-//! The database in the startup packet is the tenant, and it is looked up
-//! again for every statement -- so a tenant created after a session opened is
-//! there for it, one frozen for a move refuses writes while its reads go on,
-//! and one deleted meanwhile is gone. The node is the real binary; the
-//! client is the one `fenec import` connects to PostgreSQL with.
+//! The tenant is the path's (`/t/<tenant>/`), looked up again for every
+//! request -- so a tenant created after a connection opened is there for
+//! it, one frozen for a move refuses writes while its reads go on, and one
+//! deleted meanwhile is gone.
 
-use fenec_server::client::{Client, Url};
-use std::io::{BufRead, BufReader, Read, Write};
+#[path = "support.rs"]
+mod support;
+
+use std::io::Write;
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use support::{column, count, start, tmp, Http, Server};
 
 const ADMIN: &str = "admin-token";
 
 struct Node {
-    child: Child,
-    pg: u16,
-    http: u16,
+    server: Server,
     dir: std::path::PathBuf,
 }
 
 impl Drop for Node {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.server.child.kill();
+        let _ = self.server.child.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-fn start(name: &str) -> Node {
-    let dir = std::env::temp_dir().join(format!("fenecpg-tenants-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn node(name: &str) -> Node {
+    let dir = tmp("tenants", name);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
-        .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
-        .args(["--admin-token", ADMIN])
-        .arg("--dir")
-        .arg(&dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("could not start fenec-server");
-    let mut err = BufReader::new(child.stderr.take().unwrap());
-    let port = |line: &str, after: &str| -> Option<u16> {
-        line.split(after)
-            .nth(1)?
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .ok()
-    };
-    let (mut pg, mut http) = (None, None);
-    let mut seen = String::new();
-    while pg.is_none() || http.is_none() {
-        let mut line = String::new();
-        if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-server ended before it listened:\n{seen}");
-        }
-        seen.push_str(&line);
-        if line.contains("postgres://localhost:") {
-            pg = port(&line, "localhost:");
-        } else if line.contains("listening on: http://127.0.0.1:") {
-            http = port(&line, "127.0.0.1:");
-        }
-    }
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        while err.read_line(&mut line).unwrap_or(0) > 0 {
-            line.clear();
-        }
-    });
-    Node {
-        child,
-        pg: pg.unwrap(),
-        http: http.unwrap(),
-        dir,
-    }
+    let server = start(&["--admin-token", ADMIN, "--dir", dir.to_str().unwrap()]);
+    Node { server, dir }
 }
 
 impl Node {
-    fn connect(&self, tenant: &str) -> Result<Client, String> {
-        Client::connect(&Url {
-            user: "fenec".into(),
-            password: None,
-            host: "127.0.0.1".into(),
-            port: self.pg,
-            database: tenant.into(),
-        })
-        .map_err(|e| e.to_string())
+    fn http(&self) -> Http {
+        self.server.http()
     }
 
     /// An `/_admin/` request: create, freeze, thaw or delete a tenant.
     fn admin(&self, method: &str, path: &str) -> u16 {
-        let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        write!(
-            s,
-            "{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {ADMIN}\r\n\
-             Content-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
-        out[9..12].parse().unwrap()
+        self.http().with_token(ADMIN).ask(method, path, "").status
     }
 }
 
-fn rows(c: &mut Client, sql: &str) -> Vec<Vec<Option<String>>> {
-    c.query(sql).expect(sql).rows
+/// `prefix`'s statement, which must be answered.
+fn run(c: &mut Http, prefix: &str, q: &str) -> String {
+    c.query_at(prefix, q)
+        .unwrap_or_else(|e| panic!("{prefix} {q}: {e:?}"))
 }
 
 #[test]
-fn the_database_in_the_startup_packet_is_the_tenant() {
-    let n = start("two");
+fn the_path_names_the_tenant() {
+    let n = node("two");
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
     assert_eq!(n.admin("PUT", "/_admin/tenants/beta"), 201);
 
-    let mut acme = n.connect("acme").expect("acme");
-    let mut beta = n.connect("beta").expect("beta");
-    rows(&mut acme, "create collection notes (title text)");
-    rows(&mut acme, "put notes {title: \"acme's\"}");
-    rows(&mut beta, "create collection notes (title text)");
-    rows(&mut beta, "put notes {title: \"beta's\"}");
+    let mut c = n.http();
+    run(&mut c, "/t/acme", "create collection notes (title text)");
+    run(&mut c, "/t/acme", r#"put notes {title: "acme's"}"#);
+    run(&mut c, "/t/beta", "create collection notes (title text)");
+    run(&mut c, "/t/beta", r#"put notes {title: "beta's"}"#);
 
     // One file each: the same collection name, the same ids, other rows.
-    assert_eq!(
-        rows(&mut acme, "get notes select title"),
-        vec![vec![Some("acme's".to_string())]]
-    );
-    assert_eq!(
-        rows(&mut beta, "get notes select title"),
-        vec![vec![Some("beta's".to_string())]]
-    );
+    let title = |c: &mut Http, t: &str| column(&run(c, t, "get notes select title"), "title");
+    assert_eq!(title(&mut c, "/t/acme"), ["acme's"]);
+    assert_eq!(title(&mut c, "/t/beta"), ["beta's"]);
 
-    // psql's \d over pg_catalog answers from the tenant's own schemas.
-    let tables = rows(
-        &mut acme,
-        "SELECT relname FROM pg_class WHERE relkind = 'r' ORDER BY relname",
-    );
-    assert!(
-        tables.iter().any(|r| r[0].as_deref() == Some("notes")),
-        "{tables:?}"
-    );
-
-    // A tenant this node does not have is PostgreSQL's unknown database, and
-    // it is refused at connect.
-    let err = n.connect("nobody").unwrap_err();
-    assert!(err.contains("nobody"), "{err}");
-    let err = n.connect("../escape").unwrap_err();
-    assert!(!err.is_empty());
+    // A tenant this node does not have is a 404, and a name that is no
+    // tenant's is refused before it reaches a path.
+    let (status, body) = c.query_at("/t/nobody", "collections").unwrap_err();
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("nobody"), "{body}");
+    let (status, _) = c.query_at("/t/..", "collections").unwrap_err();
+    assert!(status >= 400);
 }
 
 #[test]
-fn a_tenant_created_after_the_session_is_there_for_it() {
-    // The registry is asked again for every statement, so a session outlives
-    // a tenant being created, closed as idle, or deleted.
-    let n = start("later");
+fn a_tenant_created_after_the_connection_is_there_for_it() {
+    // The registry is asked again for every request, so a keep-alive
+    // connection outlives a tenant being created, closed as idle, or
+    // deleted.
+    let n = node("later");
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
-    let mut acme = n.connect("acme").expect("acme");
-    rows(&mut acme, "create collection notes (title text)");
+    let mut c = n.http();
+    run(&mut c, "/t/acme", "create collection notes (title text)");
 
     assert_eq!(n.admin("DELETE", "/_admin/tenants/acme"), 204);
-    let gone = acme.query("get notes count").unwrap_err().to_string();
-    assert!(gone.contains("acme"), "{gone}");
+    let (status, body) = c.query_at("/t/acme", "get notes count").unwrap_err();
+    assert_eq!(status, 404, "{body}");
 
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
-    rows(&mut acme, "create collection notes (title text)");
-    assert_eq!(
-        rows(&mut acme, "get notes count"),
-        vec![vec![Some("0".to_string())]]
-    );
+    run(&mut c, "/t/acme", "create collection notes (title text)");
+    assert_eq!(count(&run(&mut c, "/t/acme", "get notes count")), 0);
 }
 
 #[test]
 fn a_frozen_tenant_refuses_writes_and_answers_reads() {
-    let n = start("frozen");
+    let n = node("frozen");
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
-    let mut acme = n.connect("acme").expect("acme");
-    rows(&mut acme, "create collection notes (title text)");
-    rows(&mut acme, "put notes {title: \"before\"}");
+    let mut c = n.http();
+    run(&mut c, "/t/acme", "create collection notes (title text)");
+    run(&mut c, "/t/acme", r#"put notes {title: "before"}"#);
 
     assert_eq!(n.admin("POST", "/_admin/tenants/acme/freeze"), 200);
-    let refused = acme
-        .query("put notes {title: \"during\"}")
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("moved"), "{refused}");
-    let refused = acme
-        .query("create index on notes (title) @sorted")
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("moved"), "{refused}");
+    for q in [
+        r#"put notes {title: "during"}"#,
+        "create index on notes (title) @sorted",
+    ] {
+        let (status, body) = c.query_at("/t/acme", q).unwrap_err();
+        assert!(status >= 400, "{q}: {status}");
+        assert!(body.contains("moved"), "{q}: {body}");
+    }
     assert_eq!(
-        rows(&mut acme, "get notes select title"),
-        vec![vec![Some("before".to_string())]]
+        column(&run(&mut c, "/t/acme", "get notes select title"), "title"),
+        ["before"]
     );
 
     assert_eq!(n.admin("POST", "/_admin/tenants/acme/thaw"), 200);
-    rows(&mut acme, "put notes {title: \"after\"}");
-    assert_eq!(
-        rows(&mut acme, "get notes count"),
-        vec![vec![Some("2".to_string())]]
-    );
-}
-
-/// A pg connection written and read by hand, past the startup handshake.
-fn raw(n: &Node, tenant: &str) -> TcpStream {
-    let mut s = TcpStream::connect(("127.0.0.1", n.pg)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let mut body = 196_608i32.to_be_bytes().to_vec();
-    for (k, v) in [("user", "fenec"), ("database", tenant)] {
-        body.extend_from_slice(k.as_bytes());
-        body.push(0);
-        body.extend_from_slice(v.as_bytes());
-        body.push(0);
-    }
-    body.push(0);
-    let mut msg = ((body.len() + 4) as i32).to_be_bytes().to_vec();
-    msg.extend_from_slice(&body);
-    s.write_all(&msg).unwrap();
-    while read_message(&mut s).unwrap().0 != b'Z' {}
-    s
-}
-
-fn send(s: &mut TcpStream, tag: u8, body: &[u8]) {
-    let mut msg = vec![tag];
-    msg.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
-    msg.extend_from_slice(body);
-    s.write_all(&msg).unwrap();
-}
-
-fn read_message(s: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
-    let mut head = [0u8; 5];
-    s.read_exact(&mut head)?;
-    let len = i32::from_be_bytes(head[1..5].try_into().unwrap()) as usize;
-    let mut body = vec![0u8; len - 4];
-    s.read_exact(&mut body)?;
-    Ok((head[0], body))
+    run(&mut c, "/t/acme", r#"put notes {title: "after"}"#);
+    assert_eq!(count(&run(&mut c, "/t/acme", "get notes count")), 2);
 }
 
 /// A client that stops reading a large answer does not hold its tenant:
-/// the session lets go of it before writing, as the HTTP path does. The
-/// socket has no write timeout, so the tenant was held through the write --
-/// a freeze waited on it for as long as the client did not read, and every
-/// request for the tenant queued behind the freeze.
+/// the request lets go of it before writing. The socket has no write
+/// timeout, so a tenant held through the write would keep a freeze waiting
+/// for as long as the client did not read, and every request for the
+/// tenant queued behind the freeze.
 #[test]
 fn a_client_that_stops_reading_does_not_hold_the_tenant() {
-    let n = start("stalled");
+    let n = node("stalled");
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
-    let mut acme = n.connect("acme").expect("acme");
-    rows(&mut acme, "create collection notes (body text)");
+    let mut c = n.http();
+    run(&mut c, "/t/acme", "create collection notes (body text)");
     // Some 4 MB of rows: more than the socket buffers between us hold.
     let body = "x".repeat(1_000);
     let batch: Vec<String> = (0..200).map(|_| format!("{{body: \"{body}\"}}")).collect();
     for _ in 0..20 {
-        rows(&mut acme, &format!("put notes [{}]", batch.join(", ")));
+        run(
+            &mut c,
+            "/t/acme",
+            &format!("put notes [{}]", batch.join(", ")),
+        );
     }
-    let mut stalled = raw(&n, "acme");
-    send(&mut stalled, b'Q', b"get notes\0");
+    let mut stalled = TcpStream::connect(("127.0.0.1", n.server.port)).unwrap();
+    stalled
+        .write_all(b"GET /t/acme/notes HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
     std::thread::sleep(Duration::from_millis(300));
 
-    let t = std::time::Instant::now();
+    let t = Instant::now();
     assert_eq!(n.admin("POST", "/_admin/tenants/acme/freeze"), 200);
     assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
     assert_eq!(n.admin("POST", "/_admin/tenants/acme/thaw"), 200);
-    assert_eq!(
-        rows(&mut acme, "get notes count"),
-        vec![vec![Some("4000".to_string())]]
-    );
+    assert_eq!(count(&run(&mut c, "/t/acme", "get notes count")), 4000);
     drop(stalled);
 }
 
-/// A Describe the tenant cannot answer -- deleted since the connect -- is
-/// answered with the error alone, and the client's Sync brings the one
-/// ReadyForQuery. It sent one of its own as well, and libpq, reading two
-/// for one Sync, stayed an answer behind for the rest of the session.
-#[test]
-fn a_refused_describe_answers_one_ready_for_query_per_sync() {
-    let n = start("describe");
-    assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
-    let mut s = raw(&n, "acme");
-    assert_eq!(n.admin("DELETE", "/_admin/tenants/acme"), 204);
-    send(&mut s, b'P', b"\0get notes\0\0\0");
-    send(&mut s, b'D', b"S\0");
-    send(&mut s, b'S', b"");
-    let mut tags = Vec::new();
-    loop {
-        let (tag, _) = read_message(&mut s).unwrap();
-        tags.push(tag);
-        if tag == b'Z' {
-            break;
-        }
-    }
-    assert_eq!(tags, vec![b'1', b'E', b'Z']);
-    s.set_read_timeout(Some(Duration::from_millis(300)))
-        .unwrap();
-    assert!(read_message(&mut s).is_err(), "a second ReadyForQuery");
-}
-
-impl Node {
-    /// Status and body of a GET, with `token` if any.
-    fn get(&self, path: &str, token: Option<&str>) -> (u16, String) {
-        let mut s = TcpStream::connect(("127.0.0.1", self.http)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
-        write!(
-            s,
-            "GET {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
-        let body = out
-            .split_once("\r\n\r\n")
-            .map_or("", |(_, b)| b)
-            .to_string();
-        (out[9..12].parse().unwrap(), body)
-    }
-}
-
-/// A tenant's statements are its own: its connection's `pg_stat_statements`
-/// and `/t/<tenant>/_stats/statements` hold them alone -- their text names
-/// the tenant's collections -- and the node's `/_stats/statements`, every
-/// tenant's with its name, is the admin's alone.
+/// A tenant's statements are its own: `/t/<tenant>/_stats/statements`
+/// holds them alone -- their text names the tenant's collections -- and the
+/// node's `/_stats/statements`, every tenant's with its name, is the
+/// admin's alone.
 #[test]
 fn a_tenant_sees_its_own_statements() {
-    let n = start("stats");
+    let n = node("stats");
     assert_eq!(n.admin("PUT", "/_admin/tenants/acme"), 201);
     assert_eq!(n.admin("PUT", "/_admin/tenants/beta"), 201);
-    let mut acme = n.connect("acme").expect("acme");
-    let mut beta = n.connect("beta").expect("beta");
-    rows(&mut acme, "create collection acme_notes (title text)");
-    rows(&mut beta, "create collection beta_notes (title text)");
-    rows(&mut beta, "put beta_notes {title: \"x\"}");
+    let mut c = n.http();
+    run(
+        &mut c,
+        "/t/acme",
+        "create collection acme_notes (title text)",
+    );
+    run(
+        &mut c,
+        "/t/beta",
+        "create collection beta_notes (title text)",
+    );
+    run(&mut c, "/t/beta", r#"put beta_notes {title: "x"}"#);
 
-    let seen = rows(&mut acme, "select query from pg_stat_statements");
-    assert!(seen
-        .iter()
-        .any(|r| r[0].as_deref().is_some_and(|q| q.contains("acme_notes"))));
-    assert!(!seen
-        .iter()
-        .any(|r| r[0].as_deref().is_some_and(|q| q.contains("beta_notes"))));
-
-    let (status, json) = n.get("/t/beta/_stats/statements", None);
-    assert_eq!(status, 200, "{json}");
+    let a = n.http().ask("GET", "/t/beta/_stats/statements", "");
+    assert_eq!(a.status, 200, "{}", a.body);
     assert!(
-        json.contains("beta_notes") && !json.contains("acme_notes"),
-        "{json}"
+        a.body.contains("beta_notes") && !a.body.contains("acme_notes"),
+        "{}",
+        a.body
     );
 
     // The node's own lists every tenant's, named, to its admin alone.
-    assert_eq!(n.get("/_stats/statements", None).0, 401);
-    let (status, json) = n.get("/_stats/statements", Some(ADMIN));
-    assert_eq!(status, 200, "{json}");
+    assert_eq!(n.http().ask("GET", "/_stats/statements", "").status, 401);
+    let a = n
+        .http()
+        .with_token(ADMIN)
+        .ask("GET", "/_stats/statements", "");
+    assert_eq!(a.status, 200, "{}", a.body);
     assert!(
-        json.contains("\"tenant\":\"acme\"") && json.contains("\"tenant\":\"beta\""),
-        "{json}"
+        a.body.contains("\"tenant\":\"acme\"") && a.body.contains("\"tenant\":\"beta\""),
+        "{}",
+        a.body
     );
 }

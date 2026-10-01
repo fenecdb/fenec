@@ -157,48 +157,16 @@ impl Drop for Rewriting<'_> {
     }
 }
 
-/// The database for what has landed: a block a server leaves open between
-/// a transaction's statements is parked while it is read
-/// ([`Database::park`]), or, one that cannot be, waited for. What the
-/// maintenance copies is the documents as they landed; the block's writes
-/// reach it, noted, if the block lands.
+/// The database to copy what the maintenance builds from. A block is open
+/// only under the write lock its owner holds, so whatever a read lock
+/// finds has landed.
 fn read(db: &RwLock<Database>) -> std::sync::RwLockReadGuard<'_, Database> {
-    let mut waited = 0;
-    loop {
-        let g = db.read().unwrap_or_else(|e| e.into_inner());
-        if g.reads_landed() {
-            return g;
-        }
-        drop(g);
-        if db.write().unwrap_or_else(|e| e.into_inner()).park() {
-            continue;
-        }
-        pause(&mut waited);
-    }
+    db.read().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The database with no block open on it: the maintenance's result goes
-/// in once an open transaction has ended. Put in before, it would miss the
-/// block's writes, which are noted only as the block lands.
+/// The database to put the maintenance's result in.
 fn write(db: &RwLock<Database>) -> std::sync::RwLockWriteGuard<'_, Database> {
-    let mut waited = 0;
-    loop {
-        let g = db.write().unwrap_or_else(|e| e.into_inner());
-        if !g.in_block() {
-            return g;
-        }
-        drop(g);
-        pause(&mut waited);
-    }
-}
-
-/// A wait for an open transaction's next statement or its end.
-fn pause(waited: &mut u32) {
-    *waited += 1;
-    match *waited < 64 {
-        true => std::thread::yield_now(),
-        false => std::thread::sleep(std::time::Duration::from_micros(200)),
-    }
+    db.write().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Database {

@@ -172,7 +172,7 @@ test(
   async () => {
     const { Fenec, sync, connect } = await import('../../web/fenec.js');
     const dir = await mkdtemp(join(tmpdir(), 'fenec-react-'));
-    const proc = spawn(bin, ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', '--file', join(dir, 'r.fenec')], {
+    const proc = spawn(bin, ['--http', '127.0.0.1:0', '--file', join(dir, 'r.fenec')], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     try {

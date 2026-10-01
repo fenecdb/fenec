@@ -1,108 +1,52 @@
-//! `/_metrics` and `--slow-ms` on a running `fenec-server`: what a pg and an
-//! HTTP client did, counted apart; a histogram Prometheus can take apart;
+//! `/_metrics` and `--slow-ms` on a running `fenec-server`: what clients
+//! did, counted by whether it wrote; a histogram Prometheus can take apart;
 //! the token the scrape needs; and a slow statement in the log with its
 //! text, while a fast one stays out of it.
 
-use fenec_server::client::{Client, Url};
+#[path = "support.rs"]
+mod support;
+
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use support::{start, tmp, Http, Server};
 
 const TOKEN: &str = "metrics-token";
 
-struct Server {
-    child: Child,
-    pg: u16,
-    http: u16,
+struct Node {
+    server: Server,
     metrics: u16,
-    log: Arc<Mutex<String>>,
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+fn node(name: &str, extra: &[&str]) -> Node {
+    let path = tmp("metrics", name);
+    let mut args = vec![
+        "--metrics",
+        "127.0.0.1:0",
+        "--http-token",
+        TOKEN,
+        "--file",
+        path.to_str().unwrap(),
+    ];
+    args.extend(extra);
+    let server = start(&args);
+    assert!(server.logged("metrics on: http://", Duration::from_secs(10)));
+    let log = server.log.lock().unwrap().clone();
+    let line = log
+        .lines()
+        .find(|l| l.contains("metrics on: http://"))
+        .unwrap();
+    let rest = line.split("127.0.0.1:").nth(1).unwrap();
+    let metrics = rest
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap();
+    Node { server, metrics }
 }
 
-fn start(name: &str, extra: &[&str]) -> Server {
-    let dir = std::env::temp_dir().join(format!("fenecpg-metrics-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path: PathBuf = dir.join(name);
-    let _ = std::fs::remove_file(&path);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fenec-server"))
-        .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
-        .args(["--metrics", "127.0.0.1:0", "--http-token", TOKEN])
-        .arg("--file")
-        .arg(&path)
-        .args(extra)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("could not start fenec-server");
-    let mut err = BufReader::new(child.stderr.take().unwrap());
-    let port = |line: &str, after: &str| -> Option<u16> {
-        line.split(after)
-            .nth(1)?
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .ok()
-    };
-    let (mut pg, mut http, mut metrics) = (None, None, None);
-    let mut seen = String::new();
-    while pg.is_none() || http.is_none() || metrics.is_none() {
-        let mut line = String::new();
-        if err.read_line(&mut line).unwrap_or(0) == 0 {
-            panic!("fenec-server ended before it listened:\n{seen}");
-        }
-        seen.push_str(&line);
-        if line.contains("postgres://localhost:") {
-            pg = port(&line, "localhost:");
-        } else if line.contains("metrics on: http://127.0.0.1:") {
-            metrics = port(&line, "127.0.0.1:");
-        } else if line.contains("listening on: http://127.0.0.1:") {
-            http = port(&line, "127.0.0.1:");
-        }
-    }
-    // The rest of stderr is kept: the slow-statement log is read from it.
-    let log = Arc::new(Mutex::new(seen));
-    let sink = Arc::clone(&log);
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        while err.read_line(&mut line).unwrap_or(0) > 0 {
-            sink.lock().unwrap().push_str(&line);
-            line.clear();
-        }
-    });
-    Server {
-        child,
-        pg: pg.unwrap(),
-        http: http.unwrap(),
-        metrics: metrics.unwrap(),
-        log,
-    }
-}
-
-impl Server {
-    fn client(&self) -> Client {
-        Client::connect(&Url {
-            user: "fenec".into(),
-            password: None,
-            host: "127.0.0.1".into(),
-            port: self.pg,
-            database: "fenec".into(),
-        })
-        .expect("could not connect")
-    }
-
-    /// Status and body of one request.
-    fn http(
+impl Node {
+    fn ask(
         &self,
         port: u16,
         method: &str,
@@ -110,28 +54,15 @@ impl Server {
         token: Option<&str>,
         body: &str,
     ) -> (u16, String) {
-        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
-        write!(
-            s,
-            "{method} {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\n\
-             Connection: close\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
-        let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
-        let body = out
-            .split_once("\r\n\r\n")
-            .map_or("", |(_, b)| b)
-            .to_string();
-        (out[9..12].parse().unwrap(), body)
+        let mut c = Http::open(port);
+        c.token = token.map(String::from);
+        let a = c.ask(method, path, body);
+        (a.status, a.body)
     }
 
     /// Every sample of a scrape, by its name and labels as written.
     fn scrape(&self) -> HashMap<String, f64> {
-        let (status, text) = self.http(self.metrics, "GET", "/_metrics", Some(TOKEN), "");
+        let (status, text) = self.ask(self.metrics, "GET", "/_metrics", Some(TOKEN), "");
         assert_eq!(status, 200, "{text}");
         text.lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
@@ -149,82 +80,40 @@ fn value(m: &HashMap<String, f64>, key: &str) -> f64 {
 }
 
 #[test]
-fn each_transport_is_counted_apart() {
-    let s = start("counted.fenec", &[]);
-    let mut c = s.client();
-    c.query("create collection t (name text, n int)").unwrap();
+fn reads_and_writes_are_counted_apart() {
+    let s = node("counted.fenec", &[]);
+    let mut c = s.server.http().with_token(TOKEN);
+    c.run("create collection t (name text, n int)");
     for i in 0..3 {
-        c.query(&format!("put t {{name: \"n{i}\", n: {i}}}"))
-            .unwrap();
+        c.run(&format!("put t {{name: \"n{i}\", n: {i}}}"));
     }
-    c.query("get t order name").unwrap();
+    c.run("get t order name");
     assert!(c.query("get t wher n = 1").is_err());
-
-    let (status, _) = s.http(s.http, "POST", "/t", Some(TOKEN), r#"{"name":"h","n":9}"#);
-    assert_eq!(status, 201);
-    let (status, _) = s.http(s.http, "GET", "/t?n=eq.9", Some(TOKEN), "");
-    assert_eq!(status, 200);
-    let (status, _) = s.http(s.http, "GET", "/nosuch", Some(TOKEN), "");
-    assert_eq!(status, 404);
+    assert_eq!(c.ask("POST", "/t", r#"{"name":"h","n":9}"#).status, 201);
+    assert_eq!(c.ask("GET", "/t?n=eq.9", "").status, 200);
+    assert_eq!(c.ask("GET", "/nosuch", "").status, 404);
     // A read over /query is a read, though it is a POST.
-    let (status, _) = s.http(
-        s.http,
-        "POST",
-        "/query",
-        Some(TOKEN),
-        r#"{"query":"get t count"}"#,
-    );
-    assert_eq!(status, 200);
+    c.run("get t count");
 
     let m = s.scrape();
     let n = |k: &str| value(&m, k);
-    assert_eq!(
-        n(r#"fenec_statements_total{transport="pg",kind="write"}"#),
-        4.0
-    );
+    assert_eq!(n(r#"fenec_statements_total{kind="write"}"#), 5.0);
     // The statement with the typo is counted, as a read: it never got as
     // far as saying what it would do.
-    assert_eq!(
-        n(r#"fenec_statements_total{transport="pg",kind="read"}"#),
-        2.0
-    );
-    assert_eq!(
-        n(r#"fenec_statement_errors_total{transport="pg",kind="read"}"#),
-        1.0
-    );
-    assert_eq!(
-        n(r#"fenec_statement_errors_total{transport="pg",kind="write"}"#),
-        0.0
-    );
-    assert_eq!(
-        n(r#"fenec_statements_total{transport="http",kind="write"}"#),
-        1.0
-    );
-    assert_eq!(
-        n(r#"fenec_statements_total{transport="http",kind="read"}"#),
-        3.0
-    );
-    assert_eq!(
-        n(r#"fenec_statement_errors_total{transport="http",kind="read"}"#),
-        1.0
-    );
+    assert_eq!(n(r#"fenec_statements_total{kind="read"}"#), 5.0);
+    assert_eq!(n(r#"fenec_statement_errors_total{kind="read"}"#), 2.0);
+    assert_eq!(n(r#"fenec_statement_errors_total{kind="write"}"#), 0.0);
     assert_eq!(n(r#"fenec_documents{collection="t"}"#), 4.0);
     assert_eq!(n("fenec_storage_failed"), 0.0);
     assert!(n("fenec_change_sequence") >= 5.0);
     assert!(n("fenec_memory_bytes") > 0.0);
     // The client is still connected; a scrape is nobody's connection.
-    assert_eq!(n(r#"fenec_connections{transport="pg"}"#), 1.0);
-    assert_eq!(n(r#"fenec_connections{transport="http"}"#), 0.0);
+    assert_eq!(n("fenec_connections"), 1.0);
 
     // What Prometheus needs of a histogram: buckets that only grow, the last
     // one the count, and a sum.
-    for (t, k) in [
-        ("pg", "read"),
-        ("pg", "write"),
-        ("http", "read"),
-        ("http", "write"),
-    ] {
-        let labels = format!(r#"transport="{t}",kind="{k}""#);
+    for k in ["read", "write"] {
+        let labels = format!(r#"kind="{k}""#);
         let mut buckets: Vec<(f64, f64)> = m
             .iter()
             .filter_map(|(key, v)| {
@@ -259,10 +148,10 @@ fn each_transport_is_counted_apart() {
 
     drop(c);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while value(&s.scrape(), r#"fenec_connections{transport="pg"}"#) != 0.0 {
+    while value(&s.scrape(), "fenec_connections") != 0.0 {
         assert!(
             Instant::now() < deadline,
-            "the closed session is still counted"
+            "the closed connection is still counted"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -270,14 +159,12 @@ fn each_transport_is_counted_apart() {
 
 #[test]
 fn the_scrape_takes_the_servers_tokens() {
-    let s = start("tokens.fenec", &["--admin-token", "admin-token"]);
-    for port in [s.metrics, s.http] {
-        let (status, _) = s.http(port, "GET", "/_metrics", None, "");
-        assert_eq!(status, 401);
-        let (status, _) = s.http(port, "GET", "/_metrics", Some("wrong"), "");
-        assert_eq!(status, 401);
+    let s = node("tokens.fenec", &["--admin-token", "admin-token"]);
+    for port in [s.metrics, s.server.port] {
+        assert_eq!(s.ask(port, "GET", "/_metrics", None, "").0, 401);
+        assert_eq!(s.ask(port, "GET", "/_metrics", Some("wrong"), "").0, 401);
         for token in [TOKEN, "admin-token"] {
-            let (status, body) = s.http(port, "GET", "/_metrics", Some(token), "");
+            let (status, body) = s.ask(port, "GET", "/_metrics", Some(token), "");
             assert_eq!(status, 200);
             assert!(
                 body.contains("# TYPE fenec_statements_total counter"),
@@ -286,33 +173,33 @@ fn the_scrape_takes_the_servers_tokens() {
         }
     }
     // The metrics listener serves nothing else, token or not.
-    let (status, _) = s.http(s.metrics, "GET", "/t", Some(TOKEN), "");
-    assert_eq!(status, 404);
+    assert_eq!(s.ask(s.metrics, "GET", "/t", Some(TOKEN), "").0, 404);
 }
 
 #[test]
 fn a_slow_statement_is_logged_with_its_text() {
-    let s = start("slow.fenec", &["--slow-ms", "20"]);
-    let mut c = s.client();
-    c.query("create collection t (name text, n int)").unwrap();
+    let s = node("slow.fenec", &["--slow-ms", "20"]);
+    let mut c = s.server.http().with_token(TOKEN);
+    c.run("create collection t (name text, n int)");
     let docs: Vec<String> = (0..20_000)
         .map(|i| format!("{{name: \"row {i}\", n: {i}}}"))
         .collect();
     let t = Instant::now();
-    c.query(&format!("put t [{}]", docs.join(", "))).unwrap();
+    c.run(&format!("put t [{}]", docs.join(", ")));
     assert!(
         t.elapsed() >= Duration::from_millis(20),
         "the put was not slow"
     );
     // A point read by id, far under the threshold, with a mark to look for.
-    c.query("get t where id = 987654").unwrap();
+    c.run("get t where id = 987654");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let log = s.log.lock().unwrap().clone();
+        let log = s.server.log.lock().unwrap().clone();
         if let Some(line) = log.lines().find(|l| l.starts_with("slow statement: ")) {
+            // The request as it came: its line, then its body.
             assert!(
-                line.contains(" ms, pg write: put t [{name: \"row 0\""),
+                line.contains(" ms, write: POST /query ") && line.contains("put t [{name:"),
                 "{line}"
             );
             // Cut short: the statement is a megabyte, the line is not.
@@ -323,13 +210,5 @@ fn a_slow_statement_is_logged_with_its_text() {
         assert!(Instant::now() < deadline, "no slow statement in:\n{log}");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let m = s.scrape();
-    assert_eq!(
-        value(&m, r#"fenec_slow_statements_total{transport="pg"}"#),
-        1.0
-    );
-    assert_eq!(
-        value(&m, r#"fenec_slow_statements_total{transport="http"}"#),
-        0.0
-    );
+    assert_eq!(value(&s.scrape(), "fenec_slow_statements_total"), 1.0);
 }

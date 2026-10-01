@@ -1,7 +1,7 @@
 //! What serving a mirror costs, against the Makefile's PostgreSQL
 //! (`make mirror-bench`, after `make pgvector-up`): a `fenec-server --follow`
 //! over a table of it with a `vector(384)` under an HNSW index, as `make
-//! follow-bench` has, served with `--http`.
+//! follow-bench` has, served over HTTP.
 //!
 //! - how long a committed change takes to reach a subscriber of the
 //!   collection (`GET /<collection>/changes`), one row a transaction: an
@@ -17,7 +17,7 @@
 //! cargo run --release -p fenec-server --example mirror -- [rows]
 //! ```
 
-use fenec_server::client::{Client, Url};
+use fenec_wire::client::{Client, Url};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ fn binary() -> PathBuf {
 /// Starts the server and waits until its follower streams.
 fn start(file: &Path) -> Server {
     let mut child = Command::new(binary())
-        .args(["--listen", "127.0.0.1:0", "--http", "127.0.0.1:0"])
+        .args(["--http", "127.0.0.1:0"])
         .arg("--file")
         .arg(file)
         .args(["--follow", &url(), "--follow-table", T])

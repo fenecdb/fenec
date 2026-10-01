@@ -5,8 +5,7 @@
 //! learned from `pg_type`.
 //!
 //! Why text format and not binary: a binary COPY needs a separate decoder
-//! per type. In text format a single escape decoder suffices, and it is
-//! consistent with `fenec-server`'s own choice (see `fenec_wire::proto`).
+//! per type. In text format a single escape decoder suffices.
 
 use crate::{Column, Source};
 use fenec_core::error::{Error, Result};
