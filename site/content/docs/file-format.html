@@ -219,14 +219,14 @@ file and reports <code>unknown record kind 6</code>.</p>
 
 <h2>A statement's writes are one record</h2>
 
-<p>All the writes of one statement, <code>/batch</code> or transaction are
+<p>All the writes of one statement or <code>/batch</code> are
 appended as one record, so a crash keeps all of them or none. Within one
 collection that is a data record (kind 3); otherwise a block (kind 9).</p>
 
 <details class="deep"><summary>Details</summary>
 <p>Every write is a block: the documents a <code>put</code>, a
 <code>set</code> or a <code>del</code> writes, the statements of a
-<code>/batch</code>, of a text sent over the pg wire or of a transaction.
+<code>/batch</code> or of the browser module's <code>run</code> of several.
 Their frames are held back until the block ends and are appended as one
 record, so a crash cuts all of them off the file or none; a block that fails
 is put back in memory instead, and nothing of it reaches the file. Within one
@@ -254,7 +254,7 @@ no land names is ignored.</p>
 
 <details class="deep"><summary>Details</summary>
 <p>Held back until it lands, a block's frames were in memory twice — in the
-record being built and in the stores — so a <code>COPY</code> of 250 000
+record being built and in the stores — so a load of 250 000
 768-dim rows in one command peaked 1.57 GB over what it left. Once a block's
 frames amount to 16 MB, a server appends them as record kind 10, a spill,
 whose body is a block record's, and the stores read those documents from the
@@ -325,10 +325,12 @@ included, reads the counter and nothing after it.</p>
                 calendar arithmetic, change stream          (no dependencies)
   fenec-ql/     FenecQL lexer and parser                    (core only)
   fenec-wasm/   the browser ABI                             (no wasm-bindgen)
-  fenec-server/     PostgreSQL v3 wire protocol, server and client
-  fenec-catalog/ the pg_catalog psql, JDBC and DBeaver read (core only)
-  fenec-http/   HTTP/JSON endpoint: REST, raw FenecQL, SSE  (core + ql only)
-  fenec-import/ SQLite file reader, PostgreSQL COPY source
+  fenec-http/   HTTP/JSON endpoint: REST, raw FenecQL, SSE, replication,
+                tenants                                     (core + ql only)
+  fenec-wire/   the PostgreSQL client the importer reads with
+  fenec-import/ SQLite file reader, PostgreSQL COPY source, --follow
+  fenec-server/ the server: HTTP, replication, tenants, the --follow mirror
+  fenec-shard/  the tenant router
   fenec-cli/    the `fenec` shell, `fenec import`, `fenec types`
 web/            fenec.js (builder + sync layer), fenec.d.ts,
                 fenec.test.js and fenec.sync.test.js, the browser console

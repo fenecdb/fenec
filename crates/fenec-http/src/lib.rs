@@ -12,12 +12,13 @@
 //!
 //! The server **shares** the database, it does not own it: it takes an
 //! `Arc<RwLock<Database>>`. fenecdb is single-writer and two processes cannot
-//! write to one file, so the HTTP endpoint is not a separate binary but a
-//! second listener in the same process as `fenec-server` (`fenec-server --http`). That
-//! keeps the sync policy, the checkpoint and the memory ceiling in one place.
+//! write to one file, so everything that writes a file -- this endpoint, a
+//! replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
+//! of one process, `fenec-server`, which keeps the sync policy, the
+//! checkpoint and the memory ceiling in one place.
 //!
-//! There is no TLS: the same rule as `fenec-server` applies, and a TLS terminator
-//! is needed in front of it on an open network.
+//! There is no TLS: a non-loopback address wants a token, and a TLS
+//! terminator is needed in front of it on an open network.
 //!
 //! With [`Server::with_tenants`] one listener serves many databases, one
 //! file each, under `/t/<tenant>/...` -- the same surface as a single file
@@ -126,8 +127,8 @@ pub struct Config {
     pub max_import: usize,
     /// JSON Web Tokens and the policy they are held to; see [`access`].
     pub access: Option<Arc<access::Access>>,
-    /// Data footprint ceiling in bytes (0 = off): fenec-server's `--max-memory`,
-    /// held on this listener's writes as on its own; see [`over_ceiling`].
+    /// Data footprint ceiling in bytes (0 = off): fenec-server's
+    /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
 }
 
@@ -173,7 +174,7 @@ enum Backend {
     },
     Tenants(Arc<Tenants>),
     /// `--metrics <address>`: `/_metrics` and nothing else, for a server
-    /// whose data is served over the pg wire alone.
+    /// whose data is served on another address.
     Metrics {
         db: Arc<RwLock<Database>>,
         repl: Option<Arc<Replication>>,
@@ -1095,8 +1096,8 @@ fn counted(resp: &fenec_core::prelude::Response) -> u64 {
 /// ([`Database::execute_block`]), a create, a drop or a `create index`
 /// among them put back as they are. The first error puts back what the ones
 /// before it did, and says so -- `completed` is 0. A batch holding a
-/// `compact` runs each statement on its own instead, as a text of several
-/// does over the pg wire: it stops at the first error, and `completed` says
+/// `compact` runs each statement on its own instead: it stops at the first
+/// error, and `completed` says
 /// how many were applied.
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
     let body = match std::str::from_utf8(&req.body) {

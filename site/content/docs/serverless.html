@@ -21,7 +21,7 @@ Inside is faster; a server holds more data and more writers.</p>
 <tr><td>a query</td><td>no network in the object: 2.5 ms for a request's <code>near</code> over 10 000 × 128</td><td>a round trip to the server</td></tr>
 <tr><td>writers</td><td>one an object; a tenant an object</td><td>one a file; a node holds many</td></tr>
 <tr><td>size</td><td>about 60 000 rows of 128 dimensions, 12 000 of 768 (<a href="#limits">Limits</a>)</td><td>the machine's disk, the file mapped</td></tr>
-<tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, the pg wire</td></tr>
+<tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, replicas</td></tr>
 </tbody>
 </table>
 </div>
@@ -34,7 +34,7 @@ holds one database, as a tenant is one file on a <code>fenec-server</code>
 node.</p>
 
 <p>The second needs nothing new: <code>Fenec.connect(url)</code>, the
-Python <code>Client</code> or any pg driver, and a function's connections
+Python <code>Client</code> or <code>fetch</code>, and a function's connections
 are HTTP requests, so there is no pool to exhaust. The rest of this page is
 the first.</p>
 </details>

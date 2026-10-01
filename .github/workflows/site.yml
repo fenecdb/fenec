@@ -58,6 +58,12 @@ jobs:
       - name: Build the wasm module and the site
         run: make site
 
+      # Every internal link and anchor in the built pages has to resolve: a
+      # page renamed or a heading's id changed leaves links that land
+      # nowhere, and nothing else would say so before a reader found one.
+      - name: Check the internal links
+        run: python3 site/check_links.py
+
       - uses: cloudflare/wrangler-action@v3
         with:
           # The action defaults to wrangler 3, which predates Workers static

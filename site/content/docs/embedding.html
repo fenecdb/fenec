@@ -56,12 +56,9 @@ block with <code>execute_block</code>, or between <code>begin</code> and
 opens one holds the exclusive lock until it ends. A <code>create</code>, a
 <code>drop</code> or a <code>create index</code> in it is put back with the
 rest: the collection made goes, the one dropped comes back, the index goes.
-<code>savepoint</code> marks where the open block stands, and
-<code>rollback_to</code> puts back only what came after the mark, the block
-still open. A <code>compact</code> rewrites the file and runs on its own,
-outside a block. FenecQL has no <code>BEGIN</code> or
-<code>COMMIT</code>: <code>fenec-server</code> runs a transaction as a block held
-open (<a href="postgres.html#transactions">Transactions</a>).</p>
+A <code>compact</code> rewrites the file and runs on its own, outside a
+block. FenecQL has no <code>BEGIN</code> or <code>COMMIT</code>: over HTTP a
+<code>/batch</code> is one block (<a href="http.html">HTTP endpoint</a>).</p>
 </details>
 
 <h2>Durability is the caller's job</h2>
@@ -137,8 +134,9 @@ time is passed in as a parameter there.</p>
 <details class="deep"><summary>Details</summary>
 <p><code>Error</code> in <code>fenec-core/src/error.rs</code> is the single
 error type across the whole engine: allocation-free variants, no
-<code>Box</code>. <code>fenec-server</code> maps it onto PostgreSQL SQLSTATE
-codes.</p>
+<code>Box</code>. <code>fenec-server</code> maps it onto HTTP statuses: 404
+for a missing collection, 409 for one that exists or a taken id, 400 for a
+query or type error, 403 for a write refused, 500 for a storage error.</p>
 </details>
 
 <h2>Plugins</h2>
@@ -146,13 +144,32 @@ codes.</p>
 <p>Add your own functions and write hooks to the engine by installing a
 plugin.</p>
 
-<pre data-lang="rust">db.install_plugin(&PgPlugin)?;   // pg_version(), pg_typeof(), to_pgvector()
+<pre data-lang="rust">use fenec_core::plugin::{Plugin, Registry, ScalarFn};
+
+struct Shout;
+impl ScalarFn for Shout {
+    fn call(&amp;self, args: &amp;[Value]) -&gt; Result&lt;Value&gt; {
+        Ok(Value::Text(format!("{}!", args[0].as_text().unwrap_or(""))))
+    }
+}
+
+struct MyPlugin;
+impl Plugin for MyPlugin {
+    fn name(&amp;self) -&gt; &amp;str { "mine" }
+    fn init(&amp;self, reg: &amp;mut Registry) -&gt; Result&lt;()&gt; {
+        reg.register_fn("shout", Arc::new(Shout))
+    }
+}
+
+db.install_plugin(&amp;MyPlugin)?;   // get t select shout(name)
 </pre>
 
 <details class="deep"><summary>Details</summary>
-<p>The registry takes after PostgreSQL's extension model. Scalar functions,
-write hooks in the shape of triggers, and transport adapters can all be
-registered.</p>
+<p>The registry takes after PostgreSQL's extension model. Scalar functions
+and write hooks in the shape of triggers can be registered; a plugin is
+installed once, and a second install of the same name is refused.
+<code>fenec-server --follow</code> guards its mirrored collection with such a
+hook.</p>
 </details>
 
 <h2>Module map</h2>

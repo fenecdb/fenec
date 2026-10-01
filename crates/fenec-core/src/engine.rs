@@ -569,9 +569,8 @@ struct Block {
 /// (`MAX_BATCH`), whose candidates are found on every core. Linked as each
 /// statement wrote them, a row at a time as a driver's `executemany` and a
 /// `/batch` of single puts send them, 100 000 128-dim rows went in at
-/// 5.4k rows/s with the graph kept over the pg wire and 5.3k over HTTP;
-/// linked together, at 16.9k and 16.0k, as a COPY loads them (`make
-/// load-bench`).
+/// 5.4k rows/s with the graph kept over the pg wire as it was and 5.3k over
+/// HTTP; linked together, at 16.9k and 16.0k (`make load-bench`).
 const LINK_AT: usize = 512;
 
 /// Whether a block's `put`s leave their vectors waiting: natively. The
@@ -4544,8 +4543,8 @@ impl Database {
     fn run_one(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         let out = self.execute_inner(stmt, params);
         // A block that outgrew its bound spills what it holds into the file,
-        // a statement's writes at a time: a COPY's puts of 10 000 rows, a
-        // transaction's statements.
+        // a statement's writes at a time: a /batch's statements, a `put` of
+        // many rows.
         #[cfg(not(target_arch = "wasm32"))]
         if out.is_ok() && !stmt.is_read_only() {
             self.spill_when_due()?;
@@ -8350,8 +8349,8 @@ fn order_rows(flat: &[Value], n: usize, count: usize, keys: &[OrderKey], k: usiz
 /// The query vector of `near`. Three forms are accepted, none of them
 /// silently mangled.
 ///
-/// The text form (`near embed '[1,2,3]'`) is pgvector's notation and the
-/// natural one to type by hand from psql. On the parameter path the same
+/// The text form (`near embed '[1,2,3]'`) is pgvector's notation, and a
+/// string is what most clients send. On the parameter path the same
 /// value was already parsed into a list; on the literal path it stayed
 /// `text` and raised a type error.
 fn near_vector(v: Value) -> Result<Vec<f32>> {

@@ -11,7 +11,7 @@ vector search built in, small enough to run inside a browser tab.</p>
 
 <p>Your documents, their text index and their embeddings live together in one
 file. You query them with one language, FenecQL — in the page, from Rust, or
-over the PostgreSQL wire protocol from a server.</p>
+over HTTP from a server.</p>
 
 <pre data-lang="fenecql">create collection articles (
   title     text,
@@ -28,8 +28,8 @@ get articles select title
 
 <details class="deep"><summary>Details</summary>
 <p>fenecdb stores rows and embeddings in one file, indexes them with HNSW, and
-answers queries from inside a browser tab — or from a process that speaks the
-PostgreSQL wire protocol.</p>
+answers queries from inside a browser tab — or from a server any language
+reaches over HTTP.</p>
 
 <p>Everything in these docs describes the engine as it is built today. Where
 something costs you a capability, that cost is stated next to the feature
@@ -64,8 +64,8 @@ to.</p>
     <p>A REST surface derived from the schema, plus a subscription stream.</p></li>
   <li><a href="sync.html">Sync</a>
     <p>A local replica that reads without the network and writes optimistically.</p></li>
-  <li><a href="postgres.html">PostgreSQL server</a>
-    <p>Wire-protocol compatibility, authentication, durability, cancellation.</p></li>
+  <li><a href="server.html">Server</a>
+    <p>Running <code>fenec-server</code>: flags, tokens, durability, limits, containers.</p></li>
   <li><a href="integrations.html">Integrations</a>
     <p>LangChain, LlamaIndex, the Vercel AI SDK and React.</p></li>
   <li><a href="serverless.html">Serverless and Cloudflare</a>
@@ -88,8 +88,8 @@ should live.</p>
 <thead><tr><th>Target</th><th>What you get</th><th>Size</th></tr></thead>
 <tbody>
 <tr><td>Browser</td><td>WebAssembly module plus a dependency-free ES client</td><td class="n">192 KB gzip<br><small>the wasm module</small></td></tr>
-<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1153–1687 KB</td></tr>
-<tr><td>Server</td><td><code>fenec-server</code>: PostgreSQL protocol and an HTTP listener in one process</td><td class="n">2.88 MB image</td></tr>
+<tr><td>Command line</td><td>The <code>fenec</code> shell, <code>fenec import</code>, <code>fenec types</code>, <code>fenec backup</code> and <code>restore</code></td><td class="n">1234–1784 KB</td></tr>
+<tr><td>Server</td><td><code>fenec-server</code>: HTTP, replication and tenants in one process</td><td class="n">2.81 MB image</td></tr>
 <tr><td>Embedded</td><td><code>fenec-core</code> as a Rust library</td><td class="n">zero dependencies</td></tr>
 </tbody>
 </table>
@@ -100,26 +100,25 @@ should live.</p>
 <p>Staying small meant leaving some things out on purpose. The main ones:</p>
 
 <ul>
-  <li><b>One writer.</b> Many readers, but one write or transaction at a time.</li>
-  <li><b>No SQL and no JOIN.</b> PostgreSQL clients connect, but they speak FenecQL.</li>
+  <li><b>One writer.</b> Many readers, but one write or batch at a time.</li>
+  <li><b>No SQL and no JOIN.</b> Every client speaks FenecQL, over HTTP or in process.</li>
   <li><b>No nested objects or decimals.</b> Keep fields flat; store money as cents.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
 <p>The list is short, and it is made of consequences of the design rather
-than a roadmap. Transactions were on it until one writer could give them:
-a transaction holds the database from its first write to its end.</p>
+than a roadmap.</p>
 
 <ul>
-  <li><b>One writer, no MVCC.</b> A transaction is the only writer from its
-    first write to its <code>COMMIT</code>. Readers read what has landed
-    beside it, its writes put aside while it waits for its next statement,
-    but wait for one that changed a graph or the schema.</li>
+  <li><b>One writer, no MVCC.</b> A write, or a <code>/batch</code> of them,
+    holds the write lock for as long as it runs and lands whole or not at
+    all; readers read beside it. There are no interactive transactions held
+    open across requests.</li>
   <li><b>No JOIN and no subqueries.</b> A query reads one collection, plus
     the children <code>lookup</code> attaches to each of its rows — and,
     chained, the children of those.</li>
-  <li><b>No SQL.</b> <code>fenec-server</code> is compatible at the transport
-    layer, not the language.</li>
+  <li><b>No SQL.</b> FenecQL is the one language, in the page, in Rust and
+    over HTTP.</li>
   <li><b>No schema migration</b> and no multi-writer replication.</li>
   <li><b>No decimal type.</b> <code>float</code> is binary floating point and
     unfit for money; the answer is an <code>int</code> in cents.</li>
@@ -143,12 +142,14 @@ dependencies at all.</p>
      |       std only, zero dependencies
 fenec-ql     FenecQL lexer and parser              fenec-wasm   browser ABI
      |                                                          (no wasm-bindgen)
-     |                                             fenec-catalog  the pg_catalog tools read
-fenec-http   REST/JSON surface and SSE subscriptions
      |
-fenec-server     PostgreSQL v3 wire protocol — server and client
+fenec-http   REST/JSON surface, SSE subscriptions, replication, tenants
      |
-fenec-import SQLite file reader, PostgreSQL COPY source
+fenec-wire   the PostgreSQL client the importer reads with
+     |
+fenec-import SQLite file reader, PostgreSQL COPY source, --follow
+     |
+fenec-server the server: HTTP, replication, tenants, the --follow mirror
      |
 fenec-cli    the `fenec` shell
 </pre>

@@ -447,7 +447,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "By transport, and by whether the statement wrote.",
+      "description": "By whether the statement wrote.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -486,8 +486,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (transport, kind) (rate(fenec_statements_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{transport}} {{kind}}",
+          "expr": "sum by (kind) (rate(fenec_statements_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
           "refId": "A"
         }
       ]
@@ -539,8 +539,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, transport, kind) (rate(fenec_statement_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
-          "legendFormat": "p99 {{transport}} {{kind}}",
+          "expr": "histogram_quantile(0.99, sum by (le, kind) (rate(fenec_statement_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{kind}}",
           "refId": "A"
         },
         {
@@ -548,8 +548,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, transport, kind) (rate(fenec_statement_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
-          "legendFormat": "p50 {{transport}} {{kind}}",
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(fenec_statement_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{kind}}",
           "refId": "B"
         }
       ]
@@ -601,8 +601,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (transport, kind) (rate(fenec_statement_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{transport}} {{kind}}",
+          "expr": "sum by (kind) (rate(fenec_statement_errors_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
           "refId": "A"
         }
       ]
@@ -654,8 +654,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (transport) (rate(fenec_slow_statements_total{instance=~\"$instance\"}[$__rate_interval])) * 60",
-          "legendFormat": "{{transport}}",
+          "expr": "sum(rate(fenec_slow_statements_total{instance=~\"$instance\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ]
@@ -734,7 +734,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "The change sequence's rate: every write, over any transport, and a replica's applied ones.",
+      "description": "The change sequence's rate: every write, and a replica's applied ones.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -933,7 +933,7 @@
             "uid": "${datasource}"
           },
           "expr": "fenec_connections{instance=~\"$instance\"}",
-          "legendFormat": "{{transport}}",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ]

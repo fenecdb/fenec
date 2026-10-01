@@ -1,0 +1,308 @@
+<!--
+title: Server — fenecdb
+description: Run fenecdb as a server with fenec-server: its flags, durability, security with tokens, JWT policies and the audit log, limits, health checks and containers.
+-->
+
+<h1>Server</h1>
+<p class="kicker">Run fenecdb as a server: one process over one file, reached
+over HTTP from any language.</p>
+
+<h2>Start and query</h2>
+
+<ol class="steps-doc">
+  <li>
+    <p>Start the server on a file.</p>
+<pre data-lang="bash">fenec-server --file data.fenec --http 127.0.0.1:8080</pre>
+  </li>
+  <li>
+    <p>Send it a query.</p>
+<pre data-lang="bash">curl -s -X POST localhost:8080/query \
+  -d '{"query": "get articles select title near embed $1 limit 5", "params": [[0.1, 0.2]]}'</pre>
+  </li>
+</ol>
+
+<p>Everything the server does goes over that one listener: queries and the
+REST routes, subscriptions, replication, change data capture, metrics and the
+admin routes of a tenant node. The requests are on <a href="/docs/http">HTTP
+endpoint</a>, and each language's way of sending them on <a
+href="/docs/languages">Your language</a>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>One process writes one file. Two processes over the same file corrupt it,
+which is why everything a server does — HTTP, replication, the graph keeper,
+the <code>--follow</code> mirror — runs inside this one process rather than
+as programs of its own.</p>
+
+<p>One thread per connection. Read-only statements run at the same time under
+a shared lock; writes take the exclusive one. HNSW search buffers are
+thread-local, so the same index can be searched in parallel — eight
+concurrent full scans on eight cores measured 4.3×.</p>
+
+<p>A <code>/batch</code> is one block: its writes land in the file as one
+record, or none of them do, and a replica applies it whole. There are no
+interactive transactions held open across requests — the database has one
+writer, and a transaction a client held open would hold every other write
+with it. An <code>Idempotency-Key</code> makes a write, or a
+<code>/batch</code>, safe to retry (<a href="/docs/http">HTTP endpoint</a>).</p>
+
+<p>With <code>--replica-of</code> the process follows another
+<code>fenec-server</code> as a read replica: it serves every read and refuses
+every write with 403. The flags, promotion and what a failover loses are on <a
+href="/docs/replication">Replication</a>. With <code>--dir &lt;path&gt;</code>
+instead of <code>--file</code> it serves a directory of tenant files, one per
+tenant under <code>/t/&lt;tenant&gt;/</code>; that mode, its
+<code>--admin-token</code> and <code>--idle-close</code>, and the router in
+front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
+</details>
+
+<h2 id="flags">Flags</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>-f, --file &lt;path&gt;</code></td><td>The database file. In memory without it.</td></tr>
+<tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
+<tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
+<tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
+<tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
+<tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
+<tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
+<tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it.</td></tr>
+<tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
+<tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options (<a href="/docs/http">HTTP endpoint</a>).</td></tr>
+<tr><td><code>--replication-token</code>, <code>--replica-of</code>, <code>--promote</code>, <code>--replication-buffer</code>, <code>--cdc</code></td><td><a href="/docs/replication">Replication</a> and <a href="/docs/microservices">change data capture</a>.</td></tr>
+<tr><td><code>--admin-token</code>, <code>--idle-close</code>, <code>--lease</code></td><td>A tenant node's (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
+<tr><td><code>--follow &lt;postgres://...&gt;</code>, <code>--follow-*</code></td><td>Mirrors a PostgreSQL table into the file and serves it (<a href="import.html#serving">Import</a>).</td></tr>
+<tr><td><code>--metrics</code>, <code>--slow-ms</code>, <code>--audit</code>, <code>--auth-delay</code></td><td><a href="/docs/monitoring">Monitoring</a> and the audit log.</td></tr>
+<tr><td><code>--insecure</code></td><td>Allows a non-loopback address without a token.</td></tr>
+<tr><td><code>--ping</code></td><td>Asks the server whether it is up and exits (<a href="#limits">health checks</a>).</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>fenec-server --help</code> prints every flag with its default.</p>
+
+<h2 id="security">Security</h2>
+
+<p>Give the server a token, or give each user a JSON Web Token that names what
+they may read and write.</p>
+
+<pre data-lang="bash">fenec-server --file data.fenec --http 0.0.0.0:8080 --http-token "$TOKEN"</pre>
+
+<div class="note trap">
+  <p><b>There is no TLS yet.</b> On a network, put a TLS terminator such as
+  Caddy, nginx or a load balancer in front.</p>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p><code>--http-token</code> is the server's own token: whoever sends it reads
+and writes everything. The comparison is constant time. Listening on a
+non-loopback address with no token is refused outright; it can be opened
+deliberately with <code>--insecure</code>.</p>
+
+<p>With <code>--jwt-secret</code> (HS256, at least 32 bytes) or
+<code>--jwt-keys</code> (a JWKS file: <code>oct</code> keys for HS256,
+<code>RSA</code> keys for an identity provider's RS256, a token's
+<code>kid</code> picking the key, the file read again as it changes) the
+server also takes JSON Web Tokens, each held to the rules of
+<code>--policy</code>: which collections, read or write, and which rows
+(<code>where owner = $jwt.sub</code>). A token that may only read is the
+reporting login a dashboard needs. The rules are ANDed into every statement
+a token runs, and every document it writes is checked against them as well
+(<a href="/docs/http#scoped-access">Scoped access</a>).
+<code>--mint-token '{"sub": "ada"}'</code> prints a token signed with the
+secret, for testing. Pass the secret with <code>--jwt-secret-file</code> or
+<code>FENEC_JWT_SECRET</code> — <code>argv</code> shows up in <code>ps</code>
+output.</p>
+
+<p>A request refused for its token waits before it is answered — 100 ms,
+twice as long for each refusal from the same address within a minute, 5 s at
+most (<code>--auth-delay</code>; 0 turns it off). <code>--audit
+&lt;path&gt;</code> appends a JSON line for each refused request, each change
+of the schema and each admin request (<a href="/docs/monitoring#audit">The
+audit log</a>).</p>
+</details>
+
+<h2 id="durability">Durability</h2>
+
+<p>Choose how often writes reach the disk with <code>--sync</code>.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th><code>--sync</code></th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td><code>250</code> (default)</td><td>Flushed every 250 ms. A crash loses at most that much.</td></tr>
+<tr><td><code>always</code></td><td>Each write is answered once it is on disk.</td></tr>
+<tr><td><code>off</code></td><td>Flushed only on shutdown.</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>Writes accumulate in a 1 MB buffer. Under <code>always</code> every write
+waits for an <code>fsync</code>, about 3.7 ms on macOS for a write alone, and
+writes arriving together share one; <code>250</code> costs next to nothing;
+<code>off</code> nothing. A <code>/batch</code> lands with one
+<code>fsync</code> however many writes it holds.</p>
+
+<p>Under <code>always</code> the <code>fsync</code> runs after the write has
+let go of the exclusive lock, and the bytes reach the file there too. Readers
+therefore do not wait on the disk, and writes that arrive while one
+<code>fsync</code> runs are made durable together by the next. One client
+still gets one write per <code>fsync</code>. The sync of <code>250</code>
+takes the same path, for a single database and for each tenant of a
+<code>--dir</code> node: held through the <code>fsync</code>, a tenant's lock
+had its reads and writes wait up to 27 ms once an interval.</p>
+
+<p><code>SIGINT</code>, <code>SIGTERM</code> and <code>SIGHUP</code> are caught
+and a final sync runs before exit. The exclusive lock is <b>held</b> until
+exit, so no write can be accepted between the sync and the exit and no write is
+left that looked successful to the client but never reached the disk. Under
+<code>kill -9</code> you get exactly what the chosen policy promised, and no
+more.</p>
+
+<p>When the disk refuses a write or a sync, the request fails with 500 —
+under <code>always</code>, before the client is told it succeeded — and every
+later write is refused until the process restarts; reads go on answering. The
+sync is not retried: after a failed <code>fsync</code> the kernel may already
+have dropped the pages, so a retry that succeeds would prove nothing.</p>
+
+<p><b>The shutdown checkpoint.</b> After the sync, if a vector index exists,
+a checkpoint is written: the HNSW graph lands in the file and the next open
+does not rebuild it — 9 ms instead of 3.4 s at 100 000 × 128. Vectors still
+waiting to be linked after a crash are written as waiting, and linked after
+the next open. The cost is that shutdown takes longer on a large database:
+the image is written into the new file as it is produced, so it is a copy on
+disk rather than one in memory. <code>--no-checkpoint</code> turns it off.
+The order is deliberate. The sync comes first, so even if the process is
+killed while the checkpoint is being written, the data is already on disk and
+only the graph is lost. The rewrite goes to a side file and is renamed, so a
+half-written checkpoint cannot corrupt anything.</p>
+</details>
+
+<h2 id="limits">Limits and health checks</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>--max-connections</code></td><td class="n">100</td><td>Refuses connections past it.</td></tr>
+<tr><td><code>--max-memory &lt;MiB&gt;</code></td><td class="n">off</td><td>Refuses writes that would grow the data past it; reads go on.</td></tr>
+<tr><td><code>--idle-timeout &lt;s&gt;</code></td><td class="n">60</td><td>Closes a quiet keep-alive connection (0 = never).</td></tr>
+<tr><td><code>--http-max-streams</code></td><td class="n">64</td><td>Ceiling on subscriptions, counted apart.</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre data-lang="bash">fenec-server --ping --http 127.0.0.1:8080   # exits 0 when the server is up</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>One thread per connection means unlimited connections would leave the stack
+memory ceiling to the client. Past <code>--max-connections</code> a client
+gets 503; <code>--idle-timeout</code> closes a quiet connection. A
+subscription holds a thread for as long as it lasts, so subscriptions are
+counted apart, under <code>--http-max-streams</code>.</p>
+
+<p><code>--max-memory</code> puts a ceiling on the data footprint. Above it,
+requests that <b>grow</b> the data are refused with 507, while reads,
+<code>del</code> and <code>compact</code> keep working: hitting a ceiling with
+no way out would be no better than a cgroup OOM. The point is to bring the
+OOM forward: nobody warns you about a process felled by <code>SIGKILL</code>,
+and both the last sync and the checkpoint are lost with it. The measurement
+happens <i>before</i> the statement, so the overshoot is at most one
+statement.</p>
+
+<p><code>--ping</code> asks <code>GET /_health</code> on the
+<code>--http</code> address and exits 0 when it answers. The route needs no
+token and takes no lock: every query takes the database lock first, so during
+a long <code>compact</code> a probe that ran one would wait too and a healthy
+server would look dead. Because the listener binds <i>after</i> the file is
+opened, "healthy" also means "the documents are read".</p>
+
+<p>What the server is doing is at <code>/_metrics</code>, in Prometheus's
+text format: <code>--metrics &lt;address&gt;</code> opens a listener for it
+alone, and <code>--slow-ms &lt;ms&gt;</code> logs every statement at least
+that slow with its text. The metrics, a Grafana dashboard and the log are in
+<a href="/docs/monitoring">Monitoring</a>.</p>
+</details>
+
+<h2 id="containers">Run it in a container</h2>
+
+<p>The image is under 3 MB: the binary and nothing else.</p>
+
+<pre data-lang="bash">docker run -d --name fenecdb -v fenecdata:/data \
+  -p 127.0.0.1:8080:8080 -e FENEC_HTTP_TOKEN=a-token \
+  ghcr.io/fenecdb/fenec-server</pre>
+
+<p>The image's command is <code>--http 0.0.0.0:8080 --file
+/data/data.fenec --sync 250</code>.</p>
+
+<ul>
+  <li><b>Set a token.</b> Without one it refuses to listen beyond
+    localhost.</li>
+  <li><b>Run one instance per file.</b> Two writers corrupt it: on Kubernetes,
+    a <code>StatefulSet</code> with one replica.</li>
+  <li><b>Write every flag out</b> when you override the command, or the data
+    file is dropped.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
+<code>scratch</code>. There are no dependencies and the binary runs its own
+health check (<code>--ping</code>), so the runtime image holds nothing but the
+binary — no shell, no package manager, no libc. The image is <b>2.81 MB</b> on
+amd64 and 2.44 MB on arm64 — since no target is written in, both come out of
+the same file. <code>make docker</code> builds it, and
+<code>docker compose up -d</code> starts the compose file's.</p>
+
+<p><b>The memory limit comes from the data.</b> With no page cache there is
+no knob to tune: the file is mapped and what the process holds is the
+indexes, which is what <code>--max-memory</code> counts. Below that the
+cgroup sends <code>SIGKILL</code>, the clean shutdown never runs and up to
+one sync interval is lost. Set <code>--max-memory</code> to a third of the
+container limit to bring that forward.</p>
+
+<p><b>The restart cost depends on how it stopped.</b>
+<code>docker stop</code> sends <code>SIGTERM</code> and a checkpoint is
+written, so the next open takes 9 ms. After <code>kill -9</code> or a
+cgroup OOM the graph of the last checkpoint is restored, and the vectors
+written since it go in unlinked: the server answers once the documents
+are read, and links them on a thread beside its queries,
+<code>near</code> measuring each of them until then. The only checkpoint
+the server writes on its own is the one at shutdown, but it appends its
+graphs to the file as they change — a graph that changed in 10 000 nodes,
+once the file has grown by three times its record, logged as
+<code>1 graph written into the file</code>, with writes held off for
+the 5 ms that takes at 100 000 × 768 — so what waits is what came
+after the last of them: at 100 000 × 768 at most 10 000 vectors, linked
+in 2.6 s with <code>near</code> at 1.56 ms p50 meanwhile. With no graph
+in the file every vector waits: at 100 000 × 768 never checkpointed the
+first <code>near</code> was answered 1.23 s after the start, against
+67.7 s when the open linked them first, and linking takes 19 s.
+<code>fenec_vectors_unlinked</code> counts down to 0.</p>
+
+<p>Overriding <code>CMD</code> drops <code>--file</code>, and the container
+comes up with an in-memory database. There is no shell in the image, so
+<code>docker exec ... sh</code> does not work; what is left is
+<code>docker logs</code> and <code>docker run --rm
+ghcr.io/fenecdb/fenec-server --help</code>.</p>
+
+<p>Two containers loading the same file and writing it corrupt it. On
+Kubernetes that means a <code>StatefulSet</code> rather than a
+<code>Deployment</code>, <code>replicas: 1</code>, <code>strategy:
+Recreate</code> and a <code>ReadWriteOnce</code> volume — a rolling update
+keeps two pods up together for a moment. There is a connection ceiling but no
+queue: an excess connection does not wait, it gets 503.</p>
+</details>
+
+<h2>More</h2>
+
+<ul>
+  <li><b>Mirror a PostgreSQL table.</b> <code>fenec-server --follow
+    postgres://...</code> keeps a copy as the table commits, and serves it.
+    See <a href="import.html#serving">Import</a>.</li>
+  <li><b>Embed it instead.</b> The same engine runs inside a Rust program
+    with no server at all (<a href="/docs/embedding">Embedded Rust</a>), and
+    in a browser tab (<a href="/docs/javascript">JavaScript</a>).</li>
+</ul>

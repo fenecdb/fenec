@@ -268,7 +268,7 @@ impl Value {
             (DataType::Text, Value::Timestamp(ms)) => Ok(Value::Text(crate::time::format_iso(ms))),
             (DataType::Vector(dim, _), Value::Vector(v)) => check_dim(v, *dim),
             // pgvector's text form is how a sparse vector arrives from JSON, a
-            // FenecQL literal or the pg wire; either way it is put in index
+            // FenecQL literal or an import; either way it is put in index
             // order, and its zeros dropped, before anything holds it.
             (DataType::Sparse(dim), Value::Sparse(d, e)) => {
                 let (d, e) = crate::sparse::normalise(d, e).map_err(Error::Type)?;

@@ -1,6 +1,6 @@
 <!--
 title: fenecdb — a database that fits in a browser tab
-description: An embedded document database with full-text and vector search built in. Written in Rust, compiles to 192 KB of gzipped WebAssembly, and runs as a server that speaks the PostgreSQL protocol.
+description: An embedded document database with full-text and vector search built in. Written in Rust, compiles to 192 KB of gzipped WebAssembly, and runs as a server any language reaches over HTTP.
 -->
 
 <section class="hero">
@@ -44,10 +44,9 @@ description: An embedded document database with full-text and vector search buil
   <div class="hero-in has-mark">
     <div class="hero-col">
       <h1 class="hero-say reveal">A whole database<br class="wide"> that fits in a browser tab.</h1>
-      <p class="hero-sub reveal">Documents, indexes, transactions, full-text and
+      <p class="hero-sub reveal">Documents, indexes, atomic batches, full-text and
         vector search in 192 KB of gzipped WebAssembly with no dependencies. The
-        same engine runs as a server that <code>psql</code> and pgvector's
-        clients use as they are.</p>
+        same engine runs as a server every language reaches over HTTP.</p>
       <p class="hero-cta reveal">
         <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
@@ -59,9 +58,9 @@ description: An embedded document database with full-text and vector search buil
 </section>
 
 <nav class="pillars" aria-label="On this page">
-  <a href="#performance"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4.5-5"/><path d="M8 17h.01M16 17h.01"/></svg><b>Performance</b><span>16 times pgvector's speed over a million vectors</span></a>
+  <a href="#performance"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4.5-5"/><path d="M8 17h.01M16 17h.01"/></svg><b>Performance</b><span>15 times pgvector's speed over a million vectors</span></a>
   <a href="#security"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg><b>Security</b><span>Row-level rules, your sign-in provider's keys, encrypted backups</span></a>
-  <a href="#compatibility"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></svg><b>Compatibility</b><span>Works with psql, pgvector and the PostgreSQL drivers you use</span></a>
+  <a href="#compatibility"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></svg><b>Compatibility</b><span>HTTP from any language, your AI framework, React, and data from PostgreSQL or SQLite</span></a>
   <a href="#developer"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/></svg><b>Developer</b><span>One query language from the browser tab to the server</span></a>
 </nav>
 
@@ -80,7 +79,7 @@ description: An embedded document database with full-text and vector search buil
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 12h7M4 18h4"/><path d="M18 5v14M15 16l3 3 3-3"/></svg><b>Indexes</b><span>Instant lookups and range queries on the fields you choose.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg><b>Aggregates</b><span>Counts, sums and averages, grouped and sorted.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 8.5l3 7M16 8.5l-3 7M8.5 7h7"/></svg><b>Related data</b><span>Each record arrives with its related records, in one query.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4z"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4"/></svg><b>Transactions</b><span>Several writes land together, or none of them do.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4z"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4"/></svg><b>Atomic batches</b><span>Several writes land together, or none of them do.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="M15 15l5 5M7.5 10h5M7.5 8h3"/></svg><b>Full-text search</b><span>Ranked keyword search, for Turkish, Chinese, Japanese and Korean too.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="16" r="1.5"/><circle cx="10" cy="7" r="1.5"/><circle cx="17" cy="11" r="1.5"/><circle cx="15" cy="18" r="1.5"/><circle cx="13" cy="13" r="5"/></svg><b>Vector search</b><span>Find by meaning, and blend it with keywords.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18l3.5-12L10 18M4.3 14h4.4"/><path d="M13 6h6l-6 12h6"/></svg><b>Sorting by language</b><span>Names in the order your language puts them.</span></li>
@@ -88,8 +87,8 @@ description: An embedded document database with full-text and vector search buil
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>Backups</b><span>Encrypted, continuous, restored to any moment.</span></li>
     </ul>
 
-    <p class="after rise">Run all of it in a web page, in Rust, from
-      <code>psql</code> or over HTTP. <a href="docs/fenecql.html">The whole query
+    <p class="after rise">Run all of it in a web page, in Rust, or over HTTP
+      from any language. <a href="docs/fenecql.html">The whole query
       language</a> fits on one page.</p>
   </div>
 </section>
@@ -101,15 +100,15 @@ description: An embedded document database with full-text and vector search buil
 <section class="band lit pillar" id="performance">
   <div class="band-in">
     <h2 class="rise">Performance</h2>
-    <p class="lede rise">A million 128-dim vectors, asked over the PostgreSQL wire
-      by the same client, with the same index settings, against PostgreSQL and
-      pgvector.</p>
+    <p class="lede rise">A million 128-dim vectors, asked by the same client
+      program — fenecdb over HTTP, PostgreSQL over its own wire — with the same
+      index settings, against PostgreSQL and pgvector.</p>
 
     <figure class="motion rise" data-scenes="race">
-      <canvas role="img" aria-label="fenec-server answers the nearest ten of a million vectors in 0.147 ms against pgvector's 2.353 ms. Load and index 47.2 s against 117.8 s; eight clients 17 001 queries a second against 2 097; 612 MB on disk against 1 432; 721 MB of memory against 1 132."></canvas>
+      <canvas role="img" aria-label="fenec-server answers the nearest ten of a million vectors in 0.141 ms against pgvector's 2.076 ms. Load and index 49.6 s against 108.5 s; eight clients 18 852 queries/s against 2 289 queries a second; 612 MB on disk against 1 432 MB; 738 MB of memory against 1 131 MB."></canvas>
     </figure>
-    <p class="after rise">Same client, same index settings, 99.1% recall against
-      98.3%. <a href="docs/benchmarks.html#scale">Method, hardware and the 768-dim run</a></p>
+    <p class="after rise">Same client program, same index settings,
+      99.1% recall against 98.6%. <a href="docs/benchmarks.html#scale">Method, hardware and the 768-dim run</a></p>
 
     <h3 class="sub rise">Or measure it here, in this tab</h3>
     <div class="rig" id="rig" data-state="idle">
@@ -144,14 +143,14 @@ description: An embedded document database with full-text and vector search buil
     <p class="lede rise">Every request passes the same checks, from the login to
       the disk.</p>
     <figure class="motion rise" data-scenes="security">
-      <canvas role="img" aria-label="A request passes the login, its token, the row policy and the audit log; a write in another user's name is refused with 403 at the rows, and the backup is sealed."></canvas>
+      <canvas role="img" aria-label="A request passes the server's token, the JWT's keys, the row policy and the audit log; a write in another user's name is refused with 403 at the rows, and the backup is sealed."></canvas>
     </figure>
 
     <ul class="caps three rise">
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><b>Sign in safely</b><span>Passwords never cross the wire, and a second account can only read. Repeated failures slow down.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><b>Sign in safely</b><span>A token for the server, a read-only token for a dashboard. Repeated failures slow down.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11V7a5 5 0 0 1 10 0v4"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M12 15v2"/></svg><b>Your sign-in provider</b><span>Tokens from Auth0, Clerk or Firebase work as they are. Keys rotate without a restart.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M15 9l3 3-3 3"/></svg><b>Each user, their own rows</b><span>Everyone sees only the rows they may; writing someone else's is refused.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><b>A record of who did what</b><span>Every login, refusal and schema change is written to a log.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg><b>A record of who did what</b><span>Every refusal, schema change and admin action is written to a log.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><b>Encrypted backups</b><span>Backups and archives are sealed with a key you hold, and so are copies kept in the browser.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg><b>Nothing borrowed</b><span>No third-party code in the engine or the server: nothing upstream to compromise.</span></li>
     </ul>
@@ -165,21 +164,25 @@ description: An embedded document database with full-text and vector search buil
 <section class="band lit pillar" id="compatibility">
   <div class="band-in">
     <h2 class="rise">Compatibility</h2>
-    <p class="lede rise">It speaks the PostgreSQL protocol, with pgvector's types.
-      Keep your driver, your vector library and your tools.</p>
-    <figure class="motion rise" data-scenes="postgres">
-      <canvas role="img" aria-label="psql, psycopg, asyncpg, pgx, node-postgres, tokio-postgres and JDBC on one side, pgvector's libraries, DBeaver, DuckDB, LangChain and LlamaIndex on the other, all connected to fenec-server over the PostgreSQL wire protocol."></canvas>
+    <p class="lede rise">Every language reaches it over plain HTTP and JSON.
+      Your AI framework, your React app and your data from PostgreSQL or SQLite
+      come with it.</p>
+    <figure class="motion rise" data-scenes="http">
+      <canvas role="img" aria-label="Python, JavaScript, Go, Rust, .NET, Java, PHP and Ruby on one side, LangChain, LlamaIndex, the Vercel AI SDK, React, the sync layer and Cloudflare on the other, all sending requests to fenec-server over HTTP and JSON."></canvas>
     </figure>
 
     <div class="works rise">
-      <div><h3>Your drivers</h3><ul class="chips"><li>psql</li><li>psycopg</li><li>asyncpg</li><li>SQLAlchemy</li><li>pgx</li><li>node-postgres</li><li>tokio-postgres</li><li>Npgsql</li><li>JDBC</li><li>PDO</li><li>Ruby pg</li></ul></div>
-      <div><h3>Your AI and vector code</h3><ul class="chips"><li>pgvector for Python</li><li>pgvector for Go</li><li>pgvector for Node</li><li>pgvector for Rust</li><li>pgvector for .NET</li><li>pgvector for Java</li><li>pgvector for PHP</li><li>pgvector for Ruby</li><li>LangChain</li><li>LlamaIndex</li><li>LangChain.js</li><li>Vercel AI SDK</li></ul></div>
-      <div><h3>Your tools</h3><ul class="chips"><li>DBeaver</li><li>DuckDB</li><li>Spark</li><li>React</li></ul></div>
-      <div><h3>Your data</h3><ul class="chips"><li>SQLite files</li><li>PostgreSQL, kept in sync live</li></ul></div>
+      <div><h3>Your language</h3><ul class="chips"><li>Python</li><li>JavaScript</li><li>Go</li><li>Rust</li><li>.NET</li><li>Java</li><li>PHP</li><li>Ruby</li><li>curl</li></ul></div>
+      <div><h3>Your AI code</h3><ul class="chips"><li>LangChain</li><li>LlamaIndex</li><li>LangChain.js</li><li>Vercel AI SDK</li></ul></div>
+      <div><h3>Your app</h3><ul class="chips"><li>React</li><li>Sync to the tab</li><li>Cloudflare Durable Objects</li></ul></div>
+      <div><h3>Your data</h3><ul class="chips"><li>SQLite files</li><li>PostgreSQL tables</li><li>PostgreSQL, kept in sync live</li></ul></div>
     </div>
-    <p class="after rise">The drivers and the AI libraries run against a real server
-      on every change we make. <a href="docs/languages.html">Examples in your language</a></p>
-    <p class="after rise"><a href="docs/postgres.html">The PostgreSQL server</a>
+    <p class="after rise">Each language's example and each integration runs
+      against a real server on every change we make; official SDKs for each
+      language are next on the roadmap. <a href="docs/languages.html">Examples
+      in your language</a></p>
+    <p class="after rise"><a href="docs/server.html">The server</a>,
+      <a href="docs/import.html">import from PostgreSQL and SQLite</a>
       and <a href="docs/integrations.html">every integration</a></p>
   </div>
 </section>
@@ -227,54 +230,43 @@ description: An embedded document database with full-text and vector search buil
 
       <ol class="cast-script">
         <li data-title="Start a server">
-<pre data-bare>$ fenec-server --file app.fenec --listen 0.0.0.0:5433 \
-           --http 127.0.0.1:8080 --password-file pg.pw --cdc
+<pre data-bare>$ fenec-server --file app.fenec --http 127.0.0.1:8080 --cdc
 opened: app.fenec
-fenec-http 0.1.6 listening on: http://127.0.0.1:8080  [no auth]
-fenec-server 0.1.6 listening on: postgres://localhost:5433/fenec  [password: SCRAM-SHA-256, sync=250 ms]</pre>
+fenec-server 0.1.6: app.fenec  [sync=250 ms]
+fenec-http 0.1.6 listening on: http://127.0.0.1:8080  [no auth]</pre>
         </li>
-        <li data-title="Load with psql">
-<pre data-bare>$ psql -h 127.0.0.1 -p 5433 -U fenec
-fenec=# create collection docs (title text, lang text @hash, embed vector&lt;64&gt; @hnsw(cosine));
-CREATE TABLE
-fenec=# \copy docs (title, lang, embed) from 'docs.csv' with (format csv, header)
-COPY 50000
-fenec=# \d docs
-                 Table "public.docs"
- Column |    Type    | Collation | Nullable | Default
---------+------------+-----------+----------+---------
- id     | bigint     |           | not null |
- title  | text       |           |          |
- lang   | text       |           |          |
- embed  | vector(64) |           |          |
-Indexes:
-    "docs_pkey" PRIMARY KEY, btree (id)
-    "docs_embed_hnsw" hnsw (embed)
-    "docs_lang_hash" hash (lang)</pre>
+        <li data-title="Load over HTTP">
+<pre data-bare>$ curl -X POST localhost:8080/query \
+       -d '{"query":"create collection docs (title text, lang text @hash, embed vector&lt;64&gt; @hnsw(cosine))"}'
+{"message":"collection `docs` created"}
+$ curl -X POST localhost:8080/docs --data-binary @docs.json
+{"inserted":50000}
+$ curl -X POST localhost:8080/query -d '{"query":"get docs count"}'
+[{"count":50000}]</pre>
         </li>
         <li data-title="Search from Python">
 <pre data-bare>$ python search.py
-('Oasis lantern compass', 0.44243664)
-('Sand star ear', 0.427055)
-('Fox night caravan', 0.41258407)</pre>
+('Night well ridge', 0.45985866)
+('Wind star oasis', 0.45463508)
+('Night fox well', 0.39427233)</pre>
         </li>
         <li data-title="Write over HTTP">
 <pre data-bare>$ curl -X POST localhost:8080/query \
        -d '{"query":"put docs {title: \"Night well\", lang: \"tr\"}"}'
 {"affected":1}
 $ curl 'localhost:8080/docs?lang=eq.tr&amp;select=id,title&amp;limit=2'
-[{"id":5,"title":"Ridge night sand"},{"id":9,"title":"Night well wind"}]</pre>
+[{"id":2,"title":"Star night wind"},{"id":8,"title":"Lantern oasis oasis"}]</pre>
         </li>
         <li data-title="Follow the changes">
 <pre data-bare>$ curl 'localhost:8080/_changes?since=50001'
-{"seq":50002,"at":1790832832177,"collection":"docs","op":"put","id":50001,"doc":{"id":50001,"title":"Night well","lang":"tr","embed":null}}</pre>
+{"seq":50002,"at":1790885306824,"collection":"docs","op":"put","id":50001,"doc":{"id":50001,"title":"Night well","lang":"tr","embed":null}}</pre>
         </li>
       </ol>
     </div>
 
     <ul class="caps three rise">
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg><b>In the browser</b><span>Two files, no build step and no server. The data stays in the tab, and survives a reload.</span></li>
-      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><b>On a server</b><span>One process answers PostgreSQL clients and HTTP, with replicas and backups.</span></li>
+      <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg><b>On a server</b><span>One process answers HTTP from any language, with replicas and backups.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4z"/><path d="M18 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><b>With your AI assistant</b><span>A short brief at fenecdb.com/llms.txt teaches it the query language.</span></li>
     </ul>
   </div>
@@ -287,8 +279,8 @@ $ curl 'localhost:8080/docs?lang=eq.tr&amp;select=id,title&amp;limit=2'
 <section class="band lit closing">
   <div class="band-in">
     <h2 class="rise">Try it in five minutes</h2>
-    <p class="lede rise">Open it in a web page, or start the server and connect
-      with the tools you already have.</p>
+    <p class="lede rise">Open it in a web page, or start the server and send it
+      a request from the language you already use.</p>
     <p class="hero-cta rise">
       <a class="btn btn-fill" href="docs/quickstart.html">Start in five minutes</a>
       <a class="btn btn-line" href="docs/">Read the docs</a>

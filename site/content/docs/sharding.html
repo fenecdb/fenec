@@ -97,11 +97,11 @@ node's memory.</p>
 <h2>The node: <code>fenec-server --dir</code></h2>
 
 <p>A node is one <code>fenec-server</code> serving a directory of tenant files
-instead of one file. Over PostgreSQL, the database name you connect to is the
-tenant.</p>
+instead of one file. The path names the tenant: <code>/t/acme/</code> is
+<code>acme.fenec</code>.</p>
 
-<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --listen 127.0.0.1:5433 --admin-token a1
-psql postgres://fenec@127.0.0.1:5433/acme
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1
+curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
 </pre>
 
 <ul>
@@ -116,15 +116,10 @@ psql postgres://fenec@127.0.0.1:5433/acme
 <p><code>--dir</code> serves a directory of <code>&lt;tenant&gt;.fenec</code>
 files instead of one file. It is still one process per directory — the
 single-writer rule is per file, and one process owning all of them is what keeps
-it. <code>--http</code> is required; <code>--listen</code> opens the PostgreSQL
-wire as well, where the database in the startup packet is the tenant.</p>
-
-<p>A session is bound to its tenant for its lifetime, and the tenant is looked
-up again for every statement — so one created after the session opened is
-there for it, one closed as idle reopens, one deleted meanwhile answers
-<code>3D000</code> as an unknown database does, and one frozen for a move
-refuses writes with <code>57P03</code> while its reads go on. A name that is
-no tenant of this node is refused at connect.</p>
+it. <code>--http</code> is required. The tenant is looked up for every
+request — so one created a moment ago is there, one closed as idle reopens,
+one deleted meanwhile answers 404, and one frozen for a move refuses writes
+while its reads go on.</p>
 
 <ul>
   <li><b>Opened on first use.</b> Open cost is proportional to the file, so a
@@ -493,8 +488,7 @@ a node took from clients of its own before its lease lapsed, and had not
 sent its replicas, goes with the failover as a crash takes it; a client
 going through the router loses nothing that way, since the router could not
 reach the node either. A write is refused as a replica's is: <code>503</code>
-with <code>Retry-After</code> over HTTP, <code>25006</code> over the pg wire,
-where drivers take it for a standby and connect elsewhere.</p>
+with <code>Retry-After</code>.</p>
 
 <p>The lease names tenants, not the node. A node failed over comes back with
 the files of tenants served elsewhere now, primaries' files still; a lease

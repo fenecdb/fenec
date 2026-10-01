@@ -67,7 +67,7 @@ NAV = [
         ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
-        ("docs/postgres", "PostgreSQL server"),
+        ("docs/server", "Server"),
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),
         ("docs/sharding", "Tenants and sharding"),
@@ -475,8 +475,8 @@ LLMS_BRIEF = """\
 # fenecdb
 
 > Minimal, vector-native embedded database: one file, HNSW, BM25 and hash
-> indexes, runs in the browser as WebAssembly and speaks the PostgreSQL wire
-> protocol. Its query language is FenecQL, which is not SQL.
+> indexes, runs in the browser as WebAssembly and as a server over HTTP.
+> Its query language is FenecQL, which is not SQL.
 
 Writing FenecQL -- the reference below spells it out in full:
 

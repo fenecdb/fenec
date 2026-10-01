@@ -50,8 +50,8 @@ a field not declared is refused rather than applied to the JSON after the
 search, which would return fewer than <code>k</code> rows and not say
 so.</p>
 
-<p>The score is fenecdb's own, the one the HTTP endpoint and the PostgreSQL
-wire return: the cosine similarity under <code>cosine</code> (the default),
+<p>The score is fenecdb's own, the one the HTTP endpoint and the browser
+module return: the cosine similarity under <code>cosine</code> (the default),
 the distance under <code>l2</code>, the product under <code>dot</code>.
 <code>similarity_search_with_relevance_scores</code> maps them the way
 LangChain's own functions do.</p>

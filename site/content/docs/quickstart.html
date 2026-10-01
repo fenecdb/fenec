@@ -108,33 +108,29 @@ const db = await Fenec.open(await readFile('./fenec.wasm'));
 <ol class="steps-doc">
   <li>
     <p>Start the server on a file.</p>
-<pre data-lang="bash">./target/release/fenec-server --listen 127.0.0.1:5433 --file data.fenec</pre>
+<pre data-lang="bash">./target/release/fenec-server --file data.fenec --http 127.0.0.1:8080</pre>
   </li>
   <li>
-    <p>Connect with psql, or any PostgreSQL client.</p>
-<pre data-lang="bash">psql -h 127.0.0.1 -p 5433 -U fenec</pre>
+    <p>Send it a query. The language is FenecQL.</p>
+<pre data-lang="bash">curl -X POST http://127.0.0.1:8080/query \
+  -d '{"query": "get articles select title near embed $1 limit 5", "params": [[0.1, 0.2]]}'</pre>
   </li>
   <li>
-    <p>Run a query. The language is FenecQL.</p>
-<pre data-lang="fenecql">get articles select title near embed '[0.1, 0.2]' limit 5;</pre>
-  </li>
-  <li>
-    <p>Optionally, add an HTTP listener and query it with curl.</p>
-<pre data-lang="bash">./target/release/fenec-server --file data.fenec --http 127.0.0.1:8080
-curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</pre>
+    <p>Or use the REST routes.</p>
+<pre data-lang="bash">curl 'http://127.0.0.1:8080/articles?select=title,year&year=gte.2024&limit=10'</pre>
   </li>
 </ol>
 
 <details class="deep"><summary>Details</summary>
-<p>The HTTP/JSON endpoint is a second listener in the same process. Connect
-with anything that speaks the PostgreSQL protocol; the language is still
-FenecQL.</p>
+<p>Every language reaches the server over HTTP: <a href="languages.html">Your
+language</a> has the same request in each, and every route is on <a
+href="http.html">HTTP endpoint</a>.</p>
 
 <pre data-lang="bash">./target/release/fenec-server --ping        # 0 means up — a health check
 </pre>
 
-<p>Passwords, transactions, COPY and drivers are on
-<a href="postgres.html">PostgreSQL server</a>.</p>
+<p>Tokens, durability, limits and containers are on
+<a href="server.html">Server</a>.</p>
 </details>
 
 <h2>In the shell</h2>
@@ -248,7 +244,7 @@ const rows = await db.from('articles').select('title', 'year').rows();
 <tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>
 <tr><td><code>make sweep</code></td><td>The ef/recall trade-off</td></tr>
 <tr><td><code>make compare</code></td><td>Against SQLite and pgvector (run <code>make pgvector-up</code> first)</td></tr>
-<tr><td><code>make small</code></td><td>The 1153 KB binary: <code>--profile cli --no-default-features</code></td></tr>
+<tr><td><code>make small</code></td><td>The 1234 KB binary: <code>--profile cli --no-default-features</code></td></tr>
 </tbody>
 </table>
 </div>

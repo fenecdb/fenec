@@ -575,7 +575,7 @@ impl Tenants {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
         // Every write the database lands asks the lease first, whichever
-        // way it came in: HTTP, the pg wire, a maintenance.
+        // way it came in: HTTP, a maintenance, a follower.
         if let Some(lease) = &self.lease {
             let (lease, name) = (Arc::clone(lease), name.to_string());
             db.set_fence(Some(Arc::new(move || lease.allows(&name))));

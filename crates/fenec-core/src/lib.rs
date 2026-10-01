@@ -10,8 +10,8 @@
 //!    in between. See [`store`].
 //! 3. **Vectors are first class.** `vector<N>` is a type, `@hnsw` is an
 //!    index, `near` is a query clause -- not an add-on.
-//! 4. **Extension through plugins.** A PostgreSQL-style plugin registry;
-//!    fenec-server builds the PostgreSQL wire protocol on top of it.
+//! 4. **Extension through plugins.** A registry of functions and write
+//!    hooks; a server's access checks and `--follow`'s guard are plugins.
 //!
 //! ```
 //! use fenec_core::prelude::*;

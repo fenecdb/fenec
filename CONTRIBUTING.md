@@ -50,13 +50,14 @@ node --test web/fenec.test.js
 ## The rules a change must not break
 
 **Zero dependencies.** `fenec-core`, `fenec-ql`, `fenec-wasm`, `fenec-http`,
-`fenec-server` and `fenec-import` take no external crates — own codec, own JSON, own
-HNSW, own SCRAM. The WASM output has to stay small and auditable. `fenec-bench`
+`fenec-server`, `fenec-wire`, `fenec-import` and `fenec-shard` take no external
+crates — own codec, own JSON, own HNSW, own SCRAM client. The WASM output has to stay small and auditable. `fenec-bench`
 is the single exception (`publish = false`); that is where `rusqlite` and
 `postgres` live. A PR that adds a dependency to any other crate needs to argue
 the case first, in an issue.
 
-**Dependency direction.** `core -> ql -> http -> pg -> import -> cli`, and
+**Dependency direction.** `core -> ql -> http -> wire -> import -> server`,
+`import -> cli`, and
 nothing points back up. `fenec-core` does dev-depend on `fenec-ql` so tests can
 write real queries; Cargo allows that cycle because a dev dependency never
 enters the product build.
@@ -91,7 +92,7 @@ empty.
   that was rejected. Not what the line already says.
 - All prose in the repo — comments, docs, README — is English.
 - `Error` in `fenec-core/src/error.rs` is the single error type: allocation-free
-  variants, no `Box`. `fenec-server` maps it onto PostgreSQL SQLSTATE codes.
+  variants, no `Box`. `fenec-http` maps it onto HTTP statuses.
 - Unit tests go inline in `#[cfg(test)] mod tests`. Cross-crate and protocol
   tests go in `crates/*/tests/`, one binary a crate: add a new file's `mod`
   line to that crate's `tests/all.rs`, or it is never built. Measurement
