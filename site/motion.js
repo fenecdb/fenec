@@ -23,6 +23,18 @@ const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);
 const inOut = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
 const lerp = (a, b, k) => a + (b - a) * k;
 
+/* The race scene's figures, from `make scale-bench` (docs/benchmarks.html#scale):
+   fenec-server's side over HTTP, pgvector's over its own wire. */
+const RACE = {
+  speedup: '15',
+  recall: '99.1%',
+  ms: Number('0.141'),
+  load: '49.6 s',
+  clients: '18 852 q/s',
+  disk: '612 MB',
+  memory: '738 MB',
+};
+
 function rng(seed) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
 
 /* --------------------------------------------------------------- drawing */
@@ -384,13 +396,13 @@ const SCENES = [
   },
   {
     key: 'race',
-    title: '16 times faster than pgvector',
-    sub: 'A million vectors, the same client and index settings, 99.1% recall.',
+    title: `${RACE.speedup} times faster than pgvector`,
+    sub: `A million vectors, the same client program and index settings, ${RACE.recall} recall.`,
     d: 8,
     draw(c, t) {
       const lanes = [
-        { name: 'fenec-pg', ms: 0.147, col: P.oasis },
-        { name: 'PostgreSQL + pgvector', ms: 2.353, col: P.sun },
+        { name: 'fenec-server, HTTP', ms: RACE.ms, col: P.oasis },
+        { name: 'PostgreSQL + pgvector', ms: 2.076, col: P.sun },
       ];
       const p = span(t, 0.4, 2.6);
       lanes.forEach((l, i) => {
@@ -399,16 +411,16 @@ const SCENES = [
         text(c, l.name, 80, y, { size: 22, weight: 600, color: i ? P.sand : P.oasis, alpha: k });
         box(c, 80, y + 16, 860, 30, { r: 15, fill: '#0C0819', alpha: k });
         // A bar's length is its time: the slow one keeps going.
-        const shown = Math.min(l.ms, p * 2.353);
-        box(c, 80, y + 16, Math.max(30, 860 * shown / 2.353), 30, { r: 15, fill: l.col, stroke: null, alpha: k * (i ? 0.75 : 1) });
+        const shown = Math.min(l.ms, p * 2.076);
+        box(c, 80, y + 16, Math.max(30, 860 * shown / 2.076), 30, { r: 15, fill: l.col, stroke: null, alpha: k * (i ? 0.75 : 1) });
         text(c, `${shown.toFixed(3)} ms`, 1200, y + 40, { size: 30, weight: 650, color: i ? P.sand : P.oasis, align: 'right', alpha: k });
       });
       text(c, 'nearest ten, median latency', 80, 400, { size: 16, color: P.dim, alpha: ease(span(t, 1, 1.5)) });
       const tiles = [
-        ['Load and index', '47.2 s', '117.8 s'],
-        ['Eight clients at once', '17 001 q/s', '2 097 q/s'],
-        ['On disk', '612 MB', '1 432 MB'],
-        ['Memory held', '721 MB', '1 132 MB'],
+        ['Load and index', RACE.load, '108.5 s'],
+        ['Eight clients at once', RACE.clients, '2 289 q/s'],
+        ['On disk', RACE.disk, '1 432 MB'],
+        ['Memory held', RACE.memory, '1 131 MB'],
       ];
       tiles.forEach(([label, ours, theirs], i) => {
         const k = ease(span(t, 0.7 + i * 0.15, 1.2 + i * 0.15));
@@ -421,18 +433,18 @@ const SCENES = [
     },
   },
   {
-    key: 'postgres',
-    title: 'It speaks PostgreSQL',
-    sub: 'Your driver, pgvector\'s library and your tools connect unchanged.',
+    key: 'http',
+    title: 'Every language, over HTTP',
+    sub: 'Plain requests and JSON from any language, your AI framework and your app.',
     d: 8,
     draw(c, t) {
       const cx = 640, cy = 420;
       const k = ease(span(t, 0.2, 0.9));
       box(c, cx - 130, cy - 110, 260, 220, { r: 20, fill: P.panel, stroke: P.sun, alpha: k, line: 2 });
       mark(c, cx, cy - 18, 1.6, k, t);
-      text(c, 'fenec-pg', cx, cy + 82, { size: 22, font: MONO, color: P.hot, align: 'center', alpha: k });
-      const left = ['psql', 'psycopg', 'asyncpg', 'pgx', 'node-postgres', 'tokio-postgres', 'JDBC'];
-      const right = ['pgvector for Python', 'pgvector for Go', 'DBeaver', 'DuckDB', 'LangChain', 'LlamaIndex'];
+      text(c, 'fenec-server', cx, cy + 82, { size: 22, font: MONO, color: P.hot, align: 'center', alpha: k });
+      const left = ['Python', 'JavaScript', 'Go', 'Rust', '.NET', 'Java', 'PHP', 'Ruby'];
+      const right = ['LangChain', 'LlamaIndex', 'Vercel AI SDK', 'React', 'Sync to the tab', 'Cloudflare'];
       const draw = (names, side) => names.forEach((n, i) => {
         const a = ease(span(t, 0.8 + i * 0.18, 1.3 + i * 0.18));
         const y = 210 + i * (420 / (names.length - 1)) * 0.98;
@@ -443,7 +455,7 @@ const SCENES = [
         chip(c, n, bx, y, { alpha: a, size: 18 });
         const ax = side < 0 ? x + 238 : x - 8, bx2 = side < 0 ? cx - 132 : cx + 132;
         line(c, ax, y, bx2, cy + (y - cy) * 0.25, P.rule, 1.5, a);
-        // Messages on the wire, both ways.
+        // Requests and their answers, both ways.
         const ph = ((t * 0.6 + i * 0.37) % 1);
         if (t > 2) {
           const px = lerp(ax, bx2, ph), py = lerp(y, cy + (y - cy) * 0.25, ph);
@@ -453,20 +465,20 @@ const SCENES = [
       draw(left, -1);
       draw(right, 1);
       const w = ease(span(t, 3.4, 4));
-      chip(c, 'PostgreSQL wire protocol v3', cx - 150, 196, { color: P.oasis, alpha: w, size: 17, font: MONO, weight: 400 });
+      chip(c, 'HTTP/1.1 + JSON', cx - 86, 196, { color: P.oasis, alpha: w, size: 17, font: MONO, weight: 400 });
       const b = ease(span(t, 4.6, 5.2));
-      chip(c, 'vector, halfvec, sparsevec as pgvector sends them', cx - 238, 650, { color: P.sand, alpha: b, size: 17 });
+      chip(c, 'POST /query  {"query": "get docs near embed $1", "params": [...]}', cx - 300, 650, { color: P.sand, alpha: b, size: 17, font: MONO, weight: 400 });
     },
   },
   {
     key: 'security',
     title: 'Every request is checked',
-    sub: 'Login, token, rows, audit, and backups sealed at rest.',
+    sub: 'Token, keys, rows, audit, and backups sealed at rest.',
     d: 9,
     draw(c, t) {
       const gates = [
-        ['Login', 'SCRAM-SHA-256'],
-        ['Token', 'JWT, your provider\'s keys'],
+        ['Token', 'Bearer, constant time'],
+        ['Keys', 'JWT, your provider\'s'],
         ['Rows', 'owner = $jwt.sub'],
         ['Audit', 'a JSON line'],
         ['At rest', 'ChaCha20-Poly1305'],
@@ -587,7 +599,7 @@ const SCENES = [
       const k = ease(span(t, 0.2, 0.8));
       // The server.
       box(c, 840, 200, 360, 380, { fill: P.panel, alpha: k });
-      text(c, 'fenec-pg', 870, 240, { size: 20, font: MONO, color: P.hot, alpha: k });
+      text(c, 'fenec-server', 870, 240, { size: 20, font: MONO, color: P.hot, alpha: k });
       // The browser.
       box(c, 80, 180, 560, 420, { r: 16, fill: '#100B20', alpha: k });
       box(c, 80, 180, 560, 46, { r: 16, fill: P.panel2, alpha: k });

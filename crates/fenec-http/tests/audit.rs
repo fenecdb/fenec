@@ -28,7 +28,7 @@ fn call(port: u16, token: Option<&str>, method: &str, target: &str, body: &str) 
 }
 
 #[test]
-fn refusals_wait_and_logins_schema_changes_and_refusals_are_logged() {
+fn refusals_wait_and_schema_changes_and_refusals_are_logged() {
     let dir = std::env::temp_dir().join(format!("fenec-audit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("audit.log");

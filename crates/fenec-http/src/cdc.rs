@@ -79,7 +79,7 @@ type Response2 = fenec_core::query::Response;
 
 /// Where `name` stands, `None` for a consumer not seen yet.
 fn cursor(db: &Arc<RwLock<Database>>, name: &str) -> Result<Option<u64>> {
-    let g = crate::held::read_landed(db);
+    let g = crate::held::read(db);
     if g.collection(CONSUMERS).is_err() {
         return Ok(None);
     }
@@ -99,7 +99,7 @@ fn cursor(db: &Arc<RwLock<Database>>, name: &str) -> Result<Option<u64>> {
 
 fn list(db: &Arc<RwLock<Database>>, feed: &Feed) -> Response {
     let durable = feed.durable();
-    let g = crate::held::read_landed(db);
+    let g = crate::held::read(db);
     let mut out = String::from("[");
     if g.collection(CONSUMERS).is_ok() {
         let rows = match run(
@@ -182,7 +182,7 @@ fn write(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, since: Option<i64
     }
     let key = Value::Text(name.into());
     let done = (|| -> Result<_> {
-        let mut g = crate::held::write_unheld(db);
+        let mut g = crate::held::write(db);
         let there = g.collection(CONSUMERS).is_ok();
         let mut exec =
             |sql: &str, params: &[Value]| g.execute_with(&fenec_ql::parse_one(sql)?, params);
@@ -263,7 +263,7 @@ pub fn handle(
                 times,
                 bytes,
             } => {
-                let g = crate::held::read_landed(db);
+                let g = crate::held::read(db);
                 let (body, next) = match lines(&g, &bytes, first, &lasts, &times, since, limit) {
                     Ok(out) => out,
                     Err(e) => return Response::error(500, &e.to_string()),

@@ -53,7 +53,7 @@ fn node_over(tag: &str, follows: Option<&str>, prepare: impl FnOnce(&std::path::
         addr: "127.0.0.1:0".into(),
         admin_token: Some(format!("adm-{tag}")),
         // A replica is sent what an fsync covered, so a node that feeds one
-        // syncs as it answers -- `fenec-pg --sync always` does this.
+        // syncs as it answers -- `fenec-server --sync always` does this.
         sync_on_write: true,
         ..fenec_http::Config::default()
     };

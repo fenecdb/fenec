@@ -42,7 +42,7 @@ fn serve(db: Arc<RwLock<Database>>, repl: Arc<Replication>) -> u16 {
     port
 }
 
-/// A primary over `file`, as `fenec-pg --replication-token` starts one.
+/// A primary over `file`, as `fenec-server --replication-token` starts one.
 fn primary(file: &Path, buffer: usize) -> Node {
     let (mut db, feed) = replication::open(file.to_str().unwrap(), buffer).unwrap();
     if db.history().following {
@@ -68,7 +68,7 @@ fn primary(file: &Path, buffer: usize) -> Node {
 fn replica(file: &Path, upstream: u16) -> Node {
     let (mut db, feed) =
         replication::open(file.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
-    // As `fenec-pg --replica-of` does: no write of its own from the start,
+    // As `fenec-server --replica-of` does: no write of its own from the start,
     // before the primary has said a word.
     let lineage = db.history().lineage.clone();
     db.follow(lineage).unwrap();

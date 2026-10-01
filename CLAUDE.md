@@ -3,8 +3,9 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
-the browser, has its own query language (FenecQL) and speaks the PostgreSQL v3 wire
-protocol. The docs under `site/content/docs/` are the long-form reference (design
+the browser, has its own query language (FenecQL), and its server (`fenec-server`)
+speaks HTTP; every language reaches it that way until the official SDKs
+(Phase 53). The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
 
@@ -16,7 +17,7 @@ make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
-make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-pg: a native binary's)
+make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
@@ -26,27 +27,26 @@ make memory        # memory footprint, for calibrating --max-memory
 make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
-make drivers-test  # psycopg, asyncpg, SQLAlchemy (Docker), pgx, node-postgres, Npgsql, tokio-postgres, JDBC, PDO, Ruby pg over the pg wire, pgvector's library for each
-make react-test    # useLiveQuery vs a real fenec-pg replica (needs `make wasm`)
+make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
+make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
 make follow-bench  # --follow: commit-to-visible latency, drain, reconnect (pgvector-up first)
-make mirror-bench  # fenec-pg --follow: commit to a subscriber, a server killed and started again
+make mirror-bench  # fenec-server --follow: commit to a subscriber, a server killed and started again
 make small         # smallest `fenec` binary: --profile cli --no-default-features
-make pg PGPASS=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
-make node ADMIN=secret   # a tenant node: fenec-pg --dir tenants (PG=addr adds the pg wire)
+make server TOKEN=secret HTTP=127.0.0.1:8080   # run the server against ./data.fenec
+make node ADMIN=secret   # a tenant node: fenec-server --dir tenants
 make shard               # the router in front of the nodes (./shard.fenec)
 make shard-bench         # router overhead per request, tenant move time, failovers by hand and on a lease
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
-make tx-bench            # a pg transaction: a lone write per sync policy, a write in one of 100, in a savepoint
-make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside a held transaction
-make requests-bench      # a request over the pg wire and HTTP: one client's round trip, eight's rate, against PostgreSQL
+make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
+make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
-make scale-bench         # fenec-pg against pgvector over the pg wire at scale: load, memory, recall, latency, filters (pgvector-up first)
+make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
 make statements-bench    # what counting a statement by its shape costs
 ```
 
@@ -62,7 +62,7 @@ node --test web/fenec.test.js                    # JS: builder
 node --test --test-name-pattern 'shape' web/fenec.sync.test.js
 ```
 
-`make test` runs Rust first on purpose: `cargo test` builds the `fenec-pg` binary
+`make test` runs Rust first on purpose: `cargo test` builds the `fenec-server` binary
 and `web/fenec.sync.test.js` runs against it (it self-skips when the binary or
 `web/fenec.wasm` is missing).
 
@@ -78,15 +78,16 @@ Dependency direction (nothing points back up):
 fenec-core  (std only, zero deps)
      |
 fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
-     |                                fenec-catalog (pg_catalog SQL, core only)
+     |
 fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
      |                     \
-fenec-wire  (pg wire:        fenec-shard (tenant router: directory,
-     |      framing, client)              placement, move)
+fenec-wire  (a PostgreSQL     fenec-shard (tenant router: directory,
+     |      client: framing,             placement, move)
+     |      SCRAM, COPY out, pgoutput)
 fenec-import (SQLite file reader + PG COPY source + --follow)
      |
-fenec-pg    (wire protocol server, catalog from fenec-catalog,
-     |      --follow running the importer's follower)
+fenec-server (the server: HTTP, the syncer and shutdown,
+     |        --follow running the importer's follower)
 fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
 ```
 
@@ -113,7 +114,7 @@ image, then the writes since as chunks, from the journal `fenec_journal` starts
 and `fenec_drain` empties (off until asked for -- a page that never drains would
 hold every write). One row persists in 0.18 ms over 32 MB in Chrome, against 92
 ms for the image. `openFile` (a dedicated worker) keeps the same bytes as a file
-of the origin private file system -- the file `fenec-pg` keeps, so each opens
+of the origin private file system -- the file `fenec-server` keeps, so each opens
 the other's -- and `run` appends each statement's writes and flushes before it
 answers: 0.56 ms a row, statement included, and it opens in 20 ms against
 IndexedDB's 47 (`make file-bench`; Safari 0.98 and 0.36 ms). A new image
@@ -124,12 +125,12 @@ one of the two whole; `openFile` takes the copy when its image is whole.
 AES-GCM (WebCrypto), a tag over the key, the image's random generation and
 the chunk's number, so one moved, dropped from the middle or kept from an
 image before is refused; a row persists in 0.16 ms either way, the 32 MB
-image in 129 ms against 76. The OPFS file stays plain: it is `fenec-pg`'s.
+image in 129 ms against 76. The OPFS file stays plain: it is `fenec-server`'s.
 
 ## Invariants worth knowing before you change things
 
 **Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
-`fenec-http`, `fenec-wire`, `fenec-pg`, `fenec-import`, `fenec-shard`, `fenec-catalog`. The WASM output has to stay small and
+`fenec-http`, `fenec-wire`, `fenec-server`, `fenec-import`, `fenec-shard`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 and back (`str::parse` drags in a 12 KB table, `{}` on a float 20.8 KB of
 Grisu and Dragon -- see `num.rs`). `fenec-core` does
@@ -146,7 +147,7 @@ documents written since the open until it hands them over to the file
 (below). A 1 GB file of 2.3 million rows with a hash and an ordered
 index holds 188 MB that way against 1 095 read into memory, and its
 `compact` peaks at 236 MB against 2 012; a 10 GB file opens on an 8 GB
-machine, which read it cannot. `fs::open_in_memory` (`fenec-pg --no-mmap`,
+machine, which read it cannot. `fs::open_in_memory` (`fenec-server --no-mmap`,
 which reaches a replicated file and a `--dir` node's tenants as well) is the
 other way, for a network file system or to have `--max-memory` cover the
 data. In the browser `store::Base` is the image a load was handed
@@ -219,176 +220,32 @@ and cuts off the spills a file ends with. A rollback, a lapsed lease or a
 crash leaves them dead in the file until a compact. The land never travels:
 the sink is handed the spills' bodies (`Sink::land`), and a primary's feed
 sends the block as the one block record it would have been
-(`landed_block`), which a replica applies whole. A savepoint stops the
-spills (its marks are where the stores stood in memory), and a block that
-spilled is not parked -- written again, its writes would be read into
-memory again -- so readers wait for it. With them the peaks were 904 and
+(`landed_block`), which a replica applies whole. A spill that cannot be
+made (`Store::would_hand_over` refuses its frames) stops the block's
+spills, which lands holding them as before. With them the peaks were 904 and
 888 MB (in process, in a `rust:alpine` container), and the one block
 without a graph loaded in 3.8 s against 8.6. A binary from before refuses
 kinds 10 and 11. The browser module writes no spill, and reading them cost
 it 1.5 KB, 0.5 KB brotli.
 
 **Single writer, and readers beside it.** Reads take a shared lock
-(`Database::query`), writes the exclusive one (`execute_with`). A pg
-transaction is a block held open (`fenec-pg/src/server.rs`, `Hold`) from
-its first write -- its first statement under `SERIALIZABLE` -- until
-`COMMIT` lands it or `ROLLBACK`, a failed statement (`25P02` after it, as
-PostgreSQL), the client's going or `--idle-in-transaction-timeout` (`25P03`,
-10 s) puts it back. The session takes the write lock for each of its
-statements alone (`Turn`) and leaves the block open between them
-(`Database::leave_block`): every other write waits for the transaction to
-end, which is the isolation -- nobody writes after a block's writes, since
-a block is put back by cutting each store back to where it stood -- and a
-read goes on. A reader that finds a left block's writes in the database
-parks it (`Database::park`): the rollback's own undo, a write at a time,
-the frames kept, and the owner's next statement writes them again first
-(`unpark`, the write paths' upkeep with no hook and nothing to the sink),
-so readers read what has landed and nothing else, exactly. A block that
-changed a graph -- undone, a node becomes a tombstone, and written again
-another node -- or the schema is not parked, and readers wait for it as
-they did for every block. The engine refuses a statement run through
-`&mut self` into another session's left block, and a `query` of one not
-parked, rather than join it or show its writes; `fenec_http::held` is how
-every path in the servers takes the database -- `read_landed`,
-`write_unheld`, `read_landed_now` for the graph keeper, which passes over
-a block rather than park it or wait for it, and `read_quiet` for a
-tenant's export, which waits for the transaction to end so that its
-commit lands before the move. A `Hold`
-puts its block back when dropped, however the session ends. The hold
-keeps a database found once a pass of the session loop (a `OnceCell` a
-pass), so a tenant's is found afresh for the next transaction. A pipeline of the extended protocol is one
-block up to its `Sync` when a write in it has more of the pipeline after
-it; the last statement before a `Sync` runs as one on its own. A create,
-a drop and a create index are writes of the block, put back with it; a
-compact rewrites the file, so it runs on its own before a transaction's
-first write and is refused after one (`25001`). A lone `create index`
-outside a transaction is still built beside the database.
-`SAVEPOINT` takes the held block's `Database::savepoint` -- the start of
-the block before the first write -- and `ROLLBACK TO` puts back what came
-after it (`Database::rollback_to`) and goes on, a failed transaction too:
-a savepoint after a write keeps the failed block and the lock
-(`TxState::keeps`), as would one in a serializable transaction; one before
-every write lets both go, and taken back to, the lock as well. `COMMIT
-PREPARED` is refused rather than read as the `COMMIT` it begins with, and
-`ROLLBACK TRANSACTION TO s` was once read as a `ROLLBACK`. A simple
-query's text holding transaction control, or anything else `compat`
-answers, runs a statement at a time (`compat::statements` splits it,
-quotes and comments kept whole; a text with no `;` is not walked for
-one, which a `put` of 1 000 128-dim rows spent 1.8 ms of its 12.6 on) through the pipeline's path: the
-statements outside a transaction take its implicit hold, which a `BEGIN`
-makes the transaction's, a `COMMIT` lands and the text's end lands, and
-the first error ends the text -- as PostgreSQL's implicit block. Read
-whole, `BEGIN ; put ...` was taken for its `BEGIN`, the rest dropped; a
-text of FenecQL alone still runs whole, one block, and the extended
-protocol refuses several commands (`42601`). Under `--sync always` a transaction lands with one
-fsync: a put in one of 100 costs 90 us against 3.97 ms alone, and a lone
-statement what it did (`make tx-bench`). A savepoint costs its round trips:
-a put in one of its own, released, 58.3 us against 20.7 under `--sync 250`,
-and a `ROLLBACK TO` over 100 writes 30.9 us. What one writer costs readers
-is measured against SQLite in one process (`make concurrency-bench`): four
-threads read 8.0M rows/s by id alone, 707k beside four writers, and 8.1M
-beside a transaction held open 20 ms at a time, the longest read 0.3 ms --
-held under the write lock throughout, the transaction let them read 272k
-and kept one waiting 34 ms; SQLite's WAL reads the last commit meanwhile,
-1.03M/s and 0.7 ms at most. Durable writes gain from the fsync outside the
-lock: 253 -> 537 writes/s from 1 to 16 writers, SQLite's 270 -> 270. Two processes opening the same file corrupts it,
-which is why `fenec-http` is a second listener inside `fenec-pg`, never
-its own binary.
-
-**`COPY FROM STDIN` is one block, put 10 000 rows at a time**
-(`fenec-pg/src/copy.rs`, `server::copy_in`). psql's `\copy`, psycopg's
-`copy` and JDBC's `CopyManager` send it as a simple query, tokio-postgres
-through Execute with a Sync behind it, which means nothing until the
-CopyDone -- PostgreSQL ignores a Sync during a COPY as well. The rows go in
-as puts of 10 000, or of 32 MB of text, each linking its vectors on every
-core: the first with more to come takes the block and holds the lock
-between messages as a transaction does, its waits for the client bounded as
-a transaction's; a simple query's block lands at the CopyDone, an
-Execute's at its Sync. An error, a bad row, a cancel or the client's
-CopyFail is answered at once and puts every row back, and the session loop
-drops what the client still streams, as PostgreSQL does. The COPY counts
-as one statement however many puts it made (`run_copy`). Text, CSV and
-PostgreSQL's binary format, each binary cell read by the type its column
-is described as (`copy::binary`): asyncpg's `copy_records_to_table` and
-pgx's `CopyFrom` ask `SELECT the columns FROM the table` for the types
-first, which `sql::select` reads as the `get` it is. 100 000 rows x 128: 17.6k rows/s with the graph kept and
-171k without, against 17.2k and 152k a put a row in a transaction, and
-PostgreSQL's own COPY 434 and 62k (`make load-bench`, the median of three;
-`site/content/docs/benchmarks.html#loading` has every way).
-
-**`COPY ... TO STDOUT` reads a page at a time** (`server::copy_out`).
-psql's `\copy ... to`, psycopg's `copy`, asyncpg's `copy_from_table` and
-`copy_from_query`, pgx's `CopyTo` and tokio-postgres's `copy_out` read a
-table out this way, and it was refused. A collection's rows go in id order,
-1 000 at a time by `get <c> select .. where id > $last limit 1000`, each
-page under a read lock of its own and held against a move for its read
-alone, then written to the client with no lock held: read whole under one,
-a slow client kept every writer waiting and every row was in memory. So a
-row goes out once, as it stood when its page was read, and a transaction
-that holds the database reads it as it stands throughout. A page costs only
-its own rows because a full scan starts at the floor an `id > x` or `id >=
-x` in the `and` chain sets (`Expr::conjunct_id_floor`,
-`Store::iter_ids_from`): a million rows a page at a time took 8.6 s, now
-110 ms; native only, since it was 0.4 KB brotli of the browser module. A
-cell is its PostgreSQL text escaped as `CopyAttributeOutText` or quoted as
-`CopyAttributeOutCSV` would -- `COPY FROM` reads the row back -- or, in
-binary, what a binary query's row sends, the `PGCOPY` header riding in the
-first row's CopyData: psycopg reads a message a row, and took the header
-alone for a row cut short. `COPY (get ...) TO STDOUT` runs the one `get`
-whole, as on its own, its `_score` and `lookup` levels in the row. 100 000
-rows x 128 go out at 157k rows/s in text and 1.54M in binary, against
-PostgreSQL's 156k and 747k (`make load-bench`).
-
-**A driver reads rows and sends parameters in the formats it asks for.**
-A column goes in binary where Bind's result codes ask (`binary.rs`: the
-types' `typsend`, a text type as its text, an array refused), which
-tokio-postgres and asyncpg ask for every column and pgx for every type it
-knows -- sent as text, a `bigint` was one byte where they read eight. A
-parameter's type is the one its place names (`params.rs`: the field it is
-given for or compared with, `id`'s, a `near`'s field's, a `match`'s text),
-text where nothing names one, and never the unspecified OID 0, which sent
-tokio-postgres into a type lookup that recursed until its stack ran out and
-asyncpg into an introspection query of its own; Bind reads a binary value by
-it. A value sent as text is read as the field its place names
-(`params::places`), as COPY reads a cell of it, and by its look -- a
-number, a boolean, a vector, text -- only where no field is named, or it
-is no value of the field's: by its look alone, `"t"` was a boolean and
-`"42"` a number, which a text field refused. psycopg and node-postgres
-name no type for a string and send `Parse` to `Execute` in one go, so a
-statement no `Describe` asked about has its places found at its first
-Bind, under the read lock. A vector is pgvector's type -- `vector`, `halfvec` for a `vector<N,
-f16>`, `sparsevec`, 16400 to 16402 as the catalog names them (`pg_oid`) --
-in pgvector's binary formats both ways (`binary::vector`): described as
-`text`, it was a string to pgvector's clients, which register their codecs
-by the type's name. A vector not in the format is read as the text it went
-as before, which holds no zero byte where the format's second word is 0,
-and one holding a NaN or an infinity is refused (`22000`), as pgvector
-refuses it. A page of 1 000 768-dim vectors reads in 5.5 ms against 31.4 as
-text (tokio-postgres, the rows not decoded). A list is PostgreSQL's
-array of its element's type (`binary::array_of`: `[text]` is `text[]`,
-`[int]` `bigint[]`), in `array_out`'s text and `array_send`'s binary form,
-and a parameter in its place is described so: as `text`, every driver read
-`{a,b}` as a string. A list of lists or of vectors has no array and stays
-text.
-A plain `SELECT` of columns from one collection is the `get` it is
-(`sql.rs`), which asyncpg and pgx ask before a binary COPY. Inside `COPY
-(...) TO STDOUT` it also takes the conditions DuckDB's postgres extension
-pushes down (`sql::plain`), their literals read as the columns' types --
-DuckDB quotes an int's `100` as `'100'` -- a column cast to text sent as
-its text, and the `ctid` range covering every row, part of one refused:
-fenecdb has no row addresses. Outside a COPY it takes Spark's JDBC reads:
-each condition in parentheses, a number bare and text quoted and so read
-(`Plain::inline`), `WHERE 1=0` for the columns, and `SELECT 1 FROM t` for
-`count()`, answered with as many rows of the constant as rows match
-(`constant_rows`) -- a row's id in the constant's place would have counted
-the same and been a wrong answer. DuckDB opens with `SELECT version(), (SELECT
-COUNT(*) FROM pg_settings ...)`, which `compat` answered as `version()`
-alone, dropping the column DuckDB then could not read; a call is answered
-there only alone now, and anything beside it goes to the catalog. A new field type
-needs its binary form in both. `make drivers-test` holds psycopg,
-SQLAlchemy, asyncpg, pgx, tokio-postgres and node-postgres to their own
-flows, and pgvector's library for each: pgvector-python over psycopg and
-asyncpg, pgvector-go, pgvector-node and pgvector-rust.
+(`Database::query`), writes the exclusive one (`execute_with`), and a block
+of writes (`begin` .. `commit`) is open only under the write lock of
+whoever opened it: a `/batch`, a keyed write, the browser module's `run` of
+several. So a read lock finds no block open and reads what has landed, and
+`fenec_http::held` is only the lock taken whole past a poisoned one. A pg
+transaction once left its block open between statements, parked for
+readers (`leave_block`, `park`, savepoints); with the pg wire gone that
+machinery went, since nothing else leaves a block open. What one writer
+costs readers is measured against SQLite in one process (`make
+concurrency-bench`): four threads read 7.1M rows/s by id alone, 757k beside four writers, and
+72k beside blocks of 1 000 writes, the longest read 23 ms -- a block holds
+the write lock while it runs, where SQLite's WAL reads the last commit
+meanwhile, 636k/s and 0.7 ms at most. Durable writes gain from the fsync outside
+the lock: 254 -> 502 writes/s from 1 to 4 writers, 495 at 16, SQLite's 248 -> 248. Two processes opening the same file corrupts
+it, which is why everything that writes one -- the HTTP endpoint, a
+replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
+of `fenec-server`, never a binary of its own.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -405,8 +262,8 @@ handed out are handed out again. A record is numbered by its last write, `writes
 whatever counts records -- the replication feed, the archive,
 `apply_records` -- counts that way; a restore to a change inside a block
 stops before it. A compact cannot be undone, so it is refused in a block
-(`Statement::fits_block`), and a `/batch` or a pg text holding one runs
-each statement on its own. A schema change is undone as a write is: the
+(`Statement::fits_block`), and a `/batch` holding one runs each statement
+on its own. A schema change is undone as a write is: the
 block's log (`Undo`) holds a collection made, which goes, a collection
 dropped -- kept whole until the block lands, then let go -- which comes
 back where it stood, and an index built, which goes. It lands inside the
@@ -417,14 +274,11 @@ the last write first, the collection a write is of is looked up by id, not
 kept: a drop and a create of the same name in one block are two
 collections. It cost the browser module 3.0 KB, 0.6 KB brotli, the
 removal of an index from each of the five maps most of it; draining the
-log rather than popping it was 0.5 KB more. A `/batch`, a pg text
-of several statements, a pg transaction and pipeline, and the browser
-module's `run` of several are one block. A block is put back a write at
+log rather than popping it was 0.5 KB more. A `/batch`, a keyed write
+and the browser module's `run` of several are one block. A block is put back a write at
 a time, the last first, each the inverse of what it did: 3.0 ms for 50 000
 writes, where finding each id's first write by searching took 402 ms, and
-a sort was 4.6 KB of the browser module. A `Savepoint` is how far the block's buffers
-reached and each written store's `Mark`, and `rollback_to` puts back what
-follows it the same way. The buffers are kept from one block to the next (`Block::cleared`),
+a sort was 4.6 KB of the browser module. The buffers are kept from one block to the next (`Block::cleared`),
 the record's header written into room left before the frames: allocated
 anew they took a lone `put` from 832 to 985 ns; kept, a put costs 841
 against the 829 before blocks, a `del` 648 against 634.
@@ -437,7 +291,7 @@ mapped file's pages. A page that cannot be read in is the process's end
 fails reads or a network file system -- and a mapped file is only ever
 replaced by rename: a copy over it in place took a server down. A failed `fsync` is
 never retried -- the kernel may already have dropped the pages -- and
-`fenec-pg` under `--sync always` reports it (`58030`) instead of the success it
+`fenec-server` under `--sync always` reports it (500) instead of the success it
 had not yet sent. That fsync runs *outside* the exclusive lock: under it a
 write only calls `Database::flush`, which hands back a `Durability` to run once
 the lock is released, and `FileSink` writes the bytes there as well (a `write`
@@ -463,7 +317,7 @@ no counter would leave every replica one change off. The
 history (record kind 8, `History`) moves none, as a graph a server keeps in
 the tail does, and neither is sent. A promotion forks the history, a replica is continued only from a position
 the primary's history passed through and sent an image otherwise, and a
-following database refuses writes (`Error::ReadOnly`, `25006`). Lag is 0.20 ms
+following database refuses writes (`Error::ReadOnly`, 403). Lag is 0.20 ms
 p50 under `--sync always` and at most 283 ms under `--sync 250`; ten failovers
 under `always` lost no acknowledged write. An archive (`fenec archive`,
 `fenec-http/src/archive.rs`) is the same stream written to files, each write
@@ -480,14 +334,14 @@ next begins and an image renamed into place, so a sync tool's copy, taken
 a file at a time while the archive writes, is the archive up to a moment:
 fenecdb speaks no TLS, and S3 and R2 are reached with `rclone sync`.
 
-**Scaling out is by tenant, one file each** (`fenec-pg --dir`, `fenec-shard`,
+**Scaling out is by tenant, one file each** (`fenec-server --dir`, `fenec-shard`,
 whose directory replicates to a standby router like any other file, the
 standby's maps catching up from the change ring -- 4 us a change at 100 000
 tenants against 38 ms reading them all again under the router's write lock;
 `site/content/docs/sharding.html`). The tenant comes from the path
-(`/t/<tenant>/`), or over the pg wire from the startup packet's database
-(`--listen` in `--dir` mode; looked up again per statement, so a move, an idle
-close or a delete between two of them is seen), never from the query, so tenants cannot share a file -- they
+(`/t/<tenant>/`, looked up again per request, so a move, an idle close or
+a delete between two of them is seen), never from the query, so tenants
+cannot share a file -- they
 would read each other's rows. A file each also keeps ids, the change sequence,
 BM25 statistics and `lookup` per tenant, which is why the router forwards bytes
 and never parses a query. The registry (`fenec-http/src/tenants.rs`) opens a
@@ -513,7 +367,7 @@ tenant whose follower runs is never closed as idle: the follower holds the
 database rather than the tenant, and a close left it writing the file under
 the next instance. The router cannot tell a node that is gone from one it cannot reach,
 and guessing makes two primaries, so it promotes on its own only under a
-lease (`fenec-shard --auto-failover`, nodes `fenec-pg --dir --lease`;
+lease (`fenec-shard --auto-failover`, nodes `fenec-server --dir --lease`;
 `fenec-shard/src/lease.rs`, `fenec-http/src/lease.rs`): a node stops
 writing as its lease lapses by its own clock -- measured from when the grant
 came in, where the router measures from when the answer came back, and
@@ -725,50 +579,49 @@ needed: in the search alone it gave 98.2% at 100, in the build alone a
 graph the greedy search lost 32 queries in. The browser module grew 150
 bytes brotli.
 
-**`make scale-bench` holds fenec-pg to pgvector over the wire.** The same
-client asks both -- the `postgres` crate with pgvector-rust's types -- with
-the same vectors and m and ef_construction, and each side takes its best
-way: fenec-pg keeps its graph as a binary COPY lands, pgvector builds after
-it in memory on every core (`parallel_workers`: 768-dim vectors live in
-TOAST, and PostgreSQL planned one process for them), reads its index into
-its buffers and searches a filter with `iterative_scan`; the container
-needs 2 GB of shared memory for that build (`pgvector-up`). At a million
-128-dim vectors fenec-pg loads and indexes in 47.2 s against 117.8, on
-612 MB of disk against 1 432, holding 721 MB against 1 132 -- on Linux for
-both: the engine's count, which is the anonymous memory the same load held
-in a container, against the container's anonymous memory and the shared
-memory of its buffers, read from its cgroup in a container started afresh
-(`pg_memory`: the buffers keep what an earlier run left); the pages of
-their files each keeps besides are counted apart -- answers at a beam of
-100 with 99.1% recall in
-0.147 ms against 98.3% in 2.35, a filter keeping 1% in 0.63 ms against
-13.5, and eight clients at 17 001 queries/s against 2 097
-(`site/content/docs/benchmarks.html#scale`). The laptop this was measured
-on is a fanless M1 Air, which slows to a third under minutes of load on
-every core: a comparison runs its sides in turns, each after idle minutes,
-and a figure from a hot run is not one.
+**`make scale-bench` holds fenec-server to pgvector, each over its own
+protocol.** fenec-server is asked over HTTP by a keep-alive client written
+in the bench crate (`fenec-bench/src/http.rs`), PostgreSQL by the
+`postgres` crate with pgvector-rust's types, with the same vectors and m and
+ef_construction, and each side takes its best way: fenec-server keeps its
+graph as JSON arrays of rows land (`POST /<collection>`), pgvector builds
+after a binary COPY in memory on every core (`parallel_workers`: 768-dim
+vectors live in TOAST, and PostgreSQL planned one process for them), reads
+its index into its buffers and searches a filter with `iterative_scan`; the
+container needs 2 GB of shared memory for that build (`pgvector-up`).
+At a million 128-dim vectors fenec-server loads and indexes in 49.6 s against
+108.5, on 612 MB of disk against 1 432, its engine counting 738 MB against
+PostgreSQL's 1 131 (its container's anonymous memory and the shared memory
+of its buffers, from its cgroup; macOS puts fenec-server's physical
+footprint at 992), answers a beam of 100 with 99.1% recall in 0.141 ms
+against 98.6% in 2.08, a filter keeping 1% in 0.67 ms against 16.1, and
+eight clients at 18 852 queries/s against 2 289; at 250 000 x 768, 39.9 s
+against 79.9 and 99.8% in 0.431 ms against 98.1% in 4.22 (`site/content/docs/benchmarks.html#scale`). The laptop this was
+measured on is a fanless M1 Air, which slows to a third under minutes of
+load on every core: a comparison runs its sides in turns (`--only fenec`,
+then `--only pg`), each after idle minutes, and a figure from a hot run is
+not one.
 
 **A block's `put`s link their vectors together.** A block
-`Database::begin` opened -- a pg transaction or pipeline, a `/batch`, a
-COPY -- is its statements' batch: a `put` in it leaves its vectors waiting
+`Database::begin` opened -- a `/batch`, a keyed write, the browser module's
+`run` of several -- is its statements' batch: a `put` in it leaves its vectors waiting
 (`defer_batch`, `Block::waiting`), and they are linked on every core 512
 at a time a field (`LINK_AT`, `link_waiting`), the rest as the block lands,
 before its record is written, so that a block put back after all is put
 back as any other. A search in the block measures the waiting ones
-exactly, as it does a server's backlog, and a rollback or a `ROLLBACK TO`
-drops those its undo made tombstones (`forget_waiting`) -- the newest of
-the waiting, since nothing else leaves one while a block is open. A lone
-statement links as it did. Linked a row at a time, as a driver's
-`executemany` and a `/batch` of single puts send them, 100 000 128-dim rows
-went in at 5.4k rows/s with the graph kept, 5.3k over HTTP; linked
-together, at 16.9k and 16.0k, as a COPY loads them (`make load-bench`).
+exactly, as it does a server's backlog, and a rollback drops those its
+undo made tombstones (`forget_waiting`) -- the newest of the waiting, since
+nothing else leaves one while a block is open. A lone statement links as
+it did. Linked a row at a time, as a `/batch` of single puts would have
+them, 100 000 128-dim rows went in at 5.3k rows/s with the graph kept;
+linked together, at 16.0k, and 18.3k as a `/batch` of single puts over HTTP now (`make load-bench`).
 
 **A server answers before its graph is linked.** A server checkpoints only
 on its way down, so a crash after a long run leaves every vector written
 since in the tail, and linking them at the open kept the port closed for as
-long as they took: at 100 000 x 768 never checkpointed, `fenec-pg` answered
+long as they took: at 100 000 x 768 never checkpointed, `fenec-server` answered
 its first `near` 67.7 s after it started, and linking at the open still
-takes 18.4 s with the lists pruned in parallel. `fenec-pg`, a tenant and a replica
+takes 18.4 s with the lists pruned in parallel. `fenec-server`, a tenant and a replica
 open with `fs::open_serving` instead, and it answers after 1.23 s: those
 vectors go into the arena unlinked (`VectorIndex::defer_batch`, every vector
 of a graph the open cannot restore too), a search measures each of them
@@ -793,10 +646,10 @@ serves every 5 s, and appends to the tail each graph that changed in 10 000
 nodes since it last reached the file, has none waiting to be linked, and
 whose record the file has grown three times over since
 (`Database::save_graphs`, under the read lock, which keeps the writes out
-while the graph is written). A database with a block open is passed over
-until the next look: a block that changed a graph cannot be parked, and a
-COPY of 100 000 128-dim vectors with the graph kept held the keeper 3.0 to
-4.3 s, and every other database it keeps with it. The record holds the whole graph, so a bound
+while the graph is written). A database whose lock is taken is passed over
+until the next look (`try_read`): a block of 100 000 128-dim vectors loaded
+with the graph kept held the keeper 3.0 to 4.3 s, and every other database
+it keeps with it. The record holds the whole graph, so a bound
 on the linking alone would have a big graph written over and over for a
 little of it; waiting for the linking kept a crash from leaving the nodes
 waiting again. It is a graph record (kind 4) of version 6, 8 laid out flat,
@@ -817,7 +670,7 @@ than write its megabytes under it: a record held the lock 5.0 ms p50 and
 in turns).
 
 **`/_changes` reads the writes on disk, documents and all** (`cdc.rs`,
-`fenec-pg --cdc`; a primary's feed with `--replication-token`). A
+`fenec-server --cdc`; a primary's feed with `--replication-token`). A
 subscription keeps a query's rows and is reseeded past its ring of ids,
 which holds no documents; change data capture has to see every write once.
 So it reads the records the feed keeps for replicas (`Feed::changes_after`:
@@ -870,20 +723,11 @@ test holds it. It costs the server nothing measurable -- 37 500 puts a
 second against 37 700 from a client that does not parse headers -- while
 Python's `http.client`, parsing one more, went 18 200 -> 17 900.
 
-**The reader writes nothing** (`fenec-pg --reader <name>`). The pg wire
-had one password, which wrote. A session whose startup user is the
-reader's name is authenticated against a password of its own (SCRAM picks
-its verifier by the name before the proof) and carries `TxState::reader`,
-kept through `begin` and `end`: every write is refused (`25006`) before a
-compact or an index is built beside the database, `COPY FROM` before a row
-is read, whatever the session sets. It needs `--password`, and the two
-passwords must differ.
-
 **`insert` never writes over; `put` does.** `Statement::Put` carries
 `insert` (the parser sets it for the keyword, `POST /<name>` over REST):
 a document naming an id the store holds is `Error::Duplicate` -- 409 over
-HTTP, `23505` over the pg wire, where `Exists` is a collection's `42P07`
--- and the statement, a block of one, is put back whole. JWT scoping keeps
+HTTP, as `Exists` is for a collection -- and the statement, a block of
+one, is put back whole. JWT scoping keeps
 the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
@@ -893,7 +737,7 @@ layer writes rows back through it when it undoes an optimistic write.
 before refuses the file rather than open it as a plain hash and take the
 duplicates. `put`, `insert` and `set` ask `Collection::unique_clash` after
 the hooks and before anything is written: the bucket the value would go in
-holding another id is `Error::Duplicate` (`23505`, 409), the statement put
+holding another id is `Error::Duplicate` (409), the statement put
 back whole -- and the id `put` handed out for the document handed out
 again, since nothing of it reached the store for the block's mark. A block's
 earlier writes are in the bucket as a write keeps a built index up, so it
@@ -907,8 +751,7 @@ collection with no unique field writes as before (848 against 852). `create
 index ... @unique` over a value held twice is refused naming it and two of
 its documents, under the lock or beside the database, where it is asked of
 the index once the writes made meanwhile are in. `Database::apply` builds
-it and asks nothing: the primary did. The catalog shows a unique `hash`
-index named `<t>_<f>_key` and a `UNIQUE` constraint beside it.
+it and asks nothing: the primary did.
 
 **`alter collection` rewrites no document; positions are not places.** A
 document is its values in field order, so a field added goes last and a
@@ -946,11 +789,7 @@ it by the schema it made. A field added under a dropped one's name is a new
 field: the old values stay in the dropped place. A type change is refused:
 it would rewrite every document under the write lock. A compact over a
 collection holding a dropped place holds the lock (`compact_online`): the
-copies made beside the database are the records as they stand. Over the
-pg wire `sql::alter` reads PostgreSQL's `ALTER TABLE ... ADD/DROP/RENAME
-[COLUMN]` as the `alter collection` it is, a type by any of PostgreSQL's
-spellings fenecdb has one for, and `compat` refuses the rest with `0A000`;
-the answer is tagged `ALTER TABLE`. An add, a rename and a drop take 0.025,
+copies made beside the database are the records as they stand. An add, a rename and a drop take 0.025,
 0.021 and 0.004 ms over a million rows; the browser module grew 12.2 KB,
 4.0 KB brotli -- the reading side, which a file from a server needs, and
 the writing side, which a page's own database does.
@@ -991,19 +830,17 @@ browser module's vectors handed apart -- so a vector given to one, or
 compared with a path into one, is refused (`json_value`,
 `Database::refuse_inexact`) and the caller reads that part again as
 written: `Database::exactly` names it (the text, or parameters by place),
-`fenec_ql::parse_for` / `parse_exact`, `json::parse_params_exact`, the pg
-session, `/query`, `/batch`, a REST `where=`, and the module, which answers
+`fenec_ql::parse_for` / `parse_exact`, `json::parse_params_exact`,
+`/query`, `/batch`, a REST `where=`, and the module, which answers
 `"exact": [places]` for `run` to send those as JSON. A statement with no
 list of numbers costs the walk of its literals, one into a collection with
 no json field a look at its fields: 0.03 us for a `put` of 1 000 128-dim
 rows, 14 us with a json field beside the vector, against its 9.0 ms, which
 parsed and ran as before natively and in the browser module (`make
 wasm-speed`'s `put`). A typed array handed to the module goes as the
-numbers it holds, each an `f32` exactly. An object, an HTTP body (`parse_documents_json`), a pg `jsonb`
-(`json::parse_json`) and a COPY cell are read exact from the start.
-Over the pg wire it is `jsonb` (3802), `jsonb_send`'s version byte in
-binary, a path's parameter described as jsonb as `meta->'lang'` is (pgx
-refused to send a number into a text place). Over 100 000 documents a path
+numbers it holds, each an `f32` exactly. An object, an HTTP body
+(`parse_documents_json`) and an imported `jsonb` cell (`json::parse_json`)
+are read exact from the start. Over 100 000 documents a path
 filter scans in 5.7 ms against a text field's 4.2, 0.025 ms through `@hash`;
 a scan with no json field moved by noise alone. The browser module grew
 29.8 KB, 9.6 KB brotli -- 3.7 KB of it reading a list as written, a second
@@ -1052,11 +889,11 @@ disk to encrypt. A checksum a record was measured and not taken: hardware
 CRC32C was 45 ns of an 840 ns put at 530 bytes, 357 at 3 KB, under the write
 lock, and the browser has no hardware CRC.
 
-**Logins, refusals and schema changes are logged; a failure waits**
-(`fenec_http::audit`, `--audit`, `--auth-delay`). A JSON line an event: a
-pg login and a failed one, an HTTP 401, a statement whose shape starts with
+**Refusals and schema changes are logged; a refusal waits**
+(`fenec_http::audit`, `--audit`, `--auth-delay`). A JSON line an event: an
+HTTP 401, a statement whose shape starts with
 `create`/`drop`/`alter`/`compact` -- found where `statements::record` shapes
-every statement of both protocols, so no literal reaches the log -- and a
+every statement, so no literal reaches the log -- and a
 `/_admin/` or `/_shard/` request that changes something. Who is a
 thread-local set as the connection starts, a connection being a thread. A
 refusal waits 100 ms, doubled for each more from its address within a
@@ -1178,8 +1015,8 @@ the module with the standard library's `to_lowercase`, `to_uppercase` and
 
 **A vector goes out as its `f32`s.** JSON writes a vector's components
 and a row's `_score` as the shortest text that reads back as the `f32`
-(`json::num32_into`), as the pg wire, pgvector and a sparse vector's
-weights do: `0.1`, where the `f64` each widens to wrote
+(`json::num32_into`), as pgvector and a sparse vector's weights
+do: `0.1`, where the `f64` each widens to wrote
 `0.10000000149011612`. JavaScript reads it as an `f64` and a
 `Float32Array` rounds that again, which gives every `f32` back but
 `7.038531e-26`: as an `f64` it lands exactly between itself and the `f32`
@@ -1209,8 +1046,8 @@ each number in the one pass that finds its end where Clinger's path takes
 it (`json::clinger`) and handed to the readers above otherwise: read a
 `Value` at a time, each number's text found and then read twice over, a
 128-dim vector took 5.26 us, now 2.05, and 100 000 128-dim rows without an
-index go in at 220k rows/s over HTTP against 123k, 184k by COPY against
-110k, and 160k by `executemany` against 105k (`make load-bench`). A page's
+index go in at 220k rows/s over HTTP against 123k (`make load-bench`;
+213k as REST arrays, 146k as a `/batch` of single puts now). A page's
 vectors come into the browser module as `f32`s already, and the reader
 stays out of it: there it was 474 bytes brotli for nothing.
 
@@ -1392,7 +1229,7 @@ for, so consecutive code points that alone give consecutive primaries share
 a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
 them one range (`UNIFORM`), and a table's words are written as differences
 in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1040. A comparison walks ICU's three levels, letters then
+`make small`'s 1234. A comparison walks ICU's three levels, letters then
 accents then case, over the whole string before it falls back to the
 bytes, so the order is total.
 It starts at the first byte the two strings do not share, stepped back past
@@ -1456,7 +1293,7 @@ the planner. The child key must be `id` or carry `@hash`; refusing an
 unindexed one follows `near` and `match`, because a silent full scan of the
 child collection would be a different feature under the same name. Nesting
 lives in `ResultSet.nested`, never in `Value` -- JSON transports nest all the
-way down, the PostgreSQL wire flattens (`ResultSet::flatten`: one row per
+way down, and a flat one flattens (`ResultSet::flatten`: one row per
 root-to-leaf path, nulls below the first level that ran out); a
 `Value::Object` is a `json` field's value, not a level of children.
 Measured at 22.7 us in process against 0.332 ms for the same
@@ -1553,9 +1390,9 @@ browser module; this way it is 2.
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending
 with indices from 0, and travels everywhere in pgvector's text form,
-`{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, pg text, a FenecQL
-literal -- or in its binary form where a pg driver asks for it, so a
-pgvector client and `fenec import` carry the same vector.
+`{1:0.5,3:0.25}/N` with indices from 1 -- a JSON string, a FenecQL
+literal, an imported `sparsevec` -- so a pgvector table and `fenec import`
+carry the same vector.
 Every way in goes through `sparse::normalise` (order, an index given twice
 refused, zeros dropped), and the index relies on it. `@inverted` is the text
 index's shape with weights where the counts were; `near` by dot product sums
@@ -1596,55 +1433,28 @@ which would lose the rows it never reached. An update arrives without its
 TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
 before each such read cost the batching, 5 900 rows/s against 17 100. Commit
-to visible: p50 0.32 ms (`make follow-bench`). `fenec-pg --follow` runs the
+to visible: p50 0.32 ms (`make follow-bench`). `fenec-server --follow` runs the
 same follower on a thread of the server's, over the database it serves, so
-the mirror is served over the pg wire, HTTP and subscriptions with no second
-process over the file -- two corrupt it (`fenec-pg/src/mirror.rs`). The
+the mirror is served over HTTP and subscriptions with no second process
+over the file -- two corrupt it (`fenec-server/src/mirror.rs`). The
 importer's options come as `--follow-index` and the rest
 (`fenec_import::args`, which `fenec import` reads its own with too). The
-collection takes no write but the follower thread's (a write hook, 25006):
+collection takes no write but the follower thread's (a write hook, 403):
 the next change from PostgreSQL would write over one, or a copy made again
 forget it. The follower stops at the server's shutdown flag, and the
-shutdown waits for it (`server::before_shutdown`, 5 s at most, past which a
+shutdown waits for it (`durability::before_shutdown`, 5 s at most, past which a
 copy still being made is left for the next start) before its checkpoint;
 an error it cannot wait out ends the process rather than leave it serving
-a mirror that no longer moves. This is why the pg wire's framing and client
-are `fenec-wire`'s: in fenec-pg they made the importer depend on the
-server, which could then not run it. A subscriber hears a PostgreSQL
+a mirror that no longer moves. This is why the PostgreSQL client is
+`fenec-wire`'s, below the importer: in the server it made the importer
+depend on the server, which could then not run it. A subscriber hears a PostgreSQL
 commit 0.15 ms after it returned at the median, a row inserted with a
 vector under HNSW 0.33 ms (`make mirror-bench`); a server killed while the
 table was written to held every row 880 ms after it started again. The
-follower adds 178 KB to `fenec-pg`.
-
-**The catalog is run, not matched.** psql's `\d`, JDBC's `DatabaseMetaData`
-and DBeaver send SQL over `pg_catalog` -- joins, `CASE`, `regclass` casts,
-correlated subqueries, `UNION`, window and set-returning functions -- and the
-texts change with every client version, so `fenec-catalog` evaluates that SQL
-over tables made from the schemas each time rather than pattern matching it.
-A collection is a table in `public` with `id` its primary key; fenecdb's
-indexes are indexes with their own access methods (`hash`, `btree` for
-`@sorted`, `hnsw`, `bm25`). Joins find rows by key where the query names an
-equality: over a thousand collections nested loops took JDBC's column lookup
-18.1 s, keyed 122 ms. What the subset cannot read, and catalog tables it does
-not build, answer empty -- the old behaviour -- so a tool never stalls. A
-`WITH` is read, and a recursive one runs as PostgreSQL runs it, its first
-select and then each `UNION` over the rows the step before added, until a
-step adds none, 1 000 steps at most (`with_rel`): asyncpg looks up a type it
-has no codec for with one, `WITH RECURSIVE` over a derived table and again
-in a scalar subquery. A parameter is the type the query casts it to (`param_types`: asyncpg's
-`$1::oid[]` arrives as the binary array it is told), or else the type of
-the column it is compared with: tokio-postgres looks a type up by `t.oid =
-$1` and binds the oid only to a parameter described as one. `to_regtype`,
-`bit`, `pg_range`'s columns and pgvector's types in `public` are there
-because pgvector's clients look types up by them -- asyncpg's
-`set_type_codec` in the schema it is given, where `sparsevec` in
-`pg_catalog` was not found. It is
-a crate of its own so that it can be built for size (`opt-level = "z"`): at
-opt-level 3 it added 390 KB to the amd64 image, built for size 295 KB, for
-queries 1.2-1.5x slower. The CLI and the browser module link none of it.
+follower adds 178 KB to `fenec-server`.
 
 **`/_metrics` counts at the edge, a shard per thread.** A statement is timed
-in `execute_into` (pg) and around `handle` (HTTP), from arrival to answer, so
+around `handle`, from arrival to answer, so
 the lock wait and the `--sync always` fsync are in it; whether it wrote is a
 thread-local set where the write lock is taken (`metrics::wrote`), since a
 connection is a thread running one statement at a time. The counters are
@@ -1673,35 +1483,25 @@ the least called forgotten: 0.34 us for a statement of 87 bytes, against the
 2.2 us its parse takes (`make statements-bench`). A shape is made only as
 far as the 1 000 bytes an entry keeps of it, which is as far as two can be
 told apart where they are shown: shaped whole, a `put` of 1 000 128-dim
-rows spent 1.7 ms of its 12.6 there. Over the pg wire they are
-`pg_stat_statements` (a `fenec-catalog` table, filled only for a query that
-names it). They need what reads the data without a JWT's scope, or the admin
+rows spent 1.7 ms of its 12.6 there. They need what reads the data without a JWT's scope, or the admin
 token -- a shape names every collection -- and a tenant node keeps each
-tenant's apart (`statements::View`): its own under `/t/<tenant>/` and over
-its connection, every tenant's, named, to the admin alone.
+tenant's apart (`statements::View`): its own under `/t/<tenant>/`, every
+tenant's, named, to the admin alone.
 
-**A statement is parsed once where the protocol lets it be.** A driver
-prepares a statement (`Parse`) to bind and run it again and again, so
-fenec-pg reads its text as FenecQL there and keeps it with the statement
-(`Prepared::parsed`); `Describe` and `Execute` take it, and a text `compat`
-answers, or one that does not parse, is taken at `Execute` as before.
-`POST /query` has no statements to prepare, so `api::parse_query` keeps
-what it parsed by the text's hash, 16 shards of at most 64, a shard
-emptied when full and a text over 1 KB, which holds its literals, never
-kept; a JWT's scope is ANDed into a copy (`Arc::unwrap_or_clone`), never
-into the shared one. An HTTP answer goes out in one `writev`, its head
-written without `format!`: head and body apart put the head in a packet
-of its own on a socket that sends at once, and cost a second send each
-answer. One client asking a row by id, over 10 000 x 128 (`make
-requests-bench`): the extended protocol 48.0k -> 52.0k requests a second,
-HTTP 40.4k -> 47.1k, and HTTP 14 to 20% more with eight clients; the
-parser was a quarter of what the pg wire did for one and half of what
-HTTP did. Where a text is parsed, FenecQL's lexer walks its bytes, reading
-a character whole only outside ASCII and a number where it stands, and a
-list of numbers alone becomes its vector without an expression each
+**A statement is parsed once, and an answer goes out in one write.**
+`POST /query` keeps what `api::parse_query` parsed by the text's hash, 16
+shards of at most 64, a shard emptied when full and a text over 1 KB,
+which holds its literals, never kept; a JWT's scope is ANDed into a copy
+(`Arc::unwrap_or_clone`), never into the shared one. An HTTP answer goes
+out in one `writev`, its head written without `format!`: head and body
+apart put the head in a packet of its own on a socket that sends at once,
+and cost a second send each answer. One client asking a row by id over
+10 000 x 128 went 40.4k -> 47.1k requests a second, and eight 14 to 20%
+more (`make requests-bench`). FenecQL's lexer walks a text's bytes,
+reading a character whole only outside ASCII and a number where it stands,
+and a list of numbers alone becomes its vector without an expression each
 (`numbers_in_brackets`): a query holding a 128-dim vector parsed in 16.9 us
-and takes 6.2, a row by id 1.1 and takes 0.9, and the simple protocol's
-`near` went 10.5k -> 11.6k requests a second. Natively the lexer reads a
+and takes 6.2, a row by id 1.1 and takes 0.9. Natively the lexer reads a
 list of numbers alone at once, into the vector the parser would make of it
 (`Tok::Vector`, `tokenize_vectors`), each number in the one pass that finds
 its end (`num::clinger`, the JSON reader's), and not after `in`, whose list
@@ -1709,10 +1509,7 @@ keeps its integers and `f64`s: a token a number and a comma, and each
 number's text read for its end, for a `_` and for its value, a `put` of
 1 000 128-dim rows parsed in 5.4 ms, now 2.4, and
 `a_list_read_as_a_vector_parses_as_its_tokens_did` holds 20 000 generated
-texts to the token-at-a-time parse. The message's text is checked as UTF-8
-whole before `from_utf8_lossy` walks it in chunks (`take_cstr`). A simple
-`put` of 1 000 went in at 105k rows/s without an index, and at 180k now,
-past `COPY` (`make load-bench`). The browser module reads such a list
+texts to the token-at-a-time parse. The browser module reads such a list
 into a vector too, each number the general way: token by token, a `put`
 of 1 000 768-dim rows had 39 MB of tokens, which its memory keeps. The text is sliced with
 `get`: an index that can panic brought 2.7 KB brotli of a `char`'s
@@ -1771,16 +1568,15 @@ exact search, before and after an image.
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
 the standard library for its client) and `useLiveQuery`
-(`integrations/react`) are held to their frameworks' own tests, and the pg
-wire to what psycopg and SQLAlchemy send (`integrations/drivers`: a nested
-transaction is a savepoint to both) -- `make python-test` runs LangChain's
+(`integrations/react`) are held to their frameworks' own tests, and each
+language's docs example to a real server (`integrations/languages`: the
+same flow over HTTP in Python, JavaScript, Go, C#, Java, PHP, Ruby and
+Rust, each with its own HTTP client) -- `make python-test` runs LangChain's
 standard suite and the tests LlamaIndex's integrations run from a
-`python:3.13` container against a fenec-pg started here, `make
-drivers-test` the drivers' nested transactions and psycopg's COPY the same way,
-asyncpg's typed parameters and rows, and pgx's, node-postgres's and
-tokio-postgres's with the Go, Node and Rust on the machine, pgvector's
-library for each beside them, `make
-react-test` runs the hook against a real replica, and CI runs all three
+`python:3.13` container against a fenec-server started here, `make
+languages-test` the eight examples (Python, Java, PHP and Ruby from their
+images, the others with the toolchain on the machine), `make react-test`
+runs the hook against a real replica, and CI runs all three
 (`integrations`). CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
@@ -1798,7 +1594,7 @@ LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
 `run(sql, params)` -- a `Fenec` keeps a RAG index in the page -- and is
 held, LangChain.js publishing no standard suite, to what its own vector
 store integrations are tested for, over a database in the page and over a
-fenec-pg's HTTP endpoint (`make langchain-test`); the Vercel AI SDK has no
+fenec-server's HTTP endpoint (`make langchain-test`); the Vercel AI SDK has no
 store interface, so `integrations/ai-sdk/rag.js` is three functions to copy,
 held to the SDK's mock models (`make ai-sdk-test`). `web/fenec.d.ts` is
 held to `web/fenec.js` by `make types-check`: every export and class method
@@ -1811,10 +1607,9 @@ and `in` takes one per element (`in [$2, $3]`), since a parameter binds a
 value and not a list.
 
 **Profiles differ on purpose.** `fenec-cli` uses the `cli` profile (`panic =
-abort`, single process, nothing to recover). `fenec-pg` stays on `release`: a
-panicking connection thread unwinds and drops only its own session. A cold
-crate is built for size in the profile it is cold in: the catalog in
-`release`, and in `cli` `fenec-http`, which the shell reaches only for
+abort`, single process, nothing to recover). `fenec-server` stays on `release`: a
+panicking connection thread unwinds and drops only its own request. A cold
+crate is built for size in the profile it is cold in: in `cli`, `fenec-http`, which the shell reaches only for
 `backup`, `archive` and `restore`, waiting on the network and the disk
 (16.3 KB of the released binary). Not the importer, whose SQLite import of
 200 000 rows took 285 ms against 251 for 32.6 KB, nor the root crate, which
@@ -1826,7 +1621,7 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
 ## Conventions
 
 - `Error` (`fenec-core/src/error.rs`) is the single error type: allocation-free
-  variants, no `Box`. `fenec-pg` maps it onto PostgreSQL SQLSTATE codes.
+  variants, no `Box`. `fenec-http` maps it onto HTTP statuses (`api::status_of`).
 - Unit tests live inline in `#[cfg(test)] mod tests`; cross-crate and protocol
   tests live in `crates/*/tests/`, a file each, gathered into one binary a
   crate by `tests/all.rs` (`autotests = false`: a new file needs its `mod`

@@ -5,7 +5,7 @@
 // the way a crashed page leaves its file -- the operating system still holds
 // what the browser wrote -- and a "crash" stops a write halfway.
 //
-// The last test hands files between a page and a real `fenec-pg`, both
+// The last test hands files between a page and a real `fenec-server`, both
 // ways; it is skipped when the binary (cargo build) is missing.
 
 import { test } from 'node:test';
@@ -365,7 +365,7 @@ async function binary(name) {
   }
   return null;
 }
-const bin = await binary('fenec-pg');
+const bin = await binary('fenec-server');
 const cli = await binary('fenec');
 
 // A test that fails or times out never reaches its kill; the server would
@@ -375,9 +375,9 @@ process.on('exit', () => {
   for (const p of alive) p.kill('SIGKILL');
 });
 
-/** `fenec-pg --http` over `file`; reads the address off stderr. */
+/** `fenec-server --http` over `file`; reads the address off stderr. */
 async function serve(file) {
-  const proc = spawn(bin, ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', '--sync', 'always', '--file', file], {
+  const proc = spawn(bin, ['--http', '127.0.0.1:0', '--sync', 'always', '--file', file], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   alive.add(proc);
@@ -417,7 +417,7 @@ async function serve(file) {
   return { run, kill };
 }
 
-test("a page's file opens in fenec-pg, and a server's file in a page", { skip: skip || (!bin && 'no fenec-pg binary (cargo build)') }, async () => {
+test("a page's file opens in fenec-server, and a server's file in a page", { skip: skip || (!bin && 'no fenec-server binary (cargo build)') }, async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'fenec-file-'));
   try {
     const dir = fakeDir();

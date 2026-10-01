@@ -10,18 +10,18 @@ database for each Durable Object.</p>
 <h2 id="models">Two ways to use it</h2>
 
 <p>Either the engine runs inside the function, one database per Durable
-Object, or the function sends its queries to a <code>fenec-pg</code> server.
+Object, or the function sends its queries to a <code>fenec-server</code> server.
 Inside is faster; a server holds more data and more writers.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>&nbsp;</th><th>the engine in the function</th><th>the function talks to a server</th></tr></thead>
 <tbody>
-<tr><td>where the data is</td><td>in the object's memory, kept in its storage</td><td>in <code>fenec-pg</code>'s file</td></tr>
+<tr><td>where the data is</td><td>in the object's memory, kept in its storage</td><td>in <code>fenec-server</code>'s file</td></tr>
 <tr><td>a query</td><td>no network in the object: 2.5 ms for a request's <code>near</code> over 10 000 × 128</td><td>a round trip to the server</td></tr>
 <tr><td>writers</td><td>one an object; a tenant an object</td><td>one a file; a node holds many</td></tr>
 <tr><td>size</td><td>about 60 000 rows of 128 dimensions, 12 000 of 768 (<a href="#limits">Limits</a>)</td><td>the machine's disk, the file mapped</td></tr>
-<tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, the pg wire</td></tr>
+<tr><td>fits</td><td>a database a user, a team or a document; RAG over a tenant's own corpus</td><td>one large database, many writers, replicas</td></tr>
 </tbody>
 </table>
 </div>
@@ -30,11 +30,11 @@ Inside is faster; a server holds more data and more writers.</p>
 <p>The browser module runs wherever V8 runs a WebAssembly module, a
 Cloudflare Worker among them. A Durable Object gives it what a file gives a
 server: one writer, and storage that outlives the process. So one object
-holds one database, as a tenant is one file on a <code>fenec-pg</code>
+holds one database, as a tenant is one file on a <code>fenec-server</code>
 node.</p>
 
 <p>The second needs nothing new: <code>Fenec.connect(url)</code>, the
-Python <code>Client</code> or any pg driver, and a function's connections
+Python <code>Client</code> or <code>fetch</code>, and a function's connections
 are HTTP requests, so there is no pool to exhaust. The rest of this page is
 the first.</p>
 </details>
@@ -148,7 +148,7 @@ figure. The rows went in at 3 000 to 5 700 a second, a request of
 <h2 id="limits">Limits</h2>
 
 <p>An object holds about 60 000 rows of 128 dimensions, or 12 000 of 768. For
-more, use a <code>fenec-pg</code> server or spread a tenant over more
+more, use a <code>fenec-server</code> server or spread a tenant over more
 objects.</p>
 
 <ul>
@@ -199,6 +199,6 @@ storage: made all at once, the image stood beside the rows, and 50 000
 rows of 128 went from 73 to 109 MB at it, 83 now. So an object holds
 about 60 000 rows of 128 dimensions and 12 000 of 768, however many a
 request brings; past that, a
-<code>fenec-pg</code> node and <code>Fenec.connect</code>, or a tenant's
+<code>fenec-server</code> node and <code>Fenec.connect</code>, or a tenant's
 data spread over more objects.</p>
 </details>

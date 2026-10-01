@@ -14,8 +14,8 @@ behaviour worth knowing before it surprises you.</p>
 <ul>
   <li><b>FenecQL, not SQL.</b> <code>select a from t</code> works; JOINs do
     not. <code>lookup</code> covers related rows (below).</li>
-  <li><b>One writer per file.</b> Readers run beside it, and a transaction
-    holds the writer from its first write to its end. Scale out with a file
+  <li><b>One writer per file.</b> Readers run beside it, and a
+    <code>/batch</code> holds the writer while it runs. Scale out with a file
     per tenant (<a href="/docs/sharding">Tenants and sharding</a>).</li>
   <li><b>Indexes live in memory.</b> The data stays in the mapped file; the
     indexes are restored or rebuilt on open (<a href="#memory-and-scale">Memory
@@ -25,7 +25,7 @@ behaviour worth knowing before it surprises you.</p>
     and a path (<code>meta.lang</code>) reads into it
     (<a href="/docs/fenecql#json">Objects and paths</a>).</li>
   <li><b>No TLS.</b> Put a TLS terminator in front of any port off the
-    machine (<a href="/docs/postgres">PostgreSQL server</a>).</li>
+    machine (<a href="/docs/server">Server</a>).</li>
 </ul>
 
 <p>Deliberately not done: JOIN, SQL as the query language, several writers to
@@ -92,7 +92,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>lookup</code> chain depth</td><td class="n"><b>8 levels</b></td><td>a query error when exceeded; the parser, the check and the engine all recurse per level</td></tr>
 <tr><td><code>json</code> value nesting</td><td class="n"><b>64 levels</b></td><td>objects and lists inside one another; a write or a JSON text deeper is refused, never cut</td></tr>
 <tr><td>path length</td><td class="n"><b>64 keys</b></td><td>past its field (<code>meta.a.b</code> is two); a query error, since no value nests deeper</td></tr>
-<tr><td>session stack (<code>fenec-pg</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
+<tr><td>session stack (<code>fenec-server</code>)</td><td class="n">8 MiB</td><td>virtual; the deepest expression wants ~750 KiB in release, ~5 MiB in debug</td></tr>
 <tr><td>segment size</td><td class="n">8 MiB</td><td>sealed when full, a new one is opened</td></tr>
 <tr><td>document payload, segment offset</td><td class="n">4 GiB</td><td>the location record is a <code>u32</code></td></tr>
 <tr><td>vector index node count</td><td class="n">2<sup>32</sup></td><td>the node id is a <code>u32</code>; memory runs out first in practice</td></tr>
@@ -103,9 +103,7 @@ right; so does going past the two <code>json</code> depths.</p>
 <tr><td><code>timestamp</code></td><td class="n">1 ms, i64</td><td>±2.9×10<sup>8</sup> years; microseconds truncated, always UTC</td></tr>
 <tr><td><code>vector&lt;N, f16&gt;</code></td><td class="n">±65 504</td><td>~3 decimal digits; outside it, values silently become <code>inf</code> or 0</td></tr>
 <tr><td><code>sparse&lt;N&gt;</code> dimension</td><td class="n">10<sup>9</sup></td><td>pgvector's; the weights are <code>f32</code>, finite, and a zero is dropped</td></tr>
-<tr><td><code>fenec-pg</code> message size</td><td class="n">64 MiB</td><td><code>--max-message</code>; the protocol ceiling is 1 GiB</td></tr>
-<tr><td><code>fenec-pg</code> startup packet</td><td class="n">10 000 B</td><td>same as PostgreSQL; the only allocation before authentication</td></tr>
-<tr><td><code>fenec-pg</code> column / parameter count</td><td class="n">32 767</td><td>the protocol's <code>i16</code> counters</td></tr>
+
 <tr><td>change ring</td><td class="n"><b>4096 entries</b></td><td><code>--changes</code>; how far behind a subscriber may fall, 24 bytes each</td></tr>
 <tr><td>concurrent subscriptions</td><td class="n"><b>64</b></td><td><code>--http-max-streams</code>; each is a connection and a thread</td></tr>
 </tbody>
@@ -133,8 +131,8 @@ file is mapped (<a href="concepts.html#the-file-is-mapped">The file is
 mapped</a>), so a document is read from the pages the operating system holds
 and can drop; what the process holds is the offset index, the hash, ordered
 and text indexes, the graph, and the documents written since the open until
-they amount to 16 MB and are handed over to the file — a transaction's, or a
-<code>COPY</code>'s, spilled into it as they go.</p>
+they amount to 16 MB and are handed over to the file — a large
+<code>/batch</code>'s spilled into it as it goes.</p>
 
 <ul>
   <li><b>What a file costs to hold.</b> A 1 GB file of 2.3 million rows with
@@ -220,7 +218,7 @@ time at the next open, never data.</p>
     — never on the write path. Without it in the file it is rebuilt on open:
     0.90 s every open at 20 000 × 32, against 0.01 s with it.</li>
   <li>Who writes a checkpoint: the <code>fenec</code> shell when leaving an
-    interactive or piped session, and <code>fenec-pg</code> on the shutdown
+    interactive or piped session, and <code>fenec-server</code> on the shutdown
     signal — both only if a vector index exists.
     <b>A one-shot <code>fenec file.fenec -c '...'</code> does not.</b> Neither
     does <code>kill -9</code> or a cgroup OOM. The next open then restores the
@@ -230,7 +228,7 @@ time at the next open, never data.</p>
     the writes since the checkpoint, and a server does not wait for it:
     their vectors go in unlinked, <code>near</code> measures each of them,
     and a thread beside the queries links them. At 100 000 × 768 never
-    checkpointed, <code>fenec-pg</code> answered its first <code>near</code>
+    checkpointed, <code>fenec-server</code> answered its first <code>near</code>
     1.23 s after it started, against 67.7 s when the open linked them first,
     which now takes 18 s; <code>near</code> takes the exact scan's 10.5 ms
     until the 19 s of linking are done, and 0.31 ms after. A server also keeps
@@ -245,7 +243,7 @@ time at the next open, never data.</p>
     costs — 50 s at 100 000 × 768.</li>
   <li><b>A server builds an index or compacts beside the database.</b> A
     <code>create index</code> or <code>compact</code> sent on its own to
-    <code>fenec-pg</code> or <code>POST /query</code> copies what it reads
+    <code>fenec-server</code> or <code>POST /query</code> copies what it reads
     under the read lock, builds with no lock held, and takes the write lock
     only to apply the writes made meanwhile and put the result in place. At
     100 000 × 128, where either takes about 20 s, reads waited at most 21 ms
@@ -259,9 +257,8 @@ time at the next open, never data.</p>
     waited at most 24 ms, where the rewrite under the lock held them 1.22 s,
     for 67 MB more heap at the peak. The records those documents superseded
     stay in the new file as dead ones until the next compact. One in a
-    batch or a transaction, or run by the shell or an embedding program,
-    still holds the write lock throughout — in a transaction, as one of its
-    writes, put back with them. A schema
+    batch, or run by the shell or an embedding program, still holds the
+    write lock throughout. A schema
     change to the same collection while it builds — another index, a drop —
     fails it with a request to run it again, since what was built no longer
     fits, and so does a second compact while one writes its file. It cannot
@@ -389,7 +386,7 @@ what you might expect.</p>
     <code>near</code> determines the ordering by similarity.</li>
   <li>A query vector can be given three ways: a vector, a list, or pgvector's
     text form (<code>near embed '[1,0,0]'</code>), which is the natural one
-    when typing by hand in psql. None of the three fails silently — unparsable
+    when typing by hand in the shell. None of the three fails silently — unparsable
     text and a non-numeric component both error.</li>
   <li><b><code>put</code> does not check that a vector is finite.</b> A NaN or
     infinite component enters the index and makes distances meaningless; the
@@ -406,70 +403,43 @@ what you might expect.</p>
 </ul>
 </details>
 
-<h2>fenec-pg</h2>
+<h2>fenec-server</h2>
 
-<p>The PostgreSQL server speaks the protocol, but not every part of it, and
-it has no encryption of its own.</p>
+<p>The server is one process over one file, reached over HTTP, and it has no
+encryption of its own.</p>
 
 <ul>
   <li><b>No TLS:</b> put a TLS terminator in front off the machine.</li>
-  <li><b>A transaction holds every other write</b> until it ends.</li>
+  <li><b>No interactive transactions:</b> a <code>/batch</code> is the unit
+    that lands whole.</li>
   <li><b>Too many connections are refused,</b> not queued.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
 <ul>
-  <li><b>No TLS.</b> The password is protected by SCRAM but the data flows in
-    the clear. Non-loopback plus unauthenticated listening is refused without
+  <li><b>No TLS.</b> A token travels in the clear on an open network.
+    Listening on a non-loopback address with no token is refused without
     <code>--insecure</code>.</li>
-  <li><b>A transaction holds the database against writes.</b> There is one
-    writer: from its first write to its end every other session's writes wait
-    on it, while reads go on beside it over what has landed — but for a
-    transaction that changed a graph or the schema, which reads wait for too
-    — and one whose client goes silent is put back after
-    <code>--idle-in-transaction-timeout</code>. A <code>compact</code>
-    cannot join a transaction — before its first write it runs on its own,
-    after one it is refused — and there is no two-phase commit (<a
-    href="postgres.html#transactions">Transactions</a>). <code>LISTEN</code>
-    and <code>NOTIFY</code> return <code>0A000</code> — subscriptions are
-    <code>GET /&lt;name&gt;/changes</code>.</li>
-  <li>A cancellation is seen while waiting on the lock and between batched
-    statements. A running statement, such as a long <code>compact</code>, is
-    not cut in the middle.</li>
+  <li><b>No transaction held open across requests.</b> There is one writer,
+    and a transaction a client held open between its requests would hold
+    every other write for as long as the client took. A <code>/batch</code>
+    lands its statements whole or not at all, and an
+    <code>Idempotency-Key</code> makes it safe to retry. A
+    <code>compact</code> cannot be put back, so a batch holding one runs each
+    statement on its own.</li>
+  <li>A running statement, such as a long <code>compact</code>, is not cut in
+    the middle; a client that goes away does not cancel it.</li>
   <li><b>A ceiling, not a pool.</b> Every connection is an OS thread.
-    <code>--max-connections</code> rejects the excess with <code>53300</code>
-    rather than queueing it; put pgbouncer in front if you want a queue. When a
-    thread cannot be spawned only that connection drops, and an accept error is
-    not fatal either — though the server stops after 64 in a row.</li>
-  <li>An idle session lives <b>forever</b> by default.
-    <code>--idle-timeout &lt;s&gt;</code> applies both while waiting for the
-    next message and in the middle of a half-received one: both are signs of a
-    dropped connection.</li>
-  <li>Session threads get an <b>8 MiB</b> stack.
-    <code>thread::spawn</code>'s 2 MiB default leaves 2.7× headroom for a
-    512-level expression in release but is not enough in a debug build — and a
-    stack overflow is not a catchable panic, it is the process calling
-    <code>abort</code>. It is virtual space: with 100 idle connections the
-    measured RSS is 5.2 MB, about 36 KiB per connection.</li>
-  <li><b>The row count of <code>Execute</code> is ignored.</b> The portal
-    always runs to the end and no <code>PortalSuspended</code> is sent. Clients
-    using <code>fetch_size</code> or a named cursor get the whole result at
-    once.</li>
-  <li><b>The catalog reads a part of <code>SELECT</code></b>: inner, left,
-    cross and <code>USING</code> joins, <code>CASE</code>, casts,
-    subqueries, <code>UNION</code>, aggregates, <code>row_number</code>,
-    <code>rank</code> and set-returning functions in the select list. A
-    <code>WITH</code>, a right or full join, or a catalog table it does not
-    build is answered empty rather than with an error, and a catalog function
-    it does not know is null (<a href="postgres.html#catalog">The
-    catalog</a>). It is only a catalog: a collection is still queried in
-    FenecQL.</li>
+    <code>--max-connections</code> rejects the excess with 503 rather than
+    queueing it; put a proxy in front if you want a queue.</li>
+  <li>A keep-alive connection silent for 60 s is closed
+    (<code>--idle-timeout &lt;s&gt;</code>, 0 for never).</li>
 </ul>
 </details>
 
 <h2>fenec-http</h2>
 
-<p>The HTTP endpoint runs inside <code>fenec-pg</code> and keeps to a plain
+<p>The HTTP endpoint runs inside <code>fenec-server</code> and keeps to a plain
 subset of HTTP.</p>
 
 <ul>
@@ -484,7 +454,7 @@ subset of HTTP.</p>
 <details class="deep"><summary>Details</summary>
 <ul>
   <li><b>Not a separate process.</b> It opens as a second listener via
-    <code>fenec-pg --http</code>; there is no standalone binary, because two
+    <code>fenec-server --http</code>; there is no standalone binary, because two
     processes opening the same file would corrupt it.</li>
   <li>No TLS. Without a token it will not bind a non-loopback address. The
     server's own token, <code>--http-token</code>, is a single shared secret
@@ -500,7 +470,7 @@ subset of HTTP.</p>
   <li>A field whose name matches a clause name (<code>select</code>,
     <code>order</code>, <code>limit</code>, <code>offset</code>,
     <code>count</code>, <code>where</code>) cannot be filtered from the query
-    string. <code>POST /query</code> and <code>fenec-pg</code> are
+    string. <code>POST /query</code> and <code>fenec-server</code> are
     unaffected.</li>
   <li>No <code>ETag</code>, no <code>Last-Modified</code>, no conditional
     requests. Responses are not marked cacheable.</li>
@@ -555,7 +525,8 @@ SQLite or PostgreSQL, and can follow a PostgreSQL table as it changes.</p>
     shows stale data and stopping beats silently returning it. Run
     <code>sqlite3 &lt;db&gt; "PRAGMA wal_checkpoint(TRUNCATE)"</code> first.
     <code>WITHOUT ROWID</code> tables are not read either.</li>
-  <li>No TLS, and no md5 authentication: scram-sha-256 or cleartext.</li>
+  <li>No TLS to the PostgreSQL server read from, and no md5 authentication:
+    scram-sha-256 or cleartext.</li>
   <li>PostgreSQL <code>timestamp(tz)</code> values are truncated to
     milliseconds.</li>
   <li><b>A non-finite component in a vector column stops the import</b> and it

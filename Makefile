@@ -11,15 +11,15 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve pg node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
-	python-test drivers-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
+.PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
+	python-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
 
 all: test wasm
 
-## Rust first: `cargo test` also builds the `fenec-pg` binary, and the sync
+## Rust first: `cargo test` also builds the `fenec-server` binary, and the sync
 ## tests on the JS side run against it (they skip themselves without it).
 ## Then fenec-core made without its indexes, as a small browser module is.
 ## fenec-bench has no tests, and SQLite's C source and the postgres client
@@ -34,11 +34,11 @@ test:
 
 ## JS tests. node's own runner; no dependencies.
 ##   fenec.test.js       query builder (end-to-end too when wasm is present)
-##   fenec.sync.test.js  sync layer -- against a real `fenec-pg --http` server;
+##   fenec.sync.test.js  sync layer -- against a real `fenec-server --http` server;
 ##                     skipped when `web/fenec.wasm` or the binary is missing
 ##   fenec.persist.test.js  incremental persistence, over an in-memory IndexedDB
 ##   fenec.file.test.js  a database kept in an OPFS file, over in-memory files,
-##                     and handed to and from a real `fenec-pg`
+##                     and handed to and from a real `fenec-server`
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
 		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js web/fenec.file.test.js; \
@@ -114,7 +114,7 @@ wasm-speed: wasm
 ## the generics whose copies weigh most. BASE=<git ref> builds that commit in
 ## a worktree beside it and shows what changed: make size-report BASE=main.
 ## WHY=<pattern> names the first of fenec's functions on each way to the
-## functions matching it: make size-report WHY=flt2dec. BIN=fenec|fenec-pg|
+## functions matching it: make size-report WHY=flt2dec. BIN=fenec|fenec-server|
 ## fenec-shard reports that native binary's code by crate instead.
 size-report:
 	@python3 crates/fenec-wasm/size_report.py $(BASE) $(if $(WHY),--why '$(WHY)') $(if $(BIN),--bin $(BIN))
@@ -142,17 +142,16 @@ serve: wasm
 	@echo ""
 	@cd web && python3 -m http.server $(PORT)
 
-## PostgreSQL protocol server (for a password: make pg PGPASS=secret)
-## For the HTTP/JSON endpoint: make pg HTTP=127.0.0.1:8080
-pg:
-	$(CARGO) run --release -p fenec-pg -- --listen 127.0.0.1:5433 --file data.fenec \
-	  --sync 250 $(if $(PGPASS),--password $(PGPASS),) $(if $(HTTP),--http $(HTTP),)
+## The server over ./data.fenec, HTTP on 127.0.0.1:8080 unless HTTP=addr
+## names another (a token: make server TOKEN=secret)
+server:
+	$(CARGO) run --release -p fenec-server -- --http $(or $(HTTP),127.0.0.1:8080) --file data.fenec \
+	  --sync 250 $(if $(TOKEN),--http-token $(TOKEN),)
 
 ## A tenant node: one file per tenant under ./tenants, HTTP only.
 ## make node HTTP=127.0.0.1:8081 ADMIN=secret
 node:
-	$(CARGO) run --release -p fenec-pg -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
-	  $(if $(PG),--listen $(PG),) \
+	$(CARGO) run --release -p fenec-server -- --dir tenants --http $(or $(HTTP),127.0.0.1:8081) \
 	  --admin-token $(or $(ADMIN),$(error ADMIN=<token> is required)) --sync 250
 
 ## The router in front of the nodes; the directory lives in ./shard.fenec.
@@ -166,36 +165,32 @@ shard-bench:
 ## Replication: a replica's lag under each sync policy, how fast it
 ## catches up and starts from an image, and what a failover loses.
 replica-bench:
-	$(CARGO) build --release -p fenec-pg
+	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-http --example replica -- 100000 128
-	$(CARGO) run --release -p fenec-pg --example failover -- 10
-
-## A pg transaction: a lone write under each sync policy, a write in a
-## transaction of 100, each in a savepoint, a ROLLBACK TO over 100, and a
-## read, over the wire.
-tx-bench:
-	$(CARGO) run --release -p fenec-pg --example transactions -- 20000
+	$(CARGO) run --release -p fenec-server --example failover -- 10
 
 ## Writers and readers at once, fenecdb against SQLite in one process:
 ## durable and buffered writes from 1, 4 and 16 threads, and reads alone,
-## beside writers and beside a transaction held open.
+## beside writers and beside blocks of 1 000 writes (a /batch's).
 concurrency-bench:
 	$(CARGO) run --release -p fenec-bench --bin concurrency
 
 ## What one request costs over the wire: a row by id, a filter, a near and a
-## put, over the pg wire's extended and simple protocols and over HTTP, one
-## client at a time and eight at once, against fenec-pg started here and
-## PostgreSQL + pgvector (`make pgvector-up` first, skipped without it).
+## put, over fenec-server's HTTP (POST /query, kept alive) and PostgreSQL's
+## extended and simple protocols, one client at a time and eight at once,
+## against fenec-server started here and PostgreSQL + pgvector (`make
+## pgvector-up` first, skipped without it).
 requests-bench:
-	$(CARGO) build --release -p fenec-pg
+	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin requests
 
 ## What loading 100 000 rows costs each way a client can send them: in
-## process, the pg wire's simple and extended protocols, HTTP's array and
-## /batch, with the vector index kept and without; PostgreSQL's COPY and
-## INSERT beside them (`make pgvector-up` first, skipped without it).
+## process, and over HTTP as a REST array, a /batch and a /query put of
+## 1 000, with the vector index kept and without, then read back a page at
+## a time; PostgreSQL's COPY and INSERT beside them (`make pgvector-up`
+## first, skipped without it).
 load-bench:
-	$(CARGO) build --release -p fenec-pg
+	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin load
 
 ## When size comes first: no import, abort instead of panic unwinding.
@@ -224,28 +219,29 @@ beir:
 	$(CARGO) run --release -p fenec-bench --bin beir -- $(BEIR)
 
 ## The LangChain and LlamaIndex vector stores against their frameworks' own
-## tests: fenec-pg built and started here, the tests from a python:3.13
+## tests: fenec-server built and started here, the tests from a python:3.13
 ## container (Docker). The integrations may use outside packages; the
 ## crates may not.
 python-test:
 	integrations/python/run-tests.sh
 
-## PostgreSQL drivers over the pg wire, pgvector's library for each: psycopg,
-## asyncpg and SQLAlchemy from a python:3.13 container (Docker), pgx,
-## node-postgres and tokio-postgres with the Go, Node and Rust on the machine
-drivers-test:
-	integrations/drivers/run-tests.sh
+## The docs' example for each language over HTTP, against a real
+## fenec-server: Python (the fenecdb client), Java, PHP and Ruby from
+## containers of their own (Docker), JavaScript, Go, C# and Rust with the
+## Node, Go, .NET and Rust on the machine
+languages-test:
+	integrations/languages/run-tests.sh
 
-## useLiveQuery for React, against a stand-in and a real fenec-pg + replica
+## useLiveQuery for React, against a stand-in and a real fenec-server + replica
 ## (needs `make wasm`)
 react-test:
-	@$(CARGO) build -q -p fenec-pg
+	@$(CARGO) build -q -p fenec-server
 	cd integrations/react && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## The LangChain.js vector store over a database in the page and over
-## fenec-pg's HTTP endpoint (needs `make wasm`)
+## fenec-server's HTTP endpoint (needs `make wasm`)
 langchain-test:
-	@$(CARGO) build -q -p fenec-pg
+	@$(CARGO) build -q -p fenec-server
 	cd integrations/langchain && npm ci --no-audit --no-fund --loglevel=error && npm test
 
 ## Retrieval for the Vercel AI SDK against its own mock models (needs `make wasm`)
@@ -272,7 +268,7 @@ collate-bench:
 ## Verifies the import's PostgreSQL arm against a live server
 import-test: pgvector-up
 	@$(CARGO) test -p fenec-import --test all -- --ignored pg:: follow:: && \
-	  $(CARGO) test -p fenec-pg --test all -- --ignored follow::; \
+	  $(CARGO) test -p fenec-server --test all -- --ignored follow::; \
 	  status=$$?; $(MAKE) pgvector-down; exit $$status
 
 ## `fenec import --follow` against a live server: commit-to-visible latency,
@@ -284,12 +280,12 @@ follow-bench:
 ## Starts PostgreSQL with pgvector for the comparison. `wal_level=logical`
 ## is for `fenec import --follow` and its tests; it changes what is logged
 ## for updates and deletes, not how the compared reads run.
-## `fenec-pg --follow` serving what it follows: commit to a subscriber of
+## `fenec-server --follow` serving what it follows: commit to a subscriber of
 ## the collection, and a server killed while the table is written to,
 ## started again. Needs `make pgvector-up` first.
 mirror-bench:
-	$(CARGO) build --release -p fenec-pg
-	$(CARGO) run --release -p fenec-pg --example mirror -- 10000
+	$(CARGO) build --release -p fenec-server
+	$(CARGO) run --release -p fenec-server --example mirror -- 10000
 
 ## --shm-size: a parallel HNSW build holds its graph in dynamic shared
 ## memory, up to maintenance_work_mem, which scale-bench sets to 1 800 MB so
@@ -311,21 +307,21 @@ pgvector-down:
 docker:
 	docker build -t fenecdb .
 
-## Starts the container: make docker-run PGPASS=secret
+## Starts the container: make docker-run TOKEN=secret
 ## The memory limit must be at least 3x the data file (compact peak).
 docker-run: docker
-	@test -n "$(PGPASS)" || (echo "password required: make docker-run PGPASS=secret"; exit 1)
+	@test -n "$(TOKEN)" || (echo "token required: make docker-run TOKEN=secret"; exit 1)
 	docker run -d --name fenecdb --restart unless-stopped \
-	  -p 127.0.0.1:5433:5433 -v fenecdata:/data \
-	  -e FENECPG_PASSWORD=$(PGPASS) --memory 1g --memory-swap 1g fenecdb
-	@echo "postgres://fenec@127.0.0.1:5433"
+	  -p 127.0.0.1:8080:8080 -v fenecdata:/data \
+	  -e FENEC_HTTP_TOKEN=$(TOKEN) --memory 1g --memory-swap 1g fenecdb
+	@echo "http://127.0.0.1:8080"
 
-## Writes the graph to the file. fenec-pg writes no checkpoint on shutdown:
-## without this call every restart rebuilds the HNSW index from scratch.
+## Compacts the running container's file: what deletes and rewrites left
+## dead goes, and every graph holding tombstones is built again.
 docker-compact:
-	@test -n "$(PGPASS)" || (echo "password required: make docker-compact PGPASS=secret"; exit 1)
-	docker run --rm --network container:fenecdb -e PGPASSWORD=$(PGPASS) \
-	  postgres:16-alpine psql -h 127.0.0.1 -p 5433 -U fenec -c 'compact'
+	@test -n "$(TOKEN)" || (echo "token required: make docker-compact TOKEN=secret"; exit 1)
+	curl -fsS -H 'Authorization: Bearer $(TOKEN)' -d '{"query": "compact"}' \
+	  http://127.0.0.1:8080/query
 
 docker-down:
 	-docker rm -f fenecdb
@@ -373,15 +369,17 @@ quant-bench:
 	$(CARGO) build --release -p fenec-core --example quant
 	for m in none int8 bit; do ./target/release/examples/quant $(QUANT_ROWS) 768 $$m --rank 32 --filter 3000; done
 
-## fenec-pg against PostgreSQL + pgvector at scale, both over the pg wire
-## (make pgvector-up first): the load and the index, memory, disk, recall@10
-## and latency at beams of 40, 100 and 200, and eight clients' throughput.
-## SCALE_ROWS x SCALE_DIM, a million 128-dim vectors unless given;
-## SCALE_ARGS=--after builds fenec-pg's index once the rows are in.
+## fenec-server over HTTP against PostgreSQL + pgvector over its own wire, at
+## scale (make pgvector-up first): the load and the index, memory, disk,
+## recall@10 and latency at beams of 40, 100 and 200, and eight clients'
+## throughput. SCALE_ROWS x SCALE_DIM, a million 128-dim vectors unless
+## given; SCALE_ARGS=--after builds fenec-server's index once the rows are
+## in, SCALE_ARGS="--only fenec" (or pg) runs one side, for running them in
+## turns after idle minutes.
 SCALE_ROWS ?= 1000000
 SCALE_DIM ?= 128
 scale-bench:
-	$(CARGO) build --release -p fenec-pg -p fenec-bench --bin fenec-pg --bin scale
+	$(CARGO) build --release -p fenec-server -p fenec-bench --bin fenec-server --bin scale
 	./target/release/scale $(SCALE_ROWS) $(SCALE_DIM) $(SCALE_ARGS)
 
 ## Memory footprint (for calibrating --max-memory)

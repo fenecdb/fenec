@@ -1,0 +1,14 @@
+# Rust with ureq and serde_json (integrations/languages/run-tests.sh).
+# Outside the workspace: the crates take no outside package, and this is
+# what an application of its own does.
+[package]
+name = "fenecdb-languages-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+
+[workspace]

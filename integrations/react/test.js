@@ -5,7 +5,7 @@
 // -- and a real one checks the point of it all: a row another client writes
 // through the server shows up in the component, with no code of the
 // component's asking. That half needs web/fenec.wasm (make wasm) and the
-// fenec-pg binary (cargo build), and skips itself without them.
+// fenec-server binary (cargo build), and skips itself without them.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -153,7 +153,7 @@ test("the provider's database serves a query that brings none", async () => {
 
 const wasm = await readFile(new URL('../../web/fenec.wasm', import.meta.url)).catch(() => null);
 async function binary() {
-  for (const p of ['../../target/debug/fenec-pg', '../../target/release/fenec-pg']) {
+  for (const p of ['../../target/debug/fenec-server', '../../target/release/fenec-server']) {
     const url = new URL(p, import.meta.url);
     try {
       await access(url);
@@ -168,11 +168,11 @@ const bin = await binary();
 
 test(
   'a row another client writes shows up in the component',
-  { skip: !wasm ? 'no web/fenec.wasm (make wasm)' : !bin ? 'no fenec-pg (cargo build)' : false },
+  { skip: !wasm ? 'no web/fenec.wasm (make wasm)' : !bin ? 'no fenec-server (cargo build)' : false },
   async () => {
     const { Fenec, sync, connect } = await import('../../web/fenec.js');
     const dir = await mkdtemp(join(tmpdir(), 'fenec-react-'));
-    const proc = spawn(bin, ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', '--file', join(dir, 'r.fenec')], {
+    const proc = spawn(bin, ['--http', '127.0.0.1:0', '--file', join(dir, 'r.fenec')], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     try {

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
 /// Routes SIGINT and SIGTERM to [`STOP`]; libc's `signal` is declared here,
-/// as `fenec-pg` does, to add no dependency.
+/// as `fenec-server` does, to add no dependency.
 pub fn on_signals() {
     extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;

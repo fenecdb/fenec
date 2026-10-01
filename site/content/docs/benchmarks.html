@@ -13,20 +13,21 @@ pgvector, measured by make targets you can run yourself.</p>
 was measured.</p>
 
 <p><b>The server against PostgreSQL with pgvector:</b> a million 128-dim
-vectors over the PostgreSQL wire, and 100 000 rows loaded (<a
-href="#scale">At scale</a>, <a href="#loading">Loading rows</a>).</p>
+vectors, fenec-server asked over HTTP and PostgreSQL over its own wire, and
+100 000 rows loaded (<a href="#scale">At scale</a>, <a
+href="#loading">Loading rows</a>).</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>&nbsp;</th><th class="n">fenec-pg</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<thead><tr><th>&nbsp;</th><th class="n">fenec-server</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
 <tbody>
-<tr><td>load and index 1 000 000 × 128</td><td class="n"><b>47.2 s</b></td><td class="n">117.8 s</td></tr>
-<tr><td>memory the server holds</td><td class="n"><b>721 MB</b></td><td class="n">1 132 MB</td></tr>
+<tr><td>load and index 1 000 000 × 128</td><td class="n"><b>49.6 s</b></td><td class="n">108.5 s</td></tr>
+<tr><td>memory the server holds</td><td class="n"><b>738 MB</b></td><td class="n">1 131 MB</td></tr>
 <tr><td>disk</td><td class="n"><b>612 MB</b></td><td class="n">1 432 MB</td></tr>
-<tr><td>search, ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.147 ms</b></td><td class="n">98.3%, 2.353 ms</td></tr>
-<tr><td>8 clients searching, ef 100</td><td class="n"><b>17 001 queries/s</b></td><td class="n">2 097 queries/s</td></tr>
-<tr><td>load 100 000 rows by <code>COPY</code>, HNSW kept</td><td class="n"><b>17 900 rows/s</b></td><td class="n">434 rows/s</td></tr>
-<tr><td>… with no vector index</td><td class="n"><b>165 000 rows/s</b></td><td class="n">62 000 rows/s</td></tr>
+<tr><td>search, ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.141 ms</b></td><td class="n">98.6%, 2.076 ms</td></tr>
+<tr><td>8 clients searching, ef 100</td><td class="n"><b>18 852 queries/s</b></td><td class="n">2 289 queries/s</td></tr>
+<tr><td>load 100 000 rows, HNSW kept (HTTP <code>POST /docs</code> against <code>COPY</code>)</td><td class="n"><b>19 151 rows/s</b></td><td class="n">410 rows/s</td></tr>
+<tr><td>… with no vector index</td><td class="n"><b>212 820 rows/s</b></td><td class="n">56 232 rows/s</td></tr>
 </tbody>
 </table>
 </div>
@@ -174,48 +175,46 @@ links and nothing else; the vectors are read from the one arena. The WAL is in
 neither figure.</p>
 </details>
 
-<h2 id="scale">At scale, against pgvector over the wire</h2>
+<h2 id="scale">At scale, against pgvector</h2>
 
-<p>Here the server, <code>fenec-pg</code>, and PostgreSQL with pgvector
-answer the same client over the PostgreSQL wire. At a million 128-dim
-vectors, fenec-pg loads and indexes them 2.5 times as fast, on less than
-half the disk, and answers 14 to 21 times sooner.</p>
+<p>Here the server, <code>fenec-server</code>, answers over HTTP and
+PostgreSQL with pgvector over its own wire, each asked by the same client
+program. At a million 128-dim vectors, fenec-server loads and indexes them
+2.2 times as fast, on less than half the disk, and
+answers 14 to 24 times sooner.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>1 000 000 × 128</th><th class="n">fenec-pg</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<thead><tr><th>1 000 000 × 128</th><th class="n">fenec-server, HTTP</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
 <tbody>
-<tr><td>load and index</td><td class="n"><b>47.2 s</b></td><td class="n">117.8 s</td></tr>
-<tr><td>memory the server holds</td><td class="n"><b>721 MB</b></td><td class="n">1 132 MB</td></tr>
-<tr><td>its files' pages in memory besides</td><td class="n"><b>377 MB</b></td><td class="n">2 194 MB</td></tr>
+<tr><td>load and index</td><td class="n"><b>49.6 s</b></td><td class="n">108.5 s</td></tr>
+<tr><td>memory the server holds</td><td class="n"><b>738 MB</b></td><td class="n">1 131 MB</td></tr>
+<tr><td>its files' pages in memory besides</td><td class="n"><b>377 MB</b></td><td class="n">1 940 MB</td></tr>
 <tr><td>disk</td><td class="n"><b>612 MB</b></td><td class="n">1 432 MB</td></tr>
-<tr><td>ef 40: recall@10, p50</td><td class="n">92.5%, <b>0.094 ms</b></td><td class="n"><b>93.7%</b>, 1.337 ms</td></tr>
-<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.147 ms</b></td><td class="n">98.3%, 2.353 ms</td></tr>
-<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.8%, 0.225 ms</b></td><td class="n">98.6%, 3.462 ms</td></tr>
-<tr><td>a filter keeping 1%, ef 100</td><td class="n"><b>100%, 0.632 ms</b></td><td class="n">98.8%, 13.5 ms</td></tr>
-<tr><td>a filter keeping 25%, ef 100</td><td class="n">97.2%, <b>0.159 ms</b></td><td class="n"><b>97.4%</b>, 2.481 ms</td></tr>
-<tr><td>8 clients, ef 100</td><td class="n"><b>17 001 queries/s</b></td><td class="n">2 097 queries/s</td></tr>
+<tr><td>ef 40: recall@10, p50</td><td class="n">92.5%, 0.087 ms</td><td class="n">94.2%, 1.213 ms</td></tr>
+<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.141 ms</b></td><td class="n">98.6%, 2.076 ms</td></tr>
+<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.8%, 0.232 ms</b></td><td class="n">99.0%, 3.176 ms</td></tr>
+<tr><td>a filter keeping 1%, ef 100</td><td class="n"><b>100%, 0.667 ms</b></td><td class="n">99.0%, 16.1 ms</td></tr>
+<tr><td>a filter keeping 25%, ef 100</td><td class="n">97.2%, 0.149 ms</td><td class="n">97.3%, 2.146 ms</td></tr>
+<tr><td>8 clients, ef 100</td><td class="n"><b>18 852 queries/s</b></td><td class="n">2 289 queries/s</td></tr>
 </tbody>
 </table>
 </div>
 
 <ul>
-  <li><b>Recall is as high or higher</b> in every row but two, where
-    pgvector's is ahead by 1.2 and 0.2 points.</li>
-  <li><b>768-dim vectors show the same picture</b>: 250 000 of them load 1.7
-    times as fast and are answered 5 to 18 times sooner (table below).</li>
+  <li><b>Recall comes from the engine,</b> not the transport: the same
+    graph answers in process and over HTTP.</li>
+  <li><b>768-dim vectors</b>: 250 000 of them, in the table below.</li>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
 <p>The <a href="#against-sqlite-and-pgvector">table above</a> measures
-fenecdb in process. Over the PostgreSQL wire,
-with the same client asking both — the <code>postgres</code> crate and
-pgvector-rust's types — <code>fenec-pg</code> loads and indexes a million
-128-dim vectors 2.5 times as fast as PostgreSQL with pgvector, keeps them in
-less than half the disk and 64% of the memory, and answers 14 to 21 times
-sooner; 250 000 768-dim ones 1.7 times as fast, in 72% of the memory,
-answered 5 to 18 times sooner. Its recall is as high or higher in every row
-but two, where pgvector's is ahead by 1.2 and 0.2 points.</p>
+fenecdb in process. Here one client program asks both servers the same
+questions: <code>fenec-server</code> through a kept-alive HTTP/1.1
+connection a client thread, <code>POST /query</code> with the vector as a
+parameter, and PostgreSQL through the <code>postgres</code> crate with
+pgvector-rust's types, a statement prepared once.
+At the million, fenec-server loads and indexes in 49.6 s against 108.5, takes 612 MB of disk against 1 432, and answers a beam of 100 at 99.1% recall in 0.141 ms against 98.6% in 2.08 ms; eight clients get 18 852 queries a second through, against 2 289. Its memory is what its engine counts, 738 MB; macOS puts the process's physical footprint at 992 MB.</p>
 
 <pre data-lang="bash">make pgvector-up
 make scale-bench                                   # 1 000 000 x 128
@@ -224,18 +223,18 @@ make scale-bench SCALE_ROWS=250000 SCALE_DIM=768
 
 <div class="tbl">
 <table>
-<thead><tr><th>250 000 × 768</th><th class="n">fenec-pg</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<thead><tr><th>250 000 × 768</th><th class="n">fenec-server, HTTP</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
 <tbody>
-<tr><td>load and index</td><td class="n"><b>41.3 s</b></td><td class="n">69.9 s</td></tr>
-<tr><td>memory the server holds</td><td class="n"><b>820 MB</b></td><td class="n">1 131 MB</td></tr>
-<tr><td>its files' pages in memory besides</td><td class="n"><b>419 MB</b></td><td class="n">2 199 MB</td></tr>
+<tr><td>load and index</td><td class="n"><b>39.9 s</b></td><td class="n">79.9 s</td></tr>
+<tr><td>memory the server holds</td><td class="n"><b>835 MB</b></td><td class="n">1 137 MB</td></tr>
+<tr><td>its files' pages in memory besides</td><td class="n"><b>336 MB</b></td><td class="n">2 119 MB</td></tr>
 <tr><td>disk</td><td class="n"><b>787 MB</b></td><td class="n">2 082 MB</td></tr>
-<tr><td>ef 40: recall@10, p50</td><td class="n"><b>96.9%, 0.228 ms</b></td><td class="n">95.2%, 1.583 ms</td></tr>
-<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.8%, 0.405 ms</b></td><td class="n">97.4%, 2.488 ms</td></tr>
-<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.9%, 0.585 ms</b></td><td class="n">97.6%, 3.435 ms</td></tr>
-<tr><td>a filter keeping 1%, ef 100</td><td class="n">100%, <b>0.613 ms</b></td><td class="n">100%, 11.1 ms</td></tr>
-<tr><td>a filter keeping 25%, ef 100</td><td class="n"><b>99.3%, 0.434 ms</b></td><td class="n">97.0%, 2.383 ms</td></tr>
-<tr><td>8 clients, ef 100</td><td class="n"><b>5 755 queries/s</b></td><td class="n">1 545 queries/s</td></tr>
+<tr><td>ef 40: recall@10, p50</td><td class="n"><b>96.9%, 0.302 ms</b></td><td class="n">95.8%, 2.387 ms</td></tr>
+<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.8%, 0.431 ms</b></td><td class="n">98.1%, 4.223 ms</td></tr>
+<tr><td>ef 200: recall@10, p50</td><td class="n"><b>99.9%, 0.664 ms</b></td><td class="n">98.6%, 3.852 ms</td></tr>
+<tr><td>a filter keeping 1%, ef 100</td><td class="n"><b>100%, 0.626 ms</b></td><td class="n">100%, 15.6 ms</td></tr>
+<tr><td>a filter keeping 25%, ef 100</td><td class="n"><b>99.3%, 0.458 ms</b></td><td class="n">97.7%, 3.017 ms</td></tr>
+<tr><td>8 clients, ef 100</td><td class="n"><b>5 964 queries/s</b></td><td class="n">1 991 queries/s</td></tr>
 </tbody>
 </table>
 </div>
@@ -247,16 +246,17 @@ force. Each row also carries a tag from a hash of its own, which a filter
 keeps 1% or 25% of the rows by, with an index on it in both. Both HNSW
 indexes take m 16 and ef_construction 64, pgvector's defaults.</p>
 
-<p>Each side gets its best way. <code>fenec-pg</code> keeps its index as the
-rows land from a binary COPY. pgvector builds after the COPY, as it advises,
-in memory and on every core of Docker's virtual machine (4 GB, 8 CPUs; its
-<code>parallel_workers</code> is set, since 768-dim vectors live in TOAST and
-PostgreSQL planned one process for them), reads its index into its buffers
-before the queries (<code>pg_prewarm</code>), and searches a filter with
-<code>hnsw.iterative_scan = relaxed_order</code>. PostgreSQL answers from
-inside that virtual machine, so an empty query's round trip is 0.21 ms
-against <code>fenec-pg</code>'s 0.07 on the host: it accounts for 0.14 ms of
-each answer, not for the rest.</p>
+<p>Each side gets its best way. <code>fenec-server</code> keeps its index as
+the rows land, as JSON arrays of rows, a <code>POST /items</code> of about 13 MB at a time (10 000 rows of 128 dimensions, 1 666 of 768), the next one written while the last is sent. pgvector builds after a binary
+COPY, as it advises, in memory and on every core of Docker's virtual machine
+(4 GB, 8 CPUs; its <code>parallel_workers</code> is set, since 768-dim
+vectors live in TOAST and PostgreSQL planned one process for them), reads
+its index into its buffers before the queries (<code>pg_prewarm</code>), and
+searches a filter with <code>hnsw.iterative_scan = relaxed_order</code>.
+PostgreSQL answers from inside that virtual machine, so an empty query's
+round trip is 0.13 to 0.22 ms against <code>fenec-server</code>'s
+0.06 to 0.11 ms on the host: it accounts for part of each answer,
+not for the rest.</p>
 
 <p>Each server was run on its own after four idle minutes, on an Apple M1
 MacBook Air: fanless, it slows under minutes of load on every core, and a
@@ -273,29 +273,25 @@ swapping it out, on Linux for both: PostgreSQL's is its container's
 anonymous memory and the shared memory of its buffers, from the container's
 cgroup — mostly the buffers, 1 GB as configured here and full once the
 index is read into them — measured in a container started afresh for each
-run, since the buffers keep what an earlier run left. <code>fenec-pg</code>'s
+run, since the buffers keep what an earlier run left. <code>fenec-server</code>'s
 is its vector arena, its graph and its indexes, and at most 16 MB of
 documents written since it last handed them over to its file (<a
 href="concepts.html#the-file-is-mapped">The file is mapped</a>): what its
-engine counts (<code>fenec_memory_bytes</code>), which is what the same load
-held of anonymous memory in a Linux container, 716 and 820 MB. On this Mac
-its physical footprint was larger, 1 074 and 892 MB, since macOS's
-allocator keeps freed blocks in a cache of its own. The pages of their files
-each keeps besides are clean, and the kernel takes them back as it needs
-the memory: the pages of <code>fenec-pg</code>'s mapped file that the
-queries read, and PostgreSQL's page cache of its table and index.</p>
+engine counts (<code>fenec_memory_bytes</code>). On a Mac its physical
+footprint is larger, since macOS's allocator keeps freed blocks in a cache
+of its own. The pages of their files each keeps besides are clean, and the
+kernel takes them back as it needs the memory: the pages of
+<code>fenec-server</code>'s mapped file that the queries read, and
+PostgreSQL's page cache of its table and index.</p>
 
-<p>What a load holds at its peak is another matter, and a <code>COPY</code>
-of every row in one command shows it (<code>make scale-bench
-SCALE_ARGS="--copy-rows 0"</code>). A block holds its writes until it lands,
-and it used to hold them twice, in its record and in the stores: 250 000
-768-dim rows in one block peaked at 2 389 MB of anonymous memory against the
-820 they left, measured in process in a Linux container. A block now spills
-into the file every 16 MB before it lands (<a
-href="file-format.html">File format</a>), and the same load peaks at 904 MB;
-in blocks of 50 000 rows, 888 against 1 144. On this Mac the peak footprint
-of that one <code>COPY</code> went from 2 577 to 1 396 MB, the rest of it
-blocks its allocator keeps.</p>
+<p>What a load holds at its peak is another matter, and a block of every
+row at once shows it. A block holds its writes until it lands, and it used
+to hold them twice, in its record and in the stores: 250 000 768-dim rows
+in one block peaked at 2 389 MB of anonymous memory against the 820 they
+left, measured in process in a Linux container. A block now spills into the
+file every 16 MB before it lands (<a href="file-format.html">File
+format</a>), and the same load peaks at 904 MB; in blocks of 50 000 rows,
+888 against 1 144.</p>
 </details>
 
 <h2 id="concurrency">Writers and readers at once</h2>
@@ -307,11 +303,11 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">253 / 492 / <b>537</b></td><td class="n">270 / 283 / 270</td></tr>
-<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 764 k</b> / 892 k / 625 k</td><td class="n">127 k / 126 k / 125 k</td></tr>
-<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>8 033 k</b>, p99 0.7 µs</td><td class="n">919 k, p99 19.4 µs</td></tr>
-<tr><td>… beside 4 writers</td><td class="n"><b>707 k</b>, p99 83 µs</td><td class="n">300 k, p99 84 µs</td></tr>
-<tr><td>… beside a transaction held open 20 ms</td><td class="n"><b>8 106 k</b>, 0.3 ms at most</td><td class="n">1 031 k, 0.7 ms at most</td></tr>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">254 / <b>502</b> / 495</td><td class="n">248 / 260 / 248</td></tr>
+<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 425 k</b> / 807 k / 607 k</td><td class="n">121 k / 126 k / 127 k</td></tr>
+<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>7 129 k</b>, p99 0.8 µs</td><td class="n">1 101 k, p99 16.9 µs</td></tr>
+<tr><td>… beside 4 writers</td><td class="n"><b>757 k</b>, p99 72 µs</td><td class="n">383 k, p99 77 µs</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n">72 k, the longest 23 ms</td><td class="n"><b>636 k</b>, the longest 0.7 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -319,16 +315,14 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <ul>
   <li><b>Durable writes scale with the writers.</b> Sixteen writers share
     their disk syncs; SQLite's stay flat.</li>
-  <li><b>A transaction held open does not stop the readers.</b> They read at
-    the rate they read alone.</li>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
 <p>fenecdb and SQLite both take one writer at a time. What that costs when
 many want to write, and what readers wait meanwhile, measured in one process:
-fenecdb's threads share one database behind a lock, as <code>fenec-pg</code>
+fenecdb's threads share one database behind a lock, as <code>fenec-server</code>
 does; SQLite's hold a connection each, WAL, with a 30 s busy timeout. A row a
-write, a row by id a read, median of three runs on an M1. Durable is an fsync
+write, a row by id a read, one run on an M1 after idle minutes. Durable is an fsync
 per commit, <code>F_FULLFSYNC</code> for both (Rust's <code>sync_data</code>
 on macOS; <code>PRAGMA fullfsync</code> for SQLite, <code>synchronous=FULL</code>);
 without one, fenecdb's writes stay in its buffer and SQLite's reach the
@@ -340,162 +334,116 @@ operating system (<code>synchronous=NORMAL</code>).</p>
 <p><b>Durable writes scale with the writers.</b> fenecdb's fsync runs after
 its lock is released, and a write an earlier fsync already covered waits for
 none, so sixteen writers share their fsyncs; SQLite syncs a commit while it
-holds the write lock. Without an fsync, one fenecdb writer is fourteen times
-SQLite's, and handing the lock between sixteen costs a third of that.</p>
-
-<p><b>A transaction held open does not stop the readers.</b> One writer is
-how fenecdb isolates a transaction: from its first write to its
-<code>COMMIT</code> no other session writes. Between its statements it lets
-go of the lock, though, and a reader that arrives puts the transaction's
-writes aside — the undo a rollback does, the writes kept for its next
-statement to write again — and reads what has landed. Here the reads went
-at the rate they go alone, and none waited more than 0.3 ms; held under the
-lock throughout, as it once was, the transaction cut them to a thirtieth
-and kept one waiting 34 ms. A transaction that changed a graph — a vector
-written or deleted — or the schema is not put aside, since undone and
-written again each of its nodes would be a tombstone and another node:
-readers wait for that one, where SQLite's WAL reads the last commit. A
-statement on its own holds the lock for microseconds, and
-<code>--idle-in-transaction-timeout</code> (10 s) bounds how long a
-transaction keeps the writers waiting.</p>
+holds the write lock. Without an fsync, one fenecdb writer is twelve times
+SQLite's, and handing the lock between sixteen costs more than half of that. A
+write, or a <code>/batch</code> of them, holds the
+lock only while it runs — microseconds for a row — and there is no
+transaction held open across requests to keep the readers or the other
+writers waiting. A block of 1 000 writes — a <code>/batch</code>'s — does
+hold it while it runs, and readers wait for it: 23 ms at the longest, where
+SQLite's WAL reads the last commit meanwhile.</p>
 </details>
 
-<h2 id="requests">A request over the wire</h2>
+<h2 id="requests">A request over HTTP</h2>
 
-<p>What one request to <code>fenec-pg</code> costs a client on the same
-machine, over the PostgreSQL wire and over HTTP. Most of each round trip is
-the network stack, not the server's work.</p>
+<p>What one request to <code>fenec-server</code> costs a client on the same
+machine, over HTTP. Most of each round trip is the network stack, not the
+server's work.</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>&nbsp;</th><th class="n">pg wire, p50</th><th class="n">8 clients</th><th class="n">HTTP, p50</th><th class="n">8 clients</th></tr></thead>
+<thead><tr><th>&nbsp;</th><th class="n">HTTP, p50</th><th class="n">8 clients</th></tr></thead>
 <tbody>
-<tr><td>a row by id</td><td class="n"><b>0.020 ms</b></td><td class="n">159 k/s</td><td class="n">0.024 ms</td><td class="n">113 k/s</td></tr>
-<tr><td>filter, limit 10</td><td class="n"><b>0.030 ms</b></td><td class="n">107 k/s</td><td class="n">0.034 ms</td><td class="n">87 k/s</td></tr>
-<tr><td><code>near</code>, top 10</td><td class="n"><b>0.057 ms</b></td><td class="n">59 k/s</td><td class="n">0.063 ms</td><td class="n">50 k/s</td></tr>
-<tr><td>put a row</td><td class="n"><b>0.020 ms</b></td><td class="n">114 k/s</td><td class="n">0.025 ms</td><td class="n">106 k/s</td></tr>
+<tr><td>a row by id</td><td class="n"><b>0.022 ms</b></td><td class="n">149 268/s</td></tr>
+<tr><td>filter, limit 10</td><td class="n"><b>0.032 ms</b></td><td class="n">107 322/s</td></tr>
+<tr><td><code>near</code>, top 10</td><td class="n"><b>0.057 ms</b></td><td class="n">66 071/s</td></tr>
+<tr><td>put a row</td><td class="n"><b>0.022 ms</b></td><td class="n">129 476/s</td></tr>
 </tbody>
 </table>
 </div>
 
 <details class="deep"><summary>Method and details</summary>
-<p>What one request costs a client of <code>fenec-pg</code>, on loopback: a
+<p>What one request costs a client of <code>fenec-server</code>, on loopback: a
 row by id, a filter with a limit, a <code>near</code> for the top ten and a
 put, over 10 000 rows of 128 dimensions, asked by one client at a time — the
-round trip's p50 — and by eight at once. Over the pg wire the statement is
-prepared once and bound for each request, as drivers do, text both ways;
-over HTTP it is <code>POST /query</code> with the parameters beside the
-text, on a kept-alive connection. Median of three runs on an M1.</p>
+round trip's p50 — and by eight at once. Each is <code>POST /query</code>
+with the parameters beside the text, on a kept-alive connection. One run
+on an M1, after idle minutes.</p>
 
 <pre data-lang="bash">make pgvector-up      # optional: PostgreSQL's arm, skipped without it
 make requests-bench
 </pre>
 
 <p><b>Most of a round trip is the loopback.</b> For a row by id the
-server's own work is a few microseconds of the twenty: one read and one
-write on the socket, and the statement. A prepared statement is parsed
-when it is prepared, and <code>POST /query</code> keeps the statement a
-text parsed to, so neither reads its text again for each request; an
-HTTP answer goes out in one write. The simple protocol parses each text,
-literals and all: a 128-dim vector is 6 µs of it, and its
-<code>near</code> takes 0.066 ms.</p>
+server's own work is a few microseconds: one read and one write on the
+socket, and the statement. <code>POST /query</code> keeps the statement a
+text parsed to, so it does not read its text again for each request, and an
+answer goes out in one write.</p>
 
 <p>PostgreSQL with pgvector, asked the same in SQL, answers a row by id in
-0.157 ms and a <code>near</code> in 0.665 ms, from inside Docker's virtual
-machine on the same Mac, where its empty query alone takes 0.134 ms. The
-network, not the engine, is most of that difference, and the bench prints
-the empty query beside the rest so that it reads that way.</p>
+0.142 ms and a <code>near</code> in 0.653 ms, from
+inside Docker's virtual machine on the same Mac, where its empty query alone
+takes 0.127 ms. The network, not the engine, is most of that
+difference, and the bench prints the empty query beside the rest so that it
+reads that way.</p>
 </details>
 
 <h2 id="loading">Loading rows</h2>
 
 <p>Loading 100 000 rows, each with a 128-dim vector, every way a client can
-send them. With the vector index kept up to date, every way over the wire runs at about
-18 000 rows a second, against PostgreSQL with pgvector's 434.</p>
+send them. With the vector index kept up to date, HTTP runs at about
+18 000 to 19 000 rows a second, against PostgreSQL with
+pgvector's 410.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">HNSW kept, rows/s</th><th class="n">no vector index</th></tr></thead>
 <tbody>
-<tr><td>in process, <code>put</code> of 1 000</td><td class="n">20 000</td><td class="n">814 000</td></tr>
-<tr><td>pg wire, simple <code>put</code> of 1 000</td><td class="n"><b>18 100</b></td><td class="n">180 000</td></tr>
-<tr><td>pg wire, <code>COPY</code></td><td class="n">17 900</td><td class="n">165 000</td></tr>
-<tr><td>pg wire, a row a statement, in a transaction</td><td class="n">17 800</td><td class="n">147 000</td></tr>
-<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">18 000</td><td class="n"><b>195 000</b></td></tr>
-<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">17 500</td><td class="n">159 000</td></tr>
-<tr><td>PostgreSQL + pgvector, <code>COPY</code></td><td class="n">434</td><td class="n">62 000</td></tr>
-<tr><td>PostgreSQL + pgvector, <code>INSERT</code> of 1 000</td><td class="n">424</td><td class="n">37 700</td></tr>
+<tr><td>in process, <code>put</code> of 1 000</td><td class="n">20 425</td><td class="n">921 665</td></tr>
+<tr><td>HTTP, <code>POST /docs</code> of 1 000</td><td class="n">19 151</td><td class="n">212 820</td></tr>
+<tr><td>HTTP, <code>POST /query</code>, a <code>put</code> of 1 000</td><td class="n">17 483</td><td class="n">94 662</td></tr>
+<tr><td>HTTP, <code>POST /batch</code> of single puts</td><td class="n">18 325</td><td class="n">145 811</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>COPY</code></td><td class="n">410</td><td class="n">56 232</td></tr>
+<tr><td>PostgreSQL + pgvector, <code>INSERT</code> of 1 000</td><td class="n">403</td><td class="n">29 662</td></tr>
 </tbody>
 </table>
 </div>
 
 <ul>
-  <li><b>With the index, the index is the cost.</b> A driver's
-    <code>executemany</code> goes as fast as a <code>COPY</code>.</li>
+  <li><b>With the index, the index is the cost.</b> A batch of single puts
+    goes as fast as an array.</li>
   <li><b>Without it, reading the vectors' text is the cost.</b></li>
-  <li><b>Reading rows back in binary is twice PostgreSQL's speed</b> (table
-    below).</li>
 </ul>
 
 <details class="deep"><summary>Method and details</summary>
 <p>What loading 100 000 rows of a text, an int and a 128-dim vector costs,
 each way a client can send them, into an empty collection: with the
 vector's HNSW graph kept as the rows land, and with no vector index.
-<code>fenec-pg</code> on loopback, 1 000 rows a request — a
-<code>put</code> of 1 000 over the simple protocol; a row a statement over
-the extended protocol in a transaction, a Sync every 1 000, as a driver's
-<code>executemany</code> pipelines them; <code>COPY ... FROM STDIN</code> in
-the text format; <code>POST /docs</code> with a JSON array; a
-<code>POST /batch</code> of single puts. PostgreSQL with pgvector is sent
-the same rows by <code>COPY</code> and by <code>INSERT</code>s of 1 000,
-with <code>synchronous_commit = off</code>, as fenec-pg's writes reach the
-disk within <code>--sync 250</code>. Median of three runs on an M1.</p>
+<code>fenec-server</code> on loopback, 1 000 rows a request —
+<code>POST /docs</code> with a JSON array; a <code>put</code> of 1 000 sent
+to <code>POST /query</code>; a <code>POST /batch</code> of single puts.
+PostgreSQL with pgvector is sent the same rows by <code>COPY</code> and by
+<code>INSERT</code>s of 1 000, with <code>synchronous_commit = off</code>, as
+fenec-server's writes reach the disk within <code>--sync 250</code>. One
+run on an M1, after idle minutes.</p>
 
 <pre data-lang="bash">make pgvector-up      # optional: PostgreSQL's arm, skipped without it
 make load-bench
 </pre>
 
 <p><b>With the graph kept, the graph is the cost.</b> Every way lands
-within a fifth of linking the vectors in process. A transaction's, a
-pipeline's, a <code>/batch</code>'s and a <code>COPY</code>'s vectors are
+close to linking the vectors in process. A <code>/batch</code>'s vectors are
 linked together, 512 at a time on every core, whether they came a row a
-statement or 10 000 a put, so a driver's <code>executemany</code> goes as
-fast as a <code>COPY</code>: linked a row at a time, as they were before,
-the same rows went in at 5 400 rows/s. PostgreSQL's HNSW index takes each
-row on its own, on one core.</p>
+statement or 1 000 a put: linked a row at a time, as they were before, the
+same rows went in at 5 400 rows/s. PostgreSQL's HNSW index takes each row on
+its own, on one core.</p>
 
 <p><b>Without it, the vectors' text is.</b> Each row's vector is 128
 numbers written out, read straight into its <code>f32</code>s wherever it
-comes from — a JSON array, a pg parameter, a <code>COPY</code> cell — in
-one pass that finds each number's end: through a JSON value a number, the
-same rows went in over HTTP at 123 000 rows/s. The simple protocol reads
-them as FenecQL literals, and its lexer reads a list of numbers alone the
-same way, into one vector at once: a token a number and a comma, each
-number's text read three times, it was the slowest of the ways at 105 000
-rows/s, and now passes every way but HTTP's array. In process
-the rows arrive parsed, which is what the rest can at most reach.
-PostgreSQL answers from inside Docker's virtual machine on the same Mac,
-whose network carries every byte.</p>
-
-<p><b>Read back, binary is twice PostgreSQL's.</b> The same 100 000 rows
-read out whole by <code>COPY docs TO STDOUT</code>, through the
-<code>postgres</code> crate's <code>copy_out</code>, median of three:</p>
-
-<div class="tbl">
-<table>
-<thead><tr><th>&nbsp;</th><th class="n">text, rows/s</th><th class="n">binary</th></tr></thead>
-<tbody>
-<tr><td>fenec-pg, <code>COPY ... TO STDOUT</code></td><td class="n">157 000</td><td class="n"><b>1 540 000</b></td></tr>
-<tr><td>PostgreSQL + pgvector, <code>COPY ... TO STDOUT</code></td><td class="n">156 000</td><td class="n">747 000</td></tr>
-</tbody>
-</table>
-</div>
-
-<p>In text each vector is 128 numbers written out, which is most of the
-time on both sides; in binary each goes as pgvector's four bytes a
-component, and fenec-pg's rows are read a page of 1 000 at a time by
-<code>where id &gt; $last</code>, which starts the scan where the page
-before it stopped.</p>
+comes from — a JSON array, a parameter, a FenecQL literal — in one pass that
+finds each number's end. In process the rows arrive parsed, which is what
+the rest can at most reach. PostgreSQL answers from inside Docker's virtual
+machine on the same Mac, whose network carries every byte.</p>
 </details>
 
 <h2 id="scale-measurement">Scale measurement</h2>
@@ -767,13 +715,13 @@ the browser pays is <b>187 KB brotli</b>.</p>
 <table>
 <thead><tr><th>Build</th><th class="n">On disk</th><th class="n">Brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1687 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1445 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1315 KB</td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1153 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>485 KB</b></td><td class="n"><b>161 KB</b></td><td class="n">192 KB</td></tr>
+<tr><td><code>cargo build --release -p fenec-cli</code>, default</td><td class="n">1784 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1526 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1412 KB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1234 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>484 KB</b></td><td class="n"><b>161 KB</b></td><td class="n">192 KB</td></tr>
 <tr><td><code>web/fenec.js</code>, the client</td><td class="n">96 KB</td><td class="n">26 KB</td><td class="n">30 KB</td></tr>
-<tr><td>container image, scratch + musl, amd64</td><td class="n">2.88 MB</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>container image, scratch + musl, amd64</td><td class="n">2.81 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
@@ -799,7 +747,7 @@ dashes.</p>
   and so does reading the thing end to end.</p>
 </div>
 
-<p><code>fenec-pg</code> stays on the <code>release</code> profile on purpose:
+<p><code>fenec-server</code> stays on the <code>release</code> profile on purpose:
 a connection thread that panics unwinds and takes down only its own session,
 and the server stays up. The <code>cli</code> profile turns panic unwinding
 into abort, which is right for a single process with nothing to recover.</p>

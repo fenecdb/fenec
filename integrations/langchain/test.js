@@ -1,9 +1,9 @@
 // The store against a database in the page (a Fenec over web/fenec.wasm)
-// and against fenec-pg's HTTP endpoint (a FenecHttp): `npm test` here, after
+// and against fenec-server's HTTP endpoint (a FenecHttp): `npm test` here, after
 // `npm ci`. What LangChain.js's own integrations are held to -- documents
 // in and found again, their ids, scores, deletions, filters, a retriever --
 // and BM25 and hybrid search. Needs web/fenec.wasm (make wasm); the HTTP
-// half the fenec-pg binary (cargo build -p fenec-pg), and skips without it.
+// half the fenec-server binary (cargo build -p fenec-server), and skips without it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,7 +19,7 @@ import { FenecVectorStore } from './index.js';
 
 const root = new URL('../../', import.meta.url);
 const wasm = await readFile(new URL('web/fenec.wasm', root)).catch(() => null);
-const binary = new URL('target/debug/fenec-pg', root).pathname;
+const binary = new URL('target/debug/fenec-server', root).pathname;
 const hasBinary = await access(binary).then(() => true, () => false);
 const embeddings = new SyntheticEmbeddings({ vectorSize: 16 });
 
@@ -31,11 +31,11 @@ const port = () =>
     });
   });
 
-/** fenec-pg over a file of its own, its HTTP endpoint up; `stop()` ends it. */
+/** fenec-server over a file of its own, its HTTP endpoint up; `stop()` ends it. */
 async function server() {
   const dir = await mkdtemp(join(tmpdir(), 'fenecdb-langchain-'));
-  const [pg, http] = [await port(), await port()];
-  const child = spawn(binary, ['--listen', `127.0.0.1:${pg}`, '--http', `127.0.0.1:${http}`, '--file', join(dir, 'db.fenec')], {
+  const http = await port();
+  const child = spawn(binary, ['--http', `127.0.0.1:${http}`, '--file', join(dir, 'db.fenec')], {
     stdio: 'ignore',
   });
   const url = `http://127.0.0.1:${http}`;
@@ -44,7 +44,7 @@ async function server() {
       await fetch(`${url}/_health`);
       break;
     } catch {
-      if (i > 200) throw new Error('fenec-pg did not start');
+      if (i > 200) throw new Error('fenec-server did not start');
       await new Promise((r) => setTimeout(r, 50));
     }
   }
@@ -74,7 +74,7 @@ function both(name, fn) {
       db.close();
     }
   });
-  test(`${name} (over HTTP)`, { skip: wasm && hasBinary ? false : 'no fenec-pg binary (cargo build -p fenec-pg)' }, async () => {
+  test(`${name} (over HTTP)`, { skip: wasm && hasBinary ? false : 'no fenec-server binary (cargo build -p fenec-server)' }, async () => {
     const s = await server();
     try {
       await fn(s.client);

@@ -549,189 +549,6 @@ fn a_block_of_schema_changes_lands_as_one_record() {
     }
 }
 
-#[test]
-fn a_savepoint_puts_back_the_schema_changes_after_it() {
-    let tap = Tap::default();
-    let mut db = tap.database();
-    seeded(&mut db);
-    let (before, shaped) = (answers(&db), shape(&db));
-
-    db.begin().unwrap();
-    exec(&mut db, "create collection early (x int @sorted)", &[]);
-    exec(&mut db, "put early [{x: 1}, {x: 5}]", &[]);
-    exec(&mut db, r#"put notes {k: "z", body: "before"}"#, &[]);
-    let at = (shape(&db), rows(&db, "get early where x > 2", &[]));
-    let point = db.savepoint();
-    exec(&mut db, "put early {x: 9}", &[]);
-    exec(&mut db, "drop collection early", &[]);
-    exec(&mut db, "create collection early (y text)", &[]);
-    exec(&mut db, "create index on notes (body) @text", &[]);
-    exec(&mut db, r#"put notes {k: "c", body: "after"}"#, &[]);
-    db.rollback_to(&point).unwrap();
-    assert_eq!((shape(&db), rows(&db, "get early where x > 2", &[])), at);
-
-    // A collection written before a savepoint and dropped before it too
-    // comes back whole with the rest, its store as it stood.
-    exec(&mut db, "drop collection notes", &[]);
-    let dropped = db.savepoint();
-    exec(&mut db, "create collection notes (k int)", &[]);
-    db.rollback_to(&dropped).unwrap();
-    db.rollback();
-    assert_eq!(shape(&db), shaped);
-    assert_eq!(answers(&db), before);
-
-    // Landed, the file reads back to what it held.
-    db.begin().unwrap();
-    exec(&mut db, "create collection early (x int @sorted)", &[]);
-    exec(&mut db, "put early [{x: 1}, {x: 5}]", &[]);
-    let point = db.savepoint();
-    exec(&mut db, "drop collection early", &[]);
-    db.rollback_to(&point).unwrap();
-    db.commit().unwrap();
-    let mut back = Database::new();
-    back.load(&tap.bytes()).unwrap();
-    assert_eq!(
-        rows(&back, "get early where x > 2", &[]),
-        rows(&db, "get early where x > 2", &[])
-    );
-    assert_eq!(back.collection_names(), db.collection_names());
-}
-
-#[test]
-fn a_savepoint_puts_back_only_the_writes_after_it() {
-    let tap = Tap::default();
-    let mut db = tap.database();
-    seeded(&mut db);
-    let seq = db.change_seq();
-
-    db.begin().unwrap();
-    let start = db.savepoint();
-    assert!(start.is_start());
-    // Before it: a write into each collection, over documents the writes
-    // after it write again.
-    exec(&mut db, r#"put notes {k: "b", body: "two"}"#, &[]);
-    exec(
-        &mut db,
-        &format!(
-            r#"set docs {{title: "gamma", v: {}}} where tag = "t1""#,
-            vector(7)
-        ),
-        &[],
-    );
-    let kept = answers(&db);
-    let point = db.savepoint();
-    assert!(!point.is_start());
-    exec(
-        &mut db,
-        &format!(
-            r#"put docs {{title: "beta", tag: "t9", n: 100, v: {}}}"#,
-            vector(100)
-        ),
-        &[],
-    );
-    exec(
-        &mut db,
-        &format!(
-            r#"set docs {{title: "delta", n: -5, v: {}}} where tag = "t1""#,
-            vector(9)
-        ),
-        &[],
-    );
-    exec(&mut db, "del docs where n < 10", &[]);
-    exec(&mut db, r#"set notes {body: "three"} where k = "b""#, &[]);
-    exec(&mut db, r#"del notes where k = "a""#, &[]);
-    let later = db.savepoint();
-    exec(&mut db, r#"put notes {k: "c"}"#, &[]);
-    // A statement stopped half way leaves what it wrote in the block, for
-    // a savepoint before it to put back.
-    db.install_plugin(&Refuse).unwrap();
-    let half = stmt(&format!(
-        r#"put docs [{{title: "ok", tag: "t1", v: {}}}, {{title: "bad"}}]"#,
-        vector(5)
-    ));
-    assert!(db.execute_with(&half, &[]).is_err());
-    assert_eq!(
-        rows(&db, r#"get docs select id where title = "ok""#, &[]).len(),
-        1
-    );
-    db.rollback_to(&point).unwrap();
-    assert!(db.in_block());
-    assert_eq!(answers(&db), kept);
-    // A savepoint after it is over: its writes were put back.
-    assert!(db.rollback_to(&later).is_err());
-
-    // Taken back to as often as asked; the ids handed out after it are
-    // handed out again.
-    exec(&mut db, r#"put docs {title: "epsilon"}"#, &[]);
-    assert_eq!(
-        rows(&db, r#"get docs select id where title = "epsilon""#, &[])[0].0,
-        41
-    );
-    db.rollback_to(&point).unwrap();
-    assert_eq!(answers(&db), kept);
-    exec(&mut db, r#"put docs {title: "zeta"}"#, &[]);
-    assert_eq!(
-        rows(&db, r#"get docs select id where title = "zeta""#, &[])[0].0,
-        41
-    );
-    db.rollback_to(&point).unwrap();
-
-    // It lands with what came before the savepoint: one record, numbered
-    // as its last write, which the file reads back.
-    assert!(tap.since(seq).is_empty());
-    db.commit().unwrap();
-    let written = tap.since(seq);
-    assert_eq!(written.len(), 1);
-    // The note, and the ten documents tagged `t1`.
-    assert_eq!(writes_in(&written[0].1).unwrap(), 11);
-    assert_eq!(db.change_seq(), seq + 11);
-    assert_eq!(answers(&db), kept);
-    let mut back = Database::new();
-    back.load(&tap.bytes()).unwrap();
-    assert_eq!(answers(&back), kept);
-
-    // Its block is over, and so is it.
-    assert!(db.rollback_to(&point).is_err());
-}
-
-#[test]
-fn a_savepoint_at_the_start_puts_back_every_write_and_keeps_the_block() {
-    let tap = Tap::default();
-    let mut db = tap.database();
-    seeded(&mut db);
-    let before = answers(&db);
-    let seq = db.change_seq();
-
-    // Taken before the block, as a transaction takes one before its first
-    // write: the start of whichever block is open.
-    let start = db.savepoint();
-    db.rollback_to(&start).unwrap();
-    db.begin().unwrap();
-    exec(&mut db, r#"put notes {k: "b"}"#, &[]);
-    exec(&mut db, "del docs where n >= 20", &[]);
-    db.rollback_to(&start).unwrap();
-    assert!(db.in_block());
-    assert_eq!(answers(&db), before);
-    db.commit().unwrap();
-    assert_eq!(db.change_seq(), seq);
-    assert!(tap.since(seq).is_empty());
-
-    // A savepoint of another block is refused.
-    db.begin().unwrap();
-    exec(&mut db, r#"put notes {k: "b"}"#, &[]);
-    let other = db.savepoint();
-    db.rollback();
-    db.begin().unwrap();
-    exec(&mut db, r#"put notes {k: "c"}"#, &[]);
-    exec(&mut db, r#"put notes {k: "d"}"#, &[]);
-    assert!(db.rollback_to(&other).is_err());
-    assert_eq!(
-        rows(&db, r#"get notes select id where k = "d""#, &[]).len(),
-        1
-    );
-    db.rollback();
-}
-
 // ------------------------------------------------ a block's vectors, linked
 
 /// The `i`th of a run of 16-dim vectors spread around eight centres.
@@ -826,9 +643,9 @@ fn a_blocks_puts_link_their_vectors_together() {
     }
 }
 
-/// A block put back takes the vectors it left waiting with it, and one
-/// taken back to a savepoint the ones after it: none is left waiting that
-/// no document holds, and the graph answers as it did.
+/// A block put back takes the vectors it left waiting with it: none is
+/// left waiting that no document holds, and the graph answers as it did.
+/// One that lands links them all.
 #[test]
 fn a_block_put_back_leaves_no_vector_waiting() {
     let mut db = linked("");
@@ -863,19 +680,8 @@ fn a_block_put_back_leaves_no_vector_waiting() {
             &[Value::Int(i as i64), v16(i)],
         );
     }
-    let sp = db.savepoint();
-    for i in 5_100..5_200 {
-        exec(
-            &mut db,
-            "put docs {n: $1, v: $2}",
-            &[Value::Int(i as i64), v16(i)],
-        );
-    }
-    assert_eq!(db.unlinked(), 200);
-    db.rollback_to(&sp).unwrap();
     assert_eq!(db.unlinked(), 100);
     db.commit().unwrap();
     assert_eq!(db.unlinked(), 0);
     assert_eq!(nearest(&db, 5_050, false)[0], 5_050);
-    assert!(!nearest(&db, 5_150, true).contains(&5_150));
 }

@@ -10,10 +10,11 @@ measurements, as every feature here does.
 | 1 | `alter` and `@unique` -- **done** | small | expected of any database; both ride on what exists |
 | 2 | Objects (`json` fields, paths) -- **done** | medium | the largest gap for a *document* database |
 | 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
-| 4 | TLS 1.3, our own | large | the security story ends at a terminator today |
+| 4 | TLS 1.3, our own, for HTTP | large | the security story ends at a terminator today |
+| 5 | Official SDKs over HTTP (Phase 53) | medium | every language reaches the server over HTTP since the pg wire went |
 
 Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
-are the design; SQL is spoken where tools need it, over the catalog), several
+are the design), the PostgreSQL wire protocol (below), several
 writers to one file or MVCC (the single writer is what removes the WAL, the
 row headers and the visibility map; scale is a file per tenant), multi-writer
 replication. A `decimal` type is wanted but waits behind these.
@@ -23,6 +24,19 @@ module grows only by what a feature costs it, measured; a feature the browser
 build leaves out opens a file that uses it (`off.rs`); a binary from before a
 new record kind or tag refuses the file rather than misread it; limits error,
 they do not truncate.
+
+### Decided 2026-10-01: no PostgreSQL wire protocol
+
+`fenec-pg` became `fenec-server` and lost its pg listener, its `pg_catalog`
+evaluator (`fenec-catalog`), COPY, the extended protocol, pg transactions
+and savepoints, and the driver suite (Phase 52). The compatibility was about
+17 000 lines and a fifth of the commits since September, a long tail of what
+each driver and tool sends, and it pulled away from what sets fenecdb apart:
+the engine in the browser, embedded use, HTTP and sync. Every language
+reaches the server over HTTP (`integrations/languages` runs the docs'
+example in eight), and official SDKs follow (Phase 53). Moving data in from
+PostgreSQL stays: `fenec import` and `--follow` are a migration path, and
+speak PostgreSQL as a client.
 
 ---
 
@@ -87,8 +101,7 @@ On disk: `REC_ALTER` (kind 5) today carries an index added; it gains an
 operation byte (add / drop / rename) and is undone in a block like a create
 index (`Undo`). A binary from before reads a kind-5 record it does not know
 as an index -- so the new operations get a record kind of their own (12),
-which an old binary refuses. Over the pg wire it answers `ALTER TABLE`, as a
-create answers `CREATE TABLE`, and the catalog shows the field at once.
+which an old binary refuses.
 
 Cost to watch: the null-padding check sits on every row read. Measured
 against the scan benchmarks (`make bench`), it must not move a scan.
@@ -183,10 +196,8 @@ integrations already flatten metadata into fields to get around it.
 - **Indexes on a path.** `@hash` and `@sorted` take a path; the index reads
   the value at the path. Text, vector and sparse indexes stay on top-level
   fields.
-- **Transports.** JSON is native. Over the pg wire a `json` field is `jsonb`
-  (OID 3802), sent as text and in jsonb's binary form (a version byte and the
-  text), which psycopg, asyncpg and pgx decode. `COPY` reads and writes it as
-  JSON text.
+- **Transports.** JSON is native; `fenec import` reads PostgreSQL's `jsonb`
+  into a `json` field.
 - **Integrations.** The LangChain and LlamaIndex stores move metadata into
   one `json` field and filter on paths; their framework suites are the test.
 - **Browser cost.** Measured with `make wasm-sizes`; the path walk is a few
@@ -230,16 +241,17 @@ A timestamp field whose rows expire that long after its value. Two parts:
 
 ---
 
-## Phase 4: TLS 1.3, our own
+## Phase 4: TLS 1.3, our own, for HTTP
 
-Today `SSLRequest` is answered `N`, and a port off the machine needs a
-terminator (stunnel, nginx `stream`, Caddy). A database whose pitch includes
+Today a port off the machine needs a terminator (nginx, Caddy, stunnel)
+in front of the HTTP listener. A database whose pitch includes
 security should speak TLS itself -- and the zero-dependency rule means
 writing it. That is the largest and riskiest item here, so it is scoped
 tightly and gated hard.
 
-**Scope.** Server side only, TLS 1.3 only, in `fenec-pg` and its HTTP
-listener; `fenec-wire` and the browser module carry none of it.
+**Scope.** Server side only, TLS 1.3 only, on `fenec-server`'s HTTP
+listener (and `--metrics`'s, and `fenec-shard`'s); `fenec-wire` and the
+browser module carry none of it.
 
 - Key exchange: X25519 (RFC 7748), new.
 - Ciphers: `TLS_CHACHA20_POLY1305_SHA256` -- ChaCha20-Poly1305 exists
@@ -251,8 +263,8 @@ listener; `fenec-wire` and the browser module carry none of it.
   (an RSA key's PKCS#1 v1.5 / PSS signing as a second step, constant time
   with blinding). The server reads its chain and key from PEM and sends the
   chain as it is; it parses no certificate but its own key.
-- pg wire: `SSLRequest` answered `S`, then the handshake on the socket;
-  PostgreSQL 17's direct TLS (`sslnegotiation=direct`) as well.
+- HTTP: the handshake on every accepted socket when a certificate is given,
+  ALPN `http/1.1`; no plain listener beside it on the same address.
 - `--tls-cert`, `--tls-key`, read again on change as `--jwt-keys` is, so a
   renewed certificate needs no restart.
 
@@ -264,9 +276,10 @@ No TLS 1.2, no client certificates, no session tickets in the first cut
 
 **Gates before it ships.** RFC 8448's example handshakes byte for byte;
 X25519 and P-256 against their RFC and Wycheproof vectors; a fuzz target on
-every parser the handshake reaches; interop in CI with `psql
-sslmode=require`, `openssl s_client`, curl, Go's `crypto/tls`, Java's JSSE
-(JDBC) and Node; constant-time review of every secret-dependent path; and a
+every parser the handshake reaches; interop in CI with `openssl s_client`,
+curl, and the HTTP clients `integrations/languages` runs -- Python's `ssl`,
+Go's `crypto/tls`, Java's JSSE, .NET, Node, Ruby, PHP's curl and Rust's
+rustls; constant-time review of every secret-dependent path; and a
 note in `SECURITY.md` that the TLS stack is our own, so a reader can choose
 a terminator instead.
 
@@ -281,3 +294,5 @@ a terminator instead.
    hand; expiry exact before and after a sweep.
 4. TLS -- the gates above; handshake latency and throughput against a
    terminator in front of the same server.
+5. SDKs -- each held to the same flow `integrations/languages` runs, in CI,
+   against a real server.

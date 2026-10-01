@@ -5,7 +5,7 @@
 // shape deleted, is the local side really rolled back when the server
 // rejects a write.
 //
-// Skipped when `web/fenec.wasm` (make wasm) or the `fenec-pg` binary
+// Skipped when `web/fenec.wasm` (make wasm) or the `fenec-server` binary
 // (cargo build) is missing.
 
 import { test } from 'node:test';
@@ -29,13 +29,13 @@ async function binary(name) {
   }
   return null;
 }
-const bin = await binary('fenec-pg');
+const bin = await binary('fenec-server');
 const shardBin = await binary('fenec-shard');
 
 const skip = !wasm
   ? 'no web/fenec.wasm (make wasm)'
   : !bin
-    ? 'no fenec-pg binary (cargo build)'
+    ? 'no fenec-server binary (cargo build)'
     : false;
 
 // A test that times out never reaches its `finally`; that server would be
@@ -78,11 +78,11 @@ async function listening(path, args, name) {
   return { url, close };
 }
 
-/** Brings up an in-memory `fenec-pg --http`; reads the address off stderr. */
+/** Brings up an in-memory `fenec-server --http`; reads the address off stderr. */
 async function server(extra = []) {
   const { url, close } = await listening(
     bin,
-    ['--listen', '127.0.0.1:0', '--http', '127.0.0.1:0', ...extra],
+    ['--http', '127.0.0.1:0', ...extra],
     'fenec-http',
   );
 
@@ -602,7 +602,7 @@ test('a tab joining before the leader is seeded is not left hanging', opts, asyn
 // ------------------------------------------------------------------ tenants
 //
 // The same sync layer through a router: `fenec-shard` in front of a
-// `fenec-pg --dir` node. The client's base URL gains `/t/<tenant>` and
+// `fenec-server --dir` node. The client's base URL gains `/t/<tenant>` and
 // nothing else changes -- which is the whole claim of tenant routing.
 
 const shardSkip = skip || (!shardBin ? 'no fenec-shard binary (cargo build)' : false);

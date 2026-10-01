@@ -1,5 +1,5 @@
 """The change stream: every write on the server's disk, read as a consumer
-the server keeps the cursor of (`fenec-pg --cdc`)."""
+the server keeps the cursor of (`fenec-server --cdc`)."""
 
 import os
 import subprocess

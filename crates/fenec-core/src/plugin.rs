@@ -3,10 +3,11 @@
 //! A plugin can hook into:
 //!   * scalar functions (`register_fn`)  -> callable in FenecQL expressions
 //!   * write hooks      (`register_hook`) -> trigger-like
-//!   * export adapters                    -> e.g. the PostgreSQL wire protocol
+//!   * write hooks                        -> e.g. a JWT policy's row check
 //!
-//! The core knows nothing about plugins; fenec-pg uses this interface to make
-//! fenecdb speak like a PostgreSQL server.
+//! The core knows nothing about plugins; fenec-http checks a scoped token's
+//! writes through this interface, and fenec-server guards a mirrored
+//! collection with it.
 
 use crate::error::{Error, Result};
 use crate::schema::Schema;

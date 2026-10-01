@@ -48,7 +48,7 @@ its transport first.</p>
 <h2 id="keeping">Keeping a database</h2>
 
 <p>In a dedicated worker, <code>openFile</code> keeps the database in a file
-of the origin private file system — the same file <code>fenec-pg</code>
+of the origin private file system — the same file <code>fenec-server</code>
 keeps — and each write is flushed before <code>run</code> returns.
 <code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, and work anywhere a page runs.</p>
@@ -59,7 +59,7 @@ import { Fenec, openFile } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 const file = await openFile(db, 'notes.fenec');   // loads what it holds, or takes the database's image
 db.run('put notes {text: $1}', ['in the file before run returns']);
-const bytes = file.bytes();                        // what fenec and fenec-pg open
+const bytes = file.bytes();                        // what fenec and fenec-server open
 </pre>
 
 <ul>
@@ -73,7 +73,7 @@ const bytes = file.bytes();                        // what fenec and fenec-pg op
 
 <details class="deep"><summary>Details</summary>
 <p><code>openFile</code> keeps the database in a file of the origin private
-file system, byte for byte the file <code>fenec-pg</code> keeps on disk:
+file system, byte for byte the file <code>fenec-server</code> keeps on disk:
 download it and <code>fenec notes.fenec</code> opens it, and a server's file
 handed to a page loads there. <code>run</code> appends each statement's
 writes to it and flushes the file before it answers. It needs a dedicated
@@ -146,7 +146,7 @@ Its cursors, which are only numbers, are stored in the clear. The same 32.4 MB i
 Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file
-<code>fenec-pg</code> opens. The disk's own encryption covers it.</p>
+<code>fenec-server</code> opens. The disk's own encryption covers it.</p>
 </details>
 
 <h2 id="collation">Collation data</h2>
@@ -421,7 +421,7 @@ sends it again as JSON, so a plain array keeps its numbers as written and a
 <h2>Independent of the transport</h2>
 
 <p>The same query code runs against the module in the page, a
-<code>fenec-pg</code> server or an HTTP endpoint: build it with
+<code>fenec-server</code> server or an HTTP endpoint: build it with
 <code>from()</code>, then <code>bind()</code> it to where it should run.</p>
 
 <pre data-lang="js">import { from, connect } from './fenec.js';

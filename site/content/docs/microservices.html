@@ -19,10 +19,9 @@ fenecdb gives a service a database of its own on a shared node, a token that
 reaches only that, and the writes on its disk as a stream of events — which
 is what an outbox table and a relay are usually built for.</p>
 
-<p>A tenant node (<code>fenec-pg --dir</code>) keeps a file per tenant, and
-a tenant is named by the path, <code>/t/&lt;tenant&gt;/</code>, or over the
-PostgreSQL wire by the database a client connects to — never by the query,
-so one service cannot read another's rows. Give each service its tenant,
+<p>A tenant node (<code>fenec-server --dir</code>) keeps a file per tenant, and
+a tenant is named by the path, <code>/t/&lt;tenant&gt;/</code> — never by
+the query, so one service cannot read another's rows. Give each service its tenant,
 and a router (<code>fenec-shard</code>) in front of the nodes when there are
 several: see <a href="/docs/sharding">Tenants and sharding</a>.</p>
 
@@ -30,20 +29,17 @@ several: see <a href="/docs/sharding">Tenants and sharding</a>.</p>
 the collections, and the rows, its role may read or write
 (<a href="/docs/http#scoped-access">Scoped access</a>). A service that only
 reads can be pointed at a replica, which refuses every write
-(<a href="/docs/replication">Replication</a>), or log in over the
-PostgreSQL wire as the reader, which writes nothing
-(<a href="/docs/postgres#authentication">Authentication</a>); a PostgreSQL driver that
-knows <code>target_session_attrs=read-write</code> finds the primary among
-several hosts by itself.</p>
+(<a href="/docs/replication">Replication</a>), or hold a token whose policy
+grants <code>read</code> alone.</p>
 </details>
 
 <h2>Every write as an event</h2>
 
 <p>Turn on <code>--cdc</code> and every write that reaches disk becomes an
-event a consumer can read. You do not need an outbox table: a transaction's
+event a consumer can read. You do not need an outbox table: a batch's
 rows are announced together.</p>
 
-<pre data-lang="bash">fenec-pg --file orders.fenec --http 127.0.0.1:8080 --cdc
+<pre data-lang="bash">fenec-server --file orders.fenec --http 127.0.0.1:8080 --cdc
 
 # a consumer the server keeps the cursor of, made once
 curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
@@ -51,14 +47,14 @@ curl -X POST http://127.0.0.1:8080/_changes/consumers/billing
 
 <details class="deep"><summary>Details</summary>
 <p>An outbox table exists because a service must change its data and
-announce the change together, or not at all. A fenecdb transaction, a
-<code>/batch</code> or a pipeline is one record on disk, so the rows it
+announce the change together, or not at all. A fenecdb
+<code>/batch</code> is one record on disk, so the rows it
 writes are announced together already: <code>GET /_changes</code> hands
 over every write once it is on disk, the documents with it
 (<a href="/docs/http#changes">Change data capture</a>). The collection is
 its own outbox. Where the event should say something the rows do not —
 a command, an intent — write it into a collection of its own in the same
-transaction, and it comes in the same record.</p>
+<code>/batch</code>, and it comes in the same record.</p>
 
 <p>A consumer in Python:</p>
 
@@ -106,7 +102,7 @@ from a fresh read.</p>
   <code>put</code> carries the whole document, so applying one twice
   leaves what applying it once did.</li>
   <li><b>In order, one database at a time.</b> <code>seq</code> is the
-  database's change counter; a transaction's writes come together. There is
+  database's change counter; a batch's writes come together. There is
   no order across tenants.</li>
   <li><b>Kept for a while, not for ever.</b> The server keeps as many writes
   as <code>--replication-buffer</code> holds, 64 MiB unless given. A

@@ -31,7 +31,7 @@ use fenec_core::prelude::*;
 use std::sync::Arc;
 
 /// Query keys that are read as clauses rather than as filters. A field with
-/// the same name cannot be filtered over HTTP (the FenecQL and `fenec-pg` paths
+/// the same name cannot be filtered over HTTP (the FenecQL and `fenec-server` paths
 /// are unaffected).
 const RESERVED: [&str; 8] = [
     "select", "order", "limit", "offset", "count", "where", "lookup", "group",
@@ -530,7 +530,7 @@ fn lit(raw: &str, ty: &DataType, name: &str) -> Result<Value> {
         // it has no spelling for infinity -- which makes the query string
         // agree with the JSON body, where `inf` was never a number either.
         // It also keeps `core`'s 12 KB table of powers of five out of every
-        // binary that links this crate, `fenec-pg` included.
+        // binary that links this crate, `fenec-server` included.
         DataType::Float => {
             Value::Float(fenec_core::num::parse_f64(raw).ok_or_else(|| bad("a number"))?)
         }

@@ -1,14 +1,13 @@
 //! # fenec-wire
 //!
-//! The PostgreSQL v3 wire protocol, the part both of fenecdb's sides of it
-//! speak: the framing ([`proto`]) and a client ([`client`]) for a real
-//! PostgreSQL server.
+//! The client side of PostgreSQL's v3 wire protocol: the framing
+//! ([`proto`]) and a client ([`client`]) for a real PostgreSQL server,
+//! which `fenec import` reads a table through and `--follow` a logical
+//! replication slot.
 //!
 //! A crate of its own so that the importer, which reads from PostgreSQL
 //! through the client, sits below the server, which runs the importer's
-//! `--follow` in its own process (`fenec-pg --follow`): in fenec-pg, the
-//! client made the importer depend on the server, and the server could not
-//! depend on it back.
+//! `--follow` in its own process (`fenec-server --follow`).
 
 pub mod client;
 pub mod proto;

@@ -1,12 +1,12 @@
 # fenecdb with Prometheus and Grafana, the dashboard (grafana/fenecdb.json)
 # already loaded:
 #
-#   FENECPG_PASSWORD=secret FENEC_METRICS_TOKEN=scrape \
+#   FENEC_HTTP_TOKEN=secret FENEC_METRICS_TOKEN=scrape \
 #     docker compose -f monitoring/docker-compose.yml up -d
 #   open http://127.0.0.1:3000/d/fenecdb
 #
-# fenec-pg serves /_metrics on a listener of its own (--metrics), so the
-# pg port is the only data port. That listener is on the compose network
+# fenec-server serves /_metrics on a listener of its own (--metrics), so the
+# data port need not be on the compose network. That listener is on it
 # alone and still takes a token: a non-loopback address wants one.
 
 services:
@@ -14,8 +14,8 @@ services:
     build: ..
     image: fenecdb
     command:
-      - --listen
-      - 0.0.0.0:5433
+      - --http
+      - 0.0.0.0:8080
       - --file
       - /data/data.fenec
       - --sync
@@ -28,9 +28,9 @@ services:
       - --slow-ms
       - "100"
     environment:
-      FENECPG_PASSWORD: "${FENECPG_PASSWORD:?set a password first, e.g. FENECPG_PASSWORD=secret}"
+      FENEC_HTTP_TOKEN: "${FENEC_HTTP_TOKEN:?set a token first, e.g. FENEC_HTTP_TOKEN=secret}"
     ports:
-      - "127.0.0.1:5433:5433"
+      - "127.0.0.1:8080:8080"
     volumes:
       - fenecdata:/data
     mem_limit: 1g

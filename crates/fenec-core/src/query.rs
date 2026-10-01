@@ -97,7 +97,7 @@ impl Expr {
     /// Extracts the `field = literal` pattern -- for hash index pushdown.
     ///
     /// A bound parameter is resolved as well: `where year = $1` is the usual
-    /// shape coming from the browser and from fenec-pg, and looking only at
+    /// shape coming from the browser and from fenec-server, and looking only at
     /// `Lit` disabled pushdown entirely on those two paths.
     pub fn equality_key<'a>(&'a self, params: &'a [Value]) -> Option<(&'a str, &'a Value)> {
         fn value<'a>(e: &'a Expr, params: &'a [Value]) -> Option<&'a Value> {
@@ -120,8 +120,8 @@ impl Expr {
 
     /// The lowest id a row can have and pass the `and` chain, from its `id >
     /// x` and `id >= x` (or `x < id`, `x <= id`), so a scan in id order can
-    /// start there: a page read by its last id, as COPY TO and a keyset
-    /// pagination read one, went through every row before it again --
+    /// start there: a page read by its last id, as a keyset pagination
+    /// reads one, went through every row before it again --
     /// a million rows read a page of 1 000 at a time took 8.6 s, and take
     /// 110 ms, 100 000 took 95.8 ms and take 10.9. The filter still tests
     /// each row after it, so the floor need only be no higher than any

@@ -95,8 +95,7 @@ fn put_doc(db: &mut Database, i: usize) {
 
 /// Writes of every shape a block takes: lone statements, one of many
 /// documents, a block across collections that makes and drops one, a block
-/// put back, a savepoint taken back to, a collection dropped and made again
-/// under its name.
+/// put back, a collection dropped and made again under its name.
 fn workload(db: &mut Database, from: usize) {
     if db.collection("docs").is_err() {
         run(
@@ -150,13 +149,6 @@ fn workload(db: &mut Database, from: usize) {
 
     db.begin().unwrap();
     run(db, "put other {x: 8}");
-    let sp = db.savepoint();
-    put_doc(db, from + 3000);
-    run(
-        db,
-        &format!("set docs {{title: \"taken back\"}} where n = {}", from + 40),
-    );
-    db.rollback_to(&sp).unwrap();
     put_doc(db, from + 4000);
     db.commit().unwrap();
 

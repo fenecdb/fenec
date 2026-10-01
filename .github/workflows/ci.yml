@@ -113,7 +113,7 @@ jobs:
           python3 site/build.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
-      # fenec-pg binary that the sync tests run against.
+      # fenec-server binary that the sync tests run against.
       - name: Test
         run: make test
 
@@ -167,24 +167,23 @@ jobs:
 
       # LangChain's standard vector store suite and the tests LlamaIndex's
       # own integrations run, from a python:3.13 container, against a
-      # fenec-pg started on the runner.
+      # fenec-server started on the runner.
       - name: Python stores
         run: make python-test
 
-      # psycopg's nested transactions and SQLAlchemy's begin_nested, which
-      # are savepoints, asyncpg, pgx, node-postgres and tokio-postgres, and
-      # pgvector's library for each, over the pg wire of a fenec-pg on the
-      # runner.
-      - name: PostgreSQL drivers
-        run: make drivers-test
+      # The docs' example for each language -- Python, JavaScript, Go, C#,
+      # Java, PHP, Ruby and Rust -- over HTTP against a fenec-server on the
+      # runner, each with its language's own HTTP client.
+      - name: Languages over HTTP
+        run: make languages-test
 
-      # useLiveQuery against a stand-in and a real fenec-pg and replica; the
+      # useLiveQuery against a stand-in and a real fenec-server and replica; the
       # sync layer loads the browser module.
       - name: React hook
         run: make wasm react-test
 
       # The LangChain.js store over a database in the page and over the
-      # HTTP endpoint of a fenec-pg started here.
+      # HTTP endpoint of a fenec-server started here.
       - name: LangChain.js store
         run: make langchain-test
 
@@ -237,4 +236,4 @@ jobs:
         run: make small
 
       - name: Build the server (release)
-        run: cargo build --release -p fenec-pg
+        run: cargo build --release -p fenec-server

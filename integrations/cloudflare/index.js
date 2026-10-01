@@ -24,7 +24,7 @@
 //     }
 //   }
 //
-// One object is one database, as a tenant is one file on a fenec-pg node:
+// One object is one database, as a tenant is one file on a fenec-server node:
 // the object's single thread is the single writer. Nothing here imports the
 // engine; `fenec` is a `Fenec` from `@fenecdb/web`, opened by the caller.
 

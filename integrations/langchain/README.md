@@ -1,7 +1,7 @@
 # @fenecdb/langchain
 
 A LangChain.js vector store over fenecdb: the database in the page (a
-`Fenec` from `@fenecdb/web`), or behind fenec-pg's HTTP endpoint (a
+`Fenec` from `@fenecdb/web`), or behind fenec-server's HTTP endpoint (a
 `FenecHttp`) -- anything with `run(sql, params)`.
 
 ```js
@@ -36,5 +36,5 @@ from JavaScript:
   statements run as one block; over HTTP they are two requests.
 
 `npm test` holds it to what LangChain.js's own vector store integrations
-are tested for, over a database in the page and over a fenec-pg. It needs
-`web/fenec.wasm` and the fenec-pg binary.
+are tested for, over a database in the page and over a fenec-server. It needs
+`web/fenec.wasm` and the fenec-server binary.

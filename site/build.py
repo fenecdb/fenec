@@ -67,7 +67,7 @@ NAV = [
         ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
-        ("docs/postgres", "PostgreSQL server"),
+        ("docs/server", "Server"),
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),
         ("docs/sharding", "Tenants and sharding"),
@@ -314,9 +314,9 @@ def prev_next(active, base):
 # Not everything measured is in here. The container image's size is written
 # into four files and cannot be checked from a site build, which has neither a
 # daemon nor the registry; it drifted from 1.25 MB to a claimed 1.55 before
-# anyone noticed. `docker image inspect ghcr.io/fenecdb/fenec-pg:<v>` is the
+# anyone noticed. `docker image inspect ghcr.io/fenecdb/fenec-server:<v>` is the
 # way to settle it by hand.
-# Not in here, and deliberately: the `fenec` and `fenec-pg` binary sizes. They
+# Not in here, and deliberately: the `fenec` and `fenec-server` binary sizes. They
 # are quoted for an Apple M-series and CI is Linux, so a check would compare
 # two different numbers and fail honest builds. They are re-measured by hand at
 # each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
@@ -326,7 +326,7 @@ COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all"}
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB gzip wasm", "kb_gz", 0),
     ("README.md", r"gzip wasm \+ (\d+) KB gzip client", "kb_client_gz", 0),
-    ("README.md", r"fenec-pg:(\d+\.\d+\.\d+)", "version", 0),
+    ("README.md", r"fenec-server:(\d+\.\d+\.\d+)", "version", 0),
     ("README.md", r"(\d+) KB of gzipped WebAssembly and", "kb_gz", 0),
     ("README.md", r"as (\d+) KB of\s+gzipped WebAssembly", "kb_gz", 0),
     ("README.md", r"and a (\d+) KB gzipped client", "kb_client_gz", 0),
@@ -475,8 +475,8 @@ LLMS_BRIEF = """\
 # fenecdb
 
 > Minimal, vector-native embedded database: one file, HNSW, BM25 and hash
-> indexes, runs in the browser as WebAssembly and speaks the PostgreSQL wire
-> protocol. Its query language is FenecQL, which is not SQL.
+> indexes, runs in the browser as WebAssembly and as a server over HTTP.
+> Its query language is FenecQL, which is not SQL.
 
 Writing FenecQL -- the reference below spells it out in full:
 

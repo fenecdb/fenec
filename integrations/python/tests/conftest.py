@@ -1,5 +1,5 @@
 """The server the tests talk to: FENEC_URL and FENEC_TOKEN, as run-tests.sh
-sets them for a fenec-pg it starts."""
+sets them for a fenec-server it starts."""
 
 import os
 import uuid

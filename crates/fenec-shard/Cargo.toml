@@ -1,6 +1,6 @@
 [package]
 name = "fenec-shard"
-description = "Tenant router for fenecdb: one HTTP front for many fenec-pg --dir nodes"
+description = "Tenant router for fenecdb: one HTTP front for many fenec-server --dir nodes"
 version.workspace = true
 edition.workspace = true
 autotests = false

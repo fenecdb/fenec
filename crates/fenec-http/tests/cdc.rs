@@ -26,7 +26,7 @@ struct Node {
 }
 
 /// A server keeping `buffer` bytes of writes for `/_changes` alone, as
-/// `fenec-pg --cdc` starts one, or none with `buffer` 0.
+/// `fenec-server --cdc` starts one, or none with `buffer` 0.
 fn start(name: &str, buffer: usize) -> Node {
     let path = file(name);
     let access = Arc::new(Access::new(SECRET, "notes  read  where owner = $jwt.sub\n").unwrap());

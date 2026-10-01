@@ -491,7 +491,7 @@ export class FenecHttp {
   }
 }
 
-/** Connects to a remote fenecdb HTTP endpoint (`fenec-pg --http`). */
+/** Connects to a remote fenecdb HTTP endpoint (`fenec-server --http`). */
 export function connect(url, opts = {}) {
   return new FenecHttp(url, opts);
 }
@@ -505,7 +505,7 @@ export function connect(url, opts = {}) {
 // inspected with `toFenecQL()`.
 //
 // The builder is transport independent: `from('docs')` works on its own and
-// `bind()` attaches it to any executor (wasm, HTTP, fenec-pg).
+// `bind()` attaches it to any executor (wasm, HTTP, fenec-server).
 
 /** Operator names -- both symbols and words are accepted. */
 const OPS = {
@@ -1537,7 +1537,7 @@ export async function restore(fenec, key = 'default', opts = {}) {
 
 // ------------------------------------------------------------- file (OPFS)
 // A database kept in a file of the origin private file system holds what
-// fenec-pg holds on disk, byte for byte: an image, then every write since,
+// fenec-server holds on disk, byte for byte: an image, then every write since,
 // appended as it is made. So a page's file opens with `fenec`, and a
 // server's file loads in a page. `run` hands each statement's writes to the
 // file and flushes it before it answers, where `persist` stores what was
@@ -1714,7 +1714,7 @@ function loads(fenec, bytes) {
 
 /**
  * Keeps the database in a file of the origin private file system, the bytes
- * fenec-pg keeps on disk. A file holding some is loaded into the database,
+ * fenec-server keeps on disk. A file holding some is loaded into the database,
  * which must hold nothing yet; an empty one takes the database's image. From
  * then on `run` appends every statement's writes to it and flushes it before
  * it answers.
@@ -2731,7 +2731,7 @@ function normalizeShape(raw) {
 /**
  * Opens the local replica and starts the subscriptions.
  *
- * - `url`      server root (`fenec-pg --http`)
+ * - `url`      server root (`fenec-server --http`)
  * - `shapes`   `[{ collection, where?, select?, key? }]`
  * - `local`    an existing `Fenec`; otherwise opened from the `wasm` path,
  *              its collation data from `collation` (`Fenec.open`)

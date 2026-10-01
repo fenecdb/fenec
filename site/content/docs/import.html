@@ -77,8 +77,8 @@ untyped columns are resolved from the first 1000 rows.</p>
 
 <p><b>PostgreSQL.</b> It connects to the live server and streams
 <code>COPY ... TO STDOUT</code> — no <code>psql</code>, no
-<code>pg_dump</code>. Authentication is SCRAM-SHA-256, using
-<code>fenec-pg</code>'s own crypto in the client direction. pgvector's
+<code>pg_dump</code>. Authentication is SCRAM-SHA-256, hand-written in
+<code>fenec-wire</code>'s client over <code>fenec-http</code>'s own crypto. pgvector's
 <code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> columns
 are recognised along with their dimensions.</p>
 </details>
@@ -252,10 +252,10 @@ row.</p>
 
 <h2 id="serving">Serving the mirror as it follows</h2>
 
-<p><code>fenec-pg --follow</code> runs the follower inside the server, so the
-table is served over PostgreSQL, HTTP and subscriptions while it follows.</p>
+<p><code>fenec-server --follow</code> runs the follower inside the server, so the
+table is served over HTTP and subscriptions while it follows.</p>
 
-<pre data-lang="bash">fenec-pg --file articles.fenec --listen 0.0.0.0:5433 --http 0.0.0.0:8080 \
+<pre data-lang="bash">fenec-server --file articles.fenec --http 0.0.0.0:8080 --http-token "$TOKEN" \
     --follow postgres://app@db:5432/app --follow-table docs --follow-into articles \
     --follow-index "embed@hnsw(cosine)"
 follow: docs: slot fenec_articles (created), publication fenec_articles (created)
@@ -268,22 +268,22 @@ follow: docs: streaming its changes
   <li><b>Import options take a <code>--follow-</code> prefix:</b>
     <code>--follow-index</code>, <code>--follow-cast</code> and so on.</li>
   <li><b>The mirrored collection is read-only</b> to clients
-    (<code>25006</code>); the rest of the file takes writes.</li>
+    (403); the rest of the file takes writes.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
 <p>A second process over the follower's file corrupts it, so serving the
-mirror took a copy of it and a process of its own. <code>fenec-pg
+mirror took a copy of it and a process of its own. <code>fenec-server
 --follow</code> runs the follower inside the server instead, over the file
-the server serves: the table is served over the pg wire, HTTP and
-subscriptions as it follows, with no second copy.</p>
+the server serves: the table is served over HTTP and subscriptions as it
+follows, with no second copy.</p>
 
 <p>Every option of <code>fenec import</code> that says how a row becomes a
 document — <code>--index</code>, <code>--vector</code>, <code>--cast</code>,
 <code>--id</code>, <code>--where</code>, <code>--batch</code> — is taken as
 <code>--follow-index</code> and so on, as are <code>--follow-slot</code> and
 <code>--follow-publication</code>. The collection takes no write but the
-follower's: a client's is refused with <code>25006</code>, since the next
+follower's: a client's is refused with 403, since the next
 change from PostgreSQL would write over it. The rest of the file takes
 writes as ever. A subscriber of the collection
 (<code>GET /articles/changes</code>) hears each change as the follower
@@ -314,7 +314,7 @@ under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
 (<code>make follow-bench</code>), was 0.16 ms at the median on the same
 machine. Killed while the table took a row a transaction, the server was up
 again in 98 ms and held every one of the table's 16 295 rows 880 ms after it
-started. The follower adds 178 KB to <code>fenec-pg</code>.</p>
+started. The follower adds 178 KB to <code>fenec-server</code>.</p>
 </details>
 
 <h2>Speed and testing</h2>
@@ -330,6 +330,6 @@ cargo test -p fenec-import --test all -- --ignored pg:: follow::
 <p>Import is a default feature of the <code>fenec</code> binary and accounts
 for 242 KB of it. <code>--no-default-features</code> removes it, and
 <code>fenec backup</code>, <code>archive</code> and <code>restore</code> with it (130 KB);
-with the <code>cli</code> profile as well, the binary drops from 1687 KB to 1153 KB
+with the <code>cli</code> profile as well, the binary drops from 1784 KB to 1234 KB
 (<code>make small</code>).</p>
 </details>

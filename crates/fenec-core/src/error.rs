@@ -9,8 +9,8 @@ pub enum Error {
     NotFound(String),
     /// A resource that already exists.
     Exists(String),
-    /// An `insert` of a document whose id is taken: PostgreSQL's
-    /// `unique_violation`, where `Exists` is a collection's `42P07`.
+    /// An `insert` of a document whose id is taken, or a `@unique` value
+    /// held: 409 over HTTP, as `Exists` is for a collection.
     Duplicate(String),
     /// A corrupt segment or an unexpected byte sequence.
     Corrupt(String),

@@ -1,6 +1,5 @@
-//! What each statement cost, by its shape: `GET /_stats/statements`, and
-//! `pg_stat_statements` over the pg wire, PostgreSQL's view of that name
-//! answered from the same counts.
+//! What each statement cost, by its shape: `GET /_stats/statements`, as
+//! PostgreSQL's `pg_stat_statements` counts them.
 //!
 //! A statement is counted where `/_metrics` counts it, from its arrival to
 //! its answer. Its shape is its text with every literal and parameter
@@ -91,8 +90,7 @@ thread_local! {
 /// Notes the FenecQL the request this thread is serving carries --
 /// `POST /query`'s statement, `POST /batch`'s one after the other -- to be
 /// counted as, rather than the request's JSON, where every statement is a
-/// string and the shape of each would be the same `{$1: $2}`. A statement
-/// run over HTTP is counted with the same one run over the pg wire.
+/// string and the shape of each would be the same `{$1: $2}`.
 pub fn text(sql: &str) {
     TEXT.with(|t| {
         let mut t = t.borrow_mut();
@@ -183,7 +181,7 @@ fn forget(map: &mut HashMap<u64, Entry>) {
 pub enum View<'a> {
     /// A server over one file: its own.
     Node,
-    /// A tenant's, under `/t/<tenant>/` or over its pg connection.
+    /// A tenant's, under `/t/<tenant>/`.
     Tenant(&'a str),
     /// Every tenant's, each named: a tenant node's admin alone.
     Tenants,
@@ -298,8 +296,8 @@ fn hash(tenant: Option<&str>, shape: &str) -> u64 {
 /// literals alone as `$n`, whitespace runs as a space -- as far as the
 /// [`TEXT_MAX`] bytes of it an entry keeps, which is as far as two shapes
 /// can be told apart where they are shown. Shaped whole, a `put` of 1 000
-/// 128-dim rows spent 1.7 ms of its 12.6 over the pg wire here (79k -> 92k
-/// rows/s).
+/// 128-dim rows spent 1.7 ms of its 12.6 here, over the pg wire as it was
+/// (79k -> 92k rows/s).
 pub fn shape(text: &str, out: &mut String) {
     let b = text.as_bytes();
     let mut n = 0u32;

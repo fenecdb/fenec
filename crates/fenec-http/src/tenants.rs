@@ -147,7 +147,7 @@ pub struct Tenants {
     max_memory: usize,
     checkpoint: bool,
     /// Whether tenant files are mapped (`fs::open`) or read into memory
-    /// (`fenec-pg --no-mmap`).
+    /// (`fenec-server --no-mmap`).
     mapped: bool,
     /// The router's lease, on a node that takes one (`--lease`).
     lease: Option<Arc<Lease>>,
@@ -187,7 +187,7 @@ impl Tenants {
     }
 
     /// Whether tenant files are mapped, as `fs::open` maps a file, or read
-    /// into memory: `fenec-pg --no-mmap`, which a network file system wants
+    /// into memory: `fenec-server --no-mmap`, which a network file system wants
     /// -- a read error there kills a process reading a mapping -- and which
     /// has `--max-memory` count the data.
     pub fn with_mmap(mut self, on: bool) -> Tenants {
@@ -195,7 +195,7 @@ impl Tenants {
         self
     }
 
-    /// Runs on every database as it is opened -- `fenec-pg` installs its
+    /// Runs on every database as it is opened -- `fenec-server` installs its
     /// plugin here, so a tenant sees the same functions a single file does.
     pub fn with_setup(
         mut self,
@@ -414,10 +414,10 @@ impl Tenants {
         }
         // A replica's file with nothing following for it -- a node started
         // without --replica-of, after a failover left it unpromoted -- is
-        // promoted where it stands, as `fenec-pg --promote` promotes a file.
+        // promoted where it stands, as `fenec-server --promote` promotes a file.
         // It could not be before: it opened refusing writes, and nothing on
         // the running node could make it take them.
-        let mut g = crate::held::write_unheld(&t.db);
+        let mut g = crate::held::write(&t.db);
         if !g.history().following {
             return Err(Refused(409, format!("tenant `{name}` is not a replica")));
         }
@@ -575,7 +575,7 @@ impl Tenants {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
         }
         // Every write the database lands asks the lease first, whichever
-        // way it came in: HTTP, the pg wire, a maintenance.
+        // way it came in: HTTP, a maintenance, a follower.
         if let Some(lease) = &self.lease {
             let (lease, name) = (Arc::clone(lease), name.to_string());
             db.set_fence(Some(Arc::new(move || lease.allows(&name))));
@@ -782,9 +782,7 @@ impl Tenants {
     /// write, so the receiving node opens it without rebuilding anything.
     pub fn export(&self, name: &str) -> std::result::Result<Vec<u8>, Refused> {
         let t = self.get(name)?;
-        // Once the transaction open on it has ended: its commit lands in
-        // the export, not in the file the move leaves behind.
-        let image = crate::held::read_quiet(&t.db).snapshot();
+        let image = crate::held::read(&t.db).snapshot();
         Ok(image)
     }
 

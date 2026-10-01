@@ -1,6 +1,6 @@
 """fenecdb over HTTP.
 
-A client for fenec-pg's HTTP endpoint (`fenec-pg --http <address>`), and on
+A client for fenec-server's HTTP endpoint (`fenec-server --http <address>`), and on
 top of it vector stores for LangChain (`fenecdb.langchain`) and LlamaIndex
 (`fenecdb.llama_index`).
 
@@ -17,7 +17,7 @@ request would stall:
         rows = await db.query("get articles near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 
 `Client.follow` reads every write on the server's disk (`GET /_changes`,
-`fenec-pg --cdc`) for a consumer whose cursor the server keeps, and
+`fenec-server --cdc`) for a consumer whose cursor the server keeps, and
 commits each batch once the loop comes back for the next:
 
     for batch in db.follow("search-index"):
@@ -57,7 +57,7 @@ class Changes(NamedTuple):
 
 
 class Client:
-    """fenec-pg's HTTP endpoint, one statement a request."""
+    """fenec-server's HTTP endpoint, one statement a request."""
 
     def __init__(
         self,
@@ -192,7 +192,7 @@ def _answer(status: int, raw: bytes) -> Any:
 
 
 class AsyncClient:
-    """fenec-pg's HTTP endpoint over asyncio: `Client`'s calls, awaited.
+    """fenec-server's HTTP endpoint over asyncio: `Client`'s calls, awaited.
 
     One connection, kept alive and opened again when the server closed it;
     calls made at once on one client go one after another over it, as they

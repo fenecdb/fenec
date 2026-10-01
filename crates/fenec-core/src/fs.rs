@@ -397,7 +397,7 @@ impl Drop for FileSink {
 /// A file mapped read-only into the address space: its pages come in as
 /// they are read and can be dropped again by the operating system, which
 /// writes nothing back -- they are the file's. `mmap` is declared here
-/// rather than taken from a crate, as `signal` is in fenec-pg.
+/// rather than taken from a crate, as `signal` is in fenec-server.
 ///
 /// The file is never truncated or written in place while mapped: writes
 /// append past the mapped length, and a rewrite (`compact`, `checkpoint`)
@@ -621,7 +621,7 @@ pub fn open(path: impl AsRef<Path>) -> Result<Database> {
 
 /// [`open`] -- or [`open_in_memory`] when `mapped` is false -- with the
 /// file's sink wrapped before the database takes it. The flag reaches
-/// every server path (`fenec-pg --no-mmap`), replicated files and tenant
+/// every server path (`fenec-server --no-mmap`), replicated files and tenant
 /// directories included.
 pub fn open_with(path: impl AsRef<Path>, mapped: bool, wrap: Box<Wrap<'_>>) -> Result<Database> {
     open_into(Database::new(), path, mapped, wrap)

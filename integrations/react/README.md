@@ -9,7 +9,7 @@ import wasm from '@fenecdb/web/fenec.wasm?url';   // Vite; your bundler's asset 
 import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
 
 const db = await sync({
-  url: 'http://127.0.0.1:8080',                    // fenec-pg --http
+  url: 'http://127.0.0.1:8080',                    // fenec-server --http
   shapes: [{ collection: 'tasks' }],
   wasm,
   collation: '/collate/',                          // @fenecdb/web's collate/, served as static files

@@ -12,12 +12,13 @@
 //!
 //! The server **shares** the database, it does not own it: it takes an
 //! `Arc<RwLock<Database>>`. fenecdb is single-writer and two processes cannot
-//! write to one file, so the HTTP endpoint is not a separate binary but a
-//! second listener in the same process as `fenec-pg` (`fenec-pg --http`). That
-//! keeps the sync policy, the checkpoint and the memory ceiling in one place.
+//! write to one file, so everything that writes a file -- this endpoint, a
+//! replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
+//! of one process, `fenec-server`, which keeps the sync policy, the
+//! checkpoint and the memory ceiling in one place.
 //!
-//! There is no TLS: the same rule as `fenec-pg` applies, and a TLS terminator
-//! is needed in front of it on an open network.
+//! There is no TLS: a non-loopback address wants a token, and a TLS
+//! terminator is needed in front of it on an open network.
 //!
 //! With [`Server::with_tenants`] one listener serves many databases, one
 //! file each, under `/t/<tenant>/...` -- the same surface as a single file
@@ -68,6 +69,16 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tenants::{Refused, Tenants};
 
+/// Stack of a connection's thread. `thread::spawn`'s default is 2 MiB; the
+/// deepest accepted expression (`fenec_ql::MAX_EXPR_DEPTH` = 512) needs
+/// ~750 KiB in release and ~5 MiB in a debug build. So the default is tight
+/// in the first case (2.7x) and short in the second -- and a stack overflow
+/// is not a catchable panic but an `abort` of the process: a single deep
+/// query would take the whole server down. 8 MiB is *virtual* space;
+/// untouched pages are never resident (measured: RSS 5.2 MB over 100 idle
+/// connections, ~36 KiB a connection, whatever the stack).
+const CONNECTION_STACK: usize = 8 << 20;
+
 #[derive(Clone)]
 pub struct Config {
     pub addr: String,
@@ -89,7 +100,7 @@ pub struct Config {
     pub max_body: usize,
     /// Silence ceiling while waiting for the next request on a keep-alive connection.
     pub idle_timeout: Option<Duration>,
-    /// `sync` after every write (the equivalent of fenec-pg's `--sync always`).
+    /// `sync` after every write (the equivalent of fenec-server's `--sync always`).
     pub sync_on_write: bool,
     /// How long a write's `Idempotency-Key` and answer are kept.
     pub idempotency_ttl: Duration,
@@ -116,8 +127,8 @@ pub struct Config {
     pub max_import: usize,
     /// JSON Web Tokens and the policy they are held to; see [`access`].
     pub access: Option<Arc<access::Access>>,
-    /// Data footprint ceiling in bytes (0 = off): fenec-pg's `--max-memory`,
-    /// held on this listener's writes as on its own; see [`over_ceiling`].
+    /// Data footprint ceiling in bytes (0 = off): fenec-server's
+    /// `--max-memory`, held on every write; see [`over_ceiling`].
     pub max_memory: usize,
 }
 
@@ -163,7 +174,7 @@ enum Backend {
     },
     Tenants(Arc<Tenants>),
     /// `--metrics <address>`: `/_metrics` and nothing else, for a server
-    /// whose data is served over the pg wire alone.
+    /// whose data is served on another address.
     Metrics {
         db: Arc<RwLock<Database>>,
         repl: Option<Arc<Replication>>,
@@ -173,7 +184,7 @@ enum Backend {
 impl Server {
     /// Builds the server and attaches itself to the database as a **watcher**:
     /// from then on every write -- whether it comes from HTTP or from
-    /// `fenec-pg` -- wakes the waiting subscriptions. One process, one writer,
+    /// `fenec-server` -- wakes the waiting subscriptions. One process, one writer,
     /// one wake-up point.
     pub fn new(db: Arc<RwLock<Database>>, cfg: Config) -> Server {
         let hub = Hub::new();
@@ -314,6 +325,7 @@ impl Server {
             let counter = Arc::clone(&self.live);
             let spawned = std::thread::Builder::new()
                 .name("fenec-http".into())
+                .stack_size(CONNECTION_STACK)
                 .spawn(move || {
                     serve_connection(stream, &backend, &cfg);
                     counter.fetch_sub(1, Ordering::SeqCst);
@@ -409,8 +421,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     // After the socket, so it is dropped first: a client that saw the
     // connection close finds it no longer counted. A scrape is not one of
     // the database's clients.
-    let _open = (!matches!(backend, Backend::Metrics { .. }))
-        .then(|| metrics::Connection::open(metrics::Transport::Http));
+    let _open = (!matches!(backend, Backend::Metrics { .. })).then(metrics::Connection::open);
 
     // The body is read before the path is looked at, so in tenant mode the
     // reading ceiling is the larger of the two and a data request over
@@ -433,6 +444,22 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         };
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
+
+        // `fenec-server --ping` and a container's health check: answered
+        // with no token and no lock, before any routing. A probe that ran a
+        // query would wait out a long `compact` for the lock, and a healthy
+        // server would look dead; one that needed a token would put the
+        // token in every orchestrator's configuration.
+        if matches!(req.method, Method::Get | Method::Head)
+            && req.segments() == ["_health"]
+            && !matches!(backend, Backend::Metrics { .. })
+        {
+            let resp = Response::json(200, &br#"{"ok":true}"#[..]);
+            if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+                return;
+            }
+            continue;
+        }
 
         // Before any routing: the metrics are the node's, not a tenant's.
         let scrape =
@@ -598,7 +625,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if req.method != Method::Options {
             let (took, failed) = (started.elapsed(), resp.status >= 400);
             let what = describe(&req);
-            metrics::record(metrics::Transport::Http, took, failed, || what.clone());
+            metrics::record(took, failed, || what.clone());
             statements::record(tenant.as_ref().map(|t| t.name()), &what, took, failed);
         }
         // Let go of the tenant before writing: a slow client must not keep
@@ -808,7 +835,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             Ok(k) => k,
             Err(refusal) => return refusal,
         };
-        let mut guard = held::write_unheld(db);
+        let mut guard = held::write(db);
         let ttl = cfg.idempotency_ttl.as_millis() as i64;
         if let Some(sent) = key
             .as_ref()
@@ -867,7 +894,7 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         }
         with_seq(kept.unwrap_or_else(|| answer(&result)), seq)
     } else {
-        let guard = held::read_landed(db);
+        let guard = held::read(db);
         let routed = match api::route(&guard, req) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -964,7 +991,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
     let result = if stmt.is_read_only() {
-        held::read_landed(db).query(&stmt, &params)
+        held::read(db).query(&stmt, &params)
     } else if let Some(built) = Database::maintain(db, &stmt) {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
@@ -985,7 +1012,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         }
         built
     } else {
-        let mut guard = held::write_unheld(db);
+        let mut guard = held::write(db);
         let r = access::within(who, || guard.execute_with(&stmt, &params));
         seq = Some(guard.change_seq());
         let durability = match r {
@@ -1021,7 +1048,7 @@ fn keyed_query(
     stmt: &Statement,
     params: &[fenec_core::value::Value],
 ) -> Response {
-    let mut guard = held::write_unheld(db);
+    let mut guard = held::write(db);
     let ttl = cfg.idempotency_ttl.as_millis() as i64;
     if let Some(sent) = idempotent::answered(&guard, key, ttl) {
         return sent;
@@ -1069,8 +1096,8 @@ fn counted(resp: &fenec_core::prelude::Response) -> u64 {
 /// ([`Database::execute_block`]), a create, a drop or a `create index`
 /// among them put back as they are. The first error puts back what the ones
 /// before it did, and says so -- `completed` is 0. A batch holding a
-/// `compact` runs each statement on its own instead, as a text of several
-/// does over the pg wire: it stops at the first error, and `completed` says
+/// `compact` runs each statement on its own instead: it stops at the first
+/// error, and `completed` says
 /// how many were applied.
 fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
     let body = match std::str::from_utf8(&req.body) {
@@ -1106,7 +1133,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         },
         false => None,
     };
-    let mut guard = held::write_unheld(db);
+    let mut guard = held::write(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
     if key.is_some() && !block {
         return Response::error(
@@ -1189,7 +1216,7 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
 /// Only a statement that grows the data is stopped: `del` and `compact` are
 /// the way out of a database at the ceiling, and reads are unaffected. It is
 /// measured before the statement, so the overshoot is at most one. One rule
-/// for both listeners: fenec-pg held only its own writes to it, and a client
+/// for both listeners: fenec-server held only its own writes to it, and a client
 /// writing over HTTP never met it.
 pub fn over_ceiling(max: usize, db: &Database, stmt: &Statement) -> Option<String> {
     let grows = matches!(

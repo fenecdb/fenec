@@ -1,5 +1,5 @@
 // A LangChain.js vector store over fenecdb: the database in the page (a
-// `Fenec` from @fenecdb/web) or behind fenec-pg's HTTP endpoint (a
+// `Fenec` from @fenecdb/web) or behind fenec-server's HTTP endpoint (a
 // `FenecHttp`) -- anything with `run(sql, params)`.
 //
 //   import { FenecVectorStore } from '@fenecdb/langchain';

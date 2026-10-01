@@ -1,5 +1,5 @@
 #!/bin/sh
-# The Python integrations against a real fenec-pg: built here, started on
+# The Python integrations against a real fenec-server: built here, started on
 # this machine, and tested from a python:3.13 container, which gets the same
 # interpreter everywhere -- a Homebrew Python whose pyexpat cannot load is
 # how this came to use one.
@@ -10,13 +10,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 cargo=${CARGO:-cargo}
 [ -x "$HOME/.cargo/bin/cargo" ] && cargo="$HOME/.cargo/bin/cargo"
-"$cargo" build -q -p fenec-pg --manifest-path "$root/Cargo.toml"
+"$cargo" build -q -p fenec-server --manifest-path "$root/Cargo.toml"
 
 dir=$(mktemp -d)
 port=${FENEC_TEST_PORT:-18181}
 token=python-tests
 # Outside loopback, so the container reaches it: a token is required there.
-"$root/target/debug/fenec-pg" --listen 127.0.0.1:0 --file "$dir/python.fenec" \
+"$root/target/debug/fenec-server" --file "$dir/python.fenec" \
     --http "0.0.0.0:$port" --http-token "$token" --cdc 2>"$dir/server.log" &
 server=$!
 trap 'kill $server 2>/dev/null; rm -rf "$dir"' EXIT INT TERM

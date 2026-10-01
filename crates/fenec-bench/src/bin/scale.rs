@@ -1,23 +1,30 @@
-//! fenec-pg against PostgreSQL + pgvector at scale, both over the pg wire:
-//! `make scale-bench`.
+//! fenec-server against PostgreSQL + pgvector at scale, each over its own
+//! wire -- fenec-server's HTTP, PostgreSQL's protocol: `make scale-bench`.
 //!
 //! ```text
 //! cargo run --release -p fenec-bench --bin scale -- [N] [DIM] [--rank R] [--queries Q]
 //!     [--clients C] [--only fenec|pg] [--after] [--compact] [--efs 40,100,200]
-//!     [--copy-rows ROWS]
+//!     [--copy-rows ROWS] [--http-rows ROWS]
 //! ```
 //!
 //! N vectors of DIM dimensions -- the generator `quant` uses, 64 centres
 //! spread along R directions (32 unless given), as embeddings vary along
-//! far fewer directions than they have -- go into each server by binary
-//! COPYs of ROWS rows (50 000; 0, every row in one) through the same client,
-//! the `postgres` crate with pgvector-rust's `Vector`:
+//! far fewer directions than they have -- go into each server the fastest
+//! way its clients have:
 //!
-//!   * fenec-pg, started here over an empty file, its HNSW index kept as
-//!     the rows land -- or with `--after` built by a `create index` once
-//!     they are in;
+//!   * fenec-server, started here over an empty file, by `POST /items` of
+//!     a JSON array of rows at a time (`--http-rows`, 10 000 at 128
+//!     dimensions and fewer as they grow, so that a request stays near
+//!     13 MB, under the server's 64 MB `max_body`), on one kept-alive
+//!     connection ([`http::Http`]); its HNSW index kept as the rows land --
+//!     or with `--after` built by a `create index` once they are in. A
+//!     thread writes the next request's JSON while the last is sent: a
+//!     million 128-dim vectors written out as text take one core about
+//!     8 s, which is the client's cost and not the server's;
 //!   * PostgreSQL + pgvector, the container `make pgvector-up` starts
-//!     (skipped without it), its index built after the COPY as pgvector
+//!     (skipped without it), by binary COPYs of `--copy-rows` rows (50 000;
+//!     0, every row in one) through the `postgres` crate with
+//!     pgvector-rust's `Vector`, its index built after the COPY as pgvector
 //!     advises, by as many processes as the container has cores
 //!     (`max_parallel_maintenance_workers`) and in memory
 //!     (`maintenance_work_mem`), then read into its buffers (`pg_prewarm`).
@@ -28,32 +35,39 @@
 //!
 //! Both indexes take m = 16 and ef_construction = 64, pgvector's defaults.
 //! Each server is then asked Q held-out queries at beams of 40, 100 and 200
-//! (`ef`, `hnsw.ef_search`; `--efs` names others) by one client, once to warm and once measured,
-//! for recall@10 against the exact ten -- found once, by brute force over
-//! the vectors -- and latency, unfiltered and with each filter, the exact
-//! ten then those of the rows it keeps (pgvector searching with
-//! `hnsw.iterative_scan = relaxed_order`, as it advises for a filter); and
-//! at a beam of 100 by C clients (8) for
-//! 10 s, for throughput. PostgreSQL answers from inside Docker's virtual
-//! machine, whose network carries every byte, and fenec-pg on the host, so
-//! the round trip of an empty query is measured for each. The space on
-//! disk is fenec-pg's file and the table with its index. Memory is what
-//! each server holds of its own, which the kernel cannot take back without
-//! swapping it out -- fenec-pg's physical footprint, the dirty and
+//! (`ef`, `hnsw.ef_search`; `--efs` names others) by one client, once to
+//! warm and once measured, for recall@10 against the exact ten -- found
+//! once, by brute force over the vectors -- and latency, unfiltered and
+//! with each filter, the exact ten then those of the rows it keeps
+//! (pgvector searching with `hnsw.iterative_scan = relaxed_order`, as it
+//! advises for a filter); and at a beam of 100 by C clients (8) for 10 s,
+//! for throughput. fenec-server is asked by `POST /query`, the query vector
+//! a JSON array among the parameters, written once a query as pgvector's
+//! `Vector` is made once; PostgreSQL by a statement prepared once and
+//! bound. PostgreSQL answers from inside Docker's virtual machine, whose
+//! network carries every byte, and fenec-server on the host, so the round
+//! trip of the least each can be asked -- fenec-server's `GET /`,
+//! PostgreSQL's `SELECT 1` -- is measured for each. The space on disk is
+//! fenec-server's file and the table with its index. Memory is what each
+//! server holds of its own, which the kernel cannot take back without
+//! swapping it out -- fenec-server's physical footprint, the dirty and
 //! compressed pages of `vmmap -summary` (macOS; Linux's anonymous resident
 //! pages and swap), and the container's anonymous memory and the shared
 //! memory PostgreSQL's buffers are -- and beside it the pages of their files
 //! each keeps in memory, clean, which the kernel takes back under pressure:
-//! fenec-pg's mapped file's, and the container's page cache; and the most
-//! each held of its own while the rows went in and its index was built
-//! (`Peak`), which a COPY of every row in one shows. Then what
-//! fenec-pg's engine counts it holds (`fenec_memory_bytes`), and each
-//! resident set as its tools count it: fenec-pg's, the pages of its file
-//! it touched included, and what `docker stats` counts of the container.
+//! fenec-server's mapped file's, and the container's page cache; and the
+//! most each held of its own while the rows went in and its index was built
+//! (`Peak`). Then what fenec-server's engine counts it holds
+//! (`fenec_memory_bytes`), and each resident set as its tools count it:
+//! fenec-server's, the pages of its file it touched included, and what
+//! `docker stats` counts of the container.
+//!
+//! The two sides run in turns, `--only fenec` then `--only pg`, each after
+//! the machine has been idle for minutes: a fanless laptop slows to a third
+//! under minutes of load on every core, and a side run hot is not measured.
 
-#[path = "../wire.rs"]
-#[allow(dead_code)]
-mod wire;
+#[path = "../http.rs"]
+mod http;
 
 use pgvector::Vector;
 use postgres::binary_copy::BinaryCopyInWriter;
@@ -240,10 +254,11 @@ enum Engine {
 
 struct Server {
     engine: Engine,
+    /// PostgreSQL's connection string.
     dsn: String,
-    /// fenec-pg's process, and the file it keeps.
-    fenec: Option<(wire::Server, std::path::PathBuf)>,
-    /// fenec-pg's HTTP port, for its `/_metrics`.
+    /// fenec-server's process, and the file it keeps.
+    fenec: Option<(http::Server, std::path::PathBuf)>,
+    /// fenec-server's HTTP port: its queries and its `/_metrics`.
     http: u16,
 }
 
@@ -260,7 +275,7 @@ fn vmmap_size(s: &str) -> Option<u64> {
     Some((n * m as f64) as u64)
 }
 
-/// What fenec-pg holds of its own -- the dirty and compressed pages it
+/// What fenec-server holds of its own -- the dirty and compressed pages it
 /// cannot give back, macOS's physical footprint (`vmmap -summary`), or
 /// Linux's anonymous resident pages and swap -- and its mapped file's
 /// resident pages.
@@ -295,7 +310,7 @@ fn footprint(pid: u32) -> Option<(u64, u64)> {
     Some((phys, mapped))
 }
 
-/// The most a server holds of its own while the rows go in: fenec-pg's
+/// The most a server holds of its own while the rows go in: fenec-server's
 /// physical footprint at its peak, which macOS keeps (`vmmap`'s `Physical
 /// footprint (peak)`; Linux's peak resident set, `VmHWM`, whose mapped pages
 /// are few while the rows go in); PostgreSQL's, polled from its container
@@ -338,7 +353,7 @@ impl Peak {
     }
 }
 
-/// fenec-pg's physical footprint at its peak so far; see [`Peak`].
+/// fenec-server's physical footprint at its peak so far; see [`Peak`].
 fn peak_footprint(pid: u32) -> Option<u64> {
     if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
         return status
@@ -376,7 +391,7 @@ fn pg_memory() -> Option<(u64, u64)> {
     Some((anon + shmem, file.saturating_sub(shmem)))
 }
 
-/// One of fenec-pg's `/_metrics` without labels, `fenec_memory_bytes`
+/// One of fenec-server's `/_metrics` without labels, `fenec_memory_bytes`
 /// among them: what the engine counts it holds.
 fn metric(http: u16, name: &str) -> Option<u64> {
     use std::io::{Read, Write};
@@ -390,13 +405,98 @@ fn metric(http: u16, name: &str) -> Option<u64> {
         .and_then(|v| v.trim().parse().ok())
 }
 
+/// A session with a server, over its own wire.
+enum Conn {
+    Pg(Client),
+    Fenec(http::Http),
+}
+
+/// A search ready to be asked: PostgreSQL's statement prepared once in the
+/// session, fenec-server's text sent with each query.
+enum Search {
+    Pg(postgres::Statement),
+    Fenec(String),
+}
+
+impl Conn {
+    /// A statement whose answer is not read: a schema change, a setting.
+    fn exec(&mut self, text: &str) {
+        match self {
+            Conn::Pg(c) => c.batch_execute(text).unwrap(),
+            Conn::Fenec(h) => {
+                h.query(text, "");
+            }
+        }
+    }
+
+    /// The least the server can be asked: the round trip and little else.
+    fn ping(&mut self) {
+        match self {
+            Conn::Pg(c) => {
+                c.simple_query("SELECT 1").unwrap();
+            }
+            Conn::Fenec(h) => {
+                h.get("/");
+            }
+        }
+    }
+
+    /// The ten nearest of a beam of `ef`, of the rows whose `filter` field
+    /// equals the value a query is asked with, where one is named.
+    fn search(&mut self, server: &Server, ef: usize, filter: Option<&str>) -> Search {
+        let (prelude, sql) = server.query(ef, filter);
+        match self {
+            Conn::Pg(c) => {
+                if let Some(p) = &prelude {
+                    c.batch_execute(p).unwrap();
+                }
+                Search::Pg(c.prepare(&sql).unwrap())
+            }
+            Conn::Fenec(_) => Search::Fenec(sql),
+        }
+    }
+
+    /// The ids `s` answers for query `j`, its filter's value `value`.
+    fn ask(&mut self, s: &Search, q: &Query, value: Option<i64>) -> Vec<i64> {
+        match (self, s) {
+            (Conn::Pg(c), Search::Pg(stmt)) => {
+                let rows = match value {
+                    None => c.query(stmt, &[&q.vector]).unwrap(),
+                    Some(v) => c.query(stmt, &[&q.vector, &v]).unwrap(),
+                };
+                rows.iter().map(|r| r.get::<_, i64>(0)).collect()
+            }
+            (Conn::Fenec(h), Search::Fenec(sql)) => {
+                let params = match value {
+                    None => q.json.clone(),
+                    Some(v) => format!("{},{v}", q.json),
+                };
+                http::ids(h.query(sql, &params))
+            }
+            _ => unreachable!("a search asked of another server"),
+        }
+    }
+}
+
+/// A held-out query as each wire sends it: pgvector-rust's `Vector`, and
+/// the JSON array of its numbers.
+struct Query {
+    vector: Vector,
+    json: String,
+}
+
 impl Server {
-    /// A session whose notices are shown: pgvector says so when its
+    /// A session. PostgreSQL's shows its notices: pgvector says so when its
     /// graph outgrows `maintenance_work_mem` and the build goes on disk.
-    fn connect(&self) -> Client {
-        let mut cfg: postgres::Config = self.dsn.parse().unwrap();
-        cfg.notice_callback(|n| eprintln!("  notice: {}", n.message()));
-        cfg.connect(NoTls).unwrap()
+    fn connect(&self) -> Conn {
+        match self.engine {
+            Engine::Fenec => Conn::Fenec(http::Http::connect(&format!("127.0.0.1:{}", self.http))),
+            Engine::Pg => {
+                let mut cfg: postgres::Config = self.dsn.parse().unwrap();
+                cfg.notice_callback(|n| eprintln!("  notice: {}", n.message()));
+                Conn::Pg(cfg.connect(NoTls).unwrap())
+            }
+        }
     }
 
     /// The statement a query of the ten nearest is -- of the rows whose
@@ -425,7 +525,7 @@ impl Server {
         }
     }
 
-    /// Resident memory in bytes: fenec-pg's process, the container's.
+    /// Resident memory in bytes: fenec-server's process, the container's.
     fn memory(&self) -> u64 {
         match &self.fenec {
             Some((s, _)) => {
@@ -466,14 +566,15 @@ impl Server {
         }
     }
 
-    /// Bytes on disk: fenec-pg's file, the table with its index.
-    fn disk(&self, c: &mut Client) -> u64 {
-        match &self.fenec {
-            Some((_, file)) => std::fs::metadata(file).map(|m| m.len()).unwrap_or(0),
-            None => c
+    /// Bytes on disk: fenec-server's file, the table with its index.
+    fn disk(&self, c: &mut Conn) -> u64 {
+        match (&self.fenec, c) {
+            (Some((_, file)), _) => std::fs::metadata(file).map(|m| m.len()).unwrap_or(0),
+            (None, Conn::Pg(c)) => c
                 .query_one("SELECT pg_total_relation_size('items')", &[])
                 .unwrap()
                 .get::<_, i64>(0) as u64,
+            (None, Conn::Fenec(_)) => 0,
         }
     }
 }
@@ -483,18 +584,30 @@ struct Workload<'a> {
     data: &'a Data,
     n: u64,
     dim: usize,
-    /// fenec-pg's index built once the rows are in, rather than as they land.
+    /// fenec-server's index built once the rows are in, rather than as they land.
     after: bool,
-    queries: &'a [Vec<f32>],
+    queries: &'a [Query],
     truth: &'a Truth,
     clients: usize,
     /// The beams searched with.
     efs: &'a [usize],
     /// The rows a COPY sends.
     copy_rows: u64,
+    /// The rows a `POST /items` sends.
+    http_rows: u64,
 }
 
-/// fenec-pg killed and started again: waits until no vector is left to link, asks
+/// The filter's value a query `j` is asked with: its tag or its quarter.
+fn value(filter: Option<&str>, j: usize) -> Option<i64> {
+    let (t, q) = filters(j);
+    match filter {
+        None => None,
+        Some("tag") => Some(t),
+        Some(_) => Some(q),
+    }
+}
+
+/// fenec-server killed and started again: waits until no vector is left to link, asks
 /// every query once unfiltered and once with each filter, as the run did,
 /// and measures its memory.
 fn reopen(server: &Server, w: &Workload, started: Instant) -> Option<(f64, u64, u64, u64, u64)> {
@@ -503,17 +616,10 @@ fn reopen(server: &Server, w: &Workload, started: Instant) -> Option<(f64, u64, 
     }
     let secs = started.elapsed().as_secs_f64();
     let mut c = server.connect();
-    let qs: Vec<Vector> = w.queries.iter().map(|q| Vector::from(q.clone())).collect();
     for filter in [None, Some("tag"), Some("quarter")] {
-        let (_, sql) = server.query(100, filter);
-        let stmt = c.prepare(&sql).ok()?;
-        for (j, q) in qs.iter().enumerate() {
-            let (t, qq) = filters(j);
-            let v = if filter == Some("tag") { t } else { qq };
-            match filter {
-                None => c.query(&stmt, &[q]).ok()?,
-                Some(_) => c.query(&stmt, &[q, &v]).ok()?,
-            };
+        let s = c.search(server, 100, filter);
+        for (j, q) in w.queries.iter().enumerate() {
+            c.ask(&s, q, value(filter, j));
         }
     }
     let (s, _) = server.fenec.as_ref()?;
@@ -536,13 +642,13 @@ struct Measured {
     round_trip: f64,
     /// What the server holds of its own, and the pages of its files it
     /// keeps in memory besides, which the kernel takes back under pressure
-    /// ([`footprint`], [`pg_memory`]); and what fenec-pg's engine counts it
+    /// ([`footprint`], [`pg_memory`]); and what fenec-server's engine counts it
     /// holds. Bytes.
     breakdown: Option<(u64, u64, Option<u64>)>,
     /// The most the server held of its own while the rows went in and its
     /// index was built ([`Peak`]).
     peak: Option<u64>,
-    /// fenec-pg killed and started again over its file, its documents in
+    /// fenec-server killed and started again over its file, its documents in
     /// the file rather than written since the open: the seconds until
     /// every vector was linked, and the resident set, footprint, mapped
     /// pages and engine count after every query was asked again.
@@ -561,36 +667,10 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     v[((v.len() as f64 * p) as usize).min(v.len() - 1)]
 }
 
-fn run(server: &Server, w: &Workload) -> Measured {
-    let Workload {
-        data,
-        n,
-        dim,
-        after,
-        queries,
-        truth,
-        clients,
-        efs,
-        copy_rows,
-    } = *w;
-    let mut c = server.connect();
-    let index = format!("@hnsw(cosine, m={M}, ef_construction={EF_CONSTRUCTION})");
-    match server.engine {
-        Engine::Fenec => {
-            let kept = if after { "" } else { index.as_str() };
-            c.batch_execute(&format!(
-                "create collection items (tag int @hash, quarter int @hash, embed vector<{dim}> {kept})"
-            ))
-            .unwrap();
-        }
-        Engine::Pg => {
-            c.batch_execute(&format!(
-                "CREATE EXTENSION IF NOT EXISTS vector; DROP TABLE IF EXISTS items; \
-                 CREATE TABLE items (id bigint, tag bigint, quarter bigint, embed vector({dim}))"
-            ))
-            .unwrap();
-        }
-    }
+/// PostgreSQL's load: binary COPYs of `copy_rows` rows at a time -- one of
+/// 250 000 768-dim rows, 770 MB, stalled in Docker's port forwarding, the
+/// server waiting for bytes the client could not write.
+fn load_pg(c: &mut Client, w: &Workload, t: Instant) {
     // pgvector-rust's bulk load: the type found by name, then a binary COPY.
     let found = c
         .query_one(
@@ -606,34 +686,102 @@ fn run(server: &Server, w: &Workload) -> Measured {
         Kind::Simple,
         found.get("schema"),
     );
-    // A COPY of `copy_rows` rows at a time: one of 250 000 768-dim rows,
-    // 770 MB, stalled in Docker's port forwarding, the server waiting for
-    // bytes the client could not write.
-    let peak = Peak::watch(server);
-    let t = Instant::now();
-    for from in (0..n).step_by(copy_rows as usize) {
+    for from in (0..w.n).step_by(w.copy_rows as usize) {
         let sink = c
             .copy_in("COPY items (id, tag, quarter, embed) FROM STDIN WITH (FORMAT BINARY)")
             .unwrap();
         let mut writer =
             BinaryCopyInWriter::new(sink, &[Type::INT8, Type::INT8, Type::INT8, vector.clone()]);
-        for i in from..(from + copy_rows).min(n) {
-            let v = Vector::from(data.vector(i));
+        for i in from..(from + w.copy_rows).min(w.n) {
+            let v = Vector::from(w.data.vector(i));
             let t = tag(i);
             writer.write(&[&(i as i64 + 1), &t, &(t % 4), &v]).unwrap();
         }
         writer.finish().unwrap();
-        let done = (from + copy_rows).min(n);
-        if done % 100_000 == 0 || done == n {
-            eprintln!("  {done} rows in {:.1} s", t.elapsed().as_secs_f64());
+        progress((from + w.copy_rows).min(w.n), w.n, t);
+    }
+}
+
+/// fenec-server's load: `POST /items` of `http_rows` rows a request, each
+/// row naming its id. The JSON of the next request is written on a thread
+/// of its own while the last is sent, two requests ahead at most.
+fn load_fenec(h: &mut http::Http, w: &Workload, t: Instant) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(2);
+    let (data, n, per) = (w.data, w.n, w.http_rows);
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            use std::io::Write as _;
+            for from in (0..n).step_by(per as usize) {
+                let to = (from + per).min(n);
+                let mut body = Vec::with_capacity(((to - from) as usize) * (w.dim * 11 + 48));
+                body.push(b'[');
+                for i in from..to {
+                    if i > from {
+                        body.push(b',');
+                    }
+                    let t = tag(i);
+                    write!(
+                        body,
+                        "{{\"id\":{},\"tag\":{t},\"quarter\":{},\"embed\":{}}}",
+                        i + 1,
+                        t % 4,
+                        http::vector_json(&data.vector(i))
+                    )
+                    .unwrap();
+                }
+                body.push(b']');
+                if tx.send((to, body)).is_err() {
+                    return;
+                }
+            }
+        });
+        for (to, body) in rx {
+            h.post("/items", "application/json", &body);
+            progress(to, n, t);
         }
+    });
+}
+
+fn progress(done: u64, n: u64, t: Instant) {
+    if done.is_multiple_of(100_000) || done == n {
+        eprintln!("  {done} rows in {:.1} s", t.elapsed().as_secs_f64());
+    }
+}
+
+fn run(server: &Server, w: &Workload) -> Measured {
+    let Workload {
+        dim,
+        after,
+        queries,
+        truth,
+        clients,
+        efs,
+        ..
+    } = *w;
+    let mut c = server.connect();
+    let index = format!("@hnsw(cosine, m={M}, ef_construction={EF_CONSTRUCTION})");
+    match server.engine {
+        Engine::Fenec => {
+            let kept = if after { "" } else { index.as_str() };
+            c.exec(&format!(
+                "create collection items (tag int @hash, quarter int @hash, embed vector<{dim}> {kept})"
+            ));
+        }
+        Engine::Pg => c.exec(&format!(
+            "CREATE EXTENSION IF NOT EXISTS vector; DROP TABLE IF EXISTS items; \
+             CREATE TABLE items (id bigint, tag bigint, quarter bigint, embed vector({dim}))"
+        )),
+    }
+    let peak = Peak::watch(server);
+    let t = Instant::now();
+    match &mut c {
+        Conn::Pg(pg) => load_pg(pg, w, t),
+        Conn::Fenec(h) => load_fenec(h, w, t),
     }
     let load = t.elapsed().as_secs_f64();
     let t = Instant::now();
     match server.engine {
-        Engine::Fenec if after => c
-            .batch_execute(&format!("create index on items (embed) {index}"))
-            .unwrap(),
+        Engine::Fenec if after => c.exec(&format!("create index on items (embed) {index}")),
         Engine::Fenec => {}
         // Every core the container has: PostgreSQL plans workers by the
         // size of the table, and 768-dim vectors live out of it, in TOAST,
@@ -641,40 +789,35 @@ fn run(server: &Server, w: &Workload) -> Measured {
         // settles the number.
         Engine::Pg => {
             let workers = std::thread::available_parallelism().map_or(4, |n| n.get()) - 1;
-            c.batch_execute(&format!(
+            c.exec(&format!(
                 "SET maintenance_work_mem = '1800MB'; \
                  SET max_parallel_maintenance_workers = {workers}; \
                  ALTER TABLE items SET (parallel_workers = {workers}); \
                  CREATE INDEX ON items USING hnsw (embed vector_cosine_ops) \
                  WITH (m = {M}, ef_construction = {EF_CONSTRUCTION}); \
                  CREATE INDEX ON items (tag); CREATE INDEX ON items (quarter)"
-            ))
-            .unwrap();
+            ));
         }
     }
     let build = t.elapsed().as_secs_f64();
     let peak = peak.most();
     eprintln!("  loaded in {load:.1} s, index {build:.1} s more");
     // PostgreSQL's index read into its buffers, as far as they hold it:
-    // fenec-pg holds its graph in memory.
+    // fenec-server holds its graph in memory.
     if server.engine == Engine::Pg {
-        c.batch_execute(
-            "CREATE EXTENSION IF NOT EXISTS pg_prewarm; SELECT pg_prewarm('items_embed_idx')",
-        )
-        .unwrap();
+        c.exec("CREATE EXTENSION IF NOT EXISTS pg_prewarm; SELECT pg_prewarm('items_embed_idx')");
     }
 
     // The empty round trip.
     let mut rtt: Vec<f64> = (0..200)
         .map(|_| {
             let t = Instant::now();
-            c.simple_query("SELECT 1").unwrap();
+            c.ping();
             t.elapsed().as_secs_f64() * 1e3
         })
         .collect();
     let round_trip = pct(&mut rtt, 0.5);
 
-    let qs: Vec<Vector> = queries.iter().map(|q| Vector::from(q.clone())).collect();
     let kinds: [(Option<&str>, &[Vec<i64>]); 3] = [
         (None, &truth.all),
         (Some("tag"), &truth.tag),
@@ -683,44 +826,24 @@ fn run(server: &Server, w: &Workload) -> Measured {
     let mut searches: [Vec<(usize, f64, f64, f64)>; 3] = Default::default();
     for (k, (filter, exact_tens)) in kinds.iter().enumerate() {
         for &ef in efs {
-            let (prelude, sql) = server.query(ef, *filter);
-            if let Some(p) = &prelude {
-                c.batch_execute(p).unwrap();
-            }
-            let stmt = c.prepare(&sql).unwrap();
-            // The filter's value, $2: the query's tag or quarter.
-            let value = |j: usize| -> i64 {
-                let (t, q) = filters(j);
-                if *filter == Some("tag") {
-                    t
-                } else {
-                    q
-                }
-            };
-            let ask = |c: &mut Client, j: usize| match filter {
-                None => c.query(&stmt, &[&qs[j]]).unwrap(),
-                Some(_) => c.query(&stmt, &[&qs[j], &value(j)]).unwrap(),
-            };
-            for j in 0..qs.len() {
-                ask(&mut c, j);
+            let s = c.search(server, ef, *filter);
+            for (j, q) in queries.iter().enumerate() {
+                c.ask(&s, q, value(*filter, j));
             }
             let mut hits = 0usize;
             // Queries that found none of their ten: a region of the graph
             // the walk never reached, which no beam makes up for.
             let mut lost = 0usize;
-            let mut lat = Vec::with_capacity(qs.len());
+            let mut lat = Vec::with_capacity(queries.len());
             for (j, exact) in exact_tens.iter().enumerate() {
                 let t = Instant::now();
-                let rows = ask(&mut c, j);
+                let ids = c.ask(&s, &queries[j], value(*filter, j));
                 lat.push(t.elapsed().as_secs_f64() * 1e3);
-                let found = rows
-                    .iter()
-                    .filter(|r| exact.contains(&r.get::<_, i64>(0)))
-                    .count();
+                let found = ids.iter().filter(|id| exact.contains(id)).count();
                 hits += found;
                 lost += (found == 0) as usize;
             }
-            let recall = hits as f64 / (10 * qs.len()) as f64;
+            let recall = hits as f64 / (10 * queries.len()) as f64;
             let (p50, p99) = (pct(&mut lat, 0.5), pct(&mut lat, 0.99));
             eprintln!(
                 "  {}ef {ef}: recall {:.1}%, p50 {p50:.3} ms, p99 {p99:.3} ms, {lost} queries found none",
@@ -731,28 +854,22 @@ fn run(server: &Server, w: &Workload) -> Measured {
         }
     }
     if server.engine == Engine::Pg {
-        c.batch_execute("RESET hnsw.iterative_scan").unwrap();
+        c.exec("RESET hnsw.iterative_scan");
     }
 
     // Throughput: `clients` sessions at a beam of 100 for 10 s.
-    let (prelude, sql) = server.query(100, None);
     let deadline = Instant::now() + Duration::from_secs(10);
     let started = Instant::now();
     let done: usize = std::thread::scope(|s| {
         let handles: Vec<_> = (0..clients)
             .map(|k| {
-                let (prelude, sql) = (&prelude, &sql);
                 s.spawn(move || {
                     let mut c = server.connect();
-                    if let Some(p) = prelude {
-                        c.batch_execute(p).unwrap();
-                    }
-                    let stmt = c.prepare(sql).unwrap();
-                    let qs: Vec<Vector> = queries.iter().map(|q| Vector::from(q.clone())).collect();
+                    let search = c.search(server, 100, None);
                     let mut count = 0;
                     let mut j = k;
                     while Instant::now() < deadline {
-                        c.query(&stmt, &[&qs[j % qs.len()]]).unwrap();
+                        c.ask(&search, &queries[j % queries.len()], None);
                         count += 1;
                         j += clients;
                     }
@@ -781,6 +898,18 @@ fn run(server: &Server, w: &Workload) -> Measured {
         round_trip,
         searches,
         qps,
+    }
+}
+
+/// fenec-server over `file`, on a port of its own.
+fn start(file: &std::path::Path) -> Server {
+    let http = http::free_port();
+    let s = http::start_fenec(file, http, "scale-bench", &[]);
+    Server {
+        engine: Engine::Fenec,
+        dsn: String::new(),
+        fenec: Some((s, file.to_path_buf())),
+        http,
     }
 }
 
@@ -815,20 +944,33 @@ fn main() {
     let after = args.iter().any(|a| a == "--after");
     let compact = args.iter().any(|a| a == "--compact");
     let copy_rows: u64 = flag("--copy-rows").map_or(50_000, |a| a.parse().unwrap());
+    // About 13 MB of JSON a request whatever the dimensions: a vector's
+    // number is ten bytes or so of text.
+    let http_rows: u64 = flag("--http-rows")
+        .map_or((1_280_000 / dim as u64).clamp(500, 10_000), |a| {
+            a.parse().unwrap()
+        });
     let efs: Vec<usize> = flag("--efs").map_or(vec![40, 100, 200], |a| {
         a.split(',').map(|x| x.parse().unwrap()).collect()
     });
 
     let data = Data::new(dim, rank);
-    let queries: Vec<Vec<f32>> = (0..nq as u64)
+    let vectors: Vec<Vec<f32>> = (0..nq as u64)
         .map(|j| data.vector(QUERY_BASE + j))
         .collect();
     let t = Instant::now();
-    let truth = truth(&data, n, &queries);
+    let truth = truth(&data, n, &vectors);
     eprintln!(
         "the exact ten of {nq} queries in {:.1} s",
         t.elapsed().as_secs_f64()
     );
+    let queries: Vec<Query> = vectors
+        .into_iter()
+        .map(|v| Query {
+            json: http::vector_json(&v),
+            vector: Vector::from(v),
+        })
+        .collect();
 
     let work = Workload {
         data: &data,
@@ -840,28 +982,22 @@ fn main() {
         clients,
         efs: &efs,
         copy_rows: if copy_rows == 0 { n } else { copy_rows },
+        http_rows: if http_rows == 0 { n } else { http_rows },
     };
     let mut results: Vec<(&str, Measured)> = Vec::new();
     if only.as_deref() != Some("pg") {
         let dir = std::env::temp_dir().join(format!("fenec-scale-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("scale.fenec");
-        let (pg, http) = (wire::free_port(), wire::free_port());
-        let s = wire::start_fenec(&file, pg, http, "scale-bench");
-        let server = Server {
-            engine: Engine::Fenec,
-            dsn: format!("host=127.0.0.1 port={pg} user=fenec dbname=fenec"),
-            fenec: Some((s, file)),
-            http,
-        };
-        eprintln!("fenec-pg:");
+        let server = start(&file);
+        eprintln!("fenec-server:");
         let mut r = run(&server, &work);
         // With `--compact`, the memory after a compact, which writes the
         // documents into a new image the stores then read through the map.
         if compact {
             let mut c = server.connect();
             let t = Instant::now();
-            c.simple_query("compact items").unwrap();
+            c.exec("compact items");
             let secs = t.elapsed().as_secs_f64();
             let (s, _) = server.fenec.as_ref().unwrap();
             r.compacted = footprint(s.pid()).map(|(phys, mapped)| {
@@ -880,19 +1016,12 @@ fn main() {
         let Server { fenec, .. } = server;
         let (process, file) = fenec.unwrap();
         drop(process);
-        let (pg, http) = (wire::free_port(), wire::free_port());
         let t = Instant::now();
-        let again = wire::start_fenec(&file, pg, http, "scale-bench");
-        let server = Server {
-            engine: Engine::Fenec,
-            dsn: format!("host=127.0.0.1 port={pg} user=fenec dbname=fenec"),
-            fenec: Some((again, file)),
-            http,
-        };
+        let server = start(&file);
         r.reopened = reopen(&server, &work, t);
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
-        results.push(("fenec-pg", r));
+        results.push(("fenec-server", r));
     }
     if only.as_deref() != Some("fenec") {
         match Client::connect(PG, NoTls) {
@@ -931,7 +1060,9 @@ fn main() {
         }
         println!();
     };
-    row("load (binary COPY)", &|r| format!("{:.1} s", r.load));
+    row("load (HTTP arrays; binary COPY)", &|r| {
+        format!("{:.1} s", r.load)
+    });
     row("index after it", &|r| format!("{:.1} s", r.build));
     row("load and index", &|r| {
         format!(
@@ -946,14 +1077,14 @@ fn main() {
     row("  its files' pages besides", &|r| {
         mb(r.breakdown.map(|b| b.1))
     });
-    row("  what fenec-pg's engine counts", &|r| {
+    row("  what fenec-server's engine counts", &|r| {
         mb(r.breakdown.and_then(|b| b.2))
     });
     row("resident, as counted", &|r| mb(Some(r.memory)));
     if let Some((_, r)) = results.iter().find(|(_, r)| r.compacted.is_some()) {
         let (secs, rss, phys, mapped, engine) = r.compacted.unwrap();
         println!(
-            "\nfenec-pg after a compact of {secs:.1} s: resident {:.0} MB, physical footprint {:.0} MB, \
+            "\nfenec-server after a compact of {secs:.1} s: resident {:.0} MB, physical footprint {:.0} MB, \
              the mapped file's resident pages {:.0} MB, the engine's count {:.0} MB",
             rss as f64 / 1e6,
             phys as f64 / 1e6,
@@ -964,7 +1095,7 @@ fn main() {
     if let Some((_, r)) = results.iter().find(|(_, r)| r.reopened.is_some()) {
         let (secs, rss, phys, mapped, engine) = r.reopened.unwrap();
         println!(
-            "\nfenec-pg killed and started again over its file: every vector linked after {secs:.1} s; \
+            "\nfenec-server killed and started again over its file: every vector linked after {secs:.1} s; \
              resident {:.0} MB, physical footprint {:.0} MB, the mapped file's resident pages {:.0} MB, \
              the engine's count {:.0} MB",
             rss as f64 / 1e6,

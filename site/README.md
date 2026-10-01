@@ -157,8 +157,8 @@ paint, and not where `saveData` is set.
 
 Each section shows its feature working, on a canvas between its heading and
 its detail: rows becoming points and a query walking the graph to them, the
-race against pgvector, a request passing the checks, clients connecting over
-the wire, replicas and tenants failing over, the tab keeping its own copy and
+race against pgvector, a request passing the checks, every language and
+integration sending requests over HTTP, replicas and tenants failing over, the tab keeping its own copy and
 redrawing live. `motion.js` draws any moment of a scene from the scene's time
 alone, so a section loops its scenes while in view, stops when it is not, and
 steps between them on a click; under reduced motion each shows its last frame.
@@ -170,7 +170,7 @@ it is one the docs measure, and `build.py` checks the sizes it quotes.
 The Developer section plays a recorded session as text: commands typed, output
 a line at a time, chapters to jump between, paused while off screen. The
 transcript is the `<ol class="cast-script">` in `content/index.html`, and every
-line of output in it came from a real `fenec-pg`, `psql` and pgvector-python --
+line of output in it came from a real `fenec-server`, `curl` and the `fenecdb` Python client --
 re-record it rather than edit an output by hand. Without script the transcript
 is the page.
 

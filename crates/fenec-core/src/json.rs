@@ -47,8 +47,8 @@ const TIE: u32 = 0x15ae_43fd;
 
 /// An `f32` -- a vector's component, a row's score -- as the shortest text
 /// that reads back as it: `0.1`, where the `f64` it widens to wrote
-/// `0.10000000149011612`, as the pg wire and pgvector write a vector and a
-/// sparse vector's weights. A page of 200 768-dim vectors is 43% shorter.
+/// `0.10000000149011612`, as pgvector writes a vector and a sparse
+/// vector's weights. A page of 200 768-dim vectors is 43% shorter.
 /// JavaScript reads it as an `f64` and a `Float32Array` rounds that again,
 /// which gives every `f32` back but [`TIE`], so that one keeps its `f64`'s
 /// text, which reads back exact (`every_f32_reads_back_through_an_f64`).
@@ -329,8 +329,8 @@ pub fn parse(src: &str) -> Result<Value> {
 
 /// A `json` field's value from its JSON text, every number as it is
 /// written: a list of numbers alone is a list here, not the vector [`parse`]
-/// makes of one at the top. What jsonb carries over the pg wire, a COPY's
-/// cell, and a document's member for a json field (`parse_documents_json`).
+/// makes of one at the top. What an imported `jsonb` cell holds, and a
+/// document's member for a json field (`parse_documents_json`).
 pub fn parse_json(src: &str) -> Result<Value> {
     let mut i = 0;
     let v = parse_exact_at(src, &mut i, 0)?;

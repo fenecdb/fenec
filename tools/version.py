@@ -41,7 +41,7 @@ def main():
         lock = f"integrations/{name}/package-lock.json"
         sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
         sub(lock, rf'^(    "": \{{\n      "name": "@fenecdb/{name}",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
-    sub("README.md", r"(ghcr\.io/fenecdb/fenec-pg:)\d+\.\d+\.\d+", rf"\g<1>{v}")
+    sub("README.md", r"(ghcr\.io/fenecdb/fenec-server:)\d+\.\d+\.\d+", rf"\g<1>{v}")
     print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, README.md")
 
 

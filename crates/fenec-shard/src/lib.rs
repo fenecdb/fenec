@@ -1,6 +1,6 @@
 //! # fenec-shard
 //!
-//! A router in front of several `fenec-pg --dir` nodes. Each tenant lives
+//! A router in front of several `fenec-server --dir` nodes. Each tenant lives
 //! whole on one node, in a file of its own; the router knows which node
 //! and forwards `/t/<tenant>/...` there byte for byte.
 //!

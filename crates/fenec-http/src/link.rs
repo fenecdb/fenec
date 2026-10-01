@@ -42,9 +42,7 @@ pub fn beside(what: &str, db: &Arc<RwLock<Database>>) {
                 let Some(db) = weak.upgrade() else {
                     return;
                 };
-                // An open transaction's writes are waited for: the linking
-                // is no statement of its block.
-                let mut g = crate::held::write_unheld(&db);
+                let mut g = crate::held::write(&db);
                 // The pace is the linking's alone, not the wait for the lock.
                 let t = Instant::now();
                 let left = g.link_pending(nodes);
@@ -115,16 +113,16 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
 /// Appends what of `db`'s graphs is due, and pushes it to disk once the
 /// lock is let go.
 fn save(what: &str, db: &RwLock<Database>) {
-    // The graphs as they stand for what has landed: a graph record in the
-    // file holding an open block's nodes would name documents that may
-    // never be. A database with a block open is looked at again at the next
-    // look, neither parked -- its writes put back, to be written again at
-    // the block's next statement -- nor waited for: a block that changed a
-    // graph cannot be parked, and a COPY of 100 000 128-dim vectors with
-    // the graph kept held the keeper 3.0 to 4.3 s, and every other
-    // database it keeps with it.
-    let Some(g) = crate::held::read_landed_now(db) else {
-        return;
+    // The graphs as they stand for what has landed: a block is open only
+    // under the write lock, so a read lock finds none. A database whose
+    // lock is taken is looked at again at the next look rather than waited
+    // for: a block of 100 000 128-dim vectors loaded with the graph kept
+    // held the keeper 3.0 to 4.3 s, and every other database it keeps
+    // with it.
+    let g = match db.try_read() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
     };
     if !g.graphs_due() {
         return;

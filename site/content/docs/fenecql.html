@@ -56,9 +56,8 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 <p>The <code>id</code> field is automatic. Supplying <code>id</code> inside a
 <code>put</code> turns it into an upsert. <code>insert</code> makes documents
 and never writes over one: a document naming an id that is taken refuses the
-statement, and nothing of it is written — <code>409</code> over HTTP,
-<code>23505</code> (<code>unique_violation</code>) over the PostgreSQL wire,
-as PostgreSQL's <code>INSERT</code> answers. Without an <code>id</code> the
+statement, and nothing of it is written — <code>409</code> over HTTP, as
+PostgreSQL's <code>INSERT</code> refuses a taken key. Without an <code>id</code> the
 two are the same. A retried write that must not be made twice either way
 sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 </details>
@@ -339,10 +338,10 @@ ordering can avoid — you cannot know the first three without having seen all
 of them. The query's own <code>order</code> works the same way.</p>
 
 <p>Over JSON the children are nested under the collection's name, and a chain
-nests all the way down. On the PostgreSQL wire, which has no nested row, they
-arrive flattened into the parent row the way a join presents them — the same
-data, the shape the transport can carry; a chain widens once per level, one row
-per root-to-leaf path, and a level that ran out fills its own columns and every
+nests all the way down. Flattened into rows, for a caller that wants a table,
+they arrive the way a join presents them — the same data; a chain widens once
+per level, one row per
+root-to-leaf path, and a level that ran out fills its own columns and every
 column below it with nulls. A parent with no matches keeps its row either way:
 the page is the parents. What the flat shape cannot show is the per-level
 <code>limit</code>, which is exactly why the nesting is what the other
@@ -421,10 +420,9 @@ for <code>int</code>, <code>float</code>, <code>timestamp</code> and
 <p><code>@unique</code> is a <code>@hash</code> index that refuses a
 second document holding a value one holds already: a <code>put</code>, an
 <code>insert</code> or a <code>set</code> that would write one is refused,
-and nothing of the statement is written — <code>409</code> over HTTP,
-<code>23505</code> (<code>unique_violation</code>) over the PostgreSQL
-wire, as a taken id is. It answers equality and a <code>lookup</code> as
-<code>@hash</code> does. A block — a transaction, a <code>/batch</code> —
+and nothing of the statement is written — <code>409</code> over HTTP, as a
+taken id is. It answers equality and a <code>lookup</code> as
+<code>@hash</code> does. A block — a <code>/batch</code>, a run of several —
 is checked against its own earlier writes, so it may free a value and take
 it again, and a document keeping its own value is no second one.
 <code>null</code> is no value, as in SQL: any number of documents hold it.
@@ -432,8 +430,7 @@ Values are one where <code>=</code> finds them one, so <code>-0.0</code>
 and <code>0.0</code> collide. <code>create index ... @unique</code> over
 documents that hold a value twice is refused and names the value and two
 of its documents. A replica takes what its primary took and does not ask
-again; <code>\d</code> shows the index as <code>UNIQUE</code>, with a
-<code>UNIQUE</code> constraint beside it, as PostgreSQL keeps one.</p>
+again; <code>describe</code> shows the index as <code>@unique</code>.</p>
 
 <p>The check asks the bucket the value would go in, so the index has to
 hold every document: the first write after an open builds it, where a
@@ -622,12 +619,12 @@ create index on docs (meta.source.rank) @sorted
 
 <details class="deep"><summary>Details</summary>
 <p>An object's keys are kept sorted and unique: a key given twice — in
-FenecQL, in a JSON body, in a pg parameter — refuses the write rather than
+FenecQL, in a JSON body, in a parameter — refuses the write rather than
 keep one of them, since which one a reader keeps differs from reader to
 reader. Its numbers are kept as written, an integer an integer and
 <code>19.99</code> the decimal it is, everywhere one comes in: FenecQL, a
-parameter over HTTP, over the pg wire and in the browser, a JSON body, a
-COPY cell. A list of numbers alone is read the quick way, into the
+parameter over HTTP and in the browser, a JSON body, a row
+<code>fenec import</code> reads. A list of numbers alone is read the quick way, into the
 <code>f32</code>s of the vector it nearly always is; where it is given a
 <code>json</code> field, or compared with a path into one, the statement's
 text or the parameter's JSON is read again as written, so
@@ -754,7 +751,7 @@ its non-zero entries alone: what a learned sparse model such as SPLADE gives a
 text, a weight for a few dozen or hundred of its vocabulary's 30 522 words. It
 is written and read in pgvector's <code>sparsevec</code> text form,
 <code>{index:value,...}/N</code> with the indices counted from 1, as a string
-in JSON and as text on the pg wire; entries come back in index order and
+in JSON and in FenecQL; entries come back in index order and
 zeros are dropped. <code>@inverted</code> indexes it as a word index is
 indexed, dimension by dimension, and <code>near</code> over it returns the
 documents with the largest dot product — the exact ones, walked with the
@@ -902,8 +899,8 @@ order and is walked for it. So a listing pages by the last name it
 showed — <code>where name &gt; $last order name limit 20</code> — and the
 index answers as the scan does, row for row. Equality stays the bytes', since
 the collation ties no two different strings. The collation is the field's:
-it is written with the schema into the file, and <code>\d</code> in psql
-shows it as <code>und-x-icu</code> or <code>tr-x-icu</code>. A
+it is written with the schema into the file, and <code>describe</code>
+shows it. A
 <code>@sorted</code> field without one keeps its bytes' order, so a key
 collated in the query is sorted rather than walked, and a comparison in
 <code>where</code> compares bytes.</p>
@@ -1107,8 +1104,8 @@ came up short and fell back. The steps name each of them.</p>
 </table>
 </div>
 
-<p>The same statement goes through every transport: <code>psql</code> prints
-the rows with the <code>EXPLAIN</code> tag, <code>POST /query</code> returns
+<p>The same statement goes through every transport: the shell prints
+the rows, <code>POST /query</code> returns
 them as JSON, and the JavaScript builder has <code>.explain()</code>, which
 resolves to the lines. The steps are for reading, not parsing — their wording
 may change between versions.</p>
@@ -1130,10 +1127,7 @@ get events where t >= "2026-01-01" and t < now()
 comparison is parsed.</p>
 
 <p>The representation is always ISO-8601
-(<code>2026-09-19T12:34:56.789Z</code>). On the wire <code>fenec-pg</code>
-reports PostgreSQL's own output format
-(<code>2026-09-19 12:34:56.789+00</code>) and the <code>timestamptz</code> OID,
-because client parsers expect the server format. The calendar conversion is
+(<code>2026-09-19T12:34:56.789Z</code>), in JSON and in FenecQL alike. The calendar conversion is
 integer arithmetic including leap-year and century rules — no table, no
 dependency.</p>
 

@@ -1,10 +1,10 @@
-"""Hands every write on a fenec-pg's disk to another program or a webhook.
+"""Hands every write on a fenec-server's disk to another program or a webhook.
 
     python -m fenecdb.relay http://127.0.0.1:8080 --consumer kafka | kcat -P -b broker -t fenec
     python -m fenecdb.relay http://127.0.0.1:8080 --consumer search --to https://indexer/hook
 
 The writes are read as a consumer the server keeps the cursor of
-(`GET /_changes?consumer=`, `fenec-pg --cdc`), one JSON object a line, and
+(`GET /_changes?consumer=`, `fenec-server --cdc`), one JSON object a line, and
 the cursor moves only once they are out: flushed to standard output, or
 answered 2xx by the webhook, which is sent them as `application/x-ndjson`
 and sent them again until it takes them. So each write comes at least once

@@ -654,7 +654,7 @@ fn mismatched_types_are_not_equal() {
 /// An all-numeric array coming from the JSON side is parsed as a vector (for
 /// embedding transfer). When the target field is a list it has to be
 /// converted back; otherwise `[int]`/`[float]` fields could not be filled
-/// from the browser and fenec-pg paths.
+/// from the browser and fenec-server paths.
 #[test]
 fn json_number_array_fills_list_fields() {
     let mut db = Database::new();
@@ -680,7 +680,7 @@ fn json_number_array_fills_list_fields() {
 }
 
 /// Hash pushdown must work with a bound parameter too. `where year = $1` is
-/// the usual shape coming from the browser and from fenec-pg; while only
+/// the usual shape coming from the browser and from fenec-server; while only
 /// literals were looked for, the index was never used on those paths. The
 /// result is the same either way.
 #[test]
@@ -1526,7 +1526,7 @@ fn in_pushdown_agrees_with_a_scan() {
 }
 
 /// The same, with the list coming in as parameters -- the shape the browser
-/// and `fenec-pg` actually send.
+/// and `fenec-server` actually send.
 #[test]
 fn in_pushdown_resolves_params() {
     let mut db = Database::new();

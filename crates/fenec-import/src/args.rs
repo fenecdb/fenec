@@ -1,6 +1,6 @@
 //! The options that say how a table becomes a collection -- `--where`,
 //! `--vector`, `--index`, `--cast`, `--id`, `--batch` -- read from their
-//! text. `fenec import` takes them as they are, and `fenec-pg --follow` as
+//! text. `fenec import` takes them as they are, and `fenec-server --follow` as
 //! `--follow-where` and so on: one reading of each, which two copies of had
 //! drifted before (`--index`'s).
 

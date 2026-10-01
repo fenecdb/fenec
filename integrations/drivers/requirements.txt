@@ -1,7 +1,0 @@
-psycopg[binary]>=3.2
-sqlalchemy>=2.0
-pytest>=8
-asyncpg>=0.30
-pgvector>=0.3
-numpy>=2
-duckdb>=1.5

@@ -3,14 +3,15 @@
 [![ci](https://github.com/fenecdb/fenec/actions/workflows/ci.yml/badge.svg)](https://github.com/fenecdb/fenec/actions/workflows/ci.yml)
 
 An embedded document database with full-text and vector search built in.
-Documents, indexes, aggregates, transactions, BM25 and HNSW in one engine,
+Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
 written in Rust with no dependencies. It runs inside a web page as 192 KB of
-gzipped WebAssembly, in a Rust process, or as a server that speaks the
-PostgreSQL protocol, and it has its own query language (**FenecQL**).
+gzipped WebAssembly, in a Rust process, or as a server any language reaches
+over HTTP, and it has its own query language (**FenecQL**).
 
 **[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
 home page boots the real WebAssembly module and builds an HNSW index in your
-browser, and races fenec-pg against pgvector over a million vectors.
+browser, and races fenec-server, over HTTP, against pgvector over a million
+vectors.
 Source in [`site/`](site/): `make site-serve` runs it locally, `make site-deploy`
 publishes it to Cloudflare Workers.
 
@@ -81,13 +82,14 @@ fewer than five queries and exits, fenecdb's open cost never amortises.
 
 **PostgreSQL + pgvector** for multi-writer systems shared over a network that
 need ACID. On maturity, concurrency and ecosystem the comparison is not even
-worth making — fenecdb is not aiming at that job. That is exactly why `fenec-pg`
-exists: not to *replace* PostgreSQL but to reach fenecdb with the same tools.
+worth making — fenecdb is not aiming at that job. A table can move the
+other way, though: `fenec import` copies one from PostgreSQL, and `--follow`
+keeps it following the table's commits.
 
 The numbers behind the comparison, and the method that produced them, are in
-[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-pg` against
-PostgreSQL and pgvector over the same wire, at a million vectors
-([At scale](https://fenecdb.com/docs/benchmarks#scale)).
+[Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-server` over
+HTTP against PostgreSQL and pgvector over its own protocol, at a million
+vectors ([At scale](https://fenecdb.com/docs/benchmarks#scale)).
 
 ---
 
@@ -120,40 +122,38 @@ const db = await Fenec.open('./fenec.wasm');
 build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
-**PostgreSQL server.** `fenec-pg` answers psql, psycopg, asyncpg, pgx,
-tokio-postgres, node-postgres, Npgsql, JDBC, PHP's PDO and Ruby's pg
-([drivers](https://fenecdb.com/docs/postgres#drivers)), and the catalog they
-look around in: `\d`, JDBC's `DatabaseMetaData` and
-DBeaver's navigator see the collections, their fields and their indexes.
-A vector is pgvector's `vector`, `halfvec` or `sparsevec`, so pgvector's
-client libraries for Python, Go, Node, Rust, .NET, Java, PHP and Ruby work unchanged
-([pgvector's clients](https://fenecdb.com/docs/postgres#pgvector)).
-`COPY ... FROM STDIN` loads rows as psql's `\copy` and psycopg's `copy` send
-them, in text, CSV or binary ([COPY](https://fenecdb.com/docs/postgres#copy)).
+**Server.** `fenec-server` serves a file, or a directory of tenants, over
+HTTP and JSON: REST routes, FenecQL through `POST /query`, all-or-nothing
+`/batch`es, subscriptions over SSE and change data capture. Every language
+reaches it with its own HTTP client
+([languages](https://fenecdb.com/docs/languages)); official SDKs are next on
+the [roadmap](ROADMAP.md).
 
 ```bash
-make pg PGPASS=secret HTTP=127.0.0.1:8080
-psql -h 127.0.0.1 -p 5432 -U fenec
+make server TOKEN=secret
+curl -H 'Authorization: Bearer secret' -d '{"query": "collections"}' \
+  http://127.0.0.1:8080/query
 ```
 
-The same process carries the HTTP/JSON endpoint — never a second binary, since
-two processes opening one file would corrupt it. A second `fenec-pg` follows
-it as a read replica with `--replica-of`: it is sent the writes on the
-primary's disk, serves reads, refuses writes with `25006`, and is promoted by
-hand; `fenec backup`, `fenec archive` and `fenec restore --to <time>` take a
-running database whole, keep its writes, and rebuild it as it stood at a
-moment. With `--follow postgres://...` it mirrors a PostgreSQL table into its
-file as the table commits, and serves the mirror while it follows. [PostgreSQL server](https://fenecdb.com/docs/postgres) ·
+One process writes a file -- two opening one would corrupt it -- so
+replication, the graph keeper and the mirror are threads of it. A second
+`fenec-server` follows it as a read replica with `--replica-of`: it is sent
+the writes on the primary's disk, serves reads, refuses writes with 403, and
+is promoted by hand; `fenec backup`, `fenec archive` and `fenec restore --to
+<time>` take a running database whole, keep its writes, and rebuild it as it
+stood at a moment. With `--follow postgres://...` it mirrors a PostgreSQL
+table into its file as the table commits, and serves the mirror while it
+follows. [Server](https://fenecdb.com/docs/server) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 2.88 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 2.81 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
 ```bash
-docker pull ghcr.io/fenecdb/fenec-pg:0.1.6     # published, multi-arch
-make docker && make docker-run PGPASS=secret   # or build it yourself
+docker pull ghcr.io/fenecdb/fenec-server:0.1.6     # published, multi-arch
+make docker && make docker-run TOKEN=secret   # or build it yourself
 ```
 
 **Embedded in Rust.** `fenec-core` is the engine as a library:
@@ -165,10 +165,10 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 
 | | |
 |---|---|
-| **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch or a transaction landing whole |
-| **Schema** | `alter collection` adds, drops and renames a field without rewriting a document — and over the pg wire, the `ALTER TABLE` a migration sends |
-| **Transactions** | `BEGIN`, `SAVEPOINT`, `ROLLBACK TO`, `COMMIT` over the PostgreSQL wire; `COPY` in and out |
-| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`, and `jsonb` over the pg wire) |
+| **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch landing whole |
+| **Schema** | `alter collection` adds, drops and renames a field without rewriting a document |
+| **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once |
+| **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) |
 | **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
 | **Metrics** | `cosine` `l2` `dot` |
 | **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
@@ -177,17 +177,18 @@ make docker && make docker-run PGPASS=secret   # or build it yourself
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
-| **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · PostgreSQL v3 wire · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) |
+| **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
 | **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 192 KB gzip wasm + 30 KB gzip client · 1153–1687 KB binary · 2.88 MB container image |
+| **Runtime size** | 192 KB gzip wasm + 30 KB gzip client · 1234–1784 KB binary · 2.81 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
-What it deliberately does **not** do — no second writer (a transaction holds the
-database from its first write to its end), no JOIN, no subqueries,
+What it deliberately does **not** do — no second writer (a batch holds the
+database from its first write to its end), no interactive transactions, no
+SQL and no PostgreSQL wire protocol, no JOIN, no subqueries,
 no change of a field's type in place, no multi-writer replication, no decimal
 type, no TLS (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every
@@ -207,7 +208,7 @@ query; it is not a join and is not trying to be one.
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
-| [PostgreSQL server](https://fenecdb.com/docs/postgres) | Sessions, SCRAM authentication, the type mapping, what the protocol does not carry |
+| [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
 | [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React |
 | [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, and the slow-statement log |
@@ -216,7 +217,7 @@ query; it is not a join and is not trying to be one.
 | [Import](https://fenecdb.com/docs/import) | Build a collection from SQLite or a live PostgreSQL server in one command, and keep it following the table's changes |
 | [Embedded Rust](https://fenecdb.com/docs/embedding) | `fenec-core` as a library: opening a file, executing parsed statements |
 | [File format](https://fenecdb.com/docs/file-format) | One file, replayed in a single pass; record kinds, and the crate layout |
-| [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process, and against pgvector over the pg wire at scale |
+| [Benchmarks](https://fenecdb.com/docs/benchmarks) | Against SQLite and pgvector on the same data in the same process, and fenec-server over HTTP against pgvector at scale |
 | [Limits](https://fenecdb.com/docs/limits) | What it does not do, every hard-coded ceiling, memory and scale |
 
 The docs are the long-form reference; their source is

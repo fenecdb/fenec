@@ -5,8 +5,7 @@
 //! learned from `pg_type`.
 //!
 //! Why text format and not binary: a binary COPY needs a separate decoder
-//! per type. In text format a single escape decoder suffices, and it is
-//! consistent with `fenec-pg`'s own choice (see `fenec_wire::proto`).
+//! per type. In text format a single escape decoder suffices.
 
 use crate::{Column, Source};
 use fenec_core::error::{Error, Result};
@@ -305,7 +304,7 @@ pub(crate) fn parse_cell(raw: &[u8], kind: &Kind, column: &str) -> Result<Value>
             for part in inner.split(',') {
                 // `str::parse`, and so still `core`'s 12 KB table of powers
                 // of five -- which is why the default `fenec` binary carries
-                // it while `fenec-pg` and `make small` no longer do. Going
+                // it while `fenec-server` and `make small` no longer do. Going
                 // through `num::parse_f64` and narrowing would round twice,
                 // and a component is not worth being slightly wrong about.
                 v.push(part.trim().parse::<f32>().map_err(|_| bad("a vector"))?);
