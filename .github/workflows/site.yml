@@ -64,7 +64,7 @@ jobs:
       - name: Check the internal links
         run: python3 site/check_links.py
 
-      - uses: cloudflare/wrangler-action@v3
+      - uses: cloudflare/wrangler-action@v4
         with:
           # The action defaults to wrangler 3, which predates Workers static
           # assets and rejects this config outright ("Missing entry-point")
