@@ -1,0 +1,192 @@
+<!--
+title: Your language — fenecdb
+description: Use fenecdb from JavaScript, Python, Go, Rust, .NET, Java, PHP or Ruby, with the PostgreSQL driver and pgvector library you already know.
+-->
+
+<h1>Your language</h1>
+<p class="kicker">Connect with the PostgreSQL driver you already use, and
+send vectors with pgvector's library for your language.</p>
+
+<p>Every example on this page is what the drivers run against a real server
+on each change to fenecdb (<code>make drivers-test</code>). A language not
+on this list may well work; these are the ones that are tested.</p>
+
+<h2 id="setup">Start a server</h2>
+
+<pre data-lang="bash">fenec-pg --file app.fenec --listen 127.0.0.1:5433 --password secret</pre>
+
+<p>Then pick your language. Each example makes a collection, writes a
+document with a vector, and asks for the nearest.</p>
+
+<h2 id="examples">Connect and search</h2>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Python">
+<pre data-lang="bash" data-label="install">pip install "psycopg[binary]" pgvector numpy</pre>
+<pre data-lang="python" data-label="search.py">import numpy as np, psycopg
+from pgvector.psycopg import register_vector
+
+conn = psycopg.connect("host=127.0.0.1 port=5433 user=fenec password=secret",
+                       autocommit=True)
+register_vector(conn)
+
+conn.execute("create collection if not exists docs "
+             "(title text, embed vector<3> @hnsw(cosine))")
+conn.execute("put docs {title: %s, embed: %s}",
+             ("Night at the oasis", np.array([0.1, 0.2, 0.3], dtype=np.float32)))
+
+rows = conn.execute("get docs select title near embed %s limit 5",
+                    (np.array([0.1, 0.2, 0.3], dtype=np.float32),)).fetchall()</pre>
+<p>asyncpg and SQLAlchemy work too; LangChain and LlamaIndex have stores of
+their own (<a href="integrations.html">Integrations</a>).</p>
+</div>
+
+<div class="lang" data-name="JavaScript">
+<pre data-lang="bash" data-label="install">npm install pg pgvector</pre>
+<pre data-lang="js" data-label="search.mjs">import pg from 'pg';
+import pgvector from 'pgvector/pg';
+
+const db = new pg.Client({ connectionString: 'postgres://fenec:secret@127.0.0.1:5433/fenec' });
+await db.connect();
+await pgvector.registerTypes(db);
+
+await db.query('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
+await db.query('put docs {title: $1, embed: $2}', ['Night at the oasis', pgvector.toSql([0.1, 0.2, 0.3])]);
+
+const { rows } = await db.query('get docs select title near embed $1 limit 5',
+  [pgvector.toSql([0.1, 0.2, 0.3])]);</pre>
+<p>In the browser there is no server at all: the same database runs in the
+page (<a href="javascript.html">JavaScript</a>).</p>
+</div>
+
+<div class="lang" data-name="Go">
+<pre data-lang="bash" data-label="install">go get github.com/jackc/pgx/v5 github.com/pgvector/pgvector-go</pre>
+<pre data-lang="go" data-label="main.go">conn, _ := pgx.Connect(ctx, "postgres://fenec:secret@127.0.0.1:5433/fenec")
+pgxvec.RegisterTypes(ctx, conn)
+
+conn.Exec(ctx, "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
+conn.Exec(ctx, "put docs {title: $1, embed: $2}",
+    "Night at the oasis", pgvector.NewVector([]float32{0.1, 0.2, 0.3}))
+
+rows, _ := conn.Query(ctx, "get docs select title near embed $1 limit 5",
+    pgvector.NewVector([]float32{0.1, 0.2, 0.3}))</pre>
+</div>
+
+<div class="lang" data-name="Rust">
+<pre data-lang="bash" data-label="install">cargo add tokio tokio-postgres --features tokio/full
+cargo add pgvector --features postgres</pre>
+<pre data-lang="rust" data-label="main.rs">let (client, conn) = tokio_postgres::connect(
+    "host=127.0.0.1 port=5433 user=fenec password=secret", NoTls).await?;
+tokio::spawn(conn);
+
+client.batch_execute("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))").await?;
+client.execute("put docs {title: $1, embed: $2}",
+    &[&"Night at the oasis", &Vector::from(vec![0.1, 0.2, 0.3])]).await?;
+
+let rows = client.query("get docs select title near embed $1 limit 5",
+    &[&Vector::from(vec![0.1, 0.2, 0.3])]).await?;</pre>
+<p>Or embed the engine in your process, with no server
+(<a href="embedding.html">Embedded Rust</a>).</p>
+</div>
+
+<div class="lang" data-name=".NET">
+<pre data-lang="bash" data-label="install">dotnet add package Npgsql
+dotnet add package Pgvector</pre>
+<pre data-lang="text" data-label="Program.cs">var builder = new NpgsqlDataSourceBuilder(
+    "Host=127.0.0.1;Port=5433;Username=fenec;Password=secret;Database=fenec");
+builder.UseVector();
+await using var db = builder.Build();
+await using var conn = db.CreateConnection();
+conn.Open();
+
+new NpgsqlCommand("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))", conn)
+    .ExecuteNonQuery();
+
+using (var put = new NpgsqlCommand("put docs {title: $1, embed: $2}", conn))
+{
+    put.Parameters.AddWithValue("Night at the oasis");
+    put.Parameters.AddWithValue(new Vector(new float[] { 0.1f, 0.2f, 0.3f }));
+    put.ExecuteNonQuery();
+}
+
+using var near = new NpgsqlCommand("get docs select title near embed $1 limit 5", conn);
+near.Parameters.AddWithValue(new Vector(new float[] { 0.1f, 0.2f, 0.3f }));
+using var rows = near.ExecuteReader();</pre>
+</div>
+
+<div class="lang" data-name="Java">
+<pre data-lang="text" data-label="pom.xml">&lt;dependency&gt;&lt;groupId&gt;org.postgresql&lt;/groupId&gt;&lt;artifactId&gt;postgresql&lt;/artifactId&gt;&lt;version&gt;42.7.4&lt;/version&gt;&lt;/dependency&gt;
+&lt;dependency&gt;&lt;groupId&gt;com.pgvector&lt;/groupId&gt;&lt;artifactId&gt;pgvector&lt;/artifactId&gt;&lt;version&gt;0.1.6&lt;/version&gt;&lt;/dependency&gt;</pre>
+<pre data-lang="text" data-label="Search.java">Connection conn = DriverManager.getConnection(
+    "jdbc:postgresql://127.0.0.1:5433/fenec?user=fenec&password=secret");
+PGvector.addVectorType(conn);
+
+conn.createStatement().execute(
+    "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))");
+
+PreparedStatement put = conn.prepareStatement("put docs {title: ?, embed: ?}");
+put.setString(1, "Night at the oasis");
+put.setObject(2, new PGvector(new float[] {0.1f, 0.2f, 0.3f}));
+put.executeUpdate();
+
+PreparedStatement near = conn.prepareStatement("get docs select title near embed ? limit 5");
+near.setObject(1, new PGvector(new float[] {0.1f, 0.2f, 0.3f}));
+ResultSet rows = near.executeQuery();</pre>
+</div>
+
+<div class="lang" data-name="PHP">
+<pre data-lang="bash" data-label="install">composer require pgvector/pgvector   # and the pdo_pgsql extension</pre>
+<pre data-lang="text" data-label="search.php">use Pgvector\Vector;
+
+$db = new PDO('pgsql:host=127.0.0.1;port=5433;dbname=fenec', 'fenec', 'secret');
+
+$db->exec('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
+$db->prepare('put docs {title: ?, embed: ?}')
+   ->execute(['Night at the oasis', new Vector([0.1, 0.2, 0.3])]);
+
+$near = $db->prepare('get docs select title near embed ? limit 5');
+$near->execute([new Vector([0.1, 0.2, 0.3])]);
+$rows = $near->fetchAll();</pre>
+</div>
+
+<div class="lang" data-name="Ruby">
+<pre data-lang="bash" data-label="install">gem install pg pgvector</pre>
+<pre data-lang="text" data-label="search.rb">db = PG.connect("host=127.0.0.1 port=5433 user=fenec password=secret dbname=fenec")
+registry = PG::BasicTypeRegistry.new.define_default_types
+Pgvector::PG.register_vector(registry)
+db.type_map_for_queries = PG::BasicTypeMapForQueries.new(db, registry: registry)
+db.type_map_for_results = PG::BasicTypeMapForResults.new(db, registry: registry)
+
+db.exec("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
+db.exec_params("put docs {title: $1, embed: $2}",
+               ["Night at the oasis", Pgvector::Vector.new([0.1, 0.2, 0.3])])
+
+rows = db.exec_params("get docs select title near embed $1 limit 5",
+                      [Pgvector::Vector.new([0.1, 0.2, 0.3])])</pre>
+</div>
+
+</div>
+
+<h2 id="http">No driver at all</h2>
+
+<p>Any language that can send an HTTP request can use fenecdb: start the
+server with <code>--http</code> and post a query.</p>
+
+<pre data-lang="bash">curl -X POST localhost:8080/query \
+  -d '{"query":"get docs select title near embed $1 limit 5","params":[[0.1,0.2,0.3]]}'</pre>
+
+<p>Python has a small client for it, <code>pip install fenecdb</code>
+(<a href="http.html">HTTP endpoint</a>).</p>
+
+<details class="deep"><summary>Details: what each driver is tested for</summary>
+<p>The full list of what each driver and library is held to — prepared
+statements, binary rows, transactions, COPY, the catalog queries each sends
+on its own — is on <a href="postgres.html#drivers">PostgreSQL server</a>.
+Two drivers needed the server to change before they could connect at all:
+Npgsql opens every connection with catalog queries that start with a
+comment, and Ruby's <code>pg</code> learns its types by joining
+<code>pg_type</code> to <code>pg_proc</code>. Both run in CI now, as every
+language here does, so a change that would break one is caught before it
+ships.</p>
+</details>
