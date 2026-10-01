@@ -1047,3 +1047,39 @@ if (motions.length) {
     near.observe(fig);
   }
 }
+
+/* ============================================================ language tabs */
+
+/* A block of examples, one per language: a tab for each, the reader's
+   choice kept for the next page and the next visit. Without script every
+   example shows, one under another, each under its name. */
+for (const box of document.querySelectorAll('[data-langs]')) {
+  const panels = [...box.querySelectorAll(':scope > .lang')];
+  const bar = document.createElement('div');
+  bar.className = 'lang-tabs';
+  bar.setAttribute('role', 'tablist');
+  bar.setAttribute('aria-label', 'Language');
+  const tabs = panels.map((p, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.textContent = p.dataset.name;
+    b.addEventListener('click', () => show(i, true));
+    bar.append(b);
+    return b;
+  });
+  const show = (i, keep) => {
+    panels.forEach((p, j) => { p.hidden = j !== i; });
+    tabs.forEach((b, j) => b.setAttribute('aria-selected', String(j === i)));
+    if (keep) { try { localStorage.setItem('fenec-lang', panels[i].dataset.name); } catch {} }
+  };
+  box.prepend(bar);
+  box.classList.add('on');
+  let start = 0;
+  try {
+    const kept = localStorage.getItem('fenec-lang');
+    const at = panels.findIndex((p) => p.dataset.name === kept);
+    if (at >= 0) start = at;
+  } catch {}
+  show(start, false);
+}

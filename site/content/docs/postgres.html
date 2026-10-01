@@ -80,7 +80,9 @@ concurrent full scans on eight cores measured 4.3×.</p>
 <tr><td>Node</td><td>node-postgres</td><td>pgvector-node</td></tr>
 <tr><td>Rust</td><td>tokio-postgres</td><td>pgvector-rust</td></tr>
 <tr><td>.NET</td><td>Npgsql</td><td>pgvector-dotnet</td></tr>
-<tr><td>Java</td><td>JDBC (pgjdbc)</td><td>—</td></tr>
+<tr><td>Java</td><td>JDBC (pgjdbc)</td><td>pgvector-java</td></tr>
+<tr><td>PHP</td><td>PDO (pdo_pgsql)</td><td>pgvector-php</td></tr>
+<tr><td>Ruby</td><td>pg</td><td>pgvector-ruby</td></tr>
 </tbody>
 </table>
 </div>
@@ -112,6 +114,9 @@ transactions and its COPY — and with it pgvector's library for it
 <tr><td>pgx v5</td><td>rows in binary, batches, transactions, <code>CopyFrom</code> (binary), <code>CopyTo</code></td></tr>
 <tr><td>tokio-postgres</td><td>every row and parameter in binary, <code>copy_in</code> in text and binary (<code>BinaryCopyInWriter</code>), <code>copy_out</code> in binary (<code>BinaryCopyOutStream</code>)</td></tr>
 <tr><td>node-postgres</td><td>rows and parameters in text</td></tr>
+<tr><td>pgjdbc 42.7</td><td>prepared statements with typed parameters, a transaction committed and rolled back, a batch, <code>DatabaseMetaData</code></td></tr>
+<tr><td>PDO (pdo_pgsql)</td><td>bound parameters, a transaction committed and rolled back</td></tr>
+<tr><td>pg (Ruby)</td><td>parameters, transactions, and the type maps it builds from <code>pg_type</code> joined to <code>pg_proc</code></td></tr>
 <tr><td>Npgsql 8</td><td>the type lookup it opens every connection with (one text of several catalog queries, two opening with a comment), typed parameters, rows in binary, transactions committed and rolled back</td></tr>
 <tr><td>Spark, its JDBC reader and pgjdbc</td><td>a collection read as a DataFrame: its columns, <code>count()</code>, filters pushed down, <code>IN</code>, a <code>groupBy</code> (<a href="#spark">below</a>)</td></tr>
 <tr><td>DuckDB, its <code>postgres</code> extension</td><td>a collection attached as a table, read whole, aggregated, filtered with the conditions pushed down, and written out as Parquet (<a href="#duckdb">below</a>)</td></tr>
@@ -208,6 +213,9 @@ pgvector:</p>
 <tr><td>pgvector-python, asyncpg</td><td><code>await register_vector(conn)</code></td><td>NumPy arrays, <code>HalfVector</code>, <code>SparseVector</code> both ways, <code>executemany</code>, <code>copy_records_to_table</code></td></tr>
 <tr><td>pgvector-go, pgx</td><td><code>pgxvec.RegisterTypes</code></td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, batches, <code>CopyFrom</code></td></tr>
 <tr><td>pgvector-node, node-postgres</td><td><code>registerTypes(client)</code></td><td>a vector read as an array, written with <code>toSql</code></td></tr>
+<tr><td>pgvector-java, pgjdbc</td><td><code>PGvector.addVectorType(conn)</code></td><td><code>PGvector</code> as a parameter, in a <code>near</code> and read back</td></tr>
+<tr><td>pgvector-php, PDO</td><td>none: a <code>Vector</code> is sent as its text</td><td><code>Vector</code> as a parameter and read back</td></tr>
+<tr><td>pgvector-ruby, pg</td><td><code>Pgvector::PG.register_vector(registry)</code></td><td><code>Pgvector::Vector</code> through the type maps, both ways</td></tr>
 <tr><td>pgvector-dotnet, Npgsql</td><td><code>dataSourceBuilder.UseVector()</code></td><td><code>Vector</code> as a parameter, in a <code>near</code> and read back</td></tr>
 <tr><td>pgvector-rust, tokio-postgres</td><td>none: the types are named</td><td><code>Vector</code>, <code>HalfVector</code>, <code>SparseVector</code>, a <code>BinaryCopyInWriter</code> of the type found by name</td></tr>
 </tbody>

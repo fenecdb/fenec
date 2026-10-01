@@ -1126,3 +1126,31 @@ html { scrollbar-color: var(--rule-hot) transparent; }
   padding-bottom: clamp(110px, 13vw, 190px);
 }
 @media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }
+
+/* The header is one surface on every page: opaque, the night's own colour,
+   with the rule under it. Half see-through, it showed whatever scrolled
+   beneath -- the docs' dune band, the playground's glow -- a different
+   header on each page, cut at its edge. */
+.top {
+  background: rgba(7,10,24,.96);
+  backdrop-filter: none;
+}
+/* The sidebar scrolls up and down only: a long name wraps rather than
+   push a horizontal scrollbar under it. */
+.side { overflow-x: hidden; }
+.side a { overflow-wrap: anywhere; }
+
+/* Examples by language. */
+.langs { margin: 20px 0 28px; }
+.lang-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.lang-tabs button {
+  padding: 8px 14px; border-radius: 999px; cursor: pointer;
+  font: 500 14px/1 var(--sans); color: var(--sand-2);
+  background: var(--panel); border: 1px solid var(--rule);
+}
+.lang-tabs button[aria-selected="true"] { color: #23100A; background: var(--sun); border-color: var(--sun); }
+.lang-tabs button:hover { color: var(--sand); border-color: var(--rule-hot); }
+.lang-tabs button[aria-selected="true"]:hover { color: #23100A; }
+.langs:not(.on) .lang::before { content: attr(data-name); display: block; font-weight: 600; color: var(--star); margin: 22px 0 6px; }
+.lang .code { margin: 0 0 12px; }
+.lang > p { color: var(--sand-dim); font-size: 15px; }

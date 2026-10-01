@@ -57,6 +57,7 @@ NAV = [
         ("docs/index", "Overview"),
         ("docs/quickstart", "Quickstart"),
         ("docs/concepts", "How it works"),
+        ("docs/languages", "Your language"),
     ]),
     ("Query", [
         ("docs/fenecql", "FenecQL"),
@@ -98,6 +99,12 @@ KEYWORDS = {
     "bash": """cd make cargo curl echo npx python3 docker export sudo cp mv rm set
         if then fi for do done""".split(),
     "json": "true false null".split(),
+    "python": """import from as def return if else for in while with try except
+        True False None and or not lambda class await async""".split(),
+    "go": """package import func return if else for range var const defer go
+        nil true false type struct map""".split(),
+    "sql": """INSTALL LOAD ATTACH AS SELECT FROM WHERE GROUP BY COPY TO TYPE
+        FORMAT count avg sum""".split(),
 }
 
 TYPES = """bool int float text bytes timestamp vector f16 cosine l2 dot
@@ -111,6 +118,9 @@ COMMENT = {
     "http": r"#[^\n]*",
     "text": None,
     "json": None,
+    "python": r"#[^\n]*",
+    "go": r"//[^\n]*",
+    "sql": r"--[^\n]*",
 }
 
 
