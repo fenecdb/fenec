@@ -1101,3 +1101,10 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 /* Under the docs' dune band the page starts in the band's last colour and
    fades into the night, so the band's foot leaves no edge. */
 .docs .shell { background: linear-gradient(to bottom, #150F26 0, rgba(21,15,38,0) 360px); }
+
+/* The claim in two lines on a wide screen: the text column takes more of
+   the row and the type steps down a little, so "that fits in a browser
+   tab." holds on one line. A phone wraps it as it falls. */
+.hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+.has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
+@media (max-width: 940px) { .hero-say br.wide { display: none; } }
