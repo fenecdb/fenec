@@ -121,12 +121,12 @@ build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
 **PostgreSQL server.** `fenec-pg` answers psql, psycopg, asyncpg, pgx,
-tokio-postgres, node-postgres and JDBC
+tokio-postgres, node-postgres, Npgsql and JDBC
 ([drivers](https://fenecdb.com/docs/postgres#drivers)), and the catalog they
 look around in: `\d`, JDBC's `DatabaseMetaData` and
 DBeaver's navigator see the collections, their fields and their indexes.
 A vector is pgvector's `vector`, `halfvec` or `sparsevec`, so pgvector's
-client libraries for Python, Go, Node and Rust work unchanged
+client libraries for Python, Go, Node, Rust and .NET work unchanged
 ([pgvector's clients](https://fenecdb.com/docs/postgres#pgvector)).
 `COPY ... FROM STDIN` loads rows as psql's `\copy` and psycopg's `copy` send
 them, in text, CSV or binary ([COPY](https://fenecdb.com/docs/postgres#copy)).
