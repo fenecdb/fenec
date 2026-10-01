@@ -1,4 +1,0 @@
-# The pg gem and pgvector-ruby against a real fenec-server; run by ../run-tests.sh
-source "https://rubygems.org"
-gem "pg", "~> 1.5"
-gem "pgvector", "~> 0.3"

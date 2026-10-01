@@ -11,8 +11,8 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench tx-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
-	python-test drivers-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
+.PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
+	python-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -229,11 +229,12 @@ beir:
 python-test:
 	integrations/python/run-tests.sh
 
-## PostgreSQL drivers over the pg wire, pgvector's library for each: psycopg,
-## asyncpg and SQLAlchemy from a python:3.13 container (Docker), pgx,
-## node-postgres and tokio-postgres with the Go, Node and Rust on the machine
-drivers-test:
-	integrations/drivers/run-tests.sh
+## The docs' example for each language over HTTP, against a real
+## fenec-server: Python (the fenecdb client), Java, PHP and Ruby from
+## containers of their own (Docker), JavaScript, Go, C# and Rust with the
+## Node, Go, .NET and Rust on the machine
+languages-test:
+	integrations/languages/run-tests.sh
 
 ## useLiveQuery for React, against a stand-in and a real fenec-server + replica
 ## (needs `make wasm`)

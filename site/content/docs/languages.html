@@ -1,192 +1,279 @@
 <!--
 title: Your language — fenecdb
-description: Use fenecdb from JavaScript, Python, Go, Rust, .NET, Java, PHP or Ruby, with the PostgreSQL driver and pgvector library you already know.
+description: Use fenecdb from Python, JavaScript, Go, Rust, .NET, Java, PHP or Ruby over HTTP, with the HTTP client your language already has.
 -->
 
 <h1>Your language</h1>
-<p class="kicker">Connect with the PostgreSQL driver you already use, and
-send vectors with pgvector's library for your language.</p>
+<p class="kicker">fenecdb speaks HTTP and JSON, so every language reaches it
+with the HTTP client it already has. No driver to install.</p>
 
-<p>Every example on this page is what the drivers run against a real server
-on each change to fenecdb (<code>make drivers-test</code>). A language not
-on this list may well work; these are the ones that are tested.</p>
+<p>Every example on this page is a program that runs against a real server
+on each change to fenecdb (<code>make languages-test</code>). Official SDKs
+for these languages are coming in a later release (Phase 53); until then
+these few lines are the whole client.</p>
 
 <h2 id="setup">Start a server</h2>
 
-<pre data-lang="bash">fenec-server --file app.fenec --listen 127.0.0.1:5433 --password secret</pre>
+<pre data-lang="bash">fenec-server --file app.fenec --http 127.0.0.1:8080 --http-token secret</pre>
 
-<p>Then pick your language. Each example makes a collection, writes a
-document with a vector, and asks for the nearest.</p>
+<p>Then pick your language. Each example makes a collection, writes two
+documents with a vector, asks for the nearest and handles a refusal. Each
+sends one FenecQL statement a request to <code>POST /query</code>, its
+values as <code>$1</code>, <code>$2</code>, ... in <code>params</code>, and
+the token as <code>Authorization: Bearer</code>.</p>
 
 <h2 id="examples">Connect and search</h2>
 
 <div class="langs" data-langs>
 
 <div class="lang" data-name="Python">
-<pre data-lang="bash" data-label="install">pip install "psycopg[binary]" pgvector numpy</pre>
-<pre data-lang="python" data-label="search.py">import numpy as np, psycopg
-from pgvector.psycopg import register_vector
+<pre data-lang="bash" data-label="install">pip install fenecdb   # the standard library alone</pre>
+<pre data-lang="python" data-label="search.py">from fenecdb import Client, FenecError
 
-conn = psycopg.connect("host=127.0.0.1 port=5433 user=fenec password=secret",
-                       autocommit=True)
-register_vector(conn)
+db = Client("http://127.0.0.1:8080", token="secret")
 
-conn.execute("create collection if not exists docs "
-             "(title text, embed vector<3> @hnsw(cosine))")
-conn.execute("put docs {title: %s, embed: %s}",
-             ("Night at the oasis", np.array([0.1, 0.2, 0.3], dtype=np.float32)))
+db.query("create collection if not exists docs "
+         "(title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
+db.query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
 
-rows = conn.execute("get docs select title near embed %s limit 5",
-                    (np.array([0.1, 0.2, 0.3], dtype=np.float32),)).fetchall()</pre>
-<p>asyncpg and SQLAlchemy work too; LangChain and LlamaIndex have stores of
-their own (<a href="integrations.html">Integrations</a>).</p>
+rows = db.query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+# [{"title": "Night at the oasis", "_score": 0.99...}, {"title": "Dunes", ...}]
+
+try:
+    db.query("get nowhere")
+except FenecError as e:
+    print(e.status, e)   # 404 collection `nowhere`</pre>
+<p><code>AsyncClient</code> does the same in an event loop; LangChain and
+LlamaIndex have stores of their own (<a href="integrations.html">Integrations</a>).</p>
 </div>
 
 <div class="lang" data-name="JavaScript">
-<pre data-lang="bash" data-label="install">npm install pg pgvector</pre>
-<pre data-lang="js" data-label="search.mjs">import pg from 'pg';
-import pgvector from 'pgvector/pg';
+<pre data-lang="js" data-label="search.mjs">async function query(q, params = []) {
+  const res = await fetch('http://127.0.0.1:8080/query', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
+    body: JSON.stringify({ query: q, params }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw Object.assign(new Error(body.error), { status: res.status });
+  return body;
+}
 
-const db = new pg.Client({ connectionString: 'postgres://fenec:secret@127.0.0.1:5433/fenec' });
-await db.connect();
-await pgvector.registerTypes(db);
+await query('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+await query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
+await query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
 
-await db.query('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
-await db.query('put docs {title: $1, embed: $2}', ['Night at the oasis', pgvector.toSql([0.1, 0.2, 0.3])]);
+const rows = await query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);</pre>
+<p>Or <code>npm install @fenecdb/web</code>: its <code>connect</code> sends
+the query builder's statements to a server, the same code that runs in the
+page.</p>
+<pre data-lang="js" data-label="client.mjs">import { connect } from '@fenecdb/web';
 
-const { rows } = await db.query('get docs select title near embed $1 limit 5',
-  [pgvector.toSql([0.1, 0.2, 0.3])]);</pre>
+const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
+const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();</pre>
 <p>In the browser there is no server at all: the same database runs in the
 page (<a href="javascript.html">JavaScript</a>).</p>
 </div>
 
 <div class="lang" data-name="Go">
-<pre data-lang="bash" data-label="install">go get github.com/jackc/pgx/v5 github.com/pgvector/pgvector-go</pre>
-<pre data-lang="go" data-label="main.go">conn, _ := pgx.Connect(ctx, "postgres://fenec:secret@127.0.0.1:5433/fenec")
-pgxvec.RegisterTypes(ctx, conn)
+<pre data-lang="go" data-label="main.go">// query runs one FenecQL statement and decodes its answer into out.
+func query(out any, q string, params ...any) error {
+	body, _ := json.Marshal(map[string]any{"query": q, "params": params})
+	req, _ := http.NewRequest("POST", "http://127.0.0.1:8080/query", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 300 {
+		e := &amp;FenecError{Status: res.StatusCode}
+		json.NewDecoder(res.Body).Decode(e)
+		return e
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(res.Body).Decode(out)
+}
 
-conn.Exec(ctx, "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
-conn.Exec(ctx, "put docs {title: $1, embed: $2}",
-    "Night at the oasis", pgvector.NewVector([]float32{0.1, 0.2, 0.3}))
+query(nil, "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+query(nil, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3})
+query(nil, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0})
 
-rows, _ := conn.Query(ctx, "get docs select title near embed $1 limit 5",
-    pgvector.NewVector([]float32{0.1, 0.2, 0.3}))</pre>
+var rows []struct {
+	Title string  `json:"title"`
+	Score float32 `json:"_score"`
+}
+err := query(&amp;rows, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})</pre>
+<p><code>net/http</code> and <code>encoding/json</code> alone;
+<code>FenecError</code> is a struct of the status and the body's
+<code>error</code>.</p>
 </div>
 
 <div class="lang" data-name="Rust">
-<pre data-lang="bash" data-label="install">cargo add tokio tokio-postgres --features tokio/full
-cargo add pgvector --features postgres</pre>
-<pre data-lang="rust" data-label="main.rs">let (client, conn) = tokio_postgres::connect(
-    "host=127.0.0.1 port=5433 user=fenec password=secret", NoTls).await?;
-tokio::spawn(conn);
+<pre data-lang="bash" data-label="install">cargo add ureq --features json
+cargo add serde_json</pre>
+<pre data-lang="rust" data-label="main.rs">use serde_json::{json, Value};
 
-client.batch_execute("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))").await?;
-client.execute("put docs {title: $1, embed: $2}",
-    &[&"Night at the oasis", &Vector::from(vec![0.1, 0.2, 0.3])]).await?;
+fn query(q: &amp;str, params: Value) -> Result&lt;Value, ureq::Error&gt; {
+    Ok(ureq::post("http://127.0.0.1:8080/query")
+        .set("Authorization", "Bearer secret")
+        .send_json(json!({"query": q, "params": params}))?
+        .into_json()?)
+}
 
-let rows = client.query("get docs select title near embed $1 limit 5",
-    &[&Vector::from(vec![0.1, 0.2, 0.3])]).await?;</pre>
+query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))", json!([]))?;
+query("put docs {title: $1, embed: $2}", json!(["Night at the oasis", [0.1, 0.2, 0.3]]))?;
+query("put docs {title: $1, embed: $2}", json!(["Dunes", [0.9, 0.1, 0.0]]))?;
+
+let rows = query("get docs select title near embed $1 limit 5", json!([[0.1, 0.2, 0.3]]))?;
+
+match query("get nowhere", json!([])) {
+    Err(ureq::Error::Status(404, res)) => { /* res.into_json()? holds {"error": ...} */ }
+    other => { /* ... */ }
+}</pre>
 <p>Or embed the engine in your process, with no server
 (<a href="embedding.html">Embedded Rust</a>).</p>
 </div>
 
 <div class="lang" data-name=".NET">
-<pre data-lang="bash" data-label="install">dotnet add package Npgsql
-dotnet add package Pgvector</pre>
-<pre data-lang="text" data-label="Program.cs">var builder = new NpgsqlDataSourceBuilder(
-    "Host=127.0.0.1;Port=5433;Username=fenec;Password=secret;Database=fenec");
-builder.UseVector();
-await using var db = builder.Build();
-await using var conn = db.CreateConnection();
-conn.Open();
+<pre data-lang="text" data-label="Program.cs">var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:8080") };
+http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret");
 
-new NpgsqlCommand("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))", conn)
-    .ExecuteNonQuery();
-
-using (var put = new NpgsqlCommand("put docs {title: $1, embed: $2}", conn))
+async Task&lt;JsonElement&gt; Query(string query, params object[] args)
 {
-    put.Parameters.AddWithValue("Night at the oasis");
-    put.Parameters.AddWithValue(new Vector(new float[] { 0.1f, 0.2f, 0.3f }));
-    put.ExecuteNonQuery();
+    var json = JsonSerializer.Serialize(new { query, @params = args });
+    var res = await http.PostAsync("/query", new StringContent(json, Encoding.UTF8, "application/json"));
+    var body = await res.Content.ReadFromJsonAsync&lt;JsonElement&gt;();
+    if (!res.IsSuccessStatusCode)
+        throw new HttpRequestException(body.GetProperty("error").GetString(), null, res.StatusCode);
+    return body;
 }
 
-using var near = new NpgsqlCommand("get docs select title near embed $1 limit 5", conn);
-near.Parameters.AddWithValue(new Vector(new float[] { 0.1f, 0.2f, 0.3f }));
-using var rows = near.ExecuteReader();</pre>
+await Query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))");
+await Query("put docs {title: $1, embed: $2}", "Night at the oasis", new[] { 0.1f, 0.2f, 0.3f });
+await Query("put docs {title: $1, embed: $2}", "Dunes", new[] { 0.9f, 0.1f, 0.0f });
+
+var rows = await Query("get docs select title near embed $1 limit 5", new[] { 0.1f, 0.2f, 0.3f });
+var titles = rows.EnumerateArray().Select(r =&gt; r.GetProperty("title").GetString());</pre>
+<p><code>HttpClient</code> and <code>System.Text.Json</code>, no package. The
+body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
+and the server wants a <code>Content-Length</code>.</p>
 </div>
 
 <div class="lang" data-name="Java">
-<pre data-lang="text" data-label="pom.xml">&lt;dependency&gt;&lt;groupId&gt;org.postgresql&lt;/groupId&gt;&lt;artifactId&gt;postgresql&lt;/artifactId&gt;&lt;version&gt;42.7.4&lt;/version&gt;&lt;/dependency&gt;
-&lt;dependency&gt;&lt;groupId&gt;com.pgvector&lt;/groupId&gt;&lt;artifactId&gt;pgvector&lt;/artifactId&gt;&lt;version&gt;0.1.6&lt;/version&gt;&lt;/dependency&gt;</pre>
-<pre data-lang="text" data-label="Search.java">Connection conn = DriverManager.getConnection(
-    "jdbc:postgresql://127.0.0.1:5433/fenec?user=fenec&password=secret");
-PGvector.addVectorType(conn);
+<pre data-lang="text" data-label="Search.java">static final HttpClient HTTP = HttpClient.newHttpClient();
 
-conn.createStatement().execute(
-    "create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))");
+static HttpResponse&lt;String&gt; query(String json) throws Exception {
+    var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8080/query"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer secret")
+        .POST(HttpRequest.BodyPublishers.ofString(json))
+        .build();
+    return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+}
 
-PreparedStatement put = conn.prepareStatement("put docs {title: ?, embed: ?}");
-put.setString(1, "Night at the oasis");
-put.setObject(2, new PGvector(new float[] {0.1f, 0.2f, 0.3f}));
-put.executeUpdate();
+query("""
+    {"query": "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}""");
+query("""
+    {"query": "put docs {title: $1, embed: $2}", "params": ["Night at the oasis", [0.1, 0.2, 0.3]]}""");
+query("""
+    {"query": "put docs {title: $1, embed: $2}", "params": ["Dunes", [0.9, 0.1, 0.0]]}""");
 
-PreparedStatement near = conn.prepareStatement("get docs select title near embed ? limit 5");
-near.setObject(1, new PGvector(new float[] {0.1f, 0.2f, 0.3f}));
-ResultSet rows = near.executeQuery();</pre>
+String rows = query("""
+    {"query": "get docs select title near embed $1 limit 5", "params": [[0.1, 0.2, 0.3]]}""").body();</pre>
+<p><code>java.net.http</code> alone, Java 11 and newer (text blocks need 15),
+run as <code>java Search.java</code>. The standard library has no JSON: the
+test reads the titles with a pattern, and a project reads the rows with
+Jackson or Gson.</p>
 </div>
 
 <div class="lang" data-name="PHP">
-<pre data-lang="bash" data-label="install">composer require pgvector/pgvector   # and the pdo_pgsql extension</pre>
-<pre data-lang="text" data-label="search.php">use Pgvector\Vector;
+<pre data-lang="text" data-label="search.php">function query(string $q, array $params = []) {
+    $ch = curl_init('http://127.0.0.1:8080/query');
+    curl_setopt_array($ch, [
+        CURLOPT_POST =&gt; true,
+        CURLOPT_RETURNTRANSFER =&gt; true,
+        CURLOPT_HTTPHEADER =&gt; ['Content-Type: application/json', 'Authorization: Bearer secret'],
+        CURLOPT_POSTFIELDS =&gt; json_encode(['query' =&gt; $q, 'params' =&gt; $params]),
+    ]);
+    $body = json_decode(curl_exec($ch), true);
+    $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    if ($status &gt;= 300) {
+        throw new RuntimeException($body['error'], $status);
+    }
+    return $body;
+}
 
-$db = new PDO('pgsql:host=127.0.0.1;port=5433;dbname=fenec', 'fenec', 'secret');
+query('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
+query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
 
-$db->exec('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
-$db->prepare('put docs {title: ?, embed: ?}')
-   ->execute(['Night at the oasis', new Vector([0.1, 0.2, 0.3])]);
-
-$near = $db->prepare('get docs select title near embed ? limit 5');
-$near->execute([new Vector([0.1, 0.2, 0.3])]);
-$rows = $near->fetchAll();</pre>
+$rows = query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);</pre>
+<p>The curl extension and <code>json_encode</code>; Guzzle sends the same
+request.</p>
 </div>
 
 <div class="lang" data-name="Ruby">
-<pre data-lang="bash" data-label="install">gem install pg pgvector</pre>
-<pre data-lang="text" data-label="search.rb">db = PG.connect("host=127.0.0.1 port=5433 user=fenec password=secret dbname=fenec")
-registry = PG::BasicTypeRegistry.new.define_default_types
-Pgvector::PG.register_vector(registry)
-db.type_map_for_queries = PG::BasicTypeMapForQueries.new(db, registry: registry)
-db.type_map_for_results = PG::BasicTypeMapForResults.new(db, registry: registry)
+<pre data-lang="text" data-label="search.rb">require "json"
+require "net/http"
 
-db.exec("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
-db.exec_params("put docs {title: $1, embed: $2}",
-               ["Night at the oasis", Pgvector::Vector.new([0.1, 0.2, 0.3])])
+URL = URI("http://127.0.0.1:8080")
 
-rows = db.exec_params("get docs select title near embed $1 limit 5",
-                      [Pgvector::Vector.new([0.1, 0.2, 0.3])])</pre>
+def query(q, params = [])
+  req = Net::HTTP::Post.new(URI.join(URL, "/query"), "Content-Type" =&gt; "application/json")
+  req["Authorization"] = "Bearer secret"
+  req.body = JSON.generate(query: q, params: params)
+  res = Net::HTTP.start(URL.host, URL.port) { |http| http.request(req) }
+  body = JSON.parse(res.body)
+  raise "#{res.code}: #{body["error"]}" unless res.is_a?(Net::HTTPSuccess)
+  body
+end
+
+query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
+query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
+
+rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</pre>
 </div>
 
 </div>
 
-<h2 id="http">No driver at all</h2>
+<h2 id="http">From the shell</h2>
 
-<p>Any language that can send an HTTP request can use fenecdb: start the
-server with <code>--http</code> and post a query.</p>
+<p>The same request from <code>curl</code>:</p>
 
-<pre data-lang="bash">curl -X POST localhost:8080/query \
-  -d '{"query":"get docs select title near embed $1 limit 5","params":[[0.1,0.2,0.3]]}'</pre>
+<pre data-lang="bash">curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
+  -d '{"query":"get docs select title near embed $1 limit 5","params":[[0.1,0.2,0.3]]}'
+# [{"title":"Night at the oasis","_score":0.9999999},{"title":"Dunes","_score":0.3246547}]</pre>
 
-<p>Python has a small client for it, <code>pip install fenecdb</code>
-(<a href="http.html">HTTP endpoint</a>).</p>
+<p>The REST routes, batches, subscriptions and the change stream are on
+<a href="http.html">HTTP endpoint</a>.</p>
 
-<details class="deep"><summary>Details: what each driver is tested for</summary>
-<p>The full list of what each driver and library is held to — prepared
-statements, binary rows, transactions, COPY, the catalog queries each sends
-on its own — is on <a href="postgres.html#drivers">PostgreSQL server</a>.
-Two drivers needed the server to change before they could connect at all:
-Npgsql opens every connection with catalog queries that start with a
-comment, and Ruby's <code>pg</code> learns its types by joining
-<code>pg_type</code> to <code>pg_proc</code>. Both run in CI now, as every
-language here does, so a change that would break one is caught before it
-ships.</p>
+<details class="deep"><summary>Details: what the examples are held to</summary>
+<p>The programs under <code>integrations/languages</code> are the examples
+above with their asserts: <code>make languages-test</code> starts a
+<code>fenec-server</code> over a new file for each language and runs Python,
+Java, PHP and Ruby from their official images in Docker, and JavaScript, Go,
+C# and Rust with the toolchains on the machine. CI runs it on every change,
+so a change to the HTTP endpoint that would break one of them is caught
+before it ships.</p>
+
+<p>Every answer is JSON: a read is an array of rows, a vector search's rows
+carry their <code>_score</code>, a write is <code>{"affected": n}</code>, and
+a refusal is a status of 400 and up with <code>{"error": "..."}</code> — 401
+for a missing or wrong token, 404 for a collection that is not there, 409
+for an id <code>insert</code> finds taken. A vector goes in as a JSON array
+of numbers and comes out as the shortest text that reads back as each
+<code>f32</code>. Values always go in <code>params</code>, never into the
+statement's text.</p>
+
+<p>The server keeps a connection open between requests (HTTP/1.1
+keep-alive) for a client that reuses it, as Go's, .NET's, Java's and
+ureq's do. A body is read by its <code>Content-Length</code>; a chunked one
+is refused.</p>
 </details>
