@@ -36,6 +36,7 @@ make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby
 make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
 make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
+make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
