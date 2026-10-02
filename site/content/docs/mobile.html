@@ -365,7 +365,10 @@ included:</p>
 <p>Each binding makes its requests with the platform's client --
 <code>URLSession</code>, <code>HttpURLConnection</code>,
 <code>dart:io</code>'s <code>HttpClient</code> -- so the system's trust
-store, proxies and pinning apply. During development, an emulator reaches
+store, proxies and pinning apply. An Android app declares the
+<code>INTERNET</code> permission and a sandboxed macOS app the
+<code>com.apple.security.network.client</code> entitlement, as for any
+request. During development, an emulator reaches
 a server on the machine at plain <code>http://</code> once allowed: iOS's
 <code>NSAllowsLocalNetworking</code>, Android's
 <code>network_security_config</code> with <code>cleartextTrafficPermitted</code>

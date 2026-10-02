@@ -1464,7 +1464,7 @@ impl Sync {
 
     // ------------------------------------------------------------- writes
 
-    /// Whether the statements are a synced write: `None` for statements
+    /// Whether the statements are a synced write: `false` for statements
     /// over local collections alone, which run as they would without a
     /// sync, and an error for what a replica cannot take.
     pub fn claims(&self, stmts: &[Statement]) -> Result<bool> {

@@ -101,6 +101,9 @@ public final class Fenec: @unchecked Sendable {
     // may take the main thread milliseconds. An app closes it itself.
     deinit {
         if !closed {
+            // The session holds its delegate, the replica, until it is let
+            // go of: left running, its streams outlived the database.
+            replicaSync?.stop()
             var out: UnsafeMutablePointer<CChar>?
             _ = fenec_close(handle, &out, nil)
             fenec_free_string(out)
