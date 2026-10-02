@@ -2,7 +2,7 @@
 // armeabi-v7a and x86_64, which prepare.sh copies into src/main/jniLibs
 // from integrations/kotlin's NDK build. Nothing to compile: the Dart side
 // opens the library itself.
-group 'io.github.fenecdb.flutter'
+group 'com.fenecdb.flutter'
 version '0.1.7'
 
 buildscript {
@@ -25,7 +25,7 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 
 android {
-    namespace 'io.github.fenecdb.flutter'
+    namespace 'com.fenecdb.flutter'
     compileSdk 34
 
     defaultConfig {

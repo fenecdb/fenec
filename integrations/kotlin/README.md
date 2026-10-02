@@ -6,8 +6,8 @@ JNI functions it carries itself. No server, no network.
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.fenecdb:fenecdb-android:0.1.7")   // Android: the AAR, the library for each ABI inside
-implementation("io.github.fenecdb:fenecdb:0.1.7")           // the JVM: bring libfenec_ffi for the platform
+implementation("com.fenecdb:fenecdb-android:0.1.7")   // Android: the AAR, the library for each ABI inside
+implementation("com.fenecdb:fenecdb:0.1.7")           // the JVM: bring libfenec_ffi for the platform
 ```
 
 ```kotlin

@@ -3,7 +3,7 @@ name: packages
 # PyPI's `fenecdb`, npm's `@fenecdb/web`, `@fenecdb/react`,
 # `@fenecdb/cloudflare` and `@fenecdb/langchain`, NuGet's `FenecDb`
 # (with NUGET_API_KEY, the job below), Maven Central's
-# `io.github.fenecdb:fenecdb` and `fenecdb-android` (with the Central
+# `com.fenecdb:fenecdb` and `fenecdb-android` (with the Central
 # Portal's token and a signing key) and pub.dev's `fenecdb` and
 # `fenecdb_flutter` (with PUB_CREDENTIALS) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
@@ -185,7 +185,7 @@ jobs:
           dotnet nuget push dist-nuget/FenecDb.*.nupkg --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json --skip-duplicate
 
-  # Maven Central's `io.github.fenecdb:fenecdb` (the JVM library) and
+  # Maven Central's `com.fenecdb:fenecdb` (the JVM library) and
   # `fenecdb-android` (the AAR, the native library for each ABI inside):
   # built, signed and laid out as a Maven repository by Gradle, zipped into
   # the bundle the Central Portal takes and uploaded to its API -- no
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: maven
-      url: https://central.sonatype.com/namespace/io.github.fenecdb
+      url: https://central.sonatype.com/namespace/com.fenecdb
     steps:
       - name: Look for the secrets
         id: keys

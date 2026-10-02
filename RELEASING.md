@@ -41,7 +41,7 @@ nothing reaches a registry before the notes have had a read.
    NuGet -- packed, installed into a fresh console app and used against a
    server (`integrations/dotnet/package.sh`) before it is pushed, and
    skipped with a notice where `NUGET_API_KEY` is not set. With their
-   secrets it also publishes `io.github.fenecdb:fenecdb` and
+   secrets it also publishes `com.fenecdb:fenecdb` and
    `fenecdb-android` to Maven Central and `fenecdb` and `fenecdb_flutter`
    to pub.dev -- the plugin with the release's dynamic XCFramework and AAR libraries
    in it -- each skipped with a notice where its secrets are not set. A
@@ -62,8 +62,8 @@ the .NET SDK is installed.
 | `FenecDb` on NuGet | `integrations/dotnet/FenecDb` | `FenecClient`, the .NET SDK over HTTP; `HttpClient` and `System.Text.Json` alone |
 | `github.com/fenecdb/fenec/integrations/go` | the tag `integrations/go/vX.Y.Z` | package `fenecdb`, the Go SDK over HTTP; the standard library alone |
 | `FenecDB` for SwiftPM | `Package.swift`, `integrations/swift` | the tag, and `FenecFFI.xcframework.zip` on the release: the library embedded in a macOS or iOS app |
-| `io.github.fenecdb:fenecdb` on Maven Central | `integrations/kotlin/fenecdb` | the Kotlin library for the JVM; kotlinx-coroutines alone, the native library brought by the app |
-| `io.github.fenecdb:fenecdb-android` on Maven Central | `integrations/kotlin/android` | the AAR: the same library and `libfenec_ffi.so` for arm64-v8a, armeabi-v7a, x86_64 |
+| `com.fenecdb:fenecdb` on Maven Central | `integrations/kotlin/fenecdb` | the Kotlin library for the JVM; kotlinx-coroutines alone, the native library brought by the app |
+| `com.fenecdb:fenecdb-android` on Maven Central | `integrations/kotlin/android` | the AAR: the same library and `libfenec_ffi.so` for arm64-v8a, armeabi-v7a, x86_64 |
 | `fenecdb` on pub.dev | `integrations/dart/fenecdb` | the Dart package over `dart:ffi`; `package:ffi` alone |
 | `fenecdb_flutter` on pub.dev | `integrations/dart/fenecdb_flutter` | the Flutter plugin: the package with the library for iOS, Android and macOS |
 
@@ -135,9 +135,9 @@ and approve pull requests"); without it the run pushes the branch
 **Maven Central.** The Central Portal (central.sonatype.com) takes the
 bundle `packages.yml` makes, with no Gradle plugin. Once:
 
-1. Sign in to the Portal and add the namespace `io.github.fenecdb`; it is
-   verified by a public repository named as the Portal says, made under the
-   `fenecdb` organization, which can be deleted after.
+1. Sign in to the Portal and add the namespace `com.fenecdb`, the
+   domain's: the Portal verifies it by a TXT record on `fenecdb.com`
+   holding the key it gives, which can be removed after.
 2. Under *View Account*, *Generate User Token*: its two halves are the
    secrets `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD`.
 3. Every file is signed: make a GPG key for the releases

@@ -10,7 +10,7 @@ plugins {
 }
 
 android {
-    namespace = "io.github.fenecdb"
+    namespace = "com.fenecdb"
     compileSdk = 34
 
     defaultConfig {

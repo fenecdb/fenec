@@ -1661,7 +1661,10 @@ library -- a cdylib and a staticlib, zero dependencies, its header
 `include/fenec.h` written by hand and held to the exports by a test -- for
 the Swift (`integrations/swift`, `Package.swift` at the root since SwiftPM
 fetches a package by its repository), Kotlin (`integrations/kotlin`) and
-Dart/Flutter (`integrations/dart`) bindings. A text is answered through
+Dart/Flutter (`integrations/dart`) bindings -- Maven Central's
+`com.fenecdb:fenecdb` and `com.fenecdb:fenecdb-android`, Kotlin package
+`com.fenecdb`, the JNI symbols `Java_com_fenecdb_FenecNative_*` with it.
+A text is answered through
 `fenec-abi`, the code the browser module answers through too -- prepare,
 the exact pass, the block, the answer's JSON, the change notice -- so a page
 and an app get the same bytes; out of the module's crate the optimizer at

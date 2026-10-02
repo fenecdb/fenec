@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

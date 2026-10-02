@@ -174,7 +174,7 @@ Flutter, each with the query builder and live queries driving the UI.
 | Language | Package | From |
 | --- | --- | --- |
 | Swift | SwiftPM: `github.com/fenecdb/fenec`, product `FenecDB` | [`integrations/swift`](integrations/swift) |
-| Kotlin | `io.github.fenecdb:fenecdb-android` (the AAR), `io.github.fenecdb:fenecdb` (the JVM) | [`integrations/kotlin`](integrations/kotlin) |
+| Kotlin | `com.fenecdb:fenecdb-android` (the AAR), `com.fenecdb:fenecdb` (the JVM) | [`integrations/kotlin`](integrations/kotlin) |
 | Dart | `flutter pub add fenecdb_flutter`, or `fenecdb` in Dart alone | [`integrations/dart`](integrations/dart) |
 
 ```swift

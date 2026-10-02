@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 // The query builder: FenecQL text and its parameters from a chain of calls.
 //

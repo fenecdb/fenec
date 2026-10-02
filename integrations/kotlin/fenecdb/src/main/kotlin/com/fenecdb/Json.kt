@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 /**
  * A row of an answer, a document, an object of a json field: its fields in

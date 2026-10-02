@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.DynamicTest

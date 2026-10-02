@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 import java.io.File
 

@@ -1,4 +1,4 @@
-package io.github.fenecdb
+package com.fenecdb
 
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test

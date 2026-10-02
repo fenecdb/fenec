@@ -1,5 +1,5 @@
 //! The JNI functions the Kotlin library calls (`integrations/kotlin`,
-//! `io.github.fenecdb.FenecNative`), over the same calls as the C ABI.
+//! `com.fenecdb.FenecNative`), over the same calls as the C ABI.
 //!
 //! Written by hand over the JNI function table rather than through the
 //! `jni` crate: four of its functions are used -- an array's length, a new
@@ -79,7 +79,7 @@ unsafe fn taken(env: Env, code: i32, out: *mut c_char) -> JArray {
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_version(
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_version(
     env: Env,
     _class: *mut c_void,
 ) -> JArray {
@@ -87,7 +87,7 @@ pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_version(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_open(
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_open(
     env: Env,
     _class: *mut c_void,
     path: JArray,
@@ -110,7 +110,7 @@ pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_open(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_openMemory(
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_openMemory(
     env: Env,
     _class: *mut c_void,
 ) -> JArray {
@@ -123,7 +123,7 @@ pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_openMemory(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_query(
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_query(
     env: Env,
     _class: *mut c_void,
     handle: i64,
@@ -148,7 +148,7 @@ pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_query(
 }
 
 #[no_mangle]
-pub unsafe extern "system" fn Java_io_github_fenecdb_FenecNative_changes(
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_changes(
     env: Env,
     _class: *mut c_void,
     handle: i64,
@@ -177,8 +177,8 @@ macro_rules! by_handle {
 }
 
 by_handle! {
-    Java_io_github_fenecdb_FenecNative_close => fenec_close,
-    Java_io_github_fenecdb_FenecNative_sync => fenec_sync,
-    Java_io_github_fenecdb_FenecNative_flush => fenec_flush,
-    Java_io_github_fenecdb_FenecNative_checkpoint => fenec_checkpoint,
+    Java_com_fenecdb_FenecNative_close => fenec_close,
+    Java_com_fenecdb_FenecNative_sync => fenec_sync,
+    Java_com_fenecdb_FenecNative_flush => fenec_flush,
+    Java_com_fenecdb_FenecNative_checkpoint => fenec_checkpoint,
 }

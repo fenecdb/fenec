@@ -17,7 +17,7 @@ reads.</p>
 <table>
 <thead><tr><th>&nbsp;</th><th>Swift</th><th>Kotlin and Java</th><th>Dart and Flutter</th></tr></thead>
 <tbody>
-<tr><td>install</td><td>SwiftPM: <code>github.com/fenecdb/fenec</code>, product <code>FenecDB</code></td><td><code>io.github.fenecdb:fenecdb-android</code> (the AAR), <code>io.github.fenecdb:fenecdb</code> (the JVM)</td><td><code>fenecdb_flutter</code>, or <code>fenecdb</code> in Dart alone</td></tr>
+<tr><td>install</td><td>SwiftPM: <code>github.com/fenecdb/fenec</code>, product <code>FenecDB</code></td><td><code>com.fenecdb:fenecdb-android</code> (the AAR), <code>com.fenecdb:fenecdb</code> (the JVM)</td><td><code>fenecdb_flutter</code>, or <code>fenecdb</code> in Dart alone</td></tr>
 <tr><td>platforms</td><td>iOS 15, macOS 12</td><td>Android 5 (API 21): arm64-v8a, armeabi-v7a, x86_64; the JVM</td><td>iOS, Android, macOS</td></tr>
 <tr><td>calls</td><td><code>async</code>, off the caller's thread</td><td><code>suspend</code> on <code>Dispatchers.IO</code>; <code>...Blocking</code> for Java</td><td><code>Future</code>s, on an isolate of the database's</td></tr>
 <tr><td>live queries</td><td><code>LiveQuery</code> (<code>ObservableObject</code>), <code>LiveRows</code> (<code>@Observable</code>), an <code>AsyncThrowingStream</code></td><td>a <code>Flow</code>: Compose's <code>collectAsState</code></td><td>a <code>Stream</code>: <code>StreamBuilder</code></td></tr>
@@ -100,7 +100,7 @@ struct TodoList: View {
 </div>
 
 <div class="lang" data-name="Kotlin">
-<pre data-lang="kotlin" data-label="Todos.kt">import io.github.fenecdb.*
+<pre data-lang="kotlin" data-label="Todos.kt">import com.fenecdb.*
 
 class TodosModel(app: Application) : AndroidViewModel(app) {
     val db = Fenec.open(File(app.filesDir, "todos.fenec").path)   // in a background start-up, or openAsync
