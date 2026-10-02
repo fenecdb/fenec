@@ -821,6 +821,11 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
         return handle_batch(db, cfg, req, &who);
     }
 
+    // A schema declared in code (`fenec_core::declared`).
+    if req.segments().first() == Some(&"_schema") {
+        return handle_schema(db, cfg, req, &who);
+    }
+
     // Read-only mode rejects before routing: whichever collection it is, the
     // answer is 403.
     if cfg.read_only && wants_write(req) {
@@ -912,6 +917,104 @@ pub fn handle(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request) -> Respon
             }
             Err(e) => error_response(&e),
         }
+    }
+}
+
+/// `/_schema`: a schema declared in code -- the description every SDK's
+/// declarations compile to -- against the database.
+///
+/// ```text
+/// GET  /_schema                      the database's schema as a description
+/// POST /_schema/plan                 what an apply would do; writes nothing
+/// POST /_schema/plan?mode=follow     what a client that does not own it lacks
+/// POST /_schema/apply                migrations, then what only adds: one block
+/// ```
+///
+/// The server owns its schema, so a client whose code declares one -- a
+/// synced replica, an app over HTTP -- compares by default (`follow`:
+/// everything it declares must be here as declared, and what is here beside
+/// it is the server's). Applying is for the code that owns the database, a
+/// deploy step running its migrations as drizzle-kit's `migrate` does: it
+/// takes what reads and writes everything, the server's token, never a
+/// scoped one. The plan and the apply are made under the write lock, so
+/// nothing changes the schema between them.
+fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &Who) -> Response {
+    let body = std::str::from_utf8(&req.body).unwrap_or("");
+    let follow = req.query.iter().any(|(k, v)| k == "mode" && v == "follow");
+    let full = matches!(who, Who::Full);
+    let visible = |db: &Database| -> Vec<fenec_core::schema::Schema> {
+        db.collection_names()
+            .iter()
+            .filter(|n| who.scope().is_none_or(|s| s.readable(n)))
+            .filter_map(|n| db.collection(n).ok().map(|c| c.schema.clone()))
+            .collect()
+    };
+    let outcome = match (req.method, req.segments().as_slice()) {
+        (Method::Get | Method::Head, ["_schema"]) => {
+            let schemas = visible(&held::read(db));
+            return Response::json(200, fenec_core::declared::describe(&schemas));
+        }
+        (Method::Post, ["_schema", "plan"]) if follow => {
+            // A scoped token compares what it may read: a collection it may
+            // not is one the server does not have, for it.
+            let schemas = visible(&held::read(db));
+            let schemas: Vec<_> = schemas.iter().collect();
+            fenec_abi::read(body).map(|d| fenec_abi::Outcome {
+                plan: fenec_core::declared::plan(
+                    &schemas,
+                    &d.collections,
+                    fenec_core::declared::Mode::Follow,
+                ),
+                ..Default::default()
+            })
+        }
+        (Method::Post, ["_schema", "plan" | "apply"]) if !full => return Response::error(
+            403,
+            "the schema is the server's: a scoped token compares (?mode=follow) and does not apply",
+        ),
+        (Method::Post, ["_schema", "plan"]) => {
+            fenec_abi::schema(&mut held::write(db), body, false, None)
+        }
+        (Method::Post, ["_schema", "apply"]) => {
+            if cfg.read_only {
+                return Response::error(403, "the server is in read-only mode");
+            }
+            metrics::wrote();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            let mut guard = held::write(db);
+            let r = fenec_abi::schema(&mut guard, body, true, Some(now));
+            let durability = match &r {
+                Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
+                    Ok(d) => d,
+                    Err(e) => return error_response(&e),
+                },
+                _ => None,
+            };
+            let seq = guard.change_seq();
+            drop(guard);
+            if let Err(e) = await_durable(db, durability) {
+                return error_response(&e);
+            }
+            return match r {
+                Ok(o) if o.plan.refusals.is_empty() => {
+                    with_seq(Response::json(200, o.json()), Some(seq))
+                }
+                Ok(o) => Response::json(409, o.json()),
+                Err(e) => error_response(&e),
+            };
+        }
+        _ => {
+            return Response::error(
+                404,
+                "the schema is GET /_schema, POST /_schema/plan or /_schema/apply",
+            )
+        }
+    };
+    match outcome {
+        Ok(o) => Response::json(200, o.json()),
+        Err(e) => error_response(&e),
     }
 }
 

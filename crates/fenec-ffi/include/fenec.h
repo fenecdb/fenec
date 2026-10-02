@@ -75,6 +75,23 @@ int32_t fenec_query(uint64_t handle, const uint8_t *text, size_t text_len,
 /* {"seq":N,"horizon":M,"collections":[...]|null}: what changed since `since`. */
 int32_t fenec_changes(uint64_t handle, uint64_t since, char **out, size_t *out_len);
 
+/* fenec_schema's modes. */
+#define FENEC_SCHEMA_PLAN 0     /* what an apply would do; writes nothing */
+#define FENEC_SCHEMA_APPLY 1    /* migrations not yet recorded, then what only adds: one block */
+#define FENEC_SCHEMA_FOLLOW 2   /* compares a database another owns */
+#define FENEC_SCHEMA_DESCRIBE 3 /* the database's schema as a description; text unread */
+
+/*
+ * The database and a schema declared in code: text is the JSON description
+ * every SDK's declarations compile to, {"format":1,"collections":[...],
+ * "migrations":[...]}. Writes {"kind":"schema","applied":..,"ran":..,
+ * "migrations":[n...],"statements":[...],"refusals":[{"kind","collection",
+ * "field","message","fix"}...]}; nothing is applied while anything is
+ * refused.
+ */
+int32_t fenec_schema(uint64_t handle, const uint8_t *text, size_t text_len, uint32_t mode,
+                     char **out, size_t *out_len);
+
 /* Every write so far written and fsynced. */
 int32_t fenec_sync(uint64_t handle, char **out, size_t *out_len);
 

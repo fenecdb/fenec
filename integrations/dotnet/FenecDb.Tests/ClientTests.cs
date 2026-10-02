@@ -305,4 +305,26 @@ public sealed class ClientTests(Servers servers)
         using var db = new FenecClient(servers.Primary);
         await db.HealthAsync();
     }
+
+    [Fact]
+    public async Task ASchemaIsComparedAndAppliedOnlyWhenAsked()
+    {
+        using var db = Root();
+        var name = Fresh("schema");
+        var v1 = $"create collection {name} (title text required, n int @hash)";
+        await db.ExecAsync(v1);
+        Assert.Empty((await db.SchemaAsync(v1)).Refusals);
+        // A field the server lacks: the server's to add.
+        var v2 = $"create collection {name} (title text required, n int @hash, at timestamp)";
+        var e = await Assert.ThrowsAsync<FenecSchemaException>(() => db.SchemaAsync(v2));
+        Assert.Equal("field_missing", e.Refusals[0].Kind);
+        // Asked, it is added; a rename is a migration, run once.
+        Assert.True((await db.SchemaAsync(v2, migrate: true)).Applied);
+        var v3 = $"create collection {name} (name text required, n int @hash, at timestamp)";
+        await Assert.ThrowsAsync<FenecSchemaException>(() => db.SchemaAsync(v3, migrate: true));
+        object[] moved = [$"alter collection {name} rename field title to name"];
+        Assert.Equal([1], (await db.SchemaAsync(v3, moved, migrate: true)).Migrations);
+        Assert.Empty((await db.SchemaAsync(v3, moved, migrate: true)).Migrations);
+        await db.ExecAsync("drop collection _migrations");
+    }
 }

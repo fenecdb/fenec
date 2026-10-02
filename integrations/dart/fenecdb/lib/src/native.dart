@@ -33,6 +33,8 @@ typedef _SyncStartD = int Function(int, Pointer<Uint8>, int, Pointer<Pointer<Cha
 typedef _SyncFeedC = Int32 Function(
     Uint64, Uint32, Uint64, Int32, Uint64, Pointer<Uint8>, Size, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _SyncFeedD = int Function(int, int, int, int, int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SchemaC = Int32 Function(Uint64, Pointer<Uint8>, Size, Uint32, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SchemaD = int Function(int, Pointer<Uint8>, int, int, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _FreeC = Void Function(Pointer<Char>);
 typedef _FreeD = void Function(Pointer<Char>);
 typedef _VersionC = Pointer<Char> Function();
@@ -68,6 +70,7 @@ class Native {
   final _HandleD _close, _sync, _flush, _checkpoint, _syncStatus;
   final _SyncStartD _syncStart;
   final _SyncFeedD _syncFeed;
+  final _SchemaD _schema;
   final _FreeD _free;
   final Pointer<Char> Function() _version;
 
@@ -83,6 +86,7 @@ class Native {
         _syncStatus = lib.lookupFunction<_HandleC, _HandleD>('fenec_sync_status'),
         _syncStart = lib.lookupFunction<_SyncStartC, _SyncStartD>('fenec_sync_start'),
         _syncFeed = lib.lookupFunction<_SyncFeedC, _SyncFeedD>('fenec_sync_feed'),
+        _schema = lib.lookupFunction<_SchemaC, _SchemaD>('fenec_schema'),
         _free = lib.lookupFunction<_FreeC, _FreeD>('fenec_free_string'),
         _version = lib.lookupFunction<_VersionC, Pointer<Char> Function()>('fenec_version');
 
@@ -157,6 +161,18 @@ class Native {
     final p = _bytes(b);
     try {
       return _call((out, len) => _syncStart(handle, p, b.length, out, len));
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  /// A schema declared as FenecQL against the database (`fenec_schema`):
+  /// mode 0 plans, 1 applies.
+  (int, String) schema(int handle, String request, int mode) {
+    final b = utf8.encode(request);
+    final p = _bytes(b);
+    try {
+      return _call((out, len) => _schema(handle, p, b.length, mode, out, len));
     } finally {
       malloc.free(p);
     }
@@ -261,6 +277,7 @@ class Worker {
           'query' => native.query(r[2] as int, r[3] as String, r[4] as String, r[5] as Uint8List?),
           'changes' => native.changes(r[2] as int, r[3] as int),
           'syncStart' => native.syncStart(r[2] as int, r[3] as String),
+          'schema' => native.schema(r[2] as int, r[3] as String, r[4] as int),
           'syncFeed' =>
             native.syncFeed(r[2] as int, r[3] as int, r[4] as int, r[5] as int, r[6] as int, r[7] as Uint8List?),
           'version' => (0, native.version),

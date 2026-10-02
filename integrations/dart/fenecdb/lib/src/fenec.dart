@@ -10,6 +10,7 @@ import 'query.dart';
 import 'remote.dart';
 import 'values.dart';
 
+part 'schema.dart';
 part 'sync.dart';
 
 /// What the library or the builder refused, and why. [code] is the kind:

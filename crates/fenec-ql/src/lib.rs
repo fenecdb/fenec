@@ -16,6 +16,77 @@ pub use parser::{
     MAX_EXPR_DEPTH,
 };
 
+use fenec_core::error::Result;
+use fenec_core::query::Statement;
+use fenec_core::schema::{Field, IndexKind, Schema};
+use fenec_core::value::DataType;
+
+/// A schema written as FenecQL -- a `schema.fenecql` file: `create
+/// collection` statements, and `create index` over their fields and the
+/// paths into their json fields -- as the collections it declares, what a
+/// description's `fenecql` holds (`fenec_core::declared`). The language
+/// every SDK already speaks, so each manages its schema with this text and
+/// no builder of its own; and what the browser module reads a schema in,
+/// since it carries the parser and not the reader of a description's JSON
+/// collections.
+pub fn schema_text(src: &str) -> Result<Vec<Schema>> {
+    // The description's own refusals and words (`declared::bad`): one place
+    // for both forms, and fewer texts in the browser module.
+    use fenec_core::declared::{bad, cat};
+    let mut out: Vec<Schema> = Vec::new();
+    for s in parse(src)? {
+        match s {
+            Statement::CreateCollection { schema, .. } => {
+                if out.iter().any(|o| o.name == schema.name) {
+                    return Err(bad(&schema.name, "is declared twice"));
+                }
+                out.push(schema);
+            }
+            Statement::CreateIndex {
+                collection,
+                field,
+                kind,
+                ..
+            } => {
+                let at = cat(&[&collection, ".", &field]);
+                let Some(s) = out.iter_mut().find(|s| s.name == collection) else {
+                    return Err(bad(&at, "is indexed before its collection is declared"));
+                };
+                let path = s.path_of(&field)?.is_some();
+                let f = match path {
+                    true => s.path(&field),
+                    false => s.field(&field),
+                };
+                match f {
+                    None if !path => return Err(bad(&at, "is indexed and not declared")),
+                    Some(f) if path || f.index != IndexKind::None => {
+                        return Err(bad(&at, "has two indexes: a field takes one"))
+                    }
+                    _ => {}
+                }
+                match path {
+                    true => {
+                        kind.check(&field, &DataType::Json)?;
+                        s.add_path(Field::new(field, DataType::Json).indexed(kind));
+                    }
+                    false => {
+                        let pos = s.field_pos(&field).unwrap_or_default();
+                        kind.check(&field, &s.fields[pos].ty)?;
+                        s.fields[pos].index = kind;
+                    }
+                }
+            }
+            _ => {
+                return Err(bad(
+                    "a schema",
+                    "is `create collection` and `create index` statements",
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

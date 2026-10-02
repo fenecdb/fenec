@@ -440,3 +440,37 @@ func TestHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestASchemaIsComparedAndAppliedOnlyWhenAsked(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("schema")
+	v1 := "create collection " + name + " (title text required, n int @hash)"
+	must(db.Exec(ctx, v1)).of(t)
+	if plan := must(db.Schema(ctx, v1, nil, false)).of(t); len(plan.Refusals) != 0 {
+		t.Fatalf("the same schema refused: %+v", plan)
+	}
+	// A field the server lacks: the server's to add.
+	v2 := "create collection " + name + " (title text required, n int @hash, at timestamp)"
+	_, err := db.Schema(ctx, v2, nil, false)
+	var refused *fenecdb.SchemaError
+	if !errors.As(err, &refused) || refused.Refusals[0].Kind != "field_missing" {
+		t.Fatalf("a missing field answered %v", err)
+	}
+	// Asked, it is added; a rename is a migration, run once.
+	if plan := must(db.Schema(ctx, v2, nil, true)).of(t); !plan.Applied || len(plan.Statements) != 1 {
+		t.Fatalf("migrate answered %+v", plan)
+	}
+	v3 := "create collection " + name + " (name text required, n int @hash, at timestamp)"
+	moved := []any{"alter collection " + name + " rename field title to name"}
+	if _, err := db.Schema(ctx, v3, nil, true); !errors.As(err, &refused) {
+		t.Fatalf("a rename unsaid answered %v", err)
+	}
+	if plan := must(db.Schema(ctx, v3, moved, true)).of(t); !plan.Ran || len(plan.Migrations) != 1 {
+		t.Fatalf("the migration answered %+v", plan)
+	}
+	if plan := must(db.Schema(ctx, v3, moved, true)).of(t); plan.Applied || len(plan.Migrations) != 0 {
+		t.Fatalf("again answered %+v", plan)
+	}
+	must(db.Exec(ctx, "drop collection _migrations")).of(t)
+}

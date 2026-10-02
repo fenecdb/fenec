@@ -16,7 +16,11 @@ export 'src/fenec.dart'
         SyncFailure,
         ShapeState,
         Refusal,
-        Replica;
+        Replica,
+        SchemaPlan,
+        SchemaRefusal,
+        SchemaException,
+        FenecSchema;
 export 'src/remote.dart' show FenecRemote;
 export 'src/live.dart' show LiveQueries;
 export 'src/query.dart' show Query, Cond, SortKey, Statement;

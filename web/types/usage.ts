@@ -25,13 +25,14 @@ import {
   type Vector,
 } from '../fenec.js';
 
+// As `fenec types` writes a collection: a field not `required` reads null.
 type Article = {
   title: string;
-  body: string;
-  year: number;
-  tags: string[];
-  published: Timestamp;
-  embed: Vector;
+  body: string | null;
+  year: number | null;
+  tags: string[] | null;
+  published: Timestamp | null;
+  embed: Vector | null;
   splade: Sparse | null;
   meta: Json | null;
 };
@@ -47,7 +48,7 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   await Fenec.open('./fenec.wasm', { collation: (name: string) => fetch(`/collate/${name}.bin`) });
 
   const titles = await db.from('articles').select('title', 'year').where('year', '>=', 2024).rows();
-  expect<{ title: string; year: number }[]>(titles);
+  expect<{ title: string; year: number | null }[]>(titles);
   // @ts-expect-error -- no such field
   db.from('articles').select('nope');
   // @ts-expect-error -- no such collection
@@ -88,7 +89,7 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   await db.from('articles').order('title', 'asc', { collate: 'tr' }).offset(10).explain();
 
   const grouped = await db.from('articles').select('year', 'count(*)', 'avg(year)').group('year').rows();
-  expect<number>(grouped[0].year);
+  expect<number | null>(grouped[0].year);
 
   const withReviews = await db
     .from('articles')

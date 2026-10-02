@@ -109,6 +109,37 @@ async function reopen(dir, name) {
 
 const titles = (db) => db.rows('get docs select title order title').map((r) => r.title);
 
+test('a file is checked against the schema it is opened with, what that adds written into it', { skip }, async () => {
+  const dir = fakeDir();
+  const v1 = 'create collection notes (title text required)';
+  // An empty file takes the database the schema made.
+  const db = await Fenec.open(wasm, { schema: v1 });
+  const file = await openFile(db, 'n.fenec', { dir });
+  db.run('put notes {title: "a"}');
+  file.close();
+
+  // A newer app: its database holds what its schema made and nothing else,
+  // so the file takes its place, checked; the field it adds lands in the file.
+  const v2 = 'create collection notes (title text required, at timestamp @sorted)';
+  const next = await Fenec.open(wasm, { schema: v2 });
+  const kept = await openFile(next, 'n.fenec', { dir });
+  assert.deepEqual(next.rows('get notes select title, at'), [{ title: 'a', at: null }]);
+  kept.close();
+  const { db: again, file: f } = await reopen(dir, 'n.fenec');
+  assert.deepEqual(again.schemas()[0].fields.map((x) => x.name), ['title', 'at']);
+  f.close();
+
+  // Refused: nothing is written, and the file is let go of as it was found.
+  const size = dir.bytes('n.fenec').length;
+  await assert.rejects(
+    openFile(await open(), 'n.fenec', { dir, schema: 'create collection notes (name text)' }),
+    (e) => e instanceof FenecError && /`notes.title` is in the database and not in the code/.test(e.message),
+  );
+  assert.equal(dir.bytes('n.fenec').length, size);
+  const { file: last } = await reopen(dir, 'n.fenec');
+  last.close();
+});
+
 test('a new file takes the image, then each statement as it answers', { skip }, async () => {
   const dir = fakeDir();
   const db = await open();

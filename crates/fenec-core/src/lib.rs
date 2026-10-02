@@ -31,6 +31,7 @@ pub mod case;
 pub mod changes;
 pub mod codec;
 pub mod collate;
+pub mod declared;
 pub mod engine;
 pub mod error;
 pub mod history;

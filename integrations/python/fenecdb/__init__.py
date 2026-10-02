@@ -56,6 +56,7 @@ __all__ = [
     "Cond",
     "FenecError",
     "Query",
+    "SchemaError",
     "and_",
     "collection",
     "not_",
@@ -72,6 +73,17 @@ class FenecError(Exception):
     def __init__(self, message: str, status: int):
         super().__init__(message)
         self.status = status
+
+
+class SchemaError(FenecError):
+    """The schema the code declares and the server's differ in what no
+    open applies: each difference and how to resolve it, as the engine
+    writes them, in `refusals`."""
+
+    def __init__(self, refusals: list, status: int):
+        self.refusals = refusals
+        lines = [f"  - {r['message']}\n    {r['fix']}" for r in refusals]
+        super().__init__("the database's schema differs from the code's:\n" + "\n".join(lines), status)
 
 
 class Changes(NamedTuple):
@@ -121,6 +133,23 @@ class Client:
         error stays."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
         return self._post("/batch", "\n".join(lines).encode(), "application/x-ndjson")
+
+    def schema(
+        self, fenecql: str, migrations: Sequence[Any] | None = None, *, migrate: bool = False
+    ) -> dict:
+        """Checks the server's schema against `fenecql` -- `create
+        collection` and `create index` statements, a `schema.fenecql` file
+        -- and returns the engine's plan. The server owns its schema: it is
+        compared, and nothing applied, unless `migrate` -- with the server's
+        token -- runs the migrations it has not recorded, in order, and adds
+        what only adds, all one block. Raises `SchemaError` naming every
+        difference that would lose data or could mean two things."""
+        body = {"format": 1, "fenecql": fenecql, "migrations": list(migrations or [])}
+        path = "/_schema/apply" if migrate else "/_schema/plan?mode=follow"
+        out = self._post(path, json.dumps(body).encode(), "application/json", accept=409)
+        if out["refusals"]:
+            raise SchemaError(out["refusals"], 409)
+        return out
 
     def changes(
         self,
@@ -186,7 +215,9 @@ class Client:
             _answer(e.code, e.read())
             raise
 
-    def _post(self, path: str, body: bytes, content_type: str, after: int | None = None) -> Any:
+    def _post(
+        self, path: str, body: bytes, content_type: str, after: int | None = None, accept: int = 0
+    ) -> Any:
         req = urllib.request.Request(self.url + path, data=body, method="POST")
         req.add_header("Content-Type", content_type)
         if self.token:
@@ -201,6 +232,9 @@ class Client:
                 return json.load(resp)
         except urllib.error.HTTPError as e:
             raw = e.read()
+            # An answer that is no error: a schema's refusals (409).
+            if e.code == accept:
+                return json.loads(raw)
             try:
                 message = json.loads(raw).get("error", raw.decode(errors="replace"))
             except (ValueError, AttributeError):

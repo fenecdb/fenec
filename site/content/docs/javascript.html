@@ -1,6 +1,6 @@
 <!--
 title: JavaScript and TypeScript — fenecdb
-description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, use it as the app's state with live queries, and type it from the live schema.
+description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, use it as the app's state with live queries, and declare its schema in code, Drizzle's way, or type it from the live one.
 -->
 
 <h1>JavaScript and TypeScript</h1>
@@ -158,47 +158,56 @@ The file of <code>openFile</code> stays plain, since it is the file
 <h2 id="state">State in the page</h2>
 
 <p>A database in the page can hold an app's whole state, with no server.
+Declare its collections in code, and the open makes them.
 <code>db.live(query, fn)</code> hands <code>fn</code> the query's rows now,
 and again after every write to a collection the query reads. Event handlers
 write, and <code>persist</code> keeps the state between visits.</p>
 
 <pre data-lang="ts">import { Fenec, persist, restore } from './fenec.js';
-import type { FenecSchema } from './fenec-schema.js';   // fenec types todos.fenec
+import { fenecTable, text, boolean, timestamp, index } from './schema.js';
 
-const db = await Fenec.open<FenecSchema>('./fenec.wasm');
-if (!(await restore(db, 'todos'))) {
-  db.run('create collection todos (key text @hash, title text, done bool @hash, at timestamp @sorted)');
-}
+export const todos = fenecTable('todos', {
+  key: text(),
+  title: text().notNull(),
+  done: boolean(),
+  at: timestamp(),
+}, (t) =&gt; [
+  index('todos_key').using('hash', t.key),
+  index('todos_done').using('hash', t.done),
+  index('todos_at').on(t.at),
+]);
+
+const db = await Fenec.open('./fenec.wasm', { schema: { todos } });
+await restore(db, 'todos');     // the stored database in its place, checked against todos
 
 // the rows now, and again after every write to todos
-const stop = db.live(db.from('todos').where('done', false).order('at'), draw);
+const stop = db.live(db.from(todos).where('done', false).order('at'), draw);
 
 async function add(title: string) {
-  await db.from('todos').insert({ title, done: false, at: new Date() });
+  await db.from(todos).insert({ title, done: false, at: new Date() });
   await persist(db, 'todos');            // only this write, not the whole image
 }
 async function finish(id: number) {
-  await db.from('todos').where('id', id).update({ done: true });
+  await db.from(todos).where('id', id).update({ done: true });
   await persist(db, 'todos');
 }
 </pre>
 
 <p>In React, <code>useLiveQuery</code> from <code>@fenecdb/react</code> takes
-the same database. The row type it is given types what it hands back:</p>
+the same database, and the rows it hands back are typed by the table:</p>
 
 <pre data-lang="ts">import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
-import type { Fenec, FenecSync, Row } from './fenec.js';
-import type { FenecSchema } from './fenec-schema.js';
+import type { Fenec, SchemaOf } from './fenec.js';
+import { todos } from './tables.js';   // the tables above, in a module of the app's
 
-type Todo = Row<FenecSchema['todos']>;
-type Db = Fenec<FenecSchema> | FenecSync<FenecSchema>;   // the page's own, or a replica
+type Db = Fenec&lt;SchemaOf&lt;{ todos: typeof todos }&gt;&gt;;
 
 function Todos() {
-  const db = useFenec<Db>();
-  const todos = useLiveQuery<Todo>(db.from('todos').where('done', false).order('at'));
-  if (todos === undefined) return null;
-  return todos.map((t) =&gt; (
-    &lt;li key={t.id} onClick={() =&gt; db.from('todos').where('id', t.id).update({ done: true })}&gt;{t.title}&lt;/li&gt;
+  const db = useFenec&lt;Db&gt;();
+  const open = useLiveQuery(db.from(todos).where('done', false).order('at'));
+  if (open === undefined) return null;
+  return open.map((t) =&gt; (
+    &lt;li key={t.id} onClick={() =&gt; db.from(todos).where('id', t.id).update({ done: true })}&gt;{t.title}&lt;/li&gt;
   ));
 }
 
@@ -208,15 +217,17 @@ root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
 <p>To share the todos through a server later, open a
 <a href="sync.html">synced replica</a> instead. The components stay as
 they are: a replica has the same <code>from</code> and <code>live</code>,
-and its writes reach the server.</p>
+and its writes reach the server. The server owns the schema there: the
+tables are checked against it, and nothing is applied.</p>
 
 <pre data-lang="ts">import { sync } from './fenec.js';
 import { FenecProvider } from '@fenecdb/react';
-import type { FenecSchema } from './fenec-schema.js';
+import { todos } from './tables.js';
 
-const db = await sync<FenecSchema>({
+const db = await sync({
   url: 'https://todos.example.com',
-  shapes: [{ collection: 'todos', key: 'key' }],
+  schema: { todos },
+  shapes: [{ collection: todos, key: 'key' }],
 });
 root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
 </pre>
@@ -268,6 +279,210 @@ to.</p>
 <p>The <code>key</code> field in the example is what a replica reconciles an
 optimistic insert by. It fills the field in for you. Without a key, the row
 shows up once the server has it, not at once.</p>
+</details>
+
+<h2 id="schema">Schema in code</h2>
+
+<p>Declare the collections in TypeScript, the way Drizzle declares tables,
+and open the database with them. The open compares the database with the
+code: what only adds is made, and anything that could lose data is refused,
+listed with how to resolve it. The tables also type every query.</p>
+
+<pre data-lang="ts">import { Fenec } from './fenec.js';
+import { fenecTable, text, integer, json, vector, index, uniqueIndex, defineRelations } from './schema.js';
+
+export const products = fenecTable('products', {
+  name: text().notNull().collate('tr'),
+  sku: text().unique(),
+  meta: json(),
+  embed: vector({ dimensions: 384 }),
+}, (t) =&gt; [
+  index('products_name').using('bm25', t.name).with({ prefix: 6 }),
+  index('products_embed').using('hnsw', t.embed.op('vector_cosine_ops')).with({ m: 16 }),
+  uniqueIndex('products_lang').on(t.meta.path('lang')),
+]);
+
+export const reviews = fenecTable('reviews', {
+  productId: integer().notNull(),
+  stars: integer(),
+}, (t) =&gt; [index('reviews_product').using('hash', t.productId)]);
+
+export const relations = defineRelations({ products, reviews }, (r) =&gt; ({
+  products: { reviews: r.many.reviews({ from: r.products.id, to: r.reviews.productId }) },
+}));
+
+const db = await Fenec.open('./fenec.wasm', { schema: { products, reviews }, relations });
+
+type Product = typeof products.$inferSelect;    // { id: number; name: string; sku: string | null; ... }
+const top = await db.from(products).select('name').lookup('reviews', { where: { stars: 5 } }).rows();
+//    top: { name: string; reviews: { id: number; productId: number; stars: number | null }[] }[]
+</pre>
+
+<ul>
+  <li><b>Made or checked at every open.</b> An empty database is made as
+    declared. One that exists gets what only adds — a collection, a field,
+    an index where there is none — in one block. A
+    <code>restore</code> or <code>openFile</code> checks the database it
+    brings in.</li>
+  <li><b>Refused, nothing is written.</b> A field the code lacks (dropped,
+    or renamed?), a type changed, an index changed or taken off, a collation
+    changed, a field made required: the open throws a
+    <code>FenecError</code> that names each difference and how to resolve
+    it.</li>
+  <li><b>Migrations resolve them.</b> <code>migrations: [rename('todos',
+    'title', 'name')]</code> runs once, in order, recorded in the database's
+    <code>_migrations</code>.</li>
+  <li><b>A schema is FenecQL too.</b> <code>schema</code> also takes the
+    <code>create collection</code> statements of a
+    <code>schema.fenecql</code> file, which every fenecdb SDK can hand
+    over.</li>
+</ul>
+
+<details class="deep"><summary>Details: declaring</summary>
+<p>A column builder takes no name: the key is the field's name. Columns are
+nullable unless <code>.notNull()</code>, FenecQL's <code>required</code>. A
+field takes one index, declared on the column (<code>.unique()</code>) or in
+the third argument; two on one field are refused as the table is declared,
+as is anything FenecQL cannot hold.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Declared</th><th>FenecQL</th></tr></thead>
+<tbody>
+<tr><td><code>text()</code> <code>integer()</code> <code>doublePrecision()</code> <code>boolean()</code></td><td><code>text</code> <code>int</code> <code>float</code> <code>bool</code></td></tr>
+<tr><td><code>timestamp()</code> <code>bytea()</code> <code>json()</code></td><td><code>timestamp</code> <code>bytes</code> <code>json</code></td></tr>
+<tr><td><code>vector({ dimensions: 384 })</code> / <code>halfvec(...)</code></td><td><code>vector&lt;384&gt;</code> / <code>vector&lt;384, f16&gt;</code></td></tr>
+<tr><td><code>sparsevec({ dimensions: 30522 })</code></td><td><code>sparse&lt;30522&gt;</code></td></tr>
+<tr><td><code>text().array()</code></td><td><code>[text]</code></td></tr>
+<tr><td><code>.notNull()</code> <code>.collate('tr')</code> <code>.unique()</code></td><td><code>required</code> <code>collate tr</code> <code>@unique</code></td></tr>
+<tr><td><code>index().on(t.at)</code></td><td><code>@sorted</code></td></tr>
+<tr><td><code>index().on(t.at).ttl('30d')</code></td><td><code>@ttl(30d)</code></td></tr>
+<tr><td><code>index().using('hash', t.n)</code> / <code>uniqueIndex().on(t.n)</code></td><td><code>@hash</code> / <code>@unique</code></td></tr>
+<tr><td><code>index().using('hnsw', t.e.op('vector_l2_ops')).with({ m, ef_construction, ef_search, quant })</code></td><td><code>@hnsw(l2, m=.., ...)</code></td></tr>
+<tr><td><code>index().using('bm25', t.body).with({ k1, b, prefix, prefix_min, chars })</code></td><td><code>@text(...)</code></td></tr>
+<tr><td><code>index().using('inverted', t.splade)</code></td><td><code>@inverted</code></td></tr>
+<tr><td><code>index().using('hash', t.meta.path('lang'))</code></td><td><code>create index on t (meta.lang) @hash</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>typeof products.$inferSelect</code> is a row as read, <code>id</code>
+and all, a nullable column <code>T | null</code>: the same type <code>fenec
+types</code> generates for the collection, which the tests hold it to field
+for field. <code>$inferInsert</code> is what <code>insert</code> takes: the
+<code>.notNull()</code> columns given, the rest optional. <code>db.from(table)</code>,
+<code>lookup(table, ...)</code>, a shape's <code>collection</code> and
+<code>useLiveQuery</code> are typed by the table, and a misspelt field or a
+wrong value's type is a compile error.</p>
+
+<p>A relation of <code>defineRelations</code> is a <code>lookup</code>:
+<code>on &lt;to&gt; = &lt;from&gt;</code>, its rows attached under the table
+it reaches. <code>to</code> must be <code>id</code> or a column with a hash or
+unique index, since <code>lookup</code> finds children by an index and never
+by a scan; a relation it cannot answer is refused as it is declared.
+<code>r.one</code> attaches the first child, still in a list.</p>
+</details>
+
+<details class="deep"><summary>Details: the check at an open</summary>
+<p>The engine compares, in the module or on the server, so every SDK applies
+and refuses the same things with the same words. What it does:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Difference</th><th>At an open</th><th>Resolved by</th></tr></thead>
+<tbody>
+<tr><td>A collection, a field, an index where there is none, a path index</td><td>made</td><td>—</td></tr>
+<tr><td>A collection the code does not declare</td><td>left as it is</td><td><code>dropTable('t')</code> to drop it</td></tr>
+<tr><td>A field the code does not declare</td><td>refused: dropped, or renamed?</td><td><code>rename(...)</code> or <code>drop(...)</code></td></tr>
+<tr><td>A type changed</td><td>refused</td><td>a migration: add a field, <code>set</code> it from the old, drop the old</td></tr>
+<tr><td>An index changed or taken off, a collation changed</td><td>refused</td><td><code>rebuild('t', 'field')</code>; an expiry: <code>alter field</code></td></tr>
+<tr><td>A required field made optional</td><td>refused</td><td><code>rebuild</code>: made again, not required</td></tr>
+<tr><td>A field made required, or a new required field</td><td>refused</td><td>declare it as the database has it</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre data-lang="text">FenecError: the database's schema differs from the code's, and nothing was applied:
+  - `todos.title` is in the database and not in the code
+    if it was renamed to `name`, the migration `alter collection todos rename field title to name`; if it goes, `alter collection todos drop field title`
+</pre>
+
+<p>Everything an open applies is one block: the migrations not yet
+recorded, their records, and the additions land together, or — on a
+refusal or an error — none of them. A database made from the code records
+its migrations without running them, since they lead from schemas it never
+had. A migration is known by its place in the list and held to its text:
+one changed after it ran, or a database holding more migrations than the
+code lists — an older app opening what a newer one migrated — is refused,
+and nothing runs. <code>rebuild</code> adds the field again as declared,
+copies its values with <code>set</code>, drops the old field and renames
+the new one; a field it rebuilds is not required.</p>
+
+<p><code>db.checkSchema(description, 'plan')</code> says what an open would
+do and writes nothing, the pending migrations run in a block put back. The
+check costs an open of 10 collections 0.09 ms in Node (0.11 ms without, 0.20
+with), and the module 7.5 KB brotli (23 KB raw): the comparison and its
+messages, and FenecQL read into a schema. <code>make wasm SCHEMA=0</code>
+leaves it out, and <code>fenec-lite.wasm</code> has none.</p>
+</details>
+
+<details class="deep"><summary>Details: where it runs, and the description</summary>
+<p>A database in the page (<code>Fenec.open</code>, <code>restore</code>,
+<code>openFile</code>) is the code's, and the check applies. A synced
+replica's schema is its server's: <code>sync({ schema })</code> compares
+the code with the server's (<code>POST /_schema/plan?mode=follow</code>),
+refuses what the code declares and the server lacks, and applies nothing;
+the replica takes its collections as the server declares them, as it
+always did. <code>connect(url, { schema })</code> compares the same way;
+with <code>migrate: true</code> and the server's token it runs the
+migrations and the additions on the server (<code>POST /_schema/apply</code>),
+as a deploy step runs drizzle-kit's <code>migrate</code>.</p>
+
+<p>Every SDK's declarations compile to one description, versioned JSON:
+<code>{"format": 1, "collections": [...], "migrations": [...]}</code>, a
+field <code>{"name", "type", "required", "collate", "index", "paths"}</code>
+and an index <code>{"kind": "hnsw", "metric", "m", ...}</code> holding what
+the declaration says, the engine's defaults for the rest — or the same
+collections as FenecQL text, <code>{"format": 1, "fenecql": "create
+collection ..."}</code>, which the module reads.
+<code>integrations/schema-golden.json</code> holds declarations and the
+description each compiles to, FenecQL texts, and plans with the statements
+and refusals the engine makes of them, which the Rust tests run and every
+SDK will be held to.</p>
+</details>
+
+<details class="deep"><summary>Details: coming from Drizzle, and which way to choose</summary>
+<p>One to one: a table function with columns and an array of indexes,
+column builders without a name, <code>.notNull()</code>,
+<code>.unique()</code>, <code>.array()</code>, <code>$type</code>,
+<code>index</code> and <code>uniqueIndex</code> with <code>.on</code>,
+<code>.using</code> and <code>.with</code>, pgvector's
+<code>vector</code>, <code>halfvec</code> and <code>sparsevec</code> with
+their operator classes, <code>$inferSelect</code>,
+<code>$inferInsert</code>, <code>getColumns</code> and
+<code>defineRelations</code> with <code>r.many</code> and
+<code>r.one</code>.</p>
+
+<p>fenecdb's own: <code>fenecTable</code> (also <code>collection</code>),
+<code>bm25</code> and <code>inverted</code> methods,
+<code>.ttl()</code>, <code>.collate()</code>, <code>t.meta.path(...)</code>,
+and <code>quant</code>. Not there: <code>.default()</code> (FenecQL has no
+defaults), <code>.primaryKey()</code> (every document has its
+<code>id</code>), <code>.references()</code> (no foreign keys; a relation is
+<code>defineRelations</code>), an index on two columns, and index names,
+which are checked to be distinct and kept nowhere. Drizzle generates SQL
+migrations from a diff; here the engine applies what only adds by itself,
+and only what it refuses needs a migration, written beside the
+schema.</p>
+
+<p>Declare the schema in code for an app that makes its own database: a
+page's state, an app's file, a service that owns its server. Generate the
+types from the database (<a href="#typescript">TypeScript</a>) for an app
+over a database another owns, a server's whose schema changes elsewhere.
+To move from the second to the first, <code>fenec types --schema
+data.fenec &gt; schema.ts</code> writes the tables the file holds, every
+option written, and <code>fenec types --fenecql</code> the same schema as
+FenecQL; an open with either finds no difference.</p>
 </details>
 
 <h2 id="collation">Collation data</h2>
@@ -570,11 +785,15 @@ endpoint</a>.</p>
 <h2 id="typescript">TypeScript</h2>
 
 <p><code>fenec.d.ts</code> beside the module types the client, and
-<code>@fenecdb/web</code> ships it. Generate a schema type from your database
-file, and queries are checked against its real schema: unknown fields, wrong
-value types and unselected fields are compile errors.</p>
+<code>@fenecdb/web</code> ships it. A schema declared in code types it
+(<a href="#schema">Schema in code</a>); for a database another owns,
+generate the schema type from the database file, and queries are checked
+against its real schema: unknown fields, wrong value types and unselected
+fields are compile errors.</p>
 
 <pre data-lang="bash">fenec types data.fenec > web/fenec-schema.d.ts     # or: make types FILE=data.fenec
+fenec types schema.fenecql > web/fenec-schema.d.ts # from a schema file, with no database
+fenec types --lang python data.fenec              # a row in Python, Go, C#, Swift, Kotlin or Dart
 </pre>
 
 <pre data-lang="ts">import { Fenec } from './fenec.js';
@@ -595,7 +814,9 @@ const products = await db.from('products')
 
 <details class="deep"><summary>Details</summary>
 <p>The schema is not written a second time — it is generated from the live
-file, so the two cannot drift apart.</p>
+file, so the two cannot drift apart. A schema declared in code is written a
+second time on purpose, and the check at every open is what keeps the two
+one.</p>
 
 <div class="tbl">
 <table>

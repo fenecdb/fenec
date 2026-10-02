@@ -164,6 +164,28 @@ pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_changes(
     taken(env, code, out)
 }
 
+/// `fenec_schema`: a schema declared as FenecQL, planned or applied.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_schema(
+    env: Env,
+    _class: *mut c_void,
+    handle: i64,
+    request: JArray,
+    mode: i32,
+) -> JArray {
+    let request = read(env, request);
+    let mut out = std::ptr::null_mut();
+    let code = crate::fenec_schema(
+        handle as u64,
+        request.as_ptr(),
+        request.len(),
+        mode as u32,
+        &mut out,
+        std::ptr::null_mut(),
+    );
+    taken(env, code, out)
+}
+
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_syncStart(
     env: Env,

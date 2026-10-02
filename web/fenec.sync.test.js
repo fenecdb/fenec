@@ -14,7 +14,8 @@ import { spawn } from 'node:child_process';
 import { readFile, access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fenec, sync, FenecError } from './fenec.js';
+import { Fenec, sync, connect, FenecError } from './fenec.js';
+import { fenecTable, text, integer, index, rename } from './schema.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
 async function binary(name) {
@@ -675,5 +676,71 @@ test('a tenant syncs through the router with only the base URL changed', { ...op
     acme.close();
     beta.close();
     await c.close();
+  }
+});
+
+// ------------------------------------------------------------ schema in code
+
+const tasksTable = fenecTable(
+  'tasks',
+  { key: text(), title: text(), status: text(), priority: integer() },
+  (t) => [index('tasks_key').using('hash', t.key), index('tasks_status').using('hash', t.status)],
+);
+
+test('a replica checks the code\'s schema against the server\'s and applies none of it', opts, async () => {
+  const s = await server();
+  try {
+    // The code declares what the server holds: the replica opens, typed by it.
+    const db = await open(s.url, { schema: { tasks: tasksTable } });
+    await db.ready();
+    assert.deepEqual((await db.from(tasksTable).order('priority').rows()).map((r) => r.title), ['one', 'two']);
+    db.close();
+
+    // A field the server lacks is the server's to add: refused, and the
+    // server's schema is as it was.
+    const ahead = fenecTable('tasks', { key: text(), title: text(), status: text(), priority: integer(), due: integer() }, (t) => [
+      index().using('hash', t.key),
+      index().using('hash', t.status),
+    ]);
+    await assert.rejects(open(s.url, { schema: { tasks: ahead } }), (e) => {
+      assert.ok(e instanceof FenecError);
+      assert.deepEqual(e.refusals.map((r) => [r.kind, r.field]), [['field_missing', 'due']]);
+      assert.match(e.message, /the server's is the one that counts/);
+      return true;
+    });
+    const fields = (await s.run('collections'))[0].fields.map((f) => f.name);
+    assert.deepEqual(fields, ['key', 'title', 'status', 'priority']);
+
+    // What the server holds beyond the code is its own: a replica of fewer
+    // fields opens.
+    const fewer = fenecTable('tasks', { key: text(), title: text() }, (t) => [index().using('hash', t.key)]);
+    const narrow = await open(s.url, { schema: { tasks: fewer } });
+    narrow.close();
+  } finally {
+    s.close();
+  }
+});
+
+test('connect compares, and migrates only when asked', opts, async () => {
+  const s = await server();
+  try {
+    const http = await connect(s.url, { schema: { tasks: tasksTable } });
+    assert.equal((await http.from(tasksTable).where('status', 'open').rows()).length, 2);
+
+    const renamed = fenecTable('tasks', { key: text(), name: text(), status: text(), priority: integer() }, (t) => [
+      index().using('hash', t.key),
+      index().using('hash', t.status),
+    ]);
+    const migrations = [rename('tasks', 'title', 'name')];
+    // Not asked: the server's `title` is not the code's `name`, and nothing runs.
+    await assert.rejects(connect(s.url, { schema: { tasks: renamed }, migrations }), /`tasks.name` is in the code and not in the database/);
+    // Asked: the migration runs on the server, once, recorded there.
+    const migrated = await connect(s.url, { schema: { tasks: renamed }, migrations, migrate: true });
+    assert.deepEqual((await migrated.from(renamed).select('name').order('name').rows()).map((r) => r.name), ['one', 'three', 'two']);
+    assert.deepEqual(await s.run('get _migrations select n, text'), [{ n: 1, text: 'alter collection tasks rename field title to name' }]);
+    await connect(s.url, { schema: { tasks: renamed }, migrations, migrate: true });
+    assert.equal((await s.run('get _migrations count'))[0].count, 1);
+  } finally {
+    s.close();
   }
 });

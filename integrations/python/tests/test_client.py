@@ -49,3 +49,31 @@ def test_a_write_names_its_change_and_a_read_can_wait_for_it(client):
         assert e.value.status == 400
     finally:
         client.query(f"drop collection if exists {name}")
+
+
+def test_a_schema_is_compared_and_applied_only_when_asked(client):
+    from fenecdb import SchemaError
+
+    name = fresh("schema")
+    v1 = f"create collection {name} (title text required, n int @hash)"
+    client.query(v1)
+    try:
+        assert client.schema(v1)["refusals"] == []
+        # A field the server lacks: the server's to add, refused.
+        v2 = f"create collection {name} (title text required, n int @hash, at timestamp)"
+        with pytest.raises(SchemaError) as e:
+            client.schema(v2)
+        assert [(r["kind"], r["field"]) for r in e.value.refusals] == [("field_missing", "at")]
+        # Asked, it is added: the code owns the schema.
+        out = client.schema(v2, migrate=True)
+        assert out["statements"] == [f"alter collection {name} add field at timestamp"]
+        # A rename is a migration, run once.
+        v3 = f"create collection {name} (name text required, n int @hash, at timestamp)"
+        with pytest.raises(SchemaError):
+            client.schema(v3, migrate=True)
+        moved = [f"alter collection {name} rename field title to name"]
+        assert client.schema(v3, moved, migrate=True)["migrations"] == [1]
+        assert client.schema(v3, moved, migrate=True)["migrations"] == []
+    finally:
+        client.query(f"drop collection if exists {name}")
+        client.query("drop collection if exists _migrations")

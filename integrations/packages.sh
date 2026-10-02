@@ -71,6 +71,18 @@ for (const module of ['fenec.wasm', 'fenec-lite.wasm']) {
   if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(`${module}: ${rows}`);
   console.log(`@fenecdb/web ${module}: ${db.version}, ${rows.length} rows in order`);
 }
+// A schema declared in code, from its own entry point: an open makes it,
+// and a second open with a field more adds the field.
+const { fenecTable, text, integer, index } = await import('@fenecdb/web/schema');
+const notes = fenecTable('notes', { title: text().notNull(), n: integer() }, (t) => [index('notes_n').using('hash', t.n)]);
+const declared = await Fenec.open(await file('fenec.wasm'), { schema: { notes } });
+declared.run('put notes {title: "a", n: 1}');
+const more = fenecTable('notes', { title: text().notNull(), n: integer(), tag: text() }, (t) => [index().using('hash', t.n)]);
+const out = declared.checkSchema({ format: 1, fenecql: more.toFenecQL() }, 'apply');
+if (!out.applied || out.statements[0] !== 'alter collection notes add field tag text') {
+  throw new Error(`@fenecdb/web/schema: ${JSON.stringify(out)}`);
+}
+console.log('@fenecdb/web/schema declares and checks a schema');
 if (typeof useLiveQuery !== 'function' || typeof FenecProvider !== 'function') {
   throw new Error('@fenecdb/react exports are missing');
 }

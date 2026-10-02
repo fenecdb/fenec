@@ -4,7 +4,7 @@
 
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 199 KB of
+written in Rust with no dependencies. It runs inside a web page as 208 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FenecQL**).
@@ -119,7 +119,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-199 KB of gzipped WebAssembly and a 33 KB gzipped client — no wasm-bindgen, no
+208 KB of gzipped WebAssembly and a 35 KB gzipped client — no wasm-bindgen, no
 build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
@@ -157,7 +157,7 @@ follows. [Server](https://fenecdb.com/docs/server) ·
 [HTTP endpoint](https://fenecdb.com/docs/http) ·
 [Replication](https://fenecdb.com/docs/replication).
 
-**Container.** 2.81 MB, and the `Dockerfile` is two-stage: static musl build
+**Container.** 2.99 MB, and the `Dockerfile` is two-stage: static musl build
 into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
@@ -203,6 +203,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 |---|---|
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch landing whole |
 | **Schema** | `alter collection` adds, drops and renames a field without rewriting a document |
+| **Schema in code** | tables declared in TypeScript Drizzle's way, or a `schema.fenecql` in any SDK, checked at every open: what only adds is applied, a drop, a rename or a type change refused until a migration says, run once and recorded; `fenec types` writes TypeScript, Python, Go or C# from a database or a schema file |
 | **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
 | **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once |
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) |
@@ -219,7 +220,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 199 KB gzip wasm + 33 KB gzip client · 1234–1784 KB binary · 2.81 MB container image |
+| **Runtime size** | 208 KB gzip wasm + 35 KB gzip client · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
@@ -243,7 +244,7 @@ query; it is not a join and is not trying to be one.
 | [Quickstart](https://fenecdb.com/docs/quickstart) | Build it, open a file, write a vector query |
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, HNSW with a filter, half precision, and why there is no page cache and exactly one writer |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
-| [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state |
+| [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state, a schema declared in code |
 | [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |

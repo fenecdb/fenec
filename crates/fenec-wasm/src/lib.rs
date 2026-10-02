@@ -329,6 +329,48 @@ fn run(handle: u32, sql: &str, params_src: &str, vectors: &[u8]) -> String {
     }
 }
 
+// -------------------------------------------------------------- schema
+
+/// Compares the database with a schema declared in code -- a description,
+/// `fenec_core::declared` -- and brings it there as `mode` says: 0 plans,
+/// 1 applies (the migrations not yet recorded, then what only adds, one
+/// block). `now` is when a migration is recorded. A replica's schema is
+/// its server's, which the server compares (`POST /_schema/plan`): the
+/// module carries no comparison it would not apply.
+/// Returns `{"kind":"schema", ...}` (`fenec_abi::Outcome`) or an error,
+/// naming the collation data a migration needs as `fenec_query`'s do.
+///
+/// # Safety
+/// `ptr` must be valid and `len` bytes long.
+#[cfg(feature = "schema")]
+#[no_mangle]
+pub unsafe extern "C" fn fenec_schema(
+    handle: u32,
+    ptr: *const u8,
+    len: usize,
+    mode: u32,
+    now: f64,
+) -> *mut u8 {
+    let request = str_from(ptr, len);
+    let now = now.is_finite().then_some(now as i64);
+    collate::take_missing();
+    let out = with_db(handle, |db| {
+        db.set_clock(now);
+        if mode > 1 {
+            return Err(Error::Query(
+                "the schema modes are 0, a plan, and 1, an apply".into(),
+            ));
+        }
+        fenec_abi::schema(db, &request, mode == 1, now)
+    });
+    let out = match out {
+        None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
+        Some(Ok(o)) => o.json(),
+        Some(Err(e)) => fenec_abi::refused(&e, 0),
+    };
+    boxed(out.as_bytes())
+}
+
 // ----------------------------------------------------------- collation
 
 /// The collation data: `{"chunks":[names],"loaded":mask}`, a chunk's bit its

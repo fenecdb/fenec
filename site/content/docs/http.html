@@ -61,6 +61,9 @@ GET    /_changes?consumer=C     from where consumer C committed
 POST   /_changes/consumers/C    body: {"since": N} -- make C, or move it
 GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
+GET    /_schema                 the schema as a description (Schema in code)
+POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
+POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
 </pre>
 
 <details class="deep"><summary>Details</summary>
@@ -69,6 +72,19 @@ as well: the stream a replica is fed, its status, and a replica's promotion —
 see <a href="/docs/replication">Replication</a>. It asks for that token
 rather than <code>--http-token</code>, and a collection named
 <code>_replication</code> is then out of HTTP's reach.</p>
+
+<p><code>/_schema</code> compares a schema declared in code with the
+server's, in the engine every SDK's check goes through — see <a
+href="/docs/javascript#schema">Schema in code</a>. Its body is the
+description, <code>{"format": 1, "fenecql": "create collection ...",
+"migrations": [...]}</code> or its collections as JSON. A plan answers
+<code>{"applied", "ran", "migrations", "statements", "refusals"}</code>, and
+writes nothing; with <code>?mode=follow</code> it says only what the code
+declares and the server lacks, which a scoped token may ask of the
+collections it reads. An apply takes the server's token, runs the
+migrations not yet recorded and the additions under the write lock as one
+block, and answers 409 with the refusals when anything is refused, having
+written nothing.</p>
 
 <p><code>/_metrics</code> is the server's statements, latency and data in
 Prometheus's text format, readable with <code>--http-token</code> or the
