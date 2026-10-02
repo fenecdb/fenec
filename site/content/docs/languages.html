@@ -14,7 +14,9 @@ alone; in the other languages these few lines are the whole client. Swift,
 Kotlin and Dart embed the database in the app, a file on the device
 (<a href="mobile.html">Mobile and native apps</a>), and reach a server with
 <code>Fenec.connect</code>; their tabs run the same flow in their own
-tests.</p>
+tests. Each tab ends with a full example: one app, Notes, in every
+language, a folder of a few files to clone and run
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples">examples</a>).</p>
 
 <h2 id="setup">Start a server</h2>
 
@@ -58,6 +60,7 @@ n = docs.where("title", "~", "Dunes").count()</pre>
 <p><code>AsyncClient</code> does the same in an event loop, the endpoints of
 its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/python">Full example</a>: Notes, a CLI over the server with the builder, <code>match</code>, <code>fuse</code> and the change stream.</p>
 </div>
 
 <div class="lang" data-name="TypeScript">
@@ -90,6 +93,7 @@ const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]
 <p>The same code runs as plain JavaScript, without the types. In the
 browser there is no server at all: the same database runs in the page
 (<a href="javascript.html">JavaScript and TypeScript</a>).</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/node-server">Full example</a>: Notes from Node through <code>@fenecdb/web/client</code>, its live queries run on the server; in the page, <a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a> and <a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>.</p>
 </div>
 
 <div class="lang" data-name="Go">
@@ -161,6 +165,7 @@ var rows []struct {
 err := query(&amp;rows, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})</pre>
 <p><code>FenecError</code> is a struct of the status and the body's
 <code>error</code>.</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/go">Full example</a>: Notes, a CLI over the server with the builder, typed rows and a subscription.</p>
 </div>
 
 <div class="lang" data-name="Rust">
@@ -187,6 +192,7 @@ match query("get nowhere", json!([])) {
 }</pre>
 <p>Or embed the engine in your process, with no server
 (<a href="embedding.html">Embedded Rust</a>).</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/rust">Full example</a>: Notes with <code>fenec-core</code> embedded, a file and no server.</p>
 </div>
 
 <div class="lang" data-name=".NET">
@@ -245,6 +251,7 @@ var rows = await Query("get docs select title near embed $1 limit 5", new[] { 0.
 var titles = rows.EnumerateArray().Select(r =&gt; r.GetProperty("title").GetString());</pre>
 <p>The body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
 and the server wants a <code>Content-Length</code>.</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/dotnet">Full example</a>: Notes, a console app over the server with the builder, records and <code>SubscribeAsync</code>.</p>
 </div>
 
 <div class="lang" data-name="Java">
@@ -355,6 +362,7 @@ any <code>Decodable</code>. A live query for SwiftUI, where the file goes
 and a replica a server keeps in step are on
 <a href="mobile.html">Mobile and native apps</a>. A device reaches a
 server through TLS: <code>URLSession</code> makes the requests.</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/swift">Full example</a>: Notes, a SwiftUI app over a file, its list a <code>LiveQuery</code>, and a CLI.</p>
 </div>
 
 <div class="lang" data-name="Kotlin">
@@ -389,6 +397,7 @@ val hits = remote.from("docs").select("title").near("embed", floatArrayOf(0.1f, 
 replica a server keeps in step is <code>Fenec.sync</code>
 (<a href="mobile.html">Mobile and native apps</a>). A device reaches a
 server through TLS: <code>HttpURLConnection</code> makes the requests.</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/kotlin-android">Full example</a>: Notes, a Compose app over a file, its list a live <code>Flow</code>, and a JVM CLI.</p>
 </div>
 
 <div class="lang" data-name="Dart">
@@ -423,6 +432,7 @@ Live queries are <code>Stream</code>s, and a replica a server keeps in step
 is <code>Fenec.openSynced</code> (<a href="mobile.html">Mobile and native
 apps</a>). A device reaches a server through TLS: <code>dart:io</code>'s
 <code>HttpClient</code> makes the requests.</p>
+<p><a href="https://github.com/fenecdb/fenec/tree/main/examples/flutter">Full example</a>: Notes, a Flutter app over a file, its list a <code>StreamBuilder</code> over a live query.</p>
 </div>
 
 </div>

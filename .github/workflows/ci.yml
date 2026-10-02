@@ -240,6 +240,40 @@ jobs:
           integrations/packages.sh
           integrations/dotnet/package.sh
 
+  # examples/: the Notes app in each language that runs on the runner, on
+  # this checkout's build -- npm packs of web/ and integrations/react, the
+  # Python client by PYTHONPATH, a Go replace, a .NET project reference,
+  # Cargo paths -- each its smoke against a fenec-server of its own or the
+  # engine in process, the Vite apps built besides. Swift, Kotlin and
+  # Flutter run in the mobile jobs, beside their bindings.
+  examples:
+    name: examples (Node, Python, Go, .NET, Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-examples-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-examples-
+
+      - name: The Notes examples
+        run: |
+          make wasm
+          examples/run-tests.sh node-server web-local react python go dotnet rust
+
   build:
     name: build (release + cli profile)
     runs-on: ubuntu-latest
@@ -316,6 +350,12 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           integrations/kotlin/build-aar.sh dist-mobile
 
+      # The Notes example over a Gradle composite build of integrations/kotlin
+      # (FENEC_LOCAL): the JVM CLI's smoke against the library built above,
+      # then the Compose app built as an APK.
+      - name: Notes (Kotlin, Compose)
+        run: examples/kotlin-android/run-smoke.sh
+
       - name: The library's size on Android and Linux
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
@@ -341,6 +381,11 @@ jobs:
           rm -rf test
           flutter build apk --debug
           unzip -l build/app/outputs/flutter-apk/app-debug.apk | grep libfenec_ffi.so
+
+      # The Notes example: its logic's smoke under flutter test, then the
+      # app built as an APK, on this checkout's packages (pub overrides).
+      - name: Notes (Flutter)
+        run: examples/flutter/run-tests.sh apk
 
       - uses: actions/upload-artifact@v7
         with:
@@ -390,6 +435,18 @@ jobs:
 
       - name: Swift (iOS simulator)
         run: integrations/swift/test-ios.sh
+
+      # The Notes example on the package at the root (FENEC_LOCAL): the
+      # SwiftUI app and the CLI built, the CLI's smoke run, and the views'
+      # library built for the iOS simulator.
+      - name: Notes (Swift)
+        working-directory: examples/swift
+        env:
+          FENEC_LOCAL: '1'
+        run: |
+          swift build
+          swift run notes-cli smoke
+          xcodebuild -scheme NotesKit -destination 'generic/platform=iOS Simulator' build -quiet
 
       - name: The library's size on Apple's platforms
         run: |

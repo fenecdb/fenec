@@ -8,8 +8,8 @@ nothing reaches a registry before the notes have had a read.
 
 1. `make version V=X.Y.Z`: the one version goes into the workspace, the
    Python package, the npm packages, the NuGet package, the Kotlin and Dart
-   packages, the Flutter plugin, `Package.swift`'s release and the image the
-   README pulls. Then
+   packages, the Flutter plugin, `Package.swift`'s release, the image the
+   README pulls and the examples' dependencies (`examples/`). Then
    `cargo check` moves `Cargo.lock`, and the change goes through a pull
    request like any other.
 2. Build the Swift package's binary: `gh workflow run swift-binary.yml -f

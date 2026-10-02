@@ -2480,7 +2480,9 @@ function ndjson([sql, params]) {
 
 function normalizeShape(raw, url) {
   const spec = raw instanceof Query ? { collection: raw.collection } : raw;
-  if (!isSpec(spec) || typeof spec.collection !== 'string') {
+  // A table declared in code (`fenecTable`) names its collection too, as
+  // the docs write a shape: `{ collection: todos, key: 'key' }`.
+  if (!isSpec(spec) || typeof nameOf(spec.collection) !== 'string') {
     throw new FenecError('a shape must be `{ collection, where?, select?, key? }`');
   }
   const collection = ident(nameOf(spec.collection), 'collection');

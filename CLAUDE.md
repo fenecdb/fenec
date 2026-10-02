@@ -37,6 +37,7 @@ make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
 make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
+make examples-test    # examples/: the Notes app in every language, each its smoke on this checkout's build (E="python go" for some)
 make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
 make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)

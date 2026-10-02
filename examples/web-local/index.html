@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  form, .filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  input[type=text], input:not([type]) { flex: 1; min-width: 8rem; padding: .4rem; }
+  ul { list-style: none; padding: 0; }
+  li { padding: .5rem 0; border-bottom: 1px solid #ddd; cursor: pointer; }
+  li.done b { text-decoration: line-through; color: #888; }
+  li p { margin: .2rem 0 0; color: #555; }
+  .tags { color: #36c; font-size: .85em; }
+</style>
+</head>
+<body>
+<h1>Notes</h1>
+<form id="add">
+  <input name="title" placeholder="Title" required>
+  <input name="body" placeholder="What about it" required>
+  <input name="tags" placeholder="tags, comma separated">
+  <button>Add</button>
+</form>
+<div class="filters">
+  <input id="words" placeholder="Search: words, and what is spelt alike">
+  <input id="tag" placeholder="tag">
+  <label><input id="open" type="checkbox"> open only</label>
+</div>
+<ul id="list"></ul>
+<p><small>Kept in this browser's IndexedDB. Click a note to mark it done.</small></p>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
