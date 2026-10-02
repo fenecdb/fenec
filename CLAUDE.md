@@ -1438,7 +1438,7 @@ which would lose the rows it never reached. An update arrives without its
 TOASTed columns -- a `vector(768)` is 3 KB, past the threshold -- so the
 follower takes them from its pending writes or the collection; flushing
 before each such read cost the batching, 5 900 rows/s against 17 100. Commit
-to visible: p50 0.32 ms (`make follow-bench`). `fenec-server --follow` runs the
+to visible: p50 0.16 ms (`make follow-bench`). `fenec-server --follow` runs the
 same follower on a thread of the server's, over the database it serves, so
 the mirror is served over HTTP and subscriptions with no second process
 over the file -- two corrupt it (`fenec-server/src/mirror.rs`). The
@@ -1453,9 +1453,11 @@ an error it cannot wait out ends the process rather than leave it serving
 a mirror that no longer moves. This is why the PostgreSQL client is
 `fenec-wire`'s, below the importer: in the server it made the importer
 depend on the server, which could then not run it. A subscriber hears a PostgreSQL
-commit 0.15 ms after it returned at the median, a row inserted with a
-vector under HNSW 0.33 ms (`make mirror-bench`); a server killed while the
-table was written to held every row 880 ms after it started again. The
+commit 0.09 ms after it returned at the median, a row inserted with a
+vector under HNSW 0.19 ms, p99 4.0 and 3.3 (`make mirror-bench`; the code
+before the pg wire went gave 3.7 and 3.7 the same day); a server killed
+while the table was written to held every row 370 ms after it started
+again. The
 follower adds 178 KB to `fenec-server`.
 
 **`/_metrics` counts at the edge, a shard per thread.** A statement is timed
