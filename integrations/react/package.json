@@ -1,7 +1,7 @@
 {
   "name": "@fenecdb/react",
   "version": "0.1.7",
-  "description": "useLiveQuery for fenecdb: a synced query's rows, rendered again as they change",
+  "description": "useLiveQuery for fenecdb: a query's rows over the database in the page, rendered again as they change",
   "license": "Apache-2.0",
   "type": "module",
   "main": "index.js",
@@ -15,6 +15,7 @@
     "react",
     "live-query",
     "local-first",
+    "state-management",
     "sync"
   ],
   "homepage": "https://fenecdb.com/docs/sync",

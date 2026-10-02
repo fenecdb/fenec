@@ -198,9 +198,9 @@ or a <code>FenecHttp</code> for the server's.</p>
 
 <h2>React</h2>
 
-<p><code>useLiveQuery</code> renders a query over the local replica and
-runs it again after every change to the replica. No render waits on the
-network.</p>
+<p><code>useLiveQuery</code> renders a query over the database in the page
+— a <code>Fenec</code> of its own or a synced replica — and runs it again
+after every write it may read. No render waits on the network.</p>
 
 <pre data-lang="js">import { sync } from './fenec.js';
 import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
@@ -217,15 +217,20 @@ function Open() {
 </pre>
 
 <ul>
+  <li><b>No server needed:</b> <code>&lt;FenecProvider db={await Fenec.open()}&gt;</code>
+    makes the page's own database the app's state
+    (<a href="javascript.html#state">State in the page</a>).</li>
   <li><b>It is <code>undefined</code></b> until the first answer.</li>
   <li><b>A failing query throws</b> to the nearest error boundary.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
-<p>The rows come from the local replica, so no render waits on the network:
-the sync layer runs the query again after every local change — a write of
-this tab's, or one the server streamed in from another client — and the
-component renders what it answers. <code>useLiveQuery</code> is
+<p>The rows come from the database in the page, so no render waits on the
+network: <code>live</code> runs the query again after every write it may
+read — a write of this tab's, or one the server streamed into a replica from
+another client — and the component renders what it answers. A FenecQL text
+works too, on the provider's database:
+<code>useLiveQuery('get todos count', { collections: ['todos'] })</code>. <code>useLiveQuery</code> is
 <code>undefined</code> until the first answer, and subscribes by the query's
 text and parameters, so the query built again on every render, which is the
 natural way to write one, does not subscribe again unless it asks something
