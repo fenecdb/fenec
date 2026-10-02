@@ -133,26 +133,34 @@ this collection", or the cleanup step becomes ambiguous.</p>
 
 <h2>Optimistic writes</h2>
 
-<p>A write shows up locally at once, then goes to the server. If the server
-refuses it, the local change is undone.</p>
+<p>A write shows up locally at once, then goes to the server. It is kept
+until the server answers: if the server refuses it, the local change is
+undone; if the server cannot be reached, it waits and goes again.</p>
 
 <pre data-lang="ts">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
 await db.from('tasks').where('title', 'new').first();  // already here
-await p;                                               // server ack
+await p;                                               // the server has it
 </pre>
 
 <ul>
   <li><b>Inserts need a <code>key</code>,</b> a <code>text @hash</code> field,
     to match the local row with the server's. Without one, an insert waits
     for the server.</li>
-  <li><b>Updates and deletes need no key:</b> they work by id.</li>
+  <li><b>Updates and deletes need no key:</b> they work by the filter, by
+    id or anything else -- a row an insert made before the server answered
+    included.</li>
+  <li><b>Writes go one at a time, in order,</b> each under an
+    <code>Idempotency-Key</code> it keeps until it is answered.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
 <p>A write is three steps and the order matters: first gather what undoes the
-local change, then apply it locally, then send it to the server. If the server
-refuses, the local side rolls back fully — no network needed, the undo is
-already in hand.</p>
+local change, then apply it locally, then queue it for the server. If the
+server refuses, the local side rolls back fully — no network needed, the undo
+is already in hand. The queue and the undo are kept in the replica itself, in
+collections of the sync's own (<code>_sync_queue</code>,
+<code>_sync_temps</code>, <code>_sync_shapes</code> with the cursors), as an
+app's file keeps them (<a href="mobile.html#sync">Sync with a server</a>).</p>
 
 <p>Everything up to the first <code>await</code> is synchronous. An
 <code>async</code> function body runs synchronously until its first
@@ -165,17 +173,84 @@ client cannot know it in advance, so an optimistic row gets a temporary id
 starting at 2<sup>52</sup> — far from the server's range and below
 <code>Number.MAX_SAFE_INTEGER</code>. What matches the two is a <b>business
 key</b>: when a row with the same <code>key</code> arrives from the
-subscription, the temporary one is dropped.</p>
+subscription, the temporary one is dropped. An update or a delete that
+reaches a row the server has not sent yet is sent a second way as well, by
+that key -- <code>set tasks {..} where key in [..]</code> beside the
+statement -- since the temporary id is the page's alone. An insert the shape
+does not hold leaves its temporary row once the stream is past the change
+the server answered it at (<code>Fenec-Seq</code>).</p>
 
 <div class="note">
-  <p><b>An insert into a keyless shape is not applied optimistically.</b> With
-  nothing to reconcile, the row would stay a local duplicate; one round trip of
-  latency beats a silent copy. <code>key</code> must be
-  <code>text @hash</code>.</p>
+  <p><b>An insert into a keyless shape is not applied optimistically</b>,
+  unless it names its id. With nothing to reconcile, the row would stay a
+  local duplicate; one round trip of latency beats a silent copy.
+  <code>key</code> must be <code>text @hash</code>.</p>
 </div>
 
-<p>Update and delete need no key: they work by id, and reading the previous
-state is enough.</p>
+<p>Writes go one at a time because a write that landed after one written
+after it would leave the server holding the earlier. The promise a write
+returns settles with the server's answer, so it waits through an outage;
+the row is in the replica from the start, and nothing needs to await it.</p>
+</details>
+
+<h2>Refusals, retries and offline</h2>
+
+<p>Only a refusal puts a write back. Anything else that keeps the server from
+answering keeps the write, and it goes again until the server answers it --
+once, whatever the network did meanwhile.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>The server answers</th><th>The write</th></tr></thead>
+<tbody>
+<tr><td>2xx</td><td>landed: it leaves the queue, its promise resolves</td></tr>
+<tr><td>nothing (the network failed), <code>408</code>, <code>429</code>, <code>5xx</code></td><td>kept and sent again under its key, after 250 ms doubling to 15 s</td></tr>
+<tr><td><code>401</code></td><td>kept; nothing is sent until a new token (<code>tokenProvider</code>, <code>setToken</code>)</td></tr>
+<tr><td>any other <code>4xx</code></td><td>refused: put back, its promise rejects, <code>onRefused</code> is told</td></tr>
+</tbody>
+</table>
+</div>
+
+<pre data-lang="ts">import { sync } from './fenec.js';
+
+const db = await sync({
+  url: 'https://api.example.com',
+  shapes: [{ collection: 'tasks', key: 'key' }],
+  persist: 'tasks',                                // writes survive a reload
+  tokenProvider: () => auth.refresh(),             // asked on a 401
+  onRefused: (e) => toast(`${e.status}: ${e.message}`),
+});
+await db.pushed();                                 // every write answered
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p><b>Once, by the key.</b> A write whose answer was lost -- the request
+reached the server, the response never came back -- is sent again under the
+<code>Idempotency-Key</code> it was first sent with, and the server answers it
+as it answered the first time (<a href="http.html#idempotency">Idempotency</a>)
+rather than make the row twice.</p>
+
+<p><b>Offline.</b> A write made while the server cannot be reached waits in
+the queue; the page's <code>online</code> event, or
+<code>setOnline(true)</code>, sends it at once, the backoff forgotten, and
+<code>offline</code> or <code>setOnline(false)</code> closes the streams.
+Writes left from before go before the streams open again, so what they
+bring holds them.</p>
+
+<p><b>A reload.</b> With <code>persist</code> -- or a <code>local</code> kept in
+a file (<code>openFile</code>) -- the queue is stored with the replica the
+moment a write is made, and a page opened again sends what it had not,
+under the same keys. Without either, a closed page takes its unsent writes
+with it.</p>
+
+<p><b>Backoff.</b> 250 ms, doubling to 15 s, with 30% jitter on top so a
+server back up is not met by every client at once; a stream that cannot
+reconnect waits the same way, and starts the count again once it opens.</p>
+
+<p><b>Put back in order.</b> A refused write's rows are written back as they
+stood before it. A later write to the same rows, still waiting, is not
+replayed on top; the server's answer to it, and the change it sends, has the
+last word.</p>
 </details>
 
 <h2>Live queries</h2>
@@ -214,9 +289,9 @@ and nothing lands in chunks. Both use the same code.</p>
 
 <h2>Batches</h2>
 
-<p><code>db.batch</code> sends several writes in one request. They land on the
-server together or not at all, and on failure the local copy is put back
-too.</p>
+<p><code>db.batch</code> makes several writes one: one request, one key. They
+land on the server together or not at all, and on a refusal the local copy
+is put back too.</p>
 
 <pre data-lang="ts">await db.batch(async (t) => {
   await t.from('tasks').insert({ title: 'a', status: 'open' });
@@ -230,15 +305,16 @@ single write lock, and their writes land together, as one record, or not at
 all. The gain is one round trip instead of N, no other writer slipping in
 between, and nothing half done.</p>
 
-<p><b>Both sides roll back.</b> A batch that fails lands nothing on the
+<p><b>Both sides roll back.</b> A batch that is refused lands nothing on the
 server, and the local side puts back exactly what it applied optimistically,
-so the two stay one state.</p>
+the last write first, so the two stay one state. A batch whose answer did not
+come is kept and sent again, whole, as any write is.</p>
 </details>
 
 <h2>Multiple tabs share one stream</h2>
 
-<p>Open tabs elect one leader that holds the connection to the server and
-passes changes to the others. Each tab still sends its own writes.</p>
+<p>Open tabs elect one leader that holds the connection to the server, passes
+changes to the others and sends every tab's writes, one queue for all.</p>
 
 <ul>
   <li><b>Turn it off</b> with <code>leader: false</code>; without
@@ -252,10 +328,14 @@ with <code>navigator.locks</code>; the others receive the same batches over
 <code>BroadcastChannel</code> and apply them to their own local copies. The
 apply path is identical — only the transport differs.</p>
 
-<p>Writes do not go through the leader. Every tab sends its own write straight
-to the server, so leadership concerns only the <i>read</i> stream: a leader
-dying does not stop writes, the lock passes to the next tab and it continues
-from its own cursor.</p>
+<p>Writes go through the leader, so one queue keeps them in order. A tab
+applies its own write to its own copy at once, as the leader does, and hands
+it to the leader, which keeps it in its queue -- stored with its replica when
+it persists -- sends it under its key and tells every tab the answer; the tab
+that made the write lands it or puts it back in its copy. When the leader
+goes, the lock passes to the next tab, which takes over the queue its
+predecessor stored and is handed every other tab's unanswered writes again;
+the key makes a write sent twice land once.</p>
 </details>
 
 <h2>Dropped connections and the horizon</h2>
@@ -276,6 +356,19 @@ writes per second, 4096 entries is roughly a 40 second window. With
 <code>persist</code>, the image <i>and</i> the cursor are written to IndexedDB,
 so a reopened tab is not reseeded from scratch — unless its cursor has fallen
 past the horizon.</p>
+
+<p>A seed writes the shape over the replica and deletes what it does not
+hold, keeping the rows of writes the server has not answered -- and of those
+it answered after the seed was taken -- whose copies come later. Written over
+rather than cleared first, a row that stayed keeps its vector's node.</p>
+
+<p><b>The server's schema changed.</b> A change says so
+(<code>"schema": true</code>), or rows come with a field the replica has not
+got: the replica asks <code>GET /collections</code> again, makes the
+collection again as the server now declares it, its rows kept in the fields
+that are left, and is sent the whole shape. A schema declared in code is
+checked against the server's again, and a difference goes to
+<code>onError</code>.</p>
 
 <p>When the server restarts, the horizon is set to the counter: a database
 loaded from a file has no history, only its present state. A cursor standing
@@ -327,14 +420,17 @@ expect.</p>
   <li><b>Rolling back needs no network, but the server has the last word.</b>
     A rolled-back local state is overwritten by the server's in the next
     batch.</li>
+  <li><b>Rows a <code>@ttl</code> lets go of</b> leave a replica's reads at
+    once -- the replica's collection has the server's <code>@ttl</code> -- and
+    arrive as deletes when the server's sweep takes them.</li>
 </ul>
 </details>
 
 <h2>Persisting the replica</h2>
 
-<p>Add <code>persist</code> to keep the copy and its place in the stream in
-IndexedDB, so a reopened tab starts from there instead of downloading
-everything again.</p>
+<p>Add <code>persist</code> to keep the copy, its place in the stream and the
+writes the server has not answered in IndexedDB, so a reopened tab starts from
+there instead of downloading everything again, and sends what it had not.</p>
 
 <pre data-lang="ts">import { sync } from './fenec.js';
 import type { FenecSchema } from './fenec-schema.js';
@@ -342,7 +438,7 @@ import type { FenecSchema } from './fenec-schema.js';
 const db = await sync<FenecSchema>({
   url: 'https://api.example.com',
   shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
-  persist: 'tasks',           // the image and the cursor are both stored
+  persist: 'tasks',           // the replica, its cursors and its unsent writes
 });
 await db.ready();
 

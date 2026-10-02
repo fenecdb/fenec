@@ -381,6 +381,13 @@ tests start, kill and start again. Measured: a one-row change 18.4 us
 against 7.1 for the put alone; the library +165 KB on Apple silicon (1.68
 MB), +198 KB on x86_64 Linux (1.88).
 
+Phase 59 held the page's `FenecSync` to the same behaviour rather than
+port it (+21 KB brotli): `integrations/sync-scenarios.json`, 55 scripted
+scenarios the core's tests and the page's both run, CI failing unless each
+ran every one. The page now keeps a write through a network failure or a
+5xx, reaches an unanswered insert by its key, keeps its queue in the
+replica across a reload, and sends every tab's writes through the leader.
+
 ## Phase 8: a schema declared in code (Phase 58) -- done, with what follows
 
 Tables declared in TypeScript Drizzle 1.0's way (`@fenecdb/web/schema`), or
@@ -417,4 +424,5 @@ Still to do:
 6. Mobile -- each binding's tests in CI, on an iOS simulator and for Android's
    ABIs; the library's size per target and a call against the server's
    handler in process (`make ffi-bench`).
-7. Sync for apps -- the page's sync suite, run against each binding.
+7. Sync for apps -- the page's sync suite, run against each binding; the
+   scenario file, run by the core and by the page.

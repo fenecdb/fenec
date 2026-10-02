@@ -22,6 +22,7 @@ make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
+make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
 make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server)
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
@@ -1728,8 +1729,8 @@ both) or `dart:io`'s `HttpClient`, every event handed to the core in turn on
 one serial queue so a stream's bytes stay in order and no action outruns
 its cancel. Porting `FenecSync` would have been three more copies of the
 optimistic writes, the key reconciliation and the cursors, tested apiece;
-here the logic is once, with one suite (`crates/fenec-abi/tests/sync.rs`,
-a scripted server in process), and each binding's loop is a page. A write
+here the logic is once, held to the scenario file (below), and each
+binding's loop is a page. A write
 through `fenec_query` to a shape's collection is the sync's
 (`Sync::claims`, `write`): applied to the replica with what puts it back,
 and queued with an `Idempotency-Key`, in one block; DDL over a synced
@@ -1739,17 +1740,18 @@ describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
 keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
 a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
 30% jitter), 401 asks for a token, any other 4xx is a refusal put back. A
-replica reopened sends its queue before opening its streams. Where it
-differs from `FenecSync`, on purpose: a write returns once applied and
-kept, not at the server's answer (a refusal comes as an action, `pushed()`
-waits); a network failure or 5xx keeps the write rather than putting it
-back; an update of an unanswered insert reaches the server's copy by its key
+replica reopened sends its queue before opening its streams. An update of
+an unanswered insert reaches the server's copy by its key as well
 (`fenec_ql::spans` keeps each statement's own text for the `/batch` lines,
-the puts rendered with every value a parameter); an insert the shape does
-not hold loses its temporary row once a stream passes the write's
-`Fenec-Seq`; a seed writes over and deletes the rest, keeping unanswered
-writes' rows, rather than clearing first (a row that stayed keeps its
-vector's node); no `batch()`, no tab leader, no 2 s image. A one-row change
+an insert rendered as the builders render it, every value a parameter); an
+insert the shape does not hold loses its temporary row once a stream passes
+the write's `Fenec-Seq`; a seed writes over and deletes the rest, keeping
+unanswered writes' rows, rather than clearing first (a row that stayed
+keeps its vector's node). A change with `"schema": true`, or rows naming a
+field the replica has not got, has the collection made again from `GET
+/collections`, its rows kept in the fields left (`remake`), and the shape
+seeded whole (`Shape::fresh`): applied as they came, the rows of an alter
+failed the put and the stream retried the same change for good. A one-row change
 costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
 3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
 000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
@@ -1760,6 +1762,50 @@ in as dead code, it still moved LLVM's inlining and left the module 155
 bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
 `Fenec.openSynced`, since a static `sync` cannot sit beside the instance's
 fsync `sync()`.
+
+**The browser's sync and the native core are held to one scenario file.**
+Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
+the browser module, so the two are written apart, and
+`integrations/sync-scenarios.json` says what both do: 55 scenarios, each a
+script of shapes, app writes and server events -- a seed, a change, a
+stream dropped, the status each write's request is answered with, a seed
+past the horizon, the network's signal, a token -- with what the replica,
+the queue, the requests sent (method, path, body, the idempotency key
+reused or new), the timers and the refusals are after every step.
+`crates/fenec-abi/tests/scenarios.rs` drives the sans-IO core through it,
+and `web/fenec.sync.scenarios.test.js` drives `FenecSync` through a fetch
+and a clock the script plays, its replica persisted over an in-memory
+IndexedDB so a restart is a page opened again; each writes the names that
+passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
+`make test` where the module is built, and its own CI step) fails unless
+both ran every one -- under `CI` the JS runner fails rather than skip
+without `web/fenec.wasm`. A behaviour of either changes in the file first.
+A step's values are the builders' texts, so a write's fields are written
+in alphabetical order (the native runner's JSON sorts them, JavaScript
+keeps them as given); `<name>` binds a value made at run time -- a key, an
+`Idempotency-Key` -- and `@name` is a fixture. Where the platforms differ
+on purpose a scenario says why in `differs` and a step holds
+`expect_js`/`expect_native`; none does now. What is left between them is
+the platforms': a JS write's promise settles with the server's answer
+where a native write returns once kept, JS has `batch()` where a native
+text of several statements is one write, tabs elect a leader, and the
+browser fetches collation chunks. Bringing the browser to the core fixed
+what it got wrong: a network failure or a 5xx put a write back, an update
+or a delete of an unanswered insert went by the temporary id the server
+never saw, an insert the shape did not hold kept its row until the next
+seed, a seed cleared the collection and every pending row with it, a
+write made offline was gone with the page, and each tab sent its own
+writes. Its state is now the core's, in the replica: `_sync_shapes`,
+`_sync_queue` and `_sync_temps`, stored the moment a write is made
+(`persist`'s journal, or the file of an `openFile`d `local`); a follower
+tab applies its write and hands it to the leader, which keeps it in its
+own queue and tells every tab the answer, and a tab taking the lead reads
+the queue its predecessor stored (`#lead`, through a `sibling` database).
+`fenec-http`'s CORS allows `Idempotency-Key` and exposes `Fenec-Seq`,
+without which a page on another origin could not send the one or read the
+other. `fenec.js` grew 113.3 -> 132.5 KB, 31.1 -> 35.8 KB brotli -- 3.1 KB
+of it code, the rest the comments -- and the browser module did not change
+by a byte.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,
