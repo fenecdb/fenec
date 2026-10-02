@@ -150,7 +150,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fenec-abi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-ql",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-bench"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-ql",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-http",
@@ -179,14 +179,14 @@ dependencies = [
 
 [[package]]
 name = "fenec-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-ql",
 ]
 
 [[package]]
 name = "fenec-ffi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-abi",
  "fenec-core",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-http"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-abi",
  "fenec-core",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-import"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-ql",
@@ -214,14 +214,14 @@ dependencies = [
 
 [[package]]
 name = "fenec-ql"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
 ]
 
 [[package]]
 name = "fenec-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-http",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-shard"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-http",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-wasm"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-abi",
  "fenec-core",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "fenec-wire"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fenec-core",
  "fenec-http",

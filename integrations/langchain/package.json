@@ -1,6 +1,6 @@
 {
   "name": "@fenecdb/langchain",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A LangChain.js vector store over fenecdb: the database in the page, or behind fenec-server's HTTP endpoint",
   "license": "Apache-2.0",
   "type": "module",

@@ -7,5 +7,5 @@ plugins {
 // One version wherever a release reads it (tools/version.py writes it).
 allprojects {
     group = "com.fenecdb"
-    version = "0.1.7"
+    version = "0.1.8"
 }
