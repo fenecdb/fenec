@@ -1,11 +1,12 @@
 <!--
 title: Integrations — fenecdb
-description: Vector stores for LangChain, LlamaIndex and LangChain.js, retrieval for the Vercel AI SDK, and useLiveQuery for React.
+description: Vector stores for LangChain, LlamaIndex and LangChain.js, retrieval for the Vercel AI SDK, useLiveQuery for React, and the Go and .NET SDKs.
 -->
 
 <h1>Integrations</h1>
 <p class="kicker">Use fenecdb from LangChain, LlamaIndex, LangChain.js, the
-Vercel AI SDK and React, each tested the way its framework tests its own.</p>
+Vercel AI SDK and React, each tested the way its framework tests its own,
+and from Go and .NET through their SDKs.</p>
 
 <h2>LangChain</h2>
 
@@ -234,6 +235,46 @@ lives in <code>integrations/react</code>, with React as its one peer
 dependency.</p>
 </details>
 
+<h2 id="sdks">Go and .NET</h2>
+
+<p>An SDK each over fenec-server's HTTP endpoint, each its standard library
+alone, beside Python's <code>fenecdb</code> and JavaScript's
+<code>@fenecdb/web</code>.</p>
+
+<pre data-lang="bash">go get github.com/fenecdb/fenec/integrations/go
+dotnet add package FenecDb</pre>
+
+<ul>
+  <li><b>The same surface in both:</b> a statement and its rows, typed
+    rows, writes with the change they left the database at, atomic batches,
+    an idempotency key, a read that waits for a write on a replica, a
+    subscription, the change stream, a tenant, the health check, and a typed
+    error carrying the status.</li>
+  <li><b>Vectors round-trip to the bit:</b> a <code>[]float32</code>,
+    <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
+    as the decimals that read back as each float.</li>
+</ul>
+
+<p>Each language's example is on <a href="languages.html">Your
+language</a>, and the API in <code>integrations/go</code> and
+<code>integrations/dotnet</code>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>The server reads a number as a double and rounds it to a float, and one
+float, <code>7.038531e-26</code>, has a shortest text whose double lands
+exactly between it and the float above: Go's <code>encoding/json</code>
+wrote it so, and the server stored the float above. Both SDKs write that one
+as its double's text, as the server itself writes it, and their tests try
+one float in 4 099 over every exponent and read a vector holding it back
+from a server.</p>
+<p>A subscription takes the REST surface's filter
+(<code>year=gte.2024</code>, <code>where=</code>, <code>select=</code>),
+not a statement with parameters: the stream is
+<code>GET /&lt;collection&gt;/changes</code>. A request is bounded by the
+client's timeout through its context or token, never the HTTP client's own,
+which would cut a subscription short.</p>
+</details>
+
 <h2>Their tests</h2>
 
 <p>Each integration runs its framework's own tests, or the ones its framework
@@ -248,6 +289,8 @@ holds its integrations to, against a real fenecdb.</p>
 <tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-server's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
 <tr><td>Vercel AI SDK</td><td>the SDK's own mock models: documents embedded with <code>embedMany</code> and found again with <code>near</code>, kept to a source and fused with the words, and a model that calls the search tool in <code>generateText</code> and answers from what it returned</td><td><code>make ai-sdk-test</code></td></tr>
 <tr><td>React</td><td>a stand-in database for the contract, and a real fenec-server and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
+<tr><td>Go</td><td>a primary with a token, a JWT policy and the change stream, a replica and a node of tenants, started by the tests: <code>near</code> with exact scores, parameters of every type, the errors, a batch put back whole, an idempotency key, <code>After</code> on the replica, a subscription, <code>/_changes</code>, a tenant and a scoped token</td><td><code>make go-test</code></td></tr>
+<tr><td>.NET</td><td>the same, with xunit</td><td><code>make dotnet-test</code></td></tr>
 </tbody>
 </table>
 </div>
