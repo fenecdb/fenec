@@ -100,6 +100,12 @@ struct Shape {
     attempt: u32,
     waiting: bool,
     frames: sse::Frames,
+    /// The server's schema changed: the collection is made again from it
+    /// before the stream opens.
+    rebuild: bool,
+    /// Opened without `since` though seeded: the whole shape again, after
+    /// the collection was made anew.
+    fresh: bool,
 }
 
 /// A write the server has not answered.
@@ -397,6 +403,56 @@ fn int_of(v: &Value) -> i64 {
     }
 }
 
+/// Whether every field `docs` name is one of the collection's.
+fn fits(db: &Database, collection: &str, docs: &[Vec<(String, Value)>]) -> bool {
+    let Ok(c) = db.collection(collection) else {
+        return false;
+    };
+    docs.iter()
+        .flatten()
+        .all(|(k, _)| k == "id" || c.schema.fields.iter().any(|f| &f.name == k))
+}
+
+/// The collection made again by `create`, the server's schema, its rows
+/// kept in the fields it still has: the replica reads as it did until the
+/// seed writes the shape over it, and the rows of writes not yet answered
+/// stay as a seed keeps them.
+fn remake(db: &mut Database, collection: &str, create: &Statement) -> Result<()> {
+    let held = match db.execute_with(
+        &Statement::Select(Select {
+            collection: collection.to_string(),
+            ..Default::default()
+        }),
+        &[],
+    )? {
+        Response::Rows(rs) => rs,
+        _ => ResultSet::default(),
+    };
+    db.execute_with(
+        &fenec_ql::parse_one(&format!("drop collection {collection}"))?,
+        &[],
+    )?;
+    db.execute_with(create, &[])?;
+    let schema = db.collection(collection)?.schema.clone();
+    let docs: Vec<Vec<(String, Value)>> = held
+        .rows
+        .iter()
+        .map(|r| {
+            let mut d = vec![("id".to_string(), Value::Int(r.id as i64))];
+            for (k, v) in held.columns.iter().zip(&r.values) {
+                if k != "id" && !v.is_null() && schema.fields.iter().any(|f| &f.name == k) {
+                    d.push((k.clone(), v.clone()));
+                }
+            }
+            d
+        })
+        .collect();
+    if !docs.is_empty() {
+        db.execute_with(&put_docs(collection, docs), &[])?;
+    }
+    Ok(())
+}
+
 /// `{"query":..,"params":[..]}`, a `POST /query` body and a `/batch` line.
 fn query_body(text: &str, params: &[Value]) -> String {
     let mut out = String::from("{\"query\":");
@@ -436,7 +492,13 @@ fn render_put(
     let mut params = Vec::new();
     let docs: Vec<String> = docs.iter().map(|d| render_doc(d, &mut params)).collect();
     let verb = if insert { "insert" } else { "put" };
-    (format!("{verb} {collection} [{}]", docs.join(", ")), params)
+    // As the builders write it, one document bare: the request is the same
+    // text from every platform (`integrations/sync-scenarios.json`).
+    let body = match docs.as_slice() {
+        [one] => one.clone(),
+        _ => format!("[{}]", docs.join(", ")),
+    };
+    (format!("{verb} {collection} {body}"), params)
 }
 
 /// What [`Sync::write`] made of one statement.
@@ -508,6 +570,8 @@ impl Sync {
                     attempt: 0,
                     waiting: false,
                     frames: Default::default(),
+                    rebuild: false,
+                    fresh: false,
                 });
             }
         }
@@ -796,7 +860,7 @@ impl Sync {
         let missing = self
             .shapes
             .iter()
-            .any(|s| db.collection(&s.spec.collection).is_err());
+            .any(|s| s.rebuild || db.collection(&s.spec.collection).is_err());
         if missing {
             if self.schema_req.is_none() && !self.schema_waiting && !self.paused {
                 self.schema_req = Some(self.request("GET", "/collections", &[], None));
@@ -835,7 +899,7 @@ impl Sync {
         }
         // Seeded once, it goes on from where it stopped: the server seeds
         // it again itself when the cursor is past its ring.
-        if s.seeded {
+        if s.seeded && !s.fresh {
             q.push(format!("since={}", s.cursor));
         }
         if !q.is_empty() {
@@ -945,7 +1009,8 @@ impl Sync {
             let mut ddl = Vec::new();
             for s in &self.shapes {
                 let c = &s.spec.collection;
-                if db.collection(c).is_ok() {
+                let held = db.collection(c).is_ok();
+                if held && !s.rebuild {
                     continue;
                 }
                 let schema = all
@@ -954,19 +1019,36 @@ impl Sync {
                     .ok_or_else(|| {
                         Error::NotFound(format!("the server has no `{c}` collection"))
                     })?;
-                ddl.push(fenec_ql::parse_one(&shape::schema_ddl(schema)?)?);
+                ddl.push((
+                    c.clone(),
+                    held,
+                    fenec_ql::parse_one(&shape::schema_ddl(schema)?)?,
+                ));
             }
             db.begin()?;
-            for s in &ddl {
-                if let Err(e) = db.execute_with(s, &[]) {
-                    db.rollback();
-                    return Err(e);
+            let r = (|| -> Result<()> {
+                for (c, held, create) in &ddl {
+                    match held {
+                        true => remake(db, c, create)?,
+                        false => {
+                            db.execute_with(create, &[])?;
+                        }
+                    }
                 }
+                db.commit()
+            })();
+            if r.is_err() && db.in_block() {
+                db.rollback();
             }
-            db.commit()
+            r
         })();
         match made {
-            Ok(()) => self.schema_attempt = 0,
+            Ok(()) => {
+                self.schema_attempt = 0;
+                for s in &mut self.shapes {
+                    s.rebuild = false;
+                }
+            }
             Err(e) => {
                 self.fault(e.to_string(), 0, true);
                 self.schema_waiting = true;
@@ -1189,6 +1271,11 @@ impl Sync {
         };
         let events = self.shapes[i].frames.push(bytes);
         for ev in events {
+            // The schema changed: what the stream sent after is read again
+            // from a fresh seed.
+            if self.shapes[i].stream != Some(id) {
+                break;
+            }
             let r = match ev.name.as_str() {
                 "seed" => self.seed(db, i, &ev.data),
                 "change" if self.shapes[i].seeded => self.change(db, i, &ev.data),
@@ -1210,6 +1297,9 @@ impl Sync {
                 self.retry_stream(i);
                 return;
             }
+        }
+        if self.shapes[i].rebuild {
+            self.kick(db);
         }
     }
 
@@ -1305,6 +1395,10 @@ impl Sync {
         let fields = json_fields(db, &c);
         let names: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
         let docs = json::parse_documents_json(rows, &names)?;
+        if !fits(db, &c, &docs) {
+            self.refresh(i);
+            return Ok(());
+        }
         db.begin()?;
         let r = (|| -> Result<()> {
             let held = match db.execute_with(
@@ -1357,6 +1451,7 @@ impl Sync {
             }
             self.shapes[i].cursor = seq;
             self.shapes[i].seeded = true;
+            self.shapes[i].fresh = false;
             self.save_shape(db, i)
         })();
         self.finish(db, r)
@@ -1371,6 +1466,10 @@ impl Sync {
         let fields = json_fields(db, &c);
         let names: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
         let docs = json::parse_documents_json(field(&m, "puts").unwrap_or("[]"), &names)?;
+        if field(&m, "schema") == Some("true") || !fits(db, &c, &docs) {
+            self.refresh(i);
+            return Ok(());
+        }
         let dels = ids(field(&m, "dels").unwrap_or("[]"))?;
         db.begin()?;
         let r = (|| -> Result<()> {
@@ -1404,6 +1503,16 @@ impl Sync {
                 Err(e)
             }
         }
+    }
+
+    /// The server's schema is not the replica's: a change said so, or rows
+    /// came with a field the replica has not got. The stream ends, the
+    /// collection is made again from `GET /collections`, and the shape is
+    /// sent whole -- a rename or a drop is not told apart from the rows.
+    fn refresh(&mut self, i: usize) {
+        self.drop_stream(i, true);
+        self.shapes[i].rebuild = true;
+        self.shapes[i].fresh = true;
     }
 
     fn save_shape(&self, db: &mut Database, i: usize) -> Result<()> {
