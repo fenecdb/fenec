@@ -1,6 +1,6 @@
 {
   "name": "@fenecdb/cloudflare",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "fenecdb in a Cloudflare Durable Object: the database kept in the object's storage as a file would hold it",
   "license": "Apache-2.0",
   "type": "module",

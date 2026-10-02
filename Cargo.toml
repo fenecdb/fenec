@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/fenecdb/fenec"
@@ -33,7 +33,7 @@ fenec-core = { version = "0.1.3", path = "crates/fenec-core", default-features =
 fenec-ql = { version = "0.1.3", path = "crates/fenec-ql" }
 fenec-http = { version = "0.1.3", path = "crates/fenec-http" }
 fenec-server = { version = "0.1.3", path = "crates/fenec-server" }
-fenec-wire = { version = "0.1.6", path = "crates/fenec-wire" }
+fenec-wire = { version = "0.1.7", path = "crates/fenec-wire" }
 fenec-import = { version = "0.1.3", path = "crates/fenec-import" }
 
 [profile.release]
