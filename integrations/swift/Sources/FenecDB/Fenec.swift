@@ -94,6 +94,9 @@ public final class Fenec: @unchecked Sendable {
         self.lives = Lives()
     }
 
+    // Let go of without `close()`, the database closes as it is freed, on
+    // whichever thread let it go: its graphs saved and its file synced, which
+    // may take the main thread milliseconds. An app closes it itself.
     deinit {
         if !closed {
             var out: UnsafeMutablePointer<CChar>?

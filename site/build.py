@@ -62,6 +62,7 @@ NAV = [
     ("Query", [
         ("docs/fenecql", "FenecQL"),
         ("docs/javascript", "JavaScript"),
+        ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
         ("docs/integrations", "Integrations"),
@@ -105,6 +106,15 @@ KEYWORDS = {
         nil true false type struct map""".split(),
     "sql": """INSTALL LOAD ATTACH AS SELECT FROM WHERE GROUP BY COPY TO TYPE
         FORMAT count avg sum""".split(),
+    "swift": """import let var func return if else for in while do try await async
+        throws catch struct class enum init self some any guard case switch
+        nil true false as is static private public""".split(),
+    "kotlin": """import package val var fun return if else for in while try catch
+        class object companion override suspend null true false is as by
+        when this private""".split(),
+    "dart": """import final const var return if else for in while try on catch
+        async await class extends super this null true false void required
+        late static""".split(),
 }
 
 TYPES = """bool int float text bytes timestamp vector f16 cosine l2 dot
@@ -121,6 +131,9 @@ COMMENT = {
     "python": r"#[^\n]*",
     "go": r"//[^\n]*",
     "sql": r"--[^\n]*",
+    "swift": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "kotlin": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "dart": r"//[^\n]*|/\*[\s\S]*?\*/",
 }
 
 

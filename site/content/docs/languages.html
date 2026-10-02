@@ -1,6 +1,6 @@
 <!--
 title: Your language — fenecdb
-description: Use fenecdb from Python, JavaScript, Go, Rust, .NET, Java, PHP or Ruby over HTTP, with the HTTP client your language already has.
+description: Use fenecdb from Python, JavaScript, Go, Rust, .NET, Java, PHP or Ruby over HTTP, with the HTTP client your language already has, or embedded in a Swift, Kotlin or Dart app.
 -->
 
 <h1>Your language</h1>
@@ -10,7 +10,10 @@ with the HTTP client it already has. No driver to install.</p>
 <p>Every example on this page is a program that runs against a real server
 on each change to fenecdb (<code>make languages-test</code>). Python,
 JavaScript, Go and .NET have official clients, each its standard library
-alone; in the other languages these few lines are the whole client.</p>
+alone; in the other languages these few lines are the whole client. Swift,
+Kotlin and Dart embed the database in the app instead, a file on the device
+with no server (<a href="mobile.html">Mobile and native apps</a>); their
+tabs run the same flow in their own tests.</p>
 
 <h2 id="setup">Start a server</h2>
 
@@ -320,17 +323,101 @@ query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
 rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</pre>
 </div>
 
+<div class="lang" data-name="Swift">
+<pre data-lang="text" data-label="Package.swift">.package(url: "https://github.com/fenecdb/fenec", from: "0.1.7")   // product "FenecDB"</pre>
+<pre data-lang="swift" data-label="Search.swift">import FenecDB
+
+// Embedded: the database is a file the app holds, no server.
+let db = try await Fenec.open(path: path)
+
+try await db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+try await db.execute("put docs {title: $1, embed: $2}", "Night at the oasis", [Float(0.1), 0.2, 0.3])
+try await db.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
+
+let rows = try await db.query("get docs select title near embed $1 limit 5", [Float(0.1), 0.2, 0.3])
+// rows[0]["title"] == "Night at the oasis", rows[0]["_score"] its score
+
+do {
+    _ = try await db.query("get nowhere")
+} catch let e as FenecError {
+    print(e.code, e)   // notFound: collection `nowhere` ...
+}</pre>
+<pre data-lang="swift" data-label="builder">let docs = try db.from("docs")
+try await docs.insert(["title": "Night at the oasis", "embed": .floats([0.1, 0.2, 0.3])] as Value)
+let near = try await docs.select("title").near("embed", [Float(0.1), 0.2, 0.3]).limit(5).rows()
+let n = try await docs.where("title", "~", "Dunes").count()</pre>
+<p>A <code>[Float]</code> goes to the library as its bytes; rows decode as
+any <code>Decodable</code>. A live query for SwiftUI and where the file goes
+are on <a href="mobile.html">Mobile and native apps</a>.</p>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="text" data-label="build.gradle.kts">implementation("io.github.fenecdb:fenecdb-android:0.1.7")   // the AAR; the JVM: io.github.fenecdb:fenecdb</pre>
+<pre data-lang="kotlin" data-label="Search.kt">import io.github.fenecdb.*
+
+// Embedded: the database is a file the app holds, no server.
+val db = Fenec.openAsync(path)
+
+db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.execute("put docs {title: \$1, embed: \$2}", "Night at the oasis", floatArrayOf(0.1f, 0.2f, 0.3f))
+db.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
+
+val rows = db.query("get docs select title near embed \$1 limit 5", floatArrayOf(0.1f, 0.2f, 0.3f))
+// rows[0].string("title") == "Night at the oasis", rows[0].double("_score") its score
+
+try {
+    db.query("get nowhere")
+} catch (e: FenecException) {
+    println("${e.code} ${e.message}")   // NOT_FOUND collection `nowhere` ...
+}</pre>
+<pre data-lang="kotlin" data-label="builder">val docs = db.from("docs")
+docs.insert(mapOf("title" to "Night at the oasis", "embed" to floatArrayOf(0.1f, 0.2f, 0.3f)))
+val near = docs.select("title").near("embed", floatArrayOf(0.1f, 0.2f, 0.3f)).limit(5).rows()
+val n = docs.where("title", "~", "Dunes").count()</pre>
+<p>The calls suspend, on <code>Dispatchers.IO</code>; Java calls the
+<code>...Blocking</code> ones. Live queries are <code>Flow</code>s
+(<a href="mobile.html">Mobile and native apps</a>).</p>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="bash" data-label="install">flutter pub add fenecdb_flutter   # Dart alone: dart pub add fenecdb</pre>
+<pre data-lang="dart" data-label="search.dart">import 'package:fenecdb/fenecdb.dart';
+
+// Embedded: the database is a file the app holds, no server.
+final db = await Fenec.open(path);
+
+await db.execute('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+await db.execute(r'put docs {title: $1, embed: $2}', ['Night at the oasis', Float32List.fromList([0.1, 0.2, 0.3])]);
+await db.execute(r'put docs {title: $1, embed: $2}', ['Dunes', Float32List.fromList([0.9, 0.1, 0.0])]);
+
+final rows = await db.query(r'get docs select title near embed $1 limit 5', [Float32List.fromList([0.1, 0.2, 0.3])]);
+// rows[0]['title'] == 'Night at the oasis', rows[0]['_score'] its score
+
+try {
+  await db.query('get nowhere');
+} on FenecException catch (e) {
+  print('${e.code.name} ${e.message}');   // notFound collection `nowhere` ...
+}</pre>
+<pre data-lang="dart" data-label="builder">final docs = db.from('docs');
+await docs.insert({'title': 'Night at the oasis', 'embed': Float32List.fromList([0.1, 0.2, 0.3])});
+final near = await docs.select(['title']).near('embed', Float32List.fromList([0.1, 0.2, 0.3])).limit(5).rows();
+final n = await docs.where('title', '~', 'Dunes').count();</pre>
+<p>Every call runs on an isolate the database keeps, so none blocks the UI.
+Live queries are <code>Stream</code>s (<a href="mobile.html">Mobile and
+native apps</a>).</p>
+</div>
+
 </div>
 
 <h2 id="builder">The builder</h2>
 
-<p>Python, JavaScript, Go and .NET each have a query builder: a chain of
-calls that writes the FenecQL statement, every value a parameter and every
-name checked against FenecQL's own rule, which is where an injection would
-have to get through. All four build the same text from the same chain, to
-the byte, and refuse the same mistakes with the same message. Python's
-builder starts with <code>collection</code>, since <code>from</code> is a
-keyword there.</p>
+<p>Python, JavaScript, Go, .NET, Swift, Kotlin and Dart each have a query
+builder: a chain of calls that writes the FenecQL statement, every value a
+parameter and every name checked against FenecQL's own rule, which is where
+an injection would have to get through. All seven build the same text from
+the same chain, to the byte, and refuse the same mistakes with the same
+message. Python's builder starts with <code>collection</code>, since
+<code>from</code> is a keyword there.</p>
 
 <div class="tbl code-grid">
 <table>
@@ -345,6 +432,23 @@ keyword there.</p>
 <tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.Rows(ctx)</code>, <code>.First(ctx)</code>, <code>.Count(ctx)</code>, <code>RowsAs[T]</code></td><td><code>.RowsAsync()</code>, <code>.FirstAsync()</code>, <code>.CountAsync()</code>, <code>.RowsAsync&lt;T&gt;()</code></td></tr>
 <tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.Insert(ctx, doc)</code>, <code>.Update(ctx, patch)</code>, <code>.Delete(ctx)</code></td><td><code>.InsertAsync(doc)</code>, <code>.UpdateAsync(patch)</code>, <code>.DeleteAsync()</code></td></tr>
 <tr><td><code>.to_fenecql()</code></td><td><code>.toFenecQL()</code></td><td><code>.ToFenecQL()</code></td><td><code>.ToFenecQL()</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="tbl code-grid">
+<table>
+<thead><tr><th>Swift</th><th>Kotlin</th><th>Dart</th></tr></thead>
+<tbody>
+<tr><td><code>try db.from("docs")</code></td><td><code>db.from("docs")</code></td><td><code>db.from('docs')</code></td></tr>
+<tr><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where('year', '&gt;=', 2024)</code></td></tr>
+<tr><td><code>.where(.or(["lang": "tr"], ["tags": ["has": "rust"]]))</code></td><td><code>.where(Cond.or(mapOf("lang" to "tr"), mapOf("tags" to mapOf("has" to "rust"))))</code></td><td><code>.where(Cond.or([{'lang': 'tr'}, {'tags': {'has': 'rust'}}]))</code></td></tr>
+<tr><td><code>.near("embed", v, ef: 64)</code></td><td><code>.near("embed", v, ef = 64)</code></td><td><code>.near('embed', v, ef: 64)</code></td></tr>
+<tr><td><code>.lookup("reviews", on: "product_id", limit: 3)</code></td><td><code>.lookup("reviews", on = "product_id", limit = 3)</code></td><td><code>.lookup('reviews', on: 'product_id', limit: 3)</code></td></tr>
+<tr><td><code>.order("title", "desc", collate: "tr")</code></td><td><code>.order("title", "desc", collate = "tr")</code></td><td><code>.order('title', 'desc', 'tr')</code></td></tr>
+<tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rows(as: T.self)</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rowsBlocking()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td></tr>
+<tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td></tr>
+<tr><td><code>.toFenecQL()</code></td><td><code>.toFenecQL()</code></td><td><code>.toFenecQL()</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -366,8 +470,8 @@ the statement it must make, its text and parameters, or the refusal and its
 message. The JavaScript builder is the reference: <code>make
 builder-golden</code> runs every chain through it and writes what it made,
 and its own tests run the file again, so the two cannot drift. The Python,
-Go and .NET tests each read every case, call their own builder, and compare
-the text and parameters exactly. The cases cover every method and option,
+Go, .NET, Swift, Kotlin and Dart tests each read every case, call their own
+builder, and compare the text and parameters exactly. The cases cover every method and option,
 each operator and kind of value, parameter numbering across
 <code>where</code>, <code>near</code>, <code>match</code> and the levels of
 a lookup chain, and the names and combinations each builder refuses. Each
@@ -381,7 +485,15 @@ fields go in sorted. Options are keyword arguments in Python, named
 arguments in C# and functional options in Go, where a struct could not tell
 <code>limit 0</code> from no limit. A refusal is a <code>FenecError</code>
 with status 0 in Python, a <code>*fenecdb.QueryError</code> in Go and a
-<code>FenecQueryException</code> in .NET.</p>
+<code>FenecQueryException</code> in .NET. Swift's dictionaries have no
+order either, so a document or an object condition is a <code>Value</code>
+or <code>Row</code> literal, which keeps the order written, or a
+<code>Codable</code> type, its fields in the order it encodes them; Kotlin's
+and Dart's maps keep their order. A refusal there is a
+<code>FenecError</code>, a <code>FenecException</code> and a
+<code>FenecException</code>, each with the code <code>builder</code>, and
+every builder method throws as it is called, so a Swift chain takes one
+<code>try</code>.</p>
 </details>
 
 <h2 id="http">From the shell</h2>
