@@ -213,6 +213,26 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      # A Go module in a subdirectory is fetched by a tag naming its
+      # directory: `go get github.com/fenecdb/fenec/integrations/go@vX.Y.Z`
+      # looks for integrations/go/vX.Y.Z, and vX.Y.Z alone is none of its
+      # versions. Pushed beside the release's own, at the same commit, once
+      # the builds above have passed; a push with the workflow's token starts
+      # no workflow, and the tag matches no `v*` anyway. One already there,
+      # from a release run again, is left: a module's version, once fetched,
+      # is fixed in the checksum database and must not move.
+      - name: Tag the Go module
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gotag="integrations/go/$tag"
+          if git ls-remote --exit-code --tags origin "refs/tags/$gotag" >/dev/null; then
+            echo "$gotag is there already"
+          else
+            git tag "$gotag" HEAD
+            git push origin "refs/tags/$gotag"
+          fi
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

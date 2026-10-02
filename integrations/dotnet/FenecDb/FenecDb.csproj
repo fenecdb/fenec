@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- FenecDb on NuGet: a client for fenec-server's HTTP endpoint, HttpClient
-       and System.Text.Json alone. `make version` sets <Version>. -->
+       and System.Text.Json alone. `make version` sets its version. -->
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
