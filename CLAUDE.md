@@ -175,7 +175,10 @@ record goes into the file as it lands, and the stores held its documents in
 their segments besides, until a restart or a compact: 250 000 768-dim rows
 loaded into a server, the engine counted 1 592 MB against 818 for the same
 file started again. Once the documents since the last handover amount to
-`HANDOVER_AT` (16 MB) or 65 536 records, `Database::hand_over` has the sink
+`HANDOVER_AT` (16 MB), 65 536 records or 65 536 writes
+(`HANDOVER_DOCS`: its pause is a document's work each, about 17 ns, and 16
+MB of rows of a text and an int were 930 000 of them, the write lock held
+16 to 17.5 ms), `Database::hand_over` has the sink
 write what is pending (`Sink::written_through`) and each store point the
 documents it holds at their places in the file and let its segments go
 (`Store::hand_over`): 820 MB after that load. Where each record went is
@@ -238,11 +241,13 @@ transaction once left its block open between statements, parked for
 readers (`leave_block`, `park`, savepoints); with the pg wire gone that
 machinery went, since nothing else leaves a block open. What one writer
 costs readers is measured against SQLite in one process (`make
-concurrency-bench`): four threads read 7.1M rows/s by id alone, 757k beside four writers, and
-72k beside blocks of 1 000 writes, the longest read 23 ms -- a block holds
-the write lock while it runs, where SQLite's WAL reads the last commit
-meanwhile, 636k/s and 0.7 ms at most. Durable writes gain from the fsync outside
-the lock: 254 -> 502 writes/s from 1 to 4 writers, 495 at 16, SQLite's 248 -> 248. Two processes opening the same file corrupts
+concurrency-bench`): four threads read 7.1M rows/s by id alone, 701k beside four writers, and
+213k beside blocks of 1 000 writes landing back to back, p99 0.51 ms (a
+block's run) and the longest 4.8 -- a block holds the write lock while it
+runs, where SQLite's WAL reads the last commit meanwhile, 632k/s and 0.6 ms
+at most; before the handover counted writes the longest was 17.4, a handover
+of 930 000 small documents. Durable writes gain from the fsync outside the
+lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two processes opening the same file corrupts
 it, which is why everything that writes one -- the HTTP endpoint, a
 replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
 of `fenec-server`, never a binary of its own.
