@@ -1,0 +1,775 @@
+{
+  "about": [
+    "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (the statuses refused writes were told with), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
+    "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
+    "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
+    "Where the platforms differ on purpose a scenario says why in `differs`, and a step's expect_js / expect_native hold each side's own. Both runners write the names that passed to target/sync-scenarios/, and integrations/sync-scenarios-check.mjs fails unless both ran every one."
+  ],
+  "collections": [
+    {"name": "tasks", "fields": [
+      {"name": "key", "type": "text", "index": "unique", "required": false},
+      {"name": "title", "type": "text", "index": null, "required": false},
+      {"name": "status", "type": "text", "index": "hash", "required": false},
+      {"name": "priority", "type": "int", "index": null, "required": false}
+    ]}
+  ],
+  "shapes": [{"collection": "tasks", "key": "key", "where": {"status": "open"}}],
+  "fixtures": {
+    "open": [
+      {"id": 1, "key": "a", "priority": 1, "status": "open", "title": "one"},
+      {"id": 2, "key": "b", "priority": 5, "status": "open", "title": "two"}
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "the seed fills the replica with the shape",
+      "covers": "sync.html#start, mobile.html#sync: the schema from the server, the rows from the seed",
+      "steps": [
+        {"do": "start", "expect": {
+          "requests": [{"method": "GET", "path": "/collections", "auth": "Bearer t0"}],
+          "streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}],
+          "ready": false, "pending": 0}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]},
+          "ready": true, "requests": [], "streams": []}}
+      ]
+    },
+    {
+      "name": "a shape's filter and projection go in the stream's query string",
+      "covers": "sync.html#shapes: ?field=op.value, select with id always added",
+      "shapes": [{"collection": "tasks", "select": ["title"], "where": {"priority": {"gte": 3}, "status": "open"}}],
+      "steps": [
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?priority=gte.3&status=eq.open&select=id%2Ctitle"}]}},
+        {"do": "seed", "seq": 3, "rows": [{"id": 2, "title": "two"}], "expect": {
+          "rows": {"tasks": [{"id": 2, "title": "two", "status": null, "priority": null}]}, "ready": true}}
+      ]
+    },
+    {
+      "name": "a shape's operators read as the REST surface's",
+      "covers": "sync.html#shapes: not, in, is null",
+      "shapes": [{"collection": "tasks", "where": {"key": null, "priority": {"not": {"in": [1, 2]}}, "status": {"in": ["open", "new"]}}}],
+      "steps": [
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?key=is.null&priority=not.in.%281%2C2%29&status=in.%28open%2Cnew%29"}]}}
+      ]
+    },
+    {
+      "name": "two shapes over one collection are refused",
+      "covers": "sync.html#shapes: one collection per shape",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}, {"collection": "tasks", "where": {"status": "closed"}}],
+      "steps": [{"do": "start", "expect": {"error": "two shapes for `tasks`", "requests": [], "streams": []}}]
+    },
+    {
+      "name": "a start with no shape is refused",
+      "shapes": [],
+      "steps": [{"do": "start", "expect": {"error": "at least one shape is required"}}]
+    },
+    {
+      "name": "a shape names its collection",
+      "shapes": [{"where": {"status": "open"}}],
+      "steps": [{"do": "start", "expect": {"error": "a shape must be"}}]
+    },
+    {
+      "name": "a shape's operator must be one it knows",
+      "shapes": [{"collection": "tasks", "where": {"priority": {"nope": 1}}}],
+      "steps": [{"do": "start", "expect": {"error": "unknown operator `nope`"}}]
+    },
+    {
+      "name": "a shape's in takes a list with something in it",
+      "shapes": [{"collection": "tasks", "where": {"priority": {"in": []}}}],
+      "steps": [{"do": "start", "expect": {"error": "`in` expects a non-empty array"}}]
+    },
+    {
+      "name": "two shapes over two collections are ready once both are seeded",
+      "collections": [
+        {"name": "tasks", "fields": [{"name": "key", "type": "text", "index": "hash", "required": false}, {"name": "title", "type": "text", "index": null, "required": false}]},
+        {"name": "notes", "fields": [{"name": "body", "type": "text", "index": null, "required": false}]}
+      ],
+      "shapes": [{"collection": "tasks", "key": "key"}, {"collection": "notes"}],
+      "steps": [
+        {"do": "start", "expect": {"requests": [{"method": "GET", "path": "/collections"}], "streams": [{"path": "/tasks/changes"}, {"path": "/notes/changes"}]}},
+        {"do": "seed", "seq": 2, "rows": [{"id": 1, "key": "a", "title": "one"}], "expect": {"ready": false}},
+        {"do": "seed", "shape": 1, "seq": 2, "rows": [{"body": "hello", "id": 1}], "expect": {
+          "ready": true, "rows": {"tasks": [{"id": 1, "title": "one"}], "notes": [{"id": 1, "body": "hello"}]}}}
+      ]
+    },
+    {
+      "name": "changes land, and a row leaving the shape goes",
+      "covers": "sync.html#stream: state, not operations; a row that no longer matches arrives as a deletion",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "change", "seq": 5, "puts": [{"id": 4, "key": "d", "priority": 9, "status": "open", "title": "four"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4, "title": "four"}]}}},
+        {"do": "change", "seq": 7, "puts": [{"id": 2, "key": "b", "priority": 5, "status": "open", "title": "TWO"}], "dels": [1], "expect": {
+          "rows": {"tasks": [{"id": 2, "title": "TWO"}, {"id": 4, "title": "four"}]}}}
+      ]
+    },
+    {
+      "name": "a change before the seed is not applied",
+      "covers": "an incremental diff over an unseeded copy would leave the changed rows alone",
+      "steps": [
+        {"do": "start"},
+        {"do": "change", "seq": 5, "puts": [{"id": 4, "key": "d", "priority": 9, "status": "open", "title": "four"}], "dels": [], "expect": {"rows": {"tasks": []}, "ready": false}},
+        {"do": "seed", "seq": 5, "rows": "@open", "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}, "ready": true}}
+      ]
+    },
+    {
+      "name": "a dropped connection resumes from its cursor, a change sent again harmless",
+      "covers": "sync.html#horizon: since=<cursor>, backoff 250 ms with 30% jitter",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "change", "seq": 5, "puts": [{"id": 4, "key": "d", "priority": 9, "status": "open", "title": "four"}], "dels": []},
+        {"do": "drop", "expect": {"waits": [[250, 325]], "streams": []}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=5"}], "waits": []}},
+        {"do": "change", "seq": 5, "puts": [{"id": 4, "key": "d", "priority": 9, "status": "open", "title": "four"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4, "title": "four"}]}}},
+        {"do": "change", "seq": 6, "puts": [], "dels": [1], "expect": {"rows": {"tasks": [{"id": 2}, {"id": 4}]}}}
+      ]
+    },
+    {
+      "name": "a stream that cannot reconnect backs off, doubling to 15 s",
+      "covers": "mobile.html#sync: 250 ms doubling to 15 s; an open stream starts the count again",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "net", "up": false},
+        {"do": "drop", "expect": {"waits": [[250, 325]]}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}], "waits": [[500, 650]]}},
+        {"do": "fire", "expect": {"waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"waits": [[2000, 2600]]}},
+        {"do": "fire", "expect": {"waits": [[4000, 5200]]}},
+        {"do": "fire", "expect": {"waits": [[8000, 10400]]}},
+        {"do": "fire", "expect": {"waits": [[15000, 19500]]}},
+        {"do": "fire", "expect": {"waits": [[15000, 19500]]}},
+        {"do": "net", "up": true},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}], "waits": []}},
+        {"do": "drop", "expect": {"waits": [[250, 325]]}}
+      ]
+    },
+    {
+      "name": "the server out of reach at the first start: its collections are asked for again",
+      "covers": "a replica with no collection yet waits for the server's schema, and backs off meanwhile",
+      "steps": [
+        {"do": "net", "up": false},
+        {"do": "start", "expect": {"requests": [{"method": "GET", "path": "/collections"}], "streams": [], "waits": [[250, 325]], "ready": false}},
+        {"do": "fire", "expect": {"requests": [{"method": "GET", "path": "/collections"}], "waits": [[500, 650]]}},
+        {"do": "net", "up": true},
+        {"do": "fire", "expect": {"requests": [{"method": "GET", "path": "/collections"}], "streams": [{"path": "/tasks/changes?status=eq.open"}]}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "an optimistic insert shows at once and is matched by its key",
+      "covers": "sync.html#optimistic: a temporary id from 2^52, a key made for it, the server's copy taking its place",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"priority": 2, "status": "open", "title": "new"}]}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "auth": "Bearer t0", "body": [
+            {"query": "put tasks {priority: $1, status: $2, title: $3, key: $4}", "params": [2, "open", "new", "<k1>"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "<k1>", "title": "new", "priority": 2}]},
+          "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4, "body": {"affected": 1}, "expect": {
+          "pending": 0, "requests": [], "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496}]}}},
+        {"do": "change", "seq": 4, "puts": [{"id": 3, "key": "<k1>", "priority": 2, "status": "open", "title": "new"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "key": "<k1>", "title": "new"}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "an insert keeps the key it was given",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"key": "mine", "status": "open", "title": "new"}]}, "expect": {
+          "requests": [{"path": "/query", "body": [{"query": "put tasks {key: $1, status: $2, title: $3}", "params": ["mine", "open", "new"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "mine"}]}}},
+        {"do": "answer", "status": 200, "seq": 4},
+        {"do": "change", "seq": 4, "puts": [{"id": 3, "key": "mine", "priority": null, "status": "open", "title": "new"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "key": "mine"}]}}}
+      ]
+    },
+    {
+      "name": "several documents are one write, each with its own temporary id",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "x"}, {"status": "open", "title": "y"}]}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>", "body": [
+            {"query": "put tasks [{status: $1, title: $2, key: $3}, {status: $4, title: $5, key: $6}]", "params": ["open", "x", "<kx>", "open", "y", "<ky>"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "<kx>"}, {"id": 4503599627370497, "key": "<ky>"}]},
+          "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 5},
+        {"do": "change", "seq": 5, "puts": [
+          {"id": 3, "key": "<kx>", "priority": null, "status": "open", "title": "x"},
+          {"id": 4, "key": "<ky>", "priority": null, "status": "open", "title": "y"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "title": "x"}, {"id": 4, "title": "y"}]}}}
+      ]
+    },
+    {
+      "name": "an insert into a shape with no key waits for the server's copy",
+      "covers": "sync.html#optimistic: with nothing to match it by, the server's copy would leave two",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "new"}]}, "expect": {
+          "requests": [{"path": "/query", "body": [{"query": "put tasks {status: $1, title: $2}", "params": ["open", "new"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}]}, "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}},
+        {"do": "change", "seq": 4, "puts": [{"id": 3, "key": null, "priority": null, "status": "open", "title": "new"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "title": "new"}]}}}
+      ]
+    },
+    {
+      "name": "an insert naming its id shows at once, and is put back when refused",
+      "covers": "the server's copy is matched by the id the write names",
+      "shapes": [{"collection": "tasks", "where": {"status": "open"}}],
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"id": 7, "status": "open", "title": "seven"}]}, "expect": {
+          "requests": [{"path": "/query", "body": [{"query": "put tasks {id: $1, status: $2, title: $3}", "params": [7, "open", "seven"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 7, "title": "seven"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "id 7 is held"}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "an update shows at once, is sent, and its echo changes nothing",
+      "covers": "sync.html#optimistic: update and delete work by the filter, needing no key",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{"query": "set tasks {title: $1} where key = $2", "params": ["ONE", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2, "title": "two"}]}, "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}},
+        {"do": "change", "seq": 4, "puts": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "a delete shows at once, is sent, and its echo changes nothing",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "b"}}, "expect": {
+          "requests": [{"path": "/query", "body": [{"query": "del tasks where key = $1", "params": ["b"]}]}],
+          "rows": {"tasks": [{"id": 1}]}, "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 4},
+        {"do": "change", "seq": 4, "puts": [], "dels": [2], "expect": {"rows": {"tasks": [{"id": 1}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "an update that reaches no row is still sent",
+      "covers": "the replica may not hold a row the server does",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "X"}, "where": {"key": "zz"}}, "expect": {
+          "requests": [{"path": "/query", "body": [{"query": "set tasks {title: $1} where key = $2", "params": ["X", "zz"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}, "pending": 1}}
+      ]
+    },
+    {
+      "name": "writes go one at a time, in order, each under a key of its own",
+      "covers": "mobile.html#sync: a write that lands after one written after it would leave the server holding the earlier",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "A1"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "A2"}, "where": {"key": "a"}}, "expect": {
+          "requests": [], "pending": 2, "rows": {"tasks": [{"id": 1, "title": "A2"}, {"id": 2}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {
+          "requests": [{"path": "/query", "key": "<w2>", "body": [{"query": "set tasks {title: $1} where key = $2", "params": ["A2", "a"]}]}],
+          "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"requests": [], "pending": 0}}
+      ]
+    },
+    {
+      "name": "an insert outside the shape leaves no temporary row once the stream passes it",
+      "covers": "mobile.html#sync: the server answered at seq n; a stream past n holds the server's copy, or the shape does not",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "closed", "title": "elsewhere"}]}, "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "elsewhere"}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496}]}}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [3], "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "an answer the stream already passed lets the temporary row go at once",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "closed", "title": "elsewhere"}]}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [3], "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "an update of an unanswered insert reaches the server's copy by its key",
+      "covers": "mobile.html#sync, formerly a browser bug: the temporary id is the replica's alone",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "draft"}]}, "expect": {"requests": [{"key": "<w1>", "body": [{"params": ["open", "draft", "<k1>"]}]}]}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "final"}, "where": {"id": 4503599627370496}}, "expect": {
+          "requests": [], "pending": 2,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "final"}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {
+          "requests": [{"path": "/batch", "key": "<w2>", "lines": 2, "body": [
+            {"query": "set tasks {title: $1} where id = $2", "params": ["final", 4503599627370496]},
+            {"query": "set tasks {title: $1} where key in [$2]", "params": ["final", "<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 5},
+        {"do": "change", "seq": 5, "puts": [{"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "final"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "title": "final"}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "a delete of an unanswered insert reaches the server's copy by its key",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "draft"}]}, "expect": {"requests": [{"body": [{"params": ["open", "draft", "<k1>"]}]}]}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"title": "draft"}}, "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}, "pending": 2}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {
+          "requests": [{"path": "/batch", "body": [
+            {"query": "del tasks where title = $1", "params": ["draft"]},
+            {"query": "del tasks where key in [$1]", "params": ["<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 5},
+        {"do": "change", "seq": 5, "puts": [], "dels": [3], "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}, "pending": 0}}
+      ]
+    },
+    {
+      "name": "an update of an answered insert not yet echoed reaches it by its key too",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "draft"}]}, "expect": {"requests": [{"body": [{"params": ["open", "draft", "<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 4},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "final"}, "where": {"title": "draft"}}, "expect": {
+          "requests": [{"path": "/batch", "body": [
+            {"query": "set tasks {title: $1} where title = $2", "params": ["final", "draft"]},
+            {"query": "set tasks {title: $1} where key in [$2]", "params": ["final", "<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 5},
+        {"do": "change", "seq": 5, "puts": [{"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "final"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "title": "final"}]}}}
+      ]
+    },
+    {
+      "name": "a batch is one write, sent as one /batch and refused whole",
+      "covers": "sync.html#batches: one request, one key, put back whole the last first",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"batch": [
+          {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}},
+          {"insert": "tasks", "docs": [{"status": "open", "title": "new"}]},
+          {"delete": "tasks", "where": {"key": "b"}}]}, "expect": {
+          "requests": [{"method": "POST", "path": "/batch", "key": "<w1>", "lines": 3}],
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 4503599627370496, "title": "new"}]}, "pending": 1}},
+        {"do": "answer", "status": 409, "body": {"error": "no", "completed": 0}, "expect": {
+          "refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "a batch that lands is matched as its writes would be",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"batch": [
+          {"insert": "tasks", "docs": [{"status": "open", "title": "x"}]},
+          {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}]}, "expect": {
+          "requests": [{"path": "/batch", "lines": 2}], "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}, {"id": 4503599627370496, "key": "<k1>"}]}}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"pending": 0}},
+        {"do": "change", "seq": 5, "puts": [
+          {"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"},
+          {"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "x"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}, {"id": 3, "title": "x"}]}}}
+      ]
+    },
+    {
+      "name": "a 409 refuses an insert: put back, and told",
+      "covers": "sync.html#optimistic, mobile.html#sync: a unique value held",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"key": "a", "status": "open", "title": "dup"}]}, "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "dup"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "`key` holds \"a\" already"}, "expect": {
+          "refused": [409], "pending": 0, "waits": [], "requests": [], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "a 403 refuses an update: the row put back as it was",
+      "covers": "a token's rules",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "BROKEN"}, "where": {"key": "a"}}},
+        {"do": "answer", "status": 403, "body": {"error": "denied"}, "expect": {
+          "refused": [403], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one", "priority": 1}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "every other 4xx refuses, and the writes behind it go on",
+      "covers": "mobile.html#sync: only 401, 408 and 429 of the 4xx are not refusals",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "b"}}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "X"}, "where": {"key": "a"}}},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "new"}]}, "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "X"}, {"id": 4503599627370496, "title": "new"}]}, "pending": 3}},
+        {"do": "answer", "status": 422, "body": {"error": "another request under this key"}, "expect": {
+          "refused": [422], "pending": 2, "requests": [{"key": "<w2>"}], "rows": {"tasks": [{"id": 1, "title": "X"}, {"id": 2, "title": "two"}, {"id": 4503599627370496}]}}},
+        {"do": "answer", "status": 400, "body": {"error": "bad"}, "expect": {
+          "refused": [400], "pending": 1, "requests": [{"key": "<w3>"}], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}, {"id": 4503599627370496}]}}},
+        {"do": "answer", "status": 404, "body": {"error": "no such collection"}, "expect": {
+          "refused": [404], "pending": 0, "requests": [], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a 5xx keeps the write and sends it again under the same key",
+      "covers": "mobile.html#sync, formerly a browser bug: a server error is not a refusal",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 500, "body": {"error": "boom"}, "expect": {
+          "refused": [], "pending": 1, "waits": [[250, 325]], "requests": [], "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "fire", "expect": {"requests": [{"path": "/query", "key": "<w1>", "body": [{"query": "set tasks {title: $1} where key = $2"}]}]}},
+        {"do": "answer", "status": 503, "expect": {"waits": [[500, 650]], "pending": 1}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 502, "expect": {"waits": [[1000, 1300]]}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "waits": [], "refused": [], "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a 408 and a 429 are answers to come back, not refusals",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 408, "expect": {"refused": [], "waits": [[250, 325]], "pending": 1}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 429, "body": {"error": "slow down"}, "expect": {"refused": [], "waits": [[500, 650]], "pending": 1, "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}}
+      ]
+    },
+    {
+      "name": "no answer at all keeps the write, and the same key lands it once",
+      "covers": "mobile.html#sync, formerly a browser bug: a network failure is not a refusal; Idempotency-Key makes the second send the first's answer",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "once"}]}, "expect": {"requests": [{"key": "<w1>", "body": [{"params": ["open", "once", "<k1>"]}]}]}},
+        {"do": "answer", "status": 0, "expect": {"refused": [], "waits": [[250, 325]], "pending": 1, "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "once"}]}}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>", "body": [{"params": ["open", "once", "<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}},
+        {"do": "change", "seq": 4, "puts": [{"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "once"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "title": "once"}]}}}
+      ]
+    },
+    {
+      "name": "a send that keeps failing backs off to 15 s, and a refusal after it still puts back",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}},
+        {"do": "answer", "status": 503, "expect": {"waits": [[250, 325]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[500, 650]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[1000, 1300]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[2000, 2600]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[4000, 5200]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[8000, 10400]]}},
+        {"do": "fire"}, {"do": "answer", "status": 503, "expect": {"waits": [[15000, 19500]]}},
+        {"do": "fire"}, {"do": "answer", "status": 0, "expect": {"waits": [[15000, 19500]]}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 409, "body": {"error": "no"}, "expect": {"refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a 401 asks for a token, and the write goes again with it",
+      "covers": "mobile.html#sync: a tokenProvider asked on a 401, setToken",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>", "auth": "Bearer t0"}]}},
+        {"do": "answer", "status": 401, "body": {"error": "unauthorized"}, "expect": {
+          "token_asked": true, "refused": [], "waits": [], "requests": [], "pending": 1, "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "token", "token": "t1", "expect": {"requests": [{"path": "/query", "key": "<w1>", "auth": "Bearer t1"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0, "token_asked": false}}
+      ]
+    },
+    {
+      "name": "a 401 on the stream asks for a token, and the stream opens with it",
+      "steps": [
+        {"do": "stream_status", "status": 401},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}], "token_asked": true, "waits": []}},
+        {"do": "token", "token": "t1", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t1"}]}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "a stream refused with a 5xx is tried again with backoff",
+      "steps": [
+        {"do": "stream_status", "status": 503},
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}], "waits": [[250, 325]], "token_asked": false}},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open"}]}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "offline, writes wait, and go first when the network is back",
+      "covers": "mobile.html#sync: setOnline; writes left are sent before the streams open, so what they bring holds them",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "online", "online": false, "expect": {"requests": [], "streams": []}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {
+          "requests": [], "pending": 1, "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}]}}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "b"}}, "expect": {"requests": [], "pending": 2, "rows": {"tasks": [{"id": 1}]}}},
+        {"do": "online", "online": true, "expect": {"requests": [{"key": "<w1>"}], "streams": []}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"requests": [{"key": "<w2>"}], "streams": []}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"requests": [], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}], "pending": 0}},
+        {"do": "change", "seq": 5, "puts": [{"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"}], "dels": [2], "expect": {"rows": {"tasks": [{"id": 1, "title": "ONE"}]}}}
+      ]
+    },
+    {
+      "name": "back online, the backoff is forgotten",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "net", "up": false},
+        {"do": "drop", "expect": {"waits": [[250, 325]]}},
+        {"do": "fire", "expect": {"waits": [[500, 650]]}},
+        {"do": "fire", "expect": {"waits": [[1000, 1300]]}},
+        {"do": "net", "up": true},
+        {"do": "online", "online": false},
+        {"do": "online", "online": true, "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}], "waits": []}}
+      ]
+    },
+    {
+      "name": "a write while the stream is down is sent all the same",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "net", "up": false},
+        {"do": "drop", "expect": {"waits": [[250, 325]]}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "a"}}, "expect": {"requests": [{"key": "<w1>"}], "rows": {"tasks": [{"id": 2}]}}},
+        {"do": "answer", "status": 0, "expect": {"waits": [[250, 325]], "pending": 1}},
+        {"do": "net", "up": true},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [1], "expect": {"rows": {"tasks": [{"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a restart keeps its pending writes, their keys and its cursor",
+      "covers": "mobile.html#sync and sync.html#persist: an app closed with writes unsent sends them when it opens again, in order, each once",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "kept"}]}, "expect": {"requests": [{"key": "<w1>", "body": [{"params": ["open", "kept", "<k1>"]}]}]}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}, "expect": {"pending": 2}},
+        {"do": "restart", "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{"params": ["open", "kept", "<k1>"]}]}],
+          "streams": [], "pending": 2, "ready": true,
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}, {"id": 4503599627370496, "title": "kept", "key": "<k1>"}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"requests": [{"key": "<w2>", "body": [{"query": "set tasks {title: $1} where key = $2"}]}], "streams": []}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"requests": [], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}], "pending": 0}},
+        {"do": "change", "seq": 5, "puts": [
+          {"id": 1, "key": "a", "priority": 1, "status": "open", "title": "ONE"},
+          {"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "kept"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "ONE"}, {"id": 2}, {"id": 3, "title": "kept"}]}}}
+      ]
+    },
+    {
+      "name": "after a restart a write the server cannot take now lets the streams open",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "a"}}},
+        {"do": "restart", "expect": {"requests": [{"key": "<w1>"}], "streams": []}},
+        {"do": "answer", "status": 503, "expect": {"waits": [[250, 325]], "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "fire", "expect": {"requests": [{"key": "<w1>"}]}},
+        {"do": "answer", "status": 200, "seq": 4, "expect": {"pending": 0}}
+      ]
+    },
+    {
+      "name": "a write refused after a restart is put back from what was kept",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "ONE"}, "where": {"key": "a"}}},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "ghost"}]}},
+        {"do": "restart", "expect": {"pending": 2}},
+        {"do": "answer", "status": 403, "body": {"error": "denied"}, "expect": {"refused": [403], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}, {"id": 4503599627370496, "title": "ghost"}]}}},
+        {"do": "answer", "status": 409, "body": {"error": "no"}, "expect": {"refused": [409], "pending": 0, "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a restart makes its temporary ids after the ones it kept",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "first"}]}},
+        {"do": "restart"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "second"}]}, "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "first"}, {"id": 4503599627370497, "title": "second"}]}, "pending": 2}}
+      ]
+    },
+    {
+      "name": "a restart with another shape is seeded afresh",
+      "covers": "the cursor is the shape's: another filter holds other rows",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "restart", "shapes": [{"collection": "tasks", "key": "key", "where": {"status": "closed"}}], "expect": {
+          "streams": [{"path": "/tasks/changes?status=eq.closed"}], "ready": false}},
+        {"do": "seed", "seq": 3, "rows": [{"id": 5, "key": "c", "priority": 3, "status": "closed", "title": "three"}], "expect": {
+          "rows": {"tasks": [{"id": 5, "title": "three"}]}, "ready": true}}
+      ]
+    },
+    {
+      "name": "past the horizon the server seeds again, and an unanswered insert's row stays",
+      "covers": "sync.html#horizon, mobile.html#sync, formerly a browser difference: a seed writes over and keeps the rows of writes not yet answered",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "pending"}]}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 30, "rows": [
+          {"id": 2, "key": "b", "priority": 5, "status": "open", "title": "TWO"},
+          {"id": 9, "key": "i", "priority": 9, "status": "open", "title": "nine"}], "expect": {
+          "rows": {"tasks": [{"id": 2, "title": "TWO"}, {"id": 9, "title": "nine"}, {"id": 4503599627370496, "title": "pending"}]}, "pending": 1}},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=30"}]}}
+      ]
+    },
+    {
+      "name": "a seed keeps an answered insert's row while the seed is from before the answer",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "late"}]}},
+        {"do": "answer", "status": 200, "seq": 10},
+        {"do": "drop"},
+        {"do": "fire"},
+        {"do": "seed", "seq": 9, "rows": "@open", "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "late"}]}}},
+        {"do": "drop"},
+        {"do": "fire"},
+        {"do": "seed", "seq": 12, "rows": "@open", "expect": {"rows": {"tasks": [{"id": 1}, {"id": 2}]}}}
+      ]
+    },
+    {
+      "name": "a seed's copy of a pending insert takes its place",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "mine"}]}, "expect": {"requests": [{"body": [{"params": ["open", "mine", "<k1>"]}]}]}},
+        {"do": "answer", "status": 200, "seq": 4},
+        {"do": "drop"},
+        {"do": "fire"},
+        {"do": "seed", "seq": 6, "rows": [
+          {"id": 1, "key": "a", "priority": 1, "status": "open", "title": "one"},
+          {"id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "mine"}], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 3, "title": "mine", "key": "<k1>"}]}}}
+      ]
+    },
+    {
+      "name": "a schema change on the server: the replica takes the new schema and the whole shape",
+      "covers": "the server owns the schema (sync.html#schema); a change says schema: true, and the collection is made again from GET /collections",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "pending"}]}, "expect": {"requests": [{"body": [{"params": ["open", "pending", "<k1>"]}]}]}},
+        {"do": "schema", "collections": [
+          {"name": "tasks", "fields": [
+            {"name": "key", "type": "text", "index": "unique", "required": false},
+            {"name": "title", "type": "text", "index": null, "required": false},
+            {"name": "status", "type": "text", "index": "hash", "required": false},
+            {"name": "priority", "type": "int", "index": null, "required": false},
+            {"name": "due", "type": "int", "index": "sorted", "required": false}]}]},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "schema": true, "expect": {
+          "requests": [{"method": "GET", "path": "/collections"}], "streams": [{"path": "/tasks/changes?status=eq.open"}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "pending"}]}}},
+        {"do": "seed", "seq": 4, "rows": [
+          {"due": 9, "id": 1, "key": "a", "priority": 1, "status": "open", "title": "one"},
+          {"due": null, "id": 2, "key": "b", "priority": 5, "status": "open", "title": "two"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "due": 9}, {"id": 2, "due": null}, {"id": 4503599627370496, "title": "pending"}]}, "ready": true}},
+        {"do": "answer", "status": 200, "seq": 5},
+        {"do": "change", "seq": 5, "puts": [{"due": 3, "id": 3, "key": "<k1>", "priority": null, "status": "open", "title": "pending"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 3, "due": 3, "title": "pending"}]}}}
+      ]
+    },
+    {
+      "name": "a field renamed on the server is read from the new seed",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "schema", "collections": [
+          {"name": "tasks", "fields": [
+            {"name": "key", "type": "text", "index": "unique", "required": false},
+            {"name": "name", "type": "text", "index": null, "required": false},
+            {"name": "status", "type": "text", "index": "hash", "required": false},
+            {"name": "priority", "type": "int", "index": null, "required": false}]}]},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "schema": true, "expect": {"requests": [{"path": "/collections"}], "streams": [{"path": "/tasks/changes?status=eq.open"}]}},
+        {"do": "seed", "seq": 4, "rows": [
+          {"id": 1, "key": "a", "name": "one", "priority": 1, "status": "open"},
+          {"id": 2, "key": "b", "name": "two", "priority": 5, "status": "open"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "name": "one", "title": null}, {"id": 2, "name": "two"}]}}}
+      ]
+    },
+    {
+      "name": "rows with a field the replica has not got are taken for a schema change",
+      "covers": "a seed past the horizon after an alter says nothing of the schema; its rows do",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "schema", "collections": [
+          {"name": "tasks", "fields": [
+            {"name": "key", "type": "text", "index": "unique", "required": false},
+            {"name": "title", "type": "text", "index": null, "required": false},
+            {"name": "status", "type": "text", "index": "hash", "required": false},
+            {"name": "priority", "type": "int", "index": null, "required": false},
+            {"name": "note", "type": "text", "index": null, "required": false}]}]},
+        {"do": "drop"},
+        {"do": "fire", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "seed", "seq": 40, "rows": [{"id": 1, "key": "a", "note": "hi", "priority": 1, "status": "open", "title": "one"}], "expect": {
+          "requests": [{"path": "/collections"}], "streams": [{"path": "/tasks/changes?status=eq.open"}]}},
+        {"do": "seed", "seq": 40, "rows": [{"id": 1, "key": "a", "note": "hi", "priority": 1, "status": "open", "title": "one"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "note": "hi"}]}}}
+      ]
+    },
+    {
+      "name": "rows a @ttl lets go of arrive as deletes, and read as gone before",
+      "covers": "the server's sweep deletes expired rows; the replica's @ttl leaves them out of a read at once",
+      "collections": [
+        {"name": "tasks", "fields": [
+          {"name": "key", "type": "text", "index": "hash", "required": false},
+          {"name": "title", "type": "text", "index": null, "required": false},
+          {"name": "seen", "type": "timestamp", "index": "ttl(1h)", "required": false}]}
+      ],
+      "shapes": [{"collection": "tasks", "key": "key"}],
+      "steps": [
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes"}]}},
+        {"do": "seed", "seq": 3, "rows": [
+          {"id": 1, "key": "a", "seen": "2100-01-01T00:00:00.000Z", "title": "fresh"},
+          {"id": 2, "key": "b", "seen": "2000-01-01T00:00:00.000Z", "title": "stale"},
+          {"id": 3, "key": "c", "seen": "2100-01-01T00:00:00.000Z", "title": "also fresh"}], "expect": {
+          "rows": {"tasks": [{"id": 1, "title": "fresh"}, {"id": 3}]}}},
+        {"do": "change", "seq": 5, "puts": [], "dels": [2, 3], "expect": {"rows": {"tasks": [{"id": 1, "title": "fresh"}]}}}
+      ]
+    }
+  ]
+}

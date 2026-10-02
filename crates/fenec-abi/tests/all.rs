@@ -1,1 +1,2 @@
+mod scenarios;
 mod sync;

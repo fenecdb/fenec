@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -29,16 +29,22 @@ all: test wasm
 ## under it are the heaviest thing a build compiles; the examples are
 ## measurement programs, a fifth of what `cargo test` compiled. Clippy's
 ## --all-targets checks both, so neither rots.
+## The sync scenarios' reports go first, so a runner that did not run this
+## time leaves none for sync-scenarios-check to find.
 test:
+	@rm -rf target/sync-scenarios
 	$(CARGO) test --workspace --exclude fenec-bench --lib --bins --tests
 	$(CARGO) test --workspace --exclude fenec-bench --doc
 	$(CARGO) test -p fenec-core --no-default-features --features std-fs --lib --test features
 	@$(MAKE) --no-print-directory test-js
+	@if [ -f web/fenec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
 
 ## JS tests. node's own runner; no dependencies.
 ##   fenec.test.js       query builder (end-to-end too when wasm is present)
 ##   fenec.sync.test.js  sync layer -- against a real `fenec-server --http` server;
 ##                     skipped when `web/fenec.wasm` or the binary is missing
+##   fenec.sync.scenarios.test.js  integrations/sync-scenarios.json against
+##                     FenecSync, over a scripted transport
 ##   fenec.persist.test.js  incremental persistence, over an in-memory IndexedDB
 ##   fenec.file.test.js  a database kept in an OPFS file, over in-memory files,
 ##                     and handed to and from a real `fenec-server`
@@ -46,10 +52,17 @@ test:
 ##                     declares, the check at an open, migrations, fenec types --schema
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
+
+## Both runners of integrations/sync-scenarios.json -- the native core's
+## (fenec-abi's tests/scenarios.rs) and FenecSync's
+## (web/fenec.sync.scenarios.test.js) -- passed every scenario: each writes
+## what passed to target/sync-scenarios/, and a skip fails here
+sync-scenarios-check:
+	node integrations/sync-scenarios-check.mjs
 
 ## integrations/builder-golden.json written again from the JS builder's
 ## answers: the text and parameters the Python, Go and .NET builders are

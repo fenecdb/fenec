@@ -148,7 +148,7 @@ from is the page's decision: derived from a passphrase, as above, or handed
 over by the server after a login, so that what IndexedDB holds on the disk
 reads as nothing without it. A key kept in IndexedDB beside the data protects
 nothing. The sync layer takes it as <code>sync({ persist, cryptoKey })</code>.
-Its cursors, which are only numbers, are stored in the clear. The same 32.4 MB in
+Its cursors and unsent writes are collections of the replica, sealed with it. The same 32.4 MB in
 Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file

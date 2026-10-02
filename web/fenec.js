@@ -2341,8 +2341,6 @@ function newKey() {
   return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// The backoff wait must not hold up process exit: on Node the timer is
-// unreferenced (browsers have no `unref`, so it is a no-op).
 /**
  * Fallback that runs the tick after at most this long when no frame
  * arrives. In a visible tab the frame lands in ~16 ms and cancels it; in a
@@ -2350,10 +2348,26 @@ function newKey() {
  */
 const TICK_FALLBACK_MS = 50;
 
-const sleep = (ms) =>
-  new Promise((r) => {
-    setTimeout(r, ms).unref?.();
-  });
+/**
+ * The sync's own collections, beside the replica's and as the native core
+ * (`fenec_abi::sync`) keeps them: each shape's cursor, the writes the server
+ * has not answered with what puts each back, and the rows an insert made
+ * under a temporary id. In the replica, they go wherever it goes --
+ * `persist`, an `openFile` -- so a page opened again sends what it had not.
+ */
+const SYNC_STATE = [
+  'create collection if not exists _sync_shapes (collection text, shape text, cursor int, seeded bool)',
+  'create collection if not exists _sync_queue (path text, body text, key text, undo text, label text)',
+  'create collection if not exists _sync_temps (collection text, key text, op int, until int)',
+];
+const PUT_SHAPE = 'put _sync_shapes {id: $1, collection: $2, shape: $3, cursor: $4, seeded: $5}';
+const PUT_OP = 'put _sync_queue {id: $1, path: $2, body: $3, key: $4, undo: $5, label: $6}';
+const PUT_TEMP = 'put _sync_temps {id: $1, collection: $2, key: $3, op: $4, until: $5}';
+/** An answer with no `Fenec-Seq`: no stream is known to be past it. */
+const NO_SEQ = Number.MAX_SAFE_INTEGER;
+
+/** A key's text, as the native core writes it: a text as it is, else its JSON. */
+const keyText = (k) => (typeof k === 'string' ? k : JSON.stringify(k));
 
 /**
  * Query builder that goes through the optimistic write path.
@@ -2388,6 +2402,13 @@ class SyncQuery extends Query {
  * const stop = db.live(db.from('tasks'), (rows) => render(rows));        // live
  * await db.from('tasks').insert({ title: 'new', status: 'open' });       // optimistic
  * ```
+ *
+ * It does what the native core does (`crates/fenec-abi/src/sync`), and the
+ * two are held to one script, `integrations/sync-scenarios.json`: writes go
+ * one at a time and in order, each under an `Idempotency-Key` it keeps until
+ * the server answers; no answer, a 408, a 429 or a 5xx is tried again with
+ * backoff, a 401 asks for a token, and any other 4xx is a refusal, put back.
+ * Moving this layer onto that core instead was measured at +21 KB brotli.
  */
 export class FenecSync {
   #local;
@@ -2399,22 +2420,46 @@ export class FenecSync {
   #lives;
   #scheduled = null;
   #flushers = [];
-  #pending = new Map();
-  #nextTemp = TEMP_BASE;
-  #queue = null;
+  #pendingTick = null;
   #closed = false;
-  #abort = null;
+  #abort = new AbortController();
   #ready;
   #resolveReady;
-  #persistKey = null;
-  #cryptoKey = null;
+  #persistKey;
+  #cryptoKey;
+  #persisting = null;
+  #persistAgain = false;
   #chan = null;
   #leader = true;
-  #leaderMode = 'auto';
-  #locks = null;
+  #leaderMode;
+  #locks;
+  #release = null;
   #onError;
-  #persistTimer = null;
-  #pendingTick = null;
+  #onRefused;
+  #tokenProvider;
+  /** A `batch` being gathered: what each write applied. */
+  #batch = null;
+  /** Writes the server has not answered, in order: `{n, path, body, key, undo, label, done?, count}`. */
+  #queue = [];
+  /** Rows of inserts under temporary ids: `{collection, key, temp, op, until}`. */
+  #temps = [];
+  #nextTemp = TEMP_BASE;
+  #nextN = 1;
+  #sending = false;
+  #sendAttempt = 0;
+  #sendWaiting = false;
+  #schemaBusy = false;
+  #schemaAttempt = 0;
+  #schemaWaiting = false;
+  /** Writes left from before go before the streams open, so what they bring holds them. */
+  #flushing = false;
+  #offline = false;
+  /** Waiting for a token after a 401. */
+  #paused = false;
+  #fault = null;
+  #waits = new Set();
+  #pushed = [];
+  #listeners = null;
 
   constructor(local, opts) {
     this.#local = local;
@@ -2429,16 +2474,17 @@ export class FenecSync {
     this.#persistKey = opts.persist ?? null;
     this.#cryptoKey = opts.cryptoKey ?? null;
     this.#onError = opts.onError ?? null;
+    this.#onRefused = opts.onRefused ?? null;
+    this.#tokenProvider = opts.tokenProvider ?? null;
     this.#leaderMode = opts.leader ?? 'auto';
     // The lock manager can be supplied from outside: the default is the Web
     // Locks API, but making it injectable keeps this testable and leaves
     // room for another coordination mechanism.
     this.#locks = opts.locks ?? globalThis.navigator?.locks ?? null;
-    this.#abort = new AbortController();
     this.#lives = new Lives(local);
 
     for (const raw of opts.shapes ?? []) {
-      const shape = normalizeShape(raw);
+      const shape = normalizeShape(raw, this.#url);
       if (this.#shapes.has(shape.collection)) {
         throw new FenecError(
           `two shapes for \`${shape.collection}\`: one collection per shape ` +
@@ -2446,7 +2492,6 @@ export class FenecSync {
         );
       }
       this.#shapes.set(shape.collection, shape);
-      this.#pending.set(shape.collection, new Map());
     }
     if (this.#shapes.size === 0) throw new FenecError('at least one shape is required');
 
@@ -2470,17 +2515,57 @@ export class FenecSync {
     return this.#ready;
   }
 
-  /** Shape state: `{collection, cursor, seeded, connected, pending, error}`. */
+  /** Resolves once the server has answered every write made so far. */
+  pushed() {
+    return this.#queue.length ? new Promise((r) => this.#pushed.push(r)) : Promise.resolve();
+  }
+
+  /** Shape state: `{collection, cursor, seeded, connected, pending, error, leader}`. */
   status() {
     return [...this.#shapes.values()].map((s) => ({
       collection: s.collection,
       cursor: s.cursor,
       seeded: s.seeded,
       connected: s.connected,
-      pending: this.#pending.get(s.collection).size,
-      error: s.error ? String(s.error.message ?? s.error) : null,
+      pending: this.#queue.length,
+      error: this.#fault?.message ?? (s.error ? String(s.error.message ?? s.error) : null),
       leader: this.#leader,
     }));
+  }
+
+  /** A new token: the requests from here on carry it, and what a 401 stopped goes on. */
+  setToken(token) {
+    this.#token = token || null;
+    this.#remote = new FenecHttp(this.#url, { token: this.#token, fetch: this.#fetch });
+    if (this.#paused) {
+      this.#paused = false;
+      this.#fault = null;
+    }
+    this.#kick();
+  }
+
+  /**
+   * The network is gone (`false`): the streams end and writes wait. Back
+   * (`true`): what waited goes at once, the backoff forgotten. A page has it
+   * from `online` and `offline` on its own.
+   */
+  setOnline(on) {
+    if (!on) {
+      this.#offline = true;
+      for (const s of this.#shapes.values()) this.#cancel(s);
+      return;
+    }
+    this.#offline = false;
+    this.#sendAttempt = this.#schemaAttempt = 0;
+    for (const s of this.#shapes.values()) {
+      s.attempt = 0;
+      s.waiting = false;
+    }
+    this.#sendWaiting = this.#schemaWaiting = false;
+    for (const w of this.#waits) clearTimeout(w.t);
+    this.#waits.clear();
+    this.#flushing = this.#queue.length > 0;
+    this.#kick();
   }
 
   /**
@@ -2522,33 +2607,27 @@ export class FenecSync {
   }
 
   /**
-   * Sends several writes in **a single round trip**.
-   *
-   * **One block.** The server lands every write in it, as one record, or
-   * none of them, and on an error the local side is rolled back exactly as
-   * the server's was. The gain is threefold -- one round trip instead of N,
-   * no other writer slipping in between, and nothing half done.
+   * Several writes as **one**: applied together, sent as one `/batch` under
+   * one key, and landed by the server as one block or refused -- and put
+   * back -- whole. Resolves with the number of statements once the server
+   * has them.
    */
   async batch(fn) {
-    if (this.#queue) throw new FenecError('nested batches are not supported');
-    const q = { ops: [], undo: [] };
-    this.#queue = q;
+    if (this.#batch) throw new FenecError('nested batches are not supported');
+    const b = [];
+    this.#batch = b;
     try {
       await fn(this);
     } catch (e) {
-      this.#queue = null;
-      this.#rollback(q.undo);
+      this.#batch = null;
+      this.#undo(b.map((a) => a.undo));
       throw e;
+    } finally {
+      this.#batch = null;
     }
-    this.#queue = null;
-    if (q.ops.length === 0) return 0;
-    try {
-      const out = await this.#post('/batch', q.ops.map(ndjson).join('\n'), 'application/x-ndjson');
-      return out.ok ?? q.ops.length;
-    } catch (e) {
-      this.#rollback(q.undo);
-      throw e;
-    }
+    if (b.length === 0) return 0;
+    await this.#enqueue(b);
+    return b.length;
   }
 
   /** Finishes any pending live-query runs (for tests). */
@@ -2564,104 +2643,176 @@ export class FenecSync {
     }
   }
 
-  /** Closes the subscriptions. The local database stays open. */
+  /** Closes the subscriptions and gives up the lead. The local database stays open. */
   close() {
     this.#closed = true;
     this.#abort.abort();
+    for (const s of this.#shapes.values()) this.#cancel(s);
+    for (const w of this.#waits) clearTimeout(w.t);
+    this.#waits.clear();
     this.#chan?.close();
+    this.#release?.();
     this.#lives.clear();
+    if (this.#listeners) {
+      for (const [k, f] of this.#listeners) globalThis.removeEventListener?.(k, f);
+    }
   }
 
   // ------------------------------------------------------------ writes
 
   /**
-   * `SyncQuery`'s write hook. Three steps, always in the same order:
-   * **first collect what it takes to undo the local change**, then apply
-   * it locally, then send it to the server. If the server rejects it the
-   * local side is rolled back exactly -- without the network, because the
-   * undo information is already in hand.
+   * `SyncQuery`'s write hook: applied to the replica, what puts it back in
+   * hand, and queued for the server with an idempotency key. Resolves with
+   * the rows the write reached once the server has it, and rejects -- the
+   * replica put back -- when the server refuses it; a network failure or a
+   * server error is not a refusal, and the write waits and goes again.
    *
-   * Everything up to the first `await` is **synchronous**. An `async`
-   * function runs its body synchronously up to the first `await`, so the
+   * Everything up to the first `await` is **synchronous**, so the
    * optimistic row is in the local store before the caller even awaits the
    * promise. A single microtask in between would break the "visible
    * immediately" promise.
    */
   async write(verb, q, arg, opts) {
-    const collection = q.collection;
-    const shape = this.#shapes.get(collection);
+    let applied;
+    const wait = this.#optimistic(() => {
+      applied = this.#apply(verb, q, arg, opts);
+    });
+    if (wait) await wait;
+    if (!applied) return 0;
+    if (this.#batch) {
+      this.#batch.push(applied);
+      return applied.count;
+    }
+    return this.#enqueue([applied]);
+  }
+
+  /**
+   * One statement applied to the replica: the lines the server is sent, the
+   * undo -- `{c, del, put}`, the native core's -- and the temporary rows.
+   *
+   * - An insert into a shape with a `key` gets a key where it has none and
+   *   a temporary id, and is matched with the server's copy by the key;
+   *   one naming its id is applied under it. Without either it waits for
+   *   the server: with nothing to match it by, the copy would leave two.
+   * - An update or a delete works by the filter, the rows it reaches read
+   *   first: putting them back is the undo. A row of an insert the server
+   *   has not answered has a temporary id the server never saw, so it is
+   *   reached there by its key too, in a second line after the first.
+   */
+  #apply(verb, q, arg, opts) {
+    const c = q.collection;
+    const shape = this.#shapes.get(c);
     const base = q.plain();
-
-    let undo;
-    let count;
-    let stmt;
-
+    const key = shape.key;
     if (verb === 'insert') {
       const list = Array.isArray(arg) ? arg : [arg];
-      if (list.length === 0) return 0;
+      if (list.length === 0) return null;
       const docs = list.map((d) => {
         const doc = { ...d };
-        if (shape.key && doc[shape.key] === undefined) doc[shape.key] = newKey();
+        if (key && doc[key] == null) {
+          delete doc[key];
+          doc[key] = newKey();
+        }
         return doc;
       });
-      stmt = base.toInsert(docs);
-      count = docs.length;
-
-      if (shape.key) {
-        // An optimistic row's id is temporary: the server will hand out its
-        // own. What matches the two is the business key -- which is why an
-        // insert into a keyless shape is *not* applied optimistically (see
-        // below), or the server's row would leave two copies locally.
-        const temps = docs.map(() => this.#nextTemp++);
-        // `await undefined` would itself put a microtask in between.
-        const wait = this.#optimistic(() => this.#local.run(...base.toInsert(docs.map((d, i) => ({ ...d, id: temps[i] })))));
-        if (wait) await wait;
-        const pend = this.#pending.get(collection);
-        docs.forEach((d, i) => pend.set(String(d[shape.key]), temps[i]));
-        undo = () => {
-          docs.forEach((d) => pend.delete(String(d[shape.key])));
-          this.#deleteLocal(collection, temps);
-        };
-      } else {
-        // No key: the optimistic apply is skipped and the row arrives over
-        // the subscription. One round trip of delay beats a silent duplicate.
-        undo = () => {};
+      const line = base.toInsert(docs);
+      const named = docs.filter((d) => d.id != null).map((d) => d.id);
+      if (!key && named.length < docs.length) {
+        return { lines: [line], undo: { c, del: [], put: '[]' }, temps: [], count: docs.length };
       }
-    } else {
-      // Update and delete work by id, and reading the previous state is
-      // enough -- `update` creates no rows and `delete` deletes none it
-      // created, so this id set is the whole of the change.
-      // `select()` drops the projection: writing back needs every field.
-      let before;
-      stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
-      const wait = this.#optimistic(() => {
-        before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
-        count = this.#local.run(...stmt).count ?? 0;
+      const before = named.length ? this.#local.run(...from(c).where('id', 'in', named).toFenecQL()).rows ?? [] : [];
+      const held = new Set(before.map((r) => r.id));
+      const temps = [];
+      const fresh = [];
+      let next = this.#nextTemp;
+      const local = docs.map((d) => {
+        if (d.id != null) {
+          if (!held.has(d.id)) fresh.push(d.id);
+          return d;
+        }
+        const t = next++;
+        fresh.push(t);
+        if (key) temps.push([keyText(d[key]), t]);
+        const { id: _, ...rest } = d;
+        return { id: t, ...rest };
       });
-      if (wait) await wait;
-      undo = () => {
-        // An unconditional builder: `before` already carries *which* rows
-        // changed, by id. Re-applying the filter (and running into
-        // `insert`'s ban on filters) would be wrong.
-        if (before.length) this.#local.run(...from(collection).toInsert(before));
-      };
+      this.#local.run(...from(c).toInsert(local));
+      this.#nextTemp = next;
+      return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
     }
+    const stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
+    // `select()` drops the projection: writing back needs every field.
+    const before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
+    const count = this.#local.run(...stmt).count ?? 0;
+    const lines = [stmt];
+    if (key && before.length) {
+      const ids = new Set(before.map((r) => r.id));
+      const keys = this.#temps.filter((t) => t.collection === c && ids.has(t.temp)).map((t) => t.key);
+      if (keys.length) {
+        const k = from(c).where(key, 'in', keys);
+        lines.push(verb === 'update' ? k.toUpdate(arg) : k.toDelete());
+      }
+    }
+    return { lines, undo: { c, del: [], put: JSON.stringify(before) }, temps: [], count };
+  }
 
+  /**
+   * What `#apply` made, queued: kept in the replica's `_sync_queue` and
+   * `_sync_temps`, then sent -- by this tab when it leads, or by the one
+   * that does. Resolves with the rows it reached once the server has it.
+   */
+  #enqueue(applied) {
+    const lines = applied.flatMap((a) => a.lines);
+    const n = this.#nextN++;
+    const op = {
+      n,
+      path: lines.length === 1 ? '/query' : '/batch',
+      body: lines.map(ndjson).join('\n'),
+      key: `fenec-${newKey()}`,
+      undo: JSON.stringify(applied.map((a) => a.undo)),
+      label: lines[0][0].slice(0, 500),
+      count: applied.reduce((s, a) => s + a.count, 0),
+      done: null,
+    };
+    const p = new Promise((resolve, reject) => {
+      op.done = { resolve, reject };
+    });
+    this.#keep(op);
+    for (const a of applied) {
+      for (const [collection, key, temp] of a.temps) {
+        const t = { collection, key, temp, op: n, until: 0 };
+        this.#temps.push(t);
+        this.#saveTemp(t);
+      }
+    }
+    this.#queue.push(op);
     this.#touch();
+    this.#persistSoon();
+    if (this.#leader) this.#kick();
+    else this.#chan?.postMessage({ t: 'op', op: wire(op) });
+    return p;
+  }
 
-    if (this.#queue) {
-      this.#queue.ops.push(stmt);
-      this.#queue.undo.push(undo);
-      return count;
+  #keep(op) {
+    this.#local.run(PUT_OP, [op.n, op.path, op.body, op.key, op.undo, op.label]);
+  }
+
+  #saveTemp(t) {
+    this.#local.run(PUT_TEMP, [t.temp, t.collection, t.key, t.op, t.until]);
+  }
+
+  /** Puts back what writes did, the last first: each step's ids deleted, its rows written back. */
+  #undo(steps) {
+    for (const s of steps.reverse()) {
+      try {
+        this.#deleteLocal(s.c, s.del);
+        const rows = JSON.parse(s.put);
+        if (rows.length) this.#local.run(...from(s.c).toInsert(rows));
+      } catch (e) {
+        this.#onError?.(e);
+      }
     }
-    try {
-      const r = await this.#remote.run(...stmt);
-      return r.count ?? count;
-    } catch (e) {
-      undo();
-      this.#touch();
-      throw e;
-    }
+    this.#touch();
   }
 
   /**
@@ -2684,74 +2835,324 @@ export class FenecSync {
     }
   }
 
-  #rollback(undos) {
-    for (const u of undos.reverse()) {
-      try {
-        u();
-      } catch (e) {
-        this.#onError?.(e);
-      }
-    }
-    this.#touch();
-  }
-
   get #localExec() {
     return (sql, params) => this.#local.query(sql, params);
   }
 
   #deleteLocal(collection, ids) {
     if (ids.length === 0) return 0;
-    const q = from(collection).where('id', 'in', ids);
-    return this.#local.run(...q.toDelete()).count ?? 0;
+    return this.#local.run(...from(collection).where('id', 'in', ids).toDelete()).count ?? 0;
+  }
+
+  // ----------------------------------------------------------- driving
+
+  /** Asks for whatever is due: the schemas, the queue's next write, the streams. */
+  #kick() {
+    if (this.#closed || this.#offline) return;
+    if ([...this.#shapes.values()].some((s) => s.rebuild || !s.made)) {
+      this.#schemas().catch((e) => this.#onError?.(e));
+      return;
+    }
+    if (!this.#leader) return;
+    this.#pump().catch((e) => this.#onError?.(e));
+    if (this.#paused || (this.#flushing && this.#queue.length)) return;
+    for (const s of this.#shapes.values()) this.#connect(s);
+  }
+
+  /**
+   * Waits out the backoff for `attempt` -- 250 ms doubling to 15 s, 30%
+   * jitter on top, so a server back up is not met by every client at once
+   * -- then runs `then`. The timer does not hold up a Node process's exit.
+   */
+  #wait(attempt, then) {
+    const base = Math.min(250 * 2 ** Math.min(attempt, 10), 15000);
+    const w = {
+      t: setTimeout(() => {
+        this.#waits.delete(w);
+        if (!this.#closed) then();
+      }, base + Math.random() * base * 0.3),
+    };
+    w.t.unref?.();
+    this.#waits.add(w);
+  }
+
+  #setFault(message, status, connection) {
+    this.#fault = { message, status, connection };
+  }
+
+  #clearConnectionFault() {
+    if (this.#fault?.connection) this.#fault = null;
+  }
+
+  #wantToken() {
+    if (this.#paused) return;
+    this.#paused = true;
+    this.#setFault('the server refused the token (401): a fresh one is wanted', 401, true);
+    if (this.#tokenProvider) {
+      Promise.resolve()
+        .then(() => this.#tokenProvider())
+        .then((t) => t && !this.#closed && this.setToken(t), (e) => this.#onError?.(e));
+    }
+  }
+
+  /**
+   * The server's collections, made in the replica as it declares them --
+   * field order is part of the record encoding, and rows cannot be decoded
+   * if the two drift -- and made again when its schema changed.
+   */
+  async #schemas() {
+    if (this.#schemaBusy || this.#schemaWaiting || this.#paused) return;
+    this.#schemaBusy = true;
+    const [status, , body] = await this.#call('GET', '/collections', null, {});
+    this.#schemaBusy = false;
+    if (this.#closed) return;
+    if (status === 401) return this.#wantToken();
+    try {
+      if (status < 200 || status > 299) throw new FenecError(`could not read the server's collections: ${why(status, body)}`);
+      await this.#make(JSON.parse(body));
+      this.#schemaAttempt = 0;
+    } catch (e) {
+      this.#setFault(String(e.message ?? e), status, true);
+      this.#onError?.(e);
+      this.#schemaWaiting = true;
+      this.#wait(this.#schemaAttempt++, () => {
+        this.#schemaWaiting = false;
+        this.#kick();
+      });
+      return;
+    }
+    this.#kick();
+  }
+
+  async #make(all) {
+    for (const s of this.#shapes.values()) {
+      if (s.made && !s.rebuild) continue;
+      const schema = all.find((x) => x.name === s.collection);
+      if (!schema) throw new FenecError(`the server has no \`${s.collection}\` collection`);
+      const again = s.rebuild;
+      await this.#remake(s, schema);
+      if (again) this.#relay({ t: 'schema', c: s.collection, s: schema });
+    }
+  }
+
+  /**
+   * `shape`'s collection made as `schema` says: anew, or again over the one
+   * the replica holds -- its rows kept in the fields that are left, so it
+   * reads as it did until the seed writes the shape over it, and the rows of
+   * writes not yet answered stay as a seed keeps them.
+   */
+  async #remake(s, schema) {
+    const c = s.collection;
+    const had = this.#local.schemas().some((x) => x.name === c);
+    if (had) {
+      const fields = new Set(schema.fields.map((f) => f.name));
+      const rows = (this.#local.run(`get ${c}`).rows ?? []).map((r) =>
+        Object.fromEntries(Object.entries(r).filter(([k, v]) => (k === 'id' || fields.has(k)) && v !== null)),
+      );
+      this.#local.run(`drop collection ${c}`);
+      this.#local.run(schemaDDL(schema));
+      await this.#insertChunked(c, rows);
+      // The code's schema checked again: the server's changed under it.
+      const d = declared.get(this);
+      if (d) checked(this.#remote, d, 'follow').catch((e) => this.#onError?.(e));
+    } else {
+      this.#local.run(schemaDDL(schema));
+    }
+    s.fields = new Set(schema.fields.map((f) => f.name));
+    s.made = true;
+    s.rebuild = false;
+    this.#touch();
+    this.#persistSoon();
+  }
+
+  /**
+   * The server's schema is not the replica's: a change said so, or rows came
+   * with a field the replica has not got. The stream ends, the collection is
+   * made again from `GET /collections`, and the shape is sent whole -- a
+   * rename or a drop is not told apart from the rows.
+   */
+  #refresh(s) {
+    this.#cancel(s);
+    s.rebuild = true;
+    s.fresh = true;
+    this.#kick();
+  }
+
+  /** Whether every field `rows` name is one the replica's collection has. */
+  #fits(s, rows) {
+    for (const r of rows) for (const k in r) if (k !== 'id' && !s.fields.has(k)) return false;
+    return true;
+  }
+
+  /** Sends the queue's next write: one at a time and in order, so the server ends holding the last. */
+  async #pump() {
+    if (this.#sending || this.#sendWaiting || this.#paused || this.#offline || this.#closed) return;
+    const op = this.#queue[0];
+    if (!op) return;
+    this.#sending = true;
+    const type = op.path === '/batch' ? 'application/x-ndjson' : 'application/json';
+    const [status, seq, body] = await this.#call('POST', op.path, op.body, { 'content-type': type, 'idempotency-key': op.key });
+    this.#sending = false;
+    if (this.#closed) return;
+    if (status >= 200 && status < 300) {
+      this.#sendAttempt = 0;
+      this.#clearConnectionFault();
+      this.#landed(op, seq);
+    } else if (status === 401) {
+      this.#wantToken();
+    } else if (status === 0 || status === 408 || status === 429 || status >= 500) {
+      // No answer, or one that says to come back: the write stays, and goes
+      // again under its key, which the server answers as the first time if
+      // the first reached it.
+      this.#setFault(why(status, body), status, true);
+      this.#flushing = false;
+      this.#sendWaiting = true;
+      this.#wait(this.#sendAttempt++, () => {
+        this.#sendWaiting = false;
+        this.#kick();
+      });
+    } else {
+      this.#refused(op, status, why(status, body));
+    }
+    this.#kick();
+  }
+
+  /** A request's `[status, Fenec-Seq, body]`; status 0 when none came. */
+  async #call(method, path, body, headers) {
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    try {
+      const res = await this.#fetch(`${this.#url}${path}`, { method, headers, body, signal: this.#abort.signal });
+      return [res.status, Number(res.headers?.get?.('fenec-seq')) || 0, await res.text()];
+    } catch (e) {
+      return [0, 0, String(e?.message ?? e)];
+    }
+  }
+
+  /** The server took `op`: it leaves the queue, and its rows wait for the server's copies. */
+  #landed(op, seq) {
+    const at = this.#queue.indexOf(op);
+    if (at < 0) return;
+    this.#queue.splice(at, 1);
+    this.#local.run('del _sync_queue where id = $1', [op.n]);
+    for (const t of this.#temps) {
+      if (t.op !== op.n) continue;
+      t.op = 0;
+      t.until = seq || NO_SEQ;
+      this.#saveTemp(t);
+    }
+    // A stream already past it: the server's copy came, or the shape does
+    // not hold the row.
+    for (const s of this.#shapes.values()) this.#dropPassed(s.collection, s.cursor);
+    this.#settled(op, { t: 'ans', key: op.key, status: 200, seq });
+    op.done?.resolve(op.count);
+  }
+
+  /** The server refused `op`: what it did is put back, the last statement's first, and the app told. */
+  #refused(op, status, message) {
+    const at = this.#queue.indexOf(op);
+    if (at < 0) return;
+    this.#queue.splice(at, 1);
+    this.#undo(JSON.parse(op.undo));
+    this.#local.run('del _sync_queue where id = $1', [op.n]);
+    const gone = this.#temps.filter((t) => t.op === op.n).map((t) => t.temp);
+    this.#deleteLocal('_sync_temps', gone);
+    this.#temps = this.#temps.filter((t) => t.op !== op.n);
+    this.#setFault(message, status, false);
+    this.#settled(op, { t: 'ans', key: op.key, status, message });
+    const e = Object.assign(new FenecError(message), { status, query: op.label });
+    if (!op.foreign) this.#onRefused?.(e);
+    if (op.done) op.done.reject(e);
+  }
+
+  #settled(op, ans) {
+    if (!this.#queue.length) {
+      this.#flushing = false;
+      for (const r of this.#pushed.splice(0)) r();
+    }
+    this.#touch();
+    this.#persistSoon();
+    this.#relay(ans);
+  }
+
+  /**
+   * The temporary rows of `collection` the server answered for at or before
+   * `cursor`: the server's copy is here by now, or the shape does not hold it.
+   */
+  #dropPassed(collection, cursor) {
+    const gone = this.#temps.filter((t) => t.collection === collection && t.op === 0 && t.until <= cursor);
+    if (!gone.length) return;
+    const ids = gone.map((t) => t.temp);
+    this.#deleteLocal(collection, ids);
+    this.#deleteLocal('_sync_temps', ids);
+    this.#temps = this.#temps.filter((t) => !gone.includes(t));
   }
 
   // ---------------------------------------------------------- applying
 
   /**
-   * The seed: "this is the whole collection". It clears first -- the one
-   * collection per shape rule exists precisely to make that possible.
+   * The seed: the whole shape. What the replica holds of the collection and
+   * the seed does not is deleted -- written over rather than cleared first,
+   * so a row that stayed keeps its vector's node -- except the rows of
+   * writes the server has not answered yet, and of those it answered after
+   * the seed was taken, whose copies come later.
    */
-  async #applySeed(shape, msg) {
+  async #applySeed(s, msg) {
     const rows = msg.rows ?? [];
-    this.#local.run(...from(shape.collection).toDelete({ all: true }));
-    this.#pending.get(shape.collection).clear();
-    await this.#insertChunked(shape.collection, rows);
-    shape.cursor = msg.seq ?? 0;
-    shape.seeded = true;
-    this.#afterApply(shape);
+    const seq = msg.seq ?? 0;
+    if (!this.#fits(s, rows)) return this.#refresh(s);
+    const c = s.collection;
+    const held = (this.#local.run(`get ${c} select id`).rows ?? []).map((r) => r.id);
+    const came = new Set(rows.map((r) => r.id));
+    this.#reconcile(s, rows);
+    const keep = new Set(this.#temps.filter((t) => t.collection === c && (t.op !== 0 || t.until > seq)).map((t) => t.temp));
+    this.#deleteLocal(c, held.filter((id) => !came.has(id) && !keep.has(id)));
+    const dropped = this.#temps.filter((t) => t.collection === c && t.op === 0 && t.until <= seq);
+    this.#deleteLocal('_sync_temps', dropped.map((t) => t.temp));
+    this.#temps = this.#temps.filter((t) => !dropped.includes(t));
+    await this.#insertChunked(c, rows);
+    s.cursor = seq;
+    s.seeded = true;
+    s.fresh = false;
+    this.#afterApply(s);
+    return true;
   }
 
-  async #applyChange(shape, msg) {
+  /** A change: the rows that changed as they are now, and the ids that left the shape. */
+  async #applyChange(s, msg) {
     const puts = msg.puts ?? [];
-    const dels = msg.dels ?? [];
-    await this.#reconcile(shape, puts);
-    this.#deleteLocal(shape.collection, dels);
-    await this.#insertChunked(shape.collection, puts);
-    shape.cursor = msg.seq ?? shape.cursor;
-    this.#afterApply(shape);
+    if (msg.schema || !this.#fits(s, puts)) return this.#refresh(s);
+    this.#reconcile(s, puts);
+    this.#deleteLocal(s.collection, msg.dels ?? []);
+    await this.#insertChunked(s.collection, puts);
+    const seq = msg.seq ?? s.cursor;
+    this.#dropPassed(s.collection, seq);
+    s.cursor = Math.max(seq, s.cursor);
+    this.#afterApply(s);
+    return true;
   }
 
   /**
-   * When a row from the server carries the same key as a pending
-   * optimistic row, the one with the temporary id is dropped. The
-   * counterpart of TanStack DB's `txid`; here the handle is a **business
-   * key**, because the id space belongs to the server and the client
-   * cannot know it in advance.
+   * When a row from the server carries the key of a pending optimistic row,
+   * the one with the temporary id is dropped. The counterpart of TanStack
+   * DB's `txid`; here the handle is a **business key**, because the id space
+   * belongs to the server and the client cannot know it in advance.
    */
-  async #reconcile(shape, rows) {
-    if (!shape.key || rows.length === 0) return;
-    const pend = this.#pending.get(shape.collection);
-    if (pend.size === 0) return;
+  #reconcile(s, rows) {
+    if (!s.key || rows.length === 0) return;
+    const c = s.collection;
+    if (!this.#temps.some((t) => t.collection === c)) return;
     const drop = [];
     for (const r of rows) {
-      const k = r[shape.key];
-      if (k === undefined || k === null) continue;
-      const temp = pend.get(String(k));
-      if (temp === undefined) continue;
-      pend.delete(String(k));
-      if (temp !== r.id) drop.push(temp);
+      const k = r[s.key];
+      if (k == null) continue;
+      const t = this.#temps.find((x) => x.collection === c && x.key === keyText(k));
+      if (t && t.temp !== r.id) drop.push(t);
     }
-    this.#deleteLocal(shape.collection, drop);
+    if (!drop.length) return;
+    const ids = drop.map((t) => t.temp);
+    this.#deleteLocal(c, ids);
+    this.#deleteLocal('_sync_temps', ids);
+    this.#temps = this.#temps.filter((t) => !drop.includes(t));
   }
 
   /**
@@ -2764,12 +3165,13 @@ export class FenecSync {
     }
   }
 
-  #afterApply(shape) {
-    shape.error = null;
+  /** The cursor kept beside the rows it stands for. */
+  #afterApply(s) {
+    this.#local.run(PUT_SHAPE, [s.row, s.collection, s.fingerprint, s.cursor, s.seeded]);
+    s.error = null;
     this.#touch();
-    this.#schedulePersist();
-    if (!this.#allSeeded) return;
-    this.#resolveReady();
+    this.#persistSoon();
+    if (this.#allSeeded) this.#resolveReady();
   }
 
   get #allSeeded() {
@@ -2816,43 +3218,85 @@ export class FenecSync {
   // ------------------------------------------------------------ stream
 
   async start() {
-    for (const shape of this.#shapes.values()) {
-      await this.#ensureSchema(shape.collection);
-    }
     await this.#loadPersist();
+    for (const text of SYNC_STATE) this.#local.run(text);
+    this.#load();
+    const schemas = this.#local.schemas();
+    for (const s of this.#shapes.values()) {
+      const schema = schemas.find((x) => x.name === s.collection);
+      s.made = !!schema;
+      s.fields = new Set(schema?.fields.map((f) => f.name));
+    }
+    this.#flushing = this.#queue.length > 0;
+    if (this.#allSeeded) this.#resolveReady();
+    // The replica as it was kept: a live query asked before it ran on the
+    // empty one.
+    this.#lives.stale();
+    this.#touch();
+    const on = globalThis.addEventListener;
+    if (on) {
+      this.#listeners = [['online', () => this.setOnline(true)], ['offline', () => this.setOnline(false)]];
+      for (const [k, f] of this.#listeners) on.call(globalThis, k, f);
+    }
     this.#elect();
     return this;
   }
 
-  /**
-   * The schema is fetched from the server and recreated locally **exactly**
-   * as is: field order is part of the record encoding, and rows cannot be
-   * decoded if the two sides drift apart. That is also precisely why
-   * writing the schema out a second time by hand is not wanted.
-   */
-  async #ensureSchema(collection) {
-    if (this.#local.schemas().some((s) => s.name === collection)) return;
-    const all = await this.#get('/collections');
-    const schema = all.find((s) => s.name === collection);
-    if (!schema) throw new FenecError(`the server has no \`${collection}\` collection`);
-    this.#local.run(schemaDDL(schema));
+  /** What the replica kept: each shape's cursor, the queue and the temporary rows. */
+  #load() {
+    let top = 0;
+    for (const r of this.#local.run('get _sync_shapes').rows ?? []) {
+      top = Math.max(top, r.id);
+      const s = this.#shapes.get(r.collection);
+      if (!s) continue;
+      s.row = r.id;
+      // Another server, filter or projection holds other rows: seeded again.
+      if (r.shape === s.fingerprint) {
+        s.cursor = r.cursor;
+        s.seeded = r.seeded === true;
+      }
+    }
+    for (const s of this.#shapes.values()) if (!s.row) s.row = ++top;
+    this.#queue = (this.#local.run('get _sync_queue').rows ?? []).sort((a, b) => a.id - b.id).map((r) => ({
+      n: r.id,
+      path: r.path,
+      body: r.body,
+      key: r.key,
+      undo: r.undo,
+      label: r.label,
+      count: 0,
+      done: null,
+    }));
+    this.#nextN = (this.#queue.at(-1)?.n ?? 0) + 1;
+    this.#temps = (this.#local.run('get _sync_temps').rows ?? []).map((r) => ({
+      collection: r.collection,
+      key: r.key,
+      temp: r.id,
+      op: r.op,
+      until: r.until,
+    }));
+    this.#nextTemp = Math.max(TEMP_BASE, ...this.#temps.map((t) => t.temp + 1));
   }
 
   /**
    * Multiple tabs: each tab would have its own WASM instance and its own
    * subscription -- N copies, N connections. `navigator.locks` picks a
    * **single leader**; the others take the same batches over
-   * `BroadcastChannel` and apply them to their own local copy. The apply
-   * path is the same either way, only the transport differs.
+   * `BroadcastChannel` and apply them to their own local copy.
    *
-   * Writes do not go through the leader: every tab sends its own writes
-   * straight to the server. Leadership only concerns the *read* stream.
+   * Only the leader sends writes. Every tab applies its own at once and
+   * keeps it in its queue, as the leader does; a follower hands it to the
+   * leader, which keeps it in its own queue -- persisted with its replica --
+   * sends it under its key, and tells every tab the answer, which the tab
+   * that made the write applies to its copy. A new leader is handed every
+   * follower's queue again, and the queue its predecessor persisted; the
+   * key makes a write sent twice land once.
    */
   #elect() {
     const name = `fenecdb:${this.#url}:${[...this.#shapes.keys()].join(',')}`;
     if (this.#leaderMode === false || !globalThis.BroadcastChannel || !this.#locks) {
       // A single tab (or Node): no leader election needed.
-      this.#startStreams();
+      this.#kick();
       return;
     }
     this.#leader = false;
@@ -2865,13 +3309,44 @@ export class FenecSync {
     // downloading its own seed at that moment; it ignores the request then,
     // and a one-shot hello would go unanswered forever.
     this.#hello();
-    this.#locks.request(name, { mode: 'exclusive' }, () => {
+    this.#kick();
+    this.#locks.request(name, { mode: 'exclusive' }, async () => {
       if (this.#closed) return;
-      this.#leader = true;
-      this.#startStreams();
-      // The lock stays with us until the tab closes: a promise that never settles.
-      return new Promise(() => {});
+      await this.#lead();
+      // The lock stays with us until the tab closes.
+      return new Promise((r) => {
+        this.#release = r;
+      });
     });
+  }
+
+  /** This tab leads now: the queue its predecessor kept is taken over, and the others asked for theirs. */
+  async #lead() {
+    if (this.#persistKey && globalThis.indexedDB && !kept.has(this.#local)) {
+      const other = sibling(this.#local);
+      try {
+        if (await restore(other, this.#persistKey, { cryptoKey: this.#cryptoKey })) {
+          for (const r of other.run('get _sync_queue').rows ?? []) this.#adopt(r);
+        }
+      } catch (e) {
+        this.#onError?.(e);
+      } finally {
+        other.close();
+      }
+    }
+    this.#leader = true;
+    this.#flushing = this.#queue.length > 0;
+    this.#chan.postMessage({ t: 'leader' });
+    this.#kick();
+  }
+
+  /** Another tab's write, kept and sent here: nothing of it to put back in this replica. */
+  #adopt(o) {
+    if (this.#queue.some((q) => q.key === o.key)) return;
+    const op = { n: this.#nextN++, path: o.path, body: o.body, key: o.key, undo: '[]', label: o.label, count: 0, done: null, foreign: true };
+    this.#keep(op);
+    this.#queue.push(op);
+    this.#persistSoon();
   }
 
   /** Repeats the hello until the leader is seeded. */
@@ -2882,107 +3357,83 @@ export class FenecSync {
     t.unref?.();
   }
 
-  #startStreams() {
-    for (const shape of this.#shapes.values()) {
-      this.#loop(shape).catch((e) => this.#onError?.(e));
-    }
+  /** Opens `s`'s stream, unless one is open or waits to be. */
+  #connect(s) {
+    if (s.stream || s.waiting || this.#paused || this.#offline || this.#closed) return;
+    const ctl = new AbortController();
+    s.stream = ctl;
+    this.#stream(s, ctl).catch((e) => this.#onError?.(e));
   }
 
-  async #loop(shape) {
-    let delay = 250;
-    while (!this.#closed) {
-      try {
-        const res = await this.#fetch(this.#streamUrl(shape), {
-          headers: this.#headers(),
-          signal: this.#abort.signal,
-        });
-        if (!res.ok || !res.body) {
-          const text = await res.text().catch(() => '');
-          throw new FenecError(`could not open subscription (${res.status}): ${text.slice(0, 200)}`);
-        }
-        shape.connected = true;
-        shape.error = null;
-        delay = 250;
-        for await (const ev of sseEvents(res)) {
-          if (this.#closed) break;
-          await this.#onEvent(shape, ev);
-        }
-      } catch (e) {
-        if (this.#closed || e?.name === 'AbortError') return;
-        shape.error = e;
-        this.#onError?.(e);
+  /** Ends `s`'s stream from this side. */
+  #cancel(s) {
+    s.stream?.abort();
+    s.stream = null;
+    s.connected = false;
+  }
+
+  async #stream(s, ctl) {
+    let reason = 'the server closed it';
+    try {
+      const res = await this.#fetch(this.#streamUrl(s), { headers: this.#headers(), signal: ctl.signal });
+      if (s.stream !== ctl) return;
+      if (res.status === 401) {
+        this.#cancel(s);
+        return this.#wantToken();
       }
-      shape.connected = false;
-      if (this.#closed) return;
-      // Exponential backoff + jitter: when the server restarts, not every
-      // client should come back at the same instant.
-      await sleep(delay + Math.random() * delay * 0.3);
-      delay = Math.min(delay * 2, 15000);
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '');
+        throw new FenecError(`could not open the subscription to \`${s.collection}\`: ${why(res.status, text)}`);
+      }
+      s.connected = true;
+      s.attempt = 0;
+      this.#clearConnectionFault();
+      for await (const ev of sseEvents(res)) {
+        if (s.stream !== ctl) return;
+        await this.#onEvent(s, ev);
+      }
+    } catch (e) {
+      if (s.stream !== ctl) return;
+      reason = String(e?.message ?? e);
+      s.error = e;
+      this.#onError?.(e);
     }
+    if (s.stream !== ctl) return;
+    this.#cancel(s);
+    this.#setFault(`the subscription to \`${s.collection}\` ended: ${reason}`, 0, true);
+    s.waiting = true;
+    this.#wait(s.attempt++, () => {
+      s.waiting = false;
+      this.#kick();
+    });
   }
 
-  async #onEvent(shape, ev) {
+  async #onEvent(s, ev) {
     const msg = ev.data ? JSON.parse(ev.data) : {};
     if (ev.name === 'seed') {
-      await this.#applySeed(shape, msg);
-      this.#relay({ t: 'seed', c: shape.collection, ...msg });
-    } else if (ev.name === 'change') {
-      await this.#applyChange(shape, msg);
-      this.#relay({ t: 'change', c: shape.collection, ...msg });
+      if (await this.#applySeed(s, msg)) this.#relay({ t: 'seed', c: s.collection, ...msg });
+    } else if (ev.name === 'change' && s.seeded) {
+      if (await this.#applyChange(s, msg)) this.#relay({ t: 'change', c: s.collection, ...msg });
     } else if (ev.name === 'error') {
       throw new FenecError(msg.error ?? 'subscription error');
     }
   }
 
-  #streamUrl(shape) {
+  #streamUrl(s) {
     const p = new URLSearchParams();
-    for (const [k, v] of shape.params) p.append(k, v);
-    if (shape.select) p.set('select', shape.select.join(','));
-    // If we already have a seed, resume where we left off: the server
-    // reseeds on its own when the cursor is too old.
-    if (shape.seeded) p.set('since', String(shape.cursor));
+    for (const [k, v] of s.params) p.append(k, v);
+    if (s.select) p.set('select', s.select.join(','));
+    // Seeded once, it goes on from where it stopped: the server seeds it
+    // again itself when the cursor is past its ring.
+    if (s.seeded && !s.fresh) p.set('since', String(s.cursor));
     const qs = p.toString();
-    return `${this.#url}/${encodeURIComponent(shape.collection)}/changes${qs ? `?${qs}` : ''}`;
+    return `${this.#url}/${encodeURIComponent(s.collection)}/changes${qs ? `?${qs}` : ''}`;
   }
 
   #headers() {
     const h = { accept: 'text/event-stream' };
     if (this.#token) h.authorization = `Bearer ${this.#token}`;
     return h;
-  }
-
-  async #get(path) {
-    return this.#call('GET', path, null, null);
-  }
-
-  async #post(path, body, type) {
-    return this.#call('POST', path, body, type);
-  }
-
-  async #call(method, path, body, type) {
-    const headers = {};
-    if (type) headers['content-type'] = type;
-    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
-    const res = await this.#fetch(`${this.#url}${path}`, {
-      method,
-      headers,
-      body,
-      signal: this.#abort.signal,
-    });
-    const text = await res.text();
-    let out;
-    try {
-      out = text ? JSON.parse(text) : null;
-    } catch {
-      throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
-    }
-    if (!res.ok) {
-      const e = new FenecError(out?.error ?? `HTTP ${res.status}`);
-      // A half-finished batch: how many were applied rides on the error.
-      if (typeof out?.completed === 'number') e.completed = out.completed;
-      throw e;
-    }
-    return out;
   }
 
   // -------------------------------------------------------------- tabs
@@ -2992,79 +3443,98 @@ export class FenecSync {
   }
 
   async #onRelay(msg) {
-    if (msg.t === 'hello') {
-      if (!this.#leader) return;
-      // Hand the new tab what we have: it does not need to open its own
-      // subscription.
-      for (const shape of this.#shapes.values()) {
-        if (!shape.seeded) continue;
-        const rows = await from(shape.collection).bind(this.#localExec).rows();
-        this.#chan.postMessage({ t: 'seed', c: shape.collection, rows, seq: shape.cursor });
+    if (this.#leader) {
+      if (msg.t === 'op') {
+        this.#adopt(msg.op);
+        this.#kick();
+      } else if (msg.t === 'hello') {
+        // Hand the new tab what we have, its own rows not among it: a
+        // temporary id is this replica's alone.
+        for (const s of this.#shapes.values()) {
+          if (!s.seeded) continue;
+          const rows = await from(s.collection).where('id', '<', TEMP_BASE).bind(this.#localExec).rows();
+          this.#chan.postMessage({ t: 'seed', c: s.collection, rows, seq: s.cursor });
+        }
+        this.#chan.postMessage({ t: 'leader' });
       }
       return;
     }
-    if (this.#leader) return; // the leader is fed by its own stream
-    const shape = this.#shapes.get(msg.c);
-    if (!shape) return;
-    if (msg.t === 'seed') {
-      await this.#applySeed(shape, msg);
+    if (msg.t === 'leader') {
+      for (const op of this.#queue) this.#chan.postMessage({ t: 'op', op: wire(op) });
       return;
     }
+    if (msg.t === 'ans') {
+      const op = this.#queue.find((o) => o.key === msg.key);
+      if (!op) return;
+      if (msg.status < 300) this.#landed(op, msg.seq);
+      else this.#refused(op, msg.status, msg.message);
+      return;
+    }
+    const s = this.#shapes.get(msg.c);
+    if (!s) return;
+    if (msg.t === 'schema') await this.#remake(s, msg.s);
+    else if (msg.t === 'seed') await this.#applySeed(s, msg);
     // An incremental diff cannot be applied to an unseeded copy: we would
-    // be left with the changed rows only, the rest missing. It is skipped
-    // until the seed arrives, and the cursor is not advanced either.
-    if (msg.t === 'change' && shape.seeded) await this.#applyChange(shape, msg);
+    // be left with the changed rows only, the rest missing.
+    else if (msg.t === 'change' && s.seeded) await this.#applyChange(s, msg);
   }
 
   // ------------------------------------------------------- persistence
 
-  #schedulePersist() {
-    if (!this.#persistKey || this.#persistTimer) return;
-    this.#persistTimer = setTimeout(() => {
-      this.#persistTimer = null;
-      this.#savePersist().catch((e) => this.#onError?.(e));
-    }, 2000);
-    this.#persistTimer.unref?.();
-  }
-
-  async #savePersist() {
-    if (!this.#persistKey || !globalThis.indexedDB) return;
-    await persist(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
-    await putState(`${this.#persistKey}:cursors`, {
-      cursors: Object.fromEntries(
-        [...this.#shapes.values()].map((s) => [s.collection, s.cursor]),
-      ),
-    });
+  /**
+   * Stores the replica now -- its writes since the last time, a chunk --
+   * with the sync's own collections in it: a write is kept the moment it
+   * is made. One store at a time, the next gathering what came meanwhile.
+   * The leader's alone: the other tabs' copies are fed by it.
+   */
+  #persistSoon() {
+    if (!this.#persistKey || !globalThis.indexedDB || !this.#leader || kept.has(this.#local)) return;
+    if (this.#persisting) {
+      this.#persistAgain = true;
+      return;
+    }
+    this.#persisting = (async () => {
+      do {
+        this.#persistAgain = false;
+        await persist(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
+      } while (this.#persistAgain && !this.#closed);
+    })()
+      .catch((e) => this.#onError?.(e))
+      .finally(() => {
+        this.#persisting = null;
+      });
   }
 
   /**
-   * Restores the previous session's image. The cursor is stored alongside
-   * the image, so the client is not reseeded from scratch but resumes
-   * where it stopped -- as long as the cursor is not behind the server's horizon.
+   * Restores the previous session's image: the replica, its cursors and the
+   * writes it had not sent, which go first.
    */
   async #loadPersist() {
-    if (!this.#persistKey || !globalThis.indexedDB) return;
+    if (!this.#persistKey || !globalThis.indexedDB || kept.has(this.#local)) return;
     try {
-      if (!(await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey }))) return;
-      const state = await getState(`${this.#persistKey}:cursors`);
-      for (const shape of this.#shapes.values()) {
-        const cursor = state?.cursors?.[shape.collection];
-        if (typeof cursor === 'number') {
-          shape.cursor = cursor;
-          shape.seeded = true;
-        }
-      }
-      // The replica as it was kept: a live query asked before it ran on
-      // the empty one.
-      this.#lives.stale();
-      this.#touch();
-      if (this.#allSeeded) this.#resolveReady();
+      await restore(this.#local, this.#persistKey, { cryptoKey: this.#cryptoKey });
     } catch (e) {
       // A corrupt or incompatible cache: reseed from scratch, not an error.
       this.#onError?.(e);
     }
   }
+}
 
+/** A refusal's words: the server's `{"error": ..}`, or what the transport said. */
+function why(status, body) {
+  try {
+    const e = JSON.parse(body)?.error;
+    if (e) return e;
+  } catch {
+    /* not JSON */
+  }
+  if (status === 0) return body || 'the server could not be reached';
+  return `HTTP ${status}: ${String(body).slice(0, 200)}`;
+}
+
+/** What another tab needs of a write to send it. */
+function wire(op) {
+  return { path: op.path, body: op.body, key: op.key, label: op.label };
 }
 
 /** A batch line: each line is exactly a `POST /query` body. */
@@ -3072,22 +3542,35 @@ function ndjson([sql, params]) {
   return JSON.stringify({ query: sql, params });
 }
 
-function normalizeShape(raw) {
+function normalizeShape(raw, url) {
   const spec = raw instanceof Query ? { collection: raw.collection } : raw;
   if (!isSpec(spec) || typeof spec.collection !== 'string') {
     throw new FenecError('a shape must be `{ collection, where?, select?, key? }`');
   }
   const collection = ident(nameOf(spec.collection), 'collection');
+  if (collection.startsWith('_sync_')) throw new FenecError(`\`${collection}\` is the sync's own collection`);
   const select = spec.select ? [...new Set(['id', ...spec.select.map((c) => ident(c))])] : null;
+  const params = shapeParams(spec.where);
   return {
     collection,
     key: spec.key ? ident(spec.key) : null,
     select,
-    params: shapeParams(spec.where),
+    params,
+    // The server, the filter and the projection, as the native core writes
+    // them: a replica opened with another holds rows it should not.
+    fingerprint: `${url}|${params.map(([k, v]) => `${k}=${v}&`).join('')}${select ? `|${select.join(',')}` : ''}`,
+    row: 0,
     cursor: 0,
     seeded: false,
     connected: false,
     error: null,
+    stream: null,
+    waiting: false,
+    attempt: 0,
+    made: false,
+    fields: new Set(),
+    rebuild: false,
+    fresh: false,
   };
 }
 
@@ -3097,11 +3580,15 @@ function normalizeShape(raw) {
  * - `url`      server root (`fenec-server --http`)
  * - `shapes`   `[{ collection, where?, select?, key? }]`
  * - `local`    an existing `Fenec`; otherwise opened from the `wasm` path,
- *              its collation data from `collation` (`Fenec.open`)
- * - `token`    `Authorization: Bearer`
- * - `persist`  IndexedDB key: the image **and the cursors** are stored
+ *              its collation data from `collation` (`Fenec.open`). One kept
+ *              in a file (`openFile`) keeps the replica, its cursors and
+ *              its unsent writes there.
+ * - `token`    `Authorization: Bearer`; `tokenProvider` an async function
+ *              asked for a new one when the server answers 401
+ * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes
  * - `cryptoKey` an AES-GCM `CryptoKey` the image and its chunks are sealed
- *              with (`persist`); the cursors, numbers alone, are not
+ *              with (`persist`)
+ * - `onRefused` told of each write the server refused, which was put back
  * - `leader`   `false` turns off multi-tab leader election
  * - `locks`    lock manager (defaults to `navigator.locks`)
  */
@@ -3114,4 +3601,3 @@ export async function sync(opts = {}) {
   if (opts.schema) declared.set(replica, opts);
   return replica.start();
 }
-

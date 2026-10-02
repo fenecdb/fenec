@@ -1,9 +1,15 @@
-//! The sync core driven by scripted server event sequences: a server in
-//! process answering as fenec-http does -- `/collections`, `/query` and
-//! `/batch` under an `Idempotency-Key`, the change stream's seeds and
-//! changes from the engine's own ring -- and a network the test cuts,
-//! slows and loses answers on. Nothing here does I/O: every action the
-//! core asks for is performed by the test, as a binding performs it.
+//! The sync core against a server in process answering as fenec-http
+//! does -- `/collections`, `/query` and `/batch` under an
+//! `Idempotency-Key`, the change stream's seeds and changes from the
+//! engine's own ring -- and a network the test cuts, slows and loses
+//! answers on. Nothing here does I/O: every action the core asks for is
+//! performed by the test, as a binding performs it.
+//!
+//! What a replica does is `integrations/sync-scenarios.json`, which
+//! `scenarios.rs` runs here and the browser's tests run against
+//! `FenecSync`; what stays here needs the engine on the other side -- a
+//! write made once though sent twice, a replica in a file reopened -- or is
+//! the native API's alone.
 
 use fenec_abi::sync::{Sync, TEMP_BASE};
 use fenec_core::json;
@@ -47,10 +53,6 @@ impl Server {
             runs: 0,
             streams: Vec::new(),
         }
-    }
-
-    fn run(&mut self, sql: &str) {
-        self.db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
     }
 
     fn rows(&self, sql: &str) -> Vec<Row> {
@@ -473,175 +475,6 @@ impl World {
 }
 
 #[test]
-fn the_seed_fills_the_replica_with_the_shape() {
-    let w = World::new();
-    // The schema came from the server, the rows from the seed: only what
-    // the shape holds.
-    assert_eq!(w.requests, [format!("{URL}/collections")]);
-    assert_eq!(w.streams, [format!("{URL}/tasks/changes?status=eq.open")]);
-    assert_eq!(w.titles(), ["one", "two"]);
-    assert_eq!(w.state(), "online");
-    let s = w.status();
-    let shapes = fenec_abi::sync::shape::member(&s, "shapes").unwrap();
-    assert!(json::to_string(shapes).contains(&format!("\"cursor\":{}", w.server.db.change_seq())));
-}
-
-#[test]
-fn changes_land_and_a_row_leaving_the_shape_goes() {
-    let mut w = World::new();
-    w.server
-        .run(r#"put tasks {key: "d", title: "four", status: "open", priority: 9}"#);
-    w.deliver();
-    assert_eq!(w.titles(), ["four", "one", "two"]);
-    w.server
-        .run(r#"set tasks {status: "closed"} where key = "a""#);
-    w.server.run(r#"set tasks {title: "TWO"} where key = "b""#);
-    w.deliver();
-    assert_eq!(w.titles(), ["TWO", "four"]);
-    // A server id, as the server has it.
-    let ids: Vec<u64> = w.local("get tasks").iter().map(|r| r.id).collect();
-    let server: Vec<u64> = w
-        .server
-        .rows(r#"get tasks where status = "open""#)
-        .iter()
-        .map(|r| r.id)
-        .collect();
-    assert_eq!(ids, server);
-}
-
-#[test]
-fn an_optimistic_insert_shows_at_once_and_is_matched_by_its_key() {
-    let mut w = World::new();
-    w.up = false;
-    let r = w
-        .write(
-            r#"put tasks {title: $1, status: "open", priority: 2}"#,
-            r#"["new"]"#,
-        )
-        .unwrap();
-    assert!(matches!(r, Response::Affected(1)));
-    // At once, under a temporary id, a key made for it.
-    let row = &w.local(r#"get tasks where title = "new""#)[0];
-    assert!(row.id >= TEMP_BASE as u64, "{}", row.id);
-    assert_eq!(w.pending(), 1);
-    w.up = true;
-    w.fire();
-    // Sent, landed, and its copy came over the stream: one row, the
-    // server's id, the key it was sent with.
-    w.deliver();
-    let rows = w.local(r#"get tasks where title = "new""#);
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].id < TEMP_BASE as u64);
-    assert_eq!(w.pending(), 0);
-    assert_eq!(w.server.rows(r#"get tasks where title = "new""#).len(), 1);
-    assert!(w.local("get _sync_temps").is_empty());
-    assert!(w.local("get _sync_queue").is_empty());
-}
-
-#[test]
-fn an_update_and_a_delete_land_and_echo() {
-    let mut w = World::new();
-    w.write(r#"set tasks {title: "ONE"} where key = "a""#, "")
-        .unwrap();
-    assert_eq!(w.titles(), ["ONE", "two"]);
-    w.write(r#"del tasks where key = "b""#, "").unwrap();
-    assert_eq!(w.titles(), ["ONE"]);
-    w.deliver();
-    assert_eq!(w.titles(), ["ONE"]);
-    assert_eq!(w.server.rows(r#"get tasks where title = "ONE""#).len(), 1);
-    assert_eq!(w.server.rows(r#"get tasks where key = "b""#).len(), 0);
-    assert_eq!(w.pending(), 0);
-}
-
-#[test]
-fn a_refused_write_is_put_back_and_told() {
-    let mut w = World::new();
-    // 409: the replica's `@unique` is a plain hash, the server's refuses.
-    w.write(r#"put tasks {key: "a", title: "dup", status: "open"}"#, "")
-        .unwrap();
-    assert_eq!(w.titles(), ["one", "two"], "put back once refused");
-    assert_eq!(w.refused.len(), 1);
-    assert_eq!(w.refused[0].0, 409);
-
-    // 403: an update the server will not take.
-    w.server.refuse = Some((403, "denied".into()));
-    w.write(r#"set tasks {title: "BROKEN"} where key = "a""#, "")
-        .unwrap();
-    assert_eq!(w.titles(), ["one", "two"], "the update put back");
-    assert_eq!(w.refused[1], (403, "denied".into()));
-
-    // 422: a delete.
-    w.server.refuse = Some((422, "another request under this key".into()));
-    w.write(r#"del tasks where key = "b""#, "").unwrap();
-    assert_eq!(w.titles(), ["one", "two"], "the delete put back");
-    assert_eq!(w.refused[2].0, 422);
-
-    // Several statements are one write: refused whole, put back whole,
-    // the last first.
-    w.server.refuse = Some((409, "no".into()));
-    w.write(
-        r#"set tasks {title: "x"} where key = "a"; set tasks {title: "y"} where key = "a"; del tasks where key = "b""#,
-        "",
-    )
-    .unwrap();
-    assert_eq!(w.titles(), ["one", "two"]);
-    let err = fenec_abi::sync::shape::member(&w.status(), "error")
-        .map(json::to_string)
-        .unwrap();
-    assert!(err.contains("409"), "{err}");
-    assert_eq!(w.pending(), 0);
-    assert!(w.local("get _sync_temps").is_empty());
-}
-
-#[test]
-fn a_dropped_connection_resumes_from_its_cursor() {
-    let mut w = World::new();
-    let cursor = w.server.db.change_seq();
-    w.drop_connections();
-    assert_ne!(w.state(), "online");
-    assert_eq!(w.timers.len(), 1, "a backoff, not a loop");
-    // Writes on the server while the client is away.
-    w.server
-        .run(r#"put tasks {key: "d", title: "four", status: "open"}"#);
-    w.server.run(r#"del tasks where key = "a""#);
-    w.fire();
-    assert_eq!(
-        w.streams.last().unwrap(),
-        &format!("{URL}/tasks/changes?status=eq.open&since={cursor}")
-    );
-    w.deliver();
-    assert_eq!(w.titles(), ["four", "two"]);
-    assert_eq!(w.state(), "online");
-}
-
-#[test]
-fn a_cursor_past_the_horizon_is_seeded_again() {
-    let mut w = World::new();
-    w.server.db.set_change_capacity(4);
-    w.drop_connections();
-    for i in 0..20 {
-        w.server.run(&format!(
-            r#"put tasks {{key: "k{i}", title: "t{i}", status: "open"}}"#
-        ));
-    }
-    w.server.run(r#"del tasks where key = "a""#);
-    w.fire();
-    // Resumed from the cursor, the ring no longer reaches it: the server
-    // seeds, and the replica is the shape again, the deleted row gone.
-    w.deliver();
-    assert_eq!(w.local("get tasks").len(), 21);
-    assert!(w.local(r#"get tasks where key = "a""#).is_empty());
-}
-
-#[test]
-fn two_shapes_over_one_collection_are_refused() {
-    let mut db = Database::new();
-    let shapes = r#"[{"collection":"tasks","where":{"status":"open"}},{"collection":"tasks","where":{"status":"closed"}}]"#;
-    let e = Sync::start(&mut db, &config(shapes)).err().unwrap();
-    assert!(e.to_string().contains("two shapes for `tasks`"), "{e}");
-}
-
-#[test]
 fn an_offline_write_lands_once_its_answer_lost() {
     let mut w = World::new();
     w.up = false;
@@ -670,25 +503,6 @@ fn an_offline_write_lands_once_its_answer_lost() {
     assert!(w.local(r#"get tasks where title = "offline""#)[0].id < TEMP_BASE as u64);
     assert_eq!(w.pending(), 0);
     assert_eq!(w.state(), "online");
-}
-
-#[test]
-fn a_write_offline_waits_for_the_streams_to_open_until_sent() {
-    // Writes left from before are sent before the streams open.
-    let mut w = World::new();
-    w.up = false;
-    w.drop_connections();
-    w.write(r#"set tasks {title: "ONE"} where key = "a""#, "")
-        .unwrap();
-    w.sync.signal(&mut w.client, r#"{"online":false}"#).unwrap();
-    w.settle();
-    w.up = true;
-    let before = w.streams.len();
-    w.sync.signal(&mut w.client, r#"{"online":true}"#).unwrap();
-    w.settle();
-    assert_eq!(w.pending(), 0);
-    assert_eq!(w.streams.len(), before + 1);
-    assert_eq!(w.server.rows(r#"get tasks where title = "ONE""#).len(), 1);
 }
 
 #[test]
@@ -742,52 +556,6 @@ fn a_restart_keeps_its_pending_writes_and_its_cursor() {
     assert_eq!(w.server.runs, 2);
     assert!(w.local("get tasks").iter().all(|r| r.id < TEMP_BASE as u64));
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn an_update_of_an_unsent_insert_reaches_it_by_its_key() {
-    let mut w = World::new();
-    w.up = false;
-    w.drop_connections();
-    w.write(r#"put tasks {title: "draft", status: "open"}"#, "")
-        .unwrap();
-    // The temporary id is the replica's alone: the server finds the row
-    // by the key it was sent with.
-    w.write(r#"set tasks {title: "final"} where title = "draft""#, "")
-        .unwrap();
-    w.up = true;
-    w.fire();
-    w.fire();
-    w.deliver();
-    assert_eq!(w.server.rows(r#"get tasks where title = "final""#).len(), 1);
-    assert_eq!(w.server.rows(r#"get tasks where title = "draft""#).len(), 0);
-    assert_eq!(w.titles(), ["final", "one", "two"]);
-}
-
-#[test]
-fn an_insert_outside_the_shape_leaves_no_temporary_row() {
-    let mut w = World::new();
-    w.write(r#"put tasks {title: "elsewhere", status: "closed"}"#, "")
-        .unwrap();
-    // Answered; the stream passes the write with a deletion of an id the
-    // replica never held, and the temporary row goes with it.
-    w.deliver();
-    assert!(w.local(r#"get tasks where title = "elsewhere""#).is_empty());
-    assert!(w.local("get _sync_temps").is_empty());
-}
-
-#[test]
-fn a_401_asks_for_a_token_and_goes_on_with_it() {
-    let mut w = World::new();
-    w.drop_connections();
-    w.server.refuse = Some((401, "unauthorized".into()));
-    w.write(r#"set tasks {title: "ONE"} where key = "a""#, "")
-        .unwrap();
-    assert_eq!(w.tokens, 1);
-    assert_eq!(w.pending(), 1);
-    w.sync.signal(&mut w.client, r#"{"token":"t0"}"#).unwrap();
-    w.settle();
-    assert_eq!(w.pending(), 0);
 }
 
 #[test]
