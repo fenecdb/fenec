@@ -32,9 +32,11 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    // The native library and the golden file, as `make kotlin-test` passes them.
+    // The native library, the golden file and the fenec-server the sync
+    // tests start, as `make kotlin-test` passes them.
     System.getenv("FENEC_LIBRARY")?.let { systemProperty("fenec.library", it) }
     System.getenv("FENEC_GOLDEN")?.let { systemProperty("fenec.golden", it) }
+    System.getenv("FENEC_SERVER")?.let { systemProperty("fenec.server", it) }
     testLogging {
         events("failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL

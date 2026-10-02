@@ -295,8 +295,9 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
-      # Linux with Gradle: run-tests.sh builds the library here and runs
-      # JUnit on the runner, no container.
+      # Linux with Gradle: run-tests.sh builds the library and the server
+      # the sync tests start here and runs JUnit on the runner, no
+      # container.
       - name: Kotlin (JVM tests)
         run: make kotlin-test
 
@@ -317,7 +318,8 @@ jobs:
           channel: stable
           cache: true
 
-      # The Dart package under Flutter's own Dart, then the plugin's test.
+      # The Dart package under Flutter's own Dart -- its sync tests against
+      # a server run-tests.sh builds -- then the plugin's test.
       - name: Dart and the Flutter plugin
         run: make dart-test
 
@@ -370,9 +372,12 @@ jobs:
       - name: Dynamic XCFramework (the Flutter plugin's)
         run: integrations/swift/build-xcframework.sh --dynamic --zip
 
-      # Package.swift takes the XCFramework just built.
+      # Package.swift takes the XCFramework just built; the sync tests
+      # start a fenec-server, kill it and start it again.
       - name: Swift (macOS)
-        run: swift test
+        run: |
+          cargo build -p fenec-server
+          swift test
 
       - name: Swift (iOS simulator)
         run: integrations/swift/test-ios.sh

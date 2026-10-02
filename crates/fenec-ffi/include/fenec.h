@@ -84,6 +84,39 @@ int32_t fenec_flush(uint64_t handle, char **out, size_t *out_len);
 /* The file written anew as an image, graphs and all. */
 int32_t fenec_checkpoint(uint64_t handle, char **out, size_t *out_len);
 
+/*
+ * Sync with a server: a state machine with no I/O of its own. The binding
+ * makes the requests and the event stream with its platform's HTTP client
+ * (TLS, the system's trust store), feeds what happened, and performs the
+ * actions each call writes, a JSON array of
+ *   {"do":"request","id":N,"method":..,"url":..,"headers":{..},"body":..|null}
+ *   {"do":"stream","id":N,"url":..,"headers":{..}}   an SSE body, fed as it comes
+ *   {"do":"cancel","id":N}     {"do":"wait","id":N,"ms":M}     {"do":"token"}
+ *   {"do":"changed"}           {"do":"status"}
+ *   {"do":"refused","status":S,"message":..,"query":..}
+ * Once started, a write through fenec_query to a synced collection is
+ * applied at once and queued for the server in the same block.
+ */
+#define FENEC_SYNC_POLL 0      /* nothing happened: what is due */
+#define FENEC_SYNC_RESPONSE 1  /* a request's answer: status (0: none), seq, body */
+#define FENEC_SYNC_OPENED 2    /* a stream's status; its body when not 200 */
+#define FENEC_SYNC_BYTES 3     /* a piece of a stream's body */
+#define FENEC_SYNC_CLOSED 4    /* a stream ended (or never opened): why */
+#define FENEC_SYNC_TIMER 5     /* a wait ran out */
+#define FENEC_SYNC_SIGNAL 6    /* {"online":bool} | {"token":".."} | {"stop":true} */
+
+/* config: {"url":..,"token":..,"seed":"<32 hex>","shapes":[{collection,where?,select?,key?}]}. */
+int32_t fenec_sync_start(uint64_t handle, const uint8_t *config, size_t config_len,
+                         char **out, size_t *out_len);
+
+/* Tells the sync what happened (FENEC_SYNC_*); writes the actions now due. */
+int32_t fenec_sync_feed(uint64_t handle, uint32_t kind, uint64_t id, int32_t status,
+                        uint64_t seq, const uint8_t *bytes, size_t len,
+                        char **out, size_t *out_len);
+
+/* {"state":"online"|"offline"|"catching_up","pending":N,"error":..,"shapes":[..]}. */
+int32_t fenec_sync_status(uint64_t handle, char **out, size_t *out_len);
+
 /* Frees text a call wrote through `out`. */
 void fenec_free_string(char *s);
 

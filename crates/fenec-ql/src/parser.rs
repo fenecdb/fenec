@@ -123,6 +123,29 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
     Ok(out)
 }
 
+/// Where each statement of `src` is: its text runs from its first token to
+/// the next statement's, a `;` between them included. A sync replica sends
+/// a server each write of a text on its own line of a `/batch`, as written
+/// -- the parser's own reading of where one ends, rather than a split on
+/// `;`, which a string holding one would cut. Unused by the browser module,
+/// whose link leaves it out.
+pub fn spans(src: &str) -> Result<Vec<(usize, usize)>> {
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        depth: 0,
+        subqueries: 0,
+        exact: false,
+    };
+    let mut starts = Vec::new();
+    while !p.at_eof() {
+        starts.push(p.pos());
+        p.statement()?;
+    }
+    let ends = starts.iter().skip(1).copied().chain([src.len()]);
+    Ok(starts.iter().copied().zip(ends).collect())
+}
+
 /// Parses a single statement; errors when there is more than one.
 pub fn parse_one(src: &str) -> Result<Statement> {
     one(parse(src)?)

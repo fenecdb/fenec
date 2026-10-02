@@ -115,6 +115,10 @@ struct Native {
     closed: AtomicBool,
     /// The `<file>.lock` held while the file is open (`lock_file`).
     lock: Mutex<Option<File>>,
+    /// The sync with a server, once `fenec_sync_start` attached one: then
+    /// a write to a synced collection goes through it. Taken before the
+    /// database's lock, never after.
+    sync: Mutex<Option<fenec_abi::sync::Sync>>,
 }
 
 /// The open databases by handle. A number rather than a pointer: a handle
@@ -183,6 +187,10 @@ impl Native {
             true => Err(closed()),
             false => Ok(db),
         }
+    }
+
+    fn sync_lock(&self) -> std::sync::MutexGuard<'_, Option<fenec_abi::sync::Sync>> {
+        self.sync.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn write(&self) -> Result<RwLockWriteGuard<'_, Database>, Failed> {
@@ -346,6 +354,7 @@ fn keep(db: Database, durable: bool, lock: Option<File>) -> u64 {
         file,
         closed: AtomicBool::new(false),
         lock: Mutex::new(lock),
+        sync: Mutex::new(None),
     });
     let h = NEXT.fetch_add(1, Ordering::Relaxed);
     handles().push((h, n));
@@ -413,6 +422,7 @@ pub unsafe extern "C" fn fenec_close(
                 .ok_or_else(|| misuse(&format!("no database is open under handle {handle}")))?;
             hs.swap_remove(at).1
         };
+        drop(n.sync_lock().take());
         let mut db = n.db.write().unwrap_or_else(|e| e.into_inner());
         n.closed.store(true, Ordering::Release);
         let mut result = Ok(());
@@ -529,6 +539,25 @@ fn run(
         fenec_abi::exact(&db, p, sql, params, vectors)?;
         return Ok(fenec_abi::query(&db, p)?);
     }
+    // A write to a synced collection is the sync's: applied at once, and
+    // queued for the server in the same block.
+    {
+        let mut sync = n.sync_lock();
+        if let Some(sync) = sync.as_mut() {
+            if sync.claims(&p.stmts)? {
+                let mut db = n.write()?;
+                fenec_abi::exact(&db, p, sql, params, vectors)?;
+                let r = sync.write(&mut db, p, sql)?;
+                let durability = match n.durable {
+                    true => db.flush()?,
+                    false => None,
+                };
+                drop(db);
+                n.durable(durability)?;
+                return Ok(r);
+            }
+        }
+    }
     // A lone `create index` or `compact` is built beside the database, as a
     // server builds it: an HNSW index over 100 000 x 128 held the write lock
     // ~20 s, where reads now wait at most 21 ms (`Database::maintain`).
@@ -643,6 +672,124 @@ pub unsafe extern "C" fn fenec_checkpoint(
         let mut db = n.write()?;
         db.checkpoint().map_err(|e| failed(&e))?;
         Ok(None)
+    })
+}
+
+// ------------------------------------------------------------------- sync
+
+/// What `fenec_sync_feed` is told: nothing (it hands back what is due), an
+/// answer to a request, a stream's status, a piece of its body or its end, a
+/// timer run out, or a signal.
+pub const FENEC_SYNC_POLL: u32 = 0;
+pub const FENEC_SYNC_RESPONSE: u32 = 1;
+pub const FENEC_SYNC_OPENED: u32 = 2;
+pub const FENEC_SYNC_BYTES: u32 = 3;
+pub const FENEC_SYNC_CLOSED: u32 = 4;
+pub const FENEC_SYNC_TIMER: u32 = 5;
+pub const FENEC_SYNC_SIGNAL: u32 = 6;
+
+/// Makes the database a replica that syncs with a server: `config` is
+/// `{"url":..,"token":..,"seed":"<32 hex digits>","shapes":[{collection,
+/// where?, select?, key?}]}`, `seed` from the platform's secure random
+/// source (the keys of optimistic rows come from it). The sync's own
+/// collections are made, and what they kept read. Writes the first
+/// actions to perform, a JSON array (`fenec_abi::sync`). From here on a
+/// write to a synced collection through `fenec_query` is applied at once
+/// and queued for the server.
+///
+/// # Safety
+/// `config` is valid for `config_len` bytes; `out` and `out_len` are null or
+/// valid to write.
+#[no_mangle]
+pub unsafe extern "C" fn fenec_sync_start(
+    handle: u64,
+    config: *const u8,
+    config_len: usize,
+    out: *mut *mut c_char,
+    out_len: *mut usize,
+) -> i32 {
+    call(out, out_len, || {
+        let n = native(handle)?;
+        let config = text(config, config_len, "the configuration")?;
+        let mut slot = n.sync_lock();
+        if slot.is_some() {
+            return Err(misuse("the database syncs already"));
+        }
+        let mut db = n.write()?;
+        let mut sync = fenec_abi::sync::Sync::start(&mut db, config).map_err(|e| failed(&e))?;
+        let actions = sync.actions();
+        *slot = Some(sync);
+        Ok(Some(actions))
+    })
+}
+
+/// Tells the sync what happened, and writes the actions now due: `kind` one
+/// of the `FENEC_SYNC_*`, `id` the request, stream or timer it is about,
+/// `status` a response's (0: no answer, `bytes` saying why), `seq` the
+/// response's `Fenec-Seq` (0 for none), `bytes` a body, a piece of a stream,
+/// why it ended, or a signal's JSON (`{"online":bool}`, `{"token":..}`,
+/// `{"stop":true}`).
+///
+/// # Safety
+/// `bytes` is null with length 0 or valid for `len`; `out` and `out_len`
+/// are null or valid to write.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fenec_sync_feed(
+    handle: u64,
+    kind: u32,
+    id: u64,
+    status: i32,
+    seq: u64,
+    bytes_ptr: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+    out_len: *mut usize,
+) -> i32 {
+    call(out, out_len, || {
+        let n = native(handle)?;
+        let body = bytes(bytes_ptr, len);
+        let mut slot = n.sync_lock();
+        let Some(sync) = slot.as_mut() else {
+            return Err(misuse("the database does not sync: fenec_sync_start first"));
+        };
+        let utf8 = || String::from_utf8_lossy(body);
+        let status = status.clamp(0, u16::MAX as i32) as u16;
+        if kind != FENEC_SYNC_POLL {
+            let mut db = n.write()?;
+            match kind {
+                FENEC_SYNC_RESPONSE => sync.response(&mut db, id, status, seq, &utf8()),
+                FENEC_SYNC_OPENED => sync.opened(&mut db, id, status, &utf8()),
+                FENEC_SYNC_BYTES => sync.bytes(&mut db, id, body),
+                FENEC_SYNC_CLOSED => sync.closed(&mut db, id, &utf8()),
+                FENEC_SYNC_TIMER => sync.timer(&mut db, id),
+                FENEC_SYNC_SIGNAL => sync.signal(&mut db, &utf8()).map_err(|e| failed(&e))?,
+                _ => return Err(misuse(&format!("no sync event of kind {kind}"))),
+            }
+        }
+        Ok(Some(sync.actions()))
+    })
+}
+
+/// The sync's state:
+/// `{"state":"online"|"offline"|"catching_up","pending":N,"error":null|
+/// {"message":..,"status":N},"shapes":[{"collection","cursor","seeded","connected"}]}`.
+///
+/// # Safety
+/// `out` and `out_len` are null or valid to write.
+#[no_mangle]
+pub unsafe extern "C" fn fenec_sync_status(
+    handle: u64,
+    out: *mut *mut c_char,
+    out_len: *mut usize,
+) -> i32 {
+    call(out, out_len, || {
+        let n = native(handle)?;
+        let slot = n.sync_lock();
+        match slot.as_ref() {
+            Some(sync) => Ok(Some(sync.status())),
+            None => Err(misuse("the database does not sync: fenec_sync_start first")),
+        }
     })
 }
 

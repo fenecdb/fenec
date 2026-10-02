@@ -2,7 +2,8 @@
 
 fenecdb embedded in an Android or JVM app: the database is a file on the
 device, the engine the native library (`crates/fenec-ffi`) reached through
-JNI functions it carries itself. No server, no network.
+JNI functions it carries itself -- on its own, or a replica a server keeps
+in step.
 
 ```kotlin
 // build.gradle.kts
@@ -40,11 +41,35 @@ getters (`string`, `long`, `double`, `bool`, `floats`, `row`, `list`); JSON is
 read by a reader of the library's own, so it depends on kotlinx-coroutines
 alone.
 
+## Sync with a server
+
+```kotlin
+val db = Fenec.sync(
+    url = "https://api.example.com", token = jwt,
+    shapes = listOf(Shape("todos", where = mapOf("owner" to me), key = "key")),
+    path = File(context.filesDir, "todos.fenec").path,
+    tokenProvider = { refreshToken() },
+)
+db.replica!!.ready()
+```
+
+The same `Fenec`: reads and live queries are the file's, a write to a
+shape's collection shows at once and is sent -- queued in the file while
+the server cannot be reached, under an idempotency key so it lands once --
+and one the server refuses is put back and comes on `replica.refusals`.
+`replica.status` is a `StateFlow`: `ONLINE`, `OFFLINE` or `CATCHING_UP`,
+the writes not yet answered and the last error; call `replica.resume()` in
+`onStart`. The requests and the stream are `HttpURLConnection`'s, the JVM's
+and Android's own, so a server is reached through TLS (Android refuses
+cleartext by default). `Fenec.connect(url, token)` is a server with no
+file: every query a request, the same builder.
+
 ## Building and testing
 
 `make kotlin-test` builds the native library for Linux with its JNI
 functions and runs the JVM tests under Gradle -- the engine, the builder
-over every case of `integrations/builder-golden.json`, live queries -- in
-containers unless this is Linux with Gradle and Java.
+over every case of `integrations/builder-golden.json`, live queries, a
+replica against a `fenec-server` the tests start, kill and start again --
+in containers unless this is Linux with Gradle and Java.
 `integrations/kotlin/build-aar.sh` builds the AAR with the NDK for
 arm64-v8a, armeabi-v7a and x86_64 (`ANDROID_HOME`, `ANDROID_NDK_HOME`).

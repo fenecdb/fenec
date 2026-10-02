@@ -423,6 +423,13 @@ fn the_header_declares_what_the_library_exports() {
         ("FENEC_LOCKED", FENEC_LOCKED),
         ("FENEC_OPEN_NO_SYNC", FENEC_OPEN_NO_SYNC as i32),
         ("FENEC_OPEN_IN_MEMORY", FENEC_OPEN_IN_MEMORY as i32),
+        ("FENEC_SYNC_POLL", FENEC_SYNC_POLL as i32),
+        ("FENEC_SYNC_RESPONSE", FENEC_SYNC_RESPONSE as i32),
+        ("FENEC_SYNC_OPENED", FENEC_SYNC_OPENED as i32),
+        ("FENEC_SYNC_BYTES", FENEC_SYNC_BYTES as i32),
+        ("FENEC_SYNC_CLOSED", FENEC_SYNC_CLOSED as i32),
+        ("FENEC_SYNC_TIMER", FENEC_SYNC_TIMER as i32),
+        ("FENEC_SYNC_SIGNAL", FENEC_SYNC_SIGNAL as i32),
     ] {
         assert!(
             header.contains(&format!("#define {name} {value}")),
@@ -435,4 +442,84 @@ fn the_header_declares_what_the_library_exports() {
 fn the_version_is_the_crates() {
     let v = unsafe { CStr::from_ptr(fenec_version()) };
     assert_eq!(v.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
+}
+
+fn feed(h: u64, kind: u32, id: u64, status: i32, bytes: &[u8]) -> String {
+    let mut out = std::ptr::null_mut();
+    let code = unsafe {
+        fenec_sync_feed(
+            h,
+            kind,
+            id,
+            status,
+            0,
+            bytes.as_ptr(),
+            bytes.len(),
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    let (code, text) = taken(code, out);
+    assert_eq!(code, FENEC_OK, "{text}");
+    text
+}
+
+/// A handle made to sync routes a write to a synced collection through the
+/// sync -- applied at once, a request for the server due -- and leaves the
+/// rest as it was.
+#[test]
+fn a_synced_handle_queues_its_writes_for_the_server() {
+    let h = memory();
+    query(
+        h,
+        "create collection tasks (key text @hash, title text)",
+        "",
+    );
+    query(h, "create collection notes (t text)", "");
+    let config = r#"{"url":"https://example.test","token":"tk","seed":"ab","shapes":[{"collection":"tasks","key":"key"}]}"#;
+    let mut out = std::ptr::null_mut();
+    let code = unsafe {
+        fenec_sync_start(
+            h,
+            config.as_ptr(),
+            config.len(),
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    let (code, actions) = taken(code, out);
+    assert_eq!(code, FENEC_OK, "{actions}");
+    assert!(
+        actions.contains(r#""do":"stream","id":1,"url":"https://example.test/tasks/changes""#),
+        "{actions}"
+    );
+    assert!(
+        actions.contains(r#""authorization":"Bearer tk""#),
+        "{actions}"
+    );
+    feed(h, FENEC_SYNC_OPENED, 1, 200, b"");
+    let seed =
+        b"event: seed\ndata: {\"seq\":3,\"rows\":[{\"id\":1,\"key\":\"x\",\"title\":\"one\"}]}\n\n";
+    let a = feed(h, FENEC_SYNC_BYTES, 1, 0, seed);
+    assert!(a.contains("changed"), "{a}");
+
+    let r = query(h, r#"put tasks {title: "two"}"#, "");
+    assert_eq!(r, r#"{"kind":"affected","count":1}"#);
+    let a = feed(h, FENEC_SYNC_POLL, 0, 0, b"");
+    assert!(
+        a.contains(r#""do":"request""#) && a.contains("/query") && a.contains("idempotency-key"),
+        "{a}"
+    );
+    let titles = query(h, "get tasks select title order title", "");
+    assert!(
+        titles.contains(r#"[{"title":"one"},{"title":"two"}]"#),
+        "{titles}"
+    );
+    let (_, status) = by_handle(fenec_sync_status, h);
+    assert!(status.contains(r#""pending":1"#), "{status}");
+    // A local collection is the app's own; the server's schema is not.
+    query(h, r#"put notes {t: "x"}"#, "");
+    let (code, text) = query_with(h, "drop collection tasks", "", &[]);
+    assert_eq!(code, FENEC_READ_ONLY, "{text}");
+    assert_eq!(by_handle(fenec_close, h).0, FENEC_OK);
 }

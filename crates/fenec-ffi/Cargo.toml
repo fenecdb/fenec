@@ -19,7 +19,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-ql.workspace = true
-fenec-abi.workspace = true
+fenec-abi = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 # The bench holds a call through the library to the same statement through

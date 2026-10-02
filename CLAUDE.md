@@ -21,7 +21,8 @@ make size-report   # where the module's bytes go, by crate, module and std (BASE
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
-make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test
+make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
+make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server)
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
 make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
@@ -88,7 +89,7 @@ Dependency direction (nothing points back up):
 ```
 fenec-core  (std only, zero deps)
      |
-fenec-ql    (lexer + parser)          fenec-abi   (the answers both C ABIs give)
+fenec-ql    (lexer + parser)          fenec-abi   (the answers both C ABIs give, and a replica's sync)
      |                                fenec-wasm  (browser C ABI)   fenec-ffi (native C ABI, apps)
      |
 fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
@@ -1698,8 +1699,8 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 1.51 MB stripped on aarch64-apple-darwin, 1.68 on
-x86_64 Linux with JNI; a buffered put of a 128-dim vector 4.6 us against
+the shared one 4% larger. 1.68 MB stripped on aarch64-apple-darwin, 1.88 on
+x86_64 Linux with JNI, the sync (below) 165 and 198 KB of them; a buffered put of a 128-dim vector 4.6 us against
 the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
 against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
@@ -1711,6 +1712,52 @@ and Dart opens `FenecFFI.framework/FenecFFI`: a static one kept whole with
 `-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
 phase makes with no order declared against it, and `flutter build ios`
 failed on it.
+
+**A replica's sync is a state machine; the network is the binding's.**
+iOS (ATS) and Android refuse cleartext HTTP by default and a server sits
+behind TLS, which fenecdb's own client does not speak and should not: the
+platform's client has the trust store, proxies, pinning and power
+management. So `fenec_abi::sync` does no I/O -- a binding feeds it events
+(`Sync::response`, `opened`, `bytes`, `closed`, `timer`, `signal`; FFI
+`fenec_sync_feed`) and performs the JSON actions it hands back (`request`,
+`stream`, `cancel`, `wait`, `token`, `changed`, `refused`, `status`) with
+`URLSession`, `HttpURLConnection` (Android's and the JVM's, one loop for
+both) or `dart:io`'s `HttpClient`, every event handed to the core in turn on
+one serial queue so a stream's bytes stay in order and no action outruns
+its cancel. Porting `FenecSync` would have been three more copies of the
+optimistic writes, the key reconciliation and the cursors, tested apiece;
+here the logic is once, with one suite (`crates/fenec-abi/tests/sync.rs`,
+a scripted server in process), and each binding's loop is a page. A write
+through `fenec_query` to a shape's collection is the sync's
+(`Sync::claims`, `write`): applied to the replica with what puts it back,
+and queued with an `Idempotency-Key`, in one block; DDL over a synced
+collection is refused, a collection with no shape is the app's own. What
+`FenecSync` holds in memory is in the file, written in the blocks it
+describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
+keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
+a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
+30% jitter), 401 asks for a token, any other 4xx is a refusal put back. A
+replica reopened sends its queue before opening its streams. Where it
+differs from `FenecSync`, on purpose: a write returns once applied and
+kept, not at the server's answer (a refusal comes as an action, `pushed()`
+waits); a network failure or 5xx keeps the write rather than putting it
+back; an update of an unanswered insert reaches the server's copy by its key
+(`fenec_ql::spans` keeps each statement's own text for the `/batch` lines,
+the puts rendered with every value a parameter); an insert the shape does
+not hold loses its temporary row once a stream passes the write's
+`Fenec-Seq`; a seed writes over and deletes the rest, keeping unanswered
+writes' rows, rather than clearing first (a row that stayed keeps its
+vector's node); no `batch()`, no tab leader, no 2 s image. A one-row change
+costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
+3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
+000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
+native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
+x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
+`fenec-abi`'s `sync` feature, which only `fenec-ffi` turns on. Compiled
+in as dead code, it still moved LLVM's inlining and left the module 155
+bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
+`Fenec.openSynced`, since a static `sync` cannot sit beside the instance's
+fsync `sync()`.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

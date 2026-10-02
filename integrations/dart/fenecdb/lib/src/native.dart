@@ -28,6 +28,11 @@ typedef _QueryD = int Function(
     int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _ChangesC = Int32 Function(Uint64, Uint64, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _ChangesD = int Function(int, int, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SyncStartC = Int32 Function(Uint64, Pointer<Uint8>, Size, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SyncStartD = int Function(int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SyncFeedC = Int32 Function(
+    Uint64, Uint32, Uint64, Int32, Uint64, Pointer<Uint8>, Size, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _SyncFeedD = int Function(int, int, int, int, int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _FreeC = Void Function(Pointer<Char>);
 typedef _FreeD = void Function(Pointer<Char>);
 typedef _VersionC = Pointer<Char> Function();
@@ -60,7 +65,9 @@ class Native {
   final _MemoryD _memory;
   final _QueryD _query;
   final _ChangesD _changes;
-  final _HandleD _close, _sync, _flush, _checkpoint;
+  final _HandleD _close, _sync, _flush, _checkpoint, _syncStatus;
+  final _SyncStartD _syncStart;
+  final _SyncFeedD _syncFeed;
   final _FreeD _free;
   final Pointer<Char> Function() _version;
 
@@ -73,6 +80,9 @@ class Native {
         _sync = lib.lookupFunction<_HandleC, _HandleD>('fenec_sync'),
         _flush = lib.lookupFunction<_HandleC, _HandleD>('fenec_flush'),
         _checkpoint = lib.lookupFunction<_HandleC, _HandleD>('fenec_checkpoint'),
+        _syncStatus = lib.lookupFunction<_HandleC, _HandleD>('fenec_sync_status'),
+        _syncStart = lib.lookupFunction<_SyncStartC, _SyncStartD>('fenec_sync_start'),
+        _syncFeed = lib.lookupFunction<_SyncFeedC, _SyncFeedD>('fenec_sync_feed'),
         _free = lib.lookupFunction<_FreeC, _FreeD>('fenec_free_string'),
         _version = lib.lookupFunction<_VersionC, Pointer<Char> Function()>('fenec_version');
 
@@ -142,10 +152,30 @@ class Native {
 
   (int, String) changes(int handle, int since) => _call((out, len) => _changes(handle, since, out, len));
 
+  (int, String) syncStart(int handle, String config) {
+    final b = utf8.encode(config);
+    final p = _bytes(b);
+    try {
+      return _call((out, len) => _syncStart(handle, p, b.length, out, len));
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  (int, String) syncFeed(int handle, int kind, int id, int status, int seq, Uint8List? bytes) {
+    final p = bytes == null ? nullptr.cast<Uint8>() : _bytes(bytes);
+    try {
+      return _call((out, len) => _syncFeed(handle, kind, id, status, seq, p, bytes?.length ?? 0, out, len));
+    } finally {
+      if (bytes != null) malloc.free(p);
+    }
+  }
+
   (int, String) byHandle(String op, int handle) => _call((out, len) => switch (op) {
         'close' => _close(handle, out, len),
         'sync' => _sync(handle, out, len),
         'flush' => _flush(handle, out, len),
+        'syncStatus' => _syncStatus(handle, out, len),
         _ => _checkpoint(handle, out, len),
       });
 }
@@ -230,6 +260,9 @@ class Worker {
           'memory' => native.memory(),
           'query' => native.query(r[2] as int, r[3] as String, r[4] as String, r[5] as Uint8List?),
           'changes' => native.changes(r[2] as int, r[3] as int),
+          'syncStart' => native.syncStart(r[2] as int, r[3] as String),
+          'syncFeed' =>
+            native.syncFeed(r[2] as int, r[3] as int, r[4] as int, r[5] as int, r[6] as int, r[7] as Uint8List?),
           'version' => (0, native.version),
           final op => native.byHandle(op, r[2] as int),
         };

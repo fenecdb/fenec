@@ -69,12 +69,20 @@ data class Changes(val seq: Long, val horizon: Long, val collections: List<Strin
  * ([FenecException.Code.LOCKED]), since two databases over one file
  * corrupt it.
  */
-class Fenec private constructor(private val handle: Long) : AutoCloseable {
+class Fenec private constructor(internal val handle: Long) : AutoCloseable {
     private val closed = AtomicBoolean(false)
 
     /** Writes under way, which a live query's look waits out. */
     private val inflight = AtomicInteger()
     internal val lives = Lives(this)
+
+    /** The replica's sync, set once by [Fenec.Companion.sync]. */
+    @Volatile internal var syncing: Replica? = null
+        private set
+
+    internal fun attach(r: Replica) {
+        syncing = r
+    }
 
     companion object {
         /** Writes wait in a buffer for [sync], [flush] or [close] rather than an fsync each. */
@@ -155,6 +163,8 @@ class Fenec private constructor(private val handle: Long) : AutoCloseable {
                 // After an error too: a text that failed may follow statements
                 // that wrote, and the change ring says what landed.
                 lives.touch()
+                // A write to a synced collection left a request for the server due.
+                syncing?.poll()
             }
         }
     }
@@ -248,6 +258,7 @@ class Fenec private constructor(private val handle: Long) : AutoCloseable {
     /** Saves the graphs, syncs and lets the file go; the live queries stop. Waits for the calls under way. */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        syncing?.stop()
         lives.clear()
         FenecNative.answer(FenecNative.close(handle))
     }

@@ -38,6 +38,12 @@ internal object FenecNative {
 
     @JvmStatic external fun checkpoint(handle: Long): ByteArray
 
+    @JvmStatic external fun syncStart(handle: Long, config: ByteArray): ByteArray
+
+    @JvmStatic external fun syncFeed(handle: Long, kind: Int, id: Long, status: Int, seq: Long, bytes: ByteArray?): ByteArray
+
+    @JvmStatic external fun syncStatus(handle: Long): ByteArray
+
     /** A call's answer: its text, or the error it is thrown as. */
     fun answer(bytes: ByteArray): String {
         val code = bytes[0].toInt()
