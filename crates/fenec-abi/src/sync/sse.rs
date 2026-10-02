@@ -2,7 +2,7 @@
 //! the platform's client hands them over: a binding feeds the stream's
 //! body and never parses it, so the reading is written once, here.
 //!
-//! What `web/fenec.js`'s `sseEvents` reads: an event is the lines up to a
+//! What `web/http.js`'s `sseEvents` reads: an event is the lines up to a
 //! blank one, `event:` naming it and each `data:` line's text appended,
 //! `\r\n` read as `\n`; a comment (`: keepalive`) and an event with no name
 //! are no event.

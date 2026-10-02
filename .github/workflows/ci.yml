@@ -110,10 +110,13 @@ jobs:
       # requests that passed and a deploy that failed after the merge. One
       # runner is enough: the module is the one the site workflow builds, to
       # the byte, and brotli comes from apt.
+      # esbuild bundles the app the docs weigh the client entry by, pinned as
+      # the site's deploy pins it.
       - name: Check the sizes the docs quote
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get install -y --no-install-recommends brotli
+          npm install -g esbuild@0.28.2
           python3 site/build.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the

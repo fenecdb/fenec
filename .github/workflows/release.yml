@@ -112,8 +112,9 @@ jobs:
           # What a page actually needs: the module -- with every index, and
           # without them for a page that uses none -- the bundle and the
           # types, the collation data the module fetches beside it, and a
-          # note on which module to take.
-          cp web/fenec.js web/fenec.wasm web/fenec-lite.wasm web/fenec.d.ts LICENSE "fenec-web-v${version}/"
+          # note on which module to take. fenec.js imports builder.js and
+          # http.js; client.js is the two without the engine.
+          cp web/fenec.js web/builder.js web/http.js web/client.js web/fenec.wasm web/fenec-lite.wasm web/fenec.d.ts web/client.d.ts LICENSE "fenec-web-v${version}/"
           cp web/README.md "fenec-web-v${version}/README.md"
           cp -r web/collate "fenec-web-v${version}/"
           tar -czf "dist/fenec-web-v${version}.tar.gz" "fenec-web-v${version}"

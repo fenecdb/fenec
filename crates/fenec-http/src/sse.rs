@@ -9,7 +9,7 @@
 //!
 //! **Why `fetch` rather than `EventSource`.** The browser's `EventSource`
 //! cannot send headers, so it cannot carry `Authorization: Bearer`. The
-//! client (`web/fenec.js`) therefore reads the stream with `fetch` +
+//! client (`web/http.js`) therefore reads the stream with `fetch` +
 //! `ReadableStream`; the wire format is still standard SSE and can be
 //! watched with `curl`.
 //!

@@ -24,6 +24,7 @@ import {
   type TypedFrom,
   type Vector,
 } from '../fenec.js';
+import * as client from '../client.js';
 
 // As `fenec types` writes a collection: a field not `required` reads null.
 type Article = {
@@ -163,4 +164,21 @@ export async function remote() {
   } catch (e) {
     if (e instanceof FenecError) expect<string>(e.message);
   }
+
+  // Live queries over the server: a builder query knows what it reads, a
+  // text names it.
+  const stop = http.live(http.from('articles').where('year', 2024), (rows) => expect<string>(rows[0].title));
+  stop();
+  http.live('get articles', () => {}, { collections: ['articles'] });
+  // @ts-expect-error -- a text alone does not say what it reads
+  http.live('get articles', () => {});
+
+  // `@fenecdb/web/client`: the same classes and builder, no engine.
+  const bare = client.connect<Schema>('http://127.0.0.1:8080');
+  expect<FenecHttp<Schema>>(bare);
+  expect<string>(client.from('articles').where('year', 2024).toFenecQL()[0]);
+  // @ts-expect-error -- the client holds no engine
+  void client.Fenec;
+  // @ts-expect-error -- nor the sync layer
+  void client.sync;
 }

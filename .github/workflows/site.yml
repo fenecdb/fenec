@@ -8,6 +8,8 @@ on:
     paths:
       - 'site/**'
       - 'web/fenec.js'
+      - 'web/builder.js'
+      - 'web/http.js'
       - 'wrangler.jsonc'
       - 'crates/fenec-wasm/**'
       - 'crates/fenec-core/**'

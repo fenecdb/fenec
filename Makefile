@@ -50,9 +50,11 @@ test:
 ##                     and handed to and from a real `fenec-server`
 ##   fenec.schema.test.js  a schema declared in code (web/schema.js): what it
 ##                     declares, the check at an open, migrations, fenec types --schema
+##   fenec.client.test.js  @fenecdb/web/client: the modules it reaches hold no
+##                     engine, and its live queries over a scripted server
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi

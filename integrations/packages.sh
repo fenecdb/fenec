@@ -83,6 +83,17 @@ if (!out.applied || out.statements[0] !== 'alter collection notes add field tag 
   throw new Error(`@fenecdb/web/schema: ${JSON.stringify(out)}`);
 }
 console.log('@fenecdb/web/schema declares and checks a schema');
+// The client alone, from its own entry point: no engine among its exports,
+// and the builder the package's own.
+const client = await import('@fenecdb/web/client');
+const web = await import('@fenecdb/web');
+if (typeof client.connect !== 'function' || 'Fenec' in client || 'sync' in client || client.from !== web.from) {
+  throw new Error(`@fenecdb/web/client exports ${Object.keys(client)}`);
+}
+if (client.from('docs').where('year', 2024).toFenecQL()[0] !== 'get docs where year = $1') {
+  throw new Error('@fenecdb/web/client builds another text');
+}
+console.log('@fenecdb/web/client imports, with no engine');
 if (typeof useLiveQuery !== 'function' || typeof FenecProvider !== 'function') {
   throw new Error('@fenecdb/react exports are missing');
 }

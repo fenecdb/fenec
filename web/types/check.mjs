@@ -69,6 +69,17 @@ for (const name of names) {
 // And schema.js's: every builder it exports, declared.
 const schemaNames = Object.keys(await import('../schema.js')).sort();
 out.push(`import { ${schemaNames.join(', ')} } from '../schema.js';`, `void [${schemaNames.join(', ')}];`);
+// And client.js's, `@fenecdb/web/client`: every export, declared in
+// client.d.ts, each the same one fenec.js exports.
+const clientModule = await import('../client.js');
+const clientNames = Object.keys(clientModule).sort();
+for (const name of clientNames) {
+  if (clientModule[name] !== fenec[name]) throw new Error(`client.js's ${name} is not fenec.js's`);
+}
+out.push(
+  `import * as client from '../client.js';`,
+  ...clientNames.map((name) => `void client.${name};`),
+);
 const here = new URL('.', import.meta.url).pathname;
 writeFileSync(`${here}probe.ts`, `${out.join('\n')}\n`);
 // A tsconfig of its own, for React's types: schema.ts holds `useLiveQuery`
@@ -100,5 +111,5 @@ try {
   process.exit(1);
 }
 console.log(
-  `fenec.d.ts: ${names.length} exports and their methods declared, schema.d.ts ${schemaNames.length}; usage.ts and schema.ts check`,
+  `fenec.d.ts: ${names.length} exports and their methods declared, schema.d.ts ${schemaNames.length}, client.d.ts ${clientNames.length}; usage.ts and schema.ts check`,
 );
