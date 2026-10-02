@@ -33,7 +33,7 @@ categories = ["database", "database-implementations", "wasm"]
 # false` those two write was ignored and the browser build had them too.
 fenec-core = { version = "0.1.3", path = "crates/fenec-core", default-features = false }
 fenec-ql = { version = "0.1.3", path = "crates/fenec-ql" }
-fenec-abi = { version = "0.1.7", path = "crates/fenec-abi" }
+fenec-abi = { version = "0.1.7", path = "crates/fenec-abi", default-features = false }
 fenec-http = { version = "0.1.3", path = "crates/fenec-http" }
 fenec-server = { version = "0.1.3", path = "crates/fenec-server" }
 fenec-wire = { version = "0.1.7", path = "crates/fenec-wire" }

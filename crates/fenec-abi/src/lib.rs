@@ -335,4 +335,5 @@ mod tests {
         assert!(changes(&db, seq + 1).contains("\"collections\":[]"));
     }
 }
+#[cfg(feature = "sync")]
 pub mod sync;

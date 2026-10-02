@@ -17,6 +17,12 @@ autotests = false
 fenec-core = { workspace = true, default-features = false }
 fenec-ql.workspace = true
 
+[features]
+default = ["sync"]
+# A replica's sync with a server (`sync`): the native library's; the
+# browser module is built without it.
+sync = []
+
 [dev-dependencies]
 fenec-core = { workspace = true, features = ["indexes", "std-fs"] }
 

@@ -606,7 +606,7 @@ impl Sync {
                 label: text_of(&r.values[4]),
             })
             .collect();
-        ops.sort_by_key(|o| o.n);
+        ops.sort_unstable_by_key(|o| o.n);
         self.next_n = ops.last().map_or(1, |o| o.n + 1);
         self.queue = ops;
         let rs = Self::rows(db, "get _sync_temps select collection, key, op, until")?;

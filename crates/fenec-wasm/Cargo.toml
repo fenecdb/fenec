@@ -15,7 +15,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 fenec-core = { workspace = true, default-features = false }
 fenec-ql.workspace = true
-fenec-abi.workspace = true
+# Without the replica's sync, the native bindings': dead code in the
+# module all the same, its mere presence moved LLVM's inlining and left the
+# module 155 bytes larger.
+fenec-abi = { workspace = true, default-features = false }
 
 # A page that needs no vector, text or sparse search, or no ordered index,
 # loads a module built without it: `make wasm FEATURES=...`.
