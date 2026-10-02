@@ -61,7 +61,7 @@ NAV = [
     ]),
     ("Query", [
         ("docs/fenecql", "FenecQL"),
-        ("docs/javascript", "JavaScript"),
+        ("docs/javascript", "JavaScript and TypeScript"),
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
@@ -94,6 +94,11 @@ KEYWORDS = {
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),
+    # TypeScript is JavaScript's words and its own for types.
+    "ts": """import export from const let var async await function return new class
+        extends if else for of while try catch finally throw typeof null undefined
+        true false this default type interface declare as satisfies keyof
+        readonly implements private public protected""".split(),
     "rust": """use pub fn let mut struct enum impl trait for in if else match return
         loop while const static crate mod self Some None Ok Err true false as where
         dyn ref move unsafe""".split(),
@@ -123,6 +128,7 @@ TYPES = """bool int float text bytes timestamp vector f16 cosine l2 dot
 COMMENT = {
     "fenecql": r"--[^\n]*",
     "js": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "ts": r"//[^\n]*|/\*[\s\S]*?\*/",
     "rust": r"//[^\n]*|/\*[\s\S]*?\*/",
     "bash": r"#[^\n]*",
     "http": r"#[^\n]*",

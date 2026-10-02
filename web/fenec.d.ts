@@ -353,10 +353,14 @@ export declare class Query<
    *       .lookup('orders', { on: 'shop_id' })
    *       .lookup('lines',  { on: 'order_id' })
    *     // -> { ...shop, orders: { ...order, lines: {...}[] }[] }[]
+   *
+   * `C` is never inferred from `opts`: taken from a `where` it was the
+   * fields that `where` named and no others, and an `on` or an `order` by
+   * any other field was refused.
    */
   lookup<N extends string, C extends Fields = Fields>(
     name: N,
-    opts: LookupOptions<C>,
+    opts: LookupOptions<Hold<C>>,
   ): Query<F, Attach<P, L, N, C>, [...L, N]>;
 
   /**
@@ -628,8 +632,20 @@ export interface FenecFile {
 export function openFile(
   fenec: Fenec<any>,
   name?: string,
-  opts?: { dir?: FileSystemDirectoryHandle },
+  opts?: { dir?: DirectoryHandle },
 ): Promise<FenecFile>;
+
+/**
+ * The DOM's `FileSystemDirectoryHandle`, where the program has the DOM's
+ * types. A Worker's have none, and naming it outright failed every Worker
+ * project that checks its libraries: there it is `never`, as there is no
+ * file system to open a file of.
+ */
+type DirectoryHandle = typeof globalThis extends {
+  FileSystemDirectoryHandle: { prototype: infer H };
+}
+  ? H
+  : never;
 
 // -------------------------------------------------------------------- sync
 

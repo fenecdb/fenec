@@ -61,8 +61,8 @@ its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>
 </div>
 
-<div class="lang" data-name="JavaScript">
-<pre data-lang="js" data-label="search.mjs">async function query(q, params = []) {
+<div class="lang" data-name="TypeScript">
+<pre data-lang="ts" data-label="search.ts">async function query(q: string, params: unknown[] = []) {
   const res = await fetch('http://127.0.0.1:8080/query', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
@@ -81,13 +81,16 @@ const rows = await query('get docs select title near embed $1 limit 5', [[0.1, 0
 <p>Or <code>npm install @fenecdb/web</code>: its <code>connect</code> sends
 the <a href="#builder">query builder</a>'s statements to a server, the same
 code that runs in the page.</p>
-<pre data-lang="js" data-label="client.mjs">import { connect } from '@fenecdb/web';
+<pre data-lang="ts" data-label="client.ts">import { connect } from '@fenecdb/web';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types app.fenec
 
-const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+const db = connect&lt;FenecSchema&gt;('http://127.0.0.1:8080', { token: 'secret' });
 await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
-const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();</pre>
-<p>In the browser there is no server at all: the same database runs in the
-page (<a href="javascript.html">JavaScript</a>).</p>
+const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
+//    rows: { title: string | null; _score: number }[]</pre>
+<p>The same code runs as plain JavaScript, without the types. In the
+browser there is no server at all: the same database runs in the page
+(<a href="javascript.html">JavaScript and TypeScript</a>).</p>
 </div>
 
 <div class="lang" data-name="Go">
@@ -516,6 +519,11 @@ C# and Rust with the toolchains on the machine — Go and C# both through
 their SDK and without it, and each SDK's program through its query builder
 too. The SDKs' own tests (<code>make go-test</code>,
 <code>make dotnet-test</code>) start a primary, a replica of it and a node
+<p>The TypeScript tab's programs run there as the JavaScript they are
+without their types, and the tab's code itself is type-checked under
+<code>tsc --strict</code> against the client's declarations, as every
+TypeScript example in these docs is (<code>make docs-types</code>).</p>
+
 of tenants and cover the rest: every type of parameter, the errors, a batch
 put back whole, an idempotency key, reading a write on the replica, a
 subscription, the change stream, a tenant and a scoped token. CI runs it on every change,

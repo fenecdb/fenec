@@ -11,6 +11,7 @@ import {
   connect,
   from,
   not,
+  openFile,
   or,
   persist,
   raw,
@@ -94,6 +95,11 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
     .lookup<'reviews', Review>('reviews', { on: 'product_id', where: { stars: 5 }, limit: 3 })
     .rows();
   expect<number>(withReviews[0].reviews[0].stars);
+  // Untyped, the child's fields are not taken from its `where` alone.
+  await db
+    .from('articles')
+    .lookup('reviews', { on: 'product_id', where: { stars: { gte: 4 } }, order: [['created', 'desc']], limit: 3 })
+    .rows();
 
   await db.from('articles').insert([{ title: 'a', published: new Date(), embed: new Float32Array(3) }]);
   await db.from('articles').where('id', 1).update({ year: 2025 });
@@ -129,6 +135,11 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.live(42, () => {});
 
   await persist(db, 'app');
+  // A file of the origin private file system, in a directory of the page's.
+  const file = await openFile(db, 'app.fenec', { dir: await navigator.storage.getDirectory() });
+  expect<Uint8Array>(file.bytes());
+  // @ts-expect-error -- a directory is a handle, not its name
+  openFile(db, 'app.fenec', { dir: 'data' });
   expect<boolean>(await restore(db, 'app'));
   db.close();
 }

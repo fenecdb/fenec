@@ -210,7 +210,8 @@ jobs:
         run: make ai-sdk-test
 
       # web/fenec.d.ts held to web/fenec.js: every export and method the
-      # module has declared, and a caller's code type-checked under --strict.
+      # module has declared, and a caller's code type-checked under --strict;
+      # then every TypeScript example in the docs against the same types.
       - name: TypeScript declarations
         run: make types-check
 

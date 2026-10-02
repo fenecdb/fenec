@@ -12,9 +12,10 @@ the network, writes instantly and stays up to date with the server.</p>
 <p>Call <code>sync</code> with the server and the rows you want. Then query it
 with the same builder you use anywhere else.</p>
 
-<pre data-lang="js">import { sync } from './fenec.js';
+<pre data-lang="ts">import { sync } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types, over the server's file
 
-const db = await sync({
+const db = await sync<FenecSchema>({
   url: 'http://127.0.0.1:8080',
   shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
 });
@@ -88,7 +89,7 @@ this collection", or the cleanup step becomes ambiguous.</p>
 <p>A write shows up locally at once, then goes to the server. If the server
 refuses it, the local change is undone.</p>
 
-<pre data-lang="js">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
+<pre data-lang="ts">const p = db.from('tasks').insert({ title: 'new', status: 'open' });
 await db.from('tasks').where('title', 'new').first();  // already here
 await p;                                               // server ack
 </pre>
@@ -170,7 +171,7 @@ and nothing lands in chunks. Both use the same code.</p>
 server together or not at all, and on failure the local copy is put back
 too.</p>
 
-<pre data-lang="js">await db.batch(async (t) => {
+<pre data-lang="ts">await db.batch(async (t) => {
   await t.from('tasks').insert({ title: 'a', status: 'open' });
   await t.from('tasks').where('key', 'x').update({ status: 'closed' });
 });
@@ -288,7 +289,10 @@ expect.</p>
 IndexedDB, so a reopened tab starts from there instead of downloading
 everything again.</p>
 
-<pre data-lang="js">const db = await sync({
+<pre data-lang="ts">import { sync } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';
+
+const db = await sync<FenecSchema>({
   url: 'https://api.example.com',
   shapes: [{ collection: 'tasks', where: { status: 'open' }, key: 'key' }],
   persist: 'tasks',           // the image and the cursor are both stored
