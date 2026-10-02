@@ -32,16 +32,16 @@ await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
 
 <ul>
-  <li><b>The replica loads <code>fenec-replica.wasm</code></b> unless given
-    a module: 147 KB brotli against the full module's 174, with no graph.
-    Its <code>near</code> measures every vector of the shape, as
-    <code>near ... exact</code> does, and answers the same rows and scores;
-    <code>match</code>, sparse <code>near</code> and ordered indexes are all
-    there (<a href="javascript.html#packages">Which package</a>).</li>
-  <li><b>A shape of tens of thousands of vectors</b> wants the graph back:
-    <code>sync({ wasm: './fenec.wasm', ... })</code>. A <code>near</code>
-    measured over 50 000 rows of 384 dimensions takes 40 ms, against 1.0
-    through a graph.</li>
+  <li><b>The replica loads <code>fenec.wasm</code></b>, the full module,
+    unless given another, so its <code>near</code> walks a graph.</li>
+  <li><b>A replica that searches no vectors, or holds a few thousand,</b>
+    can load the smaller one: <code>sync({ wasm: './fenec-replica.wasm', ... })</code>,
+    147 KB brotli against the full module's 174, with no graph. Its
+    <code>near</code> measures every vector of the shape, as <code>near ...
+    exact</code> does, the same rows and scores: 0.54 ms over 1 000 rows of
+    128 dimensions against 0.27 through the graph, 8.5 ms over 10 000 of 384
+    against 0.68, 40 ms over 50 000 of 384 against 1.0 (<a
+    href="javascript.html#packages">Which package</a>).</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -55,7 +55,7 @@ declared in code, which a replica asks of the server: <code>make
 wasm-replica</code>. A file moves between it and the full module both
 ways, so <code>persist</code> and <code>openFile</code> keep a replica
 either one can open. With no module given, <code>sync</code> opens
-<code>./fenec-replica.wasm</code> beside the page, its collation data from
+<code>./fenec.wasm</code> beside the page, its collation data from
 <code>collate/</code> beside it; <code>wasm</code> takes another URL, the
 bytes or a compiled module, and <code>local</code> a database already
 open.</p>

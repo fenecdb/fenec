@@ -242,7 +242,7 @@ const rows = await db.from('articles').select('title', 'year').rows();
 <tr><td><code>make test</code></td><td>Rust suite, then the JS suite</td></tr>
 <tr><td><code>make wasm</code></td><td>Build for wasm32 and copy to <code>web/fenec.wasm</code></td></tr>
 <tr><td><code>make wasm FEATURES="text sorted"</code></td><td>The same without the other indexes (<a href="javascript.html#features">A smaller module</a>)</td></tr>
-<tr><td><code>make wasm-replica</code></td><td>The module <code>sync()</code> loads, without the graph, to <code>web/fenec-replica.wasm</code> (<a href="javascript.html#packages">Which package</a>)</td></tr>
+<tr><td><code>make wasm-replica</code></td><td>A replica's module without the graph, opt-in (<code>sync({ wasm })</code>), to <code>web/fenec-replica.wasm</code> (<a href="javascript.html#packages">Which package</a>)</td></tr>
 <tr><td><code>make serve</code></td><td>Build the wasm and serve the browser console</td></tr>
 <tr><td><code>make bench</code></td><td>Scale measurement</td></tr>
 <tr><td><code>make memory</code></td><td>Memory footprint, for calibrating <code>--max-memory</code></td></tr>

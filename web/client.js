@@ -2,8 +2,10 @@
 //
 // The HTTP client, the query builder and live queries over the server's
 // subscriptions -- and no engine: it imports neither the module's glue nor
-// persistence, files or the sync layer, so a bundle of it holds none of
-// them and loads no `.wasm`. The same builder as `@fenecdb/web`, so a query
+// persistence, files or the sync layer, so a bundle of it cannot hold them.
+// That is the point of it more than the bytes: `connect` through
+// `@fenecdb/web` never fetches the `.wasm` either (only `Fenec.open` does),
+// and bundles 2.5 KB brotli larger, the glue a bundler cannot drop. The same builder as `@fenecdb/web`, so a query
 // moves between the two unchanged.
 //
 //   import { connect } from '@fenecdb/web/client';

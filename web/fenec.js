@@ -2519,12 +2519,13 @@ function normalizeShape(raw, url) {
  *              collation data from `collation` (`Fenec.open`). One kept
  *              in a file (`openFile`) keeps the replica, its cursors and
  *              its unsent writes there.
- * - `wasm`     the module the replica is opened with: by default
- *              `./fenec-replica.wasm` (`make wasm-replica`), built without
- *              the graph -- `near` measures every vector, as `exact` does,
- *              the same rows and scores -- and without the schema check,
- *              which a replica asks of the server. `./fenec.wasm` for a
- *              replica whose `near` walks a graph.
+ * - `wasm`     the module the replica is opened with: `./fenec.wasm`
+ *              unless given. `./fenec-replica.wasm` (`make wasm-replica`)
+ *              is 27 KB brotli smaller, built without the graph and the
+ *              schema check: its `near` measures every vector, as `exact`
+ *              does, the same rows and scores, 8.5 ms over 10 000 x 384
+ *              against the graph's 0.68 -- for a replica that searches no
+ *              vectors, or holds a few thousand.
  * - `token`    `Authorization: Bearer`; `tokenProvider` an async function
  *              asked for a new one when the server answers 401
  * - `persist`  IndexedDB key: the replica, its cursors and its unsent writes
@@ -2536,9 +2537,9 @@ function normalizeShape(raw, url) {
  */
 export async function sync(opts = {}) {
   if (!opts.url) throw new FenecError('sync(): `url` is required');
-  // A replica of a few thousand rows measures every vector in a few
-  // milliseconds, and the graph is an eighth of the module's bytes.
-  const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec-replica.wasm', { collation: opts.collation }));
+  // The full module unless asked: without the graph a replica's `near`
+  // is 2 to 40 times slower (fenec-replica.wasm, opt-in).
+  const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec.wasm', { collation: opts.collation }));
   const replica = new FenecSync(local, opts);
   // The server owns the schema: the code's is compared with it, never applied.
   await checked(replica.remote, opts, 'follow');

@@ -5,30 +5,48 @@ description: Run fenecdb in the page with one ES module: open a database, query 
 
 <h1>JavaScript and TypeScript</h1>
 <p class="kicker">Dependency-free ES modules run fenecdb in the page:
-open a database, query it, and keep it between visits — or reach a server
-with no engine in the page at all. Their types come with them.</p>
+open a database, query it, and keep it between visits — or query a server
+through the client alone. Their types come with them.</p>
 
 <h2 id="packages">Which package</h2>
 
-<p>Pick by where the queries run. An app whose data lives on a server and is
-asked there loads no engine; a synced replica loads less of one than a page
-that keeps its own database.</p>
+<p>Pick by where the queries run and whether they search vectors. A synced
+replica loads the full module unless told otherwise, so its
+<code>near</code> walks a graph as a database in the page does.</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">6 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A synced replica</td><td><code>sync()</code>, which loads <code>fenec-replica.wasm</code></td><td class="n">147 KB</td><td>reads from the local copy, optimistic writes, <code>match</code>, a sparse <code>near</code>, ordered indexes; <code>near</code> measures every vector, as <code>exact</code> does, the same rows and scores</td><td>walk an HNSW graph: a <code>near</code> takes 3.4 ms over 10 000 rows of 128 dimensions and 40 ms over 50 000 of 384, against 0.3 and 1.0 with one — <code>sync({ wasm: './fenec.wasm' })</code> keeps it</td></tr>
-<tr><td>A database in the page</td><td><code>Fenec.open('./fenec.wasm')</code></td><td class="n">174 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">174 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A replica that searches no vectors, or holds a few thousand</td><td><code>sync({ wasm: './fenec-replica.wasm' })</code></td><td class="n">147 KB</td><td>what the full module does, <code>match</code>, sparse <code>near</code> and ordered indexes among it; <code>near</code> measures every vector, as <code>exact</code> does, the same rows and scores</td><td>walk an HNSW graph: a <code>near</code> is 2 to 40 times slower (below)</td></tr>
 <tr><td>A page that needs no index</td><td><code>Fenec.open('./fenec-lite.wasm')</code></td><td class="n">131 KB</td><td>documents, filters, <code>order</code>, <code>lookup</code>, collations, persistence; <code>near</code> and a sparse <code>near</code> measuring every vector</td><td><code>match</code>, which needs the text index's statistics; the schema check; an index made</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>What a <code>near</code> costs without the graph, <code>limit 10</code>,
+the median of 50 queries in Node (<code>make wasm-exact-speed</code>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Rows × dimensions</th><th class="n"><code>fenec.wasm</code>, through the graph</th><th class="n"><code>fenec-replica.wasm</code></th></tr></thead>
+<tbody>
+<tr><td>1 000 × 128</td><td class="n">0.27 ms</td><td class="n">0.54 ms</td></tr>
+<tr><td>10 000 × 128</td><td class="n">0.32 ms</td><td class="n">3.4 ms</td></tr>
+<tr><td>50 000 × 128</td><td class="n">0.45 ms</td><td class="n">16.4 ms</td></tr>
+<tr><td>1 000 × 384</td><td class="n">0.66 ms</td><td class="n">1.2 ms</td></tr>
+<tr><td>10 000 × 384</td><td class="n">0.68 ms</td><td class="n">8.5 ms</td></tr>
+<tr><td>50 000 × 384</td><td class="n">0.98 ms</td><td class="n">39.6 ms</td></tr>
 </tbody>
 </table>
 </div>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
 imports, 36 KB brotli as they are served with no build step; a bundler keeps
-what the app uses of them. Over a server, only those two:</p>
+what the app uses of them. An app whose queries run on a server can import
+the client entry instead:</p>
 
 <pre data-lang="ts">import { connect } from '@fenecdb/web/client';   // or './client.js', beside builder.js and http.js
 
@@ -38,14 +56,16 @@ const stop = db.live(db.from('docs').where('year', 2024), (rows) => console.log(
 </pre>
 
 <ul>
+  <li><b>What the entry guarantees</b> is that it cannot pull in the engine,
+    the sync layer or storage. The bytes it saves are few: a page that only
+    calls <code>connect</code> never downloaded the module through
+    <code>@fenecdb/web</code> either, since only <code>Fenec.open</code>
+    fetches it.</li>
   <li><b>The same builder:</b> a query moves between the client, a replica
     and a database in the page unchanged, and so do its types.</li>
   <li><b>A live query over the server</b> runs the query there again after
     a write to a collection it reads; a FenecQL text names those with
     <code>{ collections }</code>.</li>
-  <li><b>Without a graph</b> a <code>near</code> answers what the full
-    module's <code>near ... exact</code> answers, the page's ceiling and all;
-    a file moves between the modules both ways.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -56,8 +76,8 @@ its glue, persistence and the sync layer. It reaches nothing else — no
 WebAssembly, no IndexedDB, no files — and a test fails if it does. An app
 that calls <code>connect</code> and reads a builder query's rows bundles to
 6 KB brotli through it and to 8 KB through <code>@fenecdb/web</code>,
-whose <code>Fenec</code> class a bundler cannot drop (esbuild,
-minified).</p>
+whose <code>Fenec</code> class and its glue a bundler cannot drop (esbuild,
+minified): 2.5 KB of JavaScript, and no <code>.wasm</code> either way.</p>
 
 <p>Its live queries open a subscription to each collection the query reads
 (<code>GET /&lt;collection&gt;/changes</code>), of a shape that holds no row:
@@ -74,8 +94,9 @@ replica asks the server about its schema (<a href="sync.html#schema">The
 server owns the schema</a>). Its <code>near</code> reads every vector of the
 shape and measures it as the full module's exact search measures its
 arena, so the rows, the scores to the bit and the order of ties are that
-search's. How it grows with the rows is in <a
-href="benchmarks.html#module-features">Benchmarks</a>.</p>
+search's, and a file moves between the modules both ways. It is 27 KB
+brotli smaller than the full module; whether that is worth the slower
+<code>near</code> is the table above's question.</p>
 </details>
 
 <h2>Opening a database</h2>
@@ -618,7 +639,7 @@ and <code>fenec-replica.wasm</code>, without the graph, beside
 <pre data-lang="bash">make wasm                          # every index: 174 KB brotli
 make wasm FEATURES="text sorted"   # no graph, no sparse index: 153 KB
 make wasm FEATURES=none            # none of the four: 138 KB
-make wasm-replica                  # what sync() loads: no graph, no schema check: 147 KB
+make wasm-replica                  # a replica's, opt-in: no graph, no schema check: 147 KB
 make wasm-lite                     # no index, no schema check: 131 KB
 </pre>
 

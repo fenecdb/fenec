@@ -16,7 +16,7 @@ make test          # cargo test (no fenec-bench, no examples), fenec-core withou
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
-make wasm-replica  # the module sync() loads: no graph, no schema check, to web/fenec-replica.wasm
+make wasm-replica  # a replica's module, opt-in (sync({ wasm })): no graph, no schema check, to web/fenec-replica.wasm
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
@@ -1083,10 +1083,13 @@ and sorted, no graph and no schema check, 146.9 KB) and `fenec-lite.wasm`
 (no index, no schema check, 130.5 KB), and `@fenecdb/web/client`, which
 is `web/client.js`: the builder (`builder.js`) and the HTTP client
 (`http.js`) re-exported, the two modules `fenec.js` imports beside its
-glue, persistence and sync -- an app bundling `connect` and a builder
-query's rows is 5.7 KB brotli through it and 8.2 through `fenec.js`,
-whose `Fenec` class a bundler cannot drop (its static block is a side
-effect). `web/fenec.client.test.js` walks the client's imports and fails
+glue, persistence and sync. The entry's worth is that it cannot pull in
+the engine, sync or storage, not the bytes: a `connect`-only app never
+fetched the `.wasm` through `fenec.js` either (only `Fenec.open` does),
+and bundling `connect` and a builder query's rows is 5.7 KB brotli
+through the entry against 8.2 through `fenec.js` (7.5 on main before
+`FenecHttp.live`), whose `Fenec` class a bundler cannot drop -- its static
+block is a side effect. `web/fenec.client.test.js` walks the client's imports and fails
 if they reach anything but those three files or hold the module's glue,
 `FenecSync`, IndexedDB or files. `FenecHttp.live` is `Fenec.live`'s
 contract over a server: a subscription to each collection the query reads
@@ -1097,7 +1100,12 @@ query, and a text names what it reads or is refused -- so `useLiveQuery`
 takes `connect()` as it takes `sync()`. `FenecHttp` calls `fetch` on its
 own (`#request`): as its method, a browser's `fetch` throws "Illegal
 invocation", which Node's does not. `sync()` opens
-`./fenec-replica.wasm` unless given `wasm` or `local`. Without `vector`,
+the full `./fenec.wasm` unless given `wasm` or `local`: the owner's
+call, since without the graph a replica's `near` is 2 to 40 times slower
+(0.27 -> 0.54 ms at 1 000 x 128, 0.68 -> 8.5 at 10 000 x 384, 0.98 -> 40
+at 50 000 x 384), and the rule is no performance loss. The replica module
+is opt-in, for a size-sensitive page whose replica searches no vectors or
+holds a few thousand. Without `vector`,
 `near` over a field declaring `@hnsw` is `Database::near_stored`: every
 vector read out of the store and measured as the full build's exact
 search measures its arena (`vector::search_stored`: made a unit one as
