@@ -11,6 +11,7 @@
 mod backup;
 #[cfg(feature = "import")]
 mod import;
+mod langs;
 #[cfg(any(feature = "backup", feature = "import"))]
 mod stop;
 mod types;
@@ -67,8 +68,10 @@ Backup
 const BACKUP_HELP: &str = "";
 
 const TYPES_HELP: &str = r#"
-TypeScript types
-  fenec types <file.fenec>                   generates `.d.ts` from the schema (stdout)
+Types and schemas
+  fenec types <file.fenec|.fenecql>          generates `.d.ts` from the schema (stdout)
+  fenec types --lang python|go|csharp <f>    a row of each collection in that language
+  fenec types --schema | --fenecql <file>    the schema as code: Drizzle-style tables, or FenecQL
                                          for details: fenec types --help
 "#;
 
