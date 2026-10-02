@@ -689,19 +689,29 @@ function isSpec(v) {
 
 // ---------------------------------------------------------- condition tree
 
+// What `or`, `and`, `not` and `raw` make carries this mark, which no object
+// written by hand can: told apart by its `t` alone, `where({ t: 'or' })` --
+// a field called `t` -- was taken for a node and failed with a TypeError.
+const NODE = Symbol('fenec.condition');
+
+function marked(node) {
+  node[NODE] = true;
+  return node;
+}
+
 /** `or(a, b)` / `or([a, b])` -- joins conditions with `or`. */
 export function or(...conds) {
-  return { t: 'or', items: conds.flat().map(toCond) };
+  return marked({ t: 'or', items: conds.flat().map(toCond) });
 }
 
 /** `and(a, b)` -- `where` already ands; this is only needed inside `or`. */
 export function and(...conds) {
-  return { t: 'and', items: conds.flat().map(toCond) };
+  return marked({ t: 'and', items: conds.flat().map(toCond) });
 }
 
 /** `not(condition)` */
 export function not(cond) {
-  return { t: 'not', item: toCond(cond) };
+  return marked({ t: 'not', item: toCond(cond) });
 }
 
 /**
@@ -715,13 +725,11 @@ export function not(cond) {
  */
 export function raw(sql, ...params) {
   if (typeof sql !== 'string') throw new FenecError('raw() expects text');
-  return { t: 'raw', sql, params };
+  return marked({ t: 'raw', sql, params });
 }
 
-const NODES = new Set(['and', 'or', 'not', 'raw', 'cmp', 'in', 'null']);
-
 function toCond(x) {
-  if (isSpec(x) && typeof x.t === 'string' && NODES.has(x.t)) return x;
+  if (isSpec(x) && x[NODE]) return x;
   if (isSpec(x)) return objectCond(x);
   throw new FenecError(`expected an object as a condition: ${JSON.stringify(x)}`);
 }
@@ -1274,6 +1282,10 @@ export class Query {
   #assertPlain(verb) {
     const extra = this.#extraClause();
     if (extra) throw new FenecError(`${verb} cannot be used with \`${extra}\``);
+    // Not among the read clauses `count` refuses, since a required lookup
+    // decides what a count counts; a write has no use for one, and left
+    // out, `.lookup(...).delete()` deleted every parent it filtered.
+    if (this.#s.lookups.length) throw new FenecError(`${verb} cannot be used with \`lookup\``);
     if (verb === 'insert' && this.#s.cond.length) {
       throw new FenecError('insert cannot be used with `where`');
     }
