@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'live.dart';
 import 'native.dart';
 import 'query.dart';
+import 'remote.dart';
 import 'values.dart';
+
+part 'sync.dart';
 
 /// What the library or the builder refused, and why. [code] is the kind:
 /// the engine's ([FenecCode.notFound], [FenecCode.duplicate] ...), the
@@ -119,6 +124,10 @@ class Fenec {
   var _inflight = 0;
   late final Lives lives = Lives(this);
 
+  /// The replica's sync, when the database is one ([Fenec.openSynced]).
+  Replica? get replica => _replica;
+  Replica? _replica;
+
   Fenec._(this._handle, this._worker);
 
   /// Opens the file at [path], made when missing. [flags]: [noSync],
@@ -132,6 +141,39 @@ class Fenec {
       rethrow;
     }
   }
+
+  /// A replica of [shapes] in the file at [path], kept in step with the
+  /// server at [url]: reads and live queries are the file's, a write to a
+  /// shape's collection is applied at once and sent to the server -- queued
+  /// in the file while it cannot be reached, and sent under an idempotency
+  /// key, so it lands once. The same [Fenec]: `from`, `live` and `query`
+  /// work as they do over a file of the app's own.
+  ///
+  /// ```dart
+  /// final db = await Fenec.openSynced(
+  ///   url: 'https://api.example.com', token: jwt,
+  ///   shapes: [Shape('todos', where: {'done': false}, key: 'key')],
+  ///   path: '${dir.path}/todos.fenec');
+  /// ```
+  ///
+  /// `openSynced` rather than `sync`: Dart has no static and instance
+  /// member of one name, and [sync] is the fsync. The requests and the
+  /// change stream are `dart:io`'s `HttpClient`'s, with the platform's TLS:
+  /// iOS and Android refuse cleartext HTTP by default. [tokenProvider] is
+  /// asked for a fresh token when the server answers 401.
+  static Future<Fenec> openSynced({
+    required String url,
+    String? token,
+    required List<Shape> shapes,
+    required String path,
+    int flags = 0,
+    Future<String> Function()? tokenProvider,
+  }) =>
+      _openSynced(url: url, token: token, shapes: shapes, path: path, flags: flags, tokenProvider: tokenProvider);
+
+  /// A fenec-server over HTTP, with no local file: every query goes to the
+  /// server, through the same builder ([FenecRemote]).
+  static FenecRemote connect(String url, {String? token}) => FenecRemote(url, token: token);
 
   /// A database in memory alone.
   static Future<Fenec> memory() async {
@@ -199,6 +241,8 @@ class Fenec {
         // After an error too: a text that failed may follow statements
         // that wrote, and the change ring says what landed.
         lives.touch();
+        // A write to a synced collection left a request for the server due.
+        _replica?._poll();
       }
     }
   }
@@ -258,6 +302,7 @@ class Fenec {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    await _replica?._stop();
     lives.clear();
     try {
       _answer(await _worker.call('close', [_handle]));
