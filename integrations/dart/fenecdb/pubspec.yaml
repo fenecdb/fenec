@@ -1,6 +1,6 @@
 name: fenecdb
 description: fenecdb embedded in a Dart or Flutter app -- a vector-native database in a file on the device, queried with FenecQL or a builder, with live queries as Streams.
-version: 0.1.8
+version: 0.1.9
 homepage: https://github.com/fenecdb/fenec
 repository: https://github.com/fenecdb/fenec/tree/main/integrations/dart/fenecdb
 topics: [database, vector, embedded, ffi]
