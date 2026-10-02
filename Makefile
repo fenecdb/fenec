@@ -261,6 +261,12 @@ swift-test:
 kotlin-test:
 	integrations/kotlin/run-tests.sh
 
+## The Dart package's tests (integrations/dart): the native library for
+## this machine, then dart test against it -- and flutter test for the
+## plugin where Flutter is installed
+dart-test:
+	integrations/dart/run-tests.sh
+
 ## The Go SDK (integrations/go) against fenec-server processes its tests
 ## start: a primary, a replica of it and a node of tenants
 go-test:

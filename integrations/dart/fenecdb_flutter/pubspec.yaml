@@ -1,0 +1,34 @@
+name: fenecdb_flutter
+description: fenecdb in a Flutter app on iOS, Android and macOS -- the fenecdb package with the native library bundled for each platform.
+version: 0.1.7
+homepage: https://github.com/fenecdb/fenec
+repository: https://github.com/fenecdb/fenec/tree/main/integrations/dart/fenecdb_flutter
+topics: [database, vector, embedded, ffi]
+
+environment:
+  sdk: ^3.4.0
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  fenecdb: 0.1.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# An FFI plugin: no platform channel, the Dart side calls the library
+# itself. Each platform's project only carries the library -- the
+# XCFramework on iOS and macOS, a .so for each ABI on Android -- which
+# prepare.sh puts there from the builds of integrations/swift and
+# integrations/kotlin.
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true
+      macos:
+        ffiPlugin: true

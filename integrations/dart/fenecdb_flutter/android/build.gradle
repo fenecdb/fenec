@@ -1,0 +1,38 @@
+// The native library for Android: libfenec_ffi.so for arm64-v8a,
+// armeabi-v7a and x86_64, which prepare.sh copies into src/main/jniLibs
+// from integrations/kotlin's NDK build. Nothing to compile: the Dart side
+// opens the library itself.
+group 'io.github.fenecdb.flutter'
+version '0.1.7'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'io.github.fenecdb.flutter'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 21
+    }
+
+    sourceSets {
+        main.jniLibs.srcDirs = ['src/main/jniLibs']
+    }
+}

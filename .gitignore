@@ -26,3 +26,14 @@ integrations/kotlin/.kotlin/
 integrations/kotlin/build/
 integrations/kotlin/*/build/
 integrations/kotlin/local.properties
+# Dart and Flutter: pub's state, and what prepare.sh and flutter create put
+# in the plugin and its example
+integrations/dart/**/.dart_tool/
+integrations/dart/**/pubspec.lock
+integrations/dart/**/.flutter-plugins*
+integrations/dart/fenecdb_flutter/ios/Frameworks/
+integrations/dart/fenecdb_flutter/macos/Frameworks/
+integrations/dart/fenecdb_flutter/android/src/main/jniLibs/
+integrations/dart/fenecdb_flutter/example/*
+!integrations/dart/fenecdb_flutter/example/lib/
+!integrations/dart/fenecdb_flutter/example/pubspec.yaml
