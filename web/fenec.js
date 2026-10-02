@@ -507,8 +507,13 @@ export function connect(url, opts = {}) {
 // The builder is transport independent: `from('docs')` works on its own and
 // `bind()` attaches it to any executor (wasm, HTTP, fenec-server).
 
-/** Operator names -- both symbols and words are accepted. */
+/**
+ * Operator names -- both symbols and words are accepted. No prototype: a
+ * name looked up in an object literal found `constructor`, and
+ * `where('a', 'constructor', 1)` wrote `Object`'s source into the text.
+ */
 const OPS = {
+  __proto__: null,
   '=': '=', eq: '=',
   '!=': '!=', ne: '!=', neq: '!=',
   '<': '<', lt: '<',

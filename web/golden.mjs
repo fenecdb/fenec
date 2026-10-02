@@ -129,6 +129,8 @@ c(
   Q,
 );
 c('an unknown operator is refused', docs, ['where', 'year', 'between', 1], Q);
+c('an operator is no name an object inherits', docs, ['where', 'year', 'constructor', 1], Q);
+c('an operator in an object is no name an object inherits', docs, ['where', { year: { toString: 1 } }], Q);
 c('two arguments are equality', docs, ['where', 'category', 'book'], Q);
 c('two arguments take an operator object', docs, ['where', 'year', { gte: 2020, lt: 2030 }], Q);
 c('successive where calls join with and', docs, ['where', 'a', 1], ['where', 'b', 2], Q);
