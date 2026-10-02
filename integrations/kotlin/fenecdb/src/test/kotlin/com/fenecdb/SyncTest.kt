@@ -211,6 +211,19 @@ class SyncTest {
         db.close()
     }
 
+    /** The Kotlin tab's "over HTTP" lines on languages.html, as written there but for the server's address. */
+    @Test
+    fun theDocsExampleOverHttp() = runBlocking {
+        val s = server("docs")
+        s.run("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
+        s.run("""put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}""")
+
+        val remote = Fenec.connect(s.url, token = "secret")
+        remote.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
+        val hits = remote.from("docs").select("title").near("embed", floatArrayOf(0.1f, 0.2f, 0.3f)).limit(5).rows()
+        assertEquals(listOf("Night at the oasis", "Dunes"), hits.map { it.string("title") })
+    }
+
     @Test
     fun connectRunsEveryQueryOnTheServer() = runBlocking {
         val s = server("connect")

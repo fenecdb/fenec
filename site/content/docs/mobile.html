@@ -34,9 +34,9 @@ goes in as text with its parameters as JSON, and its answer comes back as
 the JSON the browser module answers with, from the same code
 (<code>fenec-abi</code>), so a page and an app handed the same text get the
 same bytes. A vector goes in as its <code>f32</code> bytes beside the
-JSON, never as digits. Syncing an app's file with a server is not here yet;
-reaching a server from an app is plain HTTP meanwhile
-(<a href="languages.html">Your language</a>).</p>
+JSON, never as digits. The same file can be a replica a server keeps in
+step (<a href="#sync">Sync with a server</a>), and an app can ask a server
+with no file at all (<a href="#connect">Without a file</a>).</p>
 </details>
 
 <h2 id="todo">A todo list</h2>
@@ -217,6 +217,210 @@ app's writes run on other threads and come back one at a time.</p>
 FenecQL text names its collections, or runs after every write.</p>
 </details>
 
+<h2 id="sync">Sync with a server</h2>
+
+<p>The todo list kept in step with a server, every device seeing every
+change: open the file as a replica of the rows you want. That is the one
+line that changes -- the list is still a live query of the file, and a tap
+still writes to it.</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift" data-label="Todos.swift">let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
+                              shapes: [Shape("todos", key: "key")],
+                              path: dir.appendingPathComponent("todos.fenec").path)</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin" data-label="Todos.kt">val db = Fenec.sync(url = "https://api.example.com", token = jwt,
+                    shapes = listOf(Shape("todos", key = "key")),
+                    path = File(app.filesDir, "todos.fenec").path)</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart" data-label="main.dart">final db = await Fenec.openSynced(url: 'https://api.example.com', token: jwt,
+                                  shapes: [Shape('todos', key: 'key')],
+                                  path: '${dir.path}/todos.fenec');</pre>
+</div>
+
+</div>
+
+<p>The collection is made on the server, with a key the app's inserts are
+matched by -- <code>create collection todos (key text @unique, title text,
+done bool @hash)</code> -- and comes to the replica from there, so the
+<code>create collection</code> line goes. Dart's is
+<code>openSynced</code>: <code>sync()</code> is the fsync, and Dart has no
+static and instance member of one name.</p>
+
+<ul>
+  <li><b>Reads are the file's.</b> A query, a live query and the builder
+    read the replica: no network, and the app works offline.</li>
+  <li><b>A shape is a set.</b> The rows of one collection a filter on the
+    server picks, <code>Shape("todos", where: ["owner": me])</code>, in the
+    JS sync layer's form; one shape a collection. Order and limits are a
+    query's, not a shape's.</li>
+  <li><b>A write shows at once.</b> It is applied to the replica as it is
+    made, and sent. An insert gets a temporary id and a key, and the
+    server's copy takes its place when it arrives.</li>
+  <li><b>A refused write is put back.</b> When the server refuses it -- a
+    <code>409</code> for a unique value held, a <code>403</code> from a
+    token's rules -- the replica is put back as it was and the app is told:
+    <code>db.replica.refusals</code>.</li>
+  <li><b>Offline, writes wait.</b> A write made while the server cannot be
+    reached waits in the file, and goes once it can, in order, once each.
+    An app closed meanwhile sends it when it opens again.</li>
+  <li><b>It catches up from where it stopped</b>, after a dropped
+    connection, a server restart or a week in a drawer -- or is sent the
+    whole shape again when the server's ring of changes no longer reaches
+    back that far.</li>
+</ul>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>Swift</th><th>Kotlin</th><th>Dart</th></tr></thead>
+<tbody>
+<tr><td>open</td><td><code>Fenec.sync(url:token:shapes:path:)</code></td><td><code>Fenec.sync(url, token, shapes, path)</code></td><td><code>Fenec.openSynced(url:, token:, shapes:, path:)</code></td></tr>
+<tr><td>status</td><td><code>replica.status</code>, <code>statuses()</code> (an <code>AsyncStream</code>)</td><td><code>replica.status</code> (a <code>StateFlow</code>)</td><td><code>replica.status</code>, <code>statuses</code> (a <code>Stream</code>)</td></tr>
+<tr><td>first seed, writes answered</td><td colspan="3"><code>ready()</code>, <code>pushed()</code></td></tr>
+<tr><td>refused writes</td><td><code>refusals()</code></td><td><code>refusals</code> (a <code>SharedFlow</code>)</td><td><code>refusals</code></td></tr>
+<tr><td>a new token</td><td colspan="3"><code>setToken(jwt)</code>, or a <code>tokenProvider</code> asked on a <code>401</code></td></tr>
+<tr><td>the network</td><td colspan="3"><code>setOnline(bool)</code>, <code>resume()</code></td></tr>
+<tr><td>the server itself</td><td colspan="3"><code>replica.remote</code> (<a href="#connect">below</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The status says <code>online</code>, <code>offline</code> or
+<code>catchingUp</code> (connecting, seeding, or sending the writes left
+from before), how many writes the server has not answered, and the last
+error.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>What to ask, what an answer means and what is written are one state
+machine in Rust (<code>fenec_abi::sync</code>), with no network of its own:
+a binding feeds it what happened -- a request's answer, a stream's bytes, a
+timer, the network, a new token -- and does what it hands back: make this
+request, open this stream, wait this long. So the logic exists once, with
+one suite of tests driving it through scripted server event sequences, and
+each binding's loop is a page over its platform's HTTP client. A write to a
+shape's collection through <code>run</code>, the builder or
+<code>execute</code> goes to it on its own: applied to the replica, what
+puts it back kept, and the write queued with an idempotency key -- all one
+block in the file. Writes go one at a time, in order, each under its key, so
+a write whose answer was lost is sent again and answered as the first time,
+not made again. A server's answer of <code>0</code> (no answer),
+<code>408</code>, <code>429</code> or <code>5xx</code> is tried again with
+backoff, 250 ms doubling to 15 s; a <code>401</code> asks for a token; any
+other <code>4xx</code> is a refusal. A change applies in one block with the
+shape's cursor, so a crash leaves the two agreeing.</p>
+<p>The file holds three collections of the sync's own beside the
+replica's: <code>_sync_shapes</code> (each shape's cursor),
+<code>_sync_queue</code> (the writes not yet answered) and
+<code>_sync_temps</code> (rows an insert made under a temporary id, until
+the server's copy). A collection with no shape is the app's own, written
+and read as in a file of its own; a synced collection's schema is the
+server's, and <code>create index</code> or <code>drop</code> over it is
+refused. A change of one row costs the replica 18.4 µs against 7.1 for the
+same put straight into the engine (the cursor is written in the same
+block), rows in changes of 100 cost 3.8 µs either way, and a seed of 10 000
+rows 72 ms (<code>make sync-bench</code>).</p>
+<p>Where it differs from the browser's <code>sync</code>
+(<a href="sync.html">Sync</a>), on purpose:</p>
+<ul>
+  <li>A write returns once it is applied and kept, not once the server
+    answers: <code>await</code> on a button would hang offline. A refusal
+    comes on <code>refusals</code>, and <code>pushed()</code> waits for the
+    answers. In the browser the write's promise rejects.</li>
+  <li>The browser puts a write back when the network fails or the server
+    answers <code>5xx</code>; an app keeps it and sends it again. Only a
+    <code>4xx</code> refuses.</li>
+  <li>An update or a delete of a row an unanswered insert made reaches the
+    server's copy by its key; the browser sends the temporary id, which the
+    server never saw.</li>
+  <li>An insert the shape does not hold leaves no temporary row once the
+    stream passes the write; the browser keeps it until the next seed.</li>
+  <li>A seed writes the shape over the replica and deletes what it does not
+    hold, keeping the rows of writes not yet answered; the browser clears
+    the collection first.</li>
+  <li>A text of several writes is one write, sent as one
+    <code>/batch</code>: there is no <code>batch</code> function.</li>
+  <li>There is one replica a file, held by one process, so no leader is
+    elected among tabs; the file is the persistence, with no image to save
+    every 2 s.</li>
+</ul>
+</details>
+
+<h3 id="tls">TLS on devices</h3>
+
+<p>iOS (App Transport Security) and Android refuse plain <code>http://</code>
+by default, and so should you: put TLS in front of
+<code>fenec-server</code>. Caddy does it in three lines, certificate
+included:</p>
+
+<pre data-lang="text" data-label="Caddyfile">api.example.com {
+    reverse_proxy 127.0.0.1:8080
+}</pre>
+
+<p>Each binding makes its requests with the platform's client --
+<code>URLSession</code>, <code>HttpURLConnection</code>,
+<code>dart:io</code>'s <code>HttpClient</code> -- so the system's trust
+store, proxies and pinning apply. During development, an emulator reaches
+a server on the machine at plain <code>http://</code> once allowed: iOS's
+<code>NSAllowsLocalNetworking</code>, Android's
+<code>network_security_config</code> with <code>cleartextTrafficPermitted</code>
+for <code>10.0.2.2</code>.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>The change stream is Server-Sent Events: a response that does not end.
+Caddy passes <code>text/event-stream</code> through as it comes; behind
+nginx, the server's <code>X-Accel-Buffering: no</code> does the same. A
+proxy that closes an idle connection sooner than the server's keepalive
+(a comment every 20 s) cuts the stream, which then opens again from its
+cursor -- harmless, a round trip each time. fenecdb's own HTTP client, the
+server's, speaks no TLS and is not used on a device.</p>
+</details>
+
+<h3 id="background">Battery and the background</h3>
+
+<p>A replica holds one connection a shape open while the app runs, quiet
+but for the keepalive. iOS suspends an app soon after it leaves the
+screen, and Android stops one's network in Doze: the streams are cut, and
+nothing is lost -- a write waits in the file, a change waits on the server.
+As the app comes back, call <code>resume()</code> (on
+<code>scenePhase == .active</code>, <code>onStart</code>,
+<code>AppLifecycleState.resumed</code>): the streams open at once from their
+cursors, the waiting writes go first, and the live queries run again as the
+changes land.</p>
+
+<details class="deep"><summary>Details</summary>
+<p><code>setOnline(false)</code> as the app leaves the screen closes the
+streams at once rather than when the system cuts them, and spares the radio
+the keepalive. Backoff after a failure doubles from 250 ms to 15 s, with
+jitter, so a server back up is not met by every device at once;
+<code>resume()</code> and <code>setOnline(true)</code> forget it. Nothing
+here runs in the background: a write made just before suspension is sent on
+the next resume, or by an app's own background task (iOS's
+<code>BGAppRefreshTask</code>, Android's WorkManager) that opens the replica
+and waits for <code>pushed()</code>. A replica away longer than the server's
+ring of changes reaches back (<code>--changes</code>, 4 096 writes by
+default) is sent its shapes whole on return.</p>
+</details>
+
+<h2 id="connect">Without a file: the server alone</h2>
+
+<p>An app that keeps nothing on the device asks the server directly:
+<code>Fenec.connect</code> makes every query a request, through the same
+builder, as <code>connect</code> does in JavaScript.</p>
+
+<pre data-lang="swift">let db = Fenec.connect(url: "https://api.example.com", token: jwt)
+let open = try await db.from("todos").where("done", false).rows()</pre>
+
+<p>Kotlin's is <code>Fenec.connect(url, token = jwt)</code>, Dart's
+<code>Fenec.connect(url, token: jwt)</code>; a replica's
+<code>replica.remote</code> is the same, for what the replica does not
+hold. Live queries are the file's alone.</p>
+
 <h2 id="file">Where the file lives</h2>
 
 <p>Anywhere the app may write. On iOS the app's Application Support
@@ -302,16 +506,16 @@ whole open.</p>
 <table>
 <thead><tr><th>the native library, stripped</th><th class="n">size</th></tr></thead>
 <tbody>
-<tr><td>macOS, Apple silicon</td><td class="n">1.51 MB</td></tr>
-<tr><td>macOS, Intel</td><td class="n">1.59 MB</td></tr>
-<tr><td>Linux arm64, with the JNI functions</td><td class="n">1.51 MB</td></tr>
-<tr><td>Linux x86-64, with the JNI functions</td><td class="n">1.68 MB</td></tr>
+<tr><td>macOS, Apple silicon</td><td class="n">1.68 MB</td></tr>
+<tr><td>macOS, Intel</td><td class="n">1.77 MB</td></tr>
+<tr><td>Linux arm64, with the JNI functions</td><td class="n">1.71 MB</td></tr>
+<tr><td>Linux x86-64, with the JNI functions</td><td class="n">1.88 MB</td></tr>
 </tbody>
 </table>
 </div>
 
-<p>iOS's and Android's are measured by CI for every change, in the run's
-summary. An app ships the code it links: the XCFramework's static library
+<p>The sync with a server is 165 to 198 KB of each. iOS's and Android's
+are measured by CI for every change, in the run's summary. An app ships the code it links: the XCFramework's static library
 is the objects before the app's linker takes what it uses.</p>
 
 <div class="tbl">

@@ -144,6 +144,20 @@
             try await db.close()
         }
 
+        /// The Swift tab's "over HTTP" lines on languages.html, as written
+        /// there but for the server's address.
+        @Test func theDocsExampleOverHTTP() async throws {
+            let s = try await Server("docs")
+            defer { s.stop() }
+            try await s.run("create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))")
+            try await s.run(#"put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}"#)
+
+            let remote = Fenec.connect(url: s.url, token: "secret")
+            try await remote.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
+            let hits = try await remote.from("docs").select("title").near("embed", [Float(0.1), 0.2, 0.3]).limit(5).rows()
+            #expect(hits.compactMap { $0["title"]?.string } == ["Night at the oasis", "Dunes"])
+        }
+
         @Test func connectRunsEveryQueryOnTheServer() async throws {
             let s = try await Server("connect")
             defer { s.stop() }

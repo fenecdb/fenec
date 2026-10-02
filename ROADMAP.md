@@ -364,14 +364,21 @@ framework: an `ObservableObject` and an `@Observable`, a `Flow`, a
 x86_64 Linux; a buffered put 4.6 us against the server handler's 23.2, a
 `near` 97.8 us against 151.4.
 
-## Phase 7: an app's file synced with a server (Phase 57)
+## Phase 7: an app's file synced with a server (Phase 57) -- done
 
 What `FenecSync` does in a page -- a replica of a server's collections that
 reads without the network and writes optimistically -- for an app's file,
 and `Fenec.connect(url)` in each native binding for an app that talks to a
-server without a file of its own. The native library has what it needs:
-the change ring (`fenec_changes`) and the bindings' live queries already
-take a load as "everything".
+server without a file of its own. The sync is a state machine with no I/O
+in `fenec-abi` (`fenec_abi::sync`, behind a feature the browser module is
+built without), its network the platform's client -- `URLSession`,
+`HttpURLConnection`, `dart:io` -- for the TLS a device needs; its queue of
+unanswered writes, their idempotency keys and the cursors in the file, so a
+write made offline lands once after a restart. `Fenec.sync` in Swift and
+Kotlin, `Fenec.openSynced` in Dart, each held against a fenec-server its
+tests start, kill and start again. Measured: a one-row change 18.4 us
+against 7.1 for the put alone; the library +165 KB on Apple silicon (1.68
+MB), +198 KB on x86_64 Linux (1.88).
 
 ---
 

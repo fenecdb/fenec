@@ -4,6 +4,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:fenecdb/fenecdb.dart';
 import 'package:test/test.dart';
@@ -205,6 +206,28 @@ void main() {
     await eventually(
         "the server's copies", () async => (await db.from('tasks').rows()).every((r) => (r['id'] as int) < 1 << 52));
     await db.close();
+  });
+
+  // The Dart tab's "over HTTP" lines on languages.html, as written there
+  // but for the server's address.
+  test("the docs' example over HTTP", () async {
+    final s = await server('docs');
+    await s.run('create collection if not exists docs (title text, embed vector<3> @hnsw(cosine))');
+    await s.run('put docs {title: "Night at the oasis", embed: [0.1, 0.2, 0.3]}');
+
+    final remote = Fenec.connect(s.url, token: 'secret');
+    await remote.execute(r'put docs {title: $1, embed: $2}', [
+      'Dunes',
+      Float32List.fromList([0.9, 0.1, 0.0])
+    ]);
+    final hits = await remote
+        .from('docs')
+        .select(['title'])
+        .near('embed', Float32List.fromList([0.1, 0.2, 0.3]))
+        .limit(5)
+        .rows();
+    expect([for (final r in hits) r['title']], ['Night at the oasis', 'Dunes']);
+    remote.close();
   });
 
   test('connect runs every query on the server', () async {

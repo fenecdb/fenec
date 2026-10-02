@@ -11,9 +11,10 @@ with the HTTP client it already has. No driver to install.</p>
 on each change to fenecdb (<code>make languages-test</code>). Python,
 JavaScript, Go and .NET have official clients, each its standard library
 alone; in the other languages these few lines are the whole client. Swift,
-Kotlin and Dart embed the database in the app instead, a file on the device
-with no server (<a href="mobile.html">Mobile and native apps</a>); their
-tabs run the same flow in their own tests.</p>
+Kotlin and Dart embed the database in the app, a file on the device
+(<a href="mobile.html">Mobile and native apps</a>), and reach a server with
+<code>Fenec.connect</code>; their tabs run the same flow in their own
+tests.</p>
 
 <h2 id="setup">Start a server</h2>
 
@@ -345,9 +346,15 @@ do {
 try await docs.insert(["title": "Night at the oasis", "embed": .floats([0.1, 0.2, 0.3])] as Value)
 let near = try await docs.select("title").near("embed", [Float(0.1), 0.2, 0.3]).limit(5).rows()
 let n = try await docs.where("title", "~", "Dunes").count()</pre>
+<pre data-lang="swift" data-label="over HTTP">// No file: every query goes to the server, through the same builder.
+let remote = Fenec.connect(url: "http://127.0.0.1:8080", token: "secret")
+try await remote.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
+let hits = try await remote.from("docs").select("title").near("embed", [Float(0.1), 0.2, 0.3]).limit(5).rows()</pre>
 <p>A <code>[Float]</code> goes to the library as its bytes; rows decode as
-any <code>Decodable</code>. A live query for SwiftUI and where the file goes
-are on <a href="mobile.html">Mobile and native apps</a>.</p>
+any <code>Decodable</code>. A live query for SwiftUI, where the file goes
+and a replica a server keeps in step are on
+<a href="mobile.html">Mobile and native apps</a>. A device reaches a
+server through TLS: <code>URLSession</code> makes the requests.</p>
 </div>
 
 <div class="lang" data-name="Kotlin">
@@ -373,9 +380,15 @@ try {
 docs.insert(mapOf("title" to "Night at the oasis", "embed" to floatArrayOf(0.1f, 0.2f, 0.3f)))
 val near = docs.select("title").near("embed", floatArrayOf(0.1f, 0.2f, 0.3f)).limit(5).rows()
 val n = docs.where("title", "~", "Dunes").count()</pre>
+<pre data-lang="kotlin" data-label="over HTTP">// No file: every query goes to the server, through the same builder.
+val remote = Fenec.connect("http://127.0.0.1:8080", token = "secret")
+remote.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
+val hits = remote.from("docs").select("title").near("embed", floatArrayOf(0.1f, 0.2f, 0.3f)).limit(5).rows()</pre>
 <p>The calls suspend, on <code>Dispatchers.IO</code>; Java calls the
-<code>...Blocking</code> ones. Live queries are <code>Flow</code>s
-(<a href="mobile.html">Mobile and native apps</a>).</p>
+<code>...Blocking</code> ones. Live queries are <code>Flow</code>s, and a
+replica a server keeps in step is <code>Fenec.sync</code>
+(<a href="mobile.html">Mobile and native apps</a>). A device reaches a
+server through TLS: <code>HttpURLConnection</code> makes the requests.</p>
 </div>
 
 <div class="lang" data-name="Dart">
@@ -401,9 +414,15 @@ try {
 await docs.insert({'title': 'Night at the oasis', 'embed': Float32List.fromList([0.1, 0.2, 0.3])});
 final near = await docs.select(['title']).near('embed', Float32List.fromList([0.1, 0.2, 0.3])).limit(5).rows();
 final n = await docs.where('title', '~', 'Dunes').count();</pre>
+<pre data-lang="dart" data-label="over HTTP">// No file: every query goes to the server, through the same builder.
+final remote = Fenec.connect('http://127.0.0.1:8080', token: 'secret');
+await remote.execute(r'put docs {title: $1, embed: $2}', ['Dunes', Float32List.fromList([0.9, 0.1, 0.0])]);
+final hits = await remote.from('docs').select(['title']).near('embed', Float32List.fromList([0.1, 0.2, 0.3])).limit(5).rows();</pre>
 <p>Every call runs on an isolate the database keeps, so none blocks the UI.
-Live queries are <code>Stream</code>s (<a href="mobile.html">Mobile and
-native apps</a>).</p>
+Live queries are <code>Stream</code>s, and a replica a server keeps in step
+is <code>Fenec.openSynced</code> (<a href="mobile.html">Mobile and native
+apps</a>). A device reaches a server through TLS: <code>dart:io</code>'s
+<code>HttpClient</code> makes the requests.</p>
 </div>
 
 </div>

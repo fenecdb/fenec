@@ -167,9 +167,12 @@ make docker && make docker-run TOKEN=secret   # or build it yourself
 ```
 
 **Mobile and native apps.** The engine as a native library
-(`crates/fenec-ffi`, a C ABI) keeps the database in a file on the device, no
-server: Swift for iOS and macOS, Kotlin for Android and the JVM, Dart and
-Flutter, each with the query builder and live queries driving the UI.
+(`crates/fenec-ffi`, a C ABI) keeps the database in a file on the device:
+Swift for iOS and macOS, Kotlin for Android and the JVM, Dart and Flutter,
+each with the query builder and live queries driving the UI. The file can be
+a replica a server keeps in step -- reads local, writes optimistic and
+queued while offline, over the platform's own HTTP client and its TLS -- and
+`Fenec.connect` asks a server with no file at all.
 
 | Language | Package | From |
 | --- | --- | --- |
@@ -181,6 +184,10 @@ Flutter, each with the query builder and live queries driving the UI.
 let db = try await Fenec.open(path: path)
 let open = try await db.from("todos").where("done", false).rows(as: Todo.self)
 let live = LiveQuery(db, try db.from("todos").where("done", false), as: Todo.self)   // for SwiftUI
+
+// The same, a replica the server keeps in step: the one line that changes.
+let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
+                              shapes: [Shape("todos", key: "key")], path: path)
 ```
 
 [Mobile and native apps](https://fenecdb.com/docs/mobile).
@@ -237,7 +244,7 @@ query; it is not a join and is not trying to be one.
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, HNSW with a filter, half precision, and why there is no page cache and exactly one writer |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state |
-| [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, where the file lives, durability |
+| [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, syncing with a server, TLS and the background, where the file lives, durability |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |

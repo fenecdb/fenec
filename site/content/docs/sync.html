@@ -4,7 +4,7 @@ description: A local replica that reads without the network, writes optimistical
 -->
 
 <h1>Sync</h1>
-<p class="kicker">Keep a copy of your data in the browser that reads without
+<p class="kicker">Keep a copy of your data in the browser or an app that reads without
 the network, writes instantly and stays up to date with the server.</p>
 
 <h2>Start a replica</h2>
@@ -40,6 +40,15 @@ because the same engine already runs on both sides.</p>
 builder producing the same FenecQL; the only difference is where it is
 bound.</p>
 </details>
+
+<h2 id="native">Native apps sync too</h2>
+
+<p>An iOS, Android or Flutter app keeps its replica in a file on the
+device, with the same shapes, the same optimistic writes and the same
+catching up -- and its writes wait in the file while the server cannot be
+reached. Opening the file as a replica is the one line that changes:
+<code>Fenec.sync</code> in Swift and Kotlin, <code>Fenec.openSynced</code>
+in Dart (<a href="mobile.html#sync">Sync with a server</a>).</p>
 
 <h2>The stream carries state, not transactions</h2>
 
