@@ -32,19 +32,6 @@ nothing reaches a registry before the notes have had a read.
 | `@fenecdb/cloudflare` on npm | `integrations/cloudflare` | `persist`, `restore`, `checkpoint`: a database kept in a Durable Object's storage |
 | `@fenecdb/langchain` on npm | `integrations/langchain` | `FenecVectorStore` for LangChain.js, over a `Fenec` or a `FenecHttp` |
 
-## Notes for the next release
-
-Say once in its notes: **`fenec-pg` is now `fenec-server`, and it no longer
-speaks the PostgreSQL wire protocol.** The binary, the release archives'
-file and the image (`ghcr.io/fenecdb/fenec-server`) are renamed, and
-nothing keeps the old name. Clients reach it over HTTP (`--http`, default
-127.0.0.1:8080); `--listen`, `--password`, `--reader`, `--auth`, `--user`,
-`--idle-in-transaction-timeout` and `--max-message` are gone, and so are
-interactive transactions, `COPY`, the `pg_catalog` answers and
-`pg_stat_statements` (`/_stats/statements` stays). `fenec import` from
-PostgreSQL and `--follow` still read PostgreSQL through its own client.
-Remove this section once it has gone out.
-
 ## Once: the registries' side
 
 `packages.yml` publishes with a token where a registry's secret holds one,
