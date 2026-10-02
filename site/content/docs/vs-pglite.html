@@ -1,0 +1,264 @@
+<!--
+title: fenecdb and PGlite — fenecdb
+description: When to choose PGlite, PostgreSQL in the browser with pgvector, and when fenecdb, feature by feature, with what each downloads and how PGlite's SQL maps to FenecQL and the builder.
+-->
+
+<h1>fenecdb and PGlite</h1>
+<p class="kicker">PGlite is PostgreSQL compiled to WebAssembly, run in the
+browser, Node.js and Bun, with extensions such as pgvector. fenecdb is a
+document database with vector and full-text search, built small for the
+page, which also runs in apps and as a server.</p>
+
+<p>The facts about PGlite on this page were checked on 2026-10-02 against
+the pages each one links to, and its sizes measured from version 0.5.8.
+fenecdb is at version 0.1.8, and is alpha software.</p>
+
+<h2 id="choose">Which to choose</h2>
+
+<p><b>Choose PGlite when</b></p>
+
+<ul>
+  <li><b>You want PostgreSQL itself in the page:</b> its SQL, joins,
+    types and interactive transactions
+    (<a href="https://pglite.dev/docs/api">API</a>).</li>
+  <li><b>You want its extensions:</b> pgvector, pg_textsearch, pg_trgm,
+    PostGIS and others (<a href="https://pglite.dev/extensions/">extensions</a>).</li>
+  <li><b>The page and the server should share schema and queries</b>
+    with a PostgreSQL server, or an ORM such as Drizzle
+    (<a href="https://orm.drizzle.team/docs/connect-pglite">Drizzle</a>).</li>
+  <li><b>You want live queries that send only what changed</b>
+    (<a href="https://pglite.dev/docs/live-queries"><code>live.incrementalQuery</code>, <code>live.changes</code></a>).</li>
+</ul>
+
+<p><b>Choose fenecdb when</b></p>
+
+<ul>
+  <li><b>Download size matters:</b> its module is about a twentieth of
+    PGlite's files (<a href="#size">below</a>).</li>
+  <li><b>You search by meaning and by words in one query,</b> fused by
+    rank, with nothing to install (<a href="fenecql.html#hybrid">Hybrid
+    search</a>).</li>
+  <li><b>The page writes while offline and syncs back</b> to a server,
+    which PGlite's sync does not do yet (<a href="sync.html">Sync</a>).</li>
+  <li><b>You keep the database in a file in Safari too:</b> fenecdb's file
+    of the origin private file system works there
+    (<a href="javascript.html#keeping">Keeping a database</a>).</li>
+  <li><b>The same database runs in an iOS, Android or Flutter app</b>
+    (<a href="mobile.html">Mobile and native apps</a>).</li>
+</ul>
+
+<h2 id="features">Feature by feature</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>fenecdb</th><th>PGlite + pgvector</th></tr></thead>
+<tbody>
+<tr><td>Where it runs</td>
+  <td>Browser, Node, Cloudflare Workers, Rust, iOS, Android, Flutter, a server over HTTP (<a href="./#where-it-runs">Where it runs</a>)</td>
+  <td>Browser, Node.js and Bun (<a href="https://pglite.dev/docs/about">about</a>)</td></tr>
+<tr><td>Browser storage</td>
+  <td>IndexedDB, or a file of the origin private file system in a worker, Safari included (<a href="javascript.html#keeping">Keeping a database</a>)</td>
+  <td>IndexedDB, recommended; an OPFS file system in a worker that does not work in Safari (<a href="https://pglite.dev/docs/filesystems">file systems</a>)</td></tr>
+<tr><td>Data model</td>
+  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql.html#json">Objects and paths</a>)</td>
+  <td>PostgreSQL's tables and types</td></tr>
+<tr><td>Query language</td>
+  <td>FenecQL and a typed query builder (<a href="javascript.html#the-query-builder">The query builder</a>)</td>
+  <td>PostgreSQL's SQL, <code>$1</code> parameters (<a href="https://pglite.dev/docs/api">API</a>)</td></tr>
+<tr><td>Vector index</td>
+  <td>HNSW, built in (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>pgvector's HNSW and IVFFlat, an extension (<a href="https://pglite.dev/extensions/">extensions</a>, <a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Quantization</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td><code>halfvec</code>, <code>bit</code>, binary quantization by expression index (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Filtered vector search</td>
+  <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
+  <td>pgvector's iterative index scans (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Full text</td>
+  <td>BM25, built in (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td>BM25 through the pg_textsearch extension (<a href="https://pglite.dev/extensions/">extensions</a>)</td></tr>
+<tr><td>Hybrid search</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td>No operator; written in SQL</td></tr>
+<tr><td>Transactions</td>
+  <td>One writer; a <code>run</code> of several statements lands whole or not at all (<a href="concepts.html#single-writer">Single writer</a>)</td>
+  <td>Interactive transactions, <code>.transaction()</code> (<a href="https://pglite.dev/docs/api">API</a>); one connection, tabs share it through a leader (<a href="https://pglite.dev/docs/multi-tab-worker">multi-tab worker</a>)</td></tr>
+<tr><td>Live queries</td>
+  <td><code>db.live</code>: the rows again after each write to a collection the query reads (<a href="javascript.html#state">State in the page</a>)</td>
+  <td><code>live.query</code>, <code>live.incrementalQuery</code>, <code>live.changes</code> (<a href="https://pglite.dev/docs/live-queries">live queries</a>)</td></tr>
+<tr><td>Sync and offline</td>
+  <td>A replica of a fenecdb server: offline reads, writes queued and sent back (<a href="sync.html">Sync</a>)</td>
+  <td>Electric sync, alpha, server to page only: "We don't yet support local writes being synced out" (<a href="https://pglite.dev/docs/sync">sync</a>)</td></tr>
+<tr><td>Schema and migrations</td>
+  <td>Tables declared in code, Drizzle's way, checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
+  <td>PostgreSQL's DDL; Drizzle and other ORMs (<a href="https://orm.drizzle.team/docs/connect-pglite">Drizzle</a>)</td></tr>
+<tr><td>Clients</td>
+  <td>JS/TS, React; Swift, Kotlin, Dart in apps (<a href="languages.html">Your language</a>)</td>
+  <td>TypeScript and JavaScript, with React and Vue bindings (<a href="https://pglite.dev/docs/about">about</a>)</td></tr>
+<tr><td>Download, brotli</td>
+  <td>174 KB (<a href="#size">below</a>)</td>
+  <td>3 740 KB, before pgvector (<a href="#size">below</a>)</td></tr>
+<tr><td>Licence</td>
+  <td>Apache-2.0</td>
+  <td>Apache-2.0 and the PostgreSQL Licence (<a href="https://pglite.dev/docs/about">about</a>)</td></tr>
+<tr><td>Maturity</td>
+  <td>Version 0.1.8, first released in 2026</td>
+  <td>Version 0.5.8 (<a href="https://github.com/electric-sql/pglite/releases">releases</a>), on PostgreSQL</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>PGlite's IndexedDB file system loads every file of the database into
+memory at the start and flushes them after each query that changed them;
+its OPFS file system needs a worker, and Safari's limit of 252 open sync
+access handles stops it working there, "due to a standard Postgres install
+consisting of over 300 files"
+(<a href="https://pglite.dev/docs/filesystems">file systems</a>). fenecdb's
+<code>persist</code> writes the image once and then only the writes since,
+and <code>openFile</code> keeps one file
+(<a href="javascript.html#keeping">Keeping a database</a>).</p>
+
+<p>PGlite is "single connection only"; tabs elect a leader that runs the
+database and the others reach it through the leader
+(<a href="https://pglite.dev/docs/multi-tab-worker">multi-tab worker</a>).
+A synced fenecdb replica elects a leader among tabs as well
+(<a href="sync.html#multiple-tabs-share-one-stream">Multiple tabs</a>).</p>
+
+<p>What fenecdb leaves out to stay small is in <a
+href="limits.html">Limits</a>: no SQL and no join, one writer, and no
+transaction held open while the page reads between its writes.</p>
+</details>
+
+<h2 id="size">What the browser downloads</h2>
+
+<p>The WebAssembly and data files each needs before its first query, as
+each project publishes them, compressed the way a static file is served.
+PGlite's files are about 21 times fenecdb's module.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
+<tbody>
+<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>174 KB</b></td><td class="n"><b>208 KB</b></td></tr>
+<tr><td>PGlite 0.5.8: <code>pglite.wasm</code></td><td class="n">2 585 KB</td><td class="n">3 310 KB</td></tr>
+<tr><td>… <code>pglite.data</code></td><td class="n">1 038 KB</td><td class="n">1 816 KB</td></tr>
+<tr><td>… <code>initdb.wasm</code></td><td class="n">117 KB</td><td class="n">141 KB</td></tr>
+<tr><td>PGlite 0.5.8, the three</td><td class="n">3 740 KB</td><td class="n">5 267 KB</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>PGlite's own figure</b> is "under 3MB gzipped"
+    (<a href="https://pglite.dev/docs/about">about</a>); the files of
+    0.5.8 measure more.</li>
+  <li><b>pgvector adds</b> a 45 KB archive, gzipped as published.</li>
+</ul>
+
+<details class="deep"><summary>Method and details</summary>
+<p>Measured on 2026-10-02. fenecdb's module as <code>make wasm</code>
+builds it; PGlite's files from the npm package
+<code>@electric-sql/pglite</code> 0.5.8, whose client starts downloading
+all three when a database opens. Each file compressed with <code>brotli
+-q 11</code> and <code>gzip -9</code>; a KB is 1 024 bytes. The JavaScript
+beside each is left out of both. pgvector is
+<code>dist/vector.tar.gz</code> of
+<code>@electric-sql/pglite-pgvector</code> 0.0.9, 46 549 bytes; PGlite's
+extensions page gives 42.9 KB
+(<a href="https://pglite.dev/extensions/">extensions</a>).</p>
+
+<p><b>Not measured yet:</b> the time to start, load and search in either,
+and the memory each holds in the page.</p>
+</details>
+
+<h2 id="moving">Moving from PGlite</h2>
+
+<p>A table becomes a collection, a query becomes FenecQL or a builder
+chain, and parameters stay <code>$1</code>, <code>$2</code>. Opening a
+database kept in IndexedDB, with a vector and a text index:</p>
+
+<pre data-lang="js">// PGlite
+import { PGlite } from '@electric-sql/pglite';
+import { vector } from '@electric-sql/pglite-pgvector';
+
+const pg = new PGlite('idb://notes', { extensions: { vector } });
+await pg.exec(`
+  CREATE EXTENSION IF NOT EXISTS vector;
+  CREATE TABLE IF NOT EXISTS notes (id serial PRIMARY KEY, title text, body text, embed vector(384));
+  CREATE INDEX IF NOT EXISTS notes_embed ON notes USING hnsw (embed vector_cosine_ops);
+`);
+</pre>
+
+<pre data-lang="ts">// fenecdb
+import { Fenec, restore } from './fenec.js';
+import { fenecTable, text, vector, index } from './schema.js';
+
+const notes = fenecTable('notes', {
+  title: text(),
+  body: text(),
+  embed: vector({ dimensions: 384 }),
+}, (t) =&gt; [
+  index('notes_body').using('bm25', t.body),
+  index('notes_embed').using('hnsw', t.embed.op('vector_cosine_ops')),
+]);
+
+const db = await Fenec.open('./fenec.wasm', { schema: { notes } });
+await restore(db, 'notes');   // what persist(db, 'notes') kept, if anything
+</pre>
+
+<p>A write and a nearest-neighbour search:</p>
+
+<pre data-lang="js">// PGlite
+await pg.query('INSERT INTO notes (title, body, embed) VALUES ($1, $2, $3)',
+  [title, body, JSON.stringify(embedding)]);
+const { rows } = await pg.query(
+  'SELECT title FROM notes ORDER BY embed &lt;=&gt; $1 LIMIT 5', [JSON.stringify(queryVector)]);
+</pre>
+
+<pre data-lang="ts">// fenecdb, the builder
+await db.from(notes).insert({ title, body, embed: embedding });
+const rows = await db.from(notes).select('title').near('embed', queryVector).limit(5).rows();
+
+// or FenecQL
+const same = db.rows('get notes select title near embed $1 limit 5', [queryVector]);
+</pre>
+
+<p>Words and meaning in one ranking, which in PGlite is a query to write
+over pg_textsearch and pgvector:</p>
+
+<pre data-lang="ts">const hits = await db.from(notes).select('title')
+  .match('body', 'offline sync')
+  .near('embed', queryVector)
+  .fuse()
+  .limit(10)
+  .rows();
+</pre>
+
+<p>A live query:</p>
+
+<pre data-lang="js">// PGlite, with the live extension
+const ret = pg.live.query('SELECT title FROM notes ORDER BY id DESC LIMIT 20', [], (res) =&gt; draw(res.rows));
+await ret.unsubscribe();
+</pre>
+
+<pre data-lang="ts">// fenecdb
+const stop = db.live(db.from(notes).select('title').order('id', 'desc').limit(20), draw);
+stop();
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>There is no importer from PGlite. Its data can be read out with a
+query and written with <code>insert</code>, an array at a time, or, from
+a PostgreSQL server holding the same tables,
+<a href="import.html"><code>fenec import</code></a> reads them over the
+network.</p>
+
+<p>What does not carry over: a join becomes <code>lookup</code> or
+<code>in (get …)</code> (<a href="fenecql.html#the-lookup-clause">The
+lookup clause</a>), a <code>.transaction()</code> that reads between its
+writes becomes a <code>run</code> of several statements, which lands whole
+but cannot branch on what it read, and an extension has no counterpart
+unless fenecdb has the feature built in. A <code>numeric</code> has no
+counterpart either: money is an <code>int</code> of cents.</p>
+</details>
