@@ -29,7 +29,7 @@ public sealed class FenecClientOptions
 /// into the text. Safe to use from several threads at once; <see cref="After"/> and
 /// <see cref="WithIdempotencyKey"/> hand out copies that share its connections.
 /// </summary>
-public sealed class FenecClient : IDisposable
+public sealed partial class FenecClient : IDisposable
 {
     internal static readonly JsonSerializerOptions ByName = new() { PropertyNameCaseInsensitive = true };
 

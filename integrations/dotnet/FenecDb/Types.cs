@@ -67,7 +67,7 @@ public sealed record Change(long Seq, long At, string Collection, string Op, lon
 public sealed record Changes(IReadOnlyList<Change> Writes, long Next);
 
 /// <summary>A request the server refused: its HTTP status, the status's name and the server's message.</summary>
-public sealed class FenecException : Exception
+public class FenecException : Exception
 {
     /// <summary>The HTTP status.</summary>
     public int Status { get; }

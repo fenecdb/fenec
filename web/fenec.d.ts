@@ -1,16 +1,26 @@
 // Type declarations for the fenecdb client.
 //
-// The schema does not live here, it lives in the database: `fenec types
-// data.fenec` generates `FenecSchema` from the running file. Unlike Drizzle the
-// schema is not kept in two places, so the two cannot drift apart.
+// A database's schema reaches the types two ways, side by side:
 //
-//   fenec types data.fenec > web/fenec-schema.d.ts
+// - Declared in code, Drizzle's way (`@fenecdb/web/schema`): tables written
+//   in TypeScript, handed to `Fenec.open`, which checks the database against
+//   them at every open -- what only adds is made, what would lose data or
+//   could mean two things is refused, listed with how to resolve it. Two
+//   places hold the schema, and the check is what keeps them one: they cannot
+//   drift apart unseen. For an app that makes its own database.
 //
-//   import { Fenec } from './fenec.js';
-//   import type { FenecSchema } from './fenec-schema.js';
-//   const db = await Fenec.open<FenecSchema>('./fenec.wasm');
-//   const rows = await db.from('articles').select('title').rows();
-//        // rows: { title: string }[]
+//     import { fenecTable, text, boolean } from './schema.js';
+//     const todos = fenecTable('todos', { title: text().notNull(), done: boolean() });
+//     const db = await Fenec.open('./fenec.wasm', { schema: { todos } });
+//     const rows = await db.from(todos).select('title').rows();   // { title: string }[]
+//
+// - Read out of a database: `fenec types data.fenec` generates `FenecSchema`
+//   from the file a server runs, which owns its schema. For an app over an
+//   existing database. `fenec types --schema` writes the tables instead, for
+//   a project that moves to the first way.
+//
+//     import type { FenecSchema } from './fenec-schema.js';
+//     const db = await Fenec.open<FenecSchema>('./fenec.wasm');
 
 /** A `timestamp` field. ISO-8601 text when read; Date/number on write. */
 export type Timestamp = string & { readonly __fenec: 'timestamp' };
@@ -37,6 +47,130 @@ export type JsonPath<F extends Fields> = {
 /** A collection's read shape; `fenec types` generates these. */
 export type Fields = Record<string, unknown>;
 export type Schema = Record<string, Fields>;
+
+/**
+ * A table declared in code (`fenecTable`, `@fenecdb/web/schema`), as the
+ * client takes one wherever it takes a collection's name: `db.from(todos)`,
+ * `lookup(reviews, ...)`, a shape's `collection`.
+ */
+export interface TableRef<N extends string = string, F extends Fields = Fields> {
+  readonly $name: N;
+  /** The fields as read, a type alone: what `fenec types` makes of the collection. */
+  readonly $fields: F;
+}
+
+/** A schema's tables, by any key: `{ todos, reviews }`. */
+export type Tables = Record<string, TableRef>;
+
+/** The schema the client is typed by, of tables declared in code: each table's fields by its name. */
+export type SchemaOf<T extends Tables> = Typed<{ [K in keyof T as T[K]['$name']]: T[K]['$fields'] }>;
+/** A schema the client takes: what a mapped type over generic tables cannot be shown to be. */
+type Typed<S> = S extends AnySchema<S> ? S : never;
+
+/** A relation of `defineRelations`, which `lookup` names: the table it reaches. */
+export interface RelationRef<T extends TableRef = TableRef> {
+  readonly $target: T;
+}
+
+/** What `defineRelations` makes: by table, its relations by name. */
+export type Relations = Record<string, Record<string, RelationRef>>;
+
+/**
+ * A migration: FenecQL run once, in order, and recorded in `_migrations`
+ * -- or a field rebuilt as the code declares it (`rebuild`).
+ */
+export type Migration = string | { rebuild: { collection: string; field: string } };
+
+/** What every SDK's declarations compile to (`describe`): versioned JSON. */
+export interface SchemaDescription {
+  format: 1;
+  /** The collections as JSON; or, the browser module's way, `fenecql`. */
+  collections?: CollectionDescription[];
+  /** The collections as FenecQL text, which the browser module reads. */
+  fenecql?: string;
+  migrations?: readonly Migration[];
+}
+export interface CollectionDescription {
+  name: string;
+  fields: FieldDescription[];
+}
+export interface FieldDescription {
+  name: string;
+  /** As FenecQL spells it: `text`, `int`, `vector<768, f16>`, `[text]` ... */
+  type: string;
+  required?: true;
+  collate?: Collation;
+  index?: IndexDescription;
+  /** Indexes on paths into a json field. */
+  paths?: { path: string; index: IndexDescription }[];
+}
+export type IndexDescription =
+  | { kind: 'hash' | 'unique' | 'sorted' | 'inverted' }
+  | { kind: 'ttl'; ms: number }
+  | { kind: 'text'; k1?: number; b?: number; prefix?: number; prefix_min?: number; chars?: boolean }
+  | {
+      kind: 'hnsw';
+      metric?: 'cosine' | 'l2' | 'dot';
+      m?: number;
+      ef_construction?: number;
+      ef_search?: number;
+      quant?: 'none' | 'int8' | 'bit';
+    };
+
+/** A difference the check did not apply, and how to resolve it. */
+export interface SchemaRefusal {
+  kind:
+    | 'field_not_declared'
+    | 'type_changed'
+    | 'required_changed'
+    | 'required_added'
+    | 'collate_changed'
+    | 'index_changed'
+    | 'index_removed'
+    | 'collection_missing'
+    | 'field_missing'
+    | 'index_missing';
+  collection: string;
+  /** The field, or the path into a json field; `null` for the collection. */
+  field: string | null;
+  message: string;
+  fix: string;
+}
+
+/** What `checkSchema` found and did. */
+export interface SchemaOutcome {
+  kind: 'schema';
+  /** Whether anything was written. */
+  applied: boolean;
+  /** Whether the migrations recorded ran: a database made from the code records them without running. */
+  ran: boolean;
+  /** The migrations recorded (planned: to be), by number from 1. */
+  migrations: number[];
+  /** The FenecQL that adds what is missing. */
+  statements: string[];
+  refusals: SchemaRefusal[];
+}
+
+/**
+ * A schema written as FenecQL -- `create collection` and `create index`
+ * statements, a `schema.fenecql` file -- as every SDK can hand it over. It
+ * types nothing: the type is given (`Fenec.open<FenecSchema>`), or made by
+ * `fenec types schema.fenecql`.
+ */
+export interface SchemaText {
+  schema: string;
+  /** Run once each, in order, before the rest is compared. */
+  migrations?: readonly Migration[];
+}
+
+/** A database's schema declared in code, as `Fenec.open`, `openFile`, `sync` and `connect` take it. */
+export interface SchemaOptions<T extends Tables = Tables, R extends Relations = Relations> {
+  schema: T;
+  /** `defineRelations`: what `lookup` names a relation by. */
+  relations?: R;
+  /** Run once each, in order, before the rest is compared. */
+  migrations?: readonly Migration[];
+}
 
 // The schema constraint is `Record<keyof S, Fields>` rather than
 // `Record<string, Fields>`: a hand-written `interface` has no implicit index
@@ -230,22 +364,33 @@ export type CollationSource =
   | URL
   | ((name: string) => BufferSource | Response | Promise<BufferSource | Response>);
 
+/** The relations `defineRelations` gave the collection `At`, by name. */
+type RelationsAt<R extends Relations, At extends string> = At extends keyof R ? R[At] : {};
+type RelTarget<R extends Relations, At extends string, K> = K extends keyof RelationsAt<R, At>
+  ? RelationsAt<R, At>[K] extends RelationRef<infer T>
+    ? T
+    : never
+  : never;
+
 /**
  * Immutable query builder. `F` is the collection's fields, `P` the result
- * of the projection so far, and `L` the chain of `lookup` names so far --
- * bookkeeping for the chained overload, never written out by a caller.
+ * of the projection so far, and `L` the chain of `lookup` names so far,
+ * `Rel` the relations a schema in code declared and `At` the collection
+ * the next `lookup` hangs off -- bookkeeping, never written out by a caller.
  */
 export declare class Query<
   F extends Fields = Fields,
   P = Row<F>,
   L extends readonly string[] = [],
+  Rel extends Relations = {},
+  At extends string = string,
 > {
   /** Binds the query to an executor (wasm, HTTP, fenec-server). */
-  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L>;
+  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L, Rel, At>;
 
   select<K extends keyof Row<F> & string>(
     ...cols: (K | K[])[]
-  ): Query<F, Pick<Row<F>, K>, L>;
+  ): Query<F, Pick<Row<F>, K>, L, Rel, At>;
   /**
    * An aggregating list: the field grouped by, and aggregates spelled as
    * FenecQL spells them -- each answers under that name.
@@ -254,51 +399,51 @@ export declare class Query<
    */
   select<K extends keyof Row<F> & string, A extends Aggregate<F>>(
     ...cols: (K | A)[]
-  ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L>;
-  select(): Query<F, Row<F>, L>;
+  ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L, Rel, At>;
+  select(): Query<F, Row<F>, L, Rel, At>;
   /** Fields and paths into json fields, each path answering under its text. */
   select<C extends (keyof Row<F> & string) | JsonPath<F>>(
     ...cols: C[]
-  ): Query<F, { [N in C]: N extends keyof Row<F> ? Row<F>[N] : Json }, L>;
+  ): Query<F, { [N in C]: N extends keyof Row<F> ? Row<F>[N] : Json }, L, Rel, At>;
 
   /** `group field`: one row per value, for a select list that aggregates. */
-  group(field: keyof Row<F> & string): Query<F, P, L>;
+  group(field: keyof Row<F> & string): Query<F, P, L, Rel, At>;
 
-  where(cond: Where<F> | Cond<F>): Query<F, P, L>;
+  where(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At>;
   where<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'in',
     values: Writable<Row<F>[K]>[],
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'has',
     value: Elem<Row<F>[K]>,
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: Writable<Row<F>[K]> | null,
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
   /** A path into a json field: `where('meta.lang', '=', 'tr')`. */
-  where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L>;
-  where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L>;
-  where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L>;
+  where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L, Rel, At>;
+  where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L, Rel, At>;
+  where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L, Rel, At>;
 
-  orWhere(cond: Where<F> | Cond<F>): Query<F, P, L>;
+  orWhere(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: unknown,
-  ): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
 
   /**
    * Vector search; `_score` is added to the result. Over a `sparse<N>` field
@@ -308,17 +453,17 @@ export declare class Query<
     field: VectorKey<F>,
     vector: number[] | Float32Array | string,
     opts?: { ef?: number; exact?: boolean },
-  ): Query<F, P & { _score: number }, L>;
+  ): Query<F, P & { _score: number }, L, Rel, At>;
 
   /** Full-text search over a `@text` index; `_score` is added to the result. */
-  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L>;
+  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L, Rel, At>;
 
   /**
    * With both `match` and `near`: ranks by both. Each side takes its own
    * `candidates` (20 unless given, never fewer than the page) and a
    * document scores `1 / (k + rank)` from each list it is on (`k` 60).
    */
-  fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L>;
+  fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L, Rel, At>;
 
   /**
    * Reorders what `match` found by exact vector distance. Requires `match`,
@@ -328,7 +473,7 @@ export declare class Query<
     field: VectorKey<F>,
     vector: number[] | Float32Array,
     opts?: { candidates?: number },
-  ): Query<F, P & { _score: number }, L>;
+  ): Query<F, P & { _score: number }, L, Rel, At>;
 
   /**
    * Attaches the children of another collection to each row.
@@ -358,10 +503,32 @@ export declare class Query<
    * fields that `where` named and no others, and an `on` or an `order` by
    * any other field was refused.
    */
-  lookup<N extends string, C extends Fields = Fields>(
-    name: N,
+  lookup<M extends string, C extends Fields = Fields>(
+    name: M,
     opts: LookupOptions<Hold<C>>,
-  ): Query<F, Attach<P, L, N, C>, [...L, N]>;
+  ): Query<F, Attach<P, L, M, C>, [...L, M], Rel, M>;
+  /**
+   * A relation of `defineRelations`, by its name: its key comes from the
+   * relation, and its rows are typed by the table it reaches -- attached
+   * under that table's name, as `lookup` attaches them.
+   *
+   *     db.from(products).lookup('reviews', { where: { stars: 5 } })
+   */
+  lookup<K extends keyof RelationsAt<Rel, At> & string>(
+    name: K,
+    opts?: Omit<LookupOptions<Hold<RelTarget<Rel, At, K>['$fields']>>, 'on' | 'parentKey'>,
+  ): Query<
+    F,
+    Attach<P, L, RelTarget<Rel, At, K>['$name'], RelTarget<Rel, At, K>['$fields']>,
+    [...L, RelTarget<Rel, At, K>['$name']],
+    Rel,
+    RelTarget<Rel, At, K>['$name']
+  >;
+  /** A table (`fenecTable`): its fields type the child rows. */
+  lookup<T extends TableRef>(
+    table: T,
+    opts: LookupOptions<Hold<T['$fields']>>,
+  ): Query<F, Attach<P, L, T['$name'], T['$fields']>, [...L, T['$name']], Rel, T['$name']>;
 
   /**
    * Successive calls add a sort key (the second decides when the first ties).
@@ -372,15 +539,15 @@ export declare class Query<
     field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F>,
     dir?: 'asc' | 'desc',
     opts?: { collate?: Collation },
-  ): Query<F, P, L>;
-  limit(n: number): Query<F, P, L>;
-  offset(n: number): Query<F, P, L>;
+  ): Query<F, P, L, Rel, At>;
+  limit(n: number): Query<F, P, L, Rel, At>;
+  offset(n: number): Query<F, P, L, Rel, At>;
 
   /** The generated FenecQL and its parameters -- inspectable before running. */
   toFenecQL(): [sql: string, params: unknown[]];
 
   /** The text of the write statements, without running them. The write side of `toFenecQL`. */
-  toInsert(docs: Insert<F> | Insert<F>[]): [sql: string, params: unknown[]];
+  toInsert(docs: InsertRow<F> | InsertRow<F>[]): [sql: string, params: unknown[]];
   toUpdate(patch: Insert<F>, opts?: { all?: boolean }): [sql: string, params: unknown[]];
   toDelete(opts?: { all?: boolean }): [sql: string, params: unknown[]];
 
@@ -395,7 +562,7 @@ export declare class Query<
   /** The opaque context carried by `bind` (for subclasses). */
   readonly context: unknown;
   /** The same body as a plain `Query`: bypasses subclass behaviour. */
-  plain(): Query<F, P, L>;
+  plain(): Query<F, P, L, Rel, At>;
 
   run(): Promise<{ columns: string[]; rows: P[] }>;
   rows(): Promise<P[]>;
@@ -412,14 +579,27 @@ export declare class Query<
    * Writes the documents as FenecQL's `put`: new ones, and one naming an
    * `id` written over. FenecQL's `insert` refuses a taken id instead.
    */
-  insert(docs: Insert<F> | Insert<F>[]): Promise<number>;
+  insert(docs: InsertRow<F> | InsertRow<F>[]): Promise<number>;
   update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;
   delete(opts?: { all?: boolean }): Promise<number>;
 }
 
-/** A written document: every field optional; passing `id` makes it an upsert. */
+/** A patch (`update`): every field optional. */
 export type Insert<F extends Fields> = {
   [K in keyof Row<F>]?: Writable<Row<F>[K]> | null;
+};
+
+/** The fields a write must give: those that read back never null (`required`, `.notNull()`). */
+type RequiredKeys<F> = { [K in keyof F]-?: null extends F[K] ? never : K }[keyof F];
+
+/**
+ * A document as `insert` writes it: a required field given, the others
+ * optional or null, and `id` only to write over the document holding it.
+ */
+export type InsertRow<F extends Fields> = { id?: number } & {
+  [K in RequiredKeys<F>]: Writable<F[K]>;
+} & {
+  [K in Exclude<keyof F, RequiredKeys<F>>]?: Writable<F[K]> | null;
 };
 
 /**
@@ -430,6 +610,7 @@ export type Insert<F extends Fields> = {
  *   from<FenecSchema['articles']>('articles').where('year', 2024)
  */
 export function from<F extends Fields = Fields>(name: string): Query<F>;
+export function from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], {}, T['$name']>;
 
 /**
  * Binds `from` to a schema -- purely a type, the same function at runtime.
@@ -458,21 +639,50 @@ export interface HttpOptions {
  * Remote fenecdb HTTP endpoint (`fenec-server --http`). The builder generates the
  * same FenecQL text; only the transport differs.
  */
-export declare class FenecHttp<S extends AnySchema<S> = Schema> {
+export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Relations = {}> {
   constructor(url: string, opts?: HttpOptions);
-  from<K extends keyof S & string>(name: K): Query<S[K]>;
+  from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
+  from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>;
   run(sql: string, params?: unknown[]): Promise<any>;
   rows(sql: string, params?: unknown[]): Promise<any[]>;
   schemas(): Promise<{ collections?: SchemaInfo[] } | SchemaInfo[]>;
+  /**
+   * The server's database against a schema declared in code, in the
+   * server (`/_schema`): `'follow'` says what the code declares and the
+   * server lacks, `'plan'` what an apply would do, `'apply'` runs it -- the
+   * last two with the server's token.
+   */
+  checkSchema(description: SchemaDescription | string, mode?: 'follow' | 'plan' | 'apply'): Promise<SchemaOutcome>;
 }
 
+/**
+ * With a schema declared in code: the server's schema is checked against it,
+ * and with `migrate` -- and the server's token -- brought to it. The server
+ * owns its schema, so without `migrate` nothing is applied.
+ */
+export function connect<T extends Tables, R extends Relations = {}>(
+  url: string,
+  opts: HttpOptions & SchemaOptions<T, R> & { migrate?: boolean },
+): Promise<FenecHttp<SchemaOf<T>, R>>;
+export function connect<S extends AnySchema<S> = Schema>(
+  url: string,
+  opts: HttpOptions & SchemaText & { migrate?: boolean },
+): Promise<FenecHttp<S>>;
 export function connect<S extends AnySchema<S> = Schema>(
   url: string,
   opts?: HttpOptions,
 ): FenecHttp<S>;
 
-export declare class Fenec<S extends AnySchema<S> = Schema> {
+export declare class Fenec<S extends AnySchema<S> = Schema, Rel extends Relations = {}> {
   /** Connects to a remote HTTP endpoint. */
+  static connect<T extends Tables, R extends Relations = {}>(
+    url: string,
+    opts: HttpOptions & SchemaOptions<T, R> & { migrate?: boolean },
+  ): Promise<FenecHttp<SchemaOf<T>, R>>;
+  static connect<S extends AnySchema<S> = Schema>(
+    url: string,
+    opts: HttpOptions & SchemaText & { migrate?: boolean },
+  ): Promise<FenecHttp<S>>;
   static connect<S extends AnySchema<S> = Schema>(
     url: string,
     opts?: HttpOptions,
@@ -486,9 +696,22 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
    * where the collation data it does not carry comes from: by default
    * `collate/` beside the module, when `src` is a URL.
    */
+  static open<T extends Tables, R extends Relations = {}>(
+    src: string | BufferSource | WebAssembly.Module | undefined,
+    opts: { collation?: CollationSource } & SchemaOptions<T, R>,
+  ): Promise<Fenec<SchemaOf<T>, R>>;
+  /**
+   * With `schema` -- tables declared in code -- the database is checked
+   * against them: what only adds (a collection, a field, an index where
+   * there is none) is made, the migrations not yet recorded run first, all
+   * one block; anything that would lose data or could mean two things is
+   * refused, and the open throws a `FenecError` naming every difference and
+   * how to resolve it (`refusals`). `restore` and `openFile` check the
+   * database they load again.
+   */
   static open<S extends AnySchema<S> = Schema>(
     src?: string | BufferSource | WebAssembly.Module,
-    opts?: { collation?: CollationSource },
+    opts?: { collation?: CollationSource } & Partial<SchemaText>,
   ): Promise<Fenec<S>>;
 
   readonly version: string;
@@ -503,8 +726,18 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   /** Where a live query's error goes when it has no `onError` of its own. */
   onError: ((e: unknown) => void) | null;
 
-  /** Query builder. */
-  from<K extends keyof S & string>(name: K): Query<S[K]>;
+  /** Query builder, over a collection by name or a table declared in code. */
+  from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
+  from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>;
+
+  /**
+   * The database against a schema declared in code -- its description,
+   * `describe(...)` -- in the engine: `'plan'` says what an apply would do
+   * and writes nothing, `'apply'` runs the migrations not yet recorded and
+   * makes what only adds, one block, or nothing while anything is refused.
+   * `Fenec.open`'s `schema` is this, throwing on a refusal.
+   */
+  checkSchema(description: SchemaDescription | string, mode?: 'plan' | 'apply'): SchemaOutcome;
 
   /**
    * Live query: `cb` is handed the rows now, and again after every write
@@ -512,8 +745,8 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
    * every live query). The writes of one task run it once, in a microtask
    * after it. Returns the function that stops it.
    */
-  live<F extends Fields, P, L extends readonly string[]>(
-    query: Query<F, P, L>,
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
+    query: Query<F, P, L, R2, A>,
     cb: (rows: P[]) => void,
     opts?: LiveOptions,
   ): () => void;
@@ -597,9 +830,9 @@ export interface PersistOptions {
  * Writes the database into IndexedDB under `key`: the image the first time,
  * then only the writes since the last call. Returns the bytes written.
  */
-export function persist(fenec: Fenec<any>, key?: string, opts?: PersistOptions): Promise<number>;
+export function persist(fenec: Fenec<any, any>, key?: string, opts?: PersistOptions): Promise<number>;
 /** Restores from IndexedDB, image and chunks; `false` when there is no record. */
-export function restore(fenec: Fenec<any>, key?: string, opts?: PersistOptions): Promise<boolean>;
+export function restore(fenec: Fenec<any, any>, key?: string, opts?: PersistOptions): Promise<boolean>;
 /** Free-form state (cursors) -- next to the image, under a separate key. */
 export function putState(key: string, value: unknown): Promise<void>;
 export function getState(key: string): Promise<unknown>;
@@ -630,9 +863,9 @@ export interface FenecFile {
  * answers. Only in a dedicated worker, one at a time a file.
  */
 export function openFile(
-  fenec: Fenec<any>,
+  fenec: Fenec<any, any>,
   name?: string,
-  opts?: { dir?: DirectoryHandle },
+  opts?: { dir?: DirectoryHandle } & (Partial<SchemaOptions> | Partial<SchemaText>),
 ): Promise<FenecFile>;
 
 /**
@@ -658,7 +891,8 @@ type DirectoryHandle = typeof globalThis extends {
  * separate collection on the server is the right answer.
  */
 export interface Shape<F extends Fields = Fields> {
-  collection: string;
+  /** A collection's name, or its table declared in code. */
+  collection: string | TableRef;
   /** Filter applied server side. */
   where?: Where<F>;
   /** Fields to ship; `id` is always added. */
@@ -706,33 +940,35 @@ export interface ShapeStatus {
 }
 
 /** Batch context: the same surface as `db`, but writes are accumulated. */
-export interface Batch<S extends AnySchema<S> = Schema> {
-  from<K extends keyof S & string>(name: K): Query<S[K]>;
+export interface Batch<S extends AnySchema<S> = Schema, Rel extends Relations = {}> {
+  from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
+  from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>;
 }
 
 /**
  * Local replica + server connection. Reads are local (no network), writes
  * go local first and then to the server, feedback arrives over the subscription.
  */
-export declare class FenecSync<S extends AnySchema<S> = Schema> {
+export declare class FenecSync<S extends AnySchema<S> = Schema, Rel extends Relations = {}> {
   /** The local database; for raw FenecQL. */
-  readonly local: Fenec<S>;
+  readonly local: Fenec<S, Rel>;
   /** The remote endpoint; for queries outside the shapes. */
-  readonly remote: FenecHttp<S>;
+  readonly remote: FenecHttp<S, Rel>;
 
   /** Resolves once the first seed of every shape has landed. */
   ready(): Promise<void>;
   status(): ShapeStatus[];
 
   /** Reads local, writes optimistic. A collection without a shape is rejected. */
-  from<K extends keyof S & string>(name: K): Query<S[K]>;
+  from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
+  from<K extends keyof S & string>(name: K): Query<S[K], Row<S[K]>, [], Rel, K>;
 
   /**
    * Live query: re-run after every local change, at the next frame.
    * `Fenec.live`'s contract. Returns: the function that ends the subscription.
    */
-  live<F extends Fields, P, L extends readonly string[]>(
-    query: Query<F, P, L>,
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
+    query: Query<F, P, L, R2, A>,
     cb: (rows: P[]) => void,
     opts?: LiveOptions,
   ): () => void;
@@ -743,7 +979,7 @@ export declare class FenecSync<S extends AnySchema<S> = Schema> {
    * server lands all of them or none, and on an error the local side is
    * rolled back exactly as the server's was.
    */
-  batch(fn: (t: Batch<S>) => Promise<void>): Promise<number>;
+  batch(fn: (t: Batch<S, Rel>) => Promise<void>): Promise<number>;
 
   /** Finishes any pending live-query runs (for tests). */
   flush(): Promise<void>;
@@ -751,7 +987,15 @@ export declare class FenecSync<S extends AnySchema<S> = Schema> {
   close(): void;
 }
 
-/** Opens the local replica and starts the subscriptions. */
+/**
+ * Opens the local replica and starts the subscriptions. With `schema`, the
+ * code's schema is checked against the server's first and never applied:
+ * the server owns it, and a replica takes its collections as the server
+ * declares them.
+ */
+export function sync<T extends Tables, R extends Relations = {}>(
+  opts: SyncOptions<any> & SchemaOptions<T, R>,
+): Promise<FenecSync<SchemaOf<T>, R>>;
 export function sync<S extends AnySchema<S> = Schema>(
-  opts: SyncOptions<S>,
+  opts: SyncOptions<S> & Partial<SchemaText>,
 ): Promise<FenecSync<S>>;

@@ -10,8 +10,30 @@
 // and undeclared.
 
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as fenec from '../fenec.js';
+
+// schema.ts holds tables declared in code to the types `fenec types`
+// generates for the same collections: `--schema` makes the file from the
+// tables (schema-tables.ts) and writes what `fenec types` reads out of it
+// (schema-generated.d.ts), with target/debug/fenec or FENEC=<binary>.
+// web/fenec.schema.test.js makes it again and fails when it differs.
+if (process.argv.includes('--schema')) {
+  const here = new URL('.', import.meta.url).pathname;
+  const bin = process.env.FENEC ?? join(here, '../../target/debug/fenec');
+  const { tables } = await import('./schema-tables.ts');
+  const db = await fenec.Fenec.open(readFileSync(join(here, '../fenec.wasm')), { schema: tables });
+  const dir = mkdtempSync(join(tmpdir(), 'fenec-types-'));
+  try {
+    writeFileSync(join(dir, 'tables.fenec'), db.snapshot());
+    const types = execFileSync(bin, ['types', 'tables.fenec'], { cwd: dir, encoding: 'utf8' });
+    writeFileSync(join(here, 'schema-generated.d.ts'), types);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 // Public by necessity, not by intent: called across classes of the module,
 // so they cannot be `#private`.
@@ -44,15 +66,39 @@ for (const name of names) {
     out.push(`void a${name}.${key};`);
   }
 }
+// And schema.js's: every builder it exports, declared.
+const schemaNames = Object.keys(await import('../schema.js')).sort();
+out.push(`import { ${schemaNames.join(', ')} } from '../schema.js';`, `void [${schemaNames.join(', ')}];`);
 const here = new URL('.', import.meta.url).pathname;
 writeFileSync(`${here}probe.ts`, `${out.join('\n')}\n`);
+// A tsconfig of its own, for React's types: schema.ts holds `useLiveQuery`
+// to the rows a query is typed with, and integrations/react imports 'react'.
+writeFileSync(
+  `${here}tsconfig.check.json`,
+  `${JSON.stringify(
+    {
+      compilerOptions: {
+        noEmit: true,
+        strict: true,
+        target: 'es2022',
+        module: 'nodenext',
+        moduleResolution: 'nodenext',
+        lib: ['es2022', 'dom'],
+        allowImportingTsExtensions: true,
+        types: [],
+        paths: { react: ['./node_modules/@types/react/index.d.ts'] },
+      },
+      files: ['usage.ts', 'schema.ts', 'probe.ts'],
+    },
+    null,
+    2,
+  )}\n`,
+);
 try {
-  execFileSync(
-    `${here}node_modules/.bin/tsc`,
-    ['--noEmit', '--strict', '--target', 'es2022', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--lib', 'es2022,dom', 'usage.ts', 'probe.ts'],
-    { cwd: here, stdio: 'inherit' },
-  );
+  execFileSync(`${here}node_modules/.bin/tsc`, ['-p', 'tsconfig.check.json'], { cwd: here, stdio: 'inherit' });
 } catch {
   process.exit(1);
 }
-console.log(`fenec.d.ts: ${names.length} exports and their methods declared; usage.ts checks`);
+console.log(
+  `fenec.d.ts: ${names.length} exports and their methods declared, schema.d.ts ${schemaNames.length}; usage.ts and schema.ts check`,
+);

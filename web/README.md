@@ -7,8 +7,9 @@ npm, and the `fenec-web` bundle of each release.
 | --- | --- |
 | `fenec.js` | the client: the module's glue, the query builder, the HTTP client and the sync layer, one dependency-free ES module |
 | `fenec.d.ts` | its types |
-| `fenec.wasm` | the engine with every index: 139 KB brotli |
-| `fenec-lite.wasm` | the engine without its four indexes: 107 KB brotli |
+| `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fenecdb/web/schema` |
+| `fenec.wasm` | the engine with every index and the schema check: 174 KB brotli |
+| `fenec-lite.wasm` | the engine without its four indexes or the schema check: 128 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js
@@ -41,11 +42,13 @@ aggregates, `lookup`, collations, the change feed, persistence and the sync
 layer, and none of the four indexes: no graph behind `near` and `fuse`, no
 text index behind `match` and `rerank`, no sparse index behind a
 `sparse<N>` field's `near`, no ordered index (the scan answers a `@sorted`
-field's comparisons and orders, with the same rows). A page that uses none
-of them saves 30 KB brotli with it. A statement that needs a missing index
+field's comparisons and orders, with the same rows), and no check of a
+schema declared in code (`Fenec.open`'s `schema` is refused). A page that
+uses none of them saves 46 KB brotli with it. A statement that needs a missing index
 throws a `FenecError` naming it, and the file is the same either way: a
 store one module wrote opens in the other. A page that needs some of the
-indexes builds its module with them alone: `make wasm FEATURES="text sorted"`.
+indexes builds its module with them alone: `make wasm FEATURES="text sorted"`,
+and `SCHEMA=0` leaves the schema check out of it (8.4 KB brotli).
 
 Serve `.wasm` as `application/wasm`, compressed once at build time.
 Full reference: https://fenecdb.com/docs/javascript

@@ -41,6 +41,44 @@ builder producing the same FenecQL; the only difference is where it is
 bound.</p>
 </details>
 
+<h3 id="schema">The server owns the schema</h3>
+
+<p>A replica takes its collections as the server declares them. Code that
+declares its tables (<a href="javascript.html#schema">Schema in code</a>)
+hands them over too, and they are checked against the server's, never
+applied:</p>
+
+<pre data-lang="ts">import { sync } from './fenec.js';
+import { todos } from './tables.js';
+
+const db = await sync({
+  url: 'https://todos.example.com',
+  schema: { todos },
+  shapes: [{ collection: todos, key: 'key' }],
+});
+</pre>
+
+<ul>
+  <li><b>What the code declares must be there.</b> A collection, a field
+    or an index the server lacks, or one of another type, refuses the open:
+    a <code>FenecError</code> naming each difference.</li>
+  <li><b>What the server holds beside it is its own.</b> A field or a
+    collection the code does not declare is fine: an older app keeps
+    working while the server moves ahead.</li>
+  <li><b>Nothing is applied, not even an addition.</b> The schema changes
+    where it lives, on the server: its owner's migrations, a deploy step's
+    <code>connect(url, { schema, migrations, migrate: true })</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The comparison is the server's engine (<code>POST
+/_schema/plan?mode=follow</code>), the same that checks a page's own
+database at an open, so the two say the same things in the same words. A
+replica reconciles rows by its server's field order and types, which is why
+it never declares a collection of its own: a field added in the page and
+not on the server could not be decoded either way.</p>
+</details>
+
 <h2 id="native">Native apps sync too</h2>
 
 <p>An iOS, Android or Flutter app keeps its replica in a file on the

@@ -11,6 +11,10 @@
       "types": "./fenec.d.ts",
       "default": "./fenec.js"
     },
+    "./schema": {
+      "types": "./schema.d.ts",
+      "default": "./schema.js"
+    },
     "./fenec.wasm": "./fenec.wasm",
     "./fenec-lite.wasm": "./fenec-lite.wasm",
     "./collate/*": "./collate/*",
@@ -19,6 +23,8 @@
   "files": [
     "fenec.js",
     "fenec.d.ts",
+    "schema.js",
+    "schema.d.ts",
     "fenec.wasm",
     "fenec-lite.wasm",
     "collate/"

@@ -29,8 +29,65 @@ const MAX_LOOKUP_DEPTH = 8;
 
 export class FenecError extends Error {}
 
+/**
+ * What each database, endpoint and replica was opened with when its code
+ * declares its schema (`@fenecdb/web/schema`): the tables, the relations
+ * `lookup` names, the migrations.
+ */
+const declared = new WeakMap();
+
+/**
+ * The code's schema checked against `to` -- the database in the page or
+ * the server's -- and applied where `how` says (`apply`; `follow` compares a
+ * schema another owns). The schema is FenecQL text, or tables declared in
+ * code (`@fenecdb/web/schema`), which write themselves as it: this module
+ * imports none of that one. The engine decides; a refusal throws, naming
+ * every difference and how to resolve it (`refusals`).
+ */
+async function checked(to, opts, how) {
+  const s = opts?.schema;
+  if (!s) return to;
+  declared.set(to, opts);
+  const fenecql = typeof s === 'string' ? s : Object.values(s).map((t) => t.toFenecQL()).join('\n');
+  const description = { format: 1, fenecql, migrations: opts.migrations ?? [] };
+  for (;;) {
+    let out;
+    try {
+      out = await to.checkSchema(description, how);
+    } catch (e) {
+      // A migration comparing text in a collation the module has not been
+      // handed: fetched, and the whole run again, none of which landed.
+      if (e.collation && (await to.collation?.(...e.collation))) continue;
+      throw e;
+    }
+    if (!out.refusals.length) return to;
+    const head =
+      how === 'follow'
+        ? "the code's schema is not the one the server holds, and the server's is the one that counts"
+        : "the database's schema differs from the code's, and nothing was applied";
+    // The engine writes a rebuild as a description holds it; here, as the helper that makes one.
+    const fix = (f) => f.replace(/\{"rebuild": \{"collection": "([^"]+)", "field": "([^"]+)"\}\} \(rebuild in the SDKs\)/, "rebuild('$1', '$2')");
+    const lines = out.refusals.map((r) => `  - ${r.message}\n    ${fix(r.fix)}`);
+    throw Object.assign(new FenecError(`${head}:\n${lines.join('\n')}`), { refusals: out.refusals });
+  }
+}
+
+/**
+ * Where a database opened with a schema stood once it was made: a load
+ * (`restore`, `openFile`) adds the image's collections to what a database
+ * holds, so one holding what its schema made and nothing since is emptied
+ * first, and the one loaded checked instead.
+ */
+const untouched = new WeakMap();
+const replaceable = (f) => untouched.get(f) === f.changeSeq;
+
+/** A collection's name, or a table's (`fenecTable`). */
+const nameOf = (n) => (n && typeof n === 'object' ? n.$name : n);
+
 /** A second database over a database's module (`Fenec`'s static block). */
 let sibling;
+/** A database made empty again, its handle a new one (`Fenec`'s static block). */
+let emptied;
 
 // The module is built with WebAssembly SIMD (Chrome 91, Firefox 89, Safari
 // 16.4). An engine without it fails to compile it with an opaque message; this
@@ -74,6 +131,10 @@ export class Fenec {
   static {
     // For `openFile` to try bytes in without touching the database it keeps.
     sibling = (f) => new Fenec(f.#wasm, f.#wasm.fenec_open(), f.#collation);
+    emptied = (f) => {
+      f.#wasm.fenec_close(f.#handle);
+      f.#handle = f.#wasm.fenec_open();
+    };
   }
 
   /**
@@ -110,7 +171,19 @@ export class Fenec {
     // alone, and from bytes the module and the instance: read as the
     // latter, a Worker's module had no exports and `open` threw.
     const wasm = (mod instanceof WebAssembly.Instance ? mod : mod.instance).exports;
-    return new Fenec(wasm, wasm.fenec_open(), opts.collation ?? beside(src));
+    // With `schema`, what the code declares is checked and made: a load
+    // (`restore`, `openFile`) checks the database it brings in again.
+    const db = new Fenec(wasm, wasm.fenec_open(), opts.collation ?? beside(src));
+    return checked(db, opts, 'apply').then(
+      () => {
+        if (opts.schema) untouched.set(db, db.changeSeq);
+        return db;
+      },
+      (e) => {
+        db.close();
+        throw e;
+      },
+    );
   }
 
   /** Connects to a remote HTTP endpoint: `Fenec.connect('http://host:8080')`. */
@@ -293,6 +366,35 @@ export class Fenec {
     return got instanceof Uint8Array ? got : new Uint8Array(got.buffer ?? got);
   }
 
+  /**
+   * The database against a schema declared in code -- its description,
+   * `{format, collections, migrations}` (`@fenecdb/web/schema`'s
+   * `describe`) -- in the engine: `'plan'` says what an apply would do,
+   * `'apply'` runs the migrations not yet recorded and makes what only
+   * adds, one block, or nothing while anything is refused. Answers
+   * `{applied, ran, migrations, statements, refusals}`; `Fenec.open`'s
+   * `schema` is this, and throws on a refusal.
+   */
+  checkSchema(description, mode = 'plan') {
+    const call = this.#wasm.fenec_schema;
+    if (!call || mode === 'follow') {
+      throw new FenecError(call ? 'a database in the page is its own: it plans or applies' : 'this fenec.wasm was built without the schema check');
+    }
+    const [p, l] = this.#write(typeof description === 'string' ? description : JSON.stringify(description));
+    let out;
+    try {
+      out = JSON.parse(this.#readString(call(this.#handle, p, l, mode === 'apply' ? 1 : 0, this.now())));
+    } finally {
+      this.#wasm.fenec_free(p, l || 1);
+    }
+    if (out.kind === 'error') throw Object.assign(new FenecError(out.message), out.chunks ? { collation: out.chunks, ran: 0 } : {});
+    if (out.applied) {
+      if (this.#lives?.size) this.#touch();
+      kept.get(this)?.flush();
+    }
+    return out;
+  }
+
   /** Returns the query result as a plain array of objects. */
   rows(sql, params = []) {
     const r = this.run(sql, params);
@@ -307,10 +409,11 @@ export class Fenec {
    */
   from(name) {
     return new Query({
-      collection: ident(name, 'collection'),
+      collection: ident(nameOf(name), 'collection'),
       exec: (sql, params) => this.query(sql, params),
       // What `useLiveQuery` finds the query's database by.
       context: this,
+      rel: declared.get(this)?.relations,
     });
   }
 
@@ -619,23 +722,7 @@ export class FenecHttp {
 
   /** Runs FenecQL. The return shape matches `run` on the wasm path. */
   async run(sql, params = []) {
-    const headers = { 'content-type': 'application/json' };
-    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
-    const res = await this.#fetch(`${this.#url}/query`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query: sql, params: params.map((p) => normalize(p)) }),
-    });
-    const text = await res.text();
-    let body;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
-    }
-    if (!res.ok) {
-      throw new FenecError(body?.error ?? `HTTP ${res.status}`);
-    }
+    const body = await this.#post('/query', { query: sql, params: params.map((p) => normalize(p)) });
     // The endpoint returns rows as a plain array; the builder expects `{rows}`.
     if (Array.isArray(body)) return { rows: body };
     if (body && typeof body.affected === 'number') {
@@ -644,15 +731,45 @@ export class FenecHttp {
     return body;
   }
 
+  /** A POST's JSON answer; a status but `ok` among `also` is an error. */
+  async #post(path, payload, also = []) {
+    const headers = { 'content-type': 'application/json' };
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await this.#fetch(`${this.#url}${path}`, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const text = await res.text();
+    let body;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
+    }
+    if (!res.ok && !also.includes(res.status)) {
+      throw new FenecError(body?.error ?? `HTTP ${res.status}`);
+    }
+    return body;
+  }
+
   async rows(sql, params = []) {
     return (await this.run(sql, params)).rows ?? [];
+  }
+
+  /**
+   * The server's database against a schema declared in code, in the
+   * server (`/_schema`): `'follow'` -- what a client that does not own it
+   * does -- says what the code declares and the server lacks, `'plan'`
+   * what an apply would do, `'apply'` runs it, with the server's token.
+   */
+  checkSchema(description, mode = 'follow') {
+    const path = { follow: 'plan?mode=follow', plan: 'plan', apply: 'apply' }[mode];
+    return this.#post(`/_schema/${path}`, description, [409]);
   }
 
   /** Query builder -- identical to the one on the wasm path. */
   from(name) {
     return new Query({
-      collection: ident(name, 'collection'),
+      collection: ident(nameOf(name), 'collection'),
       exec: (sql, params) => this.run(sql, params),
+      rel: declared.get(this)?.relations,
     });
   }
 
@@ -662,9 +779,14 @@ export class FenecHttp {
   }
 }
 
-/** Connects to a remote fenecdb HTTP endpoint (`fenec-server --http`). */
+/**
+ * Connects to a remote fenecdb HTTP endpoint (`fenec-server --http`). With
+ * `schema`, a promise: the server's schema is checked against the code's,
+ * and with `migrate` -- and the server's token -- brought to it.
+ */
 export function connect(url, opts = {}) {
-  return new FenecHttp(url, opts);
+  const http = new FenecHttp(url, opts);
+  return opts.schema ? checked(http, opts, opts.migrate ? 'apply' : 'follow') : http;
 }
 
 // ----------------------------------------------------------- query builder
@@ -1241,6 +1363,11 @@ export class Query {
    * none, and the shops stay unless `orders` says `required` as well.
    */
   lookup(name, opts = {}) {
+    // A relation of `defineRelations` names the key; given `on`, the call does.
+    const at = this.#s.lookups.at(-1)?.collection ?? this.#s.collection;
+    const rel = !opts.on && this.#s.rel?.[at]?.[name];
+    if (rel) [name, opts] = [rel.collection, { ...rel, ...opts }];
+    name = nameOf(name);
     if (!opts.on) {
       throw new FenecError('lookup needs `on`: the child field holding the key');
     }
@@ -1610,7 +1737,7 @@ function renderDoc(doc, bind) {
  * transport, or comparing it in a test: `from('docs').where(...).toFenecQL()`.
  */
 export function from(name) {
-  return new Query({ collection: ident(name, 'collection') });
+  return new Query({ collection: ident(nameOf(name), 'collection') });
 }
 
 // ------------------------------------------------------------- persistence
@@ -1777,9 +1904,13 @@ export async function restore(fenec, key = 'default', opts = {}) {
       at += c.length;
     }
   }
+  if (replaceable(fenec)) emptied(fenec);
   await fenec.loadAsync(bytes);
   fenec.journal();
   stored.set(fenec, { key, ck, gen, next: chunks.length + 1, image: image.length, chunks: bytes.length - image.length });
+  // The database the code declared its schema for is this one now: checked
+  // again, what it adds journaled with the rest.
+  await checked(fenec, declared.get(fenec), 'apply');
   return true;
 }
 
@@ -2007,6 +2138,8 @@ export async function openFile(fenec, name = 'default.fenec', opts = {}) {
       size = snap.length;
       image = imageEnd(snap);
     } else {
+      // What its own schema made, and nothing since, is nothing to lose.
+      if (replaceable(fenec)) emptied(fenec);
       if (fenec.schemas().length) throw new FenecError(`${name} holds a database: open it into one that holds nothing`);
       const bytes = readAt(main, size);
       const took = await fenec.loadAsync(bytes);
@@ -2022,6 +2155,11 @@ export async function openFile(fenec, name = 'default.fenec', opts = {}) {
     }
     const file = new FenecFile(fenec, name, main, aside, size, Math.max(image, 0));
     kept.set(fenec, file);
+    // Refused, the file is let go of, as it was found.
+    await checked(fenec, opts.schema ? opts : declared.get(fenec), 'apply').catch((e) => {
+      file.close();
+      throw e;
+    });
     return file;
   } catch (e) {
     main.close();
@@ -2350,7 +2488,7 @@ export class FenecSync {
    * first, then to the server.
    */
   from(name) {
-    const collection = ident(name, 'collection');
+    const collection = ident(nameOf(name), 'collection');
     if (!this.#shapes.has(collection)) {
       throw new FenecError(
         `no shape for \`${collection}\`: that collection is not in the local ` +
@@ -2361,6 +2499,7 @@ export class FenecSync {
       collection,
       context: this,
       exec: (sql, params) => this.#local.query(sql, params),
+      rel: declared.get(this)?.relations,
     });
   }
 
@@ -2938,7 +3077,7 @@ function normalizeShape(raw) {
   if (!isSpec(spec) || typeof spec.collection !== 'string') {
     throw new FenecError('a shape must be `{ collection, where?, select?, key? }`');
   }
-  const collection = ident(spec.collection, 'collection');
+  const collection = ident(nameOf(spec.collection), 'collection');
   const select = spec.select ? [...new Set(['id', ...spec.select.map((c) => ident(c))])] : null;
   return {
     collection,
@@ -2969,6 +3108,10 @@ function normalizeShape(raw) {
 export async function sync(opts = {}) {
   if (!opts.url) throw new FenecError('sync(): `url` is required');
   const local = opts.local ?? (await Fenec.open(opts.wasm ?? './fenec.wasm', { collation: opts.collation }));
-  return new FenecSync(local, opts).start();
+  const replica = new FenecSync(local, opts);
+  // The server owns the schema: the code's is compared with it, never applied.
+  await checked(replica.remote, opts, 'follow');
+  if (opts.schema) declared.set(replica, opts);
+  return replica.start();
 }
 

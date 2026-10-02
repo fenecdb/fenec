@@ -14,6 +14,7 @@ measurements, as every feature here does.
 | 5 | Official SDKs over HTTP (Phase 53) -- **done** for Go and .NET | medium | every language reaches the server over HTTP since the pg wire went |
 | 6 | Embedded in mobile and native apps (Phase 56) -- **done** | large | the engine's best place after the page: a file on the device, offline |
 | 7 | An app's file synced with a server (Phase 57) | medium | what the page's `FenecSync` does, for an app |
+| 8 | A schema declared in code (Phase 58) -- **done** for TypeScript, FenecQL text, the server, Python, Go, .NET and Swift | medium | an app that makes its database declares it once, checked at every open |
 
 Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
 are the design), the PostgreSQL wire protocol (below), several
@@ -379,6 +380,30 @@ Kotlin, `Fenec.openSynced` in Dart, each held against a fenec-server its
 tests start, kill and start again. Measured: a one-row change 18.4 us
 against 7.1 for the put alone; the library +165 KB on Apple silicon (1.68
 MB), +198 KB on x86_64 Linux (1.88).
+
+## Phase 8: a schema declared in code (Phase 58) -- done, with what follows
+
+Tables declared in TypeScript Drizzle 1.0's way (`@fenecdb/web/schema`), or
+`create collection` text in any SDK, compiled to one description and
+compared with the database by the engine at every open: additions applied,
+everything else refused with its resolution, migrations run once and
+recorded (`fenec_core::declared`, `fenec_abi::schema`). Shipped: the
+browser module, the native library, the server's `/_schema`, the JS client
+(`Fenec.open`, `restore`, `openFile`, `sync`, `connect`), `schema(...)` in
+the Python, Go, .NET and Swift clients, `fenec types` over a `.fenecql` and
+for Python, Go and C#, and `integrations/schema-golden.json`.
+
+Still to do:
+
+- `schema(...)` in the Kotlin and Dart bindings: the native call is there
+  (`fenec_schema`); left out while Phase 57 changes those bindings.
+- `fenec types --lang swift|kotlin|dart`, each small, beside the Python, Go
+  and C# generators, with its file in `integrations/types-golden/`.
+- Declarations in the other SDKs' own idioms, compiled to the description
+  and held to `schema-golden.json`'s declaration cases.
+- The module's 8.4 KB brotli for the check: a page that declares nothing
+  may build without it (`make wasm SCHEMA=0`); whether the published module
+  keeps it is the owner's call.
 
 ---
 

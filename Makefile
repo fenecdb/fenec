@@ -7,11 +7,14 @@ PORT ?= 8787
 SITE_PORT ?= 8788
 WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 # The indexes the browser module is built with: every one unless named --
-# `make wasm FEATURES="text sorted"`, or FEATURES=none for none of them.
+# `make wasm FEATURES="text sorted"`, or FEATURES=none for none of them. The
+# check a schema declared in code opens with comes with any set, unless
+# SCHEMA=0: 8.4 KB brotli for a page whose code declares none.
 FEATURES ?=
-WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
+SCHEMA ?= 1
+WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js builder-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -39,9 +42,11 @@ test:
 ##   fenec.persist.test.js  incremental persistence, over an in-memory IndexedDB
 ##   fenec.file.test.js  a database kept in an OPFS file, over in-memory files,
 ##                     and handed to and from a real `fenec-server`
+##   fenec.schema.test.js  a schema declared in code (web/schema.js): what it
+##                     declares, the check at an open, migrations, fenec types --schema
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js web/fenec.file.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -51,6 +56,12 @@ test-js:
 ## held to (web/golden.mjs holds the chains; fenec.test.js checks the file)
 builder-golden:
 	node web/golden.mjs
+
+## integrations/schema-golden.json written again: each declaration's
+## description, from web/schema.js, and each plan, from the engine (the
+## module: make wasm first). crates/fenec-abi runs every plan case natively.
+schema-golden:
+	node web/schema-golden.mjs
 
 ## web/fenec.d.ts held to web/fenec.js -- every export and method declared --
 ## and to what a caller writes, under tsc --strict; then the docs' examples

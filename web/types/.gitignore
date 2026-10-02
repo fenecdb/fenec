@@ -1,2 +1,3 @@
 probe.ts
 docs/out/
+tsconfig.check.json

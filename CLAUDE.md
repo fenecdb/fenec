@@ -37,6 +37,7 @@ make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby
 make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
 make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
 make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
+make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
 make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
@@ -107,7 +108,8 @@ fenec-cli   (`fenec` shell, `fenec import`, `fenec types`)
 `fenec-bench` is a measurement harness (`publish = false`) and is the only crate
 allowed external crates — that is where `rusqlite`/`postgres` live.
 
-`fenec-core` modules: `store` (segments, offset index), `engine` (`Database`,
+`fenec-core` modules: `store` (segments, offset index), `declared` (a schema
+declared in code: its description, the plan against a database), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
 kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
 execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
@@ -119,7 +121,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~434 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~480 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -1758,6 +1760,52 @@ in as dead code, it still moved LLVM's inlining and left the module 155
 bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
 `Fenec.openSynced`, since a static `sync` cannot sit beside the instance's
 fsync `sync()`.
+
+**A schema declared in code is checked at every open, in the engine.**
+Two front ends compile to one description (`fenec_core::declared`,
+versioned JSON: `{"format": 1, "collections": [...] | "fenecql": "...",
+"migrations": [...]}`): tables written Drizzle 1.0's way in TypeScript
+(`web/schema.js`, its own entry point `@fenecdb/web/schema`, so a page that
+declares nothing loads none of it), and FenecQL `create collection` text --
+a `schema.fenecql` -- which every SDK hands over with no builder of its own
+(`fenec_ql::schema_text`). `declared::plan` compares a database's schemas
+with it: what only adds (a collection, a field, an index where there is
+none, a path index) comes back as statements; a field the code lacks
+(dropped, or renamed? never guessed), a type, a collation or `required`
+changed, an index changed or taken off, a required field new to a
+collection that exists, are refusals with their resolution; a collection
+the code does not declare is left alone. `Mode::Follow` is for a database
+another owns -- a replica's server, a client without the right -- where
+the code's must be there and the rest is the owner's. `fenec_abi::schema`
+runs the migrations not yet recorded (known by their place in the list,
+held to their text: one edited after it ran, or a database holding more
+than the code lists, is refused), records each in `_migrations (n, text,
+at)`, plans and applies the additions, all one block, put back on any
+refusal or error; a database holding none of its own collections is made
+from the description and records its migrations without running them. A
+plan runs the pending migrations in a block put back. `rebuild` is the
+migration that changes an index or a collation: the field added again as
+declared, `set` from the old, the old dropped, the new renamed. The module
+exports `fenec_schema` (feature `schema`, on by default, `make wasm
+SCHEMA=0` without; reading the collections' JSON was 8 KB of it, so the
+module reads FenecQL alone), the native library `fenec_schema` (plan,
+apply, follow, describe), the server `GET /_schema`, `POST /_schema/plan`
+(`?mode=follow` for a scoped token) and `/_schema/apply` (the server's
+token, under the write lock). `Fenec.open`, `restore` and `openFile`
+apply; `sync` follows (the server owns a replica's schema); `connect`
+follows, or applies with `migrate: true`; Python's, Go's and .NET's
+`schema(...)` and Swift's `Fenec.schema(...)` take the text. A `load`
+adds an image's collections to what a database holds, so one that holds
+only what its schema made, and nothing since, is emptied before a restore
+or an openFile loads into it (`untouched`). `integrations/schema-golden.json`
+holds declarations, texts and plans (`make schema-golden` writes it
+through the module; `fenec-abi`'s tests run every case natively, the JSON
+and the FenecQL form of each). The check costs an open of 10 collections
+0.09 ms in Node and the module 8.4 KB brotli; `fenec.js` grew 1.4 KB
+brotli for the hooks, and `schema.js` is 5.8. `fenec types` reads a
+`.fenecql` as it reads a database, and writes Python, Go and C# rows
+(`--lang`), the tables as code (`--schema`) and the schema as FenecQL
+(`--fenecql`); `integrations/types-golden/` holds each for one schema.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,
