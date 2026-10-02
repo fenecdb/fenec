@@ -328,6 +328,78 @@ fn aggregates_over_the_query_string() {
     assert_eq!(get(h.port, "/remarks?select=count(*)&limit=1").status, 400);
 }
 
+/// A query that asks for facets is answered `{"rows": [...], "facets":
+/// {...}}` -- `/query`, a `/batch` line and the REST query string's
+/// `facet=` alike -- and one that asks none the bare array it always was;
+/// a mark is a column like any other.
+#[test]
+fn facets_and_marks_over_http() {
+    let h = start(Config::default());
+    let post = |body: &str| call(h.port, "POST", "/query", Some(body));
+    let r = post(r#"{"query":"create collection docs (body text @text, kind text @hash)"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let r = post(
+        r#"{"query":"put docs [{body: \"Rust and İstanbul\", kind: \"a\"}, {body: \"rust 🦀 rust\", kind: \"b\"}, {body: \"go\", kind: \"a\"}]"}"#,
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+
+    // Offsets in UTF-16 units: the crab is two of them, as JavaScript
+    // counts it.
+    let r = post(
+        r#"{"query":"get docs select kind, highlight(body) match body $1 limit 1 facet kind","params":["rust"]}"#,
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let body = r.body.trim();
+    assert!(
+        body.starts_with(
+            "{\"rows\":[{\"kind\":\"b\",\"highlight(body)\":[[0,4],[8,12]],\"_score\":"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.ends_with(
+            "\"facets\":{\"kind\":[{\"value\":\"a\",\"count\":1},{\"value\":\"b\",\"count\":1}]}}"
+        ),
+        "{body}"
+    );
+    let r = post(
+        r#"{"query":"get docs select highlight(body, $1, $2) match body $3 limit 1","params":["<b>","</b>","rust"]}"#,
+    );
+    assert!(
+        r.body
+            .starts_with("[{\"highlight(body)\":\"<b>rust</b> 🦀 <b>rust</b>\","),
+        "{}",
+        r.body
+    );
+
+    // A batch line, and the REST query string.
+    let batch = "{\"query\":\"get docs select kind where kind = \\\"a\\\" limit 1 facet kind\"}\n\
+                 {\"query\":\"get docs select kind limit 1\"}\n";
+    let r = call(h.port, "POST", "/batch", Some(batch));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.contains(
+            "{\"rows\":[{\"kind\":\"a\"}],\"facets\":{\"kind\":[{\"value\":\"a\",\"count\":2}]}},{\"rows\":[{\"kind\":\"a\"}]}"
+        ),
+        "{}",
+        r.body
+    );
+    let r = get(h.port, "/docs?select=kind&limit=1&facet=kind%20top%201");
+    assert_eq!(
+        r.body.trim(),
+        "{\"rows\":[{\"kind\":\"a\"}],\"facets\":{\"kind\":[{\"value\":\"a\",\"count\":2}]}}"
+    );
+    let r = get(h.port, "/docs?count&facet=kind");
+    assert_eq!(
+        r.body.trim(),
+        "{\"count\":3,\"facets\":{\"kind\":[{\"value\":\"a\",\"count\":2},{\"value\":\"b\",\"count\":1}]}}"
+    );
+    assert_eq!(rows(&get(h.port, "/docs?limit=2").body), 2);
+    // Refused as the engine refuses it.
+    assert_eq!(get(h.port, "/docs?facet=nope").status, 404);
+    assert_eq!(get(h.port, "/docs?facet=kind,kind").status, 400);
+}
+
 #[test]
 fn count_and_free_where() {
     let h = start(Config::default());

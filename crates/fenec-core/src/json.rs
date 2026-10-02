@@ -228,6 +228,36 @@ pub fn result_set_into(out: &mut String, rs: &ResultSet) {
     }
     out.push_str("],\"rows\":");
     rows_array_into(out, rs);
+    facets_into(out, rs);
+    out.push('}');
+}
+
+/// `,"facets":{"brand":[{"value":"acme","count":12},...],...}` after the
+/// rows when the query asked for facets, nothing when it did not: an
+/// object keyed by field, in the order asked, each value with its count.
+pub fn facets_into(out: &mut String, rs: &ResultSet) {
+    if rs.facets.is_empty() {
+        return;
+    }
+    out.push_str(",\"facets\":{");
+    for (i, f) in rs.facets.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        escape_into(out, &f.field);
+        out.push_str(":[");
+        for (j, (v, n)) in f.values.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"value\":");
+            value_into(out, v);
+            out.push_str(",\"count\":");
+            out.push_str(&n.to_string());
+            out.push('}');
+        }
+        out.push(']');
+    }
     out.push('}');
 }
 

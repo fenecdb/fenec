@@ -77,12 +77,39 @@ fn documents_read_and_write_and_the_scan_orders_them() {
     assert_eq!(ints(&r, 0), [2021, 2030]);
 }
 
+/// Facets need no index: the scan counts them, over the rows a filter
+/// keeps, beside the page.
+#[test]
+fn facets_count_without_the_indexes() {
+    let mut db = declared();
+    run(&mut db, r#"put d {year: 2021, title: "more"}"#).unwrap();
+    let r = run(
+        &mut db,
+        "get d select year where year > 2000 limit 1 facet year",
+    )
+    .unwrap();
+    let rs = r.rows().unwrap();
+    assert_eq!(rs.rows.len(), 1);
+    assert_eq!(
+        rs.facets[0].values,
+        [(Value::Int(2021), 2), (Value::Int(2010), 1)]
+    );
+}
+
 #[test]
 fn what_needs_a_missing_index_is_refused() {
     let mut db = declared();
     run(&mut db, "alter collection d add field other vector<3>").unwrap();
     for (sql, feature) in [
         (r#"get d match title "rust""#, "`text`"),
+        (
+            r#"get d select highlight(title) match title "rust""#,
+            "`text`",
+        ),
+        (
+            r#"get d select snippet(title, 3) match title "rust" facet year"#,
+            "`text`",
+        ),
         ("create index on d (title) @sorted", "`sorted`"),
         ("create index on d (other) @hnsw(cosine)", "`vector`"),
     ] {

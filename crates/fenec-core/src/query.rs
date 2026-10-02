@@ -763,6 +763,80 @@ impl Agg {
     }
 }
 
+/// `highlight(body)` or `snippet(body, 20)` in a select list: the spans of
+/// a text field that the terms of the query's `match` were read from
+/// (`highlight.rs`), answered under its [`Mark::label`].
+///
+/// A select-list item rather than a clause, as SQLite's FTS5 and Turso
+/// write `highlight()` and `snippet()`: it is a column of the row, it goes
+/// where the list puts it, and the tags are its arguments -- values, a
+/// literal or a parameter, never markup the engine chooses.
+///
+/// Its arguments after the field are one list, as written: a highlight's
+/// tags, `pre` and `post`, or none; a snippet's ellipsis, then its tags.
+/// Held as fields of their own, a select's clone carried a copy of the
+/// code for them, 432 bytes of the browser module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mark {
+    pub field: String,
+    /// `snippet(body, n)`: a window of `n` words around the densest marks.
+    /// None: `highlight`, the whole text.
+    pub snippet: Option<usize>,
+    /// `highlight`: none, or `pre` and `post`. `snippet`: none, the
+    /// ellipsis -- what stands for the text left out at either end -- or
+    /// the ellipsis, `pre` and `post`. With the tags the column is the
+    /// marked text; without, where the marks are (UTF-16 offsets).
+    pub args: Vec<Expr>,
+}
+
+impl Mark {
+    /// The column it answers under: `highlight(body)`, `snippet(body)`.
+    pub fn label(&self) -> String {
+        let f = if self.snippet.is_some() {
+            "snippet"
+        } else {
+            "highlight"
+        };
+        format!("{f}({})", self.field)
+    }
+
+    /// The ellipsis and the tags its arguments name, each where given.
+    pub fn parts(&self) -> (Option<&Expr>, Option<(&Expr, &Expr)>) {
+        let a = &self.args;
+        match (self.snippet.is_some(), a.len()) {
+            (true, 1) => (Some(&a[0]), None),
+            (true, 3) => (Some(&a[0]), Some((&a[1], &a[2]))),
+            (false, 2) => (None, Some((&a[0], &a[1]))),
+            _ => (None, None),
+        }
+    }
+}
+
+/// `facet brand top 10`: the values a field holds over every row the query
+/// matches -- before `limit` and `offset` -- each with how many rows hold
+/// it, most first. A list counts once a row for each value it holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Facet {
+    /// A field, or a path into a json field.
+    pub field: String,
+    /// How many values, the commonest; None: every one, up to
+    /// [`MAX_FACET_VALUES`].
+    pub top: Option<usize>,
+}
+
+/// The most values one facet answers with. Past it a facet without `top` is
+/// refused rather than cut: a list cut where it happened to stop is a
+/// wrong answer believed right, and a sidebar shows far fewer anyway.
+pub const MAX_FACET_VALUES: usize = 10_000;
+
+/// One facet's answer: each value and how many matched rows hold it, by
+/// count, most first, then by value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FacetValues {
+    pub field: String,
+    pub values: Vec<(Value, u64)>,
+}
+
 /// One key of `order`: `order year desc`, `order name collate tr`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sort {
@@ -812,6 +886,12 @@ pub struct Select {
     pub group: Option<String>,
     /// `fuse`: `match` and `near` both, their rankings combined.
     pub fuse: Option<Fuse>,
+    /// `highlight()` and `snippet()` items of the select list, in the order
+    /// written. Each answers under its label, which the list (`project`)
+    /// holds where it was written, or after every field when it is `*`.
+    pub marks: Vec<Mark>,
+    /// `facet`: value counts over every matched row, beside the page.
+    pub facets: Vec<Facet>,
 }
 
 impl Select {
@@ -923,6 +1003,7 @@ impl Select {
                 seen.push(step.collection.as_str());
             }
         }
+        self.check_marks_and_facets()?;
         if !self.aggregate.is_empty() || self.group.is_some() {
             self.check_aggregate()?;
         }
@@ -947,6 +1028,87 @@ impl Select {
         Err(Error::Query(format!(
             "`count` cannot be used together with `{clash}`"
         )))
+    }
+
+    /// `highlight`, `snippet` and `facet` need what they are over: marks
+    /// the terms of a `match`, and facets a set of rows -- which `near`
+    /// does not narrow: it ranks every row the filter passes, so counts over
+    /// it would be the filter's alone, the same whatever the vector. Asked
+    /// beside one, they are refused rather than answered for another
+    /// question.
+    fn check_marks_and_facets(&self) -> Result<()> {
+        if let Some(m) = self.marks.first() {
+            let why = if self.matcher.is_none() {
+                "the terms `match` found: the query needs `match`"
+            } else if !self.aggregate.is_empty() {
+                "a row's text; aggregates answer groups"
+            } else if self.marks.iter().any(|m| m.snippet == Some(0)) {
+                "at least one word: `snippet(<field>, <words>)`"
+            } else if self.marks.iter().any(|m| {
+                !matches!(
+                    (m.snippet.is_some(), m.args.len()),
+                    (_, 0) | (false, 2) | (true, 1 | 3)
+                )
+            }) {
+                "with `highlight(<field> [, <pre>, <post>])` or \
+                 `snippet(<field>, <words> [, <ellipsis> [, <pre>, <post>]])`"
+            } else {
+                ""
+            };
+            if !why.is_empty() {
+                let what = if m.snippet.is_some() {
+                    "snippet"
+                } else {
+                    "highlight"
+                };
+                return Err(Error::Query(format!("`{what}` marks {why}")));
+            }
+            // Each answers under its label, and a JSON row holds a name once.
+            for (i, m) in self.marks.iter().enumerate() {
+                if self.marks[..i].iter().any(|n| n.label() == m.label()) {
+                    return Err(Error::Query(format!(
+                        "`{}` is asked twice: its columns would answer to one name",
+                        m.label()
+                    )));
+                }
+            }
+        }
+        if self.facets.is_empty() {
+            return Ok(());
+        }
+        if self.near.is_some() {
+            return Err(Error::Query(
+                "`facet` counts the rows a filter or `match` selects, and `near` ranks every \
+                 row the filter passes: ask the facets without `near`"
+                    .into(),
+            ));
+        }
+        if !self.aggregate.is_empty() {
+            return Err(Error::Query(
+                "`facet` cannot be used together with aggregates: `group` counts by value".into(),
+            ));
+        }
+        for (i, f) in self.facets.iter().enumerate() {
+            if self.facets[..i].iter().any(|g| g.field == f.field) {
+                return Err(Error::Query(format!("`facet {}` is asked twice", f.field)));
+            }
+            match f.top {
+                Some(0) => {
+                    return Err(Error::Query(format!(
+                        "`facet {} top 0` answers nothing: `top` takes at least 1",
+                        f.field
+                    )))
+                }
+                Some(n) if n > MAX_FACET_VALUES => {
+                    return Err(Error::Query(format!(
+                        "`facet {} top {n}`: a facet answers at most {MAX_FACET_VALUES} values",
+                        f.field
+                    )))
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Number of parameters it expects: the highest `$n` in any of its
@@ -976,7 +1138,18 @@ impl Select {
             .as_ref()
             .map(|l| l.chain().map(|s| opt(&s.filter)).max().unwrap_or(0))
             .unwrap_or(0);
-        opt(&self.filter).max(near).max(m).max(rr).max(lk)
+        let mut marks = 0;
+        for m in &self.marks {
+            for a in &m.args {
+                marks = marks.max(a.max_param());
+            }
+        }
+        opt(&self.filter)
+            .max(near)
+            .max(m)
+            .max(rr)
+            .max(lk)
+            .max(marks)
     }
 
     /// Whether a literal in its filters holds a vector
@@ -1321,6 +1494,10 @@ pub struct ResultSet {
     /// Set only by `lookup`; `None` for every query that could be written
     /// before it existed.
     pub nested: Option<Nested>,
+    /// What `facet` counted, a facet each in the order asked; empty when
+    /// none was. Beside the rows, as `nested` is, and never in a `Value`:
+    /// it answers for the query's whole set, not for a row.
+    pub facets: Vec<FacetValues>,
 }
 
 impl ResultSet {
@@ -1379,6 +1556,7 @@ impl ResultSet {
             columns,
             rows,
             nested: None,
+            facets: self.facets.clone(),
         })
     }
 }

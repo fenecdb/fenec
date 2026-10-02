@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-replica wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-replica wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -449,6 +449,13 @@ docker-down:
 ## running database: under the write lock, then beside it.
 maintenance-bench:
 	$(CARGO) run --release -p fenec-core --example maintenance -- 100000 128
+
+## `highlight()`, `snippet()` and `facet` over 100 000 documents: a row's
+## marks against `match` alone, a facet by the buckets and by the scan, and
+## the text index's build and `match` -- which must not move -- against a
+## build from before them (the program runs there too, the rest `n/a`).
+search-bench:
+	$(CARGO) run --release -p fenec-core --example search -- 100000
 
 ## `in (get ...)` against the same `in [..]` written out, and against the
 ## `lookup ... required` that asks the same question from the other side:
