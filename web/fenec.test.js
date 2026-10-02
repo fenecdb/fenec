@@ -1566,3 +1566,171 @@ test('every example in the llms brief runs', { skip: wasm ? false : 'no web/fene
     assert.doesNotThrow(() => db.run(sql, sql.includes('$1') ? [[0.1, 0.2, 0.3, 0.4]] : []), sql);
   }
 });
+
+// ------------------------------------------------------------ live queries
+
+test('a query names the collections it reads, or null when a raw one may read more', () => {
+  assert.deepEqual(from('a').where('x', 1).reads, ['a']);
+  assert.deepEqual(
+    from('a')
+      .where('x', 'in', from('b').select('id').where('y', 'in', from('c').select('id')))
+      .lookup('d', { on: 'a_id', where: { z: { in: from('e').select('id') } } })
+      .lookup('f', { on: 'd_id' })
+      .reads,
+    ['a', 'b', 'c', 'd', 'e', 'f'],
+  );
+  assert.deepEqual(from('a').where(raw('cosine(v, ?) > ?', [1, 0], 0.5)).reads, ['a']);
+  assert.equal(from('a').where(raw('x in (get b select id)')).reads, null);
+  assert.equal(from('a').lookup('d', { on: 'a_id', where: raw('y in (get b select id)') }).reads, null);
+});
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+async function liveDb() {
+  const { Fenec } = await import('./fenec.js');
+  return Fenec.open(wasm);
+}
+
+/** What a live query was handed, in turn: its titles, or the error's message. */
+function watch(db, query, opts = {}) {
+  const seen = [];
+  const stop = db.live(query, (rows) => seen.push(rows.map((r) => r.title ?? r.n)), {
+    ...opts,
+    onError: (e) => seen.push(`error: ${e.message}`),
+  });
+  return { seen, stop };
+}
+
+test('live runs again on a create, a put, an update, a delete and a drop', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  // Asked before the collection is there: told so, then its rows once it is.
+  const { seen } = watch(db, 'get todos order title', { collections: ['todos'] });
+  await settle();
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /^error: .*todos/);
+  db.run('create collection todos (title text, done bool)');
+  await settle();
+  assert.deepEqual(seen.slice(1), [[]]);
+  db.run('put todos [{title: "a", done: false}, {title: "b", done: false}]');
+  await settle();
+  await db.from('todos').where('title', 'a').update({ done: true, title: 'a!' });
+  await settle();
+  await db.from('todos').where('title', 'b').delete();
+  await settle();
+  db.run('alter collection todos add field at int');
+  await settle();
+  assert.deepEqual(seen.slice(1), [[], ['a', 'b'], ['a!', 'b'], ['a!'], ['a!']]);
+  db.run('drop collection todos');
+  await settle();
+  assert.equal(seen.length, 7);
+  assert.match(seen[6], /^error: .*todos/);
+});
+
+test('live runs only for the collections its query reads', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  db.run('create collection todos (title text, list int @hash)');
+  db.run('create collection lists (title text)');
+  db.run('create collection other (n int)');
+  const todos = watch(db, db.from('todos').order('title'));
+  const lists = watch(db, db.from('lists').lookup('todos', { on: 'list' }));
+  const text = watch(db, 'get todos');
+  const named = watch(db, ['get other where n > $1', [0]], { collections: ['other'] });
+  await settle();
+  const counts = () => [todos, lists, text, named].map((w) => w.seen.length);
+  assert.deepEqual(counts(), [1, 1, 1, 1]);
+  db.run('put other {n: 1}');
+  await settle();
+  // A text with no collections named runs again after any write.
+  assert.deepEqual(counts(), [1, 1, 2, 2]);
+  db.run('put lists {title: "home"}');
+  await settle();
+  assert.deepEqual(counts(), [1, 2, 3, 2]);
+  // A lookup reads its child collection too.
+  db.run('put todos {title: "x", list: 1}');
+  await settle();
+  assert.deepEqual(counts(), [2, 3, 4, 2]);
+  // A read is no write.
+  db.rows('get todos');
+  await settle();
+  assert.deepEqual(counts(), [2, 3, 4, 2]);
+  assert.deepEqual(named.seen.at(-1), [1]);
+});
+
+test("live runs once for a task's writes, and not for a text put back", { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  db.run('create collection todos (title text)');
+  const { seen } = watch(db, db.from('todos').order('title'));
+  await settle();
+  db.run('put todos {title: "a"}; put todos {title: "b"}; set todos {title: "c"} where title = "b"');
+  for (let i = 0; i < 10; i++) db.run('put todos {title: $1}', [`n${i}`]);
+  await db.from('todos').insert({ title: 'z' });
+  await settle();
+  assert.equal(seen.length, 2, 'one run for every write of the task');
+  assert.equal(seen[1].length, 13);
+  // A text whose last statement fails lands none of it: nothing to run for.
+  assert.throws(() => db.run('put todos {title: "y"}; put todos {title: 1}'));
+  await settle();
+  assert.equal(seen.length, 2);
+  assert.equal(db.rows('get todos count')[0].count, 13);
+});
+
+test('a stopped live query is handed nothing more, even a run already under way', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  db.run('create collection todos (title text)');
+  const a = watch(db, db.from('todos'));
+  const b = watch(db, db.from('todos'));
+  await settle();
+  db.run('put todos {title: "a"}');
+  // Stopped in the task that wrote: the tick it scheduled hands it nothing.
+  a.stop();
+  await settle();
+  assert.equal(a.seen.length, 1);
+  assert.equal(b.seen.length, 2);
+  // Stopped before its first rows came.
+  const c = watch(db, db.from('todos'));
+  c.stop();
+  await settle();
+  assert.deepEqual(c.seen, []);
+  b.stop();
+  db.run('put todos {title: "b"}');
+  await settle();
+  assert.equal(b.seen.length, 2);
+});
+
+test('a load runs every live query, the counter where it was or not', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  db.run('create collection todos (title text)');
+  db.run('put todos {title: "mine"}');
+  const other = await liveDb();
+  other.run('create collection todos (title text)');
+  other.run('put todos {title: "theirs"}');
+  // The same counter, other rows: the ring cannot tell, the load does.
+  assert.equal(other.changeSeq, db.changeSeq);
+  const image = other.snapshot();
+  const fresh = await liveDb();
+  const { seen } = watch(fresh, fresh.from('todos'), { collections: ['todos'] });
+  const unrelated = watch(fresh, 'get elsewhere', { collections: ['elsewhere'] });
+  await settle();
+  fresh.load(image);
+  await settle();
+  assert.deepEqual(seen.at(-1), ['theirs']);
+  assert.equal(unrelated.seen.length, 2, 'every live query, read or not');
+  const live = watch(db, db.from('todos'));
+  await settle();
+  db.load(image);
+  await settle();
+  assert.deepEqual(live.seen, [['mine'], ['theirs']]);
+});
+
+test("a live query's error goes to its onError, else the database's", { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const db = await liveDb();
+  const errors = [];
+  db.onError = (e) => errors.push(`db: ${e.message}`);
+  db.live('get nowhere', () => assert.fail('no rows'));
+  db.live('get nowhere', () => assert.fail('no rows'), { onError: (e) => errors.push(`own: ${e.message}`) });
+  await settle();
+  assert.equal(errors.length, 2);
+  assert.ok(errors.some((e) => e.startsWith('db: ')) && errors.some((e) => e.startsWith('own: ')));
+  assert.throws(() => db.live(db.from('x'), null), /cb must be a function/);
+  assert.throws(() => db.live(42, () => {}), /a Query, a FenecQL text/);
+});

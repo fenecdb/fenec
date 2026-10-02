@@ -111,7 +111,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~377 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~434 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -1635,6 +1635,23 @@ written 1 000 a request held 100 MB and holds 58, written as text 130 and
 7.0 ms, and builds and searches as fast (`make wasm-speed`), for 768
 bytes brotli. `web/fenec.test.js` holds an index over three chunks to the
 exact search, before and after an image.
+
+**A live query learns what a write changed from the change ring.**
+`Fenec.live` and `FenecSync.live` share one `Lives` (`web/fenec.js`): a
+query's rows now, and again once a collection it reads is written --
+`Query.reads` names them, each `lookup`'s and inner `in` query's too, `null`
+for a `raw` holding a `get`, and a text names them with `{collections}` or
+runs after every write. Which collections were written is
+`fenec_changes(since)`, `Database::changed_collections_since`: a block's
+writes reach the ring as it lands, so one put back names nothing, a schema
+change names its collection, and a drop answers `None` -- everything --
+since a dropped collection has no name left (a name kept for each would be
+kept for good). A statement's answer does not carry it: asked once in a
+microtask after the task that wrote (a replica: at the next frame, a seed
+landing in chunks), it costs a write nothing -- a write no live query reads
+about 2 us in Node, the module 33 bytes, `make wasm-speed`'s `put` as it
+was. A `load` (`restore`, `openFile`) runs every live query, since the
+image's counter may be the cursor's. The client grew 1.9 KB gzip.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

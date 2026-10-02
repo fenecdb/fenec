@@ -317,3 +317,86 @@ fn an_append_only_file_without_a_header_counts_from_zero() {
     back.load(&raw).expect("headerless file");
     assert_eq!(back.change_seq(), expected);
 }
+
+// What a live query is told after a statement: which collections it wrote
+// (`changed_collections_since`), the browser module's `fenec_changes`.
+
+fn changed(db: &Database, since: u64) -> Option<Vec<String>> {
+    db.changed_collections_since(since)
+}
+
+fn names(v: &[&str]) -> Option<Vec<String>> {
+    Some(v.iter().map(|s| s.to_string()).collect())
+}
+
+#[test]
+fn a_block_names_what_it_wrote_once_it_lands() {
+    let mut db = seeded();
+    run(&mut db, "create collection notes (text text)");
+    run(&mut db, "create collection other (n int)");
+    let cursor = db.change_seq();
+    db.begin().unwrap();
+    for sql in [
+        r#"put notes {text: "x"}"#,
+        r#"set tasks {title: "y"} where key = "a""#,
+    ] {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+    }
+    // Nothing has landed: a live query re-run now would read what it did.
+    assert_eq!(changed(&db, cursor), Some(vec![]));
+    db.commit().unwrap();
+    // In the order the collections were made, `other` untouched.
+    assert_eq!(changed(&db, cursor), names(&["tasks", "notes"]));
+}
+
+#[test]
+fn a_block_put_back_names_nothing() {
+    let mut db = seeded();
+    let cursor = db.change_seq();
+
+    // Rolled back by hand, as a pg transaction is.
+    db.begin().unwrap();
+    db.execute(&fenec_ql::parse_one(r#"put tasks {key: "d"}"#).unwrap())
+        .unwrap();
+    db.rollback();
+    assert_eq!(changed(&db, cursor), Some(vec![]));
+
+    // A text of several whose last statement fails, as `run` sends one.
+    let stmts = fenec_ql::parse(r#"put tasks {key: "e"}; put tasks {key: 7}"#).unwrap();
+    let block: Vec<(&Statement, &[Value])> = stmts.iter().map(|s| (s, &[][..])).collect();
+    assert!(db.execute_block(&block).is_err());
+    assert_eq!(changed(&db, cursor), Some(vec![]));
+}
+
+#[test]
+fn schema_changes_name_their_collection_and_a_drop_names_everything() {
+    let mut db = seeded();
+    let cursor = db.change_seq();
+    run(&mut db, "create collection notes (text text)");
+    assert_eq!(changed(&db, cursor), names(&["notes"]));
+
+    let cursor = db.change_seq();
+    run(&mut db, "alter collection tasks add field done bool");
+    assert_eq!(changed(&db, cursor), names(&["tasks"]));
+
+    let cursor = db.change_seq();
+    run(&mut db, "create index on tasks (title) @sorted");
+    assert_eq!(changed(&db, cursor), names(&["tasks"]));
+
+    // Gone, a collection has no name to give: every live query runs again,
+    // and one of `notes` is told it is gone.
+    let cursor = db.change_seq();
+    run(&mut db, "drop collection notes");
+    assert_eq!(changed(&db, cursor), None);
+    // Past the drop, names again.
+    let cursor = db.change_seq();
+    run(&mut db, r#"put tasks {key: "z"}"#);
+    assert_eq!(changed(&db, cursor), names(&["tasks"]));
+
+    // Dropped and made again under its name: a collection of its own, the
+    // first one's writes still unnamed.
+    let cursor = db.change_seq();
+    run(&mut db, "drop collection tasks");
+    run(&mut db, "create collection tasks (key text)");
+    assert_eq!(changed(&db, cursor), None);
+}

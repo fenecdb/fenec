@@ -136,6 +136,10 @@ state is enough.</p>
 it reads changes, and hands <code>fn</code> the new rows. Running it again on
 the local copy takes under a millisecond.</p>
 
+<p>A database in the page with no server has the same <code>live</code>: see
+<a href="javascript.html#state">State in the page</a>. Moving from one to
+the other leaves the code that reads unchanged.</p>
+
 <details class="deep"><summary>Details</summary>
 <p>There is no incremental maintenance and none is needed. The local side is an
 indexed database, so re-running the query from scratch is already under a
@@ -150,7 +154,14 @@ disabled for fenecdb's headline feature.</p>
 <p>Invalidation is at collection granularity: the change stream says which
 collections changed, the live queries bound to them re-run, and all of it
 coalesces into one frame. Anything finer, like intersecting id sets, would cost
-more than the local query itself.</p>
+more than the local query itself. A query built with <code>db.from</code>
+knows the collections it reads, each <code>lookup</code>'s included; a FenecQL
+text names them with <code>{ collections }</code>, or runs again after every
+write.</p>
+
+<p>A database in the page alone runs its live queries in a microtask after
+the task that wrote, not at the next frame: its writes are the page's own,
+and nothing lands in chunks. Both use the same code.</p>
 </details>
 
 <h2>Batches</h2>

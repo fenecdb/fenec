@@ -48,6 +48,9 @@ function whyNoModule(err) {
 
 export class Fenec {
   #wasm; #handle; #collation;
+  /** The live queries (`live`), made with the first; and whether a run of them is due. */
+  #lives = null;
+  #due = false;
 
   /**
    * The time, in milliseconds since the epoch, a statement is answered at:
@@ -55,6 +58,12 @@ export class Fenec {
    * their time by it. The module has no clock; a test pins it.
    */
   now = Date.now;
+
+  /**
+   * Where a live query's error goes when it was given no `onError` of its
+   * own (`live`); with neither, it is thrown, as `FenecSync` throws it.
+   */
+  onError = null;
 
   constructor(wasm, handle, collation = null) {
     this.#wasm = wasm;
@@ -157,8 +166,11 @@ export class Fenec {
     return this.#run(sql, params, null);
   }
 
-  /** `run`, the parameters at `asJson` sent as JSON rather than apart. */
-  #run(sql, params, asJson) {
+  /**
+   * `run`, the parameters at `asJson` sent as JSON rather than apart; a
+   * live query's own run `quiet`, which has nothing to tell them.
+   */
+  #run(sql, params, asJson, quiet = false) {
     // A typed array sent as JSON goes as the numbers it holds.
     if (asJson) params = params.map((p, i) => (asJson.includes(i) && ArrayBuffer.isView(p) ? Array.from(p) : p));
     // A module from before vectors went over as f32s takes five arguments,
@@ -177,6 +189,8 @@ export class Fenec {
       this.#wasm.fenec_free(pp, pl || 1);
       if (vectors) this.#wasm.fenec_free(vp, vl || 1);
     }
+    // After an error too: the change ring says what landed, after the task.
+    if (this.#lives?.size && !quiet) this.#touch();
     // Before the answer, and before an error too: a statement that failed
     // may follow ones in the same text that wrote.
     kept.get(this)?.flush();
@@ -184,7 +198,7 @@ export class Fenec {
     // A json field takes a list of numbers as written, not as the f32s it
     // went over apart as: the module names those, before running anything,
     // and they go again as JSON.
-    if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact);
+    if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact, quiet);
     if (res.kind === 'error') {
       const e = new FenecError(res.message);
       // Refused for collation data the module has not been handed: which,
@@ -205,9 +219,13 @@ export class Fenec {
    * in the same text may have.
    */
   async query(sql, params = []) {
+    return this.#fetching(sql, params, false);
+  }
+
+  async #fetching(sql, params, quiet) {
     for (;;) {
       try {
-        return this.run(sql, params);
+        return this.#run(sql, params, null, quiet);
       } catch (e) {
         if (!e.collation || e.ran || !(await this.#fetched(e.collation))) throw e;
       }
@@ -291,6 +309,38 @@ export class Fenec {
     return new Query({
       collection: ident(name, 'collection'),
       exec: (sql, params) => this.query(sql, params),
+      // What `useLiveQuery` finds the query's database by.
+      context: this,
+    });
+  }
+
+  /**
+   * Live query: `cb` is handed the rows now, and again after every write
+   * to a collection the query reads -- a `run` of this page's, the
+   * builder's writes, a `restore` or `openFile` loading the database.
+   * `query` is a builder `Query`, a FenecQL text, or `[text, params]` (what
+   * `toFenecQL` gives). The collections a builder query reads are known;
+   * a text's are named with `{collections}`, and without them every write
+   * runs it again. Returns the function that stops it.
+   *
+   * The writes of one task run each live query once, in a microtask after
+   * it, from scratch: well under a millisecond in the page (`FenecSync.live`
+   * says why nothing finer).
+   *
+   * @param {{onError?: Function, params?: Array, collections?: string[]}} opts
+   */
+  live(query, cb, opts = {}) {
+    this.#lives ??= new Lives(this);
+    return this.#lives.add(query, cb, opts, (sql, params) => this.#fetching(sql, params, true), opts.onError ?? this.onError);
+  }
+
+  /** The live queries looked at after the task that wrote: once, however many writes it made. */
+  #touch() {
+    if (this.#due) return;
+    this.#due = true;
+    queueMicrotask(() => {
+      this.#due = false;
+      this.#lives.tick();
     });
   }
 
@@ -405,6 +455,12 @@ export class Fenec {
       throw Object.assign(e, { collation: chunks.filter((_, i) => (r >>> 2) & (1 << i)), ran: 0 });
     }
     if (r !== 0) throw new FenecError('could not load image (corrupt or incompatible version)');
+    // Another database now, whose counter may stand where a live query's
+    // cursor did: every live query runs again, whatever the ring says.
+    if (this.#lives?.size) {
+      this.#lives.stale();
+      this.#touch();
+    }
     return this.#wasm.fenec_loaded(this.#handle) >>> 0;
   }
 
@@ -420,7 +476,113 @@ export class Fenec {
   }
 
   close() {
+    this.#lives?.clear();
     this.#wasm.fenec_close(this.#handle);
+  }
+}
+
+// ------------------------------------------------------------ live queries
+
+/**
+ * The live queries over one database: `Fenec.live`'s and `FenecSync.live`'s.
+ * The change ring says which collections were written since a cursor
+ * (`changes`), a block's once it lands whole, so the notice costs a write
+ * nothing: it is asked for once after a burst of writes, and only by a
+ * database holding a live query. Each holder says when (`tick`): a page's
+ * own database after the task that wrote, a replica at the next frame, as a
+ * seed lands in chunks and should not be shown half way.
+ */
+class Lives {
+  #db;
+  #subs = [];
+  #cursor;
+  #all = false;
+
+  constructor(db) {
+    this.#db = db;
+    this.#cursor = db.changeSeq;
+  }
+
+  get size() {
+    return this.#subs.length;
+  }
+
+  /** A live query: `cb` handed its rows now, and again after a write it may read. */
+  add(query, cb, opts, exec, onError) {
+    if (typeof cb !== 'function') throw new FenecError('live(query, cb): cb must be a function');
+    let rows;
+    let reads;
+    if (query instanceof Query) {
+      const bound = query.plain().bind(exec);
+      rows = () => bound.rows();
+      reads = query.reads;
+    } else {
+      const [sql, params] = typeof query === 'string' ? [query, opts.params ?? []] : Array.isArray(query) ? query : [];
+      if (typeof sql !== 'string') throw new FenecError('live: a Query, a FenecQL text, or [text, params]');
+      rows = async () => (await exec(sql, params ?? [])).rows ?? [];
+      reads = null;
+    }
+    if (opts.collections) reads = opts.collections.map((c) => ident(c, 'collection'));
+    // With none before it no tick has kept the cursor up: it starts here,
+    // where the first run reads.
+    if (this.#subs.length === 0) this.#cursor = this.#db.changeSeq;
+    const entry = { rows, reads, cb, onError, on: true };
+    this.#subs.push(entry);
+    // The first rows right away: a subscriber should not start on a blank
+    // screen. An error with no `onError` to go to is a rejection nothing
+    // waits for, as it is at a tick.
+    this.#run(entry);
+    return () => {
+      entry.on = false;
+      const i = this.#subs.indexOf(entry);
+      if (i >= 0) this.#subs.splice(i, 1);
+    };
+  }
+
+  /** Every live query runs at the next tick: the database was replaced. */
+  stale() {
+    this.#all = true;
+  }
+
+  clear() {
+    for (const e of this.#subs) e.on = false;
+    this.#subs.length = 0;
+  }
+
+  /**
+   * Runs again the live queries that read what was written since the last
+   * tick -- collection granularity: anything finer (intersecting id sets)
+   * would cost more than the local query itself.
+   */
+  async tick() {
+    const info = this.#db.changes(this.#cursor);
+    this.#cursor = info.seq;
+    const dirty = this.#all || info.collections === null ? null : new Set(info.collections);
+    this.#all = false;
+    // Only reads since: nothing to run again, not even a query whose
+    // collections are not known.
+    if (dirty?.size === 0) return;
+    let failed = null;
+    for (const e of [...this.#subs]) {
+      if (dirty && e.reads && !e.reads.some((c) => dirty.has(c))) continue;
+      // One that throws does not keep the rest from their rows.
+      await this.#run(e).catch((err) => {
+        failed ??= { err };
+      });
+    }
+    if (failed) throw failed.err;
+  }
+
+  async #run(e) {
+    try {
+      const rows = await e.rows();
+      // Stopped while it ran: its rows go nowhere.
+      if (e.on) e.cb(rows);
+    } catch (err) {
+      if (!e.on) return;
+      if (e.onError) e.onError(err);
+      else throw err;
+    }
   }
 }
 
@@ -891,6 +1053,40 @@ export class Query {
   /** The query's collection. */
   get collection() {
     return this.#s.collection;
+  }
+
+  /**
+   * Every collection the query reads -- its own, each `lookup`'s and each
+   * inner query's of an `in` -- or `null` when a `raw` fragment may read
+   * one more (`in (get ...)` written by hand). A live query runs again
+   * when one of them is written.
+   */
+  get reads() {
+    const out = new Set();
+    const read = (collection, cond) => {
+      out.add(collection);
+      return cond.every(function known(c) {
+        switch (c.t) {
+          case 'and':
+          case 'or':
+            return c.items.every(known);
+          case 'not':
+            return known(c.item);
+          case 'sub': {
+            const inner = c.query.reads;
+            inner?.forEach((n) => out.add(n));
+            return inner !== null;
+          }
+          case 'raw':
+            return !/\bget\b/i.test(c.sql);
+          default:
+            return true;
+        }
+      });
+    };
+    const { collection, cond, lookups } = this.#s;
+    const known = read(collection, cond) && lookups.every((l) => read(l.collection, l.cond));
+    return known ? [...out] : null;
   }
 
   /**
@@ -2062,8 +2258,7 @@ export class FenecSync {
   #token;
   #fetch;
   #shapes = new Map();
-  #subs = [];
-  #liveCursor = 0;
+  #lives;
   #scheduled = null;
   #flushers = [];
   #pending = new Map();
@@ -2102,7 +2297,7 @@ export class FenecSync {
     // room for another coordination mechanism.
     this.#locks = opts.locks ?? globalThis.navigator?.locks ?? null;
     this.#abort = new AbortController();
-    this.#liveCursor = local.changeSeq;
+    this.#lives = new Lives(local);
 
     for (const raw of opts.shapes ?? []) {
       const shape = normalizeShape(raw);
@@ -2177,22 +2372,14 @@ export class FenecSync {
    * diff could not give the right answer for `near` anyway -- a single
    * insert can reorder the whole top-k.
    *
+   * `Fenec.live`'s contract, over the replica: `query` a builder `Query`,
+   * a FenecQL text or `[text, params]`. Unlike a page's own database, a
+   * replica runs its live queries at the next frame (`#touch`).
+   *
    * Returns: the function that ends the subscription.
    */
   live(query, cb, opts = {}) {
-    const entry = {
-      collection: query.collection,
-      query: query.plain().bind((sql, params) => this.#local.query(sql, params)),
-      cb,
-      onError: opts.onError ?? this.#onError,
-    };
-    this.#subs.push(entry);
-    // The first value right away: a subscriber should not start on a blank screen.
-    this.#runLive(entry);
-    return () => {
-      const i = this.#subs.indexOf(entry);
-      if (i >= 0) this.#subs.splice(i, 1);
-    };
+    return this.#lives.add(query, cb, opts, this.#localExec, opts.onError ?? this.#onError);
   }
 
   /**
@@ -2243,7 +2430,7 @@ export class FenecSync {
     this.#closed = true;
     this.#abort.abort();
     this.#chan?.close();
-    this.#subs.length = 0;
+    this.#lives.clear();
   }
 
   // ------------------------------------------------------------ writes
@@ -2473,7 +2660,7 @@ export class FenecSync {
         globalThis.cancelAnimationFrame?.(this.#scheduled.frame);
       }
       this.#scheduled = null;
-      this.#pendingTick = this.#tick().finally(() => {
+      this.#pendingTick = this.#lives.tick().finally(() => {
         this.#pendingTick = null;
       });
       // Anyone waiting in `flush()`: the tick has *started*, so from here
@@ -2485,29 +2672,6 @@ export class FenecSync {
       frame: raf ? raf.call(globalThis, fire) : undefined,
     };
     this.#scheduled.timer.unref?.();
-  }
-
-  /**
-   * Which live queries get re-run: collection granularity. Anything finer
-   * (intersecting id sets) would cost more than the local query itself.
-   */
-  async #tick() {
-    const info = this.#local.changes(this.#liveCursor);
-    this.#liveCursor = info.seq;
-    const dirty = info.collections === null ? null : new Set(info.collections);
-    for (const entry of [...this.#subs]) {
-      if (dirty && !dirty.has(entry.collection)) continue;
-      await this.#runLive(entry);
-    }
-  }
-
-  async #runLive(entry) {
-    try {
-      entry.cb(await entry.query.rows());
-    } catch (e) {
-      if (entry.onError) entry.onError(e);
-      else throw e;
-    }
   }
 
   // ------------------------------------------------------------ stream
@@ -2751,7 +2915,10 @@ export class FenecSync {
           shape.seeded = true;
         }
       }
-      this.#liveCursor = this.#local.changeSeq;
+      // The replica as it was kept: a live query asked before it ran on
+      // the empty one.
+      this.#lives.stale();
+      this.#touch();
       if (this.#allSeeded) this.#resolveReady();
     } catch (e) {
       // A corrupt or incompatible cache: reseed from scratch, not an error.

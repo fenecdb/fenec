@@ -231,3 +231,31 @@ test('a sealed database restores with its key and nothing else', { skip: wasm ? 
   await persist(db, 'clear');
   await assert.rejects(restore(await Fenec.open(wasm), 'clear', { cryptoKey }), /stored in the clear/);
 });
+
+// A page that keeps its state in the database asks its live queries before
+// the restore answers: they are handed the restored rows once it lands.
+test('restore runs the live queries asked before it', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  globalThis.indexedDB = fakeIndexedDB();
+  globalThis.IDBKeyRange = KeyRange;
+  const { Fenec, persist, restore } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection todos (title text)');
+  db.run('put todos {title: "kept"}');
+  await persist(db, 'state');
+
+  const page = await Fenec.open(wasm);
+  const seen = [];
+  page.live('get todos', (rows) => seen.push(rows.map((r) => r.title)), {
+    collections: ['todos'],
+    onError: (e) => seen.push(e.message.includes('todos') ? 'none yet' : e.message),
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(await restore(page, 'state'), true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(seen, ['none yet', ['kept']]);
+  // And on from there, kept as before.
+  page.run('put todos {title: "new"}');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(seen.at(-1), ['kept', 'new']);
+  assert.ok((await persist(page, 'state')) > 0);
+});

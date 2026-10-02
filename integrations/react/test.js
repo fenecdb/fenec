@@ -2,10 +2,12 @@
 //
 // Rendered with react-dom into jsdom. A stand-in database pins down the
 // contract -- when it subscribes, what it renders meanwhile, when it lets go
-// -- and a real one checks the point of it all: a row another client writes
-// through the server shows up in the component, with no code of the
-// component's asking. That half needs web/fenec.wasm (make wasm) and the
-// fenec-server binary (cargo build), and skips itself without them.
+// -- and real ones check the point of it all: a write from an event handler
+// renders every component that reads what it wrote, over a database in the
+// page alone, and a row another client writes through the server shows up
+// in the component, with no code of the component's asking. Those need
+// web/fenec.wasm (make wasm), the second the fenec-server binary (cargo
+// build) too, and skip themselves without them.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -225,5 +227,77 @@ test(
       proc.kill('SIGKILL');
       await rm(dir, { recursive: true, force: true });
     }
+  },
+);
+
+// ---------------------------------------------------------------- local
+
+// A database in the page alone, no server: the app's state. A write from an
+// event handler renders every component whose query reads what it wrote.
+test(
+  'a local database is the state: a write renders the components that read it',
+  { skip: !wasm ? 'no web/fenec.wasm (make wasm)' : false },
+  async () => {
+    const { Fenec } = await import('../../web/fenec.js');
+    const db = await Fenec.open(wasm);
+    db.run('create collection todos (title text, done bool @hash)');
+    db.run('create collection prefs (theme text)');
+    db.run('put todos {title: "write the hook", done: false}');
+
+    const renders = { open: 0, count: 0, theme: 0 };
+    function Open() {
+      const rows = useLiveQuery(useFenec().from('todos').where('done', false).order('title'));
+      renders.open++;
+      return h('p', { id: 'open' }, rows === undefined ? 'loading' : rows.map((r) => r.title).join(', '));
+    }
+    // A text query on the provider's database, naming what it reads.
+    function Count() {
+      const rows = useLiveQuery('get todos count', { collections: ['todos'] });
+      renders.count++;
+      return h('p', { id: 'count' }, rows === undefined ? '' : String(rows[0].count));
+    }
+    // Bound to its database by `db.from`, with no provider above it.
+    function Theme() {
+      const rows = useLiveQuery(db.from('prefs'));
+      renders.theme++;
+      return h('p', { id: 'theme' }, rows === undefined ? '' : rows.map((r) => r.theme).join());
+    }
+    const view = await render(h('div', null, h(FenecProvider, { db }, h(Open), h(Count)), h(Theme)));
+    const shown = () => ['open', 'count', 'theme'].map((id) => view.container.querySelector(`#${id}`).textContent);
+    assert.deepEqual(shown(), ['write the hook', '1', '']);
+
+    // What an onClick does: writes, and nothing else.
+    await act(async () => {
+      await db.from('todos').insert({ title: 'test the hook', done: false });
+      db.run('set todos {done: true} where title = "write the hook"');
+    });
+    assert.deepEqual(shown(), ['test the hook', '2', '']);
+
+    // A write to another collection renders only what reads it.
+    const before = { ...renders };
+    await act(async () => {
+      db.run('put prefs {theme: "dark"}');
+    });
+    assert.deepEqual(shown(), ['test the hook', '2', 'dark']);
+    assert.equal(renders.open, before.open);
+    assert.equal(renders.count, before.count);
+
+    // Another database loaded in its place -- as `restore` does -- renders all.
+    const other = await Fenec.open(wasm);
+    other.run('create collection todos (title text, done bool @hash)');
+    other.run('create collection prefs (theme text)');
+    other.run('put todos {title: "restored", done: false}');
+    await act(async () => {
+      db.load(other.snapshot());
+    });
+    assert.deepEqual(shown(), ['restored', '1', '']);
+
+    await view.unmount();
+    // Unmounted, nothing is subscribed: a write renders nothing.
+    const after = { ...renders };
+    await act(async () => {
+      db.run('put todos {title: "after", done: false}');
+    });
+    assert.deepEqual(renders, after);
   },
 );

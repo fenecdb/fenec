@@ -2504,7 +2504,13 @@ impl Database {
     ///
     /// For live queries in the browser: collection granularity is enough to
     /// pick which query has to be re-run. `None` means the cursor fell
-    /// behind the horizon (everything must be re-run).
+    /// behind the horizon, or a collection written since has been dropped:
+    /// everything must be re-run.
+    ///
+    /// Exact otherwise, blocks included: a block's writes reach the ring as
+    /// it lands (`note`), so one put back -- a rollback, a failed statement
+    /// in a text of several -- names nothing, and a read inside an open
+    /// block sees none of its writes here yet.
     pub fn changed_collections_since(&self, since: u64) -> Option<Vec<String>> {
         let cids = self.changes.changed_collections(since)?;
         let mut out = Vec::new();
@@ -2513,7 +2519,12 @@ impl Database {
                 out.push(name.clone());
             }
         }
-        Some(out)
+        // A dropped collection has no name left to give, and was left out
+        // above: a query of it has to run again and be told it is gone. So
+        // a drop answers "everything", re-running queries that read other
+        // collections for nothing -- harmless, and drops are rare -- where a
+        // name kept for every collection ever dropped would be kept for good.
+        (out.len() == cids.len()).then_some(out)
     }
 
     /// Returns the changes after a cursor, **as the rows stand right now**.

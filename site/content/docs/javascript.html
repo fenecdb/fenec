@@ -1,6 +1,6 @@
 <!--
 title: JavaScript client — fenecdb
-description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, and type it from the live schema.
+description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, use it as the app's state with live queries, and type it from the live schema.
 -->
 
 <h1>JavaScript</h1>
@@ -147,6 +147,111 @@ Chrome 154: the first image 129 ms against 76, a new row 0.16 ms p50 either
 way, a restore 37 ms against 29. Only the image pays: it is 32 MB to seal.
 The file of <code>openFile</code> stays plain, since it is the file
 <code>fenec-server</code> opens. The disk's own encryption covers it.</p>
+</details>
+
+<h2 id="state">State in the page</h2>
+
+<p>A database in the page can hold an app's whole state, with no server.
+<code>db.live(query, fn)</code> hands <code>fn</code> the query's rows now,
+and again after every write to a collection the query reads. Event handlers
+write, and <code>persist</code> keeps the state between visits.</p>
+
+<pre data-lang="js">import { Fenec, persist, restore } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');
+if (!(await restore(db, 'todos'))) {
+  db.run('create collection todos (key text @hash, title text, done bool @hash, at timestamp @sorted)');
+}
+
+// the rows now, and again after every write to todos
+const stop = db.live(db.from('todos').where('done', false).order('at'), draw);
+
+async function add(title) {
+  await db.from('todos').insert({ title, done: false, at: new Date() });
+  await persist(db, 'todos');            // only this write, not the whole image
+}
+async function finish(id) {
+  await db.from('todos').where('id', id).update({ done: true });
+  await persist(db, 'todos');
+}
+</pre>
+
+<p>In React, <code>useLiveQuery</code> from <code>@fenecdb/react</code> takes
+the same database:</p>
+
+<pre data-lang="js">import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
+
+function Todos() {
+  const db = useFenec();
+  const todos = useLiveQuery(db.from('todos').where('done', false).order('at'));
+  if (todos === undefined) return null;
+  return todos.map((t) =&gt; (
+    &lt;li key={t.id} onClick={() =&gt; db.from('todos').where('id', t.id).update({ done: true })}&gt;{t.title}&lt;/li&gt;
+  ));
+}
+
+root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
+</pre>
+
+<p>To share the todos through a server later, open a
+<a href="sync.html">synced replica</a> instead. The components stay as
+they are: a replica has the same <code>from</code> and <code>live</code>,
+and its writes reach the server.</p>
+
+<pre data-lang="js">const db = await sync({
+  url: 'https://todos.example.com',
+  shapes: [{ collection: 'todos', key: 'key' }],
+});
+root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
+</pre>
+
+<ul>
+  <li><b>One run per task:</b> the writes made in one task, such as a
+    <code>run</code> of several statements or a loop, run each live query
+    once.</li>
+  <li><b>Only what it reads:</b> a query built with <code>db.from</code>
+    knows its collections, including each <code>lookup</code>'s. A text
+    names them: <code>db.live('get todos count', fn, { collections: ['todos'] })</code>.</li>
+  <li><b>A restore runs them all:</b> <code>restore</code>,
+    <code>openFile</code> and <code>load</code> hand every live query the
+    loaded rows.</li>
+  <li><b><code>live</code> returns its stop function.</b> An error goes to
+    <code>{ onError }</code>, or <code>db.onError</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The engine notes every write in its change ring, a collection id and a
+document id each, and <code>fenec_changes(since)</code> names the collections
+written since a cursor. A block's writes are noted as it lands, so a text of
+several statements that fails names nothing. A <code>create</code>, an
+<code>alter</code> and a <code>create index</code> name their collection. A
+<code>drop</code> answers <code>null</code>, which means every collection:
+a dropped collection has no name left to give. Its live query runs again and
+gets the error that the collection is gone. Queries over other collections
+also run again for nothing, which is harmless.</p>
+
+<p>The notice costs a write nothing. A statement's answer does not carry
+it. A page with a live query asks once, in a microtask after the task that
+wrote: a write to a collection no live query reads costs that one call, about
+2 µs in Node. Running a query again is the query itself: a page of 50 open
+todos out of 1 000 to 3 000, ordered by an <code>@sorted</code> field, took
+0.19 ms. No incremental maintenance is needed (<a href="sync.html">Sync</a>
+says why). The module did not grow, and <code>make wasm-speed</code>'s
+<code>put</code> did not move.</p>
+
+<p>A synced replica runs its live queries at the next frame instead, so that
+a seed landing in chunks is not shown half done. Both share one
+implementation. A <code>load</code> runs every live query whatever the ring
+says, since the image's counter may stand where the cursor did.</p>
+
+<p>With <code>openFile</code>, the database and its live queries live in the
+dedicated worker that holds the file. The worker runs them, and posts the
+rows to the page that draws them. The page holds no database to subscribe
+to.</p>
+
+<p>The <code>key</code> field in the example is what a replica reconciles an
+optimistic insert by. It fills the field in for you. Without a key, the row
+shows up once the server has it, not at once.</p>
 </details>
 
 <h2 id="collation">Collation data</h2>
