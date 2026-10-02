@@ -6,7 +6,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CARGO=${CARGO:-$(test -x "$HOME/.cargo/bin/cargo" && echo "$HOME/.cargo/bin/cargo" || echo cargo)}
-(cd "$ROOT" && "$CARGO" build -q -p fenec-ffi --profile ffi)
+(cd "$ROOT" && "$CARGO" rustc -q -p fenec-ffi --lib --profile ffi --crate-type cdylib)
 case "$(uname)" in
   Darwin) LIB="$ROOT/target/ffi/libfenec_ffi.dylib" ;;
   *) LIB="$ROOT/target/ffi/libfenec_ffi.so" ;;
@@ -23,7 +23,7 @@ dart test "$@"
 if command -v flutter >/dev/null 2>&1; then
   cd "$ROOT/integrations/dart/fenecdb_flutter"
   flutter pub get >/dev/null
-  flutter analyze
+  flutter analyze lib test
   flutter test
 else
   echo "flutter not found: the Flutter plugin (integrations/dart/fenecdb_flutter) not tested"

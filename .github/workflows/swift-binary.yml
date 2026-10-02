@@ -1,0 +1,84 @@
+name: swift-binary
+run-name: Swift binary for v${{ inputs.version }}
+
+# The XCFramework a release attaches, built before the release is tagged.
+# SwiftPM fetches the package by its tag, and Package.swift at that tag has
+# to name the zip by URL and checksum already: the zip cannot be built
+# after the tag and its checksum still be in it. So this builds the zip from
+# main, keeps it as this run's artifact, and opens a pull request writing
+# its checksum into Package.swift (integrations/swift/set-binary.sh). Once
+# that is merged, the merge is tagged, and release.yml attaches this very
+# zip -- found by its run, held to the checksum the tag's manifest names.
+# RELEASING.md has the order.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'The version about to be tagged, X.Y.Z (make version has written it)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: XCFramework for v${{ inputs.version }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The version is the workspace's
+        run: |
+          set -eu
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$have" != "${{ inputs.version }}" ]; then
+            echo "::error::Cargo.toml says $have: run make version V=${{ inputs.version }} first"
+            exit 1
+          fi
+
+      - name: Install the pinned toolchain and the Apple targets
+        run: |
+          rustup show
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-darwin
+
+      - name: Build the XCFramework and its zip
+        run: integrations/swift/build-xcframework.sh --zip
+
+      # The zip just built, linked into the tests on macOS and on a
+      # simulator before its checksum goes anywhere.
+      - name: Swift (macOS, iOS simulator)
+        run: |
+          swift test
+          integrations/swift/test-ios.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: xcframework-v${{ inputs.version }}
+          path: |
+            integrations/swift/build/FenecFFI.xcframework.zip
+            integrations/swift/build/FenecFFI.xcframework.zip.checksum
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Open the pull request naming its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          v="${{ inputs.version }}"
+          sum=$(cat integrations/swift/build/FenecFFI.xcframework.zip.checksum)
+          integrations/swift/set-binary.sh "$v" "$sum"
+          branch="swift-binary-v$v"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git commit -am "Package.swift: the XCFramework of v$v" \
+            -m "Built by run ${{ github.run_id }}, which keeps the zip; release.yml attaches it to v$v."
+          git push -f origin "$branch"
+          gh pr create --head "$branch" --title "Package.swift: the XCFramework of v$v" \
+            --body "The checksum of the zip run ${{ github.run_id }} built. Merge, then tag the merge v$v (RELEASING.md)." \
+            || echo "::notice::the branch $branch is pushed; open its pull request by hand where Actions may not"

@@ -13,7 +13,7 @@ GOLDEN=integrations/builder-golden.json
 
 if [ "$(uname)" = Linux ] && command -v gradle >/dev/null 2>&1 && command -v java >/dev/null 2>&1; then
   CARGO=${CARGO:-$(test -x "$HOME/.cargo/bin/cargo" && echo "$HOME/.cargo/bin/cargo" || echo cargo)}
-  (cd "$ROOT" && "$CARGO" build -q -p fenec-ffi --features jni --profile ffi)
+  (cd "$ROOT" && "$CARGO" rustc -q -p fenec-ffi --lib --features jni --profile ffi --crate-type cdylib)
   cd "$ROOT/integrations/kotlin"
   FENEC_LIBRARY="$ROOT/target/ffi/libfenec_ffi.so" FENEC_GOLDEN="$ROOT/$GOLDEN" \
     exec gradle --no-daemon -q :fenecdb:test "$@"
@@ -29,7 +29,7 @@ docker run --rm -v "$ROOT":/src -w /src \
   -v fenec-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/linux-docker \
   rust:1-slim-bookworm \
-  sh -c 'RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) cargo build -q -p fenec-ffi --features jni --profile ffi'
+  sh -c 'RUSTUP_TOOLCHAIN=$(ls /usr/local/rustup/toolchains | head -1) cargo rustc -q -p fenec-ffi --lib --features jni --profile ffi --crate-type cdylib'
 
 docker run --rm -v "$ROOT":/src -w /src/integrations/kotlin \
   -v fenec-gradle:/home/gradle/.gradle \

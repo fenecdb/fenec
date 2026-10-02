@@ -237,10 +237,12 @@ python-test:
 ## The native library an app links (crates/fenec-ffi), in the ffi profile:
 ## for this machine, or TARGET=aarch64-linux-android and the like (the
 ## toolchain's linker for it on the PATH, the NDK's for Android). The size
-## printed is the shared library's, stripped as the profile strips it.
+## printed is the shared library's, stripped as the profile strips it --
+## built alone, since beside the static library and the rlib its link-time
+## optimisation left it 4% larger. JNI=1 adds the Kotlin binding's functions.
 FFI_TARGET = $(or $(TARGET),$(shell rustc -vV | sed -n 's/^host: //p'))
 ffi:
-	@$(CARGO) build -q -p fenec-ffi --profile ffi --target $(FFI_TARGET) $(if $(JNI),--features jni)
+	@$(CARGO) rustc -q -p fenec-ffi --lib --profile ffi --target $(FFI_TARGET) $(if $(JNI),--features jni) --crate-type cdylib
 	@for f in target/$(FFI_TARGET)/ffi/libfenec_ffi.dylib target/$(FFI_TARGET)/ffi/libfenec_ffi.so; do \
 		test -f $$f && echo "$$f  $$(wc -c < $$f) bytes"; done; true
 

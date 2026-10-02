@@ -34,6 +34,7 @@ android {
     publishing {
         singleVariant("release") {
             withSourcesJar()
+            withJavadocJar()
         }
     }
 }
@@ -49,6 +50,15 @@ dependencies {
 }
 
 publishing {
+    // A directory laid out as a Maven repository, signatures and checksums
+    // beside each file: packages.yml zips it into the bundle Maven
+    // Central's Portal takes, with no publishing plugin.
+    repositories {
+        maven {
+            name = "local"
+            url = uri(rootProject.layout.buildDirectory.dir("repo"))
+        }
+    }
     publications {
         create<MavenPublication>("android") {
             artifactId = "fenecdb-android"
