@@ -6104,6 +6104,12 @@ impl Database {
         if let Some(DataType::Sparse(dim)) = c.schema.field(&near.field).map(|f| &f.ty) {
             return self.run_sparse_near(c, sel, near, *dim, want, params, ctx);
         }
+        #[cfg(not(feature = "vector"))]
+        if let Some(f) = c.schema.field(&near.field) {
+            if let (IndexKind::Vector(spec), DataType::Vector(dim, prec)) = (&f.index, &f.ty) {
+                return self.near_stored(c, sel, near, spec, (*dim, *prec), want, params, ctx);
+            }
+        }
         let ix = c.vectors.get(&near.field).ok_or_else(|| {
             not_built_on(c, &near.field, "vector index").unwrap_or_else(|| {
                 Error::Query(format!(
@@ -6160,6 +6166,90 @@ impl Database {
         Ok(hits)
     }
 
+    /// `near` over a field declaring `@hnsw` in a build without the graph
+    /// (`vector`): every vector measured, as `near ... exact` measures them
+    /// in the full build -- the rows, their scores and their order -- so a
+    /// module without the graph answers what the full one would, only
+    /// slower past a few thousand rows. Over codes (`quant=`) the full
+    /// build's exact search reads each document's own vector
+    /// ([`order_exactly`]), and so does this; a bit index holds its vectors
+    /// whole until it has [`crate::vector::BIT_TRAIN`] nodes, and is taken
+    /// to hold them so while the collection has fewer distinct vectors --
+    /// its tombstones, which counted there, are not known here. `ef` is
+    /// taken and has nothing to widen.
+    #[cfg(not(feature = "vector"))]
+    #[allow(clippy::too_many_arguments)]
+    fn near_stored(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        near: &Near,
+        spec: &crate::schema::VectorIndexSpec,
+        (dim, prec): (usize, VecPrec),
+        want: usize,
+        params: &[Value],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<(DocId, f32)>> {
+        use crate::schema::Quant;
+        let qv = near_vector(eval(&near.vector, &mut NoRow, ctx)?)?;
+        if qv.len() != dim {
+            return Err(Error::Type(format!(
+                "the query vector must have {dim} dimensions, got {}",
+                qv.len()
+            )));
+        }
+        let field = &near.field;
+        let pos = c
+            .schema
+            .field_pos(field)
+            .expect("a declared field is in the schema");
+        let ids = match &sel.filter {
+            Some(_) => self.matching_ids(&sel.collection, &sel.filter, params)?,
+            None => c.store.ids(),
+        };
+        plan(|| {
+            format!(
+                "near: exact scan over every vector in {field}, {} rows: this build has no graph",
+                ids.len()
+            )
+        });
+        let coded = match spec.quant {
+            Quant::None => false,
+            Quant::Int8 => true,
+            // The nodes it would hold are its vectors told apart as it
+            // stores them: documents holding one vector are one node.
+            Quant::Bit => {
+                let train = crate::vector::BIT_TRAIN;
+                let (mut buf, mut nodes) = (Vec::new(), Vec::new());
+                let mut ids = c.store.iter_ids();
+                loop {
+                    let Some(id) = ids.next() else {
+                        nodes.sort_unstable();
+                        nodes.dedup();
+                        break nodes.len() >= train;
+                    };
+                    if c.store.read_vector_into(id, pos, &mut buf)? && buf.len() == dim {
+                        nodes.push(crate::vector::stored_hash(spec.metric, prec, &buf));
+                    }
+                    if nodes.len() == 2 * train {
+                        nodes.sort_unstable();
+                        nodes.dedup();
+                        if nodes.len() >= train {
+                            break true;
+                        }
+                    }
+                }
+            }
+        };
+        if coded {
+            let mut ids = ids.into_iter().map(|id| (id, f32::NEG_INFINITY));
+            let keep = &mut |_| Ok(true);
+            return Ok(order_exactly(&c.store, pos, spec.metric, &qv, &mut ids, want, keep)?.0);
+        }
+        let read = &mut |id, out: &mut Vec<f32>| c.store.read_vector_into(id, pos, out);
+        crate::vector::search_stored(spec.metric, prec, &qv, want, &ids, read)
+    }
+
     /// `near` over a `sparse<N>` field: the documents with the largest dot
     /// product with the query, through the field's inverted index -- the
     /// exact top `want`, not an estimate, so there is no beam to widen -- or
@@ -6179,13 +6269,20 @@ impl Database {
         ctx: &EvalCtx,
     ) -> Result<Vec<(DocId, f32)>> {
         let field = &near.field;
-        let ix = c.sparse_index(field)?.ok_or_else(|| {
-            not_built_on(c, field, "inverted index").unwrap_or_else(|| {
-                Error::Query(format!(
+        // A build without `sparse` answers as `exact` does, every document
+        // scored: the index's answer is that one (`tests/sparse.rs`), and
+        // the scan needs nothing the build left out.
+        let unbuilt = !cfg!(feature = "sparse")
+            && c.schema.field(field).map(|f| &f.index) == Some(&IndexKind::Inverted);
+        let ix = match c.sparse_index(field)? {
+            Some(ix) => Some(ix),
+            None if unbuilt => None,
+            None => {
+                return Err(Error::Query(format!(
                     "field `{field}` has no inverted index (declare it with @inverted)"
-                ))
-            })
-        })?;
+                )))
+            }
+        };
         if near.ef.is_some() {
             return Err(Error::Query(format!(
                 "`ef` is the HNSW beam; `{field}` is searched exactly, through its inverted index"
@@ -6215,7 +6312,7 @@ impl Database {
                 .as_ref()
                 .is_none_or(|l| l.binary_search(&id).is_ok())
         };
-        if !near.exact {
+        if let Some(ix) = ix.filter(|_| !near.exact) {
             let hits = ix.search(&q, want, &accept);
             plan(|| {
                 format!(
@@ -6226,7 +6323,12 @@ impl Database {
             });
             return Ok(hits);
         }
-        plan(|| format!("near: exact scan over every sparse vector in {field}"));
+        plan(|| match ix {
+            Some(_) => format!("near: exact scan over every sparse vector in {field}"),
+            None => format!(
+                "near: exact scan over every sparse vector in {field}: this build has no index"
+            ),
+        });
         let pos = c
             .schema
             .field_pos(field)

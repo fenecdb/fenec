@@ -582,11 +582,18 @@ test('the module made without indexes and the full one open each other\'s files'
   const years = (db) => db.rows('get d select year order year').map((r) => r.year);
   assert.deepEqual(years(small), [1999, 2010, 2021, 2024]);
   assert.deepEqual(small.rows('get d select tag where tag > "b" order tag desc').map((r) => r.tag), ['d', 'c']);
+  // A `near` measures every vector, as `exact` does in the full module.
+  const same = await Fenec.open(wasm);
+  same.load(cat(image, written.bytes));
+  for (const sql of ['get d near embed [1.0, 0.2, 0.0] limit 3', 'get d near s "{1:0.5}/10" limit 2']) {
+    assert.deepEqual(small.run(sql), same.run(sql.replace(' limit', ' exact limit')), sql);
+  }
+  same.close();
+  small.run('alter collection d add field other vector<3>');
   for (const [sql, feature] of [
-    ['get d near embed [1.0, 0.0, 0.0] limit 1', 'vector'],
     ['get d match title "rust"', 'text'],
-    ['get d near s "{1:0.5}/10" limit 1', 'sparse'],
     ['create index on d (title) @sorted', 'sorted'],
+    ['create index on d (other) @hnsw(cosine)', 'vector'],
   ]) {
     assert.throws(() => small.run(sql), new RegExp(`\`${feature}\` feature, which this build was made without`), sql);
   }
