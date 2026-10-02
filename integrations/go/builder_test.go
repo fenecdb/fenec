@@ -284,6 +284,14 @@ func options(o object) []fenecdb.Opt {
 			out = append(out, fenecdb.Offset(v.(int)))
 		case "where":
 			out = append(out, fenecdb.Where(cond(v)))
+		case "top":
+			out = append(out, fenecdb.Top(v.(int)))
+		case "pre":
+			out = append(out, fenecdb.Pre(v))
+		case "post":
+			out = append(out, fenecdb.Post(v))
+		case "ellipsis":
+			out = append(out, fenecdb.Ellipsis(v))
 		case "select":
 			if s, ok := v.(string); ok {
 				out = append(out, fenecdb.Select(s))
@@ -432,6 +440,12 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 			q = q.Lookup(a[0].(string), options(optsOf(a, 1))...)
 		case "group":
 			q = q.Group(a[0].(string))
+		case "highlight":
+			q = q.Highlight(a[0].(string), options(optsOf(a, 1))...)
+		case "snippet":
+			q = q.Snippet(a[0].(string), a[1].(int), options(optsOf(a, 2))...)
+		case "facet":
+			q = q.Facet(a[0].(string), options(optsOf(a, 1))...)
 		case "order":
 			dir := "asc"
 			if len(a) > 1 {
@@ -722,5 +736,72 @@ func TestBuilderAnswersAreTheTextsAnswers(t *testing.T) {
 	}
 	if n := must(shelf.Count(ctx)).of(t); n != 0 {
 		t.Fatalf("count %d", n)
+	}
+}
+
+// A highlight answers a row's marks as UTF-16 offsets, and a facet's counts
+// come beside the rows -- from /query, the builder and /batch alike.
+func TestHighlightsAndFacets(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("marks")
+	must(db.Exec(ctx, "create collection "+name+" (kind text, body text @text)")).of(t)
+	defer db.Exec(ctx, "drop collection if exists "+name)
+	docs := db.From(name)
+	must(docs.Insert(ctx,
+		fenecdb.D("kind", "note", "body", "rust is fast"),
+		fenecdb.D("kind", "note", "body", "rust and go"),
+		fenecdb.D("kind", "memo", "body", "rust"),
+		fenecdb.D("kind", nil, "body", "go only"),
+		fenecdb.D("kind", nil, "body", "go again"),
+		fenecdb.D("kind", "note", "body", "notes again"),
+	)).of(t)
+
+	rows := must(docs.Select("kind").Highlight("body").Match("body", "rust").Where("kind", "=", "memo").Rows(ctx)).of(t)
+	if len(rows) != 1 || !reflect.DeepEqual(rows[0]["highlight(body)"], []any{[]any{0.0, 4.0}}) {
+		t.Fatalf("%v", rows)
+	}
+	tagged := must(docs.Highlight("body", fenecdb.Tags("<b>", "</b>")).Snippet("body", 2).Match("body", "fast").First(ctx)).of(t)
+	if tagged["highlight(body)"] != "rust is <b>fast</b>" {
+		t.Fatalf("%v", tagged)
+	}
+	if s, ok := tagged["snippet(body)"].(map[string]any); !ok || s["text"] == nil || s["marks"] == nil {
+		t.Fatalf("%v", tagged)
+	}
+
+	q := docs.Select("body").Facet("kind").Order("body", "asc").Limit(1)
+	a := must(q.Answer(ctx)).of(t)
+	want := fenecdb.Facets{{Field: "kind", Counts: []fenecdb.FacetCount{{"note", 3}, {nil, 2}, {"memo", 1}}}}
+	if len(a.Rows) != 1 || !reflect.DeepEqual(a.Facets, want) {
+		t.Fatalf("%+v", a)
+	}
+	if got := a.Facets.Of("kind"); len(got) != 3 || a.Facets.Of("other") != nil {
+		t.Fatalf("%v", got)
+	}
+	// Rows keeps handing back the rows alone, as RowsAs and Query do.
+	if r := must(q.Rows(ctx)).of(t); len(r) != 1 || r[0]["body"] != "go again" {
+		t.Fatalf("%v", r)
+	}
+	if r := must(fenecdb.RowsAs[map[string]string](ctx, q)).of(t); len(r) != 1 {
+		t.Fatalf("%v", r)
+	}
+	text, params, _ := q.ToFenecQL()
+	if r := must(db.Query(ctx, text, params...)).of(t); len(r) != 1 {
+		t.Fatalf("%v", r)
+	}
+	if b := must(db.QueryAnswer(ctx, text, params...)).of(t); !reflect.DeepEqual(b.Facets, want) {
+		t.Fatalf("%+v", b)
+	}
+	// A query without facets answers none; a count with them still counts.
+	if b := must(docs.Limit(1).Answer(ctx)).of(t); b.Facets != nil || len(b.Rows) != 1 {
+		t.Fatalf("%+v", b)
+	}
+	if n := must(docs.Where("kind", "=", "note").Facet("kind").Count(ctx)).of(t); n != 3 {
+		t.Fatalf("count %d", n)
+	}
+	out := must(db.Batch(ctx, fenecdb.Stmt(text, params...), fenecdb.Stmt("get "+name+" limit 1"))).of(t)
+	if len(out.Results) != 2 || !reflect.DeepEqual(out.Results[0].Facets, want) || len(out.Results[0].Rows) != 1 ||
+		out.Results[1].Facets != nil || len(out.Results[1].Rows) != 1 {
+		t.Fatalf("%+v", out)
 	}
 }

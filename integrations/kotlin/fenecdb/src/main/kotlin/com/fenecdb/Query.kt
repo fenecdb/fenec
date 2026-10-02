@@ -154,6 +154,10 @@ internal object Builder {
     }
 
     /** `limit`, `offset`, `ef` and the rest are literals, never parameters: a whole number JavaScript holds exactly. */
+    /** A tag or an ellipsis: text, or refused naming the value as `JSON.stringify` writes it. */
+    fun text(v: Any, what: String): String =
+        v as? String ?: throw refuse("$what must be text: ${Json.write(Values.normalize(v))}")
+
     fun whole(n: Long, what: String): Long =
         if (n in 0..(1L shl 53) - 1) n else throw refuse("$what must be a non-negative integer: $n")
 
@@ -283,6 +287,13 @@ class Query private constructor(private val s: State) {
 
     private class Key(val field: String, val asc: Boolean, val collate: String?)
 
+    /** A highlight (no [words]) or a snippet of a field, in the select list. */
+    private class Mark(val field: String, val words: Long?, val ellipsis: String?, val pre: String?, val post: String?) {
+        val kind get() = if (words == null) "highlight" else "snippet"
+    }
+
+    private class Facet(val field: String, val top: Long?)
+
     private class Level(
         val collection: String, val on: String, val parent: String?, val project: List<String>?, val cond: List<Node>,
         val required: Boolean, val order: List<Key>, val limit: Long?, val offset: Long,
@@ -304,6 +315,8 @@ class Query private constructor(private val s: State) {
         val offset: Long = 0,
         val count: Boolean = false,
         val lookups: List<Level> = emptyList(),
+        val marks: List<Mark> = emptyList(),
+        val facets: List<Facet> = emptyList(),
     )
 
     companion object {
@@ -417,6 +430,64 @@ class Query private constructor(private val s: State) {
         return Query(s.copy(lookups = s.lookups + level))
     }
 
+    /**
+     * `highlight(field)` in the select list: where the terms [match] found
+     * stand in the field's text, `[[start, end], ...]` in UTF-16 offsets --
+     * a [String]'s own -- or, given [pre] and [post], the text with each
+     * marked. The row answers it under `highlight(field)`, after the fields
+     * [select] named.
+     */
+    @JvmOverloads
+    fun highlight(field: String, pre: String? = null, post: String? = null): Query = mark(field, null, null, pre, post)
+
+    /**
+     * `snippet(field, words)`: the window of [words] words around the
+     * densest marks, `{"text": ..., "marks": [[start, end], ...]}` -- or the
+     * marked text, given [pre] and [post] -- with [ellipsis] where it was
+     * cut. The row answers it under `snippet(field)`.
+     */
+    @JvmOverloads
+    fun snippet(field: String, words: Long, ellipsis: String? = null, pre: String? = null, post: String? = null): Query =
+        mark(field, words, ellipsis, pre, post)
+
+    /**
+     * Both marks, the tags and the ellipsis taken as any value: the JS
+     * builder checks they are text, and the golden file holds that check,
+     * which the typed calls above can never fail.
+     */
+    internal fun mark(field: String, words: Long?, ellipsis: Any?, pre: Any?, post: Any?): Query {
+        val f = Builder.ident(field)
+        val kind = if (words == null) "highlight" else "snippet"
+        // In the JS builder's order, so a chain wrong twice is refused for the same thing.
+        val n = words?.let { Builder.whole(it, "snippet words") }
+        if ((pre == null) != (post == null)) throw refuse("$kind takes both pre and post, or neither")
+        val m = Mark(
+            f,
+            n,
+            null,
+            pre?.let { Builder.text(it, "$kind pre") },
+            post?.let { Builder.text(it, "$kind post") },
+        )
+        if (n == 0L) throw refuse("snippet shows at least one word")
+        val mark = if (ellipsis == null) m else Mark(f, n, Builder.text(ellipsis, "snippet ellipsis"), m.pre, m.post)
+        if (s.marks.any { it.kind == kind && it.field == f }) throw refuse("$kind($f) is asked twice")
+        return Query(s.copy(marks = s.marks + mark))
+    }
+
+    /**
+     * `facet field [top N]`: each value the field -- or a path into a json
+     * field -- holds over every row the query matches, not the page alone,
+     * and how many hold it, most first. The counts come back beside the
+     * rows: [rows]'s [Rows.facets], and a live query's.
+     */
+    @JvmOverloads
+    fun facet(field: String, top: Long? = null): Query {
+        val f = Facet(Builder.path(field), top?.let { Builder.whole(it, "facet top") })
+        if (f.top == 0L) throw refuse("facet ${f.field} top 0 answers nothing")
+        if (s.facets.any { it.field == f.field }) throw refuse("facet ${f.field} is asked twice")
+        return Query(s.copy(facets = s.facets + f))
+    }
+
     /** `order field asc|desc`: each call adds a key. `collate = "tr"` puts text in Turkish order. */
     @JvmOverloads
     fun order(field: String, direction: String = "asc", collate: String? = null): Query =
@@ -453,6 +524,17 @@ class Query private constructor(private val s: State) {
                 throw refuse("aggregates answer one row; group makes a row per value")
             }
         }
+        if (s.marks.isNotEmpty()) {
+            val what = s.marks[0].kind
+            if (s.match == null) throw refuse("$what needs match: it marks the terms match found")
+            if (s.aggregate) throw refuse("$what marks a row's text; aggregates answer groups")
+        }
+        if (s.facets.isNotEmpty()) {
+            if (s.near != null) {
+                throw refuse("facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near")
+            }
+            if (s.aggregate) throw refuse("facet cannot be combined with aggregates: group counts by value")
+        }
         if (s.rerank != null && s.match == null) throw refuse("rerank needs match: it reorders what match found")
         if (s.match != null && s.near != null && s.fuse == null) {
             throw refuse("match and near cannot be combined: both order the result; fuse() ranks by both")
@@ -482,7 +564,19 @@ class Query private constructor(private val s: State) {
         if (s.count) extraClause()?.let { throw refuse("count cannot be used with `$it`") }
 
         val sql = StringBuilder("get ${s.collection}")
-        s.project?.let { sql.append(" select ").append(it.joinToString(", ")) }
+        // The marks after the fields `select` named, or after every field;
+        // their tags bound in the order they stand.
+        val items = s.marks.map { m ->
+            val item = StringBuilder("${m.kind}(${m.field}")
+            m.words?.let { item.append(", ").append(it) }
+            // A snippet's tags come after its ellipsis, so tags alone bind an empty one.
+            if (m.ellipsis != null || (m.words != null && m.pre != null)) item.append(", ").append(bind.bind(m.ellipsis ?: ""))
+            if (m.pre != null) item.append(", ").append(bind.bind(m.pre)).append(", ").append(bind.bind(m.post))
+            item.append(")").toString()
+        }
+        if (s.project != null || items.isNotEmpty()) {
+            sql.append(" select ").append(((s.project ?: listOf("*")) + items).joinToString(", "))
+        }
         whereOf(s.cond, bind)?.let { sql.append(" where ").append(it) }
         s.group?.let { sql.append(" group ").append(it) }
         s.near?.let { n ->
@@ -504,6 +598,9 @@ class Query private constructor(private val s: State) {
         s.limit?.let { sql.append(" limit $it") }
         if (s.offset > 0) sql.append(" offset ${s.offset}")
         if (s.count) sql.append(" count")
+        if (s.facets.isNotEmpty()) {
+            sql.append(" facet ").append(s.facets.joinToString(", ") { f -> f.top?.let { "${f.field} top $it" } ?: f.field })
+        }
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.
         for (l in s.lookups) {
@@ -545,6 +642,7 @@ class Query private constructor(private val s: State) {
     private fun assertPlain(verb: String) {
         extraClause()?.let { throw refuse("$verb cannot be used with `$it`") }
         if (s.lookups.isNotEmpty()) throw refuse("$verb cannot be used with `lookup`")
+        if (s.facets.isNotEmpty()) throw refuse("$verb cannot be used with `facet`")
         if (verb == "insert" && s.cond.isNotEmpty()) throw refuse("insert cannot be used with `where`")
     }
 
@@ -596,8 +694,14 @@ class Query private constructor(private val s: State) {
         return exec(st.text, st.params)
     }
 
-    /** Runs the query and hands back its rows. */
-    suspend fun rows(): List<Row> = run(toFenecQL()).rows
+    /** Runs the query and hands back its rows, what [facet] counted as their [Rows.facets]. */
+    suspend fun rows(): Rows = run(toFenecQL()).page
+
+    /**
+     * Runs the query and hands back its whole answer: the rows, and what
+     * [facet] counted beside them as [Answer.facets].
+     */
+    suspend fun answer(): Answer = run(toFenecQL())
 
     /** The first row with `limit 1`, or null. */
     suspend fun first(): Row? = limit(1).rows().firstOrNull()
@@ -624,7 +728,10 @@ class Query private constructor(private val s: State) {
     suspend fun delete(all: Boolean = false): Long = run(toDelete(all)).affected
 
     /** [rows] on the calling thread, for Java. */
-    fun rowsBlocking(): List<Row> = kotlinx.coroutines.runBlocking { rows() }
+    fun rowsBlocking(): Rows = kotlinx.coroutines.runBlocking { rows() }
+
+    /** [answer] on the calling thread, for Java. */
+    fun answerBlocking(): Answer = kotlinx.coroutines.runBlocking { answer() }
 
     /** [count] on the calling thread, for Java. */
     fun countBlocking(): Long = kotlinx.coroutines.runBlocking { count() }

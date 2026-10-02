@@ -21,6 +21,13 @@ the JavaScript, Go and .NET builders make of the same chain:
               .where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))
               .near("embed", [0.1, 0.2, 0.3]).limit(5).rows())
 
+`match` takes `highlight` and `snippet` marks in the select list, and any
+read `facet` counts, which come back beside the rows as `rows.facets`:
+
+    rows = (db.collection("products").select("title").highlight("title")
+              .match("title", "phone").facet("brand", top=10).limit(20).rows())
+    rows.facets["brand"]   # [FacetCount(value="acme", count=12), ...]
+
 `AsyncClient` is the same over asyncio, for an event loop a blocking
 request would stall:
 
@@ -54,8 +61,10 @@ __all__ = [
     "Changes",
     "Client",
     "Cond",
+    "FacetCount",
     "FenecError",
     "Query",
+    "Rows",
     "SchemaError",
     "and_",
     "collection",
@@ -121,9 +130,10 @@ class Client:
     ) -> Any:
         """Runs one FenecQL statement. Values go in as `$1`, `$2`, ... and
         never into the text. With `after` -- a primary's `seq` -- a replica
-        answers once it holds that write."""
+        answers once it holds that write. A read answers its rows, a list;
+        one with a `facet` clause a `Rows`, the counts as its `facets`."""
         body = {"query": fenecql, "params": list(params or [])}
-        return self._post("/query", json.dumps(body).encode(), "application/json", after)
+        return _faceted(self._post("/query", json.dumps(body).encode(), "application/json", after))
 
     def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
         """Runs statements in order under one write lock, as one block:
@@ -246,6 +256,17 @@ def _seg(name: str) -> str:
     return urllib.parse.quote(name, safe="")
 
 
+def _faceted(answer: Any) -> Any:
+    """A `/query` answer as it came, but for a query that asked facets:
+    the server sends `{"rows": [...], "facets": {...}}` for it rather than
+    the bare array, and that becomes `Rows` -- a list of the rows, as every
+    other read answers, with the counts as its `facets`. A `/batch` answer
+    is left as it came, each read's result `{"rows": ..., "facets": ...}`."""
+    if isinstance(answer, dict) and "facets" in answer and isinstance(answer.get("rows"), list):
+        return _rows(answer)
+    return answer
+
+
 def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
@@ -294,7 +315,7 @@ class AsyncClient:
     async def query(self, fenecql: str, params: Sequence[Any] | None = None) -> Any:
         """One FenecQL statement, as `Client.query`."""
         body = {"query": fenecql, "params": list(params or [])}
-        return await self._post("/query", json.dumps(body).encode(), "application/json")
+        return _faceted(await self._post("/query", json.dumps(body).encode(), "application/json"))
 
     async def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
         """Statements under one write lock, as one block, as `Client.batch`."""
@@ -385,4 +406,16 @@ def placeholders(start: int, n: int) -> str:
 
 
 # Below FenecError, which the builder raises.
-from .builder import AsyncQuery, Cond, Query, and_, collection, not_, or_, raw  # noqa: E402
+from .builder import (  # noqa: E402
+    AsyncQuery,
+    Cond,
+    FacetCount,
+    Query,
+    Rows,
+    _rows,
+    and_,
+    collection,
+    not_,
+    or_,
+    raw,
+)

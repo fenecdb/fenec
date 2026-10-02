@@ -387,6 +387,14 @@ public sealed class Query
         IReadOnlyList<Node> Cond, bool Required, IReadOnlyList<(string Field, bool Asc, string? Collate)> Order,
         long? Limit, long Offset);
 
+    // A highlight when Words is null, a snippet otherwise.
+    sealed record Mark(string Field, long? Words, string? Ellipsis, string? Pre, string? Post)
+    {
+        public string Kind => Words is null ? "highlight" : "snippet";
+    }
+
+    sealed record FacetClause(string Field, long? Top);
+
     sealed record State(string Collection, FenecClient? Client)
     {
         public IReadOnlyList<string>? Project { get; init; }
@@ -402,6 +410,8 @@ public sealed class Query
         public long Offset { get; init; }
         public bool Count { get; init; }
         public IReadOnlyList<Level> Lookups { get; init; } = [];
+        public IReadOnlyList<Mark> Marks { get; init; } = [];
+        public IReadOnlyList<FacetClause> Facets { get; init; } = [];
     }
 
     readonly State _s;
@@ -480,6 +490,71 @@ public sealed class Query
     });
 
     /// <summary>
+    /// <c>highlight(field)</c> in the select list: where the terms Match found stand in the field's text --
+    /// <c>[start, end]</c> pairs of UTF-16 offsets, a .NET string's own -- or, given <paramref name="pre"/> and
+    /// <paramref name="post"/>, the text with each mark between them. The text is not escaped: a page that renders
+    /// it as HTML builds it from the offsets, or escapes it first. Answers under <c>highlight(field)</c>, after the
+    /// fields Select named.
+    /// <code>db.From("docs").Select("title").Highlight("body", "&lt;mark&gt;", "&lt;/mark&gt;").Match("body", text)</code>
+    /// </summary>
+    public Query Highlight(string field, string? pre = null, string? post = null) => Highlighted(field, pre, post);
+
+    /// <summary><c>snippet(field, words)</c>: the window of <paramref name="words"/> words around the densest
+    /// marks, <c>{"text": ..., "marks": [[s, e], ...]}</c> -- or the marked text, given <paramref name="pre"/> and
+    /// <paramref name="post"/> -- with <paramref name="ellipsis"/> where it leaves text out. Answers under
+    /// <c>snippet(field)</c>.</summary>
+    public Query Snippet(string field, long words, string? ellipsis = null, string? pre = null, string? post = null) =>
+        Snipped(field, words, ellipsis, pre, post);
+
+    // The steps' checks over values of any type, as the JS builder's take them: a C# caller cannot hand a tag
+    // that is not text, but the golden file's chains do, and the refusal has to be the JS builder's word for word.
+    internal Query Highlighted(string field, object? pre, object? post)
+    {
+        var f = Builder.Ident(field);
+        var (p, q) = Tags(pre, post, "highlight");
+        return WithMark(new Mark(f, null, null, p, q));
+    }
+
+    internal Query Snipped(string field, long words, object? ellipsis, object? pre, object? post)
+    {
+        var f = Builder.Ident(field);
+        var n = Builder.Whole(words, "snippet words");
+        var (p, q) = Tags(pre, post, "snippet");
+        if (n == 0) throw Builder.Refuse("snippet shows at least one word");
+        var e = ellipsis is null ? null : Text(ellipsis, "snippet ellipsis");
+        return WithMark(new Mark(f, n, e, p, q));
+    }
+
+    static (string?, string?) Tags(object? pre, object? post, string what)
+    {
+        if (pre is null && post is null) return (null, null);
+        if (pre is null || post is null) throw Builder.Refuse($"{what} takes both pre and post, or neither");
+        return (Text(pre, $"{what} pre"), Text(post, $"{what} post"));
+    }
+
+    static string Text(object v, string what) => v as string
+        ?? throw Builder.Refuse($"{what} must be text: {System.Text.Json.JsonSerializer.Serialize(v)}");
+
+    // Each answers under its label, and a row holds a name once.
+    Query WithMark(Mark m) => _s.Marks.Any(x => x.Kind == m.Kind && x.Field == m.Field)
+        ? throw Builder.Refuse($"{m.Kind}({m.Field}) is asked twice")
+        : new(_s with { Marks = [.. _s.Marks, m] });
+
+    /// <summary><c>facet field [top N]</c>: each value the field -- or a path into a json field,
+    /// <c>meta.lang</c> -- holds over every row the query matches, not only the page, and how many rows hold it,
+    /// most first; <paramref name="top"/> keeps the commonest. A list counts once a row for each value. The counts
+    /// come back beside the rows: <see cref="AnswerAsync"/>'s <see cref="Answer.Facets"/>.
+    /// <code>db.From("products").Match("title", "phone").Where("price", "&lt;", 500).Facet("brand", top: 10).Facet("color").Limit(20)</code>
+    /// </summary>
+    public Query Facet(string field, long? top = null)
+    {
+        var f = new FacetClause(Builder.FieldPath(field), top is { } t ? Builder.Whole(t, "facet top") : null);
+        if (f.Top == 0) throw Builder.Refuse($"facet {f.Field} top 0 answers nothing");
+        if (_s.Facets.Any(g => g.Field == f.Field)) throw Builder.Refuse($"facet {f.Field} is asked twice");
+        return new(_s with { Facets = [.. _s.Facets, f] });
+    }
+
+    /// <summary>
     /// <c>lookup name on child [= parent] ...</c>: each row's children, attached to it. <paramref name="on"/>
     /// names the child's field, <paramref name="parentKey"/> the parent's (<c>id</c> unless given); the rest
     /// binds to the looked-up collection, and <paramref name="limit"/> counts children per parent.
@@ -532,6 +607,18 @@ public sealed class Query
             if (s.Group is null && (s.Order.Count > 0 || s.Limit is not null || s.Offset > 0))
                 throw Builder.Refuse("aggregates answer one row; group makes a row per value");
         }
+        if (s.Marks.Count > 0)
+        {
+            var what = s.Marks[0].Kind;
+            if (s.Match is null) throw Builder.Refuse($"{what} needs match: it marks the terms match found");
+            if (s.Aggregate) throw Builder.Refuse($"{what} marks a row's text; aggregates answer groups");
+        }
+        if (s.Facets.Count > 0)
+        {
+            if (s.Near is not null)
+                throw Builder.Refuse("facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near");
+            if (s.Aggregate) throw Builder.Refuse("facet cannot be combined with aggregates: group counts by value");
+        }
         if (s.Rerank is not null && s.Match is null)
             throw Builder.Refuse("rerank needs match: it reorders what match found");
         if (s.Match is not null && s.Near is not null && s.Fuse is null)
@@ -560,7 +647,20 @@ public sealed class Query
 
         var bind = new Binder();
         var sql = new StringBuilder($"get {s.Collection}");
-        if (s.Project is not null) sql.Append(" select ").Append(string.Join(", ", s.Project));
+        // The marks after the fields Select named, or after every field. Their tags are bound before the
+        // where's values, as they come first in the text.
+        var items = s.Marks.Select(m =>
+        {
+            var item = new StringBuilder($"{m.Kind}({m.Field}");
+            if (m.Words is { } words) item.Append($", {words}");
+            // A snippet's tags come after its ellipsis, so tags alone take the empty one.
+            if (m.Ellipsis is not null || (m.Words is not null && m.Pre is not null))
+                item.Append(", ").Append(bind.Bind(m.Ellipsis ?? ""));
+            if (m.Pre is not null) item.Append(", ").Append(bind.Bind(m.Pre)).Append(", ").Append(bind.Bind(m.Post));
+            return item.Append(')').ToString();
+        }).ToList();
+        if (s.Project is not null || items.Count > 0)
+            sql.Append(" select ").Append(string.Join(", ", [.. s.Project ?? ["*"], .. items]));
         if (WhereOf(s.Cond, bind) is { } where) sql.Append(" where ").Append(where);
         if (s.Group is not null) sql.Append(" group ").Append(s.Group);
         if (s.Near is { } near)
@@ -585,6 +685,9 @@ public sealed class Query
         if (s.Limit is { } limit) sql.Append($" limit {limit}");
         if (s.Offset > 0) sql.Append($" offset {s.Offset}");
         if (s.Count) sql.Append(" count");
+        if (s.Facets.Count > 0)
+            sql.Append(" facet ").Append(string.Join(", ",
+                s.Facets.Select(f => f.Top is { } top ? $"{f.Field} top {top}" : f.Field)));
         // Terminal, so every clause after it is the child's -- and last, so its parameters come after the
         // parent's.
         foreach (var l in s.Lookups)
@@ -631,6 +734,7 @@ public sealed class Query
     {
         if (ExtraClause() is { } extra) throw Builder.Refuse($"{verb} cannot be used with `{extra}`");
         if (_s.Lookups.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `lookup`");
+        if (_s.Facets.Count > 0) throw Builder.Refuse($"{verb} cannot be used with `facet`");
         if (verb == "insert" && _s.Cond.Count > 0) throw Builder.Refuse("insert cannot be used with `where`");
     }
 
@@ -680,7 +784,7 @@ public sealed class Query
     FenecClient Client => _s.Client ?? throw Builder.Refuse(
         "query is not bound to a connection: use db.From(...) (ToFenecQL() if you only want the text)");
 
-    async Task<byte[]> AnswerAsync(CancellationToken ct)
+    async Task<byte[]> BodyAsync(CancellationToken ct)
     {
         var (text, ps) = ToFenecQL();
         var (body, _) = await Client.RunAsync(text, ps, ct).ConfigureAwait(false);
@@ -689,7 +793,12 @@ public sealed class Query
 
     /// <summary>Runs the query and hands back its rows.</summary>
     public async Task<IReadOnlyList<JsonElement>> RowsAsync(CancellationToken cancellationToken = default) =>
-        FenecClient.RowsOf(await AnswerAsync(cancellationToken).ConfigureAwait(false));
+        FenecClient.RowsOf(await BodyAsync(cancellationToken).ConfigureAwait(false));
+
+    /// <summary>Runs the query and hands back its rows and what its <see cref="Facet"/> clauses counted beside
+    /// them.</summary>
+    public async Task<Answer> AnswerAsync(CancellationToken cancellationToken = default) =>
+        FenecClient.AnswerOf(await BodyAsync(cancellationToken).ConfigureAwait(false));
 
     /// <summary>Runs the query and maps its rows to <typeparamref name="T"/> by property name, as
     /// <see cref="FenecClient.QueryAsync{T}"/> does.</summary>

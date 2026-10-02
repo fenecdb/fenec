@@ -125,11 +125,79 @@ func QueryAs[T any](ctx context.Context, c *Client, text string, params ...any) 
 	if err != nil {
 		return nil, err
 	}
-	var out []T
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("fenecdb: the answer is not rows: %w", err)
+	return rowsAs[T](raw)
+}
+
+// QueryAnswer runs one FenecQL statement and hands back its rows and, when
+// it asked for them, what its facet clause counted.
+func (c *Client) QueryAnswer(ctx context.Context, text string, params ...any) (Answer, error) {
+	raw, _, err := c.query(ctx, text, params)
+	if err != nil {
+		return Answer{}, err
 	}
-	return out, nil
+	return answerOf(raw)
+}
+
+// Answer is a query's rows, and the counts its facet clause asked for:
+// they answer for every row the query matched, not the page, so they come
+// beside the rows rather than in one.
+type Answer struct {
+	Rows   []Row
+	Facets Facets
+}
+
+// FacetCount is one value a facet found and how many rows hold it. The
+// value is any JSON value, null for the rows whose field is null.
+type FacetCount struct {
+	Value any   `json:"value"`
+	Count int64 `json:"count"`
+}
+
+// Facet is one field's counts, most first.
+type Facet struct {
+	Field  string
+	Counts []FacetCount
+}
+
+// Facets are the counts of each field asked, in the order asked -- a
+// slice, since a map would lose it; nil when none were.
+type Facets []Facet
+
+// Of is the counts of field, or nil when it was not asked.
+func (f Facets) Of(field string) []FacetCount {
+	for _, x := range f {
+		if x.Field == field {
+			return x.Counts
+		}
+	}
+	return nil
+}
+
+// UnmarshalJSON reads the server's {"field": [{"value", "count"}, ...]}
+// in the order it wrote the fields.
+func (f *Facets) UnmarshalJSON(raw []byte) error {
+	if string(bytes.TrimSpace(raw)) == "null" {
+		*f = nil
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return fmt.Errorf("fenecdb: facets are not an object: %s", raw)
+	}
+	out := Facets{}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		var counts []FacetCount
+		if err := dec.Decode(&counts); err != nil {
+			return err
+		}
+		out = append(out, Facet{Field: k.(string), Counts: counts})
+	}
+	*f = out
+	return nil
 }
 
 // Result is what a write answers.
@@ -169,11 +237,12 @@ type Statement struct {
 func Stmt(query string, params ...any) Statement { return Statement{query, params} }
 
 // BatchItem is one statement's answer in a batch: a write's, or a read's
-// rows.
+// rows -- and the counts, when it asked for facets.
 type BatchItem struct {
 	Affected int64  `json:"affected"`
 	Message  string `json:"message"`
 	Rows     []Row  `json:"rows"`
+	Facets   Facets `json:"facets"`
 }
 
 // BatchResult is what a batch answers: how many statements ran, each one's
@@ -306,18 +375,52 @@ func (c *Client) noteSeq(n uint64) {
 	}
 }
 
-func rowsOf(raw []byte) ([]Row, error) {
+// split is an answer's rows, as their JSON, and its facets: a query that
+// asked for facets answers {"rows": [...], "facets": {...}}, any other the
+// bare array -- or, for a write or a create, one object, which is one row.
+func split(raw []byte) (json.RawMessage, Facets, error) {
 	raw = bytes.TrimSpace(raw)
-	if len(raw) > 0 && raw[0] == '{' {
-		var one Row
-		if err := json.Unmarshal(raw, &one); err != nil {
-			return nil, err
-		}
-		return []Row{one}, nil
+	if len(raw) == 0 || raw[0] != '{' {
+		return raw, nil, nil
 	}
-	var rows []Row
-	if err := json.Unmarshal(raw, &rows); err != nil {
+	var both struct {
+		Rows   json.RawMessage `json:"rows"`
+		Facets *Facets         `json:"facets"`
+	}
+	// Only the two keys together: an object of a write's is a row, and so
+	// is one that merely holds a "rows" field of its own.
+	if err := json.Unmarshal(raw, &both); err == nil && both.Facets != nil && len(both.Rows) > 0 && both.Rows[0] == '[' {
+		return both.Rows, *both.Facets, nil
+	}
+	return append(append([]byte{'['}, raw...), ']'), nil, nil
+}
+
+func answerOf(raw []byte) (Answer, error) {
+	rows, facets, err := split(raw)
+	if err != nil {
+		return Answer{}, err
+	}
+	var a Answer
+	if err := json.Unmarshal(rows, &a.Rows); err != nil {
+		return Answer{}, fmt.Errorf("fenecdb: the answer is not rows: %w", err)
+	}
+	a.Facets = facets
+	return a, nil
+}
+
+func rowsOf(raw []byte) ([]Row, error) {
+	a, err := answerOf(raw)
+	return a.Rows, err
+}
+
+func rowsAs[T any](raw []byte) ([]T, error) {
+	rows, _, err := split(raw)
+	if err != nil {
+		return nil, err
+	}
+	var out []T
+	if err := json.Unmarshal(rows, &out); err != nil {
 		return nil, fmt.Errorf("fenecdb: the answer is not rows: %w", err)
 	}
-	return rows, nil
+	return out, nil
 }

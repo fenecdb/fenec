@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -53,23 +54,91 @@ enum FenecCode {
   static FenecCode of(int v) => values.firstWhere((c) => c.value == v, orElse: () => panic);
 }
 
+/// One value a `facet` counted, and how many matching rows hold it. The
+/// value is as JSON reads it: text, a number, a boolean, a list, a map, or
+/// null for the rows whose field is null.
+class FacetCount {
+  final Object? value;
+  final int count;
+  const FacetCount(this.value, this.count);
+
+  @override
+  bool operator ==(Object other) => other is FacetCount && other.value == value && other.count == count;
+
+  @override
+  int get hashCode => Object.hash(value, count);
+
+  @override
+  String toString() => 'FacetCount($value, $count)';
+}
+
+/// What `facet` counted: each field or path in the order asked, its values
+/// most first.
+typedef Facets = Map<String, List<FacetCount>>;
+
+Facets? _facetsOf(Object? v) => v is Map
+    ? {
+        for (final e in v.entries)
+          e.key as String: [
+            for (final c in (e.value as List).cast<Map>()) FacetCount(c['value'], (c['count'] as num).toInt())
+          ]
+      }
+    : null;
+
+/// A query's rows: a list of maps keyed by field, as before, carrying what
+/// `facet` counted beside them -- the counts are over every matching row,
+/// not the page, so they belong to no row. A list rather than a type that
+/// holds one, so that every caller of `rows()` and every live query reads
+/// it as it did.
+class Rows with ListMixin<Map<String, Object?>> {
+  final List<Map<String, Object?>> _rows;
+
+  /// The counts `facet` asked for, or null when it asked for none.
+  final Facets? facets;
+
+  const Rows(this._rows, [this.facets]);
+
+  @override
+  int get length => _rows.length;
+  @override
+  set length(int n) => _rows.length = n;
+  @override
+  Map<String, Object?> operator [](int i) => _rows[i];
+  @override
+  void operator []=(int i, Map<String, Object?> row) => _rows[i] = row;
+  // ListMixin's own grow the list a null at a time, which a list of
+  // non-null maps refuses.
+  @override
+  void add(Map<String, Object?> element) => _rows.add(element);
+  @override
+  void addAll(Iterable<Map<String, Object?>> iterable) => _rows.addAll(iterable);
+}
+
 /// An answer to a statement: rows, a count of what a write wrote, a word
 /// that it was done, or the schemas `collections` and `describe` give.
 class Answer {
   final String kind;
   final List<String> columns;
-  final List<Map<String, Object?>> rows;
+  final Rows rows;
   final int affected;
   final String message;
   final List<Map<String, Object?>> schemas;
 
+  /// What `facet` counted beside the rows, or null when the query asked for none.
+  Facets? get facets => rows.facets;
+
   Answer._(this.kind,
-      {this.columns = const [], this.rows = const [], this.affected = 0, this.message = '', this.schemas = const []});
+      {this.columns = const [],
+      this.rows = const Rows([]),
+      this.affected = 0,
+      this.message = '',
+      this.schemas = const []});
 
   static Answer of(Map<String, Object?> v) => switch (v['kind']) {
         'rows' => Answer._('rows',
             columns: ((v['result'] as Map)['columns'] as List).cast<String>(),
-            rows: ((v['result'] as Map)['rows'] as List).cast<Map<String, Object?>>()),
+            rows: Rows(((v['result'] as Map)['rows'] as List).cast<Map<String, Object?>>(),
+                _facetsOf((v['result'] as Map)['facets']))),
         'affected' => Answer._('affected', affected: v['count'] as int),
         'ok' => Answer._('ok', message: v['message'] as String),
         'schemas' => Answer._('schemas', schemas: (v['collections'] as List).cast<Map<String, Object?>>()),

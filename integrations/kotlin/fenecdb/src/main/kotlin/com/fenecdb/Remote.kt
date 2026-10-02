@@ -76,16 +76,22 @@ class FenecRemote internal constructor(url: String, @Volatile private var token:
             else -> FenecException.Code.IO
         }
 
-        /** The endpoint's answer as the library's: rows come as an array. */
+        /**
+         * The endpoint's answer as the library's: rows come as an array, or
+         * -- when the query asked for facets -- as `{"rows": [...], "facets": {...}}`.
+         */
         fun answer(v: Any): Answer = when {
-            v is List<*> -> {
-                val rows = v.map { it as Row }
-                Answer.Rows(rows.firstOrNull()?.keys?.toList() ?: emptyList(), rows)
-            }
+            v is List<*> -> rowsOf(v, null)
+            v is Row && v.list("rows") != null -> rowsOf(v.list("rows")!!, v.row("facets"))
             v is Row && v.long("affected") != null -> Answer.Affected(v.long("affected")!!)
             v is Row && v.list("collections") != null -> Answer.Schemas(v.list("collections")!!.map { it as Row })
             v is Row -> Answer.Ok(v.string("message") ?: Json.write(v))
             else -> Answer.Ok(Json.write(v))
+        }
+
+        private fun rowsOf(list: List<*>, facets: Row?): Answer.Rows {
+            val rows = list.map { it as Row }
+            return Answer.Rows(rows.firstOrNull()?.keys?.toList() ?: emptyList(), rows, facetsOf(facets))
         }
     }
 }

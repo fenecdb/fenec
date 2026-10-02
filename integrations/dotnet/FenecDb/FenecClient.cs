@@ -117,6 +117,15 @@ public sealed partial class FenecClient : IDisposable
         return RowsOf(body).Select(r => r.Deserialize<T>(ByName)!).ToList();
     }
 
+    /// <summary>Runs one FenecQL statement and hands back its rows and what its <c>facet</c> clauses counted
+    /// beside them -- <c>get products match title $1 limit 20 facet brand top 10</c>.</summary>
+    public async Task<Answer> AnswerAsync(
+        string query, IReadOnlyList<object?>? parameters = null, CancellationToken cancellationToken = default)
+    {
+        var (body, _) = await RunAsync(query, parameters, cancellationToken).ConfigureAwait(false);
+        return AnswerOf(body);
+    }
+
     /// <summary>Runs one FenecQL statement that writes -- put, insert, set, del, create, drop, alter -- and
     /// hands back what it did.</summary>
     public async Task<ExecResult> ExecAsync(
@@ -319,12 +328,12 @@ public sealed partial class FenecClient : IDisposable
     static string? Header(HttpResponseMessage res, string name) =>
         res.Headers.TryGetValues(name, out var v) ? v.FirstOrDefault() : null;
 
-    internal static IReadOnlyList<JsonElement> RowsOf(byte[] body)
+    // The rows of a bare array, or of `{"rows": [...], "facets": {...}}` when the query asked facets.
+    internal static IReadOnlyList<JsonElement> RowsOf(byte[] body) => AnswerOf(body).Rows;
+
+    internal static Answer AnswerOf(byte[] body)
     {
         using var doc = JsonDocument.Parse(body);
-        var root = doc.RootElement;
-        return root.ValueKind == JsonValueKind.Array
-            ? root.EnumerateArray().Select(e => e.Clone()).ToList()
-            : [root.Clone()];
+        return Answer.Of(doc.RootElement);
     }
 }

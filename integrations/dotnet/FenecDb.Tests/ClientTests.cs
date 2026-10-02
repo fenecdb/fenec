@@ -150,6 +150,48 @@ public sealed class ClientTests(Servers servers)
     }
 
     [Fact]
+    public async Task HighlightsAndFacetsComeBackInTheirShapes()
+    {
+        using var db = Root();
+        var name = Fresh("marks");
+        await db.ExecAsync($"create collection {name} (kind text @hash, body text @text)");
+        await db.From(name).InsertAsync(new object[]
+        {
+            new { kind = "a", body = "rust is fast" },
+            new { kind = "a", body = "rust and go" },
+            new { kind = "b", body = "rust tools" },
+            new { kind = "c", body = "python only" },
+        });
+
+        var q = db.From(name).Select("body").Highlight("body").Match("body", "rust").Facet("kind");
+        var answer = await q.AnswerAsync();
+        Assert.Equal(3, answer.Rows.Count);
+        // Offsets into the text, UTF-16 code units: "rust" is the first four.
+        Assert.All(answer.Rows, r => Assert.Equal("[[0,4]]", r.GetProperty("highlight(body)").GetRawText()));
+        var kinds = Assert.Single(answer.Facets);
+        Assert.Equal("kind", kinds.Key);
+        Assert.Equal([("a", 2L), ("b", 1L)], kinds.Value.Select(c => (c.Value.GetString(), c.Count)));
+        // The rows alone, from the same answer.
+        Assert.Equal(3, (await q.RowsAsync()).Count);
+        Assert.Equal(3, await db.From(name).Where("kind", "!=", "c").Facet("kind").CountAsync());
+
+        var tagged = await db.From(name).Select("kind").Highlight("body", "<b>", "</b>").Snippet("body", 2)
+            .Match("body", "tools").RowsAsync();
+        var row = Assert.Single(tagged);
+        Assert.Equal("rust <b>tools</b>", row.GetProperty("highlight(body)").GetString());
+        var snippet = row.GetProperty("snippet(body)");
+        Assert.Equal("rust tools", snippet.GetProperty("text").GetString());
+        Assert.Equal("[[5,10]]", snippet.GetProperty("marks").GetRawText());
+
+        // Without facets the answer is the bare array, and holds none.
+        Assert.Empty((await db.AnswerAsync($"get {name} where kind = $1", ["c"])).Facets);
+        var batch = await db.BatchAsync([new($"get {name} where kind = $1 facet kind", ["b"])]);
+        var b = Answer.Of(batch.Results[0]);
+        Assert.Single(b.Rows);
+        Assert.Equal(1, b.Facets["kind"][0].Count);
+    }
+
+    [Fact]
     public async Task AnIdempotencyKeyIsReplayed()
     {
         using var db = Root();

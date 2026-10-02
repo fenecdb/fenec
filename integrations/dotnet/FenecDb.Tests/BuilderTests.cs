@@ -112,8 +112,23 @@ public sealed class BuilderTests(Servers servers)
             order: Order(Opt(a, 1, "order")),
             limit: Long(Opt(a, 1, "limit")),
             offset: Long(Opt(a, 1, "offset"))),
+        "highlight" when Texts(a, 1, "pre", "post") =>
+            q.Highlight(a[0].GetString()!, Opt(a, 1, "pre")?.GetString(), Opt(a, 1, "post")?.GetString()),
+        "highlight" => q.Highlighted(a[0].GetString()!, Arg(a, 1, "pre"), Arg(a, 1, "post")),
+        "snippet" when Texts(a, 2, "ellipsis", "pre", "post") =>
+            q.Snippet(a[0].GetString()!, a[1].GetInt64(), Opt(a, 2, "ellipsis")?.GetString(),
+                Opt(a, 2, "pre")?.GetString(), Opt(a, 2, "post")?.GetString()),
+        "snippet" => q.Snipped(a[0].GetString()!, a[1].GetInt64(), Arg(a, 2, "ellipsis"), Arg(a, 2, "pre"), Arg(a, 2, "post")),
+        "facet" => q.Facet(a[0].GetString()!, Long(Opt(a, 1, "top"))),
         _ => throw new InvalidOperationException($"no builder step {op}"),
     };
+
+    // Whether a step's options are text where given, which the typed step takes; a chain handing a number for a
+    // tag goes through the step's untyped path, the one a C# caller cannot reach, to be refused as JS refuses it.
+    static bool Texts(JsonElement[] a, int at, params string[] names) =>
+        names.All(n => Opt(a, at, n) is not { } v || v.ValueKind == JsonValueKind.String);
+
+    static object? Arg(JsonElement[] a, int at, string name) => Opt(a, at, name) is { } v ? Value(v) : null;
 
     /// <summary>A server that answers as fenec-server would and keeps the last body it was sent.</summary>
     sealed class Recorder : HttpMessageHandler
@@ -124,8 +139,10 @@ public sealed class BuilderTests(Servers servers)
         {
             Body = await request.Content!.ReadAsStringAsync(ct);
             var query = JsonDocument.Parse(Body).RootElement.GetProperty("query").GetString()!;
+            var rows = query.EndsWith(" count") || query.Contains(" count facet ") ? """[{"count":0}]""" : "[]";
+            // A query asking facets is answered with them beside the rows.
             var answer = query.Split(' ')[0] is "put" or "set" or "del" ? """{"affected":0}"""
-                : query.EndsWith(" count") ? """[{"count":0}]""" : "[]";
+                : query.Contains(" facet ") ? """{"rows":""" + rows + ""","facets":{}}""" : rows;
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(answer, Encoding.UTF8, "application/json") };
         }
     }

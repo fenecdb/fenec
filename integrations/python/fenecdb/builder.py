@@ -27,9 +27,9 @@ import array
 import json
 import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence, TypeVar
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence, TypeVar
 
-__all__ = ["AsyncQuery", "Cond", "Query", "and_", "collection", "not_", "or_", "raw"]
+__all__ = ["AsyncQuery", "Cond", "FacetCount", "Query", "Rows", "and_", "collection", "not_", "or_", "raw"]
 
 # Operator names, the symbols and the words for them.
 _OPS = {
@@ -153,6 +153,21 @@ def _whole(n: Any, what: str) -> int:
     if isinstance(n, bool) or not isinstance(n, int) or n < 0 or n > 2**53 - 1:
         raise _err(f"{what} must be a non-negative integer: {_quote(n) if isinstance(n, bool) else n}")
     return n
+
+
+def _text(v: Any, what: str) -> str:
+    if not isinstance(v, str):
+        raise _err(f"{what} must be text: {_quote(v)}")
+    return v
+
+
+def _tags(pre: Any, post: Any, what: str) -> dict:
+    """A mark's tags: both or neither, each text."""
+    if pre is None and post is None:
+        return {}
+    if pre is None or post is None:
+        raise _err(f"{what} takes both pre and post, or neither")
+    return {"pre": _text(pre, f"{what} pre"), "post": _text(post, f"{what} post")}
 
 
 def _js_date(d: datetime) -> str:
@@ -414,6 +429,8 @@ class _Builder:
             "offset": 0,
             "count": False,
             "lookups": [],
+            "marks": [],
+            "facets": [],
         }
 
     def _with(self: Q, **patch: Any) -> Q:
@@ -432,6 +449,62 @@ class _Builder:
             return self._with(project=None, aggregate=False)
         cs = [_column(c) for c in flat]
         return self._with(project=[t for t, _ in cs], aggregate=any(a for _, a in cs))
+
+    def highlight(self: Q, field: str, *, pre: str | None = None, post: str | None = None) -> Q:
+        """`highlight(field)` in the select list: where the terms `match`
+        found stand in the field's text -- `[start, end]` pairs of UTF-16
+        offsets, a JavaScript string's own, as the server counts them -- or,
+        given `pre` and `post`, the text with each mark between them. The
+        text is not escaped: a page that renders it as HTML escapes it
+        first, or builds it from the offsets. Answers under
+        `highlight(field)`, after the fields `select` named."""
+        return self._mark({"field": _ident(field), "words": None, **_tags(pre, post, "highlight")})
+
+    def snippet(
+        self: Q,
+        field: str,
+        words: int,
+        *,
+        ellipsis: str | None = None,
+        pre: str | None = None,
+        post: str | None = None,
+    ) -> Q:
+        """`snippet(field, words)`: the window of `words` words around the
+        densest marks, `{"text", "marks"}` -- or the marked text, given
+        `pre` and `post` -- with `ellipsis` where it leaves text out.
+        Answers under `snippet(field)`."""
+        mark = {"field": _ident(field), "words": _whole(words, "snippet words"), **_tags(pre, post, "snippet")}
+        if mark["words"] == 0:
+            raise _err("snippet shows at least one word")
+        if ellipsis is not None:
+            mark["ellipsis"] = _text(ellipsis, "snippet ellipsis")
+        return self._mark(mark)
+
+    def _mark(self: Q, mark: dict) -> Q:
+        # Each answers under its label, and a row holds a name once.
+        def kind(m: dict) -> str:
+            return "highlight" if m["words"] is None else "snippet"
+
+        if any(kind(m) == kind(mark) and m["field"] == mark["field"] for m in self._s["marks"]):
+            raise _err(f"{kind(mark)}({mark['field']}) is asked twice")
+        return self._with(marks=[*self._s["marks"], mark])
+
+    def facet(self: Q, field: str, *, top: int | None = None) -> Q:
+        """`facet field [top N]`: each value the field -- or a path into a
+        json field -- holds over every row the query matches, not only the
+        page, and how many rows hold it, most first; `top` keeps the
+        commonest. A list counts once a row for each value. The counts come
+        back beside the rows, as `rows().facets`.
+
+            (db.collection("products").match("title", "phone").where("price", "<", 500)
+               .facet("brand", top=10).facet("color").limit(20).rows().facets)
+        """
+        f = (_path(field), None if top is None else _whole(top, "facet top"))
+        if f[1] == 0:
+            raise _err(f"facet {f[0]} top 0 answers nothing")
+        if any(g[0] == f[0] for g in self._s["facets"]):
+            raise _err(f"facet {f[0]} is asked twice")
+        return self._with(facets=[*self._s["facets"], f])
 
     def group(self: Q, field: str) -> Q:
         """`group field`: a row per value, for a select list that aggregates."""
@@ -537,6 +610,7 @@ class _Builder:
         s = self._s
         near, match, rerank, fuse = s["near"], s["match"], s["rerank"], s["fuse"]
         lookups, count, order = s["lookups"], s["count"], s["order"]
+        marks, facets = s["marks"], s["facets"]
         # The engine refuses each of these too; failing here sends nothing.
         if s["group"] and not s["aggregate"]:
             raise _err(f"group {s['group']} needs an aggregate in select: 'count(*)'")
@@ -548,6 +622,20 @@ class _Builder:
                 raise _err(f"aggregates cannot be combined with {clash}")
             if not s["group"] and (order or s["limit"] is not None or s["offset"]):
                 raise _err("aggregates answer one row; group makes a row per value")
+        if marks:
+            what = "highlight" if marks[0]["words"] is None else "snippet"
+            if not match:
+                raise _err(f"{what} needs match: it marks the terms match found")
+            if s["aggregate"]:
+                raise _err(f"{what} marks a row's text; aggregates answer groups")
+        if facets:
+            if near:
+                raise _err(
+                    "facet counts the rows a filter or match selects, and near ranks every "
+                    "row: ask the facets without near"
+                )
+            if s["aggregate"]:
+                raise _err("facet cannot be combined with aggregates: group counts by value")
         if rerank and not match:
             raise _err("rerank needs match: it reorders what match found")
         if match and near and not fuse:
@@ -581,8 +669,21 @@ class _Builder:
                 raise _err(f"count cannot be used with `{extra}`")
         bind = _Binder()
         sql = f"get {s['collection']}"
-        if s["project"]:
-            sql += f" select {', '.join(s['project'])}"
+        # The marks after the fields `select` named, or after every field.
+        items = []
+        for m in marks:
+            item = f"{'highlight' if m['words'] is None else 'snippet'}({m['field']}"
+            if m["words"] is not None:
+                item += f", {m['words']}"
+            # A snippet's tags come after its ellipsis, so tags without one
+            # bind the empty one.
+            if "ellipsis" in m or (m["words"] is not None and "pre" in m):
+                item += f", {bind(m.get('ellipsis', ''), 'snippet')}"
+            if "pre" in m:
+                item += f", {bind(m['pre'], m['field'])}, {bind(m['post'], m['field'])}"
+            items.append(item + ")")
+        if s["project"] or items:
+            sql += f" select {', '.join([*(s['project'] or ['*']), *items])}"
         where = self._where(bind)
         if where:
             sql += f" where {where}"
@@ -614,6 +715,8 @@ class _Builder:
             sql += f" offset {s['offset']}"
         if count:
             sql += " count"
+        if facets:
+            sql += " facet " + ", ".join(f if top is None else f"{f} top {top}" for f, top in facets)
         # Terminal, so every clause after it is the child's -- and last, so
         # its parameters come after the parent's.
         for level in lookups:
@@ -666,6 +769,8 @@ class _Builder:
             raise _err(f"{verb} cannot be used with `{extra}`")
         if self._s["lookups"]:
             raise _err(f"{verb} cannot be used with `lookup`")
+        if self._s["facets"]:
+            raise _err(f"{verb} cannot be used with `facet`")
         if verb == "insert" and self._s["cond"]:
             raise _err("insert cannot be used with `where`")
 
@@ -721,8 +826,40 @@ def _render_doc(doc: Any, bind: _Binder) -> str:
     return "{" + ", ".join(pairs) + "}"
 
 
-def _rows(answer: Any) -> list:
-    return answer if isinstance(answer, list) else []
+class FacetCount(NamedTuple):
+    """A value a facet counted -- any JSON value, `None` for the rows whose
+    field is null -- and how many rows hold it."""
+
+    value: Any
+    count: int
+
+
+class Rows(list):
+    """A query's rows, a dict each -- a list, and equal to one -- with what
+    `facet` counted beside them as `facets`: each field asked, in the order
+    asked, to its values most first. Empty when the query asked none."""
+
+    facets: dict[str, list[FacetCount]]
+
+    def __init__(self, rows: Iterable = (), facets: Mapping | None = None):
+        super().__init__(rows)
+        self.facets = {
+            k: [FacetCount(c.get("value"), c.get("count", 0)) for c in v]
+            for k, v in (facets or {}).items()
+        }
+
+
+def _rows(answer: Any) -> Rows:
+    """The rows of a `/query` answer: the bare array, or -- for a query that
+    asked facets -- `{"rows": [...], "facets": {...}}`, the counts beside
+    the rows since they answer for every row matched, not one."""
+    if isinstance(answer, Rows):
+        return answer
+    if isinstance(answer, list):
+        return Rows(answer)
+    if isinstance(answer, Mapping) and isinstance(answer.get("rows"), list):
+        return Rows(answer["rows"], answer.get("facets"))
+    return Rows()
 
 
 def _affected(answer: Any) -> int:
@@ -739,8 +876,9 @@ class Query(_Builder):
 
     __slots__ = ()
 
-    def rows(self) -> list[dict]:
-        """Every row the query answers, a dict each."""
+    def rows(self) -> Rows:
+        """Every row the query answers, a dict each -- and, for a query that
+        asked facets, the counts as the list's `facets`."""
         return _rows(self._client().query(*self.to_fenecql()))
 
     def first(self) -> dict | None:
@@ -780,7 +918,7 @@ class AsyncQuery(_Builder):
 
     __slots__ = ()
 
-    async def rows(self) -> list[dict]:
+    async def rows(self) -> Rows:
         return _rows(await self._client().query(*self.to_fenecql()))
 
     async def first(self) -> dict | None:
