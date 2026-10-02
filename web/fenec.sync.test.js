@@ -897,7 +897,8 @@ test('a replica checks the code\'s schema against the server\'s and applies none
   const s = await server();
   try {
     // The code declares what the server holds: the replica opens, typed by it.
-    const db = await open(s.url, { schema: { tasks: tasksTable } });
+    // The shape names the table, as the code declares it.
+    const db = await open(s.url, { schema: { tasks: tasksTable }, shapes: [{ collection: tasksTable, where: { status: 'open' }, key: 'key' }] });
     await db.ready();
     assert.deepEqual((await db.from(tasksTable).order('priority').rows()).map((r) => r.title), ['one', 'two']);
     db.close();
