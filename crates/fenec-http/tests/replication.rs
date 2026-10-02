@@ -537,3 +537,41 @@ fn a_read_sent_after_a_write_waits_for_it_on_a_replica() {
     );
     assert_eq!(status, 400);
 }
+
+/// The primary sweeps the rows past their time (`@ttl`) and its replica
+/// applies the deletes as any it is sent; the replica itself never sweeps,
+/// its writes being its primary's.
+#[test]
+fn a_sweep_on_the_primary_reaches_its_replica() {
+    let d = dir("sweep");
+    let primary = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    let replica = replica(&d.join("r.fenec"), primary.port);
+    for sql in [
+        "create collection s (t text, seen timestamp @ttl(1h))",
+        r#"put s [{t: "old", seen: 1}, {t: "live", seen: "2999-01-01"}, {t: "older", seen: 2}, {t: "none"}]"#,
+    ] {
+        let (status, body) = query(&primary, sql);
+        assert_eq!(status, 200, "{body}");
+    }
+    caught_up(&replica, &primary);
+    // Out of every read on both at once, before anything is deleted.
+    let alive = |n: &Node| rows(n, "get s select t order id");
+    let want = vec![
+        (2, vec![Value::Text("live".into())]),
+        (4, vec![Value::Text("none".into())]),
+    ];
+    assert_eq!(alive(&primary), want);
+    assert_eq!(alive(&replica), want);
+    // A replica sweeps nothing.
+    assert_eq!(fenec_http::sweep::pass("replica", &replica.db), 0);
+    let before = seq(&primary);
+    assert_eq!(fenec_http::sweep::pass("primary", &primary.db), 2);
+    assert_eq!(seq(&primary), before + 2, "a delete a row");
+    caught_up(&replica, &primary);
+    // Gone from both, at any time a read is answered at.
+    for n in [&primary, &replica] {
+        n.db.write().unwrap().set_clock(Some(0));
+        assert_eq!(rows(n, "get s count")[0].1, vec![Value::Int(2)]);
+        assert_eq!(alive(n), want);
+    }
+}

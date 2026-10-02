@@ -64,6 +64,12 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   db.from('articles').match('year', 'x');
 
   await db.from('articles').where('tags', 'has', 'rust').where('year', 'in', [2023, 2024]).count();
+  // `in` takes a query whose one column is the list: `in (get ...)`.
+  await db.from('articles').where({ year: { in: db.from('reviews').select('stars') } }).count();
+  // The time a read of a collection whose rows expire is answered at.
+  db.now = () => 1_800_000_000_000;
+  // @ts-expect-error -- the time is a number
+  db.now = () => 'soon';
   // A path into a json field, where a field goes.
   const tr = await db
     .from('articles')

@@ -520,10 +520,12 @@ easy to get wrong.</p>
     silently would breed the illusion that <code>limit(1)</code> deletes a
     single row, or that a required <code>lookup</code> spares the parents
     with no children.</li>
-  <li><b>No JOIN, no subquery, no <code>returning</code>.</b> The builder adds
+  <li><b>No JOIN, no <code>returning</code>.</b> The builder adds
     no capability on top of FenecQL — it only builds it safely.
     <code>lookup</code> is the exception FenecQL itself makes, and
-    <code>.lookup(name, opts)</code> builds it like any other clause.</li>
+    <code>.lookup(name, opts)</code> builds it like any other clause; a
+    query given as an <code>in</code>'s value is FenecQL's
+    <code>in (get …)</code>, its parameters bound with the outer one's.</li>
 </ul>
 
 <details class="deep"><summary>Details: the tests</summary>

@@ -283,8 +283,16 @@ pub enum IndexKind {
     /// Inverted index with BM25 scoring, behind `match`.
     Text(TextIndexSpec),
     /// Ordered index: ranges, equality, and `order ... limit` walked in
-    /// order (see [`crate::sorted`]).
-    Sorted,
+    /// order (see [`crate::sorted`]). With a `ttl` (`@ttl(30m)`, a
+    /// timestamp field's), a row is gone that long after its value: every
+    /// read leaves it out at once, and a server's sweeper deletes it later
+    /// a range of this index at a time -- which is why the expiry is an
+    /// ordered index's and not a field's own: the sweep walks the rows
+    /// past their time rather than scan for them.
+    Sorted {
+        /// Milliseconds a row lives past its value; `None` for `@sorted`.
+        ttl: Option<u64>,
+    },
     /// Inverted index over a sparse vector's dimensions, behind `near` on a
     /// `sparse<N>` field (see [`crate::sparse`]).
     Inverted,
@@ -295,6 +303,17 @@ impl IndexKind {
     pub const HASH: IndexKind = IndexKind::Hash { unique: false };
     /// `@unique`.
     pub const UNIQUE: IndexKind = IndexKind::Hash { unique: true };
+    /// `@sorted`.
+    pub const SORTED: IndexKind = IndexKind::Sorted { ttl: None };
+
+    /// How long a row lives past the field's value, in milliseconds
+    /// (`@ttl`).
+    pub fn ttl(&self) -> Option<u64> {
+        match self {
+            IndexKind::Sorted { ttl } => *ttl,
+            _ => None,
+        }
+    }
 
     /// Whether it refuses a second document holding a value (`@unique`).
     pub fn is_unique(&self) -> bool {
@@ -319,7 +338,8 @@ impl IndexKind {
         // A path reads a value of no declared type: equality and order are
         // what it takes, and the text, vector and sparse indexes stay on
         // the fields that declare their type.
-        if field.contains('.') && !matches!(self, IndexKind::Hash { .. } | IndexKind::Sorted) {
+        if field.contains('.') && !matches!(self, IndexKind::Hash { .. } | IndexKind::Sorted { .. })
+        {
             return Err(Error::Query(format!(
                 "`{field}` is a path: it takes @hash, @unique or @sorted"
             )));
@@ -344,7 +364,15 @@ impl IndexKind {
                     "field `{field}` is not text, no full-text index can be built"
                 )));
             }
-            IndexKind::Sorted if !crate::sorted::orderable(ty) => {
+            // An expiry reads the field as a time: a row of a field of any
+            // other type would never know when it is gone. A path reads a
+            // value of no declared type, and was refused above.
+            IndexKind::Sorted { ttl: Some(ms) } if *ty != DataType::Timestamp || *ms == 0 => {
+                return Err(Error::Type(format!(
+                    "`{field}`: @ttl takes a timestamp field and a duration past zero"
+                )));
+            }
+            IndexKind::Sorted { .. } if !crate::sorted::orderable(ty) => {
                 return Err(Error::Type(format!(
                     "field `{field}` is not int, float, timestamp, text or json, no ordered \
                      index can be built"
@@ -405,6 +433,39 @@ impl Field {
         self.collate = Some(c);
         self
     }
+}
+
+/// Refuses a second `@ttl` among `fields`: a row expires by one time, and
+/// the sweep walks one index for it.
+pub fn one_expiry<'a>(collection: &str, fields: impl Iterator<Item = &'a Field>) -> Result<()> {
+    let mut ttl = fields.filter(|f| f.index.ttl().is_some());
+    match (ttl.next(), ttl.next()) {
+        (Some(a), Some(b)) => Err(Error::Query(format!(
+            "`{collection}`'s rows expire by one field: `{}` and `{}` both have @ttl",
+            a.name, b.name
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A ttl as `@ttl(..)` spells it: in the largest of days, hours, minutes
+/// and seconds -- or milliseconds -- it is a whole number of, so `ttl(30m)`
+/// reads back as it was written and a schema printed parses as the one it
+/// came from. Whole numbers only: a float written out brought the standard
+/// library's float formatting into the browser module, 18.7 KB of it.
+pub fn ttl_text(ms: u64) -> String {
+    let units = [
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1_000),
+    ];
+    for (unit, n) in units {
+        if ms.is_multiple_of(n) {
+            return format!("{}{unit}", ms / n);
+        }
+    }
+    format!("{ms}ms")
 }
 
 /// Text, or a list of it -- which compares element by element: what a
@@ -500,6 +561,7 @@ impl Schema {
             f.index.check(&f.name, &f.ty)?;
             seen.push(f.name.clone());
         }
+        one_expiry(&name, fields.iter())?;
         Ok(Schema {
             name,
             fields,
@@ -787,7 +849,14 @@ fn encode_index(out: &mut Vec<u8>, index: &IndexKind) {
             put_uvarint(out, spec.prefix_max as u64);
             put_uvarint(out, spec.prefix_min as u64);
         }
-        IndexKind::Sorted => out.push(4),
+        // An expiry is a kind of its own, as `@unique` is: a version that
+        // knows none refuses the file rather than open it as a plain
+        // ordered index and hand out the rows past their time.
+        IndexKind::Sorted { ttl: None } => out.push(4),
+        IndexKind::Sorted { ttl: Some(ms) } => {
+            out.push(9);
+            put_uvarint(out, *ms);
+        }
         IndexKind::Inverted => out.push(6),
     }
 }
@@ -825,7 +894,10 @@ fn decode_index(buf: &[u8], pos: &mut usize) -> Result<IndexKind> {
             prefix_min: get_uvarint(buf, pos)? as u8,
             chars: kind == 7,
         }),
-        4 => IndexKind::Sorted,
+        4 => IndexKind::SORTED,
+        9 => IndexKind::Sorted {
+            ttl: Some(get_uvarint(buf, pos)?),
+        },
         6 => IndexKind::Inverted,
         o => return Err(Error::Corrupt(format!("unknown index kind {o}"))),
     })

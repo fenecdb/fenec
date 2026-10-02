@@ -155,6 +155,14 @@ const REC_FIELDS: u8 = 12;
 const FIELD_ADD: u8 = 1;
 const FIELD_DROP: u8 = 2;
 const FIELD_RENAME: u8 = 3;
+/// A field's expiry set or taken off (`alter field f @ttl(..)`): the
+/// schema after it, and nothing of the field's ordered index changes.
+const FIELD_TTL: u8 = 4;
+
+/// The expiry a [`FIELD_TTL`] change leaves its field with.
+fn ttl_after(ch: &FieldChange) -> Option<u64> {
+    ch.schema.field(&ch.field).and_then(|f| f.index.ttl())
+}
 
 /// A [`REC_FIELDS`] record's body, read.
 struct FieldChange {
@@ -177,7 +185,7 @@ impl FieldChange {
         let op = *body
             .first()
             .ok_or_else(|| Error::Corrupt("an alter record cut short".into()))?;
-        if !matches!(op, FIELD_ADD | FIELD_DROP | FIELD_RENAME) {
+        if !matches!(op, FIELD_ADD | FIELD_DROP | FIELD_RENAME | FIELD_TTL) {
             return Err(Error::Corrupt(format!("unknown field change {op}")));
         }
         let mut p = 1;
@@ -1292,7 +1300,7 @@ impl Collection {
                     texts.insert(f.name.clone(), Derived::new(TextIndex::new(*spec)));
                 }
                 #[cfg(feature = "sorted")]
-                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                (IndexKind::Sorted { .. }, ty) if SortedIndex::supports(ty) => {
                     let ix = SortedIndex::new(ty, f.collate);
                     sorted.push((f.name.clone(), Derived::new(ix)));
                 }
@@ -1349,7 +1357,7 @@ impl Collection {
                     self.texts.insert(f.name.clone(), Derived::unbuilt());
                 }
                 #[cfg(feature = "sorted")]
-                (IndexKind::Sorted, ty) if SortedIndex::supports(ty) => {
+                (IndexKind::Sorted { .. }, ty) if SortedIndex::supports(ty) => {
                     self.sorted.push((f.name.clone(), Derived::unbuilt()));
                 }
                 #[cfg(feature = "sparse")]
@@ -1427,7 +1435,7 @@ impl Collection {
                     self.hashes.insert(p.name.clone(), Derived::unbuilt());
                 }
                 #[cfg(feature = "sorted")]
-                IndexKind::Sorted if !self.sorted.iter().any(|(n, _)| *n == p.name) => {
+                IndexKind::Sorted { .. } if !self.sorted.iter().any(|(n, _)| *n == p.name) => {
                     let name = p.name.clone();
                     in_schema_order(&mut self.sorted, &self.schema, &name, Derived::unbuilt());
                 }
@@ -1443,7 +1451,7 @@ impl Collection {
     /// has its index built by the caller, after this, which cannot fail.
     fn alter_fields(&mut self, ch: &FieldChange) -> Taken {
         let taken = match ch.op {
-            FIELD_ADD => Taken::default(),
+            FIELD_ADD | FIELD_TTL => Taken::default(),
             _ => self.take_indexes(&ch.field),
         };
         self.schema = ch.schema.clone();
@@ -1888,7 +1896,7 @@ fn missing_feature(kind: &IndexKind) -> Option<&'static str> {
         IndexKind::Vector(_) if !cfg!(feature = "vector") => Some("vector"),
         IndexKind::Text(_) if !cfg!(feature = "text") => Some("text"),
         IndexKind::Inverted if !cfg!(feature = "sparse") => Some("sparse"),
-        IndexKind::Sorted if !cfg!(feature = "sorted") => Some("sorted"),
+        IndexKind::Sorted { .. } if !cfg!(feature = "sorted") => Some("sorted"),
         _ => None,
     }
 }
@@ -2319,6 +2327,11 @@ pub struct Database {
     /// the one place a rewrite writes beside it.
     #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
     beside: std::sync::atomic::AtomicBool,
+    /// The time a read of a collection whose rows expire is answered at
+    /// ([`Self::set_clock`]); the system's clock when `None`. The browser
+    /// module has no clock and sets it before each statement, as it is
+    /// handed every time; a test pins it.
+    clock: Option<i64>,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -2396,6 +2409,23 @@ impl Database {
             spill_at: SPILL_AT,
             #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
+            clock: None,
+        }
+    }
+
+    /// Answers a read of a collection whose rows expire (`@ttl`) as at
+    /// `now`, in milliseconds since the epoch; `None` goes back to the
+    /// system's clock. `wasm32-unknown-unknown` has none, so the browser
+    /// module sets it before each statement, from `Date.now()`.
+    pub fn set_clock(&mut self, now: Option<i64>) {
+        self.clock = now;
+    }
+
+    /// The time a read is answered at.
+    fn now(&self) -> Result<i64> {
+        match self.clock {
+            Some(t) => Ok(t),
+            None => crate::time::now_ms(),
         }
     }
 
@@ -2524,6 +2554,22 @@ impl Database {
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
+        };
+        // A row past its time is gone for the subscriber as for any read:
+        // one that changed and expired is a deletion, and the sweep's
+        // delete of it later is one it was already told of.
+        let alive = self.alive(collection)?;
+        let shape;
+        let filter = match (filter, alive) {
+            (f, None) => f,
+            (Some(f), Some(a)) => {
+                shape = Expr::And(Box::new(f.clone()), Box::new(a));
+                Some(&shape)
+            }
+            (None, Some(a)) => {
+                shape = a;
+                Some(&shape)
+            }
         };
 
         let mut rows = Vec::new();
@@ -4485,6 +4531,7 @@ impl Database {
                         match op {
                             FIELD_ADD => drop(c.take_indexes(&field)),
                             FIELD_DROP => c.put_indexes(&field, taken),
+                            FIELD_TTL => {}
                             _ => {
                                 let t = c.take_indexes(&to);
                                 c.put_indexes(&field, t);
@@ -4584,7 +4631,8 @@ impl Database {
     /// (the caller separates them first with [`Statement::is_read_only`]).
     pub fn query(&self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         self.refuse_inexact(stmt, params)?;
-        match stmt {
+        let stmt = self.answered(stmt, params)?;
+        match &*stmt {
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::ListCollections => Ok(Response::Schemas(
@@ -4645,7 +4693,8 @@ impl Database {
 
     fn execute_inner(&mut self, stmt: &Statement, params: &[Value]) -> Result<Response> {
         self.refuse_inexact(stmt, params)?;
-        match stmt {
+        let answered = self.answered(stmt, params)?;
+        match &*answered {
             Statement::CreateCollection {
                 schema,
                 if_not_exists,
@@ -4684,6 +4733,246 @@ impl Database {
                 .schema
                 .clone()])),
             Statement::Compact(which) => self.compact(which.as_deref(), true),
+        }
+    }
+
+    /// `stmt` as it runs: each `in (get ...)` in a filter answered as the
+    /// list it is, and each filter over a collection whose rows expire
+    /// (`@ttl`) given the test that leaves out those past their time. The
+    /// statement itself where it holds neither, which costs a look at its
+    /// filters and at each collection's fields -- a handful, against a
+    /// query's rows. `explain` answers its own ([`Self::explain`]), so its
+    /// plan holds the inner `get`s.
+    fn answered<'s>(
+        &self,
+        stmt: &'s Statement,
+        params: &[Value],
+    ) -> Result<std::borrow::Cow<'s, Statement>> {
+        use std::borrow::Cow;
+        let (collection, filter) = match stmt {
+            Statement::Select(sel) => {
+                return Ok(match self.answered_select(sel, params, 0)? {
+                    Cow::Borrowed(_) => Cow::Borrowed(stmt),
+                    Cow::Owned(s) => Cow::Owned(Statement::Select(s)),
+                })
+            }
+            Statement::Update {
+                collection, filter, ..
+            }
+            | Statement::Delete { collection, filter } => (collection, filter),
+            _ => return Ok(Cow::Borrowed(stmt)),
+        };
+        if !filter.as_ref().is_some_and(Expr::has_subquery) && self.ttl_of(collection).is_none() {
+            return Ok(Cow::Borrowed(stmt));
+        }
+        let mut filter = filter.clone();
+        self.answer_filter(collection, &mut filter, params, 0)?;
+        let collection = collection.clone();
+        // Made anew rather than the statement cloned whole: `Statement`'s
+        // clone was its every variant's, a schema's among them.
+        Ok(Cow::Owned(match stmt {
+            Statement::Update { set, .. } => Statement::Update {
+                collection,
+                set: set.clone(),
+                filter,
+            },
+            _ => Statement::Delete { collection, filter },
+        }))
+    }
+
+    /// [`Self::answered`] for a `get`, which an inner one is as well,
+    /// `depth` levels down.
+    fn answered_select<'s>(
+        &self,
+        sel: &'s Select,
+        params: &[Value],
+        depth: usize,
+    ) -> Result<std::borrow::Cow<'s, Select>> {
+        let expiring = self.ttl_of(&sel.collection).is_some()
+            || sel
+                .lookup
+                .as_ref()
+                .is_some_and(|l| l.chain().any(|s| self.ttl_of(&s.collection).is_some()));
+        if !expiring && !sel.has_subquery() {
+            return Ok(std::borrow::Cow::Borrowed(sel));
+        }
+        let mut sel = sel.clone();
+        sel.each_filter_mut(&mut |collection, f| self.answer_filter(collection, f, params, depth))?;
+        Ok(std::borrow::Cow::Owned(sel))
+    }
+
+    /// A filter over `collection` as it runs ([`Self::answered`]).
+    fn answer_filter(
+        &self,
+        collection: &str,
+        filter: &mut Option<Expr>,
+        params: &[Value],
+        depth: usize,
+    ) -> Result<()> {
+        if let Some(f) = filter {
+            f.each_subquery_mut(&mut |e| self.answer_subquery(e, params, depth))?;
+        }
+        if let Some(alive) = self.alive(collection)? {
+            *filter = Some(match filter.take() {
+                Some(f) => Expr::And(Box::new(f), Box::new(alive)),
+                None => alive,
+            });
+        }
+        Ok(())
+    }
+
+    /// `e`, an `in (get ...)`, made the `in [..]` it answers: the inner
+    /// `get` run once, its one column the list, a null left out -- it
+    /// equals no value a row could be found by, and in the list it would
+    /// find the rows whose field is null. Past [`MAX_SUBQUERY_VALUES`] it
+    /// is refused, never cut short.
+    fn answer_subquery(&self, e: &mut Expr, params: &[Value], depth: usize) -> Result<()> {
+        let Expr::InSelect(lhs, inner) = std::mem::replace(e, Expr::Lit(Value::Null)) else {
+            unreachable!("each_subquery_mut hands an `in (get ...)`")
+        };
+        if depth >= MAX_SUBQUERY_DEPTH {
+            return Err(Error::Query(format!(
+                "`in (get ...)` nested too deep: at most {MAX_SUBQUERY_DEPTH} levels"
+            )));
+        }
+        inner.check_subquery()?;
+        let mut inner = self
+            .answered_select(&inner, params, depth + 1)?
+            .into_owned();
+        // One past the bound is all it takes to know the set is past it:
+        // a scan stops there rather than gather a million values to refuse
+        // them. `near` and `match` are bounded by their own pages, and an
+        // aggregate without `group` answers one row.
+        let ranked = inner.near.is_some() || inner.matcher.is_some();
+        if !ranked && (inner.aggregate.is_empty() || inner.group.is_some()) {
+            let bound = MAX_SUBQUERY_VALUES + 1;
+            inner.limit = Some(inner.limit.map_or(bound, |l| l.min(bound)));
+        }
+        let rows = self.select(&inner, params)?.rows;
+        if rows.len() > MAX_SUBQUERY_VALUES {
+            return Err(Error::Query(format!(
+                "`in (get {} ...)` found more than {MAX_SUBQUERY_VALUES} values: a set is not cut \
+                 short, so narrow the inner `get` or ask with `lookup ... required`",
+                inner.collection
+            )));
+        }
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) {
+                items.push(Expr::Lit(v));
+            }
+        }
+        plan(|| {
+            format!(
+                "subquery: {} values from {}, an `in` list",
+                items.len(),
+                inner.collection
+            )
+        });
+        *e = Expr::In(lhs, items);
+        Ok(())
+    }
+
+    /// The field whose value a row of `collection` expires by, and how
+    /// long after it (`@ttl`), in milliseconds.
+    fn ttl_of(&self, collection: &str) -> Option<(&str, u64)> {
+        let c = self.collections.get(collection)?;
+        c.schema
+            .fields
+            .iter()
+            .find_map(|f| f.index.ttl().map(|ttl| (f.name.as_str(), ttl)))
+    }
+
+    /// The test a row of `collection` passes while it lives, at the time a
+    /// read is answered (`@ttl`): `not (field <= now - ttl)`, so a row whose
+    /// field is null -- which has no time to expire from -- lives, and none
+    /// is swept. `None` for a collection whose rows do not expire. A `not`
+    /// rather than `field > now - ttl`, so that the planner never takes it
+    /// for a range to narrow by: it is a test of each row the rest found.
+    fn alive(&self, collection: &str) -> Result<Option<Expr>> {
+        let Some((field, ttl)) = self.ttl_of(collection) else {
+            return Ok(None);
+        };
+        let cutoff = self.now()?.saturating_sub(ttl.min(i64::MAX as u64) as i64);
+        Ok(Some(Expr::Not(Box::new(Expr::Cmp(
+            CmpOp::Le,
+            Box::new(Expr::Field(field.to_string())),
+            Box::new(Expr::Lit(Value::Timestamp(cutoff))),
+        )))))
+    }
+
+    /// The collections whose rows expire, by name: what a server's sweeper
+    /// looks at.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn expiring(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|n| self.ttl_of(n).is_some())
+            .cloned()
+            .collect()
+    }
+
+    /// Up to `max` of `collection`'s rows past their time at `now`,
+    /// ascending: a range of the field's ordered index where it is narrow,
+    /// and the scan in id order, stopped at `max`, where most rows are past
+    /// their time. Under the read lock; [`Self::sweep`] deletes them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn expired(&self, collection: &str, now: i64, max: usize) -> Result<Vec<DocId>> {
+        let Some((field, ttl)) = self.ttl_of(collection) else {
+            return Ok(Vec::new());
+        };
+        let cutoff = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
+        let past = Expr::Cmp(
+            CmpOp::Le,
+            Box::new(Expr::Field(field.to_string())),
+            Box::new(Expr::Lit(Value::Timestamp(cutoff))),
+        );
+        self.matching_ids_capped(collection, &Some(past), &[], Some(max))
+    }
+
+    /// Deletes those of `ids` still past their time at `now` -- a write
+    /// since [`Self::expired`] may have moved one's time on -- as one block
+    /// of ordinary deletes, so a replica, `/_changes`, an archive and a
+    /// subscriber see each as any delete. Not through a statement: a
+    /// `del` leaves out the rows past their time, as every read of the
+    /// collection does, and would find none of them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sweep(&mut self, collection: &str, now: i64, ids: &[DocId]) -> Result<usize> {
+        let Some((field, ttl)) = self.ttl_of(collection) else {
+            return Ok(0);
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let cutoff = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
+        let filter = Some(Expr::And(
+            Box::new(Expr::In(
+                Box::new(Expr::Field("id".into())),
+                ids.iter()
+                    .map(|&id| Expr::Lit(Value::Int(id as i64)))
+                    .collect(),
+            )),
+            Box::new(Expr::Cmp(
+                CmpOp::Le,
+                Box::new(Expr::Field(field.to_string())),
+                Box::new(Expr::Lit(Value::Timestamp(cutoff))),
+            )),
+        ));
+        self.may_start()?;
+        if self.block.is_some() {
+            return Err(Error::Query(
+                "a block is open: the sweep waits for it".into(),
+            ));
+        }
+        let collection = collection.to_string();
+        self.open_block();
+        match self.delete(&collection, &filter, &[]) {
+            Ok(Response::Affected(n)) => self.commit().map(|_| n),
+            Ok(_) => self.commit().map(|_| 0),
+            Err(e) => {
+                self.rollback();
+                Err(e)
+            }
         }
     }
 
@@ -4802,6 +5091,21 @@ impl Database {
                 }
                 (FIELD_RENAME, from.clone(), to.clone())
             }
+            Alter::Ttl(name, ttl) => {
+                let pos = schema.field_pos(name).ok_or_else(|| no_field(name))?;
+                let f = &mut schema.fields[pos];
+                if !matches!(f.index, IndexKind::Sorted { .. }) {
+                    return Err(Error::Query(format!(
+                        "`{name}` has no ordered index to expire rows by: \
+                         `create index on {collection} ({name}) @ttl(..)` makes one"
+                    )));
+                }
+                let kind = IndexKind::Sorted { ttl: *ttl };
+                kind.check(name, &f.ty)?;
+                f.index = kind;
+                crate::schema::one_expiry(collection, schema.fields.iter())?;
+                (FIELD_TTL, name.clone(), String::new())
+            }
         };
         let ch = FieldChange {
             op,
@@ -4835,6 +5139,14 @@ impl Database {
         Ok(Response::Ok(match op {
             FIELD_ADD => format!("field `{}` added to `{collection}`", ch.field),
             FIELD_DROP => format!("field `{}` dropped from `{collection}`", ch.field),
+            FIELD_TTL => match ttl_after(&ch) {
+                Some(ms) => format!(
+                    "rows of `{collection}` expire {} after `{}`",
+                    crate::schema::ttl_text(ms),
+                    ch.field
+                ),
+                None => format!("rows of `{collection}` no longer expire"),
+            },
             _ => format!("field `{}` renamed to `{}`", ch.field, ch.to),
         }))
     }
@@ -6500,7 +6812,10 @@ impl Database {
     /// rows: one row a step, in the order the steps ran.
     fn explain(&self, sel: &Select, params: &[Value]) -> Result<ResultSet> {
         PLAN.with(|p| *p.borrow_mut() = Some(Vec::new()));
-        let result = self.select(sel, params);
+        // The inner `get`s run inside the plan, which names what each found.
+        let result = self
+            .answered_select(sel, params, 0)
+            .and_then(|sel| self.select(&sel, params));
         let mut steps = PLAN.with(|p| p.borrow_mut().take()).unwrap_or_default();
         let rs = result?;
         steps.push(match rs.rows.first().map(|r| &r.values[..]) {
@@ -7222,7 +7537,7 @@ fn build_index(c: &mut Collection, pos: usize) -> Result<()> {
             let ix = Derived::new(text_of(&c.store, pos, spec)?);
             c.texts.insert(field, ix);
         }
-        IndexKind::Sorted => {
+        IndexKind::Sorted { .. } => {
             let ix = Derived::new(sorted_of(&c.store, &c.schema.fields[pos], pos, None)?);
             match c.sorted.iter_mut().find(|(n, _)| *n == field) {
                 Some(slot) => slot.1 = ix,
@@ -7259,7 +7574,7 @@ fn build_path_index(c: &mut Collection, path: &str) -> Result<()> {
             let ix = Derived::new(hash_of(&c.store, pos, keys)?);
             c.hashes.insert(path.to_string(), ix);
         }
-        IndexKind::Sorted => {
+        IndexKind::Sorted { .. } => {
             let ix = Derived::new(sorted_of(&c.store, f, pos, keys)?);
             match c.sorted.iter_mut().find(|(n, _)| *n == path) {
                 Some(slot) => slot.1 = ix,
@@ -7893,6 +8208,46 @@ struct Filter<'q> {
     paths: Vec<(usize, &'q str)>,
     /// A row's values: its fields', then its paths'.
     vals: std::cell::RefCell<Vec<Value>>,
+    /// A row's value encoded, for a [`Test::InSet`] to look up.
+    key: std::cell::RefCell<Vec<u8>>,
+}
+
+/// How long an `in` list is before a row is looked up in it rather than
+/// compared with each value. An `in (get ...)` hands one of up to 100 000:
+/// the 2 000 codes one handed a scan of 200 000 rows by an unindexed field
+/// took 2 302 ms compared a value at a time, and take 16 looked up. Over
+/// those rows 4 ints took 9.2 ms compared and 13.2 looked up, 8 took 11.6
+/// and 11.1, 64 took 56.4 and 11.5; text pays sooner, 4 of it 20.2 against
+/// 14.9.
+const IN_SET_AT: usize = 8;
+
+/// The values of an `in` over `slot` as the keys a hash index files them
+/// under, when the list is long and a key's bytes say what `cmp_value`
+/// says: every value of the type the field holds -- an int, a text, a
+/// timestamp or a boolean, which a typed field's every row holds or
+/// `null` -- so equal keys are equal values and no others are. A float
+/// (`NaN` equals everything), a timestamp written as text, a json field or
+/// a path is compared a value at a time, as before.
+fn in_set(c: &Collection, slot: Slot, values: &[Value]) -> Option<HashIndex> {
+    let ty = match slot {
+        Slot::Id => DataType::Int,
+        Slot::At(p) => c.schema.fields[p].ty.clone(),
+        Slot::Path(_) => return None,
+    };
+    let mut set = HashIndex::default();
+    for v in values {
+        match (&ty, v) {
+            (DataType::Int, Value::Int(_))
+            | (DataType::Text, Value::Text(_))
+            | (DataType::Timestamp, Value::Timestamp(_))
+            | (DataType::Bool, Value::Bool(_)) => {}
+            _ => return None,
+        }
+        let mut key = Vec::new();
+        crate::codec::encode_value(&mut key, v);
+        set.add(key, 0);
+    }
+    Some(set)
 }
 
 /// Where a bound test reads its field: the document's id, a field by its
@@ -7919,6 +8274,11 @@ enum Test<'q> {
         coll: Option<Collation>,
     },
     In(Slot, Vec<Value>),
+    /// [`Test::In`] over a long list, its values made the keys a hash index
+    /// files them under ([`in_set`]) when the first row is tested: made
+    /// where the filter is bound, it was built for an `in` an index answers
+    /// whole, and 2 000 ids took that query from 0.93 to 2.48 ms.
+    InSet(Slot, Vec<Value>, std::cell::OnceCell<Option<HashIndex>>),
     Like(Slot, Value),
     Has(Slot, Value),
     Eval(&'q Expr),
@@ -7943,6 +8303,7 @@ impl<'q> Filter<'q> {
             index_of,
             paths,
             vals: std::cell::RefCell::new(Vec::new()),
+            key: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -8029,6 +8390,9 @@ impl<'q> Filter<'q> {
                     }
                 }
                 match slot(a) {
+                    Some(s) if values.len() >= IN_SET_AT => {
+                        Test::InSet(s, values, Default::default())
+                    }
                     Some(s) => Test::In(s, values),
                     None => Test::Eval(e),
                 }
@@ -8117,6 +8481,18 @@ impl<'q> Filter<'q> {
             Test::In(s, values) => {
                 let f = get(*s);
                 values.iter().any(|v| v.cmp_value(f) == Ordering::Equal)
+            }
+            Test::InSet(s, values, set) => {
+                let f = get(*s);
+                match set.get_or_init(|| in_set(self.c, *s, values)) {
+                    Some(set) => {
+                        let mut key = self.key.borrow_mut();
+                        key.clear();
+                        crate::codec::encode_value(&mut key, f);
+                        !f.is_null() && set.get(&key).is_some()
+                    }
+                    None => values.iter().any(|v| v.cmp_value(f) == Ordering::Equal),
+                }
             }
             Test::Like(s, v) => match (get(*s).as_text(), v.as_text()) {
                 (Some(hay), Some(needle)) => like_match(hay, needle),

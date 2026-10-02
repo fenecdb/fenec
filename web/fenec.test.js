@@ -87,6 +87,30 @@ test('in', () => {
   assert.deepEqual(p, [2023, 2024]);
 });
 
+test('in takes a query: its one column is the list, its values bound in place', () => {
+  const inner = from('customers').select('id').where({ country: 'TR', tier: { gte: 2 } });
+  const [sql, p] = q()
+    .where('year', '>', 2000)
+    .where({ author: { in: inner }, tags: { has: 'rust' } })
+    .toFenecQL();
+  assert.equal(
+    sql,
+    'get articles where year > $1 and author in (get customers select id where country = $2 ' +
+      'and tier >= $3) and tags has $4',
+  );
+  assert.deepEqual(p, [2000, 'TR', 2, 'rust']);
+  // Under `not`, and nested.
+  const deeper = from('customers').select('id').where({ tier: { in: from('tiers').select('n') } });
+  assert.equal(
+    q().where({ author: { not: { in: deeper } } }).toFenecQL()[0],
+    'get articles where not (author in (get customers select id where tier in (get tiers select n)))',
+  );
+  // One column, and nothing that counts or attaches in its place.
+  for (const bad of [from('c'), from('c').select('a', 'b'), from('c').select('id').lookup('o', { on: 'c' })]) {
+    assert.throws(() => q().where({ author: { in: bad } }).toFenecQL(), /exactly one column/);
+  }
+});
+
 test('null becomes is null, not = null', () => {
   assert.equal(q().where({ summary: null }).toFenecQL()[0], 'get articles where summary is null');
   assert.equal(q().where('summary', '=', null).toFenecQL()[0], 'get articles where summary is null');
@@ -599,6 +623,67 @@ test('the module made without indexes and the full one open each other\'s files'
   fromTail.load(cat(image, written.bytes, tail.bytes));
   assert.deepEqual(answers(fromTail), want);
   for (const db of [full, small, fromImage, fromTail]) db.close();
+});
+
+test('in (get ...) and @ttl on wasm, and in the module without indexes', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec, from } = await import('./fenec.js');
+  const now = 1_800_000_000_000;
+  for (const bytes of [wasm, lite].filter(Boolean)) {
+    const db = await Fenec.open(bytes);
+    // The module has no clock: it is handed the page's, which a test pins.
+    db.now = () => now;
+    db.run(`create collection customers (country text @hash, n int);
+            create collection orders (customer int @hash, code text, total int);
+            create collection sessions (user text, seen timestamp @ttl(30m))`);
+    db.run(`put customers [{country: "TR", n: 1}, {country: "DE", n: 2}, {country: "TR", n: 3}]`);
+    const orders = [];
+    for (let i = 0; i < 60; i++) orders.push(`{customer: ${1 + (i % 4)}, code: "c${1 + (i % 4)}", total: ${i}}`);
+    db.run(`put orders [${orders.join(',')}]`);
+    const count = (sql, params = []) => db.rows(sql, params)[0].count;
+    // As its list written out, over @hash and over the scan.
+    assert.equal(
+      count('get orders where customer in (get customers select id where country = $1) count', ['TR']),
+      count('get orders where customer in [1, 3] count'),
+    );
+    const codes = [];
+    for (let i = 1; i <= 40; i++) codes.push(`"c${i}"`);
+    db.run(`put customers {country: "US", n: 4}`);
+    // A list long enough to be looked up rather than walked.
+    assert.equal(
+      count(`get orders where code in [${codes.join(', ')}] count`),
+      count('get orders where code in (get orders select code) count'),
+    );
+    // Through the builder, bound from the same parameters.
+    const tr = await db
+      .from('orders')
+      .where({ customer: { in: db.from('customers').select('id').where({ country: 'TR' }) } })
+      .count();
+    assert.equal(tr, 30);
+    assert.throws(
+      () => db.run('get orders where customer in (get customers select id, n)'),
+      /one column/,
+    );
+
+    // A row is gone 30 minutes after its time, for every read at once.
+    db.run(`put sessions [{user: "a", seen: ${now}}, {user: "b", seen: ${now - 30 * 60 * 1000}},
+                          {user: "c", seen: ${now - 29 * 60 * 1000}}, {user: "d"}]`);
+    const users = () => db.rows('get sessions select user order id').map((r) => r.user);
+    assert.deepEqual(users(), ['a', 'c', 'd']);
+    assert.equal(count('get sessions count'), 3);
+    assert.deepEqual(
+      db.rows('get customers select id where id in (get sessions select id) order id').map((r) => r.id),
+      [1, 3, 4],
+    );
+    db.now = () => now + 60 * 1000;
+    assert.deepEqual(users(), ['a', 'd']);
+    // The page sweeps nothing: the row is still in the file for a time it
+    // is handed later, or earlier.
+    db.now = () => 0;
+    assert.deepEqual(users(), ['a', 'b', 'c', 'd']);
+    db.now = () => now;
+    assert.equal(db.schemas().find((s) => s.name === 'sessions').fields[1].index, 'ttl(30m)');
+    db.close();
+  }
 });
 
 test('alter collection in the browser, and a file holding one loaded', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

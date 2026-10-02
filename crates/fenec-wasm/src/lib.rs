@@ -278,7 +278,11 @@ fn with_db<T>(handle: u32, f: impl FnOnce(&mut Database) -> T) -> Option<T> {
 
 /// Runs FenecQL. `params` is a JSON array (it may be empty), and `vectors`
 /// the parameters that are vectors, handed over as `f32`s rather than as
-/// text (`with_vectors`); a client with none passes none.
+/// text (`with_vectors`); a client with none passes none. `now` is the
+/// time, in milliseconds since the epoch, a read of a collection whose rows
+/// expire (`@ttl`) is answered at: the module has no clock, and is handed
+/// every time. A client from before it passes none -- `NaN` here -- and
+/// such a read is refused rather than answered at some time it was not.
 /// Returns: JSON (`{"kind":"rows"|"affected"|"ok"|"schemas"|"error", ...}`).
 ///
 /// # Safety
@@ -292,6 +296,7 @@ pub unsafe extern "C" fn fenec_query(
     params_len: usize,
     vectors_ptr: *const u8,
     vectors_len: usize,
+    now: f64,
 ) -> *mut u8 {
     let sql = str_from(sql_ptr, sql_len);
     let params_src = str_from(params_ptr, params_len);
@@ -300,6 +305,8 @@ pub unsafe extern "C" fn fenec_query(
         false => std::slice::from_raw_parts(vectors_ptr, vectors_len),
     };
 
+    let now = now.is_finite().then_some(now as i64);
+    with_db(handle, |db| db.set_clock(now));
     let out = run(handle, &sql, &params_src, vectors);
     boxed(out.as_bytes())
 }

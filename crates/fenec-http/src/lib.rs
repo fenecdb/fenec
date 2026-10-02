@@ -55,6 +55,7 @@ pub mod replication;
 pub mod seal;
 pub mod sse;
 pub mod statements;
+pub mod sweep;
 pub mod tenants;
 
 use access::Who;
@@ -928,11 +929,10 @@ fn keyed(
         db.rollback();
         return Ok(());
     }
-    if let Err(e) = idempotent::keep(db, key, resp).and_then(|_| db.commit()) {
+    if let Err(e) = idempotent::keep(db, key, resp, ttl).and_then(|_| db.commit()) {
         db.rollback();
         return Err(e);
     }
-    idempotent::purge(db, ttl);
     Ok(())
 }
 

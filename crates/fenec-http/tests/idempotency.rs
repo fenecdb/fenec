@@ -15,16 +15,24 @@ const ROOT: &str = "root-token";
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<Database>>,
 }
 
 fn start(ttl: Duration) -> Node {
+    start_over(ttl, &[])
+}
+
+fn start_over(ttl: Duration, setup: &[&str]) -> Node {
     let access =
         Arc::new(Access::new(SECRET, "notes  read,write  where owner = $jwt.sub\n").unwrap());
     let mut db = Database::new();
     for sql in [
         "create collection notes (owner text, t text)",
         "create collection logs (t text)",
-    ] {
+    ]
+    .iter()
+    .chain(setup)
+    {
         db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
     }
     let cfg = Config {
@@ -34,13 +42,14 @@ fn start(ttl: Duration) -> Node {
         idempotency_ttl: ttl,
         ..Config::default()
     };
-    let server = Server::new(Arc::new(RwLock::new(db)), cfg);
+    let db = Arc::new(RwLock::new(db));
+    let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, access }
+    Node { port, access, db }
 }
 
 struct Answer {
@@ -188,4 +197,87 @@ fn a_key_past_its_time_is_a_new_request() {
     let again = n.query(ROOT, Some("k"), "put logs {t: \"a\"}");
     assert_eq!((again.status, again.replayed), (200, false));
     assert_eq!(n.count("logs"), "[{\"count\":2}]");
+}
+
+/// The keys are `@ttl`: one past its time is out of every read at once and
+/// the sweeper deletes it, where the write path once purged them itself.
+#[test]
+fn the_sweeper_deletes_the_keys_past_their_time() {
+    let n = start(Duration::from_millis(200));
+    n.query(ROOT, Some("k1"), "put logs {t: \"a\"}");
+    n.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
+    let keys = |n: &Node| {
+        let mut db = n.db.write().unwrap();
+        // Every row the file holds, past its time or not.
+        db.set_clock(Some(0));
+        let r = db.query(&fenec_ql::parse_one("get _idempotency count").unwrap(), &[]);
+        db.set_clock(None);
+        r.unwrap().rows().unwrap().rows[0].values[0].clone()
+    };
+    assert_eq!(keys(&n), Value::Int(2));
+    assert_eq!(
+        fenec_http::sweep::pass("test", &n.db),
+        0,
+        "none past its time yet"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(fenec_http::sweep::pass("test", &n.db), 2);
+    assert_eq!(keys(&n), Value::Int(0));
+    let schema =
+        n.db.read()
+            .unwrap()
+            .collection("_idempotency")
+            .unwrap()
+            .schema
+            .clone();
+    assert_eq!(schema.field("at").unwrap().index.ttl(), Some(200));
+}
+
+/// Keys kept before the expiry -- `at int @sorted`, purged by the write
+/// path -- are made again as the expiry keeps them, and a server started
+/// with another `--idempotency-ttl` moves it.
+#[test]
+fn the_keys_collection_follows_the_ttl_it_is_started_with() {
+    let n = start_over(
+        Duration::from_secs(60),
+        &[
+            "create collection _idempotency (key text @hash, request int, status int, \
+             body text, at int @sorted)",
+            "put _idempotency {key: \"x\", request: 1, status: 200, body: \"{}\", at: 1}",
+        ],
+    );
+    let ttl = |n: &Node| {
+        let db = n.db.read().unwrap();
+        let f = db.collection("_idempotency").unwrap().schema.clone();
+        let at = f.field("at").unwrap();
+        (at.ty.clone(), at.index.ttl())
+    };
+    n.query(ROOT, Some("k"), "put logs {t: \"a\"}");
+    assert_eq!(ttl(&n), (DataType::Timestamp, Some(60_000)));
+    let again = n.query(ROOT, Some("k"), "put logs {t: \"a\"}");
+    assert!(again.replayed);
+    let db = Arc::clone(&n.db);
+    let moved = Node {
+        port: {
+            let cfg = Config {
+                addr: "127.0.0.1:0".into(),
+                token: Some(ROOT.into()),
+                idempotency_ttl: Duration::from_secs(3600),
+                ..Config::default()
+            };
+            let server = Server::new(Arc::clone(&db), cfg);
+            let listener = server.bind().unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let _ = server.serve_on(listener);
+            });
+            port
+        },
+        access: Arc::clone(&n.access),
+        db,
+    };
+    let kept = moved.query(ROOT, Some("k"), "put logs {t: \"a\"}");
+    assert!(kept.replayed, "a key kept is kept across the move");
+    moved.query(ROOT, Some("k2"), "put logs {t: \"b\"}");
+    assert_eq!(ttl(&moved), (DataType::Timestamp, Some(3_600_000)));
 }

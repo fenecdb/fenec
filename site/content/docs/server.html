@@ -30,6 +30,7 @@ href="/docs/languages">Your language</a>.</p>
 <details class="deep"><summary>Details</summary>
 <p>One process writes one file. Two processes over the same file corrupt it,
 which is why everything a server does — HTTP, replication, the graph keeper,
+the sweeper of rows past their time (<a href="/docs/fenecql#ttl"><code>@ttl</code></a>),
 the <code>--follow</code> mirror — runs inside this one process rather than
 as programs of its own.</p>
 

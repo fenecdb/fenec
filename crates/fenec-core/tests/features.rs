@@ -103,7 +103,7 @@ fn what_needs_a_missing_index_is_refused() {
 fn a_path_declaring_an_ordered_index_is_scanned() {
     let mut db = Database::new();
     let mut schema = Schema::new("j", vec![Field::new("meta", DataType::Json)]).unwrap();
-    schema.add_path(Field::new("meta.n", DataType::Json).indexed(IndexKind::Sorted));
+    schema.add_path(Field::new("meta.n", DataType::Json).indexed(IndexKind::SORTED));
     db.execute(&Statement::CreateCollection {
         schema,
         if_not_exists: false,

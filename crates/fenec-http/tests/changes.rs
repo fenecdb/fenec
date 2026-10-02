@@ -597,3 +597,43 @@ fn a_quiet_collection_keeps_its_cursor_fresh() {
     assert_eq!(count(&data, "puts"), 1);
     assert!(data.contains("zed"), "{data}");
 }
+
+/// A row past its time (`@ttl`) is out of the seed at once, and a
+/// subscriber is told it is gone when the sweep deletes it -- one it was
+/// sent and one it never was alike, as any delete of the shape.
+#[test]
+fn an_expired_row_leaves_the_subscription() {
+    let h = start(Config::default());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    {
+        let mut db = h.db.write().unwrap();
+        for sql in [
+            "create collection sessions (user text, seen timestamp @ttl(2s))".to_string(),
+            format!("put sessions [{{user: \"live\", seen: {now}}}, {{user: \"old\", seen: 1}}]"),
+        ] {
+            db.execute(&fenec_ql::parse_one(&sql).unwrap()).unwrap();
+        }
+    }
+    let mut s = Sub::open(h.port, "/sessions/changes");
+    let (name, data) = s.next().expect("seed");
+    assert_eq!(name, "seed");
+    assert_eq!(count(&data, "rows"), 1, "{data}");
+    assert!(data.contains("live") && !data.contains("old"), "{data}");
+
+    // The sweep deletes the row the seed left out: a delete like any.
+    assert_eq!(fenec_http::sweep::pass("test", &h.db), 1);
+    let (name, data) = s.next().expect("change");
+    assert_eq!(name, "change");
+    assert!(data.contains("\"dels\":[2]"), "{data}");
+
+    // The row it was sent expires, and is deleted once its time is past.
+    std::thread::sleep(Duration::from_millis(2100));
+    assert_eq!(fenec_http::sweep::pass("test", &h.db), 1);
+    let (name, data) = s.next().expect("change");
+    assert_eq!(name, "change");
+    assert!(data.contains("\"dels\":[1]"), "{data}");
+    assert!(data.contains("\"puts\":[]"), "{data}");
+}
