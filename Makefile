@@ -306,7 +306,8 @@ sync-bench:
 ## The Swift package (Package.swift, integrations/swift) on macOS: the
 ## XCFramework's macOS slice for this machine, then swift test -- the
 ## engine, the builder over every golden case, live queries, a replica
-## against a fenec-server the tests start
+## against a fenec-server the tests start -- and the tests again with
+## Swift's cooperative pool cut to one thread (test-strict.sh)
 swift-test:
 	integrations/swift/run-tests.sh
 
