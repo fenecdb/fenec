@@ -10,13 +10,15 @@
 //! waits for the lock and finds it. A key is the subject's, for a scoped
 //! token, so no user is handed another's answer; the request it came with
 //! is kept as a hash, and the key sent with another request is refused
-//! (422), as the IETF draft has it. Kept for `idempotency_ttl`, then let
-//! go of a batch at a time; the change stream leaves these writes out.
+//! (422), as the IETF draft has it. Kept for `idempotency_ttl`: the
+//! collection's `at` is `@ttl`, so a key past its time is out of every read
+//! at once and the sweeper deletes it ([`crate::sweep`]), where a purge of
+//! its own once ran on the write path at most once a minute. The change
+//! stream leaves these writes out.
 
 use crate::access::Who;
 use crate::http::{Request, Response};
 use fenec_core::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The collection the keys are kept in.
@@ -90,13 +92,10 @@ fn now_ms() -> i64 {
 /// write, with the collection made if missing every time, they were most
 /// of what a key cost.
 fn stmt(which: usize) -> &'static Statement {
-    const SQL: [&str; 5] = [
-        "create collection if not exists _idempotency \
-         (key text @hash, request int, status int, body text, at int @sorted)",
+    const SQL: [&str; 3] = [
         "get _idempotency select request, status, body, at where key = $1",
         "del _idempotency where key = $1",
         "put _idempotency {key: $1, request: $2, status: $3, body: $4, at: $5}",
-        "del _idempotency where at < $1",
     ];
     static PARSED: std::sync::OnceLock<Vec<Statement>> = std::sync::OnceLock::new();
     &PARSED.get_or_init(|| {
@@ -106,11 +105,43 @@ fn stmt(which: usize) -> &'static Statement {
     })[which]
 }
 
-const CREATE: usize = 0;
-const GET: usize = 1;
-const DEL: usize = 2;
-const PUT: usize = 3;
-const PURGE: usize = 4;
+const GET: usize = 0;
+const DEL: usize = 1;
+const PUT: usize = 2;
+
+/// The keys' collection as `ttl_ms` keeps them, made, or made to keep them
+/// so: a server started again with another `--idempotency-ttl` moves the
+/// expiry (`alter field at @ttl`), and a collection from before the expiry
+/// -- `at int @sorted`, whose keys a purge let go of -- is made again, the
+/// keys it held a day's retries at most.
+fn ensure(db: &mut Database, ttl_ms: i64) -> fenec_core::error::Result<()> {
+    let ttl = fenec_core::schema::ttl_text(ttl_ms.max(1) as u64);
+    let at = db.collection(KEYS).ok().map(|c| {
+        c.schema
+            .field("at")
+            .map(|f| (f.ty == DataType::Timestamp, f.index.ttl()))
+    });
+    let sql = match at {
+        Some(Some((true, Some(t)))) if t == ttl_ms.max(1) as u64 => return Ok(()),
+        Some(Some((true, Some(_)))) => {
+            format!("alter collection {KEYS} alter field at @ttl({ttl})")
+        }
+        made => {
+            if made.is_some() {
+                db.execute(&Statement::DropCollection {
+                    name: KEYS.into(),
+                    if_exists: true,
+                })?;
+            }
+            format!(
+                "create collection {KEYS} (key text @hash, request int, status int, \
+                 body text, at timestamp @ttl({ttl}))"
+            )
+        }
+    };
+    db.execute(&fenec_ql::parse_one(&sql)?)?;
+    Ok(())
+}
 
 /// The answer kept for `key`, as it was sent: under the write lock, so a
 /// request with the key that is still running has landed by now.
@@ -122,13 +153,15 @@ pub fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
         return None;
     };
     let row = rs.rows.first()?;
-    let [Value::Int(request), Value::Int(status), Value::Text(body), Value::Int(at)] =
+    let [Value::Int(request), Value::Int(status), Value::Text(body), Value::Timestamp(at)] =
         row.values.as_slice()
     else {
         return None;
     };
-    // Past its time: as if never sent, and let go of by the next purge.
-    if now_ms() - at > ttl_ms {
+    // Past its time: as if never sent. A read leaves out a key past the
+    // collection's expiry already; this is for a `--idempotency-ttl`
+    // shortened since, until the next keyed write moves it.
+    if now_ms() - at >= ttl_ms {
         return None;
     }
     if *request != key.request {
@@ -140,12 +173,16 @@ pub fn answered(db: &Database, key: &Key, ttl_ms: i64) -> Option<Response> {
     Some(Response::json(*status as u16, body.clone()).header("Idempotent-Replayed", "true"))
 }
 
-/// Keeps `resp` as `key`'s answer, in the block the write is in.
-pub fn keep(db: &mut Database, key: &Key, resp: &Response) -> fenec_core::error::Result<()> {
+/// Keeps `resp` as `key`'s answer, in the block the write is in, for
+/// `ttl_ms`.
+pub fn keep(
+    db: &mut Database,
+    key: &Key,
+    resp: &Response,
+    ttl_ms: i64,
+) -> fenec_core::error::Result<()> {
     let fresh = db.collection(KEYS).is_err();
-    if fresh {
-        db.execute_with(stmt(CREATE), &[])?;
-    }
+    ensure(db, ttl_ms)?;
     let body = match resp.body.len() <= KEPT_BODY {
         true => String::from_utf8_lossy(&resp.body).into_owned(),
         false => format!(
@@ -158,27 +195,14 @@ pub fn keep(db: &mut Database, key: &Key, resp: &Response) -> fenec_core::error:
         Value::Int(key.request),
         Value::Int(resp.status as i64),
         Value::Text(body),
-        Value::Int(now_ms()),
+        Value::Timestamp(now_ms()),
     ];
-    // Once past its time a key may be sent again: the row is written over.
+    // A key sent again after its time is a new request: the row of the
+    // first, if a read still finds it, is written over; one past the
+    // expiry is the sweeper's.
     if !fresh {
         db.execute_with(stmt(DEL), &row[..1])?;
     }
     db.execute_with(stmt(PUT), &row)?;
     Ok(())
-}
-
-/// When the keys past their time were last let go of.
-static PURGED: AtomicU64 = AtomicU64::new(0);
-
-/// Lets go of the keys past their time, at most once a minute: a range of
-/// the ordered index, not a scan.
-pub fn purge(db: &mut Database, ttl_ms: i64) {
-    let now = now_ms();
-    let last = PURGED.load(Ordering::Relaxed) as i64;
-    if now - last < 60_000 || db.collection(KEYS).is_err() {
-        return;
-    }
-    PURGED.store(now as u64, Ordering::Relaxed);
-    let _ = db.execute_with(stmt(PURGE), &[Value::Int(now - ttl_ms)]);
 }

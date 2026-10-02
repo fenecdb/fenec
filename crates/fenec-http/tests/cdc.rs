@@ -23,6 +23,7 @@ fn file(name: &str) -> PathBuf {
 struct Node {
     port: u16,
     access: Arc<Access>,
+    db: Arc<RwLock<fenec_core::engine::Database>>,
 }
 
 /// A server keeping `buffer` bytes of writes for `/_changes` alone, as
@@ -39,18 +40,21 @@ fn start(name: &str, buffer: usize) -> Node {
         access: Some(Arc::clone(&access)),
         ..Config::default()
     };
-    let server = match buffer {
+    let (server, db) = match buffer {
         0 => {
             let db = fenec_core::fs::open(path.to_str().unwrap()).unwrap();
-            Server::new(Arc::new(RwLock::new(db)), cfg)
+            let db = Arc::new(RwLock::new(db));
+            (Server::new(Arc::clone(&db), cfg), db)
         }
         _ => {
             let (db, feed) = replication::open(path.to_str().unwrap(), buffer).unwrap();
-            Server::new(Arc::new(RwLock::new(db)), cfg).with_replication(Replication::new(
+            let db = Arc::new(RwLock::new(db));
+            let server = Server::new(Arc::clone(&db), cfg).with_replication(Replication::new(
                 None,
                 Some(feed),
                 None,
-            ))
+            ));
+            (server, db)
         }
     };
     let listener = server.bind().unwrap();
@@ -58,7 +62,7 @@ fn start(name: &str, buffer: usize) -> Node {
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    Node { port, access }
+    Node { port, access, db }
 }
 
 struct Answer {
@@ -387,7 +391,8 @@ fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
         sync_on_write: true,
         ..Config::default()
     };
-    let server = Server::new(Arc::new(RwLock::new(db)), cfg).with_replication(Replication::new(
+    let db = Arc::new(RwLock::new(db));
+    let server = Server::new(Arc::clone(&db), cfg).with_replication(Replication::new(
         None,
         Some(feed),
         None,
@@ -400,6 +405,7 @@ fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
     let n = Node {
         port,
         access: Arc::new(Access::new(SECRET, "").unwrap()),
+        db,
     };
     n.run("create collection a (t text)");
     n.run("put a {t: \"x\"}");
@@ -422,6 +428,33 @@ fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
         [
             fenec_core::value::Value::Text("idx".into()),
             fenec_core::value::Value::Int(2)
+        ]
+    );
+}
+
+/// The sweep's deletes of rows past their time (`@ttl`) are ordinary
+/// deletes on disk: the stream hands each over as one.
+#[test]
+fn a_sweep_comes_as_deletes() {
+    let n = start("sweep", replication::DEFAULT_BUFFER);
+    n.run("create collection s (t text, seen timestamp @ttl(1h))");
+    n.run(
+        "put s [{t: \"old\", seen: 1}, {t: \"live\", seen: \"2999-01-01\"}, {t: \"older\", seen: 2}]",
+    );
+    let before = n.changes("since=0");
+    let last = events(&before.body).last().unwrap().0;
+    assert_eq!(fenec_http::sweep::pass("test", &n.db), 2);
+    let after = n.changes(&format!("since={last}"));
+    assert_eq!(after.status, 200, "{}", after.body);
+    let got: Vec<_> = events(&after.body)
+        .into_iter()
+        .map(|e| (e.1, e.2, e.3))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("del".to_string(), "s".to_string(), Some(1)),
+            ("del".to_string(), "s".to_string(), Some(3)),
         ]
     );
 }

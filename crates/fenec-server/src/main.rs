@@ -589,6 +589,9 @@ fn main() {
         fenec_http::link::beside(path, &shared);
         fenec_http::link::keep(path, &shared);
     }
+    // The rows past their time (`@ttl`) are deleted once a minute, a
+    // replica's by its primary.
+    fenec_http::sweep::watch(file.as_deref().unwrap_or("the database"), &shared);
 
     // The follower applies the primary's writes; this server's own feed
     // passes them on to replicas of its own.
