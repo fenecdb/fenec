@@ -250,6 +250,12 @@ dotnet add package FenecDb</pre>
     an idempotency key, a read that waits for a write on a replica, a
     subscription, the change stream, a tenant, the health check, and a typed
     error carrying the status.</li>
+  <li><b>The query builder,</b> as Python's and JavaScript's have it:
+    <code>db.From("docs").Where("year", "&gt;=", 2024).Near("embed",
+    v).Limit(5)</code>, immutable, ending in <code>Rows</code>,
+    <code>First</code>, <code>Count</code> or a write. All four build the same
+    text from the same chain, held to one golden file
+    (<a href="languages.html#builder">The builder</a>).</li>
   <li><b>Vectors round-trip to the bit:</b> a <code>[]float32</code>,
     <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
     as the decimals that read back as each float.</li>
@@ -289,8 +295,9 @@ holds its integrations to, against a real fenecdb.</p>
 <tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-server's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
 <tr><td>Vercel AI SDK</td><td>the SDK's own mock models: documents embedded with <code>embedMany</code> and found again with <code>near</code>, kept to a source and fused with the words, and a model that calls the search tool in <code>generateText</code> and answers from what it returned</td><td><code>make ai-sdk-test</code></td></tr>
 <tr><td>React</td><td>a stand-in database for the contract, and a real fenec-server and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
-<tr><td>Go</td><td>a primary with a token, a JWT policy and the change stream, a replica and a node of tenants, started by the tests: <code>near</code> with exact scores, parameters of every type, the errors, a batch put back whole, an idempotency key, <code>After</code> on the replica, a subscription, <code>/_changes</code>, a tenant and a scoped token</td><td><code>make go-test</code></td></tr>
+<tr><td>Go</td><td>a primary with a token, a JWT policy and the change stream, a replica and a node of tenants, started by the tests: <code>near</code> with exact scores, parameters of every type, the errors, a batch put back whole, an idempotency key, <code>After</code> on the replica, a subscription, <code>/_changes</code>, a tenant and a scoped token; the query builder against every case of <code>integrations/builder-golden.json</code>, and its queries' answers against the same statements sent as text</td><td><code>make go-test</code></td></tr>
 <tr><td>.NET</td><td>the same, with xunit</td><td><code>make dotnet-test</code></td></tr>
+<tr><td>Python client</td><td>the query builder against every case of <code>integrations/builder-golden.json</code>, sync and async, and its queries' answers against the same statements sent as text</td><td><code>make python-test</code></td></tr>
 </tbody>
 </table>
 </div>

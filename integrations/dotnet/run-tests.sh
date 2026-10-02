@@ -22,7 +22,9 @@ if [ "$(uname -s)" != Linux ]; then
     exit 1
 fi
 # The tests start servers on loopback ports of their own: the host's
-# network. The source is copied inside, so bin/ and obj/ stay there.
+# network. The source is copied inside, so bin/ and obj/ stay there, and
+# the builder's golden file, outside it, goes in beside it.
 exec docker run --rm --network host -v "$here:/src:ro" -v "$root/target/debug/fenec-server:/fenec-server:ro" \
+    -v "$root/integrations/builder-golden.json:/golden.json:ro" -e FENEC_GOLDEN=/golden.json \
     -e FENEC_SERVER=/fenec-server mcr.microsoft.com/dotnet/sdk:8.0 sh -c \
     "cp -r /src /work && cd /work && dotnet test FenecDb.Tests --nologo $*"

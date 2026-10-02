@@ -984,6 +984,33 @@ test('HTTP and wasm generate the same query text', async () => {
   }
 });
 
+// The golden file every builder is held to: the JS builder is its
+// reference, so each case run through it again gives what the file says.
+test('the builder makes what integrations/builder-golden.json says, case by case', async () => {
+  const { run, GOLDEN } = await import('./golden.mjs');
+  const cases = JSON.parse(await readFile(GOLDEN, 'utf8'));
+  assert.ok(cases.length >= 60, `${cases.length} cases`);
+  for (const k of cases) {
+    const want = 'error' in k ? { error: k.error } : { text: k.text, params: k.params };
+    assert.deepEqual(await run(k.steps), want, k.name);
+  }
+});
+
+test('a field called t is a field, not a condition node', () => {
+  assert.deepEqual(q().where({ t: 'or' }).toFenecQL(), ['get articles where t = $1', ['or']]);
+  assert.deepEqual(q().where(or({ t: 'not' }, { u: 1 })).toFenecQL(), [
+    'get articles where t = $1 or u = $2',
+    ['not', 1],
+  ]);
+});
+
+test('a write refuses a lookup rather than drop it', async () => {
+  const exec = () => ({ count: 0 });
+  const withLookup = q().where('id', 1).lookup('remarks', { on: 'article_id', required: true });
+  await assert.rejects(() => withLookup.bind(exec).delete(), /delete cannot be used with `lookup`/);
+  assert.throws(() => withLookup.toUpdate({ a: 1 }), /update cannot be used with `lookup`/);
+});
+
 test('HTTP response shapes are normalised', async () => {
   const s = await stub((req) =>
     req.body.query.startsWith('put') ? [200, { affected: 2 }] : [200, [{ count: 7 }]],

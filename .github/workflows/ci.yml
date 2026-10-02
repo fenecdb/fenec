@@ -177,8 +177,14 @@ jobs:
       - name: Languages over HTTP
         run: make languages-test
 
+      # integrations/builder-golden.json is what the JS builder makes of its
+      # chains, which the Python, Go and .NET builders are held to below.
+      - name: Builder golden file
+        run: node web/golden.mjs --check
+
       # The Go and .NET SDKs against a primary, a replica of it and a node
-      # of tenants their tests start, with the runner's Go and .NET.
+      # of tenants their tests start, with the runner's Go and .NET; each
+      # runs its builder over every case of the golden file.
       - name: Go SDK
         run: make go-test
 

@@ -30,6 +30,7 @@ make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (D
 make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
 make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
 make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
+make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -1601,7 +1602,22 @@ which would cut a subscription short. `make go-test` and `make
 dotnet-test` start the servers they need (`FENEC_SERVER`, else
 `target/debug/fenec-server`), CI runs both, and `make languages-test`
 runs the docs' Go and C# examples through each SDK too (`go-sdk`,
-`dotnet-sdk`). CI also builds the three packages as a release
+`dotnet-sdk`). Python, Go and .NET have the JS builder too
+(`fenecdb/builder.py`'s `db.collection(...)`, Go's `db.From(...)` and
+.NET's `db.From(...)`), and all four make the same text of the same chain,
+to the byte, refusals by the same message: `integrations/builder-golden.json`
+holds the chains (`{op, args}`, the JS builder's names, what JSON has no
+word for an object of one `$` key) and what the JS builder made of each --
+`web/golden.mjs` holds the chains and writes the file (`make
+builder-golden`), `web/fenec.test.js` runs every case through the JS
+builder again so the file cannot drift, and `make python-test`, `go-test`
+and `dotnet-test` run every case through their own builder, the
+endpoints' statements read off a recording transport. A builder change
+starts in `web/fenec.js` and a case in `golden.mjs`, then the three
+follow. Go's object conditions are `Fields`/`Ops` and a document a
+`D(...)`, names and values in turn, since a map has no order and the order
+is the text's; its options are functional, since a struct cannot tell
+`limit 0` from none. CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
 `collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
