@@ -121,6 +121,11 @@ jobs:
       - name: Test
         run: make test
 
+      # make test checks it too, but only where the module was built; here
+      # it was, and a runner that skipped a scenario fails the job.
+      - name: Both sync runners ran every scenario
+        run: node integrations/sync-scenarios-check.mjs
+
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
