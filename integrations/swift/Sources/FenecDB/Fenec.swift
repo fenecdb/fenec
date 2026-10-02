@@ -88,6 +88,8 @@ public final class Fenec: @unchecked Sendable {
     /// Writes under way, which a live query's run waits out.
     private var inflight = 0
     let lives: Lives
+    /// The replica's sync, set once by `Fenec.sync`.
+    private var replicaSync: Replica?
 
     private init(handle: UInt64) {
         self.handle = handle
@@ -200,6 +202,20 @@ public final class Fenec: @unchecked Sendable {
         // After an error too: a text that failed may follow statements that
         // wrote, and the change ring says what landed.
         lives.touch(self)
+        // A write to a synced collection left a request for the server due.
+        syncing?.poll()
+    }
+
+    var syncing: Replica? {
+        state.lock()
+        defer { state.unlock() }
+        return replicaSync
+    }
+
+    func attach(_ r: Replica) {
+        state.lock()
+        replicaSync = r
+        state.unlock()
     }
 
     var isClosed: Bool {
@@ -253,6 +269,7 @@ public final class Fenec: @unchecked Sendable {
     /// Waits for the calls under way.
     public func close() async throws {
         if markClosed() { return }
+        syncing?.stop()
         await lives.clear()
         try await byHandle(.close)
     }
