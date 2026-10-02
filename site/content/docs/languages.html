@@ -328,9 +328,11 @@ rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</
 calls that writes the FenecQL statement, every value a parameter and every
 name checked against FenecQL's own rule, which is where an injection would
 have to get through. All four build the same text from the same chain, to
-the byte, and refuse the same mistakes with the same message.</p>
+the byte, and refuse the same mistakes with the same message. Python's
+builder starts with <code>collection</code>, since <code>from</code> is a
+keyword there.</p>
 
-<div class="tbl">
+<div class="tbl code-grid">
 <table>
 <thead><tr><th>Python</th><th>JavaScript</th><th>Go</th><th>.NET</th></tr></thead>
 <tbody>
