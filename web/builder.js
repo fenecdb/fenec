@@ -59,6 +59,17 @@ export async function checked(to, opts, how) {
 /** A collection's name, or a table's (`fenecTable`). */
 export const nameOf = (n) => (n && typeof n === 'object' ? n.$name : n);
 
+/**
+ * A response's rows, with what `facet` counted beside them as `facets`
+ * when the query asked for any: the array a page renders and its sidebar,
+ * through `rows()`, a live query and `useLiveQuery` alike.
+ */
+export function rowsOf(res) {
+  const rows = res?.rows ?? [];
+  if (res?.facets) rows.facets = res.facets;
+  return rows;
+}
+
 // ----------------------------------------------------------- query builder
 //
 // Why it exists: every interface with conditional filters forced manual
@@ -386,7 +397,7 @@ export class Query {
   #s;
 
   constructor(state) {
-    this.#s = { cond: [], order: [], offset: 0, lookups: [], ...state };
+    this.#s = { cond: [], order: [], offset: 0, lookups: [], marks: [], facets: [], ...state };
   }
 
   // Cloned through `this.constructor`: subclasses such as `FenecSync.from()`
@@ -475,6 +486,62 @@ export class Query {
       project: list.map((c) => c.text),
       aggregate: list.some((c) => c.aggregate),
     });
+  }
+
+  /**
+   * `highlight(field)` in the select list: where the terms `match` found
+   * stand in the field's text -- `[start, end]` pairs of UTF-16 offsets, a
+   * JavaScript string's own -- or, given `{ pre, post }`, the text with
+   * each mark between them. The text is not escaped: a page that renders it
+   * as HTML builds it from the offsets, or escapes it first. Answers under
+   * `highlight(field)`, after the fields `select` named.
+   *
+   *   db.from('docs').select('title').highlight('body', { pre: '<mark>', post: '</mark>' })
+   *     .match('body', text)
+   */
+  highlight(field, opts = {}) {
+    return this.#mark({ field: ident(field), words: null, ...tags(opts, 'highlight') });
+  }
+
+  /**
+   * `snippet(field, words)`: the window of `words` words around the densest
+   * marks, `{ text, marks }` -- or the marked text, given `{ pre, post }` --
+   * with `ellipsis` where it leaves text out. Answers under
+   * `snippet(field)`.
+   */
+  snippet(field, words, opts = {}) {
+    const mark = { field: ident(field), words: whole(words, 'snippet words'), ...tags(opts, 'snippet') };
+    if (mark.words === 0) throw new FenecError('snippet shows at least one word');
+    if (opts.ellipsis !== undefined) mark.ellipsis = text(opts.ellipsis, 'snippet ellipsis');
+    return this.#mark(mark);
+  }
+
+  #mark(mark) {
+    // Each answers under its label, and a row holds a name once.
+    const kind = (m) => (m.words === null ? 'highlight' : 'snippet');
+    if (this.#s.marks.some((m) => kind(m) === kind(mark) && m.field === mark.field)) {
+      throw new FenecError(`${kind(mark)}(${mark.field}) is asked twice`);
+    }
+    return this.#with({ marks: [...this.#s.marks, mark] });
+  }
+
+  /**
+   * `facet field [top N]`: each value the field holds over every row the
+   * query matches -- not only the page -- and how many rows hold it, most
+   * first; `top` keeps the commonest. A list counts once a row for each
+   * value. The counts come back beside the rows: `run()`'s `facets`, and
+   * `rows().facets`.
+   *
+   *   db.from('products').match('title', 'phone').where('price', '<', 500)
+   *     .facet('brand', { top: 10 }).facet('color').limit(20)
+   */
+  facet(field, opts = {}) {
+    const f = { field: path(field), top: opts.top === undefined ? null : whole(opts.top, 'facet top') };
+    if (f.top === 0) throw new FenecError(`facet ${f.field} top 0 answers nothing`);
+    if (this.#s.facets.some((g) => g.field === f.field)) {
+      throw new FenecError(`facet ${f.field} is asked twice`);
+    }
+    return this.#with({ facets: [...this.#s.facets, f] });
   }
 
   /** `group field` -- one row per value, for a select list that aggregates. */
@@ -649,9 +716,9 @@ export class Query {
 
   /** The text as an inner query of `in`, its values bound by the outer `bind`. */
   [INNER](bind) {
-    const { project, count, lookups } = this.#s;
+    const { project, count, lookups, marks, facets } = this.#s;
     // One column is the list; the engine refuses the rest too.
-    if (!project || project.length !== 1 || count || lookups.length) {
+    if (!project || project.length !== 1 || count || lookups.length || marks.length || facets.length) {
       throw new FenecError(
         `an inner query of \`in\` selects exactly one column: from('${this.#s.collection}').select('id')`,
       );
@@ -661,7 +728,7 @@ export class Query {
 
   #text(bind) {
     const { collection, project, near, order, limit, offset, count } = this.#s;
-    const { match, rerank, lookups, aggregate, group, fuse } = this.#s;
+    const { match, rerank, lookups, aggregate, group, fuse, marks, facets } = this.#s;
     // The engine refuses these too; failing here never sends a query.
     if (group && !aggregate) {
       throw new FenecError(`group ${group} needs an aggregate in select: 'count(*)'`);
@@ -672,6 +739,15 @@ export class Query {
       if (!group && (order.length || limit !== undefined || offset)) {
         throw new FenecError('aggregates answer one row; group makes a row per value');
       }
+    }
+    if (marks.length) {
+      const what = marks[0].words === null ? 'highlight' : 'snippet';
+      if (!match) throw new FenecError(`${what} needs match: it marks the terms match found`);
+      if (aggregate) throw new FenecError(`${what} marks a row's text; aggregates answer groups`);
+    }
+    if (facets.length) {
+      if (near) throw new FenecError('facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near');
+      if (aggregate) throw new FenecError('facet cannot be combined with aggregates: group counts by value');
     }
     // The engine refuses both of these too; failing here never sends a query.
     if (rerank && !match) {
@@ -724,7 +800,17 @@ export class Query {
     if (count) this.#assertCountable();
 
     let sql = `get ${collection}`;
-    if (project) sql += ` select ${project.join(', ')}`;
+    // The marks after the fields `select` named, or after every field.
+    const items = marks.map((m) => {
+      let s = `${m.words === null ? 'highlight' : 'snippet'}(${m.field}`;
+      if (m.words !== null) s += `, ${m.words}`;
+      if (m.ellipsis !== undefined || (m.words !== null && m.pre !== undefined)) {
+        s += `, ${bind(m.ellipsis ?? '', 'snippet')}`;
+      }
+      if (m.pre !== undefined) s += `, ${bind(m.pre, m.field)}, ${bind(m.post, m.field)}`;
+      return `${s})`;
+    });
+    if (project || items.length) sql += ` select ${[...(project ?? ['*']), ...items].join(', ')}`;
     const where = this.#where(bind);
     if (where) sql += ` where ${where}`;
     if (group) sql += ` group ${group}`;
@@ -751,6 +837,9 @@ export class Query {
     if (limit !== undefined) sql += ` limit ${limit}`;
     if (offset) sql += ` offset ${offset}`;
     if (count) sql += ' count';
+    if (facets.length) {
+      sql += ` facet ${facets.map((f) => (f.top === null ? f.field : `${f.field} top ${f.top}`)).join(', ')}`;
+    }
     // Terminal, so every clause after it belongs to the child -- and being
     // emitted last, its parameters land after the parent's, which is the
     // order `bind` numbered them in.
@@ -773,15 +862,18 @@ export class Query {
     return sql;
   }
 
-  /** The raw response (`{columns, rows}`). */
+  /** The raw response (`{columns, rows}`, and `facets` when asked). */
   async run() {
     const [sql, params] = this.toFenecQL();
     return this.#exec(sql, params);
   }
 
-  /** Rows: an array of objects keyed by field name. */
+  /**
+   * Rows: an array of objects keyed by field name -- and, when the query
+   * asked for facets, the counts as its `facets`.
+   */
   async rows() {
-    return (await this.run()).rows ?? [];
+    return rowsOf(await this.run());
   }
 
   /** The first row, or `null`. */
@@ -873,6 +965,7 @@ export class Query {
     // decides what a count counts; a write has no use for one, and left
     // out, `.lookup(...).delete()` deleted every parent it filtered.
     if (this.#s.lookups.length) throw new FenecError(`${verb} cannot be used with \`lookup\``);
+    if (this.#s.facets.length) throw new FenecError(`${verb} cannot be used with \`facet\``);
     if (verb === 'insert' && this.#s.cond.length) {
       throw new FenecError('insert cannot be used with `where`');
     }
@@ -925,6 +1018,20 @@ export class Query {
     }
     return this.#s.exec(sql, params);
   }
+}
+
+/** A mark's tags, `{ pre, post }`: both or neither, each text. */
+function tags(opts, what) {
+  if (opts.pre === undefined && opts.post === undefined) return {};
+  if (opts.pre === undefined || opts.post === undefined) {
+    throw new FenecError(`${what} takes both pre and post, or neither`);
+  }
+  return { pre: text(opts.pre, `${what} pre`), post: text(opts.post, `${what} post`) };
+}
+
+function text(v, what) {
+  if (typeof v !== 'string') throw new FenecError(`${what} must be text: ${JSON.stringify(v)}`);
+  return v;
 }
 
 /** Turns the `where` arguments into a single condition. */

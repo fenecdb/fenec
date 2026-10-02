@@ -34,6 +34,7 @@ import {
   ident,
   isSpec,
   nameOf,
+  rowsOf,
   whole,
 } from './builder.js';
 import { FenecHttp, connect, sseEvents } from './http.js';
@@ -364,10 +365,12 @@ export class Fenec {
     return out;
   }
 
-  /** Returns the query result as a plain array of objects. */
+  /**
+   * Returns the query result as a plain array of objects, the counts a
+   * `facet` asked for as its `facets`.
+   */
   rows(sql, params = []) {
-    const r = this.run(sql, params);
-    return r.rows ?? [];
+    return rowsOf(this.run(sql, params));
   }
 
   /**
@@ -591,7 +594,7 @@ class Lives {
     } else {
       const [sql, params] = typeof query === 'string' ? [query, opts.params ?? []] : Array.isArray(query) ? query : [];
       if (typeof sql !== 'string') throw new FenecError('live: a Query, a FenecQL text, or [text, params]');
-      rows = async () => (await exec(sql, params ?? [])).rows ?? [];
+      rows = async () => rowsOf(await exec(sql, params ?? []));
       reads = null;
     }
     if (opts.collections) reads = opts.collections.map((c) => ident(c, 'collection'));

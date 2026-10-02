@@ -38,9 +38,10 @@ export function useLiveQuery<Q extends LiveQuery & { rows(): Promise<unknown[]> 
 ): Awaited<ReturnType<Q['rows']>> | undefined;
 /**
  * The same, its rows typed by the caller: a FenecQL text, or a query whose
- * type does not say.
+ * type does not say. A text that asks for facets (`facet brand`) has them
+ * on its rows.
  */
 export function useLiveQuery<Row = Record<string, unknown>>(
   query: LiveQuery | string | [string, unknown[]] | null | undefined,
   opts?: { collections?: string[] },
-): Row[] | undefined;
+): (Row[] & { facets?: Record<string, { value: unknown; count: number }[]> }) | undefined;

@@ -1122,6 +1122,72 @@ test('collate und on wasm is Intl.Collator("und") in every script, handed the da
   for (const d of [db, again, plain, stale, bare]) d.close();
 });
 
+// Highlights are UTF-16 offsets: what a JavaScript string's `slice` takes,
+// past an emoji and a Han character outside the first plane; the facets
+// count every matched row, whatever the page, and come back on the rows.
+test('highlight, snippet and facet on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection p (title text @text, brand text @hash, color text, tags [text])');
+  const docs = [
+    { title: '🦀 Rust phone case, İstanbul edition', brand: 'acme', color: 'red', tags: ['new', 'sale'] },
+    { title: 'phone stand 𠮷 for ISTANBUL desks', brand: 'acme', color: 'blue', tags: ['sale'] },
+    { title: 'a cable for any phone', brand: 'nova', color: 'red', tags: [] },
+    { title: 'lens cap', brand: 'zeta', color: 'red' },
+  ];
+  await db.from('p').insert(docs);
+
+  const q = db
+    .from('p')
+    .select('title')
+    .highlight('title')
+    .snippet('title', 3, { ellipsis: '…' })
+    .match('title', 'phone istanbul')
+    .facet('brand')
+    .facet('color', { top: 1 })
+    .facet('tags')
+    .limit(1);
+  const rows = await q.rows();
+  assert.equal(rows.length, 1);
+  for (const r of rows) {
+    // Each mark, sliced out of the text as JavaScript slices it, is a word
+    // the query holds -- folded as the index folds it.
+    for (const [s, e] of r['highlight(title)']) {
+      assert.ok(['phone', 'istanbul'].includes(r.title.slice(s, e).toLocaleLowerCase('tr')), r.title.slice(s, e));
+    }
+    const { text, marks } = r['snippet(title)'];
+    for (const [s, e] of marks) assert.match(text.slice(s, e), /phone|stanbul|STANBUL/);
+  }
+  const first = (await db.from('p').select('title').highlight('title', { pre: '[', post: ']' }).match('title', 'istanbul').rows())
+    .map((r) => r['highlight(title)']);
+  assert.deepEqual(first.sort(), ['phone stand 𠮷 for [ISTANBUL] desks', '🦀 Rust phone case, [İstanbul] edition']);
+  // The counts are over the three rows that hold `phone`, not the page of one.
+  assert.deepEqual(rows.facets, {
+    brand: [{ value: 'acme', count: 2 }, { value: 'nova', count: 1 }],
+    color: [{ value: 'red', count: 2 }],
+    tags: [{ value: 'sale', count: 2 }, { value: 'new', count: 1 }],
+  });
+  // `run` carries them beside the rows; a query without facets has none.
+  assert.deepEqual((await q.run()).facets, rows.facets);
+  assert.equal((await db.from('p').rows()).facets, undefined);
+  assert.equal(db.rows('get p limit 0 facet brand').facets.brand.length, 3);
+  // A live query is handed them too, and again after a write.
+  const seen = [];
+  const stop = db.live(db.from('p').where('color', 'red').facet('brand').limit(0), (r) => seen.push(r.facets.brand));
+  await new Promise((r) => setTimeout(r, 0));
+  await db.from('p').insert({ title: 'red phone', brand: 'zeta', color: 'red' });
+  await new Promise((r) => setTimeout(r, 0));
+  stop();
+  assert.deepEqual(seen, [
+    [{ value: 'acme', count: 1 }, { value: 'nova', count: 1 }, { value: 'zeta', count: 1 }],
+    [{ value: 'zeta', count: 2 }, { value: 'acme', count: 1 }, { value: 'nova', count: 1 }],
+  ]);
+  // Refused where there is nothing to mark, or nothing a facet could count.
+  assert.throws(() => db.run('get p select highlight(title)'), /needs `match`/);
+  assert.throws(() => db.run('get p facet brand, brand'), /asked twice/);
+  db.close();
+});
+
 // ----------------------------------------------------------- HTTP endpoint
 //
 // Tests against a real server live on the Rust side (`crates/fenec-http/tests`).
@@ -1166,6 +1232,23 @@ test('the HTTP transport sends the text the builder generated', async () => {
       query: 'get articles select title where year >= $1 near embed $2 limit 5',
       params: [2024, [1, 2]],
     });
+  } finally {
+    s.close();
+  }
+});
+
+// A query that asks for facets is answered `{rows, facets}` rather than the
+// bare array, and the rows carry them as a page's do.
+test('the HTTP transport hands facets beside the rows', async () => {
+  const facets = { brand: [{ value: 'acme', count: 3 }] };
+  const s = await stub(() => [200, { rows: [{ title: 'a' }], facets }]);
+  try {
+    const db = connect(s.url);
+    const rows = await db.from('articles').select('title').facet('brand').limit(1).rows();
+    assert.deepEqual([...rows], [{ title: 'a' }]);
+    assert.deepEqual(rows.facets, facets);
+    assert.equal(s.seen[0].body.query, 'get articles select title limit 1 facet brand');
+    assert.deepEqual((await db.rows('get articles facet brand')).facets, facets);
   } finally {
     s.close();
   }

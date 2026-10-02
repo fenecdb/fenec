@@ -186,6 +186,30 @@ export type Aggregate<F extends Fields> =
 
 export type Row<F extends Fields> = F & { id: number };
 
+/** Where a mark stands: `[start, end)` in UTF-16 code units, a string's index. */
+export type Mark = [start: number, end: number];
+
+/** A `snippet()` without tags: the window's text and its marks in it. */
+export interface Snippet {
+  text: string;
+  marks: Mark[];
+}
+
+/** One value of a `facet` and how many matched rows hold it. */
+export interface FacetCount<V = unknown> {
+  value: V | null;
+  count: number;
+}
+
+/** What `facet` counted: each field asked, its values most first. */
+export type Facets = Record<string, FacetCount[]>;
+
+/** The value a facet of a field counts: a list's elements one by one. */
+export type FacetValue<T> = NonNullable<T> extends readonly (infer E)[] ? E : NonNullable<T>;
+
+/** A query's rows, and when it asked for facets, the counts as `facets`. */
+export type Rows<P, Fa> = {} extends Fa ? P[] : P[] & { facets: Fa };
+
 /**
  * The row shape a chained `lookup` produces: the new collection's rows are
  * attached to the level named by `Path`, not to the parent.
@@ -303,7 +327,7 @@ export interface Spec<T> {
    * .select('id').where(...)` runs once, before the outer query
    * (`in (get ...)`).
    */
-  in?: Writable<T>[] | Query<any, any, any>;
+  in?: Writable<T>[] | Query<any, any, any, any, any, any>;
   not?: Writable<T> | null | Spec<T>;
 }
 
@@ -388,13 +412,14 @@ export declare class Query<
   L extends readonly string[] = [],
   Rel extends Relations = {},
   At extends string = string,
+  Fa extends Facets = {},
 > {
   /** Binds the query to an executor (wasm, HTTP, fenec-server). */
-  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L, Rel, At>;
+  bind(exec: Exec | { run(sql: string, params: unknown[]): unknown }): Query<F, P, L, Rel, At, Fa>;
 
   select<K extends keyof Row<F> & string>(
     ...cols: (K | K[])[]
-  ): Query<F, Pick<Row<F>, K>, L, Rel, At>;
+  ): Query<F, Pick<Row<F>, K>, L, Rel, At, Fa>;
   /**
    * An aggregating list: the field grouped by, and aggregates spelled as
    * FenecQL spells them -- each answers under that name.
@@ -403,51 +428,98 @@ export declare class Query<
    */
   select<K extends keyof Row<F> & string, A extends Aggregate<F>>(
     ...cols: (K | A)[]
-  ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L, Rel, At>;
-  select(): Query<F, Row<F>, L, Rel, At>;
+  ): Query<F, Pick<Row<F>, K> & { [N in A]: number | string | null }, L, Rel, At, Fa>;
+  select(): Query<F, Row<F>, L, Rel, At, Fa>;
   /** Fields and paths into json fields, each path answering under its text. */
   select<C extends (keyof Row<F> & string) | JsonPath<F>>(
     ...cols: C[]
-  ): Query<F, { [N in C]: N extends keyof Row<F> ? Row<F>[N] : Json }, L, Rel, At>;
+  ): Query<F, { [N in C]: N extends keyof Row<F> ? Row<F>[N] : Json }, L, Rel, At, Fa>;
+
+  /**
+   * `highlight(field)` in the select list: where the terms `match` found
+   * stand in the field's text, `[start, end]` pairs of UTF-16 offsets --
+   * a JavaScript string's own -- or, given `{ pre, post }`, the text with
+   * each mark between them, not escaped. Needs `match`; answers under
+   * `highlight(<field>)`, after the fields `select` named.
+   */
+  highlight<K extends TextKey<F>>(
+    field: K,
+  ): Query<F, P & { [N in `highlight(${K})`]: Mark[] | null }, L, Rel, At, Fa>;
+  highlight<K extends TextKey<F>>(
+    field: K,
+    opts: { pre: string; post: string },
+  ): Query<F, P & { [N in `highlight(${K})`]: string | null }, L, Rel, At, Fa>;
+
+  /**
+   * `snippet(field, words)`: the window of `words` words around the densest
+   * marks, `{ text, marks }` -- or, given `{ pre, post }`, the marked text --
+   * with `ellipsis` where text is left out. Answers under
+   * `snippet(<field>)`.
+   */
+  snippet<K extends TextKey<F>>(
+    field: K,
+    words: number,
+    opts?: { ellipsis?: string },
+  ): Query<F, P & { [N in `snippet(${K})`]: Snippet | null }, L, Rel, At, Fa>;
+  snippet<K extends TextKey<F>>(
+    field: K,
+    words: number,
+    opts: { ellipsis?: string; pre: string; post: string },
+  ): Query<F, P & { [N in `snippet(${K})`]: string | null }, L, Rel, At, Fa>;
+
+  /**
+   * `facet field [top N]`: each value the field holds over every row the
+   * query matches -- not only the page -- and how many rows hold it, most
+   * first; a list counts once a row for each value. Beside the rows:
+   * `rows().facets`, `run().facets`.
+   */
+  facet<K extends keyof Row<F> & string>(
+    field: K,
+    opts?: { top?: number },
+  ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<FacetValue<Row<F>[K]>>[] }>;
+  facet<K extends JsonPath<F>>(
+    field: K,
+    opts?: { top?: number },
+  ): Query<F, P, L, Rel, At, Fa & { [N in K]: FacetCount<Json>[] }>;
 
   /** `group field`: one row per value, for a select list that aggregates. */
-  group(field: keyof Row<F> & string): Query<F, P, L, Rel, At>;
+  group(field: keyof Row<F> & string): Query<F, P, L, Rel, At, Fa>;
 
-  where(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At>;
+  where(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At, Fa>;
   where<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'in',
     values: Writable<Row<F>[K]>[],
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: 'has',
     value: Elem<Row<F>[K]>,
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
   where<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: Writable<Row<F>[K]> | null,
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
   /** A path into a json field: `where('meta.lang', '=', 'tr')`. */
-  where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L, Rel, At>;
-  where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L, Rel, At>;
-  where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L, Rel, At>;
+  where(field: JsonPath<F>, value: Json | Spec<Json>): Query<F, P, L, Rel, At, Fa>;
+  where(field: JsonPath<F>, op: 'in', values: Json[]): Query<F, P, L, Rel, At, Fa>;
+  where(field: JsonPath<F>, op: Op, value: Json): Query<F, P, L, Rel, At, Fa>;
 
-  orWhere(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At>;
+  orWhere(cond: Where<F> | Cond<F>): Query<F, P, L, Rel, At, Fa>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     value: Writable<Row<F>[K]> | null | Spec<Row<F>[K]>,
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
   orWhere<K extends keyof Row<F> & string>(
     field: K,
     op: Op,
     value: unknown,
-  ): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
 
   /**
    * Vector search; `_score` is added to the result. Over a `sparse<N>` field
@@ -457,17 +529,17 @@ export declare class Query<
     field: VectorKey<F>,
     vector: number[] | Float32Array | string,
     opts?: { ef?: number; exact?: boolean },
-  ): Query<F, P & { _score: number }, L, Rel, At>;
+  ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
   /** Full-text search over a `@text` index; `_score` is added to the result. */
-  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L, Rel, At>;
+  match(field: TextKey<F>, query: string): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
   /**
    * With both `match` and `near`: ranks by both. Each side takes its own
    * `candidates` (20 unless given, never fewer than the page) and a
    * document scores `1 / (k + rank)` from each list it is on (`k` 60).
    */
-  fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L, Rel, At>;
+  fuse(opts?: { k?: number; candidates?: number }): Query<F, P, L, Rel, At, Fa>;
 
   /**
    * Reorders what `match` found by exact vector distance. Requires `match`,
@@ -477,7 +549,7 @@ export declare class Query<
     field: VectorKey<F>,
     vector: number[] | Float32Array,
     opts?: { candidates?: number },
-  ): Query<F, P & { _score: number }, L, Rel, At>;
+  ): Query<F, P & { _score: number }, L, Rel, At, Fa>;
 
   /**
    * Attaches the children of another collection to each row.
@@ -510,7 +582,7 @@ export declare class Query<
   lookup<M extends string, C extends Fields = Fields>(
     name: M,
     opts: LookupOptions<Hold<C>>,
-  ): Query<F, Attach<P, L, M, C>, [...L, M], Rel, M>;
+  ): Query<F, Attach<P, L, M, C>, [...L, M], Rel, M, Fa>;
   /**
    * A relation of `defineRelations`, by its name: its key comes from the
    * relation, and its rows are typed by the table it reaches -- attached
@@ -526,13 +598,14 @@ export declare class Query<
     Attach<P, L, RelTarget<Rel, At, K>['$name'], RelTarget<Rel, At, K>['$fields']>,
     [...L, RelTarget<Rel, At, K>['$name']],
     Rel,
-    RelTarget<Rel, At, K>['$name']
+    RelTarget<Rel, At, K>['$name'],
+    Fa
   >;
   /** A table (`fenecTable`): its fields type the child rows. */
   lookup<T extends TableRef>(
     table: T,
     opts: LookupOptions<Hold<T['$fields']>>,
-  ): Query<F, Attach<P, L, T['$name'], T['$fields']>, [...L, T['$name']], Rel, T['$name']>;
+  ): Query<F, Attach<P, L, T['$name'], T['$fields']>, [...L, T['$name']], Rel, T['$name'], Fa>;
 
   /**
    * Successive calls add a sort key (the second decides when the first ties).
@@ -543,9 +616,9 @@ export declare class Query<
     field: (keyof Row<F> & string) | Aggregate<F> | JsonPath<F>,
     dir?: 'asc' | 'desc',
     opts?: { collate?: Collation },
-  ): Query<F, P, L, Rel, At>;
-  limit(n: number): Query<F, P, L, Rel, At>;
-  offset(n: number): Query<F, P, L, Rel, At>;
+  ): Query<F, P, L, Rel, At, Fa>;
+  limit(n: number): Query<F, P, L, Rel, At, Fa>;
+  offset(n: number): Query<F, P, L, Rel, At, Fa>;
 
   /** The generated FenecQL and its parameters -- inspectable before running. */
   toFenecQL(): [sql: string, params: unknown[]];
@@ -566,10 +639,12 @@ export declare class Query<
   /** The opaque context carried by `bind` (for subclasses). */
   readonly context: unknown;
   /** The same body as a plain `Query`: bypasses subclass behaviour. */
-  plain(): Query<F, P, L, Rel, At>;
+  plain(): Query<F, P, L, Rel, At, Fa>;
 
-  run(): Promise<{ columns: string[]; rows: P[] }>;
-  rows(): Promise<P[]>;
+  /** The raw response; `facets` holds what `facet` counted. */
+  run(): Promise<{ columns: string[]; rows: P[]; facets?: Fa }>;
+  /** The rows -- with what `facet` counted as `facets`, when it was asked. */
+  rows(): Promise<Rows<P, Fa>>;
   first(): Promise<P | null>;
   /** Number of matching rows (`get ... count`); rows are not decoded. */
   count(): Promise<number>;
@@ -668,9 +743,9 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
    * time. A text names what it reads with `{collections}`, or is refused.
    * Returns the function that stops it.
    */
-  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
-    query: Query<F, P, L, R2, A>,
-    cb: (rows: P[]) => void,
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(
+    query: Query<F, P, L, R2, A, Fa>,
+    cb: (rows: Rows<P, Fa>) => void,
     opts?: LiveOptions,
   ): () => void;
   live(
@@ -770,9 +845,9 @@ export declare class Fenec<S extends AnySchema<S> = Schema, Rel extends Relation
    * every live query). The writes of one task run it once, in a microtask
    * after it. Returns the function that stops it.
    */
-  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
-    query: Query<F, P, L, R2, A>,
-    cb: (rows: P[]) => void,
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(
+    query: Query<F, P, L, R2, A, Fa>,
+    cb: (rows: Rows<P, Fa>) => void,
     opts?: LiveOptions,
   ): () => void;
   live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void;
@@ -1020,9 +1095,9 @@ export declare class FenecSync<S extends AnySchema<S> = Schema, Rel extends Rela
    * Live query: re-run after every local change, at the next frame.
    * `Fenec.live`'s contract. Returns: the function that ends the subscription.
    */
-  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
-    query: Query<F, P, L, R2, A>,
-    cb: (rows: P[]) => void,
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string, Fa extends Facets>(
+    query: Query<F, P, L, R2, A, Fa>,
+    cb: (rows: Rows<P, Fa>) => void,
     opts?: LiveOptions,
   ): () => void;
   live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void;
