@@ -15,6 +15,16 @@ var titles = hits.Select(h => h.Title).ToArray();
 if (!titles.SequenceEqual(["Night at the oasis", "Dunes"]))
     throw new Exception($"near answered {string.Join(", ", titles)}");
 
+// The same through the query builder, which writes that statement itself.
+var query = db.From("docs").Select("title").Near("embed", new[] { 0.1f, 0.2f, 0.3f }).Limit(5);
+if (query.ToFenecQL().Text != "get docs select title near embed $1 limit 5")
+    throw new Exception($"the builder wrote {query.ToFenecQL().Text}");
+var built = await query.RowsAsync<Hit>();
+if (!built.SequenceEqual(hits))
+    throw new Exception($"the builder's query answered {string.Join(", ", built)}");
+if (await db.From("docs").Where("title", "~", "Dunes").CountAsync() != 1)
+    throw new Exception("count answered another number");
+
 try
 {
     await db.QueryAsync("get nowhere");

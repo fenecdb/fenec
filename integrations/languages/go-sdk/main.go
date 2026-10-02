@@ -36,6 +36,19 @@ func main() {
 		fail("near answered %v", titles)
 	}
 
+	// The same through the query builder, which writes that statement itself.
+	query := db.From("docs").Select("title").Near("embed", []float32{0.1, 0.2, 0.3}).Limit(5)
+	if text, _, err := query.ToFenecQL(); err != nil || text != "get docs select title near embed $1 limit 5" {
+		fail("the builder wrote %q, %v", text, err)
+	}
+	built, err := fenecdb.RowsAs[Hit](ctx, query)
+	if err != nil || !reflect.DeepEqual(built, hits) {
+		fail("the builder's query answered %v, %v", built, err)
+	}
+	if n, err := db.From("docs").Where("title", "~", "Dunes").Count(ctx); err != nil || n != 1 {
+		fail("count answered %d, %v", n, err)
+	}
+
 	var e *fenecdb.Error
 	if _, err := db.Query(ctx, "get nowhere"); !errors.As(err, &e) || e.Status != 404 {
 		fail("a missing collection was answered with %v", err)

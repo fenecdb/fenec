@@ -44,8 +44,18 @@ try:
     db.query("get nowhere")
 except FenecError as e:
     print(e.status, e)   # 404 collection `nowhere`</pre>
-<p><code>AsyncClient</code> does the same in an event loop; LangChain and
-LlamaIndex have stores of their own (<a href="integrations.html">Integrations</a>).</p>
+<p>Or let the <a href="#builder">query builder</a> write the statement: the
+same text, every value a parameter, every name checked.</p>
+<pre data-lang="python" data-label="builder">docs = db.collection("docs")
+docs.insert({"title": "Night at the oasis", "embed": [0.1, 0.2, 0.3]})
+
+rows = docs.select("title").near("embed", [0.1, 0.2, 0.3]).limit(5).rows()
+# docs.select("title").near(...).limit(5).to_fenecql()
+#   == ("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+n = docs.where("title", "~", "Dunes").count()</pre>
+<p><code>AsyncClient</code> does the same in an event loop, the endpoints of
+its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
+stores of their own (<a href="integrations.html">Integrations</a>).</p>
 </div>
 
 <div class="lang" data-name="JavaScript">
@@ -66,8 +76,8 @@ await query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
 
 const rows = await query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);</pre>
 <p>Or <code>npm install @fenecdb/web</code>: its <code>connect</code> sends
-the query builder's statements to a server, the same code that runs in the
-page.</p>
+the <a href="#builder">query builder</a>'s statements to a server, the same
+code that runs in the page.</p>
 <pre data-lang="js" data-label="client.mjs">import { connect } from '@fenecdb/web';
 
 const db = connect('http://127.0.0.1:8080', { token: 'secret' });
@@ -97,6 +107,15 @@ var e *fenecdb.Error
 if _, err := db.Query(ctx, "get nowhere"); errors.As(err, &amp;e) {
 	fmt.Println(e.Status, e.Code, e.Message) // 404 not_found collection `nowhere`
 }</pre>
+<p>Or let the <a href="#builder">query builder</a> write the statement,
+immutable, each step a copy:</p>
+<pre data-lang="go" data-label="builder">docs := db.From("docs")
+docs.Insert(ctx, fenecdb.D("title", "Night at the oasis", "embed", []float32{0.1, 0.2, 0.3}))
+
+query := docs.Select("title").Near("embed", []float32{0.1, 0.2, 0.3}).Limit(5)
+hits, err := fenecdb.RowsAs[Hit](ctx, query)
+// query.ToFenecQL(): "get docs select title near embed $1 limit 5", [[0.1 0.2 0.3]]
+n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <p><code>Query</code> gives rows as <code>[]map[string]any</code>;
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
 replica, <code>Subscribe</code>, <code>Changes</code> and
@@ -182,6 +201,15 @@ try { await db.QueryAsync("get nowhere"); }
 catch (FenecException e) { Console.WriteLine($"{e.Status} {e.Code} {e.Message}"); } // 404 not_found collection `nowhere`
 
 record Hit(string Title, [property: JsonPropertyName("_score")] float Score);</pre>
+<p>Or let the <a href="#builder">query builder</a> write the statement,
+immutable, each call a new query:</p>
+<pre data-lang="text" data-label="builder">var docs = db.From("docs");
+await docs.InsertAsync(new { title = "Night at the oasis", embed = new[] { 0.1f, 0.2f, 0.3f } });
+
+var query = docs.Select("title").Near("embed", new[] { 0.1f, 0.2f, 0.3f }).Limit(5);
+var hits = await query.RowsAsync&lt;Hit&gt;();
+// query.ToFenecQL(): ("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+var n = await docs.Where("title", "~", "Dunes").CountAsync();</pre>
 <p>.NET 8 and newer, async throughout with a <code>CancellationToken</code>
 on every call. <code>QueryAsync&lt;T&gt;</code> maps rows to records or
 classes by property name, any case; <code>BatchAsync</code>,
@@ -294,6 +322,66 @@ rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</
 
 </div>
 
+<h2 id="builder">The builder</h2>
+
+<p>Python, JavaScript, Go and .NET each have a query builder: a chain of
+calls that writes the FenecQL statement, every value a parameter and every
+name checked against FenecQL's own rule, which is where an injection would
+have to get through. All four build the same text from the same chain, to
+the byte, and refuse the same mistakes with the same message.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Python</th><th>JavaScript</th><th>Go</th><th>.NET</th></tr></thead>
+<tbody>
+<tr><td><code>db.collection("docs")</code></td><td><code>db.from('docs')</code></td><td><code>db.From("docs")</code></td><td><code>db.From("docs")</code></td></tr>
+<tr><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where('year', '&gt;=', 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td></tr>
+<tr><td><code>.where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))</code></td><td><code>.where(or({ lang: 'tr' }, { tags: { has: 'rust' } }))</code></td><td><code>.WhereCond(fenecdb.Or(fenecdb.Fields("lang", "tr"), fenecdb.Fields("tags", fenecdb.Ops("has", "rust"))))</code></td><td><code>.Where(Cond.Or(Cond.Cmp("lang", "=", "tr"), Cond.Cmp("tags", "has", "rust")))</code></td></tr>
+<tr><td><code>.near("embed", v, ef=64)</code></td><td><code>.near('embed', v, { ef: 64 })</code></td><td><code>.Near("embed", v, fenecdb.Ef(64))</code></td><td><code>.Near("embed", v, ef: 64)</code></td></tr>
+<tr><td><code>.lookup("reviews", on="product_id", limit=3)</code></td><td><code>.lookup('reviews', { on: 'product_id', limit: 3 })</code></td><td><code>.Lookup("reviews", fenecdb.On("product_id"), fenecdb.Limit(3))</code></td><td><code>.Lookup("reviews", on: "product_id", limit: 3)</code></td></tr>
+<tr><td><code>.order("title", "desc", collate="tr")</code></td><td><code>.order('title', 'desc', { collate: 'tr' })</code></td><td><code>.Order("title", "desc", fenecdb.Collate("tr"))</code></td><td><code>.Order("title", "desc", collate: "tr")</code></td></tr>
+<tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.Rows(ctx)</code>, <code>.First(ctx)</code>, <code>.Count(ctx)</code>, <code>RowsAs[T]</code></td><td><code>.RowsAsync()</code>, <code>.FirstAsync()</code>, <code>.CountAsync()</code>, <code>.RowsAsync&lt;T&gt;()</code></td></tr>
+<tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.Insert(ctx, doc)</code>, <code>.Update(ctx, patch)</code>, <code>.Delete(ctx)</code></td><td><code>.InsertAsync(doc)</code>, <code>.UpdateAsync(patch)</code>, <code>.DeleteAsync()</code></td></tr>
+<tr><td><code>.to_fenecql()</code></td><td><code>.toFenecQL()</code></td><td><code>.ToFenecQL()</code></td><td><code>.ToFenecQL()</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Each has <code>select</code> with aggregates and <code>group</code>,
+<code>where</code> with every operator, <code>in</code>, <code>null</code>,
+paths into a json field and <code>or</code>, <code>and</code>,
+<code>not</code> and <code>raw</code>; <code>near</code>, <code>match</code>,
+<code>fuse</code> and <code>rerank</code>; <code>lookup</code> and its
+chains; <code>order</code> with a collation; <code>limit</code> and
+<code>offset</code>; and the writes, an <code>update</code> or
+<code>delete</code> with no filter refused unless it says <code>all</code>.
+A query is immutable, so a base query can be kept and branched from.</p>
+
+<details class="deep"><summary>Details: one golden file</summary>
+<p><code>integrations/builder-golden.json</code> is the contract: each case a
+chain of steps (<code>{op, args}</code>, the JavaScript builder's names) and
+the statement it must make, its text and parameters, or the refusal and its
+message. The JavaScript builder is the reference: <code>make
+builder-golden</code> runs every chain through it and writes what it made,
+and its own tests run the file again, so the two cannot drift. The Python,
+Go and .NET tests each read every case, call their own builder, and compare
+the text and parameters exactly. The cases cover every method and option,
+each operator and kind of value, parameter numbering across
+<code>where</code>, <code>near</code>, <code>match</code> and the levels of
+a lookup chain, and the names and combinations each builder refuses. Each
+SDK's tests also run builder queries against a real server and hold their
+answers to the same statements sent as text.</p>
+<p>What a language has no word for is written its own way: Go's object
+conditions are <code>Fields</code> and <code>Ops</code>, names and values
+in turn, since a Go map has no order and the order is the text's; a Go
+document keeps its order as a <code>fenecdb.D(...)</code>, and a map's
+fields go in sorted. Options are keyword arguments in Python, named
+arguments in C# and functional options in Go, where a struct could not tell
+<code>limit 0</code> from no limit. A refusal is a <code>FenecError</code>
+with status 0 in Python, a <code>*fenecdb.QueryError</code> in Go and a
+<code>FenecQueryException</code> in .NET.</p>
+</details>
+
 <h2 id="http">From the shell</h2>
 
 <p>The same request from <code>curl</code>:</p>
@@ -311,7 +399,8 @@ above with their asserts: <code>make languages-test</code> starts a
 <code>fenec-server</code> over a new file for each language and runs Python,
 Java, PHP and Ruby from their official images in Docker, and JavaScript, Go,
 C# and Rust with the toolchains on the machine — Go and C# both through
-their SDK and without it. The SDKs' own tests (<code>make go-test</code>,
+their SDK and without it, and each SDK's program through its query builder
+too. The SDKs' own tests (<code>make go-test</code>,
 <code>make dotnet-test</code>) start a primary, a replica of it and a node
 of tenants and cover the rest: every type of parameter, the errors, a batch
 put back whole, an idempotency key, reading a write on the replica, a

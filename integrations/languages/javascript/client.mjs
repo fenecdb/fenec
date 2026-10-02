@@ -18,6 +18,12 @@ await db.from('docs').insert({ title: 'Dunes', embed: [0.9, 0.1, 0.0] });
 const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
 assert.deepEqual(rows.map((r) => r.title), ['Night at the oasis', 'Dunes']);
 
+// The builder's statement is the one written by hand, and so is its answer.
+const [text, params] = db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).toFenecQL();
+assert.equal(text, 'get docs select title near embed $1 limit 5');
+assert.deepEqual(await db.rows(text, params), rows);
+assert.equal(await db.from('docs').where('title', '~', 'Dunes').count(), 1);
+
 await assert.rejects(db.run('get nowhere'), /nowhere/);
 
 console.log('javascript (@fenecdb/web): ok');

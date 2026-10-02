@@ -514,10 +514,12 @@ easy to get wrong.</p>
     refused.</b> Covering a whole collection by accident is far too easy and
     impossible to undo; when it is deliberate you write
     <code>delete({ all: true })</code>. PostgREST decides the same.</li>
-  <li><b><code>near</code>, <code>order</code> and <code>limit</code> error out
-    on write statements.</b> FenecQL does not support them on <code>set</code>
-    or <code>del</code>, and ignoring them silently would breed the illusion
-    that <code>limit(1)</code> deletes a single row.</li>
+  <li><b><code>near</code>, <code>order</code>, <code>limit</code> and
+    <code>lookup</code> error out on write statements.</b> FenecQL does not
+    support them on <code>set</code> or <code>del</code>, and ignoring them
+    silently would breed the illusion that <code>limit(1)</code> deletes a
+    single row, or that a required <code>lookup</code> spares the parents
+    with no children.</li>
   <li><b>No JOIN, no subquery, no <code>returning</code>.</b> The builder adds
     no capability on top of FenecQL — it only builds it safely.
     <code>lookup</code> is the exception FenecQL itself makes, and
@@ -525,6 +527,10 @@ easy to get wrong.</p>
 </ul>
 
 <details class="deep"><summary>Details: the tests</summary>
+<p>The Python, Go and .NET clients have the same builder, and
+<code>integrations/builder-golden.json</code> holds all four to one text: the
+chains there and what this builder makes of each, which every language's
+tests run (<a href="languages.html#builder">Your language</a>).</p>
 <p>The tests run with <code>node --test web/fenec.test.js</code> and are part
 of <code>make test</code>. When <code>web/fenec.wasm</code> is present, an
 end-to-end test that actually parses the generated text runs too.</p>

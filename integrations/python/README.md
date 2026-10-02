@@ -14,6 +14,26 @@ db = Client("http://127.0.0.1:8080", token="...")
 db.query("get articles select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 ```
 
+Or the query builder writes the statement -- every value a parameter,
+every name checked -- the same text the JavaScript, Go and .NET builders
+make of the same chain:
+
+```python
+from fenecdb import or_
+
+docs = db.collection("articles")
+rows = (docs.select("title")
+            .where("year", ">=", 2024)
+            .where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))
+            .near("embed", [0.1, 0.2, 0.3], ef=64)
+            .limit(5)
+            .rows())
+docs.insert({"title": "Dunes", "year": 2021})
+docs.where("year", "<", 2000).delete()        # no filter: refused unless all=True
+docs.where("lang", "tr").count()
+docs.select("title").limit(5).to_fenecql()   # ("get articles select title limit 5", [])
+```
+
 In an event loop -- FastAPI, aiohttp, an agent -- `AsyncClient` makes the
 same calls awaited, over one kept-alive connection, the standard library
 alone:
@@ -24,6 +44,7 @@ from fenecdb import AsyncClient
 async with AsyncClient("http://127.0.0.1:8080", token="...") as db:
     rows = await db.query("get articles select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
     await db.batch([("put articles {title: $1}", ["a"]), ("put articles {title: $1}", ["b"])])
+    rows = await db.collection("articles").where("year", ">=", 2024).rows()
 ```
 
 Every write on the server's disk (`fenec-server --cdc`), for a consumer whose
@@ -76,5 +97,6 @@ store.similarity_search("how do I compact", k=4, mode="hybrid")
 ```
 
 `./run-tests.sh` runs LangChain's standard vector store suite and the tests
-LlamaIndex's own integrations run against a fenec-server it builds and starts.
+LlamaIndex's own integrations run against a fenec-server it builds and starts,
+and the query builder against every case of `integrations/builder-golden.json`.
 Full reference: https://fenecdb.com/docs/integrations
