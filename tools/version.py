@@ -60,8 +60,29 @@ def main():
     # release's zip, whose checksum swift-binary.yml writes beside it
     # (integrations/swift/set-binary.sh) before the tag is made.
     sub("Package.swift", r'^let release = "[^"]+"', f'let release = "{v}"')
+    examples(v)
     print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md, "
-          "the Kotlin and Dart packages, the Flutter plugin, Package.swift")
+          "the Kotlin and Dart packages, the Flutter plugin, Package.swift, the examples")
+
+
+def examples(v):
+    """The Notes examples (examples/) take the published packages at the
+    release's version; CI runs them on this checkout's build instead."""
+    for name in ("web-local", "react", "node-server"):
+        sub(f"examples/{name}/package.json", r'^(    "@fenecdb/web": )"[^"]+"', rf'\g<1>"^{v}"')
+    sub("examples/react/package.json", r'^(    "@fenecdb/react": )"[^"]+"', rf'\g<1>"^{v}"')
+    sub("examples/python/requirements.txt", r"^fenecdb==\S+$", f"fenecdb=={v}")
+    # The Go module is fetched by the tag release.yml pushes beside the release's.
+    sub("examples/go/go.mod", r"^(require github\.com/fenecdb/fenec/integrations/go )v\S+$", rf"\g<1>v{v}")
+    sub("examples/dotnet/Notes.csproj", r'(<PackageReference Include="FenecDb" Version=")[^"]+(")', rf"\g<1>{v}\g<2>")
+    # The crates are not on crates.io: Cargo takes them from the release's tag.
+    for crate in ("fenec-core", "fenec-ql", "fenec-abi"):
+        sub("examples/rust/Cargo.toml", rf'^({crate} = \{{ git = "[^"]+", tag = )"v[^"]+"', rf'\g<1>"v{v}"')
+    sub("examples/swift/Package.swift", r'(\.package\(url: "https://github\.com/fenecdb/fenec", from: )"[^"]+"', rf'\g<1>"{v}"')
+    sub("examples/kotlin-android/gradle.properties", r"^fenecVersion=.+$", f"fenecVersion={v}")
+    sub("examples/flutter/pubspec.yaml", r"^version: .+$", f"version: {v}")
+    for package in ("fenecdb", "fenecdb_flutter"):
+        sub("examples/flutter/pubspec.yaml", rf"^(  {package}: )\S+$", rf"\g<1>^{v}")
 
 
 if __name__ == "__main__":

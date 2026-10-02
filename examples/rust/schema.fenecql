@@ -1,0 +1,9 @@
+-- Notes: the same schema in every example (examples/README.md).
+create collection notes (
+  title text,
+  body  text @text,
+  tags  [text],
+  done  bool @hash,
+  at    timestamp @sorted,
+  embed vector<64> @hnsw(cosine)
+)

@@ -1,0 +1,16 @@
+[package]
+name = "notes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The engine embedded in the program, from the repository at the release's
+# tag (the crates are not on crates.io). CI builds it against this checkout
+# instead: examples/run-tests.sh patches the three to their paths.
+[dependencies]
+fenec-core = { git = "https://github.com/fenecdb/fenec", tag = "v0.1.9" }
+fenec-ql = { git = "https://github.com/fenecdb/fenec", tag = "v0.1.9" }
+fenec-abi = { git = "https://github.com/fenecdb/fenec", tag = "v0.1.9", default-features = false }
+
+# Not a member of the repository's workspace.
+[workspace]

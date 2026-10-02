@@ -15,7 +15,7 @@ SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
 .PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-replica wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
-	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
+	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -341,6 +341,14 @@ dotnet-test:
 ## Node, Go, .NET and Rust on the machine
 languages-test:
 	integrations/languages/run-tests.sh
+
+## The Notes examples (examples/) on this checkout's build, each its smoke
+## test: Node, Python, Go, .NET, Rust and the Swift CLI with the toolchains
+## on the machine, Kotlin's JVM CLI in Docker unless this is Linux with
+## Gradle, Flutter (or its logic under plain Dart) where installed.
+## E=python go for some of them
+examples-test:
+	examples/run-tests.sh $(E)
 
 ## useLiveQuery for React, against a stand-in and a real fenec-server + replica
 ## (needs `make wasm`)
