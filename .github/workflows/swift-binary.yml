@@ -54,9 +54,11 @@ jobs:
         run: integrations/swift/build-xcframework.sh --dynamic --zip
 
       # The zip just built, linked into the tests on macOS and on a
-      # simulator before its checksum goes anywhere.
+      # simulator before its checksum goes anywhere. The sync tests start a
+      # fenec-server, as ci.yml's do.
       - name: Swift (macOS, iOS simulator)
         run: |
+          cargo build -p fenec-server
           swift test
           integrations/swift/test-ios.sh
 
