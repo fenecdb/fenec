@@ -188,11 +188,14 @@ pub fn window(text: &str, spans: &[(usize, usize)], tokens: usize) -> (usize, us
         }
     }
     if best > 0 {
-        // Its marked words all fit, so centred on them it still holds them.
+        // Its marked words all fit, so centred on them it still holds them:
+        // the half before the middle rounded down, or an even window
+        // centred on marks `tokens - 1` apart would start one early and
+        // leave the last out.
         let first = (at..at + tokens).find(|&i| hit[i]).unwrap_or(at);
         let last = (at..at + tokens).rev().find(|&i| hit[i]).unwrap_or(at);
         let mid = (first + last) / 2;
-        at = mid.saturating_sub(tokens / 2).min(n - tokens);
+        at = mid.saturating_sub((tokens - 1) / 2).min(n - tokens);
     }
     let from = if at == 0 {
         0
@@ -241,4 +244,45 @@ pub fn marked(text: &str, spans: &[(usize, usize)], pre: &str, post: &str) -> St
     }
     out.push_str(text.get(at..).unwrap_or(""));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every window size over two marks every distance apart: the window
+    /// holds both, whatever the parity of its size, and is that many words.
+    #[test]
+    fn a_window_holds_the_marks_it_was_centred_on() {
+        let words: Vec<String> = (0..30).map(|i| format!("w{i}")).collect();
+        let terms = Terms::new("x", TextIndexSpec::default());
+        for tokens in 1..12 {
+            for gap in 0..tokens {
+                for first in 0..30 - gap {
+                    let mut w = words.clone();
+                    w[first] = "x".into();
+                    w[first + gap] = "x".into();
+                    let text = w.join(" ");
+                    let (from, to) = window(&text, &terms.spans(&text), tokens);
+                    let cut = &text[from..to];
+                    let held = cut.split(' ').filter(|s| *s == "x").count();
+                    assert_eq!(
+                        held,
+                        1 + (gap > 0) as usize,
+                        "{tokens} {gap} {first}: {cut:?}"
+                    );
+                    assert_eq!(cut.split(' ').count(), tokens, "{cut:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offsets_count_utf16_units() {
+        let text = "a🦀b𠮷c";
+        let mut at = vec![0, 1, 5, 6, 10, 11];
+        utf16(text, &mut at);
+        assert_eq!(at, [0, 1, 3, 4, 6, 7]);
+        assert_eq!(utf16_len(text), text.encode_utf16().count());
+    }
 }
