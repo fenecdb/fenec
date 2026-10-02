@@ -224,10 +224,10 @@ follow-bench</code>):</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">vector(384)</th><th class="n">vector(768), TOASTed</th></tr></thead>
 <tbody>
-<tr><td>commit to visible, one row a transaction</td><td class="n">p50 0.32 ms, p99 1.54 ms</td><td class="n">p50 0.45 ms, p99 4.78 ms</td></tr>
-<tr><td>one transaction updating every row</td><td class="n">21 300 rows/s</td><td class="n">17 100 rows/s</td></tr>
-<tr><td>2 000 one-row transactions from one client</td><td class="n">visible 0.2 ms after the last</td><td class="n">0.4 ms</td></tr>
-<tr><td>a connection the server cut</td><td class="n">585 ms</td><td class="n">539 ms</td></tr>
+<tr><td>commit to visible, one row a transaction</td><td class="n">p50 0.16 ms, p99 1.56 ms</td><td class="n">p50 0.16 ms, p99 1.57 ms</td></tr>
+<tr><td>one transaction updating every row</td><td class="n">40 400 rows/s</td><td class="n">52 600 rows/s</td></tr>
+<tr><td>2 000 one-row transactions from one client</td><td class="n">visible 0.3 ms after the last</td><td class="n">0.2 ms</td></tr>
+<tr><td>a connection the server cut</td><td class="n">553 ms</td><td class="n">536 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -304,8 +304,8 @@ under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
 <table>
 <thead><tr><th>commit to the subscriber</th><th class="n">p50</th><th class="n">p99</th></tr></thead>
 <tbody>
-<tr><td>an update of a title</td><td class="n">0.15 ms</td><td class="n">3.82 ms</td></tr>
-<tr><td>a row inserted with its vector, put into the graph first</td><td class="n">0.33 ms</td><td class="n">0.56 ms</td></tr>
+<tr><td>an update of a title</td><td class="n">0.09 ms</td><td class="n">4.00 ms</td></tr>
+<tr><td>a row inserted with its vector, put into the graph first</td><td class="n">0.19 ms</td><td class="n">3.34 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -313,7 +313,7 @@ under an HNSW index, a subscriber reading <code>/changes</code> over HTTP
 <p>Commit to visible in the file, with no server between
 (<code>make follow-bench</code>), was 0.16 ms at the median on the same
 machine. Killed while the table took a row a transaction, the server was up
-again in 98 ms and held every one of the table's 16 295 rows 880 ms after it
+again in 75 ms and held every one of the table's 14 063 rows 370 ms after it
 started. The follower adds 178 KB to <code>fenec-server</code>.</p>
 </details>
 
