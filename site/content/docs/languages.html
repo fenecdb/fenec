@@ -53,16 +53,14 @@ same text, every value a parameter, every name checked.</p>
 docs.insert({"title": "Night at the oasis", "embed": [0.1, 0.2, 0.3]})
 
 rows = docs.select("title").near("embed", [0.1, 0.2, 0.3]).limit(5).rows()
-# docs.select("title").near(...).limit(5).to_fenecql()
-#   == ("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 n = docs.where("title", "~", "Dunes").count()</pre>
 <p><code>AsyncClient</code> does the same in an event loop, the endpoints of
 its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>
 </div>
 
-<div class="lang" data-name="JavaScript">
-<pre data-lang="js" data-label="search.mjs">async function query(q, params = []) {
+<div class="lang" data-name="TypeScript">
+<pre data-lang="ts" data-label="search.ts">async function query(q: string, params: unknown[] = []) {
   const res = await fetch('http://127.0.0.1:8080/query', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer secret' },
@@ -81,13 +79,16 @@ const rows = await query('get docs select title near embed $1 limit 5', [[0.1, 0
 <p>Or <code>npm install @fenecdb/web</code>: its <code>connect</code> sends
 the <a href="#builder">query builder</a>'s statements to a server, the same
 code that runs in the page.</p>
-<pre data-lang="js" data-label="client.mjs">import { connect } from '@fenecdb/web';
+<pre data-lang="ts" data-label="client.ts">import { connect } from '@fenecdb/web';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types app.fenec
 
-const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+const db = connect&lt;FenecSchema&gt;('http://127.0.0.1:8080', { token: 'secret' });
 await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
-const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();</pre>
-<p>In the browser there is no server at all: the same database runs in the
-page (<a href="javascript.html">JavaScript</a>).</p>
+const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
+//    rows: { title: string | null; _score: number }[]</pre>
+<p>The same code runs as plain JavaScript, without the types. In the
+browser there is no server at all: the same database runs in the page
+(<a href="javascript.html">JavaScript and TypeScript</a>).</p>
 </div>
 
 <div class="lang" data-name="Go">
@@ -117,7 +118,6 @@ docs.Insert(ctx, fenecdb.D("title", "Night at the oasis", "embed", []float32{0.1
 
 query := docs.Select("title").Near("embed", []float32{0.1, 0.2, 0.3}).Limit(5)
 hits, err := fenecdb.RowsAs[Hit](ctx, query)
-// query.ToFenecQL(): "get docs select title near embed $1 limit 5", [[0.1 0.2 0.3]]
 n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <p><code>Query</code> gives rows as <code>[]map[string]any</code>;
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
@@ -211,7 +211,6 @@ await docs.InsertAsync(new { title = "Night at the oasis", embed = new[] { 0.1f,
 
 var query = docs.Select("title").Near("embed", new[] { 0.1f, 0.2f, 0.3f }).Limit(5);
 var hits = await query.RowsAsync&lt;Hit&gt;();
-// query.ToFenecQL(): ("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
 var n = await docs.Where("title", "~", "Dunes").CountAsync();</pre>
 <p>.NET 8 and newer, async throughout with a <code>CancellationToken</code>
 on every call. <code>QueryAsync&lt;T&gt;</code> maps rows to records or
@@ -431,7 +430,6 @@ message. Python's builder starts with <code>collection</code>, since
 <tr><td><code>.order("title", "desc", collate="tr")</code></td><td><code>.order('title', 'desc', { collate: 'tr' })</code></td><td><code>.Order("title", "desc", fenecdb.Collate("tr"))</code></td><td><code>.Order("title", "desc", collate: "tr")</code></td></tr>
 <tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.Rows(ctx)</code>, <code>.First(ctx)</code>, <code>.Count(ctx)</code>, <code>RowsAs[T]</code></td><td><code>.RowsAsync()</code>, <code>.FirstAsync()</code>, <code>.CountAsync()</code>, <code>.RowsAsync&lt;T&gt;()</code></td></tr>
 <tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.Insert(ctx, doc)</code>, <code>.Update(ctx, patch)</code>, <code>.Delete(ctx)</code></td><td><code>.InsertAsync(doc)</code>, <code>.UpdateAsync(patch)</code>, <code>.DeleteAsync()</code></td></tr>
-<tr><td><code>.to_fenecql()</code></td><td><code>.toFenecQL()</code></td><td><code>.ToFenecQL()</code></td><td><code>.ToFenecQL()</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -448,7 +446,6 @@ message. Python's builder starts with <code>collection</code>, since
 <tr><td><code>.order("title", "desc", collate: "tr")</code></td><td><code>.order("title", "desc", collate = "tr")</code></td><td><code>.order('title', 'desc', 'tr')</code></td></tr>
 <tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rows(as: T.self)</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rowsBlocking()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td></tr>
 <tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td></tr>
-<tr><td><code>.toFenecQL()</code></td><td><code>.toFenecQL()</code></td><td><code>.toFenecQL()</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -521,6 +518,11 @@ put back whole, an idempotency key, reading a write on the replica, a
 subscription, the change stream, a tenant and a scoped token. CI runs it on every change,
 so a change to the HTTP endpoint that would break one of them is caught
 before it ships.</p>
+
+<p>The TypeScript tab's programs run there as the JavaScript they are
+without their types, and the tab's code itself is type-checked under
+<code>tsc --strict</code> against the client's declarations, as every
+TypeScript example in these docs is (<code>make docs-types</code>).</p>
 
 <p>Every answer is JSON: a read is an array of rows, a vector search's rows
 carry their <code>_score</code>, a write is <code>{"affected": n}</code>, and

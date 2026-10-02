@@ -28,4 +28,5 @@ hands them to the system, which outlives the app being killed.
 
 The query builder makes the text the JavaScript builder makes of the same
 chain, to the byte: `integrations/builder-golden.json` holds the chains,
-and `make dart-test` runs every one.
+and `make dart-test` runs every one. To see the text and parameters a chain
+builds, for logging or a test, `toFenecQL()` returns them and runs nothing.

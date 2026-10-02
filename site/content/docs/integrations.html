@@ -203,15 +203,19 @@ or a <code>FenecHttp</code> for the server's.</p>
 — a <code>Fenec</code> of its own or a synced replica — and runs it again
 after every write it may read. No render waits on the network.</p>
 
-<pre data-lang="js">import { sync } from './fenec.js';
+<pre data-lang="ts">import { sync, type FenecSync, type Row } from '@fenecdb/web';
 import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types, over the server's file
 
-const db = await sync({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'tasks' }] });
+type TaskRow = Row<FenecSchema['tasks']>;
+
+const db = await sync<FenecSchema>({ url: 'http://127.0.0.1:8080', shapes: [{ collection: 'tasks' }] });
 
 function Open() {
-  const rows = useLiveQuery(useFenec().from('tasks').where('done', false).order('title'));
+  const db = useFenec<FenecSync<FenecSchema>>();
+  const rows = useLiveQuery<TaskRow>(db.from('tasks').where('done', false).order('title'));
   if (rows === undefined) return &lt;Spinner /&gt;;
-  return rows.map((t) =&gt; &lt;Task key={t.id} {...t} /&gt;);
+  return rows.map((t) =&gt; &lt;Task key={t.id} task={t} /&gt;);
 }
 
 &lt;FenecProvider db={db}&gt;&lt;Open /&gt;&lt;/FenecProvider&gt;

@@ -27,7 +27,6 @@ q := docs.Select("title").
 	Near("embed", vec, fenecdb.Ef(64)).
 	Limit(5)
 rows, err := q.Rows(ctx)                       // or fenecdb.RowsAs[Hit](ctx, q), q.First(ctx), q.Count(ctx)
-text, params, err := q.ToFenecQL()
 docs.Insert(ctx, fenecdb.D("title", "Dunes", "year", 2021))
 docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fenecdb.All()
 ```
@@ -44,6 +43,8 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,
   `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup`. An object condition is `Fields` and `Ops`,
   names and values in turn, and a document a `D(...)` in its order, a map in its sorted keys, or a struct.
+- To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
+  nothing; a query needs no call to it before it runs.
 
 `go test` runs against `fenec-server` processes it starts (`cargo build -p fenec-server`, or `FENEC_SERVER`), and the
 builder against every case of `integrations/builder-golden.json`.

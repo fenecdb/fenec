@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js builder-golden types types-check ffi ffi-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js builder-golden types types-check docs-typesffi ffi-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -53,9 +53,14 @@ builder-golden:
 	node web/golden.mjs
 
 ## web/fenec.d.ts held to web/fenec.js -- every export and method declared --
-## and to what a caller writes, under tsc --strict
+## and to what a caller writes, under tsc --strict; then the docs' examples
 types-check:
 	cd web/types && npm ci --no-audit --no-fund --loglevel=error && npm test
+
+## Every TypeScript example in the docs (site/content, data-lang="ts")
+## type-checked under tsc --strict against the client's declarations
+docs-types:
+	cd web/types && npm ci --no-audit --no-fund --loglevel=error && npm run docs
 
 ## TypeScript declarations from the schema: make types FILE=data.fenec
 types:

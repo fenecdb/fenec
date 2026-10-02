@@ -1,0 +1,14 @@
+-- The collections the docs' TypeScript examples read and write.
+-- fenec-schema.d.ts is what `fenec types` makes of them: docs.mjs says how
+-- to make it again.
+create collection articles (title text, body text @text, year int @sorted, category text, tags [text], published timestamp, embed vector<384> @hnsw(cosine), meta json)
+create collection docs (title text, embed vector<384> @hnsw(cosine))
+create collection notes (text text)
+create collection todos (key text @hash, title text, done bool @hash, at timestamp @sorted)
+create collection tasks (key text @hash, title text, status text @hash, priority int @sorted, done bool @hash)
+create collection people (name text collate und @sorted)
+create collection products (name text, price int @sorted)
+create collection reviews (product_id int @hash, stars int, text text, created timestamp @sorted)
+create collection shops (name text)
+create collection orders (shop_id int @hash, code text)
+create collection lines (order_id int @hash, item text, quantity int)

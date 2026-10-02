@@ -181,7 +181,9 @@ operator, <code>near</code>, <code>match</code>, <code>fuse</code>,
 checked. All seven make the same text of the same chain, to the byte, held
 to one golden file; each language's spelling is on
 <a href="languages.html#builder">Your language</a>. A builder query also
-knows the collections it reads, which is what a live query runs again for.</p>
+knows the collections it reads, which is what a live query runs again for.
+To see the text and parameters a chain builds, for logging or a test,
+<code>toFenecQL()</code> returns them and runs nothing.</p>
 
 <pre data-lang="swift">let near = try await db.from("notes")
     .select("title")

@@ -31,8 +31,13 @@ rows = (docs.select("title")
 docs.insert({"title": "Dunes", "year": 2021})
 docs.where("year", "<", 2000).delete()        # no filter: refused unless all=True
 docs.where("lang", "tr").count()
-docs.select("title").limit(5).to_fenecql()   # ("get articles select title limit 5", [])
 ```
+
+To see the text and parameters a chain builds, for logging or a test,
+`to_fenecql()` returns them and runs nothing:
+`docs.select("title").limit(5).to_fenecql()` is
+`("get articles select title limit 5", [])`. A query needs no call to it
+before it runs.
 
 In an event loop -- FastAPI, aiohttp, an agent -- `AsyncClient` makes the
 same calls awaited, over one kept-alive connection, the standard library

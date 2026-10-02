@@ -218,12 +218,12 @@ code and the database cannot drift apart.</p>
 <p>The schema is already in the database, so it is not written a second time in
 TypeScript — it is generated, and the two cannot drift.</p>
 
-<pre data-lang="js">import { Fenec } from './fenec.js';
+<pre data-lang="ts">import { Fenec } from './fenec.js';
 import type { FenecSchema } from './fenec-schema.js';
 
 const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
 const rows = await db.from('articles').select('title', 'year').rows();
-//    rows: { title: string; year: number | null }[]
+//    rows: { title: string | null; year: number | null }[]
 </pre>
 </details>
 

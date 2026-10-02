@@ -27,7 +27,9 @@ fun Todos(db: Fenec) {
 The suspending calls run on `Dispatchers.IO`; Java calls the `...Blocking`
 ones (`queryBlocking`, `executeBlocking`, `rowsBlocking` ...) off its main
 thread. A live query is a conflated `Flow<List<Row>>`, run again after a
-write to a collection it reads, once a burst. Every write is fsynced before
+write to a collection it reads, once a burst. To see the text and
+parameters a chain builds, for logging or a test, `query.toFenecQL()`
+returns them and runs nothing. Every write is fsynced before
 it returns unless the file is opened with `Fenec.NO_SYNC`, which leaves the
 writes for `sync()`; `flush()` hands them to the system, which outlives the
 app being killed -- what `onStop` calls. The docs:

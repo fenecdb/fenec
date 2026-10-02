@@ -44,22 +44,28 @@ the first.</p>
 <p>The object opens the engine on its first request, restores its database
 from storage, and saves after every write, before it answers.</p>
 
-<pre data-lang="js">import { DurableObject } from 'cloudflare:workers';
+<pre data-lang="ts">import { DurableObject } from 'cloudflare:workers';
 import { Fenec } from '@fenecdb/web';
 import { checkpoint, persist, restore } from '@fenecdb/cloudflare';
 import wasm from '@fenecdb/web/fenec.wasm';
 
-export class Tenant extends DurableObject {
-  async db() {
-    if (!this.fenec) {
-      this.fenec = await Fenec.open(wasm);        // the module as the Worker imports it
-      await restore(this.fenec, this.ctx.storage);
+interface Env {
+  TENANT: DurableObjectNamespace&lt;Tenant&gt;;
+}
+
+export class Tenant extends DurableObject&lt;Env&gt; {
+  #fenec?: Fenec;
+
+  async #db(): Promise&lt;Fenec&gt; {
+    if (!this.#fenec) {
+      this.#fenec = await Fenec.open(wasm);       // the module as the Worker imports it
+      await restore(this.#fenec, this.ctx.storage);
     }
-    return this.fenec;
+    return this.#fenec;
   }
 
-  async query(sql, params) {
-    const db = await this.db();
+  async query(sql: string, params: unknown[]): Promise&lt;unknown&gt; {
+    const db = await this.#db();
     const out = db.run(sql, params);
     await persist(db, this.ctx.storage);          // kept before the answer goes
     await this.ctx.storage.setAlarm(Date.now() + 10_000);
@@ -67,17 +73,17 @@ export class Tenant extends DurableObject {
   }
 
   async alarm() {
-    await checkpoint(await this.db(), this.ctx.storage);
+    await checkpoint(await this.#db(), this.ctx.storage);
   }
 }
 
 export default {
   async fetch(req, env) {
     const tenant = env.TENANT.get(env.TENANT.idFromName('acme'));
-    const { sql, params } = await req.json();
+    const { sql, params } = await req.json&lt;{ sql: string; params: unknown[] }&gt;();
     return Response.json(await tenant.query(sql, params));
   },
-};</pre>
+} satisfies ExportedHandler&lt;Env&gt;;</pre>
 
 <details class="deep"><summary>Details</summary>
 <p>A Worker imports a <code>.wasm</code> file compiled, and cannot compile

@@ -1,11 +1,12 @@
 <!--
-title: JavaScript client — fenecdb
+title: JavaScript and TypeScript — fenecdb
 description: Run fenecdb in the page with one ES module: open a database, query it with the builder, keep it in IndexedDB or a file, use it as the app's state with live queries, and type it from the live schema.
 -->
 
-<h1>JavaScript</h1>
+<h1>JavaScript and TypeScript</h1>
 <p class="kicker">One dependency-free ES module runs fenecdb in the page:
-open a database, query it, and keep it between visits.</p>
+open a database, query it, and keep it between visits. Its types come
+with it.</p>
 
 <h2>Opening a database</h2>
 
@@ -13,7 +14,7 @@ open a database, query it, and keep it between visits.</p>
 open the module, and run FenecQL or the query builder. <code>persist</code>
 keeps the database in IndexedDB and <code>restore</code> reads it back.</p>
 
-<pre data-lang="js">import { Fenec, persist, restore } from './fenec.js';
+<pre data-lang="ts">import { Fenec, persist, restore } from './fenec.js';
 
 const db = await Fenec.open('./fenec.wasm');
 
@@ -28,6 +29,9 @@ await restore(db);     // read it back
 </pre>
 
 <ul>
+  <li><b>The examples are TypeScript.</b> The same code runs as plain
+    JavaScript, and the module needs no build step: <code>fenec.d.ts</code>
+    beside it holds the types (<a href="#typescript">TypeScript</a>).</li>
   <li><b><code>db.run()</code> is synchronous;</b> the builder's endpoints
     return promises.</li>
   <li><b>Text in a collation</b> also needs the <code>collate/</code>
@@ -53,7 +57,7 @@ keeps — and each write is flushed before <code>run</code> returns.
 <code>persist</code> and <code>restore</code> keep the same bytes in
 IndexedDB, and work anywhere a page runs.</p>
 
-<pre data-lang="js">// in a dedicated worker
+<pre data-lang="ts">// in a dedicated worker
 import { Fenec, openFile } from './fenec.js';
 
 const db = await Fenec.open('./fenec.wasm');
@@ -120,7 +124,9 @@ was not measured.</p>
 stores; <code>restore</code> then needs the same key. Where the key comes
 from is up to the page — never keep it in IndexedDB beside the data.</p>
 
-<pre data-lang="js">// A key from a passphrase, never stored: the page asks for it again.
+<pre data-lang="ts">import { persist, restore } from './fenec.js';
+
+// A key from a passphrase, never stored: the page asks for it again.
 const salt = new TextEncoder().encode('myapp:' + userId);
 const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
 const cryptoKey = await crypto.subtle.deriveKey(
@@ -156,9 +162,10 @@ The file of <code>openFile</code> stays plain, since it is the file
 and again after every write to a collection the query reads. Event handlers
 write, and <code>persist</code> keeps the state between visits.</p>
 
-<pre data-lang="js">import { Fenec, persist, restore } from './fenec.js';
+<pre data-lang="ts">import { Fenec, persist, restore } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';   // fenec types todos.fenec
 
-const db = await Fenec.open('./fenec.wasm');
+const db = await Fenec.open<FenecSchema>('./fenec.wasm');
 if (!(await restore(db, 'todos'))) {
   db.run('create collection todos (key text @hash, title text, done bool @hash, at timestamp @sorted)');
 }
@@ -166,24 +173,29 @@ if (!(await restore(db, 'todos'))) {
 // the rows now, and again after every write to todos
 const stop = db.live(db.from('todos').where('done', false).order('at'), draw);
 
-async function add(title) {
+async function add(title: string) {
   await db.from('todos').insert({ title, done: false, at: new Date() });
   await persist(db, 'todos');            // only this write, not the whole image
 }
-async function finish(id) {
+async function finish(id: number) {
   await db.from('todos').where('id', id).update({ done: true });
   await persist(db, 'todos');
 }
 </pre>
 
 <p>In React, <code>useLiveQuery</code> from <code>@fenecdb/react</code> takes
-the same database:</p>
+the same database. The row type it is given types what it hands back:</p>
 
-<pre data-lang="js">import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
+<pre data-lang="ts">import { FenecProvider, useFenec, useLiveQuery } from '@fenecdb/react';
+import type { Fenec, FenecSync, Row } from './fenec.js';
+import type { FenecSchema } from './fenec-schema.js';
+
+type Todo = Row<FenecSchema['todos']>;
+type Db = Fenec<FenecSchema> | FenecSync<FenecSchema>;   // the page's own, or a replica
 
 function Todos() {
-  const db = useFenec();
-  const todos = useLiveQuery(db.from('todos').where('done', false).order('at'));
+  const db = useFenec<Db>();
+  const todos = useLiveQuery<Todo>(db.from('todos').where('done', false).order('at'));
   if (todos === undefined) return null;
   return todos.map((t) =&gt; (
     &lt;li key={t.id} onClick={() =&gt; db.from('todos').where('id', t.id).update({ done: true })}&gt;{t.title}&lt;/li&gt;
@@ -198,7 +210,11 @@ root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
 they are: a replica has the same <code>from</code> and <code>live</code>,
 and its writes reach the server.</p>
 
-<pre data-lang="js">const db = await sync({
+<pre data-lang="ts">import { sync } from './fenec.js';
+import { FenecProvider } from '@fenecdb/react';
+import type { FenecSchema } from './fenec-schema.js';
+
+const db = await sync<FenecSchema>({
   url: 'https://todos.example.com',
   shapes: [{ collection: 'todos', key: 'key' }],
 });
@@ -261,7 +277,9 @@ needs each script's sorting data. The module carries Latin and fetches the
 rest from <code>collate/</code> beside it the first time a page needs
 them.</p>
 
-<pre data-lang="js">const db = await Fenec.open('./fenec.wasm');            // collate/ beside it
+<pre data-lang="ts">import { Fenec } from './fenec.js';
+
+const db = await Fenec.open('./fenec.wasm');            // collate/ beside it
 db.run('create collection people (name text collate und @sorted)');
 
 await db.from('people').insert([{ name: 'Ζωή' }, { name: '山田' }]);   // fetches greek, han
@@ -352,7 +370,7 @@ back.</p>
 parameter. Each call returns a new query, so a base query can be shared and
 extended with optional filters.</p>
 
-<pre data-lang="js">const rows = await db.from('articles')
+<pre data-lang="ts">const rows = await db.from('articles')
   .select('title', 'year')
   .where('year', '>=', 2024)
   .where('tags', 'has', 'rust')
@@ -373,7 +391,7 @@ extended with optional filters.</p>
 <p>FenecQL reads well, but on the application side the job is still building a
 string — and every interface with conditional filters ends up here:</p>
 
-<pre data-lang="js">let q = 'get articles where 1=1';
+<pre data-lang="ts">let q = 'get articles where 1=1';
 if (year) q += ` and year >= ${year}`;    // quote escaping and $n by hand
 </pre>
 
@@ -384,7 +402,7 @@ a second schema definition.</p>
 <p>Every <code>where</code> is <code>and</code>ed with the previous one, and the
 query object is <b>immutable</b> — so a body can be shared and branched:</p>
 
-<pre data-lang="js">let q = db.from('articles').select('title');
+<pre data-lang="ts">let q = db.from('articles').select('title');
 if (year) q = q.where('year', '>=', year);
 if (tag)  q = q.where('tags', 'has', tag);
 const rows = await q.limit(20).rows();
@@ -396,10 +414,12 @@ const rows = await q.limit(20).rows();
 <p>A filter can be written three ways, which all build the same query. The
 table lists everything else a query can carry.</p>
 
-<pre data-lang="js">.where('year', '>=', 2024)                   // field, operator, value
-.where('category', 'book')                   // two arguments means equality
-.where({ year: { gte: 2024 }, tags: { has: 'rust' } })
-.where('meta.lang', '=', 'tr')               // a path into a json field
+<pre data-lang="ts">const articles = db.from('articles');
+
+articles.where('year', '>=', 2024);                          // field, operator, value
+articles.where('category', 'book');                          // two arguments means equality
+articles.where({ year: { gte: 2024 }, tags: { has: 'rust' } });
+articles.where('meta.lang', '=', 'tr');                      // a path into a json field
 </pre>
 
 <p>A path into a <a href="fenecql.html#json"><code>json</code> field</a>
@@ -421,7 +441,7 @@ types take <code>'meta.lang'</code> as a path of it.</p>
 <tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fenecql.html#collation">Collation</a>)</td></tr>
 <tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
-<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
+<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>
 </tbody>
 </table>
@@ -435,7 +455,7 @@ row. Everything in its options object binds to that collection, so
 <code>limit</code> there counts children per parent — twenty products with
 three reviews each, in one query:</p>
 
-<pre data-lang="js">const rows = await db.from('products')
+<pre data-lang="ts">const rows = await db.from('products')
   .where('price', '>=', 10000)
   .limit(20)
   .lookup('reviews', {
@@ -451,7 +471,7 @@ three reviews each, in one query:</p>
 <p>Calling it again chains rather than replaces: the second call binds to the
 collection the first one named, the way position scopes it in FenecQL.</p>
 
-<pre data-lang="js">const rows = await db.from('shops')
+<pre data-lang="ts">const rows = await db.from('shops')
   .limit(20)
   .lookup('orders', { on: 'shop_id', limit: 3 })
   .lookup('lines',  { on: 'order_id', limit: 5 })
@@ -474,7 +494,9 @@ tightens it:
 <code>where</code> chain is an <code>and</code>. A nested group is written
 explicitly and the parenthesising is left to the builder:</p>
 
-<pre data-lang="js">db.from('articles')
+<pre data-lang="ts">import { or } from './fenec.js';
+
+db.from('articles')
   .where('year', '>=', 2024)
   .where(or({ tags: { has: 'rust' } }, { title: { like: 'rust' } }))
 // get articles where year >= $1 and (tags has $2 or title ~ $3)
@@ -487,10 +509,11 @@ in order, so the escape hatch does not become string concatenation either.</p>
 
 <h2>Seeing what it produces</h2>
 
-<p><code>toFenecQL()</code> returns exactly the text and parameters that will
-run, so you can log it, test it or run it by hand.</p>
+<p>To see the text and parameters a chain builds, for logging or a test,
+call <code>toFenecQL()</code>. It returns exactly what will run, and runs
+nothing; a query needs no call to it before it runs.</p>
 
-<pre data-lang="js">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
+<pre data-lang="ts">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
 // ['get articles where year >= $1 limit 10', [2024]]
 </pre>
 
@@ -507,7 +530,7 @@ never embedded into the query, which leaves a single injection boundary:
 validated against FenecQL's identifier rule and anything that does not fit
 errors out.</p>
 
-<pre data-lang="js">db.from('articles').where('title', '"; del articles; --')
+<pre data-lang="ts">db.from('articles').where('title', '"; del articles; --')
 // get articles where title = $1     ← a value, not text
 </pre>
 
@@ -529,7 +552,7 @@ sends it again as JSON, so a plain array keeps its numbers as written and a
 <code>fenec-server</code> server or an HTTP endpoint: build it with
 <code>from()</code>, then <code>bind()</code> it to where it should run.</p>
 
-<pre data-lang="js">import { from, connect } from './fenec.js';
+<pre data-lang="ts">import { from, connect } from './fenec.js';
 
 const q = from('articles').where('year', '>=', 2024);
 
@@ -544,22 +567,30 @@ goes to <code>POST /query</code> as is. See <a href="http.html">HTTP
 endpoint</a>.</p>
 </details>
 
-<h2>TypeScript</h2>
+<h2 id="typescript">TypeScript</h2>
 
-<p>Generate types from your database file, and queries are checked against
-its real schema: unknown fields, wrong value types and unselected fields are
-compile errors.</p>
+<p><code>fenec.d.ts</code> beside the module types the client, and
+<code>@fenecdb/web</code> ships it. Generate a schema type from your database
+file, and queries are checked against its real schema: unknown fields, wrong
+value types and unselected fields are compile errors.</p>
 
 <pre data-lang="bash">fenec types data.fenec > web/fenec-schema.d.ts     # or: make types FILE=data.fenec
 </pre>
 
-<pre data-lang="js">import { Fenec } from './fenec.js';
+<pre data-lang="ts">import { Fenec } from './fenec.js';
 import type { FenecSchema } from './fenec-schema.js';
 
 const db = await Fenec.open&lt;FenecSchema&gt;('./fenec.wasm');
 
 const rows = await db.from('articles').select('title', 'year').rows();
-//    rows: { title: string; year: number | null }[]
+//    rows: { title: string | null; year: number | null }[]
+
+await db.from('articles').insert({ title: 'Dunes', year: 2021, published: new Date() });
+
+const products = await db.from('products')
+  .lookup&lt;'reviews', FenecSchema['reviews']&gt;('reviews', { on: 'product_id', limit: 3 })
+  .rows();
+//    products[0].reviews[0].stars: number | null
 </pre>
 
 <details class="deep"><summary>Details</summary>
@@ -591,7 +622,7 @@ schema lives in the call rather than in <code>db</code>. In TypeScript it binds
 through <code>TypedFrom</code>; at runtime it is the same function and the only
 difference is name completion.</p>
 
-<pre data-lang="js">import { from as fenecFrom, type TypedFrom } from './fenec.js';
+<pre data-lang="ts">import { from as fenecFrom, type TypedFrom } from './fenec.js';
 import type { FenecSchema } from './fenec-schema.js';
 
 const from: TypedFrom&lt;FenecSchema&gt; = fenecFrom;
