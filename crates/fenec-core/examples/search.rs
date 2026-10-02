@@ -199,4 +199,25 @@ fn main() {
         q,
         "ms a query",
     );
+    // How many rows a query's `match` selects, which the facets count:
+    // every document has a brand, so the brand counts add up to it. Read
+    // off the answer's JSON, so this compiles against a build from before
+    // facets, which parses no `facet` and skips it.
+    if let Ok(stmt) = fenec_ql::parse_one("get d limit 0 match body $1 facet brand") {
+        let mut rows = 0u64;
+        for q in &queries {
+            if let Ok(r) = db.query(&stmt, std::slice::from_ref(q)) {
+                let json = fenec_core::json::response_to_string(&r);
+                for part in json.split("\"count\":").skip(1) {
+                    let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+                    rows += digits.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        println!(
+            "  {:<52} {:>9}",
+            "rows a query's match selects, on average",
+            rows / queries.len() as u64
+        );
+    }
 }
