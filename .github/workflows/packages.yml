@@ -255,7 +255,7 @@ jobs:
           # The Portal takes the components alone: the repository's metadata
           # files are the Portal's to write.
           find build/repo -name 'maven-metadata.xml*' -delete
-          (cd build/repo && zip -qr ../central-bundle.zip io)
+          (cd build/repo && zip -qr ../central-bundle.zip com)
           unzip -l build/central-bundle.zip
 
       # AUTOMATIC: the Portal releases the deployment once it validates.
