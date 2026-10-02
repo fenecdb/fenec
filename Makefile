@@ -249,6 +249,12 @@ ffi:
 ffi-bench:
 	$(CARGO) run --release -p fenec-ffi --example ffi_bench
 
+## The Swift package (Package.swift, integrations/swift) on macOS: the
+## XCFramework's macOS slice for this machine, then swift test -- the
+## engine, the builder over every golden case, live queries
+swift-test:
+	integrations/swift/run-tests.sh
+
 ## The Go SDK (integrations/go) against fenec-server processes its tests
 ## start: a primary, a replica of it and a node of tenants
 go-test:

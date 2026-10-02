@@ -136,11 +136,13 @@ fn failed(e: &Error) -> Failed {
     (code(e), json::error_to_string(e))
 }
 
+/// The boundary's own refusal: its message alone, with no engine error's
+/// kind before it.
 fn misuse(why: &str) -> Failed {
-    (
-        FENEC_MISUSE,
-        json::error_to_string(&Error::Query(why.to_string())),
-    )
+    let mut text = String::from("{\"kind\":\"error\",\"message\":");
+    json::escape_into(&mut text, why);
+    text.push('}');
+    (FENEC_MISUSE, text)
 }
 
 /// An error's code: its kind, which a binding turns into its own error type

@@ -13,3 +13,10 @@ __pycache__/
 *.egg-info/
 integrations/python/build/
 .pytest_cache/
+*.fenec.lock
+# Swift: SwiftPM's build and state at the root, where Package.swift is, and
+# the XCFramework integrations/swift/build-xcframework.sh makes.
+/.build/
+/.swiftpm/
+Package.resolved
+integrations/swift/build/
