@@ -254,3 +254,15 @@ def test_the_async_builder_awaits_the_same_answers(client, shelf):
             assert await db.collection(notes).where("stars", "<=", 2).delete() == 2
 
     asyncio.run(go())
+
+
+def test_from_underscore_is_collection():
+    # `from` is a Python keyword; `from_` is the other builders' `from`.
+    import fenecdb
+
+    a = fenecdb.from_("docs").select("title").where("year", ">=", 2024).limit(5)
+    b = fenecdb.collection("docs").select("title").where("year", ">=", 2024).limit(5)
+    assert a.to_fenecql() == b.to_fenecql()
+    db = fenecdb.Client("http://127.0.0.1:1")
+    assert db.from_("docs").to_fenecql() == db.collection("docs").to_fenecql()
+    assert fenecdb.AsyncClient.from_ is fenecdb.AsyncClient.collection

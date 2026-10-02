@@ -811,3 +811,7 @@ def collection(name: str) -> Query:
     """A query bound to no client: for its text alone, `to_fenecql()`."""
     return Query(name)
 
+
+# The other builders' `from`, which Python keeps as a keyword.
+from_ = collection
+

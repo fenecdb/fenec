@@ -46,7 +46,7 @@ except FenecError as e:
     print(e.status, e)   # 404 collection `nowhere`</pre>
 <p>Or let the <a href="#builder">query builder</a> write the statement: the
 same text, every value a parameter, every name checked.</p>
-<pre data-lang="python" data-label="builder">docs = db.collection("docs")
+<pre data-lang="python" data-label="builder">docs = db.from_("docs")
 docs.insert({"title": "Night at the oasis", "embed": [0.1, 0.2, 0.3]})
 
 rows = docs.select("title").near("embed", [0.1, 0.2, 0.3]).limit(5).rows()
@@ -328,13 +328,15 @@ rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</
 calls that writes the FenecQL statement, every value a parameter and every
 name checked against FenecQL's own rule, which is where an injection would
 have to get through. All four build the same text from the same chain, to
-the byte, and refuse the same mistakes with the same message.</p>
+the byte, and refuse the same mistakes with the same message. Python's
+<code>from</code> is a keyword, so its builder starts with <code>from_</code>
+(or <code>collection</code>, the same).</p>
 
-<div class="tbl">
+<div class="tbl code-grid">
 <table>
 <thead><tr><th>Python</th><th>JavaScript</th><th>Go</th><th>.NET</th></tr></thead>
 <tbody>
-<tr><td><code>db.collection("docs")</code></td><td><code>db.from('docs')</code></td><td><code>db.From("docs")</code></td><td><code>db.From("docs")</code></td></tr>
+<tr><td><code>db.from_("docs")</code></td><td><code>db.from('docs')</code></td><td><code>db.From("docs")</code></td><td><code>db.From("docs")</code></td></tr>
 <tr><td><code>.where("year", "&gt;=", 2024)</code></td><td><code>.where('year', '&gt;=', 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td><td><code>.Where("year", "&gt;=", 2024)</code></td></tr>
 <tr><td><code>.where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))</code></td><td><code>.where(or({ lang: 'tr' }, { tags: { has: 'rust' } }))</code></td><td><code>.WhereCond(fenecdb.Or(fenecdb.Fields("lang", "tr"), fenecdb.Fields("tags", fenecdb.Ops("has", "rust"))))</code></td><td><code>.Where(Cond.Or(Cond.Cmp("lang", "=", "tr"), Cond.Cmp("tags", "has", "rust")))</code></td></tr>
 <tr><td><code>.near("embed", v, ef=64)</code></td><td><code>.near('embed', v, { ef: 64 })</code></td><td><code>.Near("embed", v, fenecdb.Ef(64))</code></td><td><code>.Near("embed", v, ef: 64)</code></td></tr>
