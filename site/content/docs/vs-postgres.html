@@ -1,0 +1,248 @@
+<!--
+title: fenecdb and PostgreSQL with pgvector — fenecdb
+description: When to choose PostgreSQL with pgvector and when fenecdb, feature by feature, with the measured numbers and how to move a table across.
+-->
+
+<h1>fenecdb and PostgreSQL with pgvector</h1>
+<p class="kicker">PostgreSQL is a relational database server, and pgvector
+adds vector types and indexes to it. fenecdb is a document database with
+vector and full-text search that runs in a page, in an app, or as a server
+over HTTP.</p>
+
+<p>The facts about PostgreSQL and pgvector on this page were checked on
+2026-10-02 against the pages each one links to. fenecdb is at version 0.1.8,
+and is alpha software.</p>
+
+<h2 id="choose">Which to choose</h2>
+
+<p><b>Choose PostgreSQL with pgvector when</b></p>
+
+<ul>
+  <li><b>You want SQL:</b> joins, subqueries, window functions, and every
+    ORM, driver and tool written for it.</li>
+  <li><b>Several clients write at once,</b> in transactions they hold open
+    across statements (<a href="https://www.postgresql.org/docs/current/mvcc.html">MVCC</a>).</li>
+  <li><b>You need what a mature server has:</b>
+    <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">row-level security</a>,
+    <a href="https://www.postgresql.org/docs/current/logical-replication.html">logical replication</a>,
+    extensions such as <a href="https://postgis.net/">PostGIS</a>, and
+    managed services from many providers.</li>
+  <li><b>Your vectors already live beside relational data</b> you query
+    together.</li>
+</ul>
+
+<p><b>Choose fenecdb when</b></p>
+
+<ul>
+  <li><b>The same database runs in the browser, in a mobile app and on the
+    server,</b> with one query language.</li>
+  <li><b>You search by meaning and by words together:</b> BM25 and rank
+    fusion are built in (<a href="fenecql.html#hybrid">Hybrid search</a>).</li>
+  <li><b>The client keeps a replica</b> that reads offline and redraws
+    live (<a href="sync.html">Sync</a>).</li>
+  <li><b>A file per tenant</b> suits your service
+    (<a href="sharding.html">Tenants and sharding</a>).</li>
+  <li><b>Search latency at a million vectors matters</b>
+    (<a href="#measured">measured below</a>).</li>
+</ul>
+
+<h2 id="features">Feature by feature</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>fenecdb</th><th>PostgreSQL + pgvector</th></tr></thead>
+<tbody>
+<tr><td>Where it runs</td>
+  <td>Browser (WebAssembly), Rust, iOS, Android, Flutter, a server over HTTP (<a href="./#where-it-runs">Where it runs</a>)</td>
+  <td>A server; in the browser and Node through <a href="https://pglite.dev/docs/about">PGlite</a> (<a href="vs-pglite.html">fenecdb and PGlite</a>)</td></tr>
+<tr><td>Data model</td>
+  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql.html#json">Objects and paths</a>)</td>
+  <td>Relational tables, plus <a href="https://www.postgresql.org/docs/current/datatype-json.html"><code>jsonb</code></a></td></tr>
+<tr><td>Query language</td>
+  <td>FenecQL; builders in JS, Python, Go, .NET, Swift, Kotlin, Dart (<a href="fenecql.html">FenecQL</a>)</td>
+  <td><a href="https://www.postgresql.org/docs/current/sql.html">SQL</a></td></tr>
+<tr><td>Vector index</td>
+  <td>HNSW (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>HNSW and IVFFlat (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Quantization</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td><code>halfvec</code>, <code>bit</code>, binary quantization by expression index (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Filtered vector search</td>
+  <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
+  <td>Iterative index scans since 0.8.0 (<a href="https://www.postgresql.org/about/news/pgvector-080-released-2952">release</a>)</td></tr>
+<tr><td>Sparse vectors</td>
+  <td><code>sparse&lt;N&gt;</code>, pgvector's text form (<a href="fenecql.html#sparse">Sparse vectors</a>)</td>
+  <td><code>sparsevec</code> (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Full text</td>
+  <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td><code>tsvector</code> ranked by <a href="https://www.postgresql.org/docs/current/textsearch-controls.html"><code>ts_rank</code></a>; BM25 through an extension such as <a href="https://github.com/timescale/pg_textsearch">pg_textsearch</a></td></tr>
+<tr><td>Hybrid search</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td>No operator; fusion written in SQL (<a href="https://www.tigerdata.com/blog/introducing-pg_textsearch-true-bm25-ranking-hybrid-retrieval-postgres">an example</a>)</td></tr>
+<tr><td>Transactions</td>
+  <td>One writer a file; a batch lands whole or not at all; no transaction held open between requests (<a href="concepts.html#single-writer">Single writer</a>)</td>
+  <td>ACID, MVCC, many writers, interactive transactions (<a href="https://www.postgresql.org/docs/current/mvcc.html">MVCC</a>)</td></tr>
+<tr><td>Replication</td>
+  <td>Read replicas over HTTP, archives restored to a moment (<a href="replication.html">Replication</a>)</td>
+  <td><a href="https://www.postgresql.org/docs/current/warm-standby.html">Streaming</a> and <a href="https://www.postgresql.org/docs/current/logical-replication.html">logical</a> replication</td></tr>
+<tr><td>Sync, live queries, offline</td>
+  <td>A replica in the page or app: offline reads, queued writes, live queries (<a href="sync.html">Sync</a>)</td>
+  <td>Not in core; <a href="https://www.postgresql.org/docs/current/sql-notify.html"><code>LISTEN</code>/<code>NOTIFY</code></a> and <a href="https://www.postgresql.org/docs/current/logicaldecoding.html">logical decoding</a></td></tr>
+<tr><td>Access control</td>
+  <td>A server token; JWT rules added to every statement (<a href="http.html#scoped-access">Scoped access</a>). No TLS: a terminator goes in front</td>
+  <td>Roles, <code>GRANT</code>, <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">row-level security</a></td></tr>
+<tr><td>Schema and migrations</td>
+  <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
+  <td>Transactional DDL (<a href="https://www.postgresql.org/docs/current/sql-altertable.html"><code>ALTER TABLE</code></a>); migrations by outside tools</td></tr>
+<tr><td>Clients</td>
+  <td>JS/TS, Python, Go, .NET, Swift, Kotlin, Dart; any language over HTTP (<a href="languages.html">Your language</a>)</td>
+  <td>Drivers in every major language; pgvector lists libraries for 40 or more (<a href="https://github.com/pgvector/pgvector">pgvector</a>)</td></tr>
+<tr><td>Size</td>
+  <td>A 2.99 MB server image (<a href="benchmarks.html#binary-size">Binary size</a>)</td>
+  <td>Not measured here</td></tr>
+<tr><td>Licence and hosting</td>
+  <td>Apache-2.0; self-hosted only</td>
+  <td><a href="https://www.postgresql.org/about/licence/">PostgreSQL Licence</a> (<a href="https://github.com/pgvector/pgvector/blob/master/LICENSE">pgvector's</a>); managed by many providers</td></tr>
+<tr><td>Maturity</td>
+  <td>Version 0.1.8, first released in 2026</td>
+  <td>Descends from POSTGRES, 1986 (<a href="https://www.postgresql.org/docs/current/history.html">history</a>); pgvector 0.8.7 (<a href="https://github.com/pgvector/pgvector">README</a>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>What fenecdb gives up for its size is listed in <a
+href="limits.html">Limits</a>: no SQL and no join (a query reads one
+collection and attaches related rows with <code>lookup</code>), one writer
+a file, no transaction held open across requests, and no TLS on the
+server. PostgreSQL's server has none of those limits.</p>
+
+<p>pgvector's HNSW indexes take <code>vector</code> up to 2 000
+dimensions, <code>halfvec</code> up to 4 000, <code>bit</code> up to
+64 000 and <code>sparsevec</code> up to 1 000 non-zero elements
+(<a href="https://github.com/pgvector/pgvector">README</a>). pgvectorscale
+adds a disk-based index, StreamingDiskANN, for data larger than memory
+(<a href="https://github.com/timescale/pgvectorscale">pgvectorscale</a>).
+fenecdb keeps its indexes in memory and its documents in a mapped file
+(<a href="limits.html#memory-and-scale">Memory and scale</a>).</p>
+</details>
+
+<h2 id="measured">Measured</h2>
+
+<p>A million 128-dim vectors, fenec-server asked over HTTP and PostgreSQL
+with pgvector over its own protocol, by the same client program with the
+same index settings. We measured these on one laptop; the method is
+below.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>1 000 000 × 128</th><th class="n">fenec-server, HTTP</th><th class="n">PostgreSQL + pgvector</th></tr></thead>
+<tbody>
+<tr><td>load and index</td><td class="n"><b>49.6 s</b></td><td class="n">108.5 s</td></tr>
+<tr><td>memory the server holds</td><td class="n"><b>738 MB</b></td><td class="n">1 131 MB</td></tr>
+<tr><td>disk</td><td class="n"><b>612 MB</b></td><td class="n">1 432 MB</td></tr>
+<tr><td>ef 100: recall@10, p50</td><td class="n"><b>99.1%, 0.141 ms</b></td><td class="n">98.6%, 2.076 ms</td></tr>
+<tr><td>a filter keeping 1%, ef 100</td><td class="n"><b>100%, 0.667 ms</b></td><td class="n">99.0%, 16.1 ms</td></tr>
+<tr><td>8 clients, ef 100</td><td class="n"><b>18 852 queries/s</b></td><td class="n">2 289 queries/s</td></tr>
+<tr><td>load 100 000 rows, HNSW kept (<code>POST /docs</code> against <code>COPY</code>)</td><td class="n"><b>19 151 rows/s</b></td><td class="n">410 rows/s</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>One machine, one run of each side.</b> An Apple M1 MacBook Air;
+    PostgreSQL ran in Docker.</li>
+  <li><b>Every figure, and the 768-dim run,</b> is in
+    <a href="benchmarks.html#scale">Benchmarks</a>.</li>
+</ul>
+
+<details class="deep"><summary>Method and details</summary>
+<p>The numbers are <code>make scale-bench</code>'s and <code>make
+load-bench</code>'s, as <a href="benchmarks.html#scale">At scale</a> and
+<a href="benchmarks.html#loading">Loading rows</a> report them.</p>
+
+<pre data-lang="bash">make pgvector-up      # PostgreSQL 17 with pgvector, the pgvector/pgvector:pg17 image
+make scale-bench
+make load-bench
+</pre>
+
+<ul>
+  <li><b>Hardware.</b> An Apple M1 MacBook Air. It has no fan and slows
+    under minutes of load, so each side was run on its own after four idle
+    minutes, once.</li>
+  <li><b>Where each ran.</b> <code>fenec-server</code> on the host,
+    asked over kept-alive HTTP connections. PostgreSQL in Docker's virtual
+    machine (4 GB, 8 CPUs, <code>shared_buffers</code> 1 GB), asked through
+    the <code>postgres</code> crate. An empty query's round trip was 0.13 to
+    0.22 ms to PostgreSQL and 0.06 to 0.11 ms to fenec-server: part of each
+    answer, not the rest of it.</li>
+  <li><b>Same index settings.</b> HNSW with m 16 and ef_construction 64,
+    pgvector's defaults, on both.</li>
+  <li><b>Each side's best way to load.</b> fenec-server builds its graph
+    as JSON arrays of rows arrive. pgvector builds after a binary
+    <code>COPY</code>, on every core, then reads its index into its buffers
+    (<code>pg_prewarm</code>) and searches a filter with
+    <code>hnsw.iterative_scan = relaxed_order</code>.</li>
+  <li><b>Data.</b> Vectors spread along 32 directions around 64 centres,
+    1 000 held-out queries, recall against the exact ten found by brute
+    force.</li>
+</ul>
+
+<p><b>Not measured yet:</b> a Linux machine, PostgreSQL outside Docker,
+data larger than memory, pgvectorscale, and several clients writing at
+once.</p>
+</details>
+
+<h2 id="moving">Moving from PostgreSQL</h2>
+
+<p><code>fenec import</code> copies a table into a collection over the
+network, vectors and index included. With <code>--follow</code> it keeps
+applying the table's changes as they commit.</p>
+
+<pre data-lang="bash">fenec import postgres://app@db:5432/app --table docs --into articles \
+    --index "embed@hnsw(cosine)" --follow
+</pre>
+
+<ul>
+  <li><b>pgvector's types come across:</b> <code>vector</code>,
+    <code>halfvec</code> and <code>sparsevec</code> keep their dimensions.
+    A <code>numeric</code> needs <code>--cast</code>
+    (<a href="import.html#type-mapping">Type mapping</a>).</li>
+  <li><b>Following needs</b> <code>wal_level = logical</code> and an integer
+    key. <code>fenec-server --follow</code> serves the mirror as it
+    follows (<a href="import.html#serving">Serving the mirror</a>).</li>
+  <li><b>Queries are rewritten.</b> fenecdb does not speak SQL or
+    PostgreSQL's protocol, so a pgvector client library cannot connect to
+    it.</li>
+</ul>
+
+<p>The same search in each:</p>
+
+<pre data-lang="sql">SELECT title FROM articles
+WHERE year >= 2024
+ORDER BY embed &lt;=&gt; $1
+LIMIT 10;
+</pre>
+
+<pre data-lang="fenecql">get articles select title
+  where year >= 2024
+  near embed $1
+  limit 10
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>A join becomes <code>lookup</code>, which attaches each row's related
+rows, or <code>in (get …)</code>, which filters by another collection's
+rows (<a href="fenecql.html#the-lookup-clause">The lookup clause</a>,
+<a href="fenecql.html#subqueries">Subqueries</a>). A transaction of several
+statements becomes a <code>/batch</code>, which lands whole or not at all
+but cannot read between its writes (<a href="http.html#batches">Batches</a>).
+Row-level security becomes a JWT rule
+(<a href="http.html#scoped-access">Scoped access</a>).</p>
+
+<p>The import reads the table with <code>COPY ... TO STDOUT</code> and
+needs nothing installed on the server, and the follower reads a logical
+replication slot through PostgreSQL's own <code>pgoutput</code>. Drop the
+slot when you stop following, or PostgreSQL keeps its log for it
+(<a href="import.html#following">Following changes</a>).</p>
+</details>

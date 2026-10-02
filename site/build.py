@@ -77,6 +77,12 @@ NAV = [
         ("docs/import", "Import"),
         ("docs/embedding", "Embedded Rust"),
     ]),
+    ("Compare", [
+        ("docs/compare", "Overview"),
+        ("docs/vs-postgres", "PostgreSQL + pgvector"),
+        ("docs/vs-sqlite", "SQLite"),
+        ("docs/vs-pglite", "PGlite"),
+    ]),
     ("Reference", [
         ("docs/benchmarks", "Benchmarks"),
         ("docs/file-format", "File format"),
@@ -371,6 +377,21 @@ CLAIMS = [
      "kb_client_br", 0),
     ("site/content/docs/benchmarks.html",
      r"browser pays is\s*\n?\s*<b>(\d+) KB brotli</b>", "kb_br_all", 0),
+    # The comparison pages set the module beside another engine's files.
+    ("site/content/docs/vs-sqlite.html",
+     r'<code>fenec\.wasm</code> [\d.]+</td><td class="n"><b>(\d+) KB</b>', "kb_br", 0),
+    ("site/content/docs/vs-sqlite.html",
+     r'<code>fenec\.wasm</code> [\d.]+</td><td class="n"><b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b>',
+     "kb_gz", 0),
+    ("site/content/docs/vs-sqlite.html",
+     r"<tr><td>Browser module, brotli</td>\s*<td>(\d+) KB", "kb_br", 0),
+    ("site/content/docs/vs-pglite.html",
+     r'<code>fenec\.wasm</code> [\d.]+</td><td class="n"><b>(\d+) KB</b>', "kb_br", 0),
+    ("site/content/docs/vs-pglite.html",
+     r'<code>fenec\.wasm</code> [\d.]+</td><td class="n"><b>\d+ KB</b></td><td class="n"><b>(\d+) KB</b>',
+     "kb_gz", 0),
+    ("site/content/docs/vs-pglite.html",
+     r"<tr><td>Download, brotli</td>\s*<td>(\d+) KB", "kb_br", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
@@ -730,11 +751,14 @@ def build():
         page = page.replace("{{description}}", html.escape(meta.get("description", "")))
         page = page.replace("{{base}}", base)
         page = page.replace("{{repo}}", REPO_URL)
-        # One header link is current: Benchmarks for its page, Docs for the
-        # rest of the docs, Playground for its own.
+        # One header link is current: Benchmarks for its page, Compare for the
+        # comparison pages, Docs for the rest of the docs, Playground for its own.
         here = ' aria-current="page"'
+        compare = key == "docs/compare" or key.startswith("docs/vs-")
         page = page.replace("{{nav_bench}}", here if key == "docs/benchmarks" else "")
-        page = page.replace("{{nav_docs}}", here if is_docs and key != "docs/benchmarks" else "")
+        page = page.replace("{{nav_compare}}", here if compare else "")
+        page = page.replace("{{nav_docs}}", here if is_docs and key != "docs/benchmarks"
+                            and not compare else "")
         page = page.replace("{{nav_playground}}", here if key == "playground" else "")
         if is_docs:
             # The dune field carries over the top of every docs page, so the

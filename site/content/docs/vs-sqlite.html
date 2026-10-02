@@ -1,0 +1,267 @@
+<!--
+title: fenecdb and SQLite — fenecdb
+description: When to choose SQLite, with sqlite-vec, FTS5 and its official WebAssembly build, and when fenecdb, feature by feature, with what is measured and what is not.
+-->
+
+<h1>fenecdb and SQLite</h1>
+<p class="kicker">SQLite is an embedded SQL database in one file; sqlite-vec
+adds vector search to it and FTS5 full-text search. fenecdb is an embedded
+document database with vector and full-text search built in, which also
+runs as a server over HTTP.</p>
+
+<p>The facts about SQLite, sqlite-vec and FTS5 on this page were checked on
+2026-10-02 against the pages each one links to. fenecdb is at version 0.1.8,
+and is alpha software.</p>
+
+<h2 id="choose">Which to choose</h2>
+
+<p><b>Choose SQLite when</b></p>
+
+<ul>
+  <li><b>You want the database that is already everywhere:</b> SQLite is
+    "likely used more than all other database engines combined"
+    (<a href="https://sqlite.org/mostdeployed.html">sqlite.org</a>), with
+    bindings, ORMs and tools in every language.</li>
+  <li><b>You want SQL</b> with joins, and transactions you hold open
+    across statements, with savepoints
+    (<a href="https://sqlite.org/lang_transaction.html">transactions</a>).</li>
+  <li><b>Readers must never wait for the writer:</b> in WAL mode they do
+    not (<a href="https://sqlite.org/wal.html">WAL</a>).</li>
+  <li><b>You need a long track record:</b> 100% branch coverage in its
+    tests (<a href="https://sqlite.org/testing.html">testing</a>), and an
+    on-disk format kept backwards compatible, supported through 2050
+    (<a href="https://sqlite.org/lts.html">long-term support</a>).</li>
+  <li><b>Exact vector search over a modest table</b> is enough, through
+    sqlite-vec.</li>
+</ul>
+
+<p><b>Choose fenecdb when</b></p>
+
+<ul>
+  <li><b>You want an approximate vector index:</b> HNSW with
+    quantization and filtered search
+    (<a href="fenecql.html#the-vector-clause">The vector clause</a>).
+    sqlite-vec's approximate indexes are in its alpha releases.</li>
+  <li><b>You search by meaning and by words in one query,</b> fused by
+    rank (<a href="fenecql.html#hybrid">Hybrid search</a>).</li>
+  <li><b>The page or app should stay in step with a server:</b> a replica
+    with live queries and offline writes (<a href="sync.html">Sync</a>).</li>
+  <li><b>The same file should also be served</b> to other languages over
+    HTTP, with replicas (<a href="server.html">Server</a>).</li>
+</ul>
+
+<h2 id="features">Feature by feature</h2>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th>fenecdb</th><th>SQLite + sqlite-vec + FTS5</th></tr></thead>
+<tbody>
+<tr><td>Where it runs</td>
+  <td>Browser (WebAssembly), Rust, iOS, Android, Flutter, a server over HTTP (<a href="./#where-it-runs">Where it runs</a>)</td>
+  <td>Everywhere a C library runs; the browser through the official WebAssembly build since 3.40.0 (<a href="https://sqlite.org/releaselog/3_40_0.html">release</a>). No server of its own</td></tr>
+<tr><td>Browser storage</td>
+  <td>IndexedDB, or a file of the origin private file system in a worker (<a href="javascript.html#keeping">Keeping a database</a>)</td>
+  <td><code>kvvfs</code> (localStorage), <code>opfs</code> (a worker and COOP/COEP headers), <code>opfs-sahpool</code> (<a href="https://sqlite.org/wasm/doc/trunk/persistence.md">persistence</a>)</td></tr>
+<tr><td>Data model</td>
+  <td>Typed documents in collections, <code>json</code> fields (<a href="fenecql.html#json">Objects and paths</a>)</td>
+  <td>Relational tables</td></tr>
+<tr><td>Query language</td>
+  <td>FenecQL; builders in JS, Python, Go, .NET, Swift, Kotlin, Dart (<a href="fenecql.html">FenecQL</a>)</td>
+  <td>SQL</td></tr>
+<tr><td>Vector index</td>
+  <td>HNSW (<a href="fenecql.html#the-vector-clause">The vector clause</a>)</td>
+  <td>sqlite-vec's <code>vec0</code>; ANN indexes (rescore, DiskANN) in the v0.1.10 alpha releases, "pre-v1, so expect breaking changes" (<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>, <a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Quantization</td>
+  <td><code>f16</code> storage; <code>int8</code> and <code>bit</code> codes, re-ordered by the full vectors (<a href="fenecql.html#quantized">Quantized indexes</a>)</td>
+  <td>float, int8 and binary vectors (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Filtered vector search</td>
+  <td>Planned with the filter, an exact fallback when the filter leaves too few (<a href="concepts.html#a-filter-and-a-vector-together">A filter and a vector together</a>)</td>
+  <td>Up to 16 metadata columns and 4 partition keys, filtered inside the KNN query (<a href="https://alexgarcia.xyz/sqlite-vec/features/vec0.html">vec0</a>)</td></tr>
+<tr><td>Full text</td>
+  <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
+  <td>FTS5 with <code>bm25()</code>; unicode61, ascii, porter and trigram tokenizers (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Hybrid search</td>
+  <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
+  <td>None built in; FTS5's page has no vector search (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Transactions</td>
+  <td>One writer a file; a batch lands whole or not at all; no transaction held open across statements (<a href="concepts.html#single-writer">Single writer</a>)</td>
+  <td><code>BEGIN</code> … <code>COMMIT</code>, savepoints (<a href="https://sqlite.org/lang_transaction.html">transactions</a>); one writer at a time, readers beside it in WAL mode (<a href="https://sqlite.org/wal.html">WAL</a>)</td></tr>
+<tr><td>Sync, live queries, offline</td>
+  <td>A replica in the page or app: offline reads, queued writes, live queries (<a href="sync.html">Sync</a>)</td>
+  <td>No sync; the session extension records changesets to apply to another database (<a href="https://sqlite.org/sessionintro.html">sessions</a>)</td></tr>
+<tr><td>Access control</td>
+  <td>On the server: a token, JWT rules added to every statement (<a href="http.html#scoped-access">Scoped access</a>)</td>
+  <td>Embedded: none of its own</td></tr>
+<tr><td>Schema and migrations</td>
+  <td>Typed schema, <code>alter collection</code>, a schema declared in code and checked at every open (<a href="javascript.html#schema">Schema in code</a>)</td>
+  <td>SQL DDL; migrations by your own code or tools</td></tr>
+<tr><td>Clients</td>
+  <td>JS/TS, Python, Go, .NET, Swift, Kotlin, Dart; any language over HTTP (<a href="languages.html">Your language</a>)</td>
+  <td>Bindings in nearly every language; sqlite-vec packages for Python, Node.js, Ruby, Go and Rust (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Browser module, brotli</td>
+  <td>174 KB (<a href="#size">below</a>)</td>
+  <td>341 KB, without sqlite-vec (<a href="#size">below</a>)</td></tr>
+<tr><td>Licence</td>
+  <td>Apache-2.0</td>
+  <td>Public domain (<a href="https://sqlite.org/copyright.html">copyright</a>); sqlite-vec Apache-2.0 or MIT (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
+<tr><td>Maturity</td>
+  <td>Version 0.1.8, first released in 2026</td>
+  <td>Supported through 2050 (<a href="https://sqlite.org/lts.html">long-term support</a>); sqlite-vec pre-v1</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>sqlite-vec's first stable release, v0.1.0, searched by brute force
+(<a href="https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html">announcement</a>).
+Its ANN indexes arrived in v0.1.10-alpha.1 on 2026-03-31: rescore and
+DiskANN, with IVF "experimental, not enabled"; the latest is
+v0.1.10-alpha.4, from 2026-05-18
+(<a href="https://github.com/asg017/sqlite-vec/releases">releases</a>).</p>
+
+<p>FTS5's <code>bm25()</code> has its constants fixed at k1 = 1.2 and
+b = 0.75 (<a href="https://sqlite.org/fts5.html">FTS5</a>). fenecdb's
+<code>@text</code> also splits Chinese, Japanese, Korean and Thai text into
+character runs and can index word prefixes
+(<a href="fenecql.html#the-text-clause">The text clause</a>).</p>
+
+<p>Of the official build's browser storage, <code>opfs-sahpool</code>
+needs no COOP/COEP headers but "does not support multiple simultaneous
+connections to the same database"
+(<a href="https://sqlite.org/wasm/doc/trunk/persistence.md">persistence</a>).
+fenecdb's <code>openFile</code> also holds its file for one worker; other
+tabs reach it through the one that holds it, or share a synced replica
+(<a href="sync.html#multiple-tabs-share-one-stream">Multiple tabs</a>).</p>
+</details>
+
+<h2 id="measured">Measured</h2>
+
+<p>SQLite against fenecdb in one process, 100 000 rows of 128 dimensions,
+SQLite with no vector extension: its rows are read back and scored by
+fenecdb's own code. We measured these on one laptop; the method is
+below.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>100 000 × 128</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<tbody>
+<tr><td>data write, no index</td><td class="n"><b>936 k rows/s</b></td><td class="n">430 k/s</td></tr>
+<tr><td>disk size</td><td class="n"><b>59.3 MB</b></td><td class="n">59.8 MB</td></tr>
+<tr><td>scalar filter, indexed</td><td class="n"><b>1.25 ms</b></td><td class="n">14.1 ms</td></tr>
+<tr><td>vector top-10, exact</td><td class="n"><b>2.9 ms</b></td><td class="n">30.2 ms</td></tr>
+<tr><td>vector top-10, approximate</td><td class="n"><b>0.091 ms</b></td><td class="n">not measured</td></tr>
+<tr><td>reopen</td><td class="n">9 ms</td><td class="n"><b>0.9 ms</b></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Writers and readers at once, a row a write:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
+<tbody>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 487 / <b>516</b></td><td class="n">248 / 248 / 258</td></tr>
+<tr><td>reads/s from 4 threads, beside 4 writers</td><td class="n"><b>701 k</b>, p99 75 µs</td><td class="n">344 k, p99 79 µs</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n">213 k, the longest 4.8 ms</td><td class="n"><b>632 k</b>, the longest 0.6 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<ul>
+  <li><b>SQLite opens faster</b> and its readers never wait for a block of
+    writes; fenecdb's do, while the block runs.</li>
+  <li><b>Not measured yet:</b> sqlite-vec, by brute force or with its
+    alpha indexes; FTS5; and either in the browser.</li>
+</ul>
+
+<details class="deep"><summary>Method and details</summary>
+<p>The numbers are <code>make compare</code>'s and <code>make
+concurrency-bench</code>'s, as <a
+href="benchmarks.html#against-sqlite-and-pgvector">Against SQLite and
+pgvector</a> and <a href="benchmarks.html#concurrency">Writers and readers
+at once</a> report them, on an Apple M-series laptop.</p>
+
+<pre data-lang="bash">make compare
+make concurrency-bench
+</pre>
+
+<ul>
+  <li><b>SQLite 3.53</b>, in WAL mode with
+    <code>synchronous=NORMAL</code>, the rows written in one transaction and
+    the index built afterwards. The first table is the median of three
+    runs.</li>
+  <li><b>SQLite had no vector index.</b> Its exact search reads every row
+    and scores it with the same kernel fenecdb uses, so the difference is
+    in reading the rows, not in the arithmetic.</li>
+  <li><b>Writers and readers</b> ran in one process, after idle minutes,
+    once: fenecdb's threads share one database behind a lock, SQLite's hold
+    a connection each with a 30 s busy timeout. Durable is an fsync a
+    commit, <code>F_FULLFSYNC</code> for both.</li>
+</ul>
+</details>
+
+<h2 id="size">What the browser downloads</h2>
+
+<p>The WebAssembly engine alone, as each project publishes it, compressed
+the way a static file is served.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>&nbsp;</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
+<tbody>
+<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>174 KB</b></td><td class="n"><b>208 KB</b></td></tr>
+<tr><td>SQLite's official build, <code>sqlite3.wasm</code> 3.53.4-build2</td><td class="n">341 KB</td><td class="n">393 KB</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Method and details</summary>
+<p>Measured on 2026-10-02: fenecdb's module as <code>make wasm</code> builds
+it, and <code>dist/sqlite3.wasm</code> from the npm package
+<code>@sqlite.org/sqlite-wasm</code> 3.53.4-build2, each compressed with
+<code>brotli -q 11</code> and <code>gzip -9</code>. A KB is 1 024 bytes.
+The JavaScript beside each is left out of both. sqlite-vec's WebAssembly
+size is not published, and is not in the figure.</p>
+</details>
+
+<h2 id="moving">Moving from SQLite</h2>
+
+<p><code>fenec import</code> reads a SQLite file directly, with no SQLite
+library installed, and makes a collection of a table.</p>
+
+<pre data-lang="bash">fenec import data.sqlite --table docs --into articles \
+    --vector embed:384 --index "embed@hnsw(cosine)" --dry-run
+</pre>
+
+<ul>
+  <li><b><code>--dry-run</code></b> prints the schema it would make and
+    writes nothing.</li>
+  <li><b>Vectors stored as BLOBs</b> of little-endian <code>f32</code>s
+    become <code>vector&lt;N&gt;</code> with <code>--vector</code>.</li>
+  <li><b><code>INTEGER PRIMARY KEY</code></b> becomes the document id.</li>
+</ul>
+
+<p>A search and its filter, in each:</p>
+
+<pre data-lang="sql">-- sqlite-vec, year a metadata column of the vec0 table
+SELECT rowid, distance FROM vec_articles
+WHERE embed MATCH ?1 AND k = 10 AND year >= 2024;
+</pre>
+
+<pre data-lang="fenecql">get articles select title
+  where year >= 2024
+  near embed $1
+  limit 10
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The import reads the file format itself, and resolves untyped columns
+from the first 1 000 rows. A table with no equivalent type is refused until
+<code>--cast</code> says what to do (<a href="import.html#type-mapping">Type
+mapping</a>). A join
+becomes <code>lookup</code> or <code>in (get …)</code>
+(<a href="fenecql.html#the-lookup-clause">The lookup clause</a>), and a
+transaction becomes a batch that lands whole
+(<a href="http.html#batches">Batches</a>).</p>
+</details>
