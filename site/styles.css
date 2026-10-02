@@ -829,6 +829,9 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 /* Once WebGL draws, the SVG steps aside; it keeps its room for the layout. */
 .hero.gl .hero-mark .mark { opacity: 0; }
+/* The cloud can be turned by hand once WebGL draws it. */
+.hero.gl .hero-mark.turnable { cursor: grab; touch-action: pan-y; }
+.hero.gl .hero-mark.grabbing { cursor: grabbing; }
 @media (max-width: 940px) {
   .hero-in.has-mark { grid-template-columns: 1fr; }
   .hero-mark { order: -1; width: min(62vw, 300px); margin-bottom: -8px; }

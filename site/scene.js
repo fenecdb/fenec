@@ -170,6 +170,34 @@ export function start(canvas, anchor, { still = false, onFirstFrame } = {}) {
     }, { passive: true });
   }
 
+  // Dragged: the cloud turns with the hand, and once let go keeps the turn
+  // it was given, slowing, then drifts back to the pointer's lean. A
+  // vertical drag on a touch screen still scrolls the page (`pan-y`).
+  let drag = null, dragYaw = 0, dragPitch = 0, spinVel = 0;
+  if (!still) {
+    anchor.addEventListener('pointerdown', (e) => {
+      if (e.button > 0) return;
+      drag = { x: e.clientX, y: e.clientY, t: performance.now() };
+      spinVel = 0;
+      anchor.setPointerCapture(e.pointerId);
+      anchor.classList.add('grabbing');
+      wake();
+    });
+    anchor.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const now = performance.now(), dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      dragYaw += dx * 0.009;
+      dragPitch = Math.max(-0.7, Math.min(0.7, dragPitch + dy * 0.006));
+      // Radians a frame, from the last move's pace.
+      spinVel = (dx * 0.009) / Math.max(8, now - drag.t) * 16;
+      drag = { x: e.clientX, y: e.clientY, t: now };
+    });
+    const release = () => { drag = null; anchor.classList.remove('grabbing'); };
+    anchor.addEventListener('pointerup', release);
+    anchor.addEventListener('pointercancel', release);
+    anchor.classList.add('turnable');
+  }
+
   // A query: from a star into the graph, then greedily along edges to the
   // node nearest the target, a hop at a time.
   let query = null, nextQuery = ASSEMBLE + 1.2;
@@ -203,7 +231,12 @@ export function start(canvas, anchor, { still = false, onFirstFrame } = {}) {
 
     // A slow turn, so the cloud reads as three-dimensional, plus the pointer.
     const spin = still ? 0.5 : t * 0.09;
-    const model = mul(translate(place.x, place.y, 0), mul(scale(place.s), mul(rotY(yaw + spin), rotX(pitch * 0.8 - 0.04))));
+    if (!drag) {
+      dragYaw += spinVel;
+      spinVel *= 0.95;
+      dragPitch *= 0.97;
+    }
+    const model = mul(translate(place.x, place.y, 0), mul(scale(place.s), mul(rotY(yaw + spin + dragYaw), rotX(pitch * 0.8 - 0.04 + dragPitch))));
     const view = translate(0, 0, -D);
     const vp = mul(proj, view);
     const cloudM = mul(vp, model);
