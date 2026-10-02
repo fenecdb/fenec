@@ -2,7 +2,7 @@
 """One version wherever a release reads it: `make version V=0.1.5`.
 
 The workspace's version and fenec-wire's where the workspace names it, the
-Python package's, both npm packages' and the React package's lock file, and
+Python package's, the npm packages' and their lock files, NuGet's FenecDb, and
 the image the README pulls -- site/build.py holds the README to the
 workspace, and packages.yml refuses a release whose packages say another
 number. Cargo.lock follows at the next build."""
@@ -42,7 +42,10 @@ def main():
         sub(lock, r'^(  "version": )"[^"]+"', rf'\g<1>"{v}"')
         sub(lock, rf'^(    "": \{{\n      "name": "@fenecdb/{name}",\n      "version": )"[^"]+"', rf'\g<1>"{v}"')
     sub("README.md", r"(ghcr\.io/fenecdb/fenec-server:)\d+\.\d+\.\d+", rf"\g<1>{v}")
-    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, README.md")
+    # NuGet's FenecDb. The Go module has no number of its own to write: it
+    # is the tag release.yml pushes beside the release's (RELEASING.md).
+    sub("integrations/dotnet/FenecDb/FenecDb.csproj", r"(<Version>)[^<]+(</Version>)", rf"\g<1>{v}\g<2>")
+    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md")
 
 
 if __name__ == "__main__":

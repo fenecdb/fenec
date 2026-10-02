@@ -12,7 +12,7 @@ FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
 .PHONY: all test test-js types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
-	python-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
+	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
 	site site-serve site-deploy
@@ -121,9 +121,12 @@ size-report:
 
 ## PyPI's fenecdb and npm's @fenecdb/web and @fenecdb/react as a release
 ## publishes them, installed into a project and a venv of their own and
-## used (PYTHON=... picks the interpreter; it wants 3.10 or newer).
+## used (PYTHON=... picks the interpreter; it wants 3.10 or newer), and
+## NuGet's FenecDb where the .NET SDK is installed.
 packages: wasm wasm-lite
 	@integrations/packages.sh
+	@if command -v dotnet >/dev/null 2>&1; then integrations/dotnet/package.sh; \
+	else echo "dotnet not found: FenecDb (NuGet) not checked"; fi
 
 ## One version wherever a release reads it: make version V=0.1.5
 version:
@@ -224,6 +227,17 @@ beir:
 ## crates may not.
 python-test:
 	integrations/python/run-tests.sh
+
+## The Go SDK (integrations/go) against fenec-server processes its tests
+## start: a primary, a replica of it and a node of tenants
+go-test:
+	@$(CARGO) build -q -p fenec-server
+	cd integrations/go && go vet ./... && go test -count=1 ./...
+
+## The .NET SDK (integrations/dotnet) the same way, with the .NET on the
+## machine or, on Linux without one, from the dotnet/sdk:8.0 image
+dotnet-test:
+	integrations/dotnet/run-tests.sh
 
 ## The docs' example for each language over HTTP, against a real
 ## fenec-server: Python (the fenecdb client), Java, PHP and Ruby from

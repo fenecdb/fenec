@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- C# with the FenecDb SDK, as this checkout holds it; a program of
+       yours takes the NuGet package. Run by ../run-tests.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../dotnet/FenecDb/FenecDb.csproj" />
+  </ItemGroup>
+</Project>

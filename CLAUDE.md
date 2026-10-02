@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
 the browser, has its own query language (FenecQL), and its server (`fenec-server`)
-speaks HTTP; every language reaches it that way until the official SDKs
-(Phase 53). The docs under `site/content/docs/` are the long-form reference (design
+speaks HTTP; every language reaches it that way, Python, JavaScript, Go and
+.NET through official clients. The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
 
@@ -19,7 +19,7 @@ make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.t
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
-make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
+make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make serve         # wasm + python3 http.server -> http://localhost:8787
 make bench         # scale measurement (fenec-core/examples/bench.rs)
@@ -28,6 +28,8 @@ make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
 make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
+make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
+make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -1584,14 +1586,34 @@ standard suite and the tests LlamaIndex's integrations run from a
 languages-test` the eight examples (Python, Java, PHP and Ruby from their
 images, the others with the toolchain on the machine), `make react-test`
 runs the hook against a real replica, and CI runs all three
-(`integrations`). CI also builds the three packages as a release
+(`integrations`). The Go and .NET SDKs (`integrations/go`, module
+`github.com/fenecdb/fenec/integrations/go`, package `fenecdb`;
+`integrations/dotnet`, NuGet's `FenecDb`, `net8.0`) are the standard
+library alone, the Python client's surface -- a statement and its rows,
+typed rows, writes with their `Fenec-Seq`, `/batch`, an idempotency key,
+`After` for a replica, a subscription, `/_changes`, a tenant, `/_health`,
+a typed error -- and write a `float32` as the shortest text that reads back
+as it through an `f64`, which is how the server reads a number, but for
+`json::TIE`, which goes as its `f64`'s text: `encoding/json` wrote its
+shortest `f32` text and the server stored the float above. A request is
+bounded through its context or token, never the HTTP client's timeout,
+which would cut a subscription short. `make go-test` and `make
+dotnet-test` start the servers they need (`FENEC_SERVER`, else
+`target/debug/fenec-server`), CI runs both, and `make languages-test`
+runs the docs' Go and C# examples through each SDK too (`go-sdk`,
+`dotnet-sdk`). CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
 `collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
 release's draft is published (`packages.yml`), only after that same check,
 with a token where the registry's secret holds one (`NPM_TOKEN`,
 `PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
-where it does not (RELEASING.md). With
+where it does not (RELEASING.md). NuGet's `FenecDb` is packed, installed
+into a fresh console app and used against a server
+(`integrations/dotnet/package.sh`) and only then pushed with
+`NUGET_API_KEY`, its job skipped with a notice without the secret; the Go
+module has no registry, and `release.yml` pushes the tag
+`integrations/go/vX.Y.Z` it is fetched by beside `vX.Y.Z`. With
 `full_text=True` a store indexes its text for BM25 as well and searches by
 the words (`match`) or by the words and the vector fused (`fuse`):
 LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and

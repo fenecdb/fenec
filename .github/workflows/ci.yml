@@ -177,6 +177,14 @@ jobs:
       - name: Languages over HTTP
         run: make languages-test
 
+      # The Go and .NET SDKs against a primary, a replica of it and a node
+      # of tenants their tests start, with the runner's Go and .NET.
+      - name: Go SDK
+        run: make go-test
+
+      - name: .NET SDK
+        run: make dotnet-test
+
       # useLiveQuery against a stand-in and a real fenec-server and replica; the
       # sync layer loads the browser module.
       - name: React hook
@@ -203,12 +211,14 @@ jobs:
       - name: Durable Object storage
         run: make cloudflare-test
 
-      # What PyPI and npm would take, built as they build it, installed and
-      # used. A published release publishes them (packages.yml).
+      # What PyPI, npm and NuGet would take, built as they build it,
+      # installed and used. A published release publishes them
+      # (packages.yml).
       - name: Packages
         run: |
           make wasm-lite
           integrations/packages.sh
+          integrations/dotnet/package.sh
 
   build:
     name: build (release + cli profile)

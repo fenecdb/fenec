@@ -11,7 +11,7 @@ measurements, as every feature here does.
 | 2 | Objects (`json` fields, paths) -- **done** | medium | the largest gap for a *document* database |
 | 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
 | 4 | TLS 1.3, our own, for HTTP | large | the security story ends at a terminator today |
-| 5 | Official SDKs over HTTP (Phase 53) | medium | every language reaches the server over HTTP since the pg wire went |
+| 5 | Official SDKs over HTTP (Phase 53) -- **done** for Go and .NET | medium | every language reaches the server over HTTP since the pg wire went |
 
 Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
 are the design), the PostgreSQL wire protocol (below), several

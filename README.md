@@ -126,8 +126,15 @@ none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client
 HTTP and JSON: REST routes, FenecQL through `POST /query`, all-or-nothing
 `/batch`es, subscriptions over SSE and change data capture. Every language
 reaches it with its own HTTP client
-([languages](https://fenecdb.com/docs/languages)); official SDKs are next on
-the [roadmap](ROADMAP.md).
+([languages](https://fenecdb.com/docs/languages)), and these have a client
+of their own, each its standard library alone:
+
+| Language | Package | From |
+| --- | --- | --- |
+| Python | `pip install fenecdb` (with the LangChain and LlamaIndex stores) | [`integrations/python`](integrations/python) |
+| JavaScript | `npm install @fenecdb/web` (`connect`) | [`web/`](web) |
+| Go | `go get github.com/fenecdb/fenec/integrations/go` | [`integrations/go`](integrations/go) |
+| .NET | `dotnet add package FenecDb` | [`integrations/dotnet`](integrations/dotnet) |
 
 ```bash
 make server TOKEN=secret
@@ -178,7 +185,7 @@ make docker && make docker-run TOKEN=secret   # or build it yourself
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
 | **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
-| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React |
+| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React · SDKs for Python, JavaScript, Go and .NET |
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
@@ -210,7 +217,7 @@ query; it is not a join and is not trying to be one.
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |
-| [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React |
+| [Integrations](https://fenecdb.com/docs/integrations) | LangChain and LlamaIndex vector stores over HTTP, `useLiveQuery` for React, the Go and .NET SDKs |
 | [Monitoring](https://fenecdb.com/docs/monitoring) | `/_metrics` in Prometheus's format, the Grafana dashboard in `monitoring/`, and the slow-statement log |
 | [Sync](https://fenecdb.com/docs/sync) | A local replica that reads without the network and writes optimistically |
 | [Tenants and sharding](https://fenecdb.com/docs/sharding) | A file per tenant, many per node, and a router that places and moves them |

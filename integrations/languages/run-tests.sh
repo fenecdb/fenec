@@ -4,8 +4,10 @@
 # (java.net.http), PHP (curl) and Ruby (Net::HTTP) from containers of their
 # own, as integrations/python runs its stores -- a runner need not carry the
 # toolchains, and every machine runs the same -- then JavaScript (fetch, and
-# @fenecdb/web's client) with the Node, Go (net/http) with the Go, C#
-# (HttpClient) with the .NET and Rust (ureq) with the Rust on the machine.
+# @fenecdb/web's client) with the Node, Go (net/http, and the fenecdb SDK
+# in integrations/go) with the Go, C# (HttpClient, and the FenecDb SDK in
+# integrations/dotnet) with the .NET and Rust (ureq) with the Rust on the
+# machine.
 # Each language gets a server of its own over a new file, so every program
 # starts from an empty database and makes the same collection. Under CI a
 # missing toolchain fails the run rather than skip it.
@@ -98,6 +100,9 @@ if command -v go >/dev/null 2>&1; then
     serve go
     (cd "$here/go" && FENEC_URL="$local_url" FENEC_TOKEN="$token" go run .)
     stop
+    serve go-sdk
+    (cd "$here/go-sdk" && FENEC_URL="$local_url" FENEC_TOKEN="$token" go run .)
+    stop
 else
     missing go "Go's example"
 fi
@@ -105,6 +110,10 @@ fi
 if command -v dotnet >/dev/null 2>&1; then
     serve dotnet
     (cd "$here/dotnet" && FENEC_URL="$local_url" FENEC_TOKEN="$token" \
+        dotnet run -c Release)
+    stop
+    serve dotnet-sdk
+    (cd "$here/dotnet-sdk" && FENEC_URL="$local_url" FENEC_TOKEN="$token" \
         dotnet run -c Release)
     stop
 else

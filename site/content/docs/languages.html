@@ -8,9 +8,9 @@ description: Use fenecdb from Python, JavaScript, Go, Rust, .NET, Java, PHP or R
 with the HTTP client it already has. No driver to install.</p>
 
 <p>Every example on this page is a program that runs against a real server
-on each change to fenecdb (<code>make languages-test</code>). Official SDKs
-for these languages are coming in a later release (Phase 53); until then
-these few lines are the whole client.</p>
+on each change to fenecdb (<code>make languages-test</code>). Python,
+JavaScript, Go and .NET have official clients, each its standard library
+alone; in the other languages these few lines are the whole client.</p>
 
 <h2 id="setup">Start a server</h2>
 
@@ -78,6 +78,33 @@ page (<a href="javascript.html">JavaScript</a>).</p>
 </div>
 
 <div class="lang" data-name="Go">
+<pre data-lang="bash" data-label="install">go get github.com/fenecdb/fenec/integrations/go   # the standard library alone</pre>
+<pre data-lang="go" data-label="main.go">import fenecdb "github.com/fenecdb/fenec/integrations/go"
+
+db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
+
+db.Exec(ctx, "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.Exec(ctx, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3})
+db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0})
+
+type Hit struct {
+	Title string  `json:"title"`
+	Score float32 `json:"_score"`
+}
+hits, err := fenecdb.QueryAs[Hit](ctx, db, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})
+
+var e *fenecdb.Error
+if _, err := db.Query(ctx, "get nowhere"); errors.As(err, &amp;e) {
+	fmt.Println(e.Status, e.Code, e.Message) // 404 not_found collection `nowhere`
+}</pre>
+<p><code>Query</code> gives rows as <code>[]map[string]any</code>;
+<code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
+replica, <code>Subscribe</code>, <code>Changes</code> and
+<code>WithTenant</code> cover the rest of the <a href="http.html">HTTP
+endpoint</a> (<a href="https://github.com/fenecdb/fenec/tree/main/integrations/go">integrations/go</a>).
+A <code>[]float32</code> goes out as the decimals that read back as each
+<code>f32</code>, so a vector round-trips to the bit.</p>
+<p>Without the SDK, <code>net/http</code> and <code>encoding/json</code>:</p>
 <pre data-lang="go" data-label="main.go">// query runs one FenecQL statement and decodes its answer into out.
 func query(out any, q string, params ...any) error {
 	body, _ := json.Marshal(map[string]any{"query": q, "params": params})
@@ -109,8 +136,7 @@ var rows []struct {
 	Score float32 `json:"_score"`
 }
 err := query(&amp;rows, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})</pre>
-<p><code>net/http</code> and <code>encoding/json</code> alone;
-<code>FenecError</code> is a struct of the status and the body's
+<p><code>FenecError</code> is a struct of the status and the body's
 <code>error</code>.</p>
 </div>
 
@@ -141,6 +167,32 @@ match query("get nowhere", json!([])) {
 </div>
 
 <div class="lang" data-name=".NET">
+<pre data-lang="bash" data-label="install">dotnet add package FenecDb   # HttpClient and System.Text.Json alone</pre>
+<pre data-lang="text" data-label="Program.cs">using FenecDb;
+
+using var db = new FenecClient("http://127.0.0.1:8080", new() { Token = "secret" });
+
+await db.ExecAsync("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))");
+await db.ExecAsync("put docs {title: $1, embed: $2}", ["Night at the oasis", new[] { 0.1f, 0.2f, 0.3f }]);
+await db.ExecAsync("put docs {title: $1, embed: $2}", ["Dunes", new[] { 0.9f, 0.1f, 0.0f }]);
+
+var hits = await db.QueryAsync&lt;Hit&gt;("get docs select title near embed $1 limit 5", [new[] { 0.1f, 0.2f, 0.3f }]);
+
+try { await db.QueryAsync("get nowhere"); }
+catch (FenecException e) { Console.WriteLine($"{e.Status} {e.Code} {e.Message}"); } // 404 not_found collection `nowhere`
+
+record Hit(string Title, [property: JsonPropertyName("_score")] float Score);</pre>
+<p>.NET 8 and newer, async throughout with a <code>CancellationToken</code>
+on every call. <code>QueryAsync&lt;T&gt;</code> maps rows to records or
+classes by property name, any case; <code>BatchAsync</code>,
+<code>WithIdempotencyKey</code>, <code>After</code> for a replica,
+<code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code>,
+<code>ChangesAsync</code> and a <code>Tenant</code> option cover the rest
+of the <a href="http.html">HTTP endpoint</a>
+(<a href="https://github.com/fenecdb/fenec/tree/main/integrations/dotnet">integrations/dotnet</a>).
+A <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
+as the decimals that read back as each float.</p>
+<p>Without the SDK, <code>HttpClient</code> and <code>System.Text.Json</code>:</p>
 <pre data-lang="text" data-label="Program.cs">var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:8080") };
 http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret");
 
@@ -160,8 +212,7 @@ await Query("put docs {title: $1, embed: $2}", "Dunes", new[] { 0.9f, 0.1f, 0.0f
 
 var rows = await Query("get docs select title near embed $1 limit 5", new[] { 0.1f, 0.2f, 0.3f });
 var titles = rows.EnumerateArray().Select(r =&gt; r.GetProperty("title").GetString());</pre>
-<p><code>HttpClient</code> and <code>System.Text.Json</code>, no package. The
-body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
+<p>The body is serialised whole: <code>PostAsJsonAsync</code> streams it chunked,
 and the server wants a <code>Content-Length</code>.</p>
 </div>
 
@@ -259,7 +310,12 @@ rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])</
 above with their asserts: <code>make languages-test</code> starts a
 <code>fenec-server</code> over a new file for each language and runs Python,
 Java, PHP and Ruby from their official images in Docker, and JavaScript, Go,
-C# and Rust with the toolchains on the machine. CI runs it on every change,
+C# and Rust with the toolchains on the machine — Go and C# both through
+their SDK and without it. The SDKs' own tests (<code>make go-test</code>,
+<code>make dotnet-test</code>) start a primary, a replica of it and a node
+of tenants and cover the rest: every type of parameter, the errors, a batch
+put back whole, an idempotency key, reading a write on the replica, a
+subscription, the change stream, a tenant and a scoped token. CI runs it on every change,
 so a change to the HTTP endpoint that would break one of them is caught
 before it ships.</p>
 

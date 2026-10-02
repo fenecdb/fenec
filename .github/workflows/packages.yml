@@ -1,7 +1,8 @@
 name: packages
 
-# PyPI's `fenecdb` and npm's `@fenecdb/web`, `@fenecdb/react`,
-# `@fenecdb/cloudflare` and `@fenecdb/langchain` go out when
+# PyPI's `fenecdb`, npm's `@fenecdb/web`, `@fenecdb/react`,
+# `@fenecdb/cloudflare` and `@fenecdb/langchain`, and NuGet's `FenecDb`
+# (with NUGET_API_KEY, the job below) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
 # the moment the packages follow it. A registry keeps what it is given, so
@@ -130,3 +131,53 @@ jobs:
             # github.com/dist/...` and stopped there.
             npm publish "./$pkg" --access public --provenance
           done
+
+  # NuGet's `FenecDb`: packed, installed from the .nupkg into a console app
+  # of its own and used against a fenec-server (integrations/dotnet/
+  # package.sh), and only then pushed. NuGet takes an API key alone here;
+  # without NUGET_API_KEY the job says so and stops, and the other
+  # registries go on.
+  nuget:
+    name: NuGet
+    runs-on: ubuntu-latest
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/FenecDb
+    steps:
+      - name: Look for the key
+        id: key
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::notice::NUGET_API_KEY is not set: FenecDb is not published to NuGet (RELEASING.md, 'Once: the registries' side')"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.key.outputs.set == 'true'
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        if: steps.key.outputs.set == 'true'
+        run: rustup show
+
+      - name: Pack, install and use the package
+        if: steps.key.outputs.set == 'true'
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: integrations/dotnet/package.sh dist-nuget
+
+      # `--skip-duplicate`: a dispatch after a run that failed part of the
+      # way pushes again what already went out, and NuGet refuses a version
+      # twice.
+      - name: Publish
+        if: steps.key.outputs.set == 'true'
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push dist-nuget/FenecDb.*.nupkg --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json --skip-duplicate
