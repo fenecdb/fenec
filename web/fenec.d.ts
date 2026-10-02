@@ -352,6 +352,10 @@ export declare class FenecError extends Error {
   collation?: string[];
   /** How many statements of the same text ran before this one. */
   ran?: number;
+  /** A write the server refused (`FenecSync`): the HTTP status it answered. */
+  status?: number;
+  /** A write the server refused: the text of its first statement. */
+  query?: string;
 }
 
 /**
@@ -916,8 +920,14 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** Where the local module's collation data comes from (`Fenec.open`). */
   collation?: CollationSource;
   token?: string;
+  /** Asked for a new token when the server answers 401; until then nothing is sent. */
+  tokenProvider?: () => string | Promise<string>;
   fetch?: typeof globalThis.fetch;
-  /** IndexedDB key: the image **and the cursors** are stored. */
+  /**
+   * IndexedDB key: the replica is stored there with its cursors and the
+   * writes the server has not answered, which a page opened again sends.
+   * A `local` kept in a file (`openFile`) keeps them in the file instead.
+   */
   persist?: string;
   /** Seals the stored image and its chunks with AES-GCM (`persist`). */
   cryptoKey?: CryptoKey | null;
@@ -926,6 +936,12 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** Lock manager (defaults to `navigator.locks`). */
   locks?: { request(name: string, opts: unknown, fn: () => unknown): Promise<unknown> };
   onError?: (e: unknown) => void;
+  /**
+   * Told of each write the server refused -- any 4xx but 401, 408 and 429 --
+   * once it was put back, a write left from a page before among them. A
+   * network failure or a 5xx is no refusal: the write waits and goes again.
+   */
+  onRefused?: (e: FenecError & { status: number; query: string }) => void;
 }
 
 export interface ShapeStatus {
@@ -933,7 +949,7 @@ export interface ShapeStatus {
   cursor: number;
   seeded: boolean;
   connected: boolean;
-  /** Number of optimistic rows awaiting server confirmation. */
+  /** Writes the server has not answered yet. */
   pending: number;
   error: string | null;
   leader: boolean;
@@ -957,7 +973,17 @@ export declare class FenecSync<S extends AnySchema<S> = Schema, Rel extends Rela
 
   /** Resolves once the first seed of every shape has landed. */
   ready(): Promise<void>;
+  /** Resolves once the server has answered every write made so far. */
+  pushed(): Promise<void>;
   status(): ShapeStatus[];
+  /** A new token: requests carry it from here on, and what a 401 stopped goes on. */
+  setToken(token: string): void;
+  /**
+   * The network gone (`false`: the streams end, writes wait) or back
+   * (`true`: what waited goes at once). A page has it from `online` and
+   * `offline` on its own.
+   */
+  setOnline(online: boolean): void;
 
   /** Reads local, writes optimistic. A collection without a shape is rejected. */
   from<T extends TableRef>(table: T): Query<T['$fields'], Row<T['$fields']>, [], Rel, T['$name']>;
@@ -975,15 +1001,15 @@ export declare class FenecSync<S extends AnySchema<S> = Schema, Rel extends Rela
   live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void;
 
   /**
-   * Sends several writes in a single round trip, as **one block**: the
-   * server lands all of them or none, and on an error the local side is
-   * rolled back exactly as the server's was.
+   * Several writes as **one**: applied together, sent as one `/batch` under
+   * one key, landed by the server as one block or refused and put back
+   * whole. Resolves with the number of statements once the server has them.
    */
   batch(fn: (t: Batch<S, Rel>) => Promise<void>): Promise<number>;
 
   /** Finishes any pending live-query runs (for tests). */
   flush(): Promise<void>;
-  /** Closes the subscriptions; the local database stays open. */
+  /** Closes the subscriptions and gives up the lead; the local database stays open. */
   close(): void;
 }
 

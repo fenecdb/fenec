@@ -15,7 +15,7 @@ import { promisify } from 'node:util';
 import { readFile, writeFile, access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fenec, FenecError, openFile, persist } from './fenec.js';
+import { Fenec, FenecError, openFile, persist, sync } from './fenec.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
 const skip = !wasm && 'no web/fenec.wasm (make wasm)';
@@ -511,4 +511,46 @@ test('openFile runs the live queries, at the load and at each write', { skip }, 
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(seen, ['none yet', ['a'], ['a', 'b']]);
   assert.equal(file.size, dir.bytes('live.fenec').length);
+});
+
+// A replica whose database is kept in a file keeps its sync there too: the
+// cursors, the writes the server has not answered and their keys.
+test('a replica kept in a file sends, opened again, the writes it had not', { skip }, async () => {
+  const dir = fakeDir();
+  const posts = [];
+  const schema = [{ name: 'tasks', fields: [{ name: 'key', type: 'text', index: 'hash' }, { name: 'title', type: 'text' }] }];
+  const fetch = (url, init = {}) => {
+    if (init.headers?.accept === 'text/event-stream') {
+      const seed = 'event: seed\ndata: {"seq":3,"rows":[{"id":1,"key":"a","title":"one"}]}\n\n';
+      const body = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(seed));
+          init.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')));
+        },
+      });
+      return Promise.resolve(new Response(body));
+    }
+    if (init.method !== 'POST') return Promise.resolve(new Response(JSON.stringify(schema)));
+    posts.push(init.headers['idempotency-key']);
+    return Promise.resolve(new Response('{"affected":1}', { headers: { 'fenec-seq': '4' } }));
+  };
+  const opts = { url: 'http://server', leader: false, shapes: [{ collection: 'tasks', key: 'key' }], fetch };
+  const db = await open();
+  const file = await openFile(db, 'replica.fenec', { dir });
+  const first = await sync({ ...opts, local: db });
+  await first.ready();
+  first.setOnline(false);
+  first.from('tasks').insert({ title: 'kept' }).catch(() => {});
+  const key = db.rows('get _sync_queue select key')[0].key;
+  first.close();
+  file.close();
+  assert.deepEqual(posts, [], 'offline: nothing sent');
+
+  const { db: again } = await reopen(dir, 'replica.fenec');
+  const second = await sync({ ...opts, local: again });
+  assert.ok(await second.from('tasks').where('title', 'kept').first(), 'its row came back with it');
+  await second.pushed();
+  assert.deepEqual(posts, [key], 'sent once it opened, under the key it was made with');
+  assert.equal(second.status()[0].cursor, 3, 'and went on from its cursor');
+  second.close();
 });

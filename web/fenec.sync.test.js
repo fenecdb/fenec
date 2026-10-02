@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Fenec, sync, connect, FenecError } from './fenec.js';
 import { fenecTable, text, integer, index, rename } from './schema.js';
+import { installIndexedDB } from './idb.fake.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
 async function binary(name) {
@@ -245,17 +246,18 @@ test('an optimistic insert shows up at once, then reconciles with the server id'
   }
 });
 
-test('when the server rejects, the local side is rolled back exactly', opts, async () => {
+test('when the server refuses, the local side is rolled back exactly', opts, async () => {
   const s = await server();
-  // A transport that rejects writes: the only honest way to force the error
-  // path *without* breaking the server.
+  // A transport that refuses writes: the only honest way to force the error
+  // path *without* breaking the server. A 403, since a 5xx is not a
+  // refusal: the write waits and goes again.
   let reject = false;
   const db = await open(s.url, {
     fetch: (u, init) => {
       if (reject && init?.method === 'POST') {
         return Promise.resolve(
           new Response(JSON.stringify({ error: 'nope' }), {
-            status: 503,
+            status: 403,
             headers: { 'content-type': 'application/json' },
           }),
         );
@@ -289,6 +291,41 @@ test('when the server rejects, the local side is rolled back exactly', opts, asy
       null,
       'the optimistic insert must be rolled back',
     );
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
+test('a server error keeps the write, and it lands once the server is back', opts, async () => {
+  const s = await server();
+  let failing = 0;
+  const keys = [];
+  const db = await open(s.url, {
+    fetch: (u, init) => {
+      if (init?.method === 'POST') {
+        keys.push(init.headers['idempotency-key']);
+        if (failing > 0) {
+          failing--;
+          return Promise.resolve(new Response('{"error":"down"}', { status: 503 }));
+        }
+      }
+      return fetch(u, init);
+    },
+  });
+  try {
+    await db.ready();
+    failing = 1;
+    const p = db.from('tasks').where('key', 'a').update({ title: 'KEPT' });
+    assert.equal((await db.from('tasks').where('key', 'a').first()).title, 'KEPT');
+    // 250 ms of backoff, then sent again under the same key.
+    assert.equal(await p, 1);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0], keys[1], 'the retry carries the key it was sent with');
+    await until(async () => (await s.run('get tasks where title = "KEPT"')).length === 1, 'the server has it');
+    assert.equal((await db.from('tasks').where('key', 'a').first()).title, 'KEPT', 'never put back');
+    await db.pushed();
+    assert.equal(db.status()[0].pending, 0);
   } finally {
     db.close();
     s.close();
@@ -364,7 +401,7 @@ test('on error a batch rolls the local side back from end to start', opts, async
       if (reject && String(u).endsWith('/batch')) {
         return Promise.resolve(
           new Response(JSON.stringify({ error: 'nope', completed: 1 }), {
-            status: 503,
+            status: 409,
             headers: { 'content-type': 'application/json' },
           }),
         );
@@ -597,6 +634,174 @@ test('a tab joining before the leader is seeded is not left hanging', opts, asyn
     a.close();
     b.close();
     s.close();
+  }
+});
+
+// ------------------------------------------------------------- outages
+//
+// A write is kept until the server answers it: no answer and a 5xx send it
+// again under its key, which the server answers as the first time.
+
+/** A fetch that fails every POST while `down.on`, the server reached or not first. */
+function flaky(down) {
+  const keys = [];
+  return {
+    keys,
+    fetch: async (u, init) => {
+      if (init?.method !== 'POST') return fetch(u, init);
+      keys.push(init.headers['idempotency-key']);
+      if (down.on === 'refused') throw new TypeError('fetch failed');
+      if (down.on === 'lost') {
+        // The server takes it; the answer never comes back.
+        await fetch(u, init);
+        throw new TypeError('the connection was reset');
+      }
+      return fetch(u, init);
+    },
+  };
+}
+
+test('a write whose answer was lost lands once, sent again under its key', opts, async () => {
+  const s = await server();
+  const down = { on: 'lost' };
+  const f = flaky(down);
+  const db = await open(s.url, { fetch: f.fetch });
+  try {
+    await db.ready();
+    const p = db.from('tasks').insert({ title: 'once', status: 'open' });
+    await until(() => f.keys.length >= 1, 'the first send');
+    down.on = null;
+    assert.equal(await p, 1);
+    assert.ok(f.keys.length >= 2 && f.keys.every((k) => k === f.keys[0]), 'one key for every send');
+    assert.equal((await s.run('get tasks where title = "once"')).length, 1, 'made once');
+    await until(async () => {
+      const rows = await db.from('tasks').where('title', 'once').rows();
+      return rows.length === 1 && rows[0].id < 2 ** 52;
+    }, 'the server copy in its place');
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
+test("an update of an unanswered insert reaches the server's copy by its key", opts, async () => {
+  const s = await server();
+  const down = { on: 'refused' };
+  const db = await open(s.url, { fetch: flaky(down).fetch });
+  try {
+    await db.ready();
+    db.from('tasks').insert({ title: 'draft', status: 'open' });
+    const row = await db.from('tasks').where('title', 'draft').first();
+    assert.ok(row.id >= 2 ** 52);
+    // By the temporary id: the server never saw it.
+    const p = db.from('tasks').where('id', row.id).update({ title: 'final' });
+    down.on = null;
+    db.setOnline(true);
+    await p;
+    const open = await s.run('get tasks where status = "open" select title order title');
+    assert.deepEqual(open.map((r) => r.title), ['final', 'one', 'two']);
+    await until(async () => (await db.from('tasks').where('title', 'final').first())?.id < 2 ** 52, 'the copy came');
+  } finally {
+    db.close();
+    s.close();
+  }
+});
+
+test('writes made offline survive a reload of the page, and go once it is back', opts, async () => {
+  installIndexedDB();
+  const s = await server();
+  const first = await open(s.url, { fetch: flaky({ on: 'refused' }).fetch, persist: 'reload' });
+  await first.ready();
+  first.setOnline(false);
+  first.from('tasks').insert({ title: 'kept', status: 'open' }).catch(() => {});
+  first.from('tasks').where('key', 'a').update({ title: 'ONE' }).catch(() => {});
+  assert.equal(first.status()[0].pending, 2);
+  // What a page closed now leaves in IndexedDB.
+  await new Promise((r) => setTimeout(r, 50));
+  first.close();
+
+  const second = await open(s.url, { persist: 'reload' });
+  try {
+    assert.equal(second.status()[0].pending, 2, 'the writes came back with the replica');
+    assert.ok(await second.from('tasks').where('title', 'kept').first(), 'and so did their rows');
+    await second.pushed();
+    const open = await s.run('get tasks where status = "open" select title order title');
+    assert.deepEqual(open.map((r) => r.title), ['ONE', 'kept', 'two']);
+    await until(
+      async () => (await second.from('tasks').where('title', 'kept').rows()).every((r) => r.id < 2 ** 52),
+      'the copy in place',
+    );
+    assert.equal((await second.from('tasks').where('title', 'kept').rows()).length, 1);
+  } finally {
+    second.close();
+    s.close();
+    delete globalThis.indexedDB;
+  }
+});
+
+test("the leader sends a follower's writes, and the follower is told the answer", opts, async () => {
+  const s = await server();
+  const locks = fakeLocks();
+  const posts = { a: 0, b: 0 };
+  let refuse = false;
+  const counting = (tab) => (u, init) => {
+    if (init?.method === 'POST') {
+      posts[tab]++;
+      if (refuse) return Promise.resolve(new Response('{"error":"denied"}', { status: 403 }));
+    }
+    return fetch(u, init);
+  };
+  const a = await open(s.url, { leader: 'auto', locks, fetch: counting('a') });
+  await a.ready();
+  const refused = [];
+  const b = await open(s.url, { leader: 'auto', locks, fetch: counting('b'), onRefused: (e) => refused.push(e.status) });
+  try {
+    await b.ready();
+    assert.equal(await b.from('tasks').insert({ title: 'from b', status: 'open' }), 1);
+    assert.deepEqual(posts, { a: 1, b: 0 }, 'only the leader sends');
+    await until(
+      async () => (await b.from('tasks').where('title', 'from b').rows()).every((r) => r.id < 2 ** 52),
+      "b's row is the server's",
+    );
+    assert.equal(b.status()[0].pending, 0);
+
+    refuse = true;
+    await assert.rejects(b.from('tasks').where('key', 'a').update({ title: 'NOPE' }), /denied/);
+    assert.equal((await b.from('tasks').where('key', 'a').first()).title, 'one', 'put back in the follower');
+    assert.deepEqual(refused, [403]);
+    assert.equal(posts.b, 0);
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+  }
+});
+
+test('a new leader sends what the tabs before it had not', opts, async () => {
+  installIndexedDB();
+  const s = await server();
+  const locks = fakeLocks();
+  const a = await open(s.url, { leader: 'auto', locks, fetch: flaky({ on: 'refused' }).fetch, persist: 'tabs' });
+  await a.ready();
+  const b = await open(s.url, { leader: 'auto', locks, persist: 'tabs' });
+  try {
+    await b.ready();
+    a.from('tasks').insert({ title: 'from a', status: 'open' }).catch(() => {});
+    const fromB = b.from('tasks').insert({ title: 'from b', status: 'open' });
+    await until(() => a.status()[0].pending === 2, 'the leader holds both writes');
+    await new Promise((r) => setTimeout(r, 50));
+    // The leader goes, its write unsent: the next one takes over.
+    a.close();
+    await fromB;
+    await b.pushed();
+    assert.equal(b.status()[0].leader, true);
+    assert.equal((await s.run('get tasks where title = "from a" count'))[0].count, 1);
+    assert.equal((await s.run('get tasks where title = "from b" count'))[0].count, 1);
+  } finally {
+    a.close();
+    b.close();
+    s.close();
+    delete globalThis.indexedDB;
   }
 });
 
