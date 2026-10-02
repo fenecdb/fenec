@@ -99,10 +99,11 @@ jobs:
       # The browser bundle comes first: web/fenec.sync.test.js and the
       # end-to-end half of web/fenec.test.js skip themselves when
       # web/fenec.wasm is missing, so without this the JS side is a no-op.
-      # The module without the indexes is what web/fenec.test.js hands the
-      # full one's files to, and back.
+      # The module without the indexes and the replica's are what
+      # web/fenec.test.js hands the full one's files to, and back, and holds
+      # their `near` to its `near ... exact`.
       - name: Build WASM
-        run: make wasm wasm-lite
+        run: make wasm wasm-lite wasm-replica
 
       # site/build.py holds every size the docs quote against the module just
       # built, and under CI refuses one that drifted. The site is built only
@@ -110,10 +111,13 @@ jobs:
       # requests that passed and a deploy that failed after the merge. One
       # runner is enough: the module is the one the site workflow builds, to
       # the byte, and brotli comes from apt.
+      # esbuild bundles the app the docs weigh the client entry by, pinned as
+      # the site's deploy pins it.
       - name: Check the sizes the docs quote
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get install -y --no-install-recommends brotli
+          npm install -g esbuild@0.28.2
           python3 site/build.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
@@ -129,7 +133,7 @@ jobs:
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
-  # most. A pull request is checked out as its merge, so the base is the
+  # most -- and the lite and the replica module's sizes beside it. A pull request is checked out as its merge, so the base is the
   # merge's first parent. It fails nothing -- a size the docs quote is held
   # by site/build.py in the test job.
   size:
@@ -232,7 +236,7 @@ jobs:
       # (packages.yml).
       - name: Packages
         run: |
-          make wasm-lite
+          make wasm-lite wasm-replica
           integrations/packages.sh
           integrations/dotnet/package.sh
 

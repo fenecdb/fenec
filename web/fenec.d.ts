@@ -657,6 +657,27 @@ export declare class FenecHttp<S extends AnySchema<S> = Schema, Rel extends Rela
    * last two with the server's token.
    */
   checkSchema(description: SchemaDescription | string, mode?: 'follow' | 'plan' | 'apply'): Promise<SchemaOutcome>;
+
+  /** Where a live query's error goes when it has no `onError` of its own. */
+  onError: ((e: unknown) => void) | null;
+
+  /**
+   * Live query over the server: `cb` is handed the rows once a
+   * subscription to every collection the query reads is open, and again
+   * after every write to one of them, the query run on the server each
+   * time. A text names what it reads with `{collections}`, or is refused.
+   * Returns the function that stops it.
+   */
+  live<F extends Fields, P, L extends readonly string[], R2 extends Relations, A extends string>(
+    query: Query<F, P, L, R2, A>,
+    cb: (rows: P[]) => void,
+    opts?: LiveOptions,
+  ): () => void;
+  live(
+    query: string | [sql: string, params: unknown[]],
+    cb: (rows: any[]) => void,
+    opts: LiveOptions & { collections: string[] },
+  ): () => void;
 }
 
 /**
@@ -914,9 +935,15 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** Server root (`fenec-server --http`). */
   url: string;
   shapes: Shape<any>[];
-  /** An existing local database; otherwise opened from the `wasm` path. */
+  /** An existing local database; otherwise opened from `wasm`. */
   local?: Fenec<S>;
-  wasm?: string | BufferSource;
+  /**
+   * The module the replica is opened with: `./fenec.wasm` unless given.
+   * `./fenec-replica.wasm` is smaller, with no graph: its `near` measures
+   * every vector as `exact` does, for a replica that searches no vectors
+   * or holds a few thousand.
+   */
+  wasm?: string | BufferSource | WebAssembly.Module;
   /** Where the local module's collation data comes from (`Fenec.open`). */
   collation?: CollationSource;
   token?: string;

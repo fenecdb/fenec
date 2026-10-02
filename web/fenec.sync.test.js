@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { Fenec, sync, connect, FenecError } from './fenec.js';
 import { fenecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
+import * as client from './client.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
 async function binary(name) {
@@ -946,6 +947,87 @@ test('connect compares, and migrates only when asked', opts, async () => {
     await connect(s.url, { schema: { tasks: renamed }, migrations, migrate: true });
     assert.equal((await s.run('get _migrations count'))[0].count, 1);
   } finally {
+    s.close();
+  }
+});
+
+// `@fenecdb/web/client`: no module at all, the queries run on the server
+// and a live query follows its subscriptions.
+test("a live query over HTTP follows the server's writes, with no module", { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  const db = client.connect(s.url);
+  const seen = [];
+  const stop = db.live(db.from('tasks').where('status', 'open').order('priority', 'desc').limit(2), (rows) =>
+    seen.push(rows.map((r) => r.title)),
+  );
+  try {
+    await until(() => seen.length === 1, 'the first rows');
+    assert.deepEqual(seen[0], ['two', 'one']);
+    await s.run('put tasks {key: "d", title: "four", status: "open", priority: 9}');
+    await until(() => seen.at(-1)?.[0] === 'four', 'the rows again after a write');
+    assert.deepEqual(seen.at(-1), ['four', 'two']);
+    // A write to a collection the query does not read runs nothing.
+    await s.run('create collection other (n int)');
+    await new Promise((r) => setTimeout(r, 150));
+    const count = seen.length;
+    await s.run('put other {n: 1}');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(seen.length, count);
+    stop();
+    await s.run('put tasks {key: "e", title: "five", status: "open", priority: 10}');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(seen.length, count, 'nothing after the stop');
+  } finally {
+    stop();
+    s.close();
+  }
+});
+
+// sync() opens the full module unless given one, and the replica's --
+// `./fenec-replica.wasm`, no graph, whose `near` measures every vector as
+// `exact` does -- when asked.
+const replicaWasm = await readFile(new URL('./fenec-replica.wasm', import.meta.url)).catch(() => null);
+
+test('sync opens the full module by default, and the replica module when asked', { ...opts, skip: skip || (replicaWasm ? false : 'no web/fenec-replica.wasm (make wasm-replica)') }, async () => {
+  const s = await server();
+  await s.run('create collection docs (key text @hash, title text @text, embed vector<3> @hnsw(cosine))');
+  await s.run(`put docs [{key: "a", title: "east", embed: [1.0, 0.0, 0.0]},
+                         {key: "b", title: "north", embed: [0.0, 1.0, 0.0]},
+                         {key: "c", title: "between", embed: [0.7, 0.7, 0.0]}]`);
+  // The module's URL is asked of fetch, as a page asks it; the rest goes
+  // to the server.
+  const asked = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    if (typeof url === 'string' && url.endsWith('.wasm')) {
+      asked.push(url);
+      const bytes = url.endsWith('fenec-replica.wasm') ? replicaWasm : wasm;
+      return Promise.resolve(new Response(bytes, { headers: { 'content-type': 'application/wasm' } }));
+    }
+    return real(url, init);
+  };
+  let db;
+  try {
+    const shapes = [{ collection: 'docs', key: 'key' }];
+    const full = await sync({ url: s.url, leader: false, shapes });
+    await full.ready();
+    assert.deepEqual(asked, ['./fenec.wasm']);
+    full.local.run('create collection own (v vector<2>)');
+    full.local.run('create index on own (v) @hnsw(l2)');
+    full.close();
+
+    db = await sync({ url: s.url, leader: false, shapes, wasm: './fenec-replica.wasm' });
+    await db.ready();
+    assert.deepEqual(asked, ['./fenec.wasm', './fenec-replica.wasm']);
+    const near = await db.from('docs').near('embed', [0.9, 0.5, 0.0]).limit(2).rows();
+    assert.deepEqual(near.map((r) => r.key), ['c', 'a']);
+    assert.deepEqual((await db.from('docs').match('title', 'north').rows()).map((r) => r.key), ['b']);
+    // No graph in it: an index of one is refused, naming the feature.
+    db.local.run('create collection own (v vector<2>)');
+    assert.throws(() => db.local.run('create index on own (v) @hnsw(l2)'), /`vector` feature/);
+  } finally {
+    globalThis.fetch = real;
+    db?.close();
     s.close();
   }
 });

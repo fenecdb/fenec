@@ -24,9 +24,11 @@
 //
 // A module of its own, so a page that declares nothing loads none of it.
 // fenec.js reads the tables it is handed as FenecQL (`toFenecQL`), and never
-// imports it.
+// imports it. Its error comes from the builder's module, which is all of
+// the client it imports: a page that declares its schema and reaches a
+// server (`@fenecdb/web/client`) loads no engine for it.
 
-import { FenecError } from './fenec.js';
+import { FenecError } from './builder.js';
 
 /** The description's format, as `fenec_core::declared` reads it. */
 export const FORMAT = 1;

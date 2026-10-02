@@ -6,6 +6,7 @@ node_modules/
 web/fenec-schema.d.ts
 web/fenec.wasm
 web/fenec-lite.wasm
+web/fenec-replica.wasm
 web/collate/
 site/dist/
 .wrangler/

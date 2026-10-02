@@ -1,0 +1,45 @@
+// `@fenecdb/web/client`: the HTTP client, the query builder and live
+// queries over the server's subscriptions, without the engine. The types
+// are `@fenecdb/web`'s own, re-exported: a query typed for one is typed for
+// the other.
+
+export { FenecError, FenecHttp, Query, and, connect, from, not, or, raw } from './fenec.js';
+export type {
+  Aggregate,
+  Bytes,
+  Collation,
+  Cond,
+  Exec,
+  Fields,
+  HttpOptions,
+  Insert,
+  InsertRow,
+  Json,
+  JsonPath,
+  LiveOptions,
+  LookupOptions,
+  Migration,
+  Op,
+  Relations,
+  RelationRef,
+  Row,
+  Schema,
+  SchemaDescription,
+  SchemaInfo,
+  SchemaOf,
+  SchemaOptions,
+  SchemaOutcome,
+  SchemaRefusal,
+  SchemaText,
+  Sparse,
+  Spec,
+  TableRef,
+  Tables,
+  TextKey,
+  Timestamp,
+  TypedFrom,
+  Vector,
+  VectorKey,
+  Where,
+  Writable,
+} from './fenec.js';

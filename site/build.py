@@ -347,7 +347,21 @@ def prev_next(active, base):
 # each release, next to the version bump -- 0.1.4 moved them 636/717/863 KB ->
 # 684/765/927 KB when the text index went in.
 NOISE_KB = 0.3
-COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all"}
+COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all",
+              "kb_lite_gz", "kb_lite_br", "kb_replica_gz", "kb_replica_br",
+              "kb_app_br", "kb_app_client_br"}
+# The browser client's modules, each after those it imports: what
+# `@fenecdb/web` ships of JavaScript. client.js is `@fenecdb/web/client`,
+# builder.js and http.js without the engine.
+CLIENT_MODULES = ("builder.js", "http.js", "client.js", "fenec.js")
+# An app that runs its queries on a server, bundled as an app is (esbuild,
+# minified): `connect`, a builder query and its rows, through the package
+# and through its client entry.
+APP = (
+    "import {{ connect }} from '{entry}';\n"
+    "const db = connect('https://db.example.com', {{ token: 't' }});\n"
+    "console.log(await db.from('docs').where('year', '>=', 2024).limit(10).rows());\n"
+)
 CLAIMS = [
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB gzip wasm", "kb_gz", 0),
     ("README.md", r"gzip wasm \+ (\d+) KB gzip client", "kb_client_gz", 0),
@@ -392,6 +406,62 @@ CLAIMS = [
      "kb_gz", 0),
     ("site/content/docs/vs-pglite.html",
      r"<tr><td>Download, brotli</td>\s*<td>(\d+) KB", "kb_br", 0),
+    # The packages a page picks between (javascript.html#packages), and
+    # wherever else their sizes are quoted.
+    ("site/content/docs/javascript.html",
+     r'<code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">(\d+) KB</td>',
+     "kb_app_client_br", 0),
+    ("site/content/docs/javascript.html",
+     r"<code>sync\(\{ wasm: './fenec-replica.wasm' \}\)</code></td><td class=\"n\">(\d+) KB</td>", "kb_replica_br", 0),
+    ("site/content/docs/javascript.html",
+     r"<code>sync\(\)</code> loads it too</td><td class=\"n\">(\d+) KB</td>", "kb_br", 0),
+    ("site/content/docs/javascript.html",
+     r"<code>Fenec.open\('./fenec-lite.wasm'\)</code></td><td class=\"n\">(\d+) KB</td>", "kb_lite_br", 0),
+    ("site/content/docs/javascript.html", r"modules it\s+imports, (\d+) KB brotli", "kb_client_br", 0),
+    ("site/content/docs/javascript.html", r"bundles to\s+(\d+) KB brotli through it", "kb_app_client_br", 0),
+    ("site/content/docs/javascript.html", r"and to (\d+) KB through <code>@fenecdb/web</code>", "kb_app_br", 0),
+    ("site/content/docs/sync.html", r"fenec-replica.wasm', ... \}\)</code>,\s+(\d+) KB brotli", "kb_replica_br", 0),
+    ("site/content/docs/sync.html", r"against the full module's (\d+), with no graph", "kb_br", 0),
+    ("site/content/docs/integrations.html", r"no module, (\d+) KB brotli of client", "kb_app_client_br", 0),
+    ("site/content/docs/integrations.html", r"<code>fenec-replica.wasm</code>, (\d+), when asked", "kb_replica_br", 0),
+    ("site/content/docs/integrations.html", r"<td><code>fenec.wasm</code>, (\d+) KB brotli; ", "kb_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec.wasm</code></td><td class="n"><b>(\d+) KB</b></td>', "kb_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec.wasm</code></td><td class="n"><b>\d+ KB</b></td><td class="n">(\d+) KB</td>', "kb_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r"A replica's module, opt-in, <code>fenec-replica.wasm</code></td><td class=\"n\">(\d+) KB</td>", "kb_replica_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r"A replica's module, opt-in, <code>fenec-replica.wasm</code></td><td class=\"n\">\d+ KB</td><td class=\"n\">(\d+) KB</td>",
+     "kb_replica_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec.js</code> and its modules</td><td class="n">(\d+) KB</td>', "kb_client_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec.js</code> and its modules</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_client_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r"in an app's bundle, <code>@fenecdb/web/client</code></td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-replica.wasm</code>, no graph</td><td class="n">(\d+) KB</td>', "kb_replica", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-replica.wasm</code>, no graph</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_replica_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-replica.wasm</code>, no graph</td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_replica_gz", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">(\d+) KB</td>', "kb_lite", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_lite_br", 0),
+    ("site/content/docs/benchmarks.html",
+     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     "kb_lite_gz", 0),
+    ("README.md", r"`@fenecdb/web/client`, (\d+) KB brotli\s+in its bundle", "kb_app_client_br", 0),
+    ("web/README.md", r"`fenec.wasm` \|[^\n]*: (\d+) KB brotli", "kb_br", 0),
+    ("web/README.md", r"`fenec-replica.wasm` \|[^\n]*: (\d+) KB brotli", "kb_replica_br", 0),
+    ("web/README.md", r"`fenec-lite.wasm` \|[^\n]*: (\d+) KB brotli", "kb_lite_br", 0),
+    ("web/README.md", r"`@fenecdb/web/client`, (\d+) KB brotli in an app's bundle", "kb_app_client_br", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
@@ -422,7 +492,11 @@ def compressed(path):
     is missing the caller is told, and the brotli claims are reported as
     unverified rather than quietly passed.
     """
-    raw = open(path, "rb").read()
+    return compressed_bytes(open(path, "rb").read())
+
+
+def compressed_bytes(raw):
+    """[`compressed`] of bytes in hand."""
     gz = len(gziplib.compress(raw, 9, mtime=0))
     exe = shutil.which("brotli")
     if not exe:
@@ -433,27 +507,61 @@ def compressed(path):
     return gz, len(out)
 
 
+def app_bundle(entry):
+    """An app that connects to a server, bundled and minified by esbuild
+    through `entry` (`APP`): its bytes, or None without esbuild -- the
+    claims on it are then reported unverified, as brotli's are."""
+    if ESBUILD is None:
+        return None
+    run = subprocess.run(
+        [ESBUILD, "--bundle", "--minify", "--format=esm", "--target=es2022", "--log-level=error"],
+        input=APP.format(entry=f"./{entry}"), capture_output=True, text=True,
+        # The text on stdin resolves its imports from here.
+        cwd=os.path.join(REPO, "web"),
+    )
+    if run.returncode != 0:
+        raise SystemExit(f"esbuild failed on the app through {entry}:\n{run.stderr}")
+    return run.stdout.encode("utf-8")
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
-    wasm = os.path.join(REPO, "web", "fenec.wasm")
-    client = os.path.join(REPO, "web", "fenec.js")
+    web = lambda name: os.path.join(REPO, "web", name)
+    wasm = web("fenec.wasm")
     if not os.path.exists(wasm):
         return []  # the copy step above already said so
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
-    client_size = os.path.getsize(client)
-    client_gz, client_br = compressed(client)
+    # The client is fenec.js and the two modules it imports, as a page loads
+    # them with no build step.
+    client = b"".join(open(web(n), "rb").read() for n in CLIENT_MODULES if n != "client.js")
+    client_gz, client_br = compressed_bytes(client)
     kb = lambda n: None if n is None else n / 1024
+    # The modules built without some of the indexes, where they were built:
+    # a claim on one that is missing says so.
+    other = {}
+    for key, name in (("lite", "fenec-lite.wasm"), ("replica", "fenec-replica.wasm")):
+        if os.path.exists(web(name)):
+            gz, br = compressed(web(name))
+            other[f"kb_{key}"] = kb(os.path.getsize(web(name)))
+            other[f"kb_{key}_gz"] = kb(gz)
+            other[f"kb_{key}_br"] = kb(br)
+    apps = {}
+    for key, entry in (("kb_app_br", "fenec.js"), ("kb_app_client_br", "client.js")):
+        bundle = app_bundle(entry)
+        apps[key] = None if bundle is None else kb(compressed_bytes(bundle)[1])
     truth = {
         "bytes": size,
         "kb": kb(size),
         "kb_gz": kb(wasm_gz),
         "kb_br": kb(wasm_br),
-        "kb_client": kb(client_size),
+        "kb_client": kb(len(client)),
         "kb_client_gz": kb(client_gz),
         "kb_client_br": kb(client_br),
         # What the browser actually pays: the module and the client together.
         "kb_br_all": kb(wasm_br + client_br) if wasm_br else None,
+        **other,
+        **apps,
         "glue": glue_lines(),
         # The tag the docs tell people to pull. It follows the workspace
         # version rather than the last release, so a version bump that
@@ -477,10 +585,12 @@ def check_claims():
             problems.append(f"{rel}: nothing matched /{pattern}/ -- reworded?")
             continue
         if truth.get(fact) is None:
-            problems.append(
-                f"{rel}: /{pattern}/ claims a brotli size and `brotli` is not "
-                f"installed, so it went unchecked"
+            why = (
+                "an app's bundle and `esbuild` is not on PATH" if fact.startswith("kb_app")
+                else "a module `make wasm-lite wasm-replica` did not build" if fact not in truth
+                else "a brotli size and `brotli` is not installed"
             )
+            problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
         for m in found:
             said, want = m.group(1), truth[fact]
@@ -665,15 +775,22 @@ def build():
     # source. They are deliberately kept out of `assets`: that dict drives a
     # page-wide replace and the docs are full of `./fenec.js` inside code
     # examples, which must not be rewritten.
+    #
+    # fenec.js imports builder.js and http.js, and client.js the two of
+    # them: each module's hashed copy imports the others' hashed copies,
+    # so the imported are made first.
     engine = {}
-    for name in ("fenec.js", "fenec.wasm"):
+    for name in CLIENT_MODULES + ("fenec.wasm",):
         src = os.path.join(REPO, "web", name)
         if not os.path.exists(src):
             print(f"  note: web/{name} missing -- run `make wasm` for the live demo")
             continue
         shutil.copy(src, os.path.join(OUT, name))
         if name.endswith(".js"):
-            blob = minify(open(src, encoding="utf-8").read(), ".js").encode("utf-8")
+            body = open(src, encoding="utf-8").read()
+            for dep, hashed_dep in engine.items():
+                body = body.replace(f"from './{dep}'", f"from './{hashed_dep}'")
+            blob = minify(body, ".js").encode("utf-8")
         else:
             blob = open(src, "rb").read()
         stem, ext = os.path.splitext(name)
@@ -802,7 +919,7 @@ def build():
         if hashed.endswith("/"):
             hashed += "*"
         rules += [f"/{hashed}", "  Cache-Control: public, max-age=31536000, immutable", ""]
-    for stable in ("fenec.js", "fenec.wasm", "collate/*"):
+    for stable in CLIENT_MODULES + ("fenec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
 

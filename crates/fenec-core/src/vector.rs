@@ -1662,7 +1662,7 @@ impl<T: Copy> RowsOf<T> for Rows<T> {
 /// it learns its centres from them and codes them all: with fewer, a code
 /// has no centres to be taken from. An index smaller than this searches
 /// exactly.
-const BIT_TRAIN: usize = 2048;
+pub(crate) const BIT_TRAIN: usize = 2048;
 
 /// Centres per vector learned from, one in sixteen: over 100 000 vectors in
 /// 64 clusters, spread in every dimension, 128 centres from the first 2 048
@@ -2272,6 +2272,14 @@ impl PartialOrd for Cand {
 const MEASURE_SHARE: usize = 8192;
 #[cfg(not(target_family = "wasm"))]
 const MEASURE_APART: usize = 4 * MEASURE_SHARE;
+
+/// Each component of `v` rounded to a half and widened back, as a
+/// `vector<N, f16>` field's record holds it.
+fn halved(v: &[f32]) -> Vec<f32> {
+    v.iter()
+        .map(|&x| half(crate::codec::f16_from_f32(x)))
+        .collect()
+}
 
 /// Up to this many nearest are kept as they are measured, the rest let go
 /// at a comparison; more are sorted whole, as a page past it is rare and
@@ -3396,6 +3404,7 @@ impl VectorIndex {
     /// was.
     #[inline(never)]
     fn place(&mut self, doc: DocId, raw: &[f32]) -> Option<(u32, usize)> {
+        let raw = &*self.as_held(raw);
         if let Some(old) = self.node_of(doc) {
             if self.retire(doc, old, raw) {
                 return None;
@@ -3712,6 +3721,21 @@ impl VectorIndex {
     /// serial insertion -- there every node sees the ones before it.)
     pub fn insert_batch(&mut self, items: &[(DocId, Vec<f32>)]) {
         self.insert_batch_by(items, Self::link_batch)
+    }
+
+    /// `raw` as a `vector<N, f16>` field holds it, each component rounded
+    /// to a half: what a restore fills the arena with, reading the
+    /// document's record. Placed as written, a vector was made a unit one
+    /// of other halves under cosine than an open made, and `near ...
+    /// exact` scored differently once the database was opened again --
+    /// and from the module without the graph, which measures the stored
+    /// halves. Only the arena takes it: the walk that links a node may
+    /// start from the vector as written.
+    fn as_held<'a>(&self, raw: &'a [f32]) -> Cow<'a, [f32]> {
+        match self.prec {
+            VecPrec::F32 => Cow::Borrowed(raw),
+            VecPrec::F16 => Cow::Owned(halved(raw)),
+        }
     }
 
     /// [`Self::insert_batch`], linking each batch with `link`: the tests
@@ -4715,6 +4739,154 @@ impl VectorIndex {
 #[cfg(not(feature = "vector"))]
 pub use crate::off::VectorIndex;
 
+/// A hash of the bits an index would store `raw` as -- unit length under
+/// cosine, halved for an `f16` field -- which two vectors the index holds
+/// as one node ([`VectorIndex::place`]) share: for a build without the
+/// graph to count the nodes a bit index would hold. Hashed, they are told
+/// apart through the `u64` sort the module has, where a set of the bits
+/// was another copy of the hash table, 2.5 KB of it.
+#[cfg(not(feature = "vector"))]
+pub(crate) fn stored_hash(metric: Metric, prec: VecPrec, raw: &[f32]) -> u64 {
+    let inv = match metric {
+        Metric::Cosine => unit_scale(flat_sq(raw)),
+        _ => 1.0,
+    };
+    match prec {
+        VecPrec::F32 if inv != 1.0 => hash_words(raw.iter().map(|x| (x * inv).to_bits())),
+        VecPrec::F32 => hash_words(raw.iter().map(|x| x.to_bits())),
+        VecPrec::F16 => hash_words(
+            raw.iter()
+                .map(|x| crate::codec::f16_from_f32(x * inv) as u32),
+        ),
+    }
+}
+
+/// [`flat_sq`] of four vectors of one length, side by side, each in its
+/// own order: the same bits, four chains of adds in flight rather than
+/// one. Zipped rather than indexed, so no read is checked.
+#[cfg(not(feature = "vector"))]
+fn flat_sqs4(a: &[f32], b: &[f32], c: &[f32], d: &[f32]) -> [f32; 4] {
+    let mut s = [0.0f32; 4];
+    for (((w, x), y), z) in a.iter().zip(b).zip(c).zip(d) {
+        s = [s[0] + w * w, s[1] + x * x, s[2] + y * y, s[3] + z * z];
+    }
+    s
+}
+
+/// `near` in a build without the graph: what [`VectorIndex::search_exact`]
+/// answers over an arena holding the vectors `read` gives for `ids`, each
+/// as the index would store it -- made a unit one for cosine as
+/// `Arena::push` makes it, halved where the field is `f16` -- and measured
+/// by the arena's own kernel, the nearest kept in the order [`nearest`]
+/// keeps them. So the rows, their scores to the bit and the order of their ties are
+/// those of the full build's `near ... exact`, ties in id order where the
+/// arena holds the nodes in id order: written in id order and never
+/// written again, which a rebuild at an open makes so. Nothing is held
+/// but twice the page: an arena of 50 000 x 384 would have been 77 MB of
+/// a module's memory, which it never gives back.
+///
+/// Under cosine a vector's length is a flat sum, each add waiting on the
+/// one before ([`flat_sq`]): one at a time it was 40% of a scan of 10 000
+/// x 128 in the browser module, so four are read and summed side by side,
+/// 4.31 -> 3.29 ms there and 11.8 -> 8.7 at 384 dimensions, for 241 bytes
+/// brotli. Eight indexed as a restore sums them natively ([`flat_sqs8`])
+/// gained nothing in the module.
+#[cfg(not(feature = "vector"))]
+pub(crate) fn search_stored(
+    metric: Metric,
+    prec: VecPrec,
+    query: &[f32],
+    k: usize,
+    ids: &[DocId],
+    read: &mut dyn FnMut(DocId, &mut Vec<f32>) -> crate::error::Result<bool>,
+) -> crate::error::Result<Vec<(DocId, f32)>> {
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    let q = match metric {
+        Metric::Cosine => normalized(query),
+        _ => query.to_vec(),
+    };
+    let dim = q.len();
+    let mut halves = Vec::new();
+    let mut measure = |raw: &mut [f32], inv: f32| match prec {
+        VecPrec::F32 => {
+            // Scaled where it was read, as `Arena::push_scaled` scales it
+            // as it copies.
+            if inv != 1.0 {
+                raw.iter_mut().for_each(|x| *x *= inv);
+            }
+            distance(metric, &q, raw)
+        }
+        VecPrec::F16 => {
+            halves.clear();
+            halves.extend(raw.iter().map(|x| crate::codec::f16_from_f32(x * inv)));
+            distance_hf(metric, &halves, &q)
+        }
+    };
+    let unit = metric == Metric::Cosine;
+    // Up to four vectors read, waiting for their lengths, and where each is
+    // among `ids`: one place measures them, the kernels inlined once.
+    let (mut four, mut at) = (Vec::with_capacity(4 * dim), [0u32; 4]);
+    let mut raw = Vec::new();
+    // Distances held negated, so the engine's one sort puts the nearest
+    // first and a tie the lower id first -- the order the arena's stable
+    // sort leaves nodes written in id order -- cut back to the `k` nearest
+    // whenever there are twice as many, as `order_exactly` keeps them: a
+    // sort of the arena's candidates of its own was 1.1 KB brotli here.
+    let (mut out, mut worst) = (Vec::new(), f32::INFINITY);
+    let mut each = ids.iter().enumerate();
+    loop {
+        let next = each.next();
+        if let Some((i, &id)) = next {
+            if !read(id, &mut raw)? || raw.len() != dim {
+                continue;
+            }
+            at[four.len() / dim.max(1)] = i as u32;
+            four.extend_from_slice(&raw);
+            if four.len() < 4 * dim {
+                continue;
+            }
+        }
+        let n = four.len() / dim.max(1);
+        let sq = match (unit, n) {
+            (false, _) => [1.0; 4],
+            (true, 4) => {
+                let (ab, cd) = four.split_at(2 * dim);
+                let ((a, b), (c, d)) = (ab.split_at(dim), cd.split_at(dim));
+                flat_sqs4(a, b, c, d)
+            }
+            (true, _) => std::array::from_fn(|j| match four.get(j * dim..(j + 1) * dim) {
+                Some(v) => flat_sq(v),
+                None => 1.0,
+            }),
+        };
+        for ((v, sq), i) in four.chunks_mut(dim.max(1)).zip(sq).zip(at) {
+            let inv = if unit { unit_scale(sq) } else { 1.0 };
+            let dist = measure(v, inv);
+            if dist > worst {
+                continue;
+            }
+            out.push((ids[i as usize], -dist));
+            if out.len() == k || out.len() == 2 * k {
+                out.sort_by(crate::text::best_first);
+                out.truncate(k);
+                worst = -out[k - 1].1;
+            }
+        }
+        four.clear();
+        if next.is_none() {
+            break;
+        }
+    }
+    out.sort_by(crate::text::best_first);
+    out.truncate(k);
+    for hit in &mut out {
+        hit.1 = score_from_distance(metric, -hit.1);
+    }
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "vector"))]
 mod tests {
 
@@ -4983,14 +5155,20 @@ mod tests {
                 .map(|i| (i, (0..dim).map(|_| rng.next_f32() * 3.0 - 1.5).collect()))
                 .collect();
             ix.insert_batch(&items);
-            held.extend(items);
+            // What a restore reads is the document's record, which holds
+            // an f16 field's halves.
+            let stored = |v: Vec<f32>| match prec {
+                VecPrec::F32 => v,
+                VecPrec::F16 => halved(&v),
+            };
+            held.extend(items.into_iter().map(|(d, v)| (d, stored(v))));
             // Written again with another vector, and deleted: tombstones
             // carrying their own vectors among the live nodes, on either
             // side of a share's edge too.
             for i in [3u64, 11, 12, 30, edge - 1, edge, 2 * edge + 7] {
                 let v: Vec<f32> = (0..dim).map(|_| rng.next_f32() - 0.5).collect();
                 ix.insert(i, &v);
-                held.insert(i, v);
+                held.insert(i, stored(v));
             }
             for i in [7u64, 20, edge + 1] {
                 ix.remove(i);
@@ -5656,10 +5834,15 @@ mod tests {
             let mut ix = VectorIndex::with_precision(8, VectorIndexSpec::default(), prec);
             let mut rng = Rng(7);
             let mut vecs: Vec<Option<Vec<f32>>> = Vec::new();
+            // A restore reads the document's record: an f16 field's halves.
+            let stored = |v: Vec<f32>| match prec {
+                VecPrec::F32 => v,
+                VecPrec::F16 => halved(&v),
+            };
             for i in 0..300u64 {
                 let v: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
                 ix.insert(i, &v);
-                vecs.push(Some(v));
+                vecs.push(Some(stored(v)));
             }
             // Deleted: the document is gone.
             for i in [3u64, 50, 51, 299] {
@@ -5670,7 +5853,7 @@ mod tests {
             for i in [10u64, 11] {
                 let v: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
                 ix.insert(i, &v);
-                vecs[i as usize] = Some(v);
+                vecs[i as usize] = Some(stored(v));
             }
             let q: Vec<f32> = (0..8).map(|_| rng.next_f32() - 0.5).collect();
             let before = ix.search(&q, 20, None, |_| true);

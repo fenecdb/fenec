@@ -13,6 +13,9 @@ standard library is split by what it is for: float formatting, the rest of
 `core::fmt`, Unicode tables, the sort, `HashMap`, drop glue, the allocator,
 panics.
 
+The lite and the replica module (`make wasm-lite`, `make wasm-replica`) are
+built too, and their sizes listed after, against the base's.
+
 gzip and brotli move by up to 0.3 KB with nothing but the layout of the bytes
 changed -- two lines of comment at the top of engine.rs moved brotli 46 bytes,
 through the line numbers the panics carry -- so a delta under that is marked
@@ -300,13 +303,19 @@ def part_of(home):
     return "the rest"
 
 
-def build(root, target):
+# The modules the package ships beside the full one, by the features each
+# is built with: `make wasm-lite` and `make wasm-replica`.
+OTHERS = [("fenec-lite.wasm", []), ("fenec-replica.wasm", ["text", "sparse", "sorted"])]
+
+
+def build(root, target, features=None):
     """The module built with its names, as bytes: its debug information
     stripped, which the link's `--compress-relocations` refuses, and its
-    symbols kept."""
+    symbols kept. With `features`, built without the default ones."""
     env = dict(os.environ, CARGO_TARGET_DIR=target, CARGO_PROFILE_WASM_STRIP="debuginfo")
+    pick = [] if features is None else ["--no-default-features", "--features", ",".join(features)]
     subprocess.run(
-        [CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown", "--profile", "wasm"],
+        [CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown", "--profile", "wasm"] + pick,
         check=True, cwd=root, env=env,
     )
     with open(os.path.join(target, WASM), "rb") as f:
@@ -603,6 +612,34 @@ def measure(root, target):
     }
 
 
+def served_sizes(served):
+    """`(raw, gzip, brotli)` of a module as it is served."""
+    brotli = None
+    if shutil.which("brotli"):
+        brotli = len(subprocess.run(["brotli", "-c", "-q", "11"], input=served,
+                                    stdout=subprocess.PIPE, check=True).stdout)
+    return len(served), len(gzip.compress(served, 9, mtime=0)), brotli
+
+
+def others(root, target):
+    """The other modules' served sizes, by name."""
+    return {name: served_sizes(read(build(root, target, features))[0]) for name, features in OTHERS}
+
+
+def others_report(head, base=None):
+    """Markdown: the lite and the replica module, against the base's."""
+    out = ["| module | raw | gzip | brotli |" + (" against the base, bytes |" if base else ""),
+           "| --- | ---: | ---: | ---: |" + (" ---: |" if base else "")]
+    for name, sizes in head.items():
+        line = f"| `{name}` | " + " | ".join(kb(n) for n in sizes) + " |"
+        if base:
+            was = base[name]
+            line += " " + ", ".join(signed(None if a is None or b is None else a - b, NOISE if i else 0)
+                                    for i, (a, b) in enumerate(zip(sizes, was))) + " |"
+        out.append(line)
+    return "\n".join(out)
+
+
 def kb(n):
     return "--" if n is None else f"{n / 1024:.1f}"
 
@@ -741,7 +778,8 @@ def main():
         print(why(ROOT, os.path.join(out, "why"), pattern))
         return
     head = measure(ROOT, os.path.join(out, "head"))
-    base = None
+    head_others = others(ROOT, os.path.join(out, "head"))
+    base = base_others = None
     if base_ref:
         # Outside the repository: Cargo reads the `.cargo/config.toml` of
         # every directory above the build, and joins their `rustflags` -- a
@@ -751,11 +789,14 @@ def main():
                        cwd=ROOT, stdout=subprocess.DEVNULL)
         try:
             base = measure(tree, os.path.join(out, "base"))
+            base_others = others(tree, os.path.join(out, "base"))
         finally:
             subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=ROOT)
             shutil.rmtree(os.path.dirname(tree), ignore_errors=True)
     title = "## The browser module" + (f", against `{called}`" if base_ref else "")
     text = title + "\n\n" + report(head, base) + "\n"
+    text += ("\n## The lite and the replica module" + (f", against `{called}`" if base_ref else "")
+             + "\n\n" + others_report(head_others, base_others) + "\n")
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

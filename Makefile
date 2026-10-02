@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-replica wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -50,9 +50,11 @@ test:
 ##                     and handed to and from a real `fenec-server`
 ##   fenec.schema.test.js  a schema declared in code (web/schema.js): what it
 ##                     declares, the check at an open, migrations, fenec types --schema
+##   fenec.client.test.js  @fenecdb/web/client: the modules it reaches hold no
+##                     engine, and its live queries over a scripted server
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js; \
+		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi
@@ -128,6 +130,15 @@ wasm-lite:
 	@cp $(WASM_OUT) web/fenec-lite.wasm
 	@echo "web/fenec-lite.wasm  $$(wc -c < web/fenec-lite.wasm) bytes"
 
+## The module `sync()` loads: a replica's. No graph (`vector`) -- `near`
+## measures every vector, as `exact` does, the same rows and scores -- and
+## no schema check (`schema`), since a replica follows the server's schema
+## and asks the server; `text`, `sparse` and `sorted` kept.
+wasm-replica:
+	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features --features "text sparse sorted" 2>&1 | tail -2
+	@cp $(WASM_OUT) web/fenec-replica.wasm
+	@echo "web/fenec-replica.wasm  $$(wc -c < web/fenec-replica.wasm) bytes"
+
 ## What counting a statement by its shape costs (/_stats/statements,
 ## pg_stat_statements): a million each, by one thread and by eight.
 statements-bench:
@@ -144,6 +155,12 @@ wasm-sizes:
 wasm-speed: wasm
 	@node crates/fenec-wasm/speed.mjs
 
+## `near` in the replica's module, which has no graph and measures every
+## vector: 1 000, 10 000 and 50 000 rows of 128 and 384 dimensions, against
+## the full module's walk and its own exact scan (ROWS=10000 for one size)
+wasm-exact-speed: wasm wasm-replica
+	@node crates/fenec-wasm/exact.mjs
+
 ## Where the browser module's bytes go: raw, gzip and brotli, its code by
 ## crate, module and part of the standard library, the largest functions and
 ## the generics whose copies weigh most. BASE=<git ref> builds that commit in
@@ -158,7 +175,7 @@ size-report:
 ## publishes them, installed into a project and a venv of their own and
 ## used (PYTHON=... picks the interpreter; it wants 3.10 or newer), and
 ## NuGet's FenecDb where the .NET SDK is installed.
-packages: wasm wasm-lite
+packages: wasm wasm-lite wasm-replica
 	@integrations/packages.sh
 	@if command -v dotnet >/dev/null 2>&1; then integrations/dotnet/package.sh; \
 	else echo "dotnet not found: FenecDb (NuGet) not checked"; fi
@@ -499,11 +516,11 @@ sweep:
 
 ## The website and the documentation. Plain static files, stdlib-only
 ## generator; the live console on the home page needs `make wasm` first.
-site: wasm
+site: wasm wasm-lite wasm-replica
 	python3 site/build.py
 
 ## Same, on http://localhost:8788
-site-serve: wasm
+site-serve: wasm wasm-lite wasm-replica
 	python3 site/build.py --serve --port $(SITE_PORT)
 
 ## Publishes to Cloudflare Workers (fenecdb.com). Needs `wrangler login`
