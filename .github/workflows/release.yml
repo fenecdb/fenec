@@ -166,6 +166,11 @@ jobs:
             exit 1
           fi
           echo "FenecFFI.xcframework.zip from run $run, checksum $got"
+          # The Flutter plugin's frameworks, built by the same run.
+          test -f dist/FenecFFIDynamic.xcframework.zip || {
+            echo "::error::run $run kept no FenecFFIDynamic.xcframework.zip"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v7
         with:
@@ -173,6 +178,7 @@ jobs:
           path: |
             dist/FenecFFI.xcframework.zip
             dist/FenecFFI.xcframework.zip.checksum
+            dist/FenecFFIDynamic.xcframework.zip
           if-no-files-found: error
 
   # The Android AAR: the Kotlin library with the native library for

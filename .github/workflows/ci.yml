@@ -364,6 +364,11 @@ jobs:
       - name: XCFramework (macOS, iOS, the simulator)
         run: integrations/swift/build-xcframework.sh --zip
 
+      # FenecFFI.framework a slice, the shared library: what the Flutter
+      # plugin's pods vendor and CocoaPods embeds.
+      - name: Dynamic XCFramework (the Flutter plugin's)
+        run: integrations/swift/build-xcframework.sh --dynamic --zip
+
       # Package.swift takes the XCFramework just built.
       - name: Swift (macOS)
         run: swift test
@@ -396,4 +401,5 @@ jobs:
           path: |
             integrations/swift/build/FenecFFI.xcframework.zip
             integrations/swift/build/FenecFFI.xcframework.zip.checksum
+            integrations/swift/build/FenecFFIDynamic.xcframework.zip
           if-no-files-found: error

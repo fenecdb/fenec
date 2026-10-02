@@ -1,8 +1,11 @@
-# The native library for iOS: the XCFramework integrations/swift builds
-# (prepare.sh copies it into Frameworks/), a static library a slice, linked
-# into the app. The Dart side finds its functions in the process, by name,
-# where nothing in the app calls them -- so the linker is told to keep the
-# whole archive rather than strip what it sees no caller of.
+# The native library for iOS: FenecFFI.framework, a dynamic framework for
+# the device and the simulator, which integrations/swift/build-xcframework.sh
+# --dynamic makes and prepare.sh copies into Frameworks/. CocoaPods embeds a
+# vendored dynamic framework in the app, and the Dart side opens it by name
+# (`FenecFFI.framework/FenecFFI`). A static library kept whole with
+# -force_load had the Runner link a file the pod's "Copy XCFrameworks" phase
+# makes with no order declared against it, and `flutter build ios` stopped
+# at "Build input file cannot be found".
 Pod::Spec.new do |s|
   s.name             = 'fenecdb_flutter'
   s.version          = '0.1.7'
@@ -12,9 +15,6 @@ Pod::Spec.new do |s|
   s.author           = { 'fenecdb' => 'https://github.com/fenecdb' }
   s.source           = { :path => '.' }
   s.platform         = :ios, '15.0'
-  s.vendored_frameworks = 'Frameworks/FenecFFI.xcframework'
-  s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-force_load "${PODS_XCFRAMEWORKS_BUILD_DIR}/fenecdb_flutter/libfenec_ffi.a"'
-  }
+  s.vendored_frameworks = 'Frameworks/FenecFFIDynamic.xcframework'
   s.dependency 'Flutter'
 end

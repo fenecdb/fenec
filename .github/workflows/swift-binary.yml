@@ -48,6 +48,11 @@ jobs:
       - name: Build the XCFramework and its zip
         run: integrations/swift/build-xcframework.sh --zip
 
+      # The Flutter plugin's frameworks, from the same commit, kept with it
+      # for the release to attach; Package.swift names only the static one.
+      - name: Build the dynamic XCFramework and its zip
+        run: integrations/swift/build-xcframework.sh --dynamic --zip
+
       # The zip just built, linked into the tests on macOS and on a
       # simulator before its checksum goes anywhere.
       - name: Swift (macOS, iOS simulator)
@@ -61,6 +66,7 @@ jobs:
           path: |
             integrations/swift/build/FenecFFI.xcframework.zip
             integrations/swift/build/FenecFFI.xcframework.zip.checksum
+            integrations/swift/build/FenecFFIDynamic.xcframework.zip
           retention-days: 90
           if-no-files-found: error
 

@@ -18,13 +18,15 @@ nothing reaches a registry before the notes have had a read.
    its URL and checksum, so the zip is built before the tag: the run builds
    it from main, tests it on macOS and an iOS simulator, keeps it as its
    artifact and opens a pull request writing its checksum into
-   `Package.swift` (`integrations/swift/set-binary.sh`). Merge it.
+   `Package.swift` (`integrations/swift/set-binary.sh`). It keeps the
+   Flutter plugin's `FenecFFIDynamic.xcframework.zip` beside it, built from
+   the same commit and named by nothing. Merge it.
 3. Tag what was merged and push the tag:
    `git tag vX.Y.Z origin/main && git push origin vX.Y.Z`.
    `release.yml` builds the binaries for Linux and macOS, the `fenec-web`
    bundle, the Android AAR (`fenecdb-android-X.Y.Z.aar`, the native library
    for each ABI inside) and the multi-arch image on ghcr.io, takes the
-   XCFramework zip step 2's run kept -- held to the checksum the tag's
+   XCFramework zips step 2's run kept -- the static one held to the checksum the tag's
    `Package.swift` names, and stopping the release where none matches --
    and drafts the release with all of them and their checksums. Beside `vX.Y.Z` it pushes `integrations/go/vX.Y.Z` at
    the same commit: a Go module in a subdirectory is fetched by a tag that
@@ -41,7 +43,7 @@ nothing reaches a registry before the notes have had a read.
    skipped with a notice where `NUGET_API_KEY` is not set. With their
    secrets it also publishes `io.github.fenecdb:fenecdb` and
    `fenecdb-android` to Maven Central and `fenecdb` and `fenecdb_flutter`
-   to pub.dev -- the plugin with the release's XCFramework and AAR libraries
+   to pub.dev -- the plugin with the release's dynamic XCFramework and AAR libraries
    in it -- each skipped with a notice where its secrets are not set. A
    package whose version is not the tag's stops it before anything goes out.
    SwiftPM has no registry: the tag and the zip on the release are the

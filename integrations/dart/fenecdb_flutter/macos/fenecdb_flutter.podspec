@@ -1,5 +1,6 @@
-# The native library for macOS: the XCFramework's macOS slice (prepare.sh
-# copies it into Frameworks/), linked into the app and kept whole, as on iOS.
+# The native library for macOS: the dynamic XCFramework's macOS slice,
+# FenecFFI.framework (prepare.sh copies it into Frameworks/), embedded by
+# CocoaPods and opened by name from Dart, as on iOS.
 Pod::Spec.new do |s|
   s.name             = 'fenecdb_flutter'
   s.version          = '0.1.7'
@@ -9,9 +10,6 @@ Pod::Spec.new do |s|
   s.author           = { 'fenecdb' => 'https://github.com/fenecdb' }
   s.source           = { :path => '.' }
   s.platform         = :osx, '12.0'
-  s.vendored_frameworks = 'Frameworks/FenecFFI.xcframework'
-  s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-force_load "${PODS_XCFRAMEWORKS_BUILD_DIR}/fenecdb_flutter/libfenec_ffi.a"'
-  }
+  s.vendored_frameworks = 'Frameworks/FenecFFIDynamic.xcframework'
   s.dependency 'FlutterMacOS'
 end

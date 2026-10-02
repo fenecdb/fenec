@@ -13,6 +13,13 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${1:-$ROOT/integrations/kotlin/build}
+# Against the caller's directory: the script moves to integrations/kotlin
+# before it copies, and CI's `dist-mobile` landed there, where its upload
+# found nothing.
+case "$OUT" in
+  /*) ;;
+  *) OUT="$PWD/$OUT" ;;
+esac
 NDK=${ANDROID_NDK_HOME:?ANDROID_NDK_HOME names the NDK}
 : "${ANDROID_HOME:?ANDROID_HOME names the SDK}"
 CARGO=${CARGO:-$(test -x "$HOME/.cargo/bin/cargo" && echo "$HOME/.cargo/bin/cargo" || echo cargo)}

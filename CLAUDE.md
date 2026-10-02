@@ -1700,7 +1700,13 @@ the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
 against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
 release's zip is built before its tag (`swift-binary.yml`), since the tag's
-`Package.swift` must name its checksum.
+`Package.swift` must name its checksum. Swift links a static library; the
+Flutter plugin vendors `FenecFFIDynamic.xcframework` (`--dynamic`,
+`FenecFFI.framework` a slice, install name `@rpath/FenecFFI.framework/...`)
+and Dart opens `FenecFFI.framework/FenecFFI`: a static one kept whole with
+`-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
+phase makes with no order declared against it, and `flutter build ios`
+failed on it.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

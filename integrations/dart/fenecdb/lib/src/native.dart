@@ -33,19 +33,20 @@ typedef _FreeD = void Function(Pointer<Char>);
 typedef _VersionC = Pointer<Char> Function();
 
 /// Where the library is: what `Fenec.library` was set to, else
-/// `FENEC_LIBRARY`, else the platform's place -- linked into the app on iOS
-/// (the XCFramework), `libfenec_ffi.so` beside the app on Android and
-/// Linux, `libfenec_ffi.dylib` on macOS.
+/// `FENEC_LIBRARY`, else the platform's place -- on iOS and macOS the
+/// `FenecFFI.framework` the Flutter plugin's pod embeds in the app, found
+/// through the app's `@rpath` as Flutter's FFI plugins open theirs;
+/// `libfenec_ffi.so` beside the app on Android and Linux. A macOS program
+/// without the plugin falls back to `libfenec_ffi.dylib` on the loader's
+/// path.
 DynamicLibrary loadLibrary(String? path) {
   path ??= Platform.environment['FENEC_LIBRARY'];
   if (path != null) return DynamicLibrary.open(path);
-  if (Platform.isIOS) return DynamicLibrary.process();
+  if (Platform.isIOS) return DynamicLibrary.open('FenecFFI.framework/FenecFFI');
   if (Platform.isMacOS) {
     try {
-      final lib = DynamicLibrary.process();
-      lib.lookup('fenec_version');
-      return lib;
-    } catch (_) {
+      return DynamicLibrary.open('FenecFFI.framework/FenecFFI');
+    } on ArgumentError {
       return DynamicLibrary.open('libfenec_ffi.dylib');
     }
   }

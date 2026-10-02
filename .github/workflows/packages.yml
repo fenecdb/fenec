@@ -276,7 +276,7 @@ jobs:
 
   # pub.dev's `fenecdb` (the Dart package) and then `fenecdb_flutter` (the
   # plugin, which names that version and bundles the native library: the
-  # release's XCFramework and the .so of each ABI from its AAR). pub.dev's
+  # release's dynamic XCFramework and the .so of each ABI from its AAR). pub.dev's
   # own automated publishing trusts a workflow started by a tag's push,
   # which this one is not, so it takes the credentials `dart pub login`
   # writes; without PUB_CREDENTIALS the job says so and stops.
@@ -316,9 +316,9 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: |
           set -eu
-          gh release download "$RELEASE_TAG" -R "${{ github.repository }}" -p 'FenecFFI.xcframework.zip' -p 'fenecdb-android-*.aar' -D assets
+          gh release download "$RELEASE_TAG" -R "${{ github.repository }}" -p 'FenecFFIDynamic.xcframework.zip' -p 'fenecdb-android-*.aar' -D assets
           mkdir -p integrations/swift/build integrations/kotlin/android/build/jniLibs
-          unzip -q assets/FenecFFI.xcframework.zip -d integrations/swift/build
+          unzip -q assets/FenecFFIDynamic.xcframework.zip -d integrations/swift/build
           unzip -q assets/fenecdb-android-*.aar 'jni/*' -d assets/aar
           cp -R assets/aar/jni/. integrations/kotlin/android/build/jniLibs/
           integrations/dart/fenecdb_flutter/prepare.sh
