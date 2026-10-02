@@ -1185,7 +1185,11 @@ fn schemas_json(list: &[Schema]) -> String {
                 IndexKind::None => out.push_str("null"),
                 IndexKind::Hash { unique: false } => json::escape_into(&mut out, "hash"),
                 IndexKind::Hash { unique: true } => json::escape_into(&mut out, "unique"),
-                IndexKind::Sorted => json::escape_into(&mut out, "sorted"),
+                IndexKind::Sorted { ttl: None } => json::escape_into(&mut out, "sorted"),
+                IndexKind::Sorted { ttl: Some(ms) } => json::escape_into(
+                    &mut out,
+                    &format!("ttl({})", fenec_core::schema::ttl_text(*ms)),
+                ),
                 IndexKind::Vector(spec) => json::escape_into(
                     &mut out,
                     &format!(

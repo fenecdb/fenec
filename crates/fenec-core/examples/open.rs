@@ -103,7 +103,7 @@ fn schema(indexes: &str) -> Schema {
                 kind
             },
             if indexes.contains('s') {
-                n.indexed(IndexKind::Sorted)
+                n.indexed(IndexKind::SORTED)
             } else {
                 n
             },

@@ -49,6 +49,13 @@ function whyNoModule(err) {
 export class Fenec {
   #wasm; #handle; #collation;
 
+  /**
+   * The time, in milliseconds since the epoch, a statement is answered at:
+   * a read of a collection whose rows expire (`@ttl`) leaves out those past
+   * their time by it. The module has no clock; a test pins it.
+   */
+  now = Date.now;
+
   constructor(wasm, handle, collation = null) {
     this.#wasm = wasm;
     this.#handle = handle;
@@ -162,7 +169,9 @@ export class Fenec {
     const [vp, vl] = vectors ? this.#write(vectors) : [0, 0];
     let out;
     try {
-      out = this.#readString(this.#wasm.fenec_query(this.#handle, sp, sl, pp, pl, vp, vl));
+      // The time a read of a collection whose rows expire (`@ttl`) is
+      // answered at: the module has no clock of its own.
+      out = this.#readString(this.#wasm.fenec_query(this.#handle, sp, sl, pp, pl, vp, vl, this.now()));
     } finally {
       this.#wasm.fenec_free(sp, sl || 1);
       this.#wasm.fenec_free(pp, pl || 1);
@@ -774,6 +783,10 @@ function fieldCond(field, spec) {
 }
 
 function inCond(field, values) {
+  // `{ customer: { in: from('customers').select('id').where(...) } }`: the
+  // inner query runs once, before the outer one, and its one column is the
+  // list -- `customer in (get customers select id where ...)`.
+  if (values instanceof Query) return { t: 'sub', field, query: values };
   if (!Array.isArray(values)) {
     throw new FenecError(`\`in\` expects an array (field: ${field})`);
   }
@@ -828,6 +841,10 @@ function render(c, bind, parent = null) {
       return `${c.field} is ${c.negated ? 'not ' : ''}null`;
     case 'in':
       return `${c.field} in [${c.values.map((v) => bind(v, c.field)).join(', ')}]`;
+    case 'sub':
+      // Its parameters numbered where its text stands, after the outer
+      // query's before it.
+      return `${c.field} in (${c.query[INNER](bind)})`;
     case 'cmp':
       return `${c.field} ${c.op} ${bind(c.value, c.field)}`;
     case 'raw': {
@@ -849,6 +866,9 @@ function render(c, bind, parent = null) {
 }
 
 // ------------------------------------------------------------------- query
+
+// What a `Query` renders its text through as the inner query of an `in`.
+const INNER = Symbol('inner');
 
 /**
  * Immutable query builder: every call returns a new `Query`, so a query
@@ -1076,6 +1096,23 @@ export class Query {
    * logged, or handed to another transport.
    */
   toFenecQL() {
+    const params = [];
+    return [this.#text(binder(params)), params];
+  }
+
+  /** The text as an inner query of `in`, its values bound by the outer `bind`. */
+  [INNER](bind) {
+    const { project, count, lookups } = this.#s;
+    // One column is the list; the engine refuses the rest too.
+    if (!project || project.length !== 1 || count || lookups.length) {
+      throw new FenecError(
+        `an inner query of \`in\` selects exactly one column: from('${this.#s.collection}').select('id')`,
+      );
+    }
+    return this.#text(bind);
+  }
+
+  #text(bind) {
     const { collection, project, near, order, limit, offset, count } = this.#s;
     const { match, rerank, lookups, aggregate, group, fuse } = this.#s;
     // The engine refuses these too; failing here never sends a query.
@@ -1138,8 +1175,6 @@ export class Query {
       }
     }
     if (count) this.#assertCountable();
-    const params = [];
-    const bind = binder(params);
 
     let sql = `get ${collection}`;
     if (project) sql += ` select ${project.join(', ')}`;
@@ -1188,7 +1223,7 @@ export class Query {
       if (lookup.limit !== undefined) sql += ` limit ${lookup.limit}`;
       if (lookup.offset) sql += ` offset ${lookup.offset}`;
     }
-    return [sql, params];
+    return sql;
   }
 
   /** The raw response (`{columns, rows}`). */
@@ -1886,6 +1921,11 @@ function shapeParams(where) {
     const op = REST_OPS[k];
     if (!op) throw new FenecError(`unknown operator \`${k}\` in shape (field: ${field})`);
     if (op === 'in') {
+      // A subscription is told of its own collection's writes, and an
+      // inner query's set would not follow those of the other.
+      if (v instanceof Query) {
+        throw new FenecError(`a shape's \`in\` takes a list, not a query (field: ${field})`);
+      }
       if (!Array.isArray(v) || v.length === 0) {
         throw new FenecError(`\`in\` expects a non-empty array (field: ${field})`);
       }

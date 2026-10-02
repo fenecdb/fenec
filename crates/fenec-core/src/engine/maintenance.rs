@@ -264,6 +264,10 @@ impl Database {
             return Err(Error::Exists(format!("an index on field `{field}`")));
         }
         kind.check(field, &f.ty)?;
+        if kind.ttl().is_some() {
+            let other = crate::schema::Field::new(field, f.ty.clone()).indexed(kind.clone());
+            crate::schema::one_expiry(collection, c.schema.fields.iter().chain([&other]))?;
+        }
         Ok(None)
     }
 
@@ -891,9 +895,9 @@ impl IndexCopy {
                 Built::Text(ix)
             }
             #[cfg(not(feature = "sorted"))]
-            IndexKind::Sorted => unreachable!("`create index` refuses what the build lacks"),
+            IndexKind::Sorted { .. } => unreachable!("`create index` refuses what the build lacks"),
             #[cfg(feature = "sorted")]
-            IndexKind::Sorted => Built::Sorted(SortedIndex::build(
+            IndexKind::Sorted { .. } => Built::Sorted(SortedIndex::build(
                 &self.ty,
                 self.collate,
                 &mut self.values.iter().map(|(id, v)| (*id, v.clone())),

@@ -164,7 +164,12 @@ export interface Spec<T> {
   like?: string;
   contains?: string;
   has?: Elem<T>;
-  in?: Writable<T>[];
+  /**
+   * A list, or a query whose one column is the list: `from('customers')
+   * .select('id').where(...)` runs once, before the outer query
+   * (`in (get ...)`).
+   */
+  in?: Writable<T>[] | Query<any, any, any>;
   not?: Writable<T> | null | Spec<T>;
 }
 
@@ -477,6 +482,13 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   ): Promise<Fenec<S>>;
 
   readonly version: string;
+
+  /**
+   * The time, in milliseconds since the epoch, a statement is answered at:
+   * a read of a collection whose rows expire (`@ttl`) leaves out those past
+   * their time by it. `Date.now` unless set; the module has no clock.
+   */
+  now: () => number;
 
   /** Query builder. */
   from<K extends keyof S & string>(name: K): Query<S[K]>;

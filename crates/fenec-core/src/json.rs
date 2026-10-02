@@ -275,7 +275,10 @@ pub fn response_to_string(r: &Response) -> String {
                             crate::schema::IndexKind::None => "none".to_string(),
                             crate::schema::IndexKind::Hash { unique: false } => "hash".to_string(),
                             crate::schema::IndexKind::Hash { unique: true } => "unique".to_string(),
-                            crate::schema::IndexKind::Sorted => "sorted".to_string(),
+                            crate::schema::IndexKind::Sorted { ttl: None } => "sorted".to_string(),
+                            crate::schema::IndexKind::Sorted { ttl: Some(ms) } => {
+                                format!("ttl({})", crate::schema::ttl_text(*ms))
+                            }
                             crate::schema::IndexKind::Inverted => "inverted".to_string(),
                             crate::schema::IndexKind::Vector(spec) => {
                                 format!(

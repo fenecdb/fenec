@@ -509,7 +509,10 @@ fn index_name(kind: &IndexKind) -> String {
     match kind {
         IndexKind::Hash { unique: false } => "@hash".into(),
         IndexKind::Hash { unique: true } => "@unique".into(),
-        IndexKind::Sorted => "@sorted".into(),
+        IndexKind::Sorted { ttl: None } => "@sorted".into(),
+        IndexKind::Sorted { ttl: Some(ms) } => {
+            format!("@ttl({})", fenec_core::schema::ttl_text(*ms))
+        }
         IndexKind::Vector(s) => format!(
             "@hnsw({}, m={}, ef_construction={}, ef_search={}{})",
             s.metric.name(),

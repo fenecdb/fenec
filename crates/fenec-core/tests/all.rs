@@ -30,4 +30,6 @@ mod sorted;
 mod sparse;
 mod spill;
 mod storage;
+mod subquery;
+mod ttl;
 mod unique;

@@ -4,7 +4,7 @@
 //! ```text
 //! create collection [if not exists] <name> ( <field> <type> [required] [collate und|tr] [@index], ... )
 //!        type:  bool int float text bytes timestamp vector<N[, f16]> sparse<N> [type] json
-//!        index: @hash @sorted @hnsw(..) @text(..) @inverted (a sparse<N> field's)
+//!        index: @hash @unique @sorted @ttl(30m) @hnsw(..) @text(..) @inverted (a sparse<N> field's)
 //! drop   collection [if exists] <name>
 //! put    <name> { k: v, ... }            -- or [ {...}, {...} ]; v may be {..}, a json value
 //! a.b.c                                  -- a path into a json field, where a field goes
@@ -13,6 +13,8 @@
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
 //!            [order <field> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+//! where  <field> in (get <name> select <field> ...)  -- the inner get's one column, run once
+//! alter  collection <name> alter field <field> @ttl(<duration>) | @sorted
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
 //!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
 //! select a, b from <name> ...            -- the classic SQL order works too
@@ -57,6 +59,8 @@ pub struct Parser {
     i: usize,
     /// Stack depth of the expression currently being built.
     depth: usize,
+    /// How many `in (get ...)` the parser is inside.
+    subqueries: usize,
     /// Inside an object literal, whose lists keep their numbers as written
     /// rather than become a vector: only a `json` field holds an object,
     /// and `[19.99]` in it is two decimals, not an `f32`.
@@ -106,6 +110,7 @@ fn statements(toks: Vec<Token>, exact: bool) -> Result<Vec<Statement>> {
         toks,
         i: 0,
         depth: 0,
+        subqueries: 0,
         exact,
     };
     let mut out = Vec::new();
@@ -141,6 +146,7 @@ pub fn parse_select_list(src: &str) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
         toks: tokenize(src)?,
         i: 0,
         depth: 0,
+        subqueries: 0,
         exact: false,
     };
     let list = p.select_list()?;
@@ -366,7 +372,10 @@ impl Parser {
         let kind = match self.ident()?.to_ascii_lowercase().as_str() {
             "hash" => IndexKind::HASH,
             "unique" => IndexKind::UNIQUE,
-            "sorted" => IndexKind::Sorted,
+            "sorted" => IndexKind::SORTED,
+            "ttl" => IndexKind::Sorted {
+                ttl: Some(self.ttl_args()?),
+            },
             "hnsw" | "vector" => IndexKind::Vector(self.hnsw_args()?),
             "text" | "bm25" => IndexKind::Text(self.text_args()?),
             "inverted" => IndexKind::Inverted,
@@ -402,7 +411,13 @@ impl Parser {
                 match kind.as_str() {
                     "hash" => field = field.indexed(IndexKind::HASH),
                     "unique" => field = field.indexed(IndexKind::UNIQUE),
-                    "sorted" => field = field.indexed(IndexKind::Sorted),
+                    "sorted" => field = field.indexed(IndexKind::SORTED),
+                    // An ordered index whose rows expire: the sweep walks
+                    // it rather than scan for them.
+                    "ttl" => {
+                        let ttl = Some(self.ttl_args()?);
+                        field = field.indexed(IndexKind::Sorted { ttl });
+                    }
                     "hnsw" | "vector" => {
                         let spec = self.hnsw_args()?;
                         field = field.indexed(IndexKind::Vector(spec));
@@ -419,6 +434,41 @@ impl Parser {
             break;
         }
         Ok(field)
+    }
+
+    /// `(30m)`: how long a row lives past its timestamp, in milliseconds --
+    /// a whole number of milliseconds, seconds, minutes, hours or days.
+    /// FenecQL had no duration of its own to follow.
+    fn ttl_args(&mut self) -> Result<u64> {
+        self.expect(Tok::LParen)?;
+        let n = self.int()?;
+        let unit = match self.peek() {
+            Tok::Ident(u) => u.to_ascii_lowercase(),
+            other => {
+                return self.err(format!(
+                    "@ttl takes a duration such as 30s, 30m, 12h or 7d, not {}",
+                    other.describe()
+                ))
+            }
+        };
+        let ms: u64 = match unit.as_str() {
+            "ms" => 1,
+            "s" => 1_000,
+            "m" => 60_000,
+            "h" => 3_600_000,
+            "d" => 86_400_000,
+            other => return self.err(format!("unknown unit `{other}` in @ttl: ms, s, m, h or d")),
+        };
+        self.next();
+        self.expect(Tok::RParen)?;
+        match u64::try_from(n)
+            .ok()
+            .filter(|&n| n > 0)
+            .and_then(|n| n.checked_mul(ms))
+        {
+            Some(ttl) if ttl <= i64::MAX as u64 => Ok(ttl),
+            _ => self.err(format!("@ttl takes a duration past zero, not {n}{unit}")),
+        }
     }
 
     fn text_args(&mut self) -> Result<TextIndexSpec> {
@@ -624,6 +674,27 @@ impl Parser {
                 let from = self.ident()?;
                 self.expect_kw("to")?;
                 Alter::RenameField(from, self.ident()?)
+            }
+            // A field's expiry, set or taken off: `@ttl(..)`, or `@sorted`
+            // for none. Its ordered index stays.
+            "alter"
+                if {
+                    self.eat_kw("field");
+                    matches!(self.toks.get(self.i + 1).map(|t| &t.tok), Some(Tok::At))
+                } =>
+            {
+                let field = self.ident()?;
+                self.expect(Tok::At)?;
+                match self.ident()?.to_ascii_lowercase().as_str() {
+                    "ttl" => Alter::Ttl(field, Some(self.ttl_args()?)),
+                    "sorted" => Alter::Ttl(field, None),
+                    other => {
+                        return self.err(format!(
+                            "`alter field` sets @ttl(..) or @sorted, not @{other}: an index \
+                             is made by `create index`"
+                        ))
+                    }
+                }
             }
             // Every document would be rewritten under the write lock, which
             // the changes `alter` makes are chosen not to need.
@@ -1206,6 +1277,9 @@ impl Parser {
         }
         if self.peek_kw("in") {
             self.next();
+            if matches!(self.peek(), Tok::LParen) {
+                return self.subquery(left);
+            }
             self.expect(Tok::LBracket)?;
             let mut items = Vec::new();
             loop {
@@ -1229,6 +1303,32 @@ impl Parser {
             return Ok(if negated { Expr::Not(Box::new(e)) } else { e });
         }
         Ok(left)
+    }
+
+    /// `(get <collection> select <field> ...)` after `in`: a query whose one
+    /// column is the list, run before the query around it.
+    fn subquery(&mut self, left: Expr) -> Result<Expr> {
+        self.expect(Tok::LParen)?;
+        if !(self.peek_kw("get") || self.peek_kw("select")) {
+            return self
+                .err("`in (...)` takes a `get`: `in (get <collection> select <field> ...)`");
+        }
+        if self.subqueries >= MAX_SUBQUERY_DEPTH {
+            return self.err(format!(
+                "`in (get ...)` nested too deep: at most {MAX_SUBQUERY_DEPTH} levels"
+            ));
+        }
+        self.subqueries += 1;
+        let inner = self.get();
+        self.subqueries -= 1;
+        let Statement::Select(sel) = inner? else {
+            unreachable!("`get` parses a select")
+        };
+        if let Err(e) = sel.check_subquery() {
+            return self.err(e);
+        }
+        self.expect(Tok::RParen)?;
+        Ok(Expr::InSelect(Box::new(left), Box::new(sel)))
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -1384,6 +1484,7 @@ mod tests {
             toks: crate::lexer::tokenize(src)?,
             i: 0,
             depth: 0,
+            subqueries: 0,
             exact: false,
         };
         let mut out = Vec::new();

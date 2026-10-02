@@ -35,6 +35,11 @@ pub enum Expr {
     /// List contains an element: `tags has "ai"`
     Has(Box<Expr>, Box<Expr>),
     In(Box<Expr>, Vec<Expr>),
+    /// `customer in (get customers select id where country = "TR")`: the
+    /// inner `get` runs once, before the query, and its one column becomes
+    /// the list of an [`Expr::In`] (`Database::query` answers it so before
+    /// anything else runs); `eval` never meets one.
+    InSelect(Box<Expr>, Box<Select>),
     IsNull(Box<Expr>),
     /// Plugin or builtin function call: `cosine(embed, $1)`
     Call(String, Vec<Expr>),
@@ -65,10 +70,59 @@ impl Expr {
                     i.referenced_fields(out);
                 }
             }
+            // The inner `get`'s fields are its own collection's.
+            Expr::InSelect(a, _) => a.referenced_fields(out),
             Expr::Call(_, args) => {
                 for a in args {
                     a.referenced_fields(out);
                 }
+            }
+        }
+    }
+
+    /// Whether an `in (get ...)` is anywhere in it.
+    pub fn has_subquery(&self) -> bool {
+        match self {
+            Expr::InSelect(..) => true,
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => false,
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b) => a.has_subquery() || b.has_subquery(),
+            Expr::Not(a) | Expr::IsNull(a) => a.has_subquery(),
+            Expr::In(a, items) => a.has_subquery() || items.iter().any(Expr::has_subquery),
+            Expr::Call(_, args) => args.iter().any(Expr::has_subquery),
+        }
+    }
+
+    /// Calls `f` on each `in (get ...)` in it, outermost first and not
+    /// inside one another: the inner `get`s are `f`'s to walk.
+    pub fn each_subquery_mut(&mut self, f: &mut dyn FnMut(&mut Expr) -> Result<()>) -> Result<()> {
+        match self {
+            Expr::InSelect(..) => f(self),
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => Ok(()),
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b) => {
+                a.each_subquery_mut(f)?;
+                b.each_subquery_mut(f)
+            }
+            Expr::Not(a) | Expr::IsNull(a) => a.each_subquery_mut(f),
+            Expr::In(a, items) => {
+                a.each_subquery_mut(f)?;
+                for i in items {
+                    i.each_subquery_mut(f)?;
+                }
+                Ok(())
+            }
+            Expr::Call(_, args) => {
+                for a in args {
+                    a.each_subquery_mut(f)?;
+                }
+                Ok(())
             }
         }
     }
@@ -90,6 +144,8 @@ impl Expr {
             Expr::In(a, items) => items
                 .iter()
                 .fold(a.max_param(), |m, i| m.max(i.max_param())),
+            // The inner `get` binds from the same parameters.
+            Expr::InSelect(a, sel) => a.max_param().max(sel.max_param()),
             Expr::Call(_, args) => args.iter().map(|a| a.max_param()).max().unwrap_or(0),
         }
     }
@@ -431,6 +487,13 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             }
             Value::Bool(found)
         }
+        // Answered before the query runs, as the list it becomes: one met
+        // here is in a filter evaluated on its own.
+        Expr::InSelect(..) => {
+            return Err(Error::Query(
+                "`in (get ...)` is answered before a query runs, and cannot be here".into(),
+            ))
+        }
         Expr::Call(name, args) => {
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
@@ -629,6 +692,20 @@ pub struct Lookup {
 /// asked for. Exceeding it is an error, not a truncation -- a chain quietly
 /// cut short is a wrong answer believed right.
 pub const MAX_LOOKUP_DEPTH: usize = 8;
+
+/// The most values an `in (get ...)` may hand its query. A larger set is a
+/// query error, never a set cut short, which would be a wrong answer
+/// believed right. The list is held whole while the query runs, and a
+/// question over more is one `lookup ... required` asks from the other
+/// side, probing each parent's children rather than listing them.
+pub const MAX_SUBQUERY_VALUES: usize = 100_000;
+
+/// How deep `in (get ...)` may nest: `a in (get b select x where y in
+/// (get c ...))` is two. Each level runs a query before the one around it,
+/// and the parser and the engine recurse once a level; four is room for
+/// what a question asks without a join, and a fifth is refused rather
+/// than run.
+pub const MAX_SUBQUERY_DEPTH: usize = 4;
 
 impl Lookup {
     /// This clause and every one hanging off it, outermost first.
@@ -872,6 +949,97 @@ impl Select {
         )))
     }
 
+    /// Number of parameters it expects: the highest `$n` in any of its
+    /// clauses, a `lookup` level's and an inner `get`'s among them.
+    pub fn max_param(&self) -> usize {
+        let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
+        let near = self
+            .near
+            .as_ref()
+            .map(|n| n.vector.max_param())
+            .unwrap_or(0);
+        let m = self
+            .matcher
+            .as_ref()
+            .map(|m| m.query.max_param())
+            .unwrap_or(0);
+        let rr = self
+            .rerank
+            .as_ref()
+            .map(|r| r.vector.max_param())
+            .unwrap_or(0);
+        // A `lookup`'s `where` belongs to the same statement, so its
+        // parameters count here too: a client told there are fewer sends
+        // fewer, and the query then fails on an unbound `$1`.
+        let lk = self
+            .lookup
+            .as_ref()
+            .map(|l| l.chain().map(|s| opt(&s.filter)).max().unwrap_or(0))
+            .unwrap_or(0);
+        opt(&self.filter).max(near).max(m).max(rr).max(lk)
+    }
+
+    /// Whether a literal in its filters holds a vector
+    /// ([`Expr::reads_vectors`]).
+    pub fn reads_vectors(&self) -> bool {
+        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
+        let mut level = self.lookup.as_ref();
+        let mut any = opt(&self.filter);
+        while let (false, Some(l)) = (any, level) {
+            any = opt(&l.filter);
+            level = l.next.as_deref();
+        }
+        any
+    }
+
+    /// Whether an `in (get ...)` is in its filter or a `lookup` level's.
+    pub fn has_subquery(&self) -> bool {
+        let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::has_subquery);
+        opt(&self.filter)
+            || self
+                .lookup
+                .as_ref()
+                .is_some_and(|l| l.chain().any(|s| opt(&s.filter)))
+    }
+
+    /// Calls `f` on each filter it holds, its own and each `lookup`
+    /// level's, with the collection the filter is over.
+    pub fn each_filter_mut(
+        &mut self,
+        f: &mut dyn FnMut(&str, &mut Option<Expr>) -> Result<()>,
+    ) -> Result<()> {
+        f(&self.collection, &mut self.filter)?;
+        let mut level = self.lookup.as_mut();
+        while let Some(l) = level {
+            f(&l.collection, &mut l.filter)?;
+            level = l.next.as_deref_mut();
+        }
+        Ok(())
+    }
+
+    /// What an inner `get` must be to answer `in (get ...)`: one column,
+    /// which is the list -- a field named, or one aggregate -- and nothing
+    /// that attaches children to its rows or counts them in its place.
+    pub fn check_subquery(&self) -> Result<()> {
+        let one = match (&self.project, self.aggregate.len()) {
+            (_, 1) => true,
+            (Some(cols), 0) => cols.len() == 1,
+            _ => false,
+        };
+        if !one || self.count {
+            return Err(Error::Query(format!(
+                "`in (get {} ...)` takes one column: `select` exactly one field",
+                self.collection
+            )));
+        }
+        if self.lookup.is_some() {
+            return Err(Error::Query(
+                "`in (get ...)` takes one column, and a `lookup` attaches children to it".into(),
+            ));
+        }
+        self.check()
+    }
+
     /// Aggregates follow `count`'s rules: they collapse rows, so nothing that
     /// ranks the rows or hangs children from them combines with them, and a
     /// single row has nothing to order or page. Grouped, the rows are the
@@ -1003,6 +1171,10 @@ pub enum Alter {
     AddField(crate::schema::Field),
     DropField(String),
     RenameField(String, String),
+    /// `alter field seen @ttl(1h)`, or `@sorted` to let the rows live: a
+    /// `@sorted` or `@ttl` field's expiry set or taken off. The ordered
+    /// index stays as it is, and no document is read.
+    Ttl(String, Option<u64>),
 }
 
 /// Whether `v` is or holds a vector: what a reader with no schema makes of a
@@ -1031,6 +1203,7 @@ impl Expr {
             | Expr::Has(a, b) => a.reads_vectors() || b.reads_vectors(),
             Expr::Not(a) | Expr::IsNull(a) => a.reads_vectors(),
             Expr::In(a, items) => a.reads_vectors() || items.iter().any(Expr::reads_vectors),
+            Expr::InSelect(a, sel) => a.reads_vectors() || sel.reads_vectors(),
             Expr::Call(_, args) => args.iter().any(Expr::reads_vectors),
         }
     }
@@ -1047,15 +1220,7 @@ impl Statement {
                 set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter)
             }
             Statement::Delete { filter, .. } => opt(filter),
-            Statement::Select(s) | Statement::Explain(s) => {
-                let mut level = s.lookup.as_ref();
-                let mut any = opt(&s.filter);
-                while let (false, Some(l)) = (any, level) {
-                    any = opt(&l.filter);
-                    level = l.next.as_deref();
-                }
-                any
-            }
+            Statement::Select(s) | Statement::Explain(s) => s.reads_vectors(),
             _ => false,
         }
     }
@@ -1087,29 +1252,7 @@ impl Statement {
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
             Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
-            Statement::Select(sel) | Statement::Explain(sel) => {
-                let near = sel.near.as_ref().map(|n| n.vector.max_param()).unwrap_or(0);
-                let m = sel
-                    .matcher
-                    .as_ref()
-                    .map(|m| m.query.max_param())
-                    .unwrap_or(0);
-                let rr = sel
-                    .rerank
-                    .as_ref()
-                    .map(|r| r.vector.max_param())
-                    .unwrap_or(0);
-                // A `lookup`'s `where` belongs to the same statement, so its
-                // parameters count here too. `Describe` answers with this
-                // number before the query runs; a client told there are none
-                // sends none, and the query then fails on an unbound `$1`.
-                let lk = sel
-                    .lookup
-                    .as_ref()
-                    .map(|l| l.chain().map(|s| opt(&s.filter)).max().unwrap_or(0))
-                    .unwrap_or(0);
-                opt(&sel.filter).max(near).max(m).max(rr).max(lk)
-            }
+            Statement::Select(sel) | Statement::Explain(sel) => sel.max_param(),
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
             Statement::Delete { filter, .. } => opt(filter),
             _ => 0,

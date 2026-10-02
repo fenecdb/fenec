@@ -508,6 +508,12 @@ fn rule(line: &str) -> std::result::Result<Rule, String> {
         let Statement::Select(sel) = stmt else {
             unreachable!("a get parses as a select")
         };
+        // A rule is tested against a document being written on its own
+        // (`admits`), where no query runs to answer an inner `get`, and the
+        // inner `get` would itself be scoped by the rules it is part of.
+        if sel.filter.as_ref().is_some_and(Expr::has_subquery) {
+            return Err("a rule's filter takes no `in (get ...)`".into());
+        }
         sel.filter
     };
     Ok(Rule {
@@ -534,6 +540,8 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
         Expr::In(x, items) => Expr::In(b(x), items.iter().map(|i| bind(i, values)).collect()),
+        // A rule holds none ([`rule`]).
+        Expr::InSelect(..) => e.clone(),
         Expr::Call(f, args) => {
             Expr::Call(f.clone(), args.iter().map(|a| bind(a, values)).collect())
         }
@@ -614,14 +622,31 @@ impl Scope {
         Ok(and(filter, f))
     }
 
+    /// Every level of the query held to the token's read rules: its own
+    /// filter, each `lookup` level's, and each inner `get` of an `in (get
+    /// ...)` in any of them -- which reads its collection as any `get`
+    /// does, so a token that may not read a row there learns nothing of
+    /// it through the list it would have made.
     fn select(&self, mut sel: Select) -> Result<Select> {
-        sel.filter = self.restrict(&sel.collection, sel.filter.take())?;
-        let mut level = sel.lookup.as_mut();
-        while let Some(l) = level {
-            l.filter = self.restrict(&l.collection, l.filter.take())?;
-            level = l.next.as_deref_mut();
-        }
+        sel.each_filter_mut(&mut |collection, filter| {
+            self.inner(filter)?;
+            *filter = self.restrict(collection, filter.take())?;
+            Ok(())
+        })?;
         Ok(sel)
+    }
+
+    /// Each inner `get` in `filter` held to the read rules ([`Self::select`]).
+    fn inner(&self, filter: &mut Option<Expr>) -> Result<()> {
+        let Some(f) = filter else {
+            return Ok(());
+        };
+        f.each_subquery_mut(&mut |e| {
+            if let Expr::InSelect(_, sel) = e {
+                **sel = self.select(std::mem::take(&mut **sel))?;
+            }
+            Ok(())
+        })
     }
 
     fn writable(&self, collection: &str) -> Result<Option<Expr>> {
@@ -671,17 +696,22 @@ impl Scope {
             Statement::Update {
                 collection,
                 set,
-                filter,
+                mut filter,
             } => {
                 let f = self.writable(&collection)?;
+                self.inner(&mut filter)?;
                 Statement::Update {
                     collection,
                     set,
                     filter: and(filter, f),
                 }
             }
-            Statement::Delete { collection, filter } => {
+            Statement::Delete {
+                collection,
+                mut filter,
+            } => {
                 let f = self.writable(&collection)?;
+                self.inner(&mut filter)?;
                 Statement::Delete {
                     collection,
                     filter: and(filter, f),

@@ -380,7 +380,10 @@ fn print_response(r: &Response, took: std::time::Duration) {
                         IndexKind::None => String::new(),
                         IndexKind::Hash { unique: false } => "  @hash".into(),
                         IndexKind::Hash { unique: true } => "  @unique".into(),
-                        IndexKind::Sorted => "  @sorted".into(),
+                        IndexKind::Sorted { ttl: None } => "  @sorted".into(),
+                        IndexKind::Sorted { ttl: Some(ms) } => {
+                            format!("  @ttl({})", fenec_core::schema::ttl_text(*ms))
+                        }
                         IndexKind::Vector(sp) => format!(
                             "  @hnsw({}, m={}, ef_search={}{})",
                             sp.metric.name(),

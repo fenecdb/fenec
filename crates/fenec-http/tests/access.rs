@@ -340,3 +340,85 @@ fn a_rule_over_a_collated_field_checks_writes_in_its_order() {
     let (_, rows) = n.query(&t, "get people select name");
     assert!(rows.contains("çay"), "{rows}");
 }
+
+/// An inner `get` reads its collection as any `get` does: held to the
+/// token's rules, so the list it makes holds only rows the token may read,
+/// and a token learns nothing of the others through what the outer query
+/// finds by it -- not in a read, a count or a write.
+#[test]
+fn an_inner_get_reads_only_what_the_token_may() {
+    let n = start_with(
+        &format!("{POLICY}board  read,write  for poster\n"),
+        &[
+            "create collection notes (owner text @hash, title text)",
+            "create collection board (msg text)",
+            "create collection secrets (x int)",
+            "put secrets {x: 42}",
+            r#"put notes [{owner: "alice", title: "a1"}, {owner: "alice", title: "a2"},
+                         {owner: "bob", title: "b1"}, {owner: "bob", title: "b2"}]"#,
+            r#"put board [{msg: "a1"}, {msg: "b1"}, {msg: "b2"}, {msg: "42"}]"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let poster = n.token(r#"{"sub":"alice","role":"poster"}"#);
+
+    // The board is everyone's, the notes' titles each owner's: the list is
+    // alice's titles, whatever the inner `where` asks for.
+    let (status, body) = n.query(&alice, "get board where msg in (get notes select title)");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        (
+            count(&body, "\"a1\""),
+            count(&body, "\"b1\""),
+            count(&body, "\"b2\"")
+        ),
+        (1, 0, 0),
+        "{body}"
+    );
+    for sql in [
+        r#"get board where msg in (get notes select title where owner = "bob") count"#,
+        r#"get board where msg in (get notes select title where owner = "bob" or owner = "alice") and msg ~ "b" count"#,
+        "get board where not msg in (get notes select title) and msg ~ \"b\" count",
+    ] {
+        let (status, body) = n.query(&alice, sql);
+        assert_eq!(status, 200, "{sql}: {body}");
+        let want = if sql.contains("not msg") { 2 } else { 0 };
+        assert!(body.contains(&format!("\"count\":{want}")), "{sql}: {body}");
+    }
+    // Unscoped, the same text finds bob's.
+    let (_, body) = n.query(
+        ROOT,
+        r#"get board where msg in (get notes select title where owner = "bob") count"#,
+    );
+    assert!(body.contains("\"count\":2"), "{body}");
+
+    // Nested, each level held to the rules.
+    let (_, body) = n.query(
+        &alice,
+        r#"get board where msg in (get notes select title where owner in
+             (get notes select owner where title = "b1")) count"#,
+    );
+    assert!(body.contains("\"count\":0"), "{body}");
+
+    // A collection the token may not read is not there for it, inside too.
+    let (status, body) = n.query(&alice, "get board where msg in (get secrets select x)");
+    assert_eq!(status, 404, "{body}");
+
+    // A write by an inner `get` reaches only what the list the token may
+    // make holds: the poster deletes nothing by bob's titles.
+    let (status, body) = n.query(
+        &poster,
+        r#"del board where msg in (get notes select title where owner = "bob")"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"affected\":0"), "{body}");
+    let (_, body) = n.query(ROOT, "get board count");
+    assert!(body.contains("\"count\":4"), "{body}");
+
+    // A rule takes none: tested against a document on its own, no query
+    // would answer it.
+    let Err(e) = Access::new(SECRET, "notes read where owner in (get board select msg)") else {
+        panic!("a rule holding `in (get ...)` was taken");
+    };
+    assert!(e.contains("in (get ...)"), "{e}");
+}

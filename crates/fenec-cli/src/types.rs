@@ -204,7 +204,10 @@ fn index_note(k: &IndexKind) -> Option<String> {
         IndexKind::None => None,
         IndexKind::Hash { unique: false } => Some(" @hash".into()),
         IndexKind::Hash { unique: true } => Some(" @unique".into()),
-        IndexKind::Sorted => Some(" @sorted".into()),
+        IndexKind::Sorted { ttl: None } => Some(" @sorted".into()),
+        IndexKind::Sorted { ttl: Some(ms) } => {
+            Some(format!(" @ttl({})", fenec_core::schema::ttl_text(*ms)))
+        }
         IndexKind::Vector(spec) => Some(format!(
             " @hnsw({}, m={}, ef_search={}{})",
             spec.metric.name(),
