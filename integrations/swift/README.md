@@ -32,7 +32,9 @@ a collection it reads, once a burst, on the main actor:
 @StateObject var todos = LiveQuery(db, try! db.from("todos").where("done", false), as: Todo.self)
 ```
 
-`db.live(query)` is the same as an `AsyncThrowingStream`.
+`db.live(query)` is the same as an `AsyncThrowingStream`. To see the text
+and parameters a chain builds, for logging or a test, `try
+query.toFenecQL()` returns them and runs nothing.
 
 Every write is fsynced before it returns unless the file is opened
 `.noSync`, which leaves the writes for `sync()`; `flush()` hands them to the

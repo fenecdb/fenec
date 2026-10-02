@@ -26,7 +26,6 @@ var q = docs.Select("title")
     .Near("embed", vector, ef: 64)
     .Limit(5);
 var hits = await q.RowsAsync<Hit>();           // or RowsAsync(), FirstAsync(), CountAsync()
-var (text, ps) = q.ToFenecQL();
 await docs.InsertAsync(new { title = "Dunes", year = 2021 });
 await docs.Where("year", "<", 2000).DeleteAsync();   // no filter: refused unless all: true
 await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", "desc")]).RowsAsync();
@@ -43,6 +42,8 @@ await docs.Lookup("reviews", on: "article_id", limit: 3, order: [new("created", 
 
 - A `Dictionary<string, object?>` is the builder's object condition, its operators a dictionary too; a refused
   step throws `FenecQueryException` with the JS builder's message.
+- To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
+  nothing; a query needs no call to it before it runs.
 
 `dotnet test FenecDb.Tests` runs against `fenec-server` processes it starts (`cargo build -p fenec-server`, or
 `FENEC_SERVER`), and the builder against every case of `integrations/builder-golden.json`.

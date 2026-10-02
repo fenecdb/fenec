@@ -441,7 +441,7 @@ types take <code>'meta.lang'</code> as a path of it.</p>
 <tr><td><b>Ordering</b></td><td><code>order('year','desc').order('title')</code> — successive calls add keys; <code>order('name', 'asc', { collate: 'und' })</code> puts text in Unicode's order for every language, <code>{ collate: 'tr' }</code> in Turkish order (<a href="fenecql.html#collation">Collation</a>)</td></tr>
 <tr><td><b>Ranking</b></td><td><code>near('embed', v, { ef, exact })</code>, <code>match('body', text)</code>, <code>rerank('embed', v, { candidates })</code> after a <code>match</code>, and <code>match(...).near(...).fuse({ k, candidates })</code> to rank by both (<a href="fenecql.html#hybrid">Hybrid search</a>)</td></tr>
 <tr><td><b>Relations</b></td><td><code>lookup('reviews', { on: 'product_id', limit: 3 })</code> — children per row, chainable</td></tr>
-<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code> <code>toFenecQL()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
+<tr><td><b>Endpoints</b></td><td><code>rows()</code> <code>first()</code> <code>count()</code> <code>run()</code>, and <code>explain()</code>: the path the query took, one line a step (<a href="fenecql.html#explain">Explain</a>)</td></tr>
 <tr><td><b>Writes</b></td><td><code>insert(doc|docs)</code> <code>update(object)</code> <code>delete()</code></td></tr>
 </tbody>
 </table>
@@ -509,10 +509,11 @@ in order, so the escape hatch does not become string concatenation either.</p>
 
 <h2>Seeing what it produces</h2>
 
-<p><code>toFenecQL()</code> returns exactly the text and parameters that will
-run, so you can log it, test it or run it by hand.</p>
+<p>To see the text and parameters a chain builds, for logging or a test,
+call <code>toFenecQL()</code>. It returns exactly what will run, and runs
+nothing; a query needs no call to it before it runs.</p>
 
-<pre data-lang="js">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
+<pre data-lang="ts">db.from('articles').where('year', '>=', 2024).limit(10).toFenecQL()
 // ['get articles where year >= $1 limit 10', [2024]]
 </pre>
 
