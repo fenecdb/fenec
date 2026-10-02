@@ -270,7 +270,7 @@ test('what would lose data or could mean two things is refused, listed with its 
   // Renamed, or dropped and another added? Not guessed.
   await refusedWith(image, t({ name: text(), done: boolean() }, hash), ['field_not_declared'], /if it was renamed to `name`, the migration `alter collection todos rename field title to name`/);
   await refusedWith(image, t({ title: integer().notNull(), done: boolean() }, hash), ['type_changed'], /`todos.title` is text in the database and int in the code/);
-  await refusedWith(image, t({ title: text(), done: boolean() }, hash), ['required_changed'], /required in the database and not in the code/);
+  await refusedWith(image, t({ title: text(), done: boolean() }, hash), ['required_changed'], /required in the database and not required in the code/);
   await refusedWith(image, t({ title: text().notNull().collate('tr'), done: boolean() }, hash), ['collate_changed'], /rebuild\('todos', 'title'\)/);
   // An index added to one field would be made; the one taken off another is refused.
   await refusedWith(image, t({ title: text().notNull(), done: boolean() }, (t) => [index().on(t.title)]), ['index_removed'], /`todos.done` has @hash/);

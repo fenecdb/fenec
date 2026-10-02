@@ -9,7 +9,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 # The indexes the browser module is built with: every one unless named --
 # `make wasm FEATURES="text sorted"`, or FEATURES=none for none of them. The
 # check a schema declared in code opens with comes with any set, unless
-# SCHEMA=0: 8.4 KB brotli for a page whose code declares none.
+# SCHEMA=0: 7.5 KB brotli for a page whose code declares none.
 FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)

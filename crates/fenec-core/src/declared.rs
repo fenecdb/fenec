@@ -422,7 +422,7 @@ pub fn type_named(s: &str) -> Option<DataType> {
 }
 
 /// Text joined: one loop, where each `format!` is code of its own.
-fn cat(parts: &[&str]) -> String {
+pub fn cat(parts: &[&str]) -> String {
     let mut s = String::new();
     for p in parts {
         s.push_str(p);
@@ -430,7 +430,7 @@ fn cat(parts: &[&str]) -> String {
     s
 }
 
-fn bad(at: &str, why: &str) -> Error {
+pub fn bad(at: &str, why: &str) -> Error {
     Error::Query(cat(&["schema description: ", at, " ", why]))
 }
 
@@ -671,6 +671,15 @@ pub fn field_text(f: &Field, required: bool) -> String {
 /// The statements that make a collection as declared: the collection, then
 /// an index on each path.
 pub fn create(s: &Schema) -> Vec<String> {
+    let mut out = Vec::new();
+    create_into(s, &mut out);
+    out
+}
+
+/// [`create`] onto `out`. Loops that push, here and through the plan, rather
+/// than iterators collected: each `collect` and `extend` is a generic of its
+/// own in the browser module (`make size-report`).
+fn create_into(s: &Schema, out: &mut Vec<String>) {
     let mut c = cat(&["create collection ", &s.name, " ("]);
     for (i, f) in s.fields.iter().enumerate() {
         if i > 0 {
@@ -679,9 +688,17 @@ pub fn create(s: &Schema) -> Vec<String> {
         c.push_str(&field_text(f, true));
     }
     c.push(')');
-    let mut out = vec![c];
-    out.extend(s.paths.iter().map(|p| path_index(&s.name, p)));
-    out
+    out.push(c);
+    paths_into(s, None, out);
+}
+
+/// The `create index` of each path into `field`, or into every field.
+fn paths_into(s: &Schema, field: Option<&str>, out: &mut Vec<String>) {
+    for p in &s.paths {
+        if field.is_none_or(|f| under(p, f)) {
+            out.push(path_index(&s.name, p));
+        }
+    }
 }
 
 fn path_index(collection: &str, p: &Field) -> String {
@@ -695,7 +712,7 @@ fn path_index(collection: &str, p: &Field) -> String {
 /// `db` is every collection the database holds: one the code does not
 /// declare is left alone.
 #[inline(always)]
-pub fn plan(db: &[Schema], declared: &[Schema], mode: Mode) -> Plan {
+pub fn plan(db: &[&Schema], declared: &[Schema], mode: Mode) -> Plan {
     // Two copies, so that a caller that only applies -- the browser module
     // -- carries none of what only following says.
     match mode {
@@ -704,11 +721,11 @@ pub fn plan(db: &[Schema], declared: &[Schema], mode: Mode) -> Plan {
     }
 }
 
-fn planned<const FOLLOW: bool>(db: &[Schema], declared: &[Schema]) -> Plan {
+fn planned<const FOLLOW: bool>(db: &[&Schema], declared: &[Schema]) -> Plan {
     let mut p = Plan::default();
     for d in declared {
         match db.iter().find(|s| s.name == d.name) {
-            None if !FOLLOW => p.statements.extend(create(d)),
+            None if !FOLLOW => create_into(d, &mut p.statements),
             None => p.refuse(
                 "collection_missing",
                 &d.name,
@@ -741,7 +758,7 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                     "field_missing",
                     c,
                     Some(&f.name),
-                    cat(&[&at, " is in the code and not in the database"]),
+                    only_in(&at, "the code", "the database"),
                     cat(&[
                         "its owner adds it (`",
                         &add,
@@ -764,12 +781,7 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 );
             } else {
                 p.statements.push(add);
-                p.statements.extend(
-                    d.paths
-                        .iter()
-                        .filter(|q| under(q, &f.name))
-                        .map(|q| path_index(c, q)),
-                );
+                paths_into(d, Some(&f.name), &mut p.statements);
             }
             continue;
         };
@@ -778,7 +790,7 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 "type_changed",
                 c,
                 Some(&f.name),
-                cat(&[&at, " is ", &g.ty.name(), " in the database and ", &f.ty.name(), " in the code"]),
+                differs(&at, " is ", &g.ty.name(), &f.ty.name()),
                 match FOLLOW {
                     true => AS_IT_IS.into(),
                     false => cat(&[
@@ -796,15 +808,15 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
             // Loosened, no value is lost, and a rebuild -- whose field is
             // never required -- makes it so; tightened, the documents there
             // may hold none, and no statement makes a field required.
-            let (yes, no, fix) = match g.required {
+            let (had, want, fix) = match g.required {
                 true => (
-                    "the database",
-                    "the code",
+                    "required",
+                    "not required",
                     fix_rebuild::<FOLLOW>(c, &f.name),
                 ),
                 false => (
-                    "the code",
-                    "the database",
+                    "not required",
+                    "required",
                     cat(&[
                         AS_IT_IS,
                         ": a field becomes required only as its collection is made",
@@ -815,24 +827,17 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
                 "required_changed",
                 c,
                 Some(&f.name),
-                cat(&[&at, " is required in ", yes, " and not in ", no]),
+                differs(&at, " is ", had, want),
                 fix,
             );
         }
         if g.collate != f.collate {
-            let name = |c: Option<Collation>| c.map_or("no collation", |c| c.name());
+            let name = |c: Option<Collation>| c.map_or("none", |c| c.name());
             p.refuse(
                 "collate_changed",
                 c,
                 Some(&f.name),
-                cat(&[
-                    &at,
-                    " is in ",
-                    name(g.collate),
-                    " in the database and in ",
-                    name(f.collate),
-                    " in the code",
-                ]),
+                differs(&at, "'s collation is ", name(g.collate), name(f.collate)),
                 fix_rebuild::<FOLLOW>(c, &f.name),
             );
         }
@@ -890,16 +895,25 @@ fn collection_plan<const FOLLOW: bool>(p: &mut Plan, s: &Schema, d: &Schema) {
             "field_not_declared",
             c,
             Some(&g.name),
-            cat(&[
-                "`",
-                c,
-                ".",
-                &g.name,
-                "` is in the database and not in the code",
-            ]),
+            only_in(
+                &cat(&["`", c, ".", &g.name, "`"]),
+                "the database",
+                "the code",
+            ),
             fix,
         );
     }
+}
+
+/// "`t.f` is int in the database and float in the code": every difference
+/// said one way, one text in the module.
+fn differs(at: &str, verb: &str, had: &str, want: &str) -> String {
+    cat(&[at, verb, had, " in the database and ", want, " in the code"])
+}
+
+/// "`t.f` is in the code and not in the database".
+fn only_in(at: &str, here: &str, there: &str) -> String {
+    cat(&[at, " is in ", here, " and not in ", there])
 }
 
 const AS_IT_IS: &str = "declare it as the database has it";
@@ -919,7 +933,7 @@ fn index_plan<const FOLLOW: bool>(
     if had == want {
         return;
     }
-    let at = cat(&["`", c, ".", f, "` has "]);
+    let at = cat(&["`", c, ".", f, "`"]);
     let show = |k: &IndexKind| index_text(k).unwrap_or_else(|| "no index".into());
     let create = cat(&["create index on ", c, " (", f, ") ", &show(want)]);
     match (had, want) {
@@ -930,11 +944,7 @@ fn index_plan<const FOLLOW: bool>(
             "index_missing",
             c,
             Some(f),
-            cat(&[
-                &at,
-                &show(want),
-                " in the code and no index in the database",
-            ]),
+            differs(&at, " has ", "no index", &show(want)),
             cat(&[
                 "its owner builds it (`",
                 &create,
@@ -945,7 +955,7 @@ fn index_plan<const FOLLOW: bool>(
             "index_removed",
             c,
             Some(f),
-            cat(&[&at, &show(had), " in the database and no index in the code"]),
+            differs(&at, " has ", &show(had), "no index"),
             fix_rebuild::<FOLLOW>(c, root(f)),
         ),
         _ => {
@@ -967,13 +977,7 @@ fn index_plan<const FOLLOW: bool>(
                 "index_changed",
                 c,
                 Some(f),
-                cat(&[
-                    &at,
-                    &show(had),
-                    " in the database and ",
-                    &show(want),
-                    " in the code",
-                ]),
+                differs(&at, " has ", &show(had), &show(want)),
                 fix,
             )
         }
@@ -1054,10 +1058,10 @@ impl Plan {
 /// Each migration as the FenecQL it runs, a rebuild written out against the
 /// declaration: what is run, and what is recorded.
 pub fn migration_texts(d: &Declared) -> Result<Vec<String>> {
-    d.migrations
-        .iter()
-        .map(|m| match m {
-            Migration::Text(t) => Ok(t.clone()),
+    let mut out = Vec::new();
+    for m in &d.migrations {
+        out.push(match m {
+            Migration::Text(t) => t.clone(),
             Migration::Rebuild { collection, field } => d
                 .collections
                 .iter()
@@ -1068,9 +1072,10 @@ pub fn migration_texts(d: &Declared) -> Result<Vec<String>> {
                         &cat(&[collection, ".", field]),
                         "is rebuilt and not declared",
                     )
-                }),
-        })
-        .collect()
+                })?,
+        });
+    }
+    Ok(out)
 }
 
 /// A field made again as `s` declares it: a field of that declaration under
@@ -1105,9 +1110,11 @@ pub fn rebuild(s: &Schema, field: &str) -> Option<String> {
         " to ",
         field,
     ]);
-    for p in s.paths.iter().filter(|p| under(p, field)) {
+    let mut paths = Vec::new();
+    paths_into(s, Some(field), &mut paths);
+    for p in paths {
         out.push_str("; ");
-        out.push_str(&path_index(&s.name, p));
+        out.push_str(&p);
     }
     Some(out)
 }
@@ -1241,6 +1248,7 @@ mod tests {
             r#"[{"name":"t","fields":[{"name":"a","type":"int","index":{"kind":"sorted"}},{"name":"new","type":"text"},{"name":"b","type":"bool","index":{"kind":"hash"}}]},
                 {"name":"u","fields":[{"name":"y","type":"int"}]}]"#,
         );
+        let db: Vec<&Schema> = db.iter().collect();
         let p = plan(&db, &code, Mode::Apply);
         assert_eq!(
             p.statements,
@@ -1282,7 +1290,8 @@ mod tests {
             ]
         );
         // The same schema plans nothing.
-        assert_eq!(plan(&code, &code, Mode::Apply), Plan::default());
+        let same: Vec<&Schema> = code.iter().collect();
+        assert_eq!(plan(&same, &code, Mode::Apply), Plan::default());
     }
 
     #[test]

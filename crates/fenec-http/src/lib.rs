@@ -957,9 +957,11 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
         (Method::Post, ["_schema", "plan"]) if follow => {
             // A scoped token compares what it may read: a collection it may
             // not is one the server does not have, for it.
+            let schemas = visible(&held::read(db));
+            let schemas: Vec<_> = schemas.iter().collect();
             fenec_abi::read(body).map(|d| fenec_abi::Outcome {
                 plan: fenec_core::declared::plan(
-                    &visible(&held::read(db)),
+                    &schemas,
                     &d.collections,
                     fenec_core::declared::Mode::Follow,
                 ),

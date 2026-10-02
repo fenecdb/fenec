@@ -26,7 +26,7 @@ fenec-abi = { workspace = true, default-features = false }
 default = ["indexes", "schema"]
 indexes = ["vector", "text", "sparse", "sorted"]
 # The check a schema declared in code is opened with (`fenec_schema`,
-# `fenec_core::declared`): 27 KB of the module, 8.4 KB brotli, which a page
+# `fenec_core::declared`): 23 KB of the module, 7.5 KB brotli, which a page
 # whose code declares none may leave out.
 schema = []
 vector = ["fenec-core/vector"]

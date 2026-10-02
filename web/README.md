@@ -48,7 +48,7 @@ uses none of them saves 46 KB brotli with it. A statement that needs a missing i
 throws a `FenecError` naming it, and the file is the same either way: a
 store one module wrote opens in the other. A page that needs some of the
 indexes builds its module with them alone: `make wasm FEATURES="text sorted"`,
-and `SCHEMA=0` leaves the schema check out of it (8.4 KB brotli).
+and `SCHEMA=0` leaves the schema check out of it (7.5 KB brotli).
 
 Serve `.wasm` as `application/wasm`, compressed once at build time.
 Full reference: https://fenecdb.com/docs/javascript

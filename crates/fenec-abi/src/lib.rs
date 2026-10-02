@@ -312,12 +312,16 @@ pub fn read(request: &str) -> Result<declared::Declared> {
     Ok(d)
 }
 
-/// Every collection the database holds, its own among them.
-fn schemas(db: &Database) -> Vec<Schema> {
-    db.collection_names()
-        .iter()
-        .filter_map(|n| db.collection(n).ok().map(|c| c.schema.clone()))
-        .collect()
+/// Every collection the database holds, its own among them: borrowed,
+/// where cloned they were drop glue and a clone of the browser module's own.
+fn schemas(db: &Database) -> Vec<&Schema> {
+    let mut out = Vec::new();
+    for n in &db.collection_names() {
+        if let Ok(c) = db.collection(n) {
+            out.push(&c.schema);
+        }
+    }
+    out
 }
 
 /// `(n, text)` of each migration `_migrations` records, ascending.
@@ -328,17 +332,15 @@ fn recorded(db: &mut Database) -> Result<Vec<(i64, String)>> {
         return Ok(Vec::new());
     }
     let stmt = fenec_ql::parse_one("get _migrations select n, text order n")?;
-    let Response::Rows(rs) = db.execute_with(&stmt, &[])? else {
-        return Ok(Vec::new());
-    };
-    Ok(rs
-        .rows
-        .into_iter()
-        .filter_map(|r| match <[Value; 2]>::try_from(r.values) {
-            Ok([Value::Int(n), Value::Text(t)]) => Some((n, t)),
-            _ => None,
-        })
-        .collect())
+    let mut out = Vec::new();
+    if let Response::Rows(rs) = db.execute_with(&stmt, &[])? {
+        for r in rs.rows {
+            if let [Value::Int(n), Value::Text(t)] = r.values.as_slice() {
+                out.push((*n, t.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Runs FenecQL inside the block [`schema`] holds open: a compact, which
@@ -355,17 +357,10 @@ fn exec(db: &mut Database, text: &str, params: &[Value]) -> Result<()> {
     Ok(())
 }
 
-/// A migration's error, saying which migration it was.
+/// A migration's error, saying which migration it was: a query error
+/// whatever it was, the migration's being the statement that failed.
 fn in_migration(n: usize, e: Error) -> Error {
-    let at = |m: String| format!("migration {n}: {m}");
-    match e {
-        Error::Query(m) => Error::Query(at(m)),
-        Error::Type(m) => Error::Type(at(m)),
-        Error::NotFound(m) => Error::NotFound(at(m)),
-        Error::Exists(m) => Error::Exists(at(m)),
-        Error::Duplicate(m) => Error::Duplicate(at(m)),
-        other => other,
-    }
+    Error::Query(format!("migration {n}: {e}"))
 }
 
 /// The database compared with a schema declared in code -- a description
@@ -430,9 +425,13 @@ pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -
         true => db.commit()?,
         false => db.rollback(),
     }
+    let mut migrations = Vec::new();
+    for i in pending {
+        migrations.push(i + 1);
+    }
     Ok(Outcome {
         plan,
-        migrations: pending.map(|i| i + 1).collect(),
+        migrations,
         ran: !fresh,
         applied,
     })
