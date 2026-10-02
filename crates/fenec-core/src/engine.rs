@@ -964,6 +964,14 @@ pub trait Sink: Send {
     fn sync_existing(&mut self) -> Result<()> {
         Ok(())
     }
+    /// Writes what is buffered into the file, with no fsync: it outlives the
+    /// process, not the machine. What an app asks for as it is sent to the
+    /// background (`fenec_flush`), where the system may end the process
+    /// without a word and an fsync is milliseconds it may not be given.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_out(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn sync(&mut self) -> Result<()> {
         Ok(())
     }
@@ -3882,6 +3890,16 @@ impl Database {
         let durable = self.storage(r)?;
         self.dirty = false;
         Ok(durable)
+    }
+
+    /// Hands the buffered writes to the operating system with no fsync
+    /// ([`Sink::write_out`]): they survive the process being killed, not
+    /// the machine losing power.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_out(&mut self) -> Result<()> {
+        self.refuse_if_failed()?;
+        let r = self.sink_mut().write_out();
+        self.storage(r)
     }
 
     /// Records a storage failure found outside the engine, a

@@ -45,7 +45,23 @@ def main():
     # NuGet's FenecDb. The Go module has no number of its own to write: it
     # is the tag release.yml pushes beside the release's (RELEASING.md).
     sub("integrations/dotnet/FenecDb/FenecDb.csproj", r"(<Version>)[^<]+(</Version>)", rf"\g<1>{v}\g<2>")
-    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md")
+    # The native bindings. Kotlin's library and AAR (Maven Central), and the
+    # Flutter plugin's Android project; Dart's package and the Flutter
+    # plugin, which names the package's version (pub.dev), and its pods.
+    sub("integrations/kotlin/build.gradle.kts", r'^(    version = )"[^"]+"', rf'\g<1>"{v}"')
+    sub("integrations/dart/fenecdb_flutter/android/build.gradle", r"^version '[^']+'", f"version '{v}'")
+    for path in ("integrations/dart/fenecdb/pubspec.yaml", "integrations/dart/fenecdb_flutter/pubspec.yaml",
+                 "integrations/dart/fenecdb_flutter/example/pubspec.yaml"):
+        sub(path, r"^version: .+$", f"version: {v}")
+    sub("integrations/dart/fenecdb_flutter/pubspec.yaml", r"^(  fenecdb: )\S+$", rf"\g<1>{v}")
+    for os in ("ios", "macos"):
+        sub(f"integrations/dart/fenecdb_flutter/{os}/fenecdb_flutter.podspec", r"^(  s\.version += )'[^']+'", rf"\g<1>'{v}'")
+    # SwiftPM is fetched by the tag: Package.swift's binary target names the
+    # release's zip, whose checksum swift-binary.yml writes beside it
+    # (integrations/swift/set-binary.sh) before the tag is made.
+    sub("Package.swift", r'^let release = "[^"]+"', f'let release = "{v}"')
+    print(f"version {v}: Cargo.toml, pyproject.toml, every package.json and lock, FenecDb.csproj, README.md, "
+          "the Kotlin and Dart packages, the Flutter plugin, Package.swift")
 
 
 if __name__ == "__main__":

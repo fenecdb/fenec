@@ -13,3 +13,27 @@ __pycache__/
 *.egg-info/
 integrations/python/build/
 .pytest_cache/
+*.fenec.lock
+# Swift: SwiftPM's build and state at the root, where Package.swift is, and
+# the XCFramework integrations/swift/build-xcframework.sh makes.
+/.build/
+/.swiftpm/
+Package.resolved
+integrations/swift/build/
+# Kotlin: Gradle's and the Kotlin compiler's state, and the builds
+integrations/kotlin/.gradle/
+integrations/kotlin/.kotlin/
+integrations/kotlin/build/
+integrations/kotlin/*/build/
+integrations/kotlin/local.properties
+# Dart and Flutter: pub's state, and what prepare.sh and flutter create put
+# in the plugin and its example
+integrations/dart/**/.dart_tool/
+integrations/dart/**/pubspec.lock
+integrations/dart/**/.flutter-plugins*
+integrations/dart/fenecdb_flutter/ios/Frameworks/
+integrations/dart/fenecdb_flutter/macos/Frameworks/
+integrations/dart/fenecdb_flutter/android/src/main/jniLibs/
+integrations/dart/fenecdb_flutter/example/*
+!integrations/dart/fenecdb_flutter/example/lib/
+!integrations/dart/fenecdb_flutter/example/pubspec.yaml

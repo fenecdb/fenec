@@ -149,6 +149,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
+name = "fenec-abi"
+version = "0.1.7"
+dependencies = [
+ "fenec-core",
+ "fenec-ql",
+]
+
+[[package]]
 name = "fenec-bench"
 version = "0.1.7"
 dependencies = [
@@ -173,6 +181,16 @@ dependencies = [
 name = "fenec-core"
 version = "0.1.7"
 dependencies = [
+ "fenec-ql",
+]
+
+[[package]]
+name = "fenec-ffi"
+version = "0.1.7"
+dependencies = [
+ "fenec-abi",
+ "fenec-core",
+ "fenec-http",
  "fenec-ql",
 ]
 
@@ -224,6 +242,7 @@ dependencies = [
 name = "fenec-wasm"
 version = "0.1.7"
 dependencies = [
+ "fenec-abi",
  "fenec-core",
  "fenec-ql",
 ]

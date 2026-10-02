@@ -1,0 +1,5 @@
+# In the repository the plugin takes the package beside it; what pub.dev
+# serves names the release's version (.pubignore leaves this file out).
+dependency_overrides:
+  fenecdb:
+    path: ../fenecdb

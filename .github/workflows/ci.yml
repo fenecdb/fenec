@@ -51,7 +51,7 @@ jobs:
       # The browser build compiles code the native one does not: the SIMD
       # kernels, the graph builder without threads, fenec-core without
       # std-fs.
-      - run: cargo clippy -p fenec-wasm -p fenec-core -p fenec-ql --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo clippy -p fenec-wasm -p fenec-abi -p fenec-core -p fenec-ql --target wasm32-unknown-unknown -- -D warnings
 
       # A module made without some of the indexes (`make wasm FEATURES=...`)
       # compiles what the full one does not: the stand-ins in off.rs, and
@@ -62,6 +62,10 @@ jobs:
             cargo clippy -p fenec-wasm -p fenec-core --target wasm32-unknown-unknown --no-default-features ${f:+--features=$f} -- -D warnings
           done
       - run: cargo clippy -p fenec-core --no-default-features --features std-fs --all-targets -- -D warnings
+
+      # The native library with the JNI functions the Kotlin binding calls,
+      # which the workspace's run builds without.
+      - run: cargo clippy -p fenec-ffi --features jni --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -253,3 +257,149 @@ jobs:
 
       - name: Build the server (release)
         run: cargo build --release -p fenec-server
+
+  # The native library an app links (crates/fenec-ffi) on Android and the
+  # JVM, and its Kotlin, Dart and Flutter bindings: the Kotlin library's
+  # JVM tests against the Linux build, the AAR with the library built by
+  # the NDK for each ABI, the Dart package's tests, the Flutter plugin's,
+  # and the plugin's example built as an Android app. The runner has the
+  # Android SDK and NDK.
+  mobile-android:
+    name: mobile (Android, JVM, Dart, Flutter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain and the Android targets
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu-latest-mobile-
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      # Linux with Gradle: run-tests.sh builds the library here and runs
+      # JUnit on the runner, no container.
+      - name: Kotlin (JVM tests)
+        run: make kotlin-test
+
+      - name: Android AAR
+        run: |
+          set -eu
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          integrations/kotlin/build-aar.sh dist-mobile
+
+      - name: The library's size on Android and Linux
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          integrations/ffi-sizes.sh x86_64-unknown-linux-gnu aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # The Dart package under Flutter's own Dart, then the plugin's test.
+      - name: Dart and the Flutter plugin
+        run: make dart-test
+
+      - name: The Flutter plugin in an Android app
+        run: |
+          set -eu
+          integrations/dart/fenecdb_flutter/prepare.sh
+          cd integrations/dart/fenecdb_flutter/example
+          flutter create --platforms=android --project-name fenecdb_flutter_example .
+          rm -rf test
+          flutter build apk --debug
+          unzip -l build/app/outputs/flutter-apk/app-debug.apk | grep libfenec_ffi.so
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fenecdb-android
+          path: dist-mobile/*.aar
+          if-no-files-found: error
+
+  # The same on Apple's platforms: every slice of the XCFramework, the Swift
+  # package's tests on macOS and on an iOS simulator, the library's size
+  # linked for each target, and the Flutter plugin's example built for the
+  # simulator. The runner has Xcode.
+  mobile-apple:
+    name: mobile (Swift, iOS, XCFramework)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain and the Apple targets
+        run: |
+          rustup show
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-darwin
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-latest-mobile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-latest-mobile-
+
+      - name: XCFramework (macOS, iOS, the simulator)
+        run: integrations/swift/build-xcframework.sh --zip
+
+      # FenecFFI.framework a slice, the shared library: what the Flutter
+      # plugin's pods vendor and CocoaPods embeds.
+      - name: Dynamic XCFramework (the Flutter plugin's)
+        run: integrations/swift/build-xcframework.sh --dynamic --zip
+
+      # Package.swift takes the XCFramework just built.
+      - name: Swift (macOS)
+        run: swift test
+
+      - name: Swift (iOS simulator)
+        run: integrations/swift/test-ios.sh
+
+      - name: The library's size on Apple's platforms
+        run: |
+          integrations/ffi-sizes.sh aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: The Flutter plugin in an iOS app
+        run: |
+          set -eu
+          integrations/dart/fenecdb_flutter/prepare.sh
+          cd integrations/dart/fenecdb_flutter/example
+          flutter create --platforms=ios --project-name fenecdb_flutter_example .
+          rm -rf test
+          flutter build ios --simulator --debug --no-codesign
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fenecdb-xcframework
+          path: |
+            integrations/swift/build/FenecFFI.xcframework.zip
+            integrations/swift/build/FenecFFI.xcframework.zip.checksum
+            integrations/swift/build/FenecFFIDynamic.xcframework.zip
+          if-no-files-found: error

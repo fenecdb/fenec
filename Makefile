@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js builder-golden types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js builder-golden types types-check ffi ffi-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -233,6 +233,41 @@ beir:
 ## crates may not.
 python-test:
 	integrations/python/run-tests.sh
+
+## The native library an app links (crates/fenec-ffi), in the ffi profile:
+## for this machine, or TARGET=aarch64-linux-android and the like (the
+## toolchain's linker for it on the PATH, the NDK's for Android). The size
+## printed is the shared library's, stripped as the profile strips it --
+## built alone, since beside the static library and the rlib its link-time
+## optimisation left it 4% larger. JNI=1 adds the Kotlin binding's functions.
+FFI_TARGET = $(or $(TARGET),$(shell rustc -vV | sed -n 's/^host: //p'))
+ffi:
+	@$(CARGO) rustc -q -p fenec-ffi --lib --profile ffi --target $(FFI_TARGET) $(if $(JNI),--features jni) --crate-type cdylib
+	@for f in target/$(FFI_TARGET)/ffi/libfenec_ffi.dylib target/$(FFI_TARGET)/ffi/libfenec_ffi.so; do \
+		test -f $$f && echo "$$f  $$(wc -c < $$f) bytes"; done; true
+
+## A call through the native library against the same work through
+## fenec-server's HTTP handler in process: an open, a put, a near
+ffi-bench:
+	$(CARGO) run --release -p fenec-ffi --example ffi_bench
+
+## The Swift package (Package.swift, integrations/swift) on macOS: the
+## XCFramework's macOS slice for this machine, then swift test -- the
+## engine, the builder over every golden case, live queries
+swift-test:
+	integrations/swift/run-tests.sh
+
+## The Kotlin library's JVM tests (integrations/kotlin): the native library
+## built for Linux with its JNI functions, then JUnit under Gradle -- in
+## rust and gradle:8-jdk17 containers unless this is Linux with Gradle
+kotlin-test:
+	integrations/kotlin/run-tests.sh
+
+## The Dart package's tests (integrations/dart): the native library for
+## this machine, then dart test against it -- and flutter test for the
+## plugin where Flutter is installed
+dart-test:
+	integrations/dart/run-tests.sh
 
 ## The Go SDK (integrations/go) against fenec-server processes its tests
 ## start: a primary, a replica of it and a node of tenants

@@ -332,6 +332,13 @@ impl Sink for FileSink {
     /// and never synced included. After a crash of the process alone they
     /// are in the file but may be only in the kernel's cache: a primary
     /// calls this before it tells a replica they exist.
+    /// The pending appends written, and no fsync: past the process's end,
+    /// in the kernel's cache.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_out(&mut self) -> Result<()> {
+        lock(&self.disk).write_pending(&self.pending)
+    }
+
     fn sync_existing(&mut self) -> Result<()> {
         let disk = lock(&self.disk);
         disk.file.sync_data()?;

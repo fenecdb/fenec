@@ -1,8 +1,11 @@
 name: packages
 
 # PyPI's `fenecdb`, npm's `@fenecdb/web`, `@fenecdb/react`,
-# `@fenecdb/cloudflare` and `@fenecdb/langchain`, and NuGet's `FenecDb`
-# (with NUGET_API_KEY, the job below) go out when
+# `@fenecdb/cloudflare` and `@fenecdb/langchain`, NuGet's `FenecDb`
+# (with NUGET_API_KEY, the job below), Maven Central's
+# `com.fenecdb:fenecdb` and `fenecdb-android` (with the Central
+# Portal's token and a signing key) and pub.dev's `fenecdb` and
+# `fenecdb_flutter` (with PUB_CREDENTIALS) go out when
 # a release is published -- not when its tag is pushed: release.yml leaves
 # the release a draft so its notes get a read, and publishing the draft is
 # the moment the packages follow it. A registry keeps what it is given, so
@@ -181,3 +184,173 @@ jobs:
         run: |
           dotnet nuget push dist-nuget/FenecDb.*.nupkg --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Maven Central's `com.fenecdb:fenecdb` (the JVM library) and
+  # `fenecdb-android` (the AAR, the native library for each ABI inside):
+  # built, signed and laid out as a Maven repository by Gradle, zipped into
+  # the bundle the Central Portal takes and uploaded to its API -- no
+  # publishing plugin. The Portal takes a user token and every file signed;
+  # without MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD and SIGNING_KEY
+  # the job says so and stops, and the other registries go on.
+  maven:
+    name: Maven Central
+    runs-on: ubuntu-latest
+    environment:
+      name: maven
+      url: https://central.sonatype.com/namespace/com.fenecdb
+    steps:
+      - name: Look for the secrets
+        id: keys
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -z "$MAVEN_CENTRAL_USERNAME" ] || [ -z "$MAVEN_CENTRAL_PASSWORD" ] || [ -z "$SIGNING_KEY" ]; then
+            echo "::notice::MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD or SIGNING_KEY is not set: fenecdb is not published to Maven Central (RELEASING.md, 'Once: the registries' side')"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.keys.outputs.set == 'true'
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain and the Android targets
+        if: steps.keys.outputs.set == 'true'
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: actions/setup-java@v5
+        if: steps.keys.outputs.set == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.keys.outputs.set == 'true'
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build, sign and lay out the repository
+        if: steps.keys.outputs.set == 'true'
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          set -eu
+          version=$(sed -n 's/^ *version = "\(.*\)"/\1/p' integrations/kotlin/build.gradle.kts)
+          if [ "v$version" != "$RELEASE_TAG" ]; then
+            echo "::error::integrations/kotlin says $version, the release is $RELEASE_TAG"
+            exit 1
+          fi
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          integrations/kotlin/build-aar.sh dist-maven
+          cd integrations/kotlin
+          gradle --no-daemon -q publishAllPublicationsToLocalRepository
+          # The Portal takes the components alone: the repository's metadata
+          # files are the Portal's to write.
+          find build/repo -name 'maven-metadata.xml*' -delete
+          (cd build/repo && zip -qr ../central-bundle.zip io)
+          unzip -l build/central-bundle.zip
+
+      # AUTOMATIC: the Portal releases the deployment once it validates.
+      # A version already there is refused by the Portal, and the job says so.
+      - name: Upload to the Central Portal
+        if: steps.keys.outputs.set == 'true'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer $token" \
+            -F "bundle=@integrations/kotlin/build/central-bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?name=fenecdb-$RELEASE_TAG&publishingType=AUTOMATIC"
+
+  # pub.dev's `fenecdb` (the Dart package) and then `fenecdb_flutter` (the
+  # plugin, which names that version and bundles the native library: the
+  # release's dynamic XCFramework and the .so of each ABI from its AAR). pub.dev's
+  # own automated publishing trusts a workflow started by a tag's push,
+  # which this one is not, so it takes the credentials `dart pub login`
+  # writes; without PUB_CREDENTIALS the job says so and stops.
+  pub:
+    name: pub.dev
+    runs-on: ubuntu-latest
+    environment:
+      name: pub
+      url: https://pub.dev/packages/fenecdb
+    steps:
+      - name: Look for the credentials
+        id: keys
+        env:
+          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
+        run: |
+          if [ -z "$PUB_CREDENTIALS" ]; then
+            echo "::notice::PUB_CREDENTIALS is not set: fenecdb and fenecdb_flutter are not published to pub.dev (RELEASING.md, 'Once: the registries' side')"
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.keys.outputs.set == 'true'
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: subosito/flutter-action@v2
+        if: steps.keys.outputs.set == 'true'
+        with:
+          channel: stable
+
+      - name: The native libraries, from the release
+        if: steps.keys.outputs.set == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          gh release download "$RELEASE_TAG" -R "${{ github.repository }}" -p 'FenecFFIDynamic.xcframework.zip' -p 'fenecdb-android-*.aar' -D assets
+          mkdir -p integrations/swift/build integrations/kotlin/android/build/jniLibs
+          unzip -q assets/FenecFFIDynamic.xcframework.zip -d integrations/swift/build/dynamic
+          unzip -q assets/fenecdb-android-*.aar 'jni/*' -d assets/aar
+          cp -R assets/aar/jni/. integrations/kotlin/android/build/jniLibs/
+          integrations/dart/fenecdb_flutter/prepare.sh
+
+      # Each published from a copy outside the repository: the repository's
+      # .gitignore leaves out the libraries prepare.sh put in the plugin,
+      # and pub would leave them out with it. A version already on pub.dev
+      # is passed over, as the other registries' are.
+      - name: Publish
+        if: steps.keys.outputs.set == 'true'
+        env:
+          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -eu
+          mkdir -p "$HOME/.config/dart"
+          printf '%s' "$PUB_CREDENTIALS" > "$HOME/.config/dart/pub-credentials.json"
+          version="${RELEASE_TAG#v}"
+          for pkg in fenecdb fenecdb_flutter; do
+            if curl -sf "https://pub.dev/api/packages/$pkg/versions/$version" >/dev/null; then
+              echo "$pkg $version is on pub.dev already"
+              continue
+            fi
+            have=$(sed -n 's/^version: //p' "integrations/dart/$pkg/pubspec.yaml")
+            if [ "$have" != "$version" ]; then
+              echo "::error::$pkg says $have, the release is $version"
+              exit 1
+            fi
+            out="$RUNNER_TEMP/$pkg"
+            rm -rf "$out"
+            cp -R "integrations/dart/$pkg" "$out"
+            rm -f "$out/pubspec_overrides.yaml"
+            cp LICENSE "$out/"
+            (cd "$out" && flutter pub publish --force)
+          done

@@ -1,0 +1,20 @@
+[package]
+name = "fenec-abi"
+description = "What fenecdb's C ABIs answer with: the browser module's and the native library's, one code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Without the indexes, as fenec-ql takes the core: each binding names the
+# ones it is built with, and asking for them here would put them back into
+# a browser module made without them.
+fenec-core = { workspace = true, default-features = false }
+fenec-ql.workspace = true
+
+[dev-dependencies]
+fenec-core = { workspace = true, features = ["indexes"] }

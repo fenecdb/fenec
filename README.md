@@ -5,8 +5,9 @@
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
 written in Rust with no dependencies. It runs inside a web page as 199 KB of
-gzipped WebAssembly, in a Rust process, or as a server any language reaches
-over HTTP, and it has its own query language (**FenecQL**).
+gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
+device, in a Rust process, or as a server any language reaches over HTTP,
+and it has its own query language (**FenecQL**).
 
 **[fenecdb.com](https://fenecdb.com)** — the website and documentation. The
 home page boots the real WebAssembly module and builds an HNSW index in your
@@ -165,6 +166,25 @@ docker pull ghcr.io/fenecdb/fenec-server:0.1.7     # published, multi-arch
 make docker && make docker-run TOKEN=secret   # or build it yourself
 ```
 
+**Mobile and native apps.** The engine as a native library
+(`crates/fenec-ffi`, a C ABI) keeps the database in a file on the device, no
+server: Swift for iOS and macOS, Kotlin for Android and the JVM, Dart and
+Flutter, each with the query builder and live queries driving the UI.
+
+| Language | Package | From |
+| --- | --- | --- |
+| Swift | SwiftPM: `github.com/fenecdb/fenec`, product `FenecDB` | [`integrations/swift`](integrations/swift) |
+| Kotlin | `com.fenecdb:fenecdb-android` (the AAR), `com.fenecdb:fenecdb` (the JVM) | [`integrations/kotlin`](integrations/kotlin) |
+| Dart | `flutter pub add fenecdb_flutter`, or `fenecdb` in Dart alone | [`integrations/dart`](integrations/dart) |
+
+```swift
+let db = try await Fenec.open(path: path)
+let open = try await db.from("todos").where("done", false).rows(as: Todo.self)
+let live = LiveQuery(db, try db.from("todos").where("done", false), as: Todo.self)   // for SwiftUI
+```
+
+[Mobile and native apps](https://fenecdb.com/docs/mobile).
+
 **Embedded in Rust.** `fenec-core` is the engine as a library:
 [Embedded Rust](https://fenecdb.com/docs/embedding).
 
@@ -187,8 +207,8 @@ make docker && make docker-run TOKEN=secret   # or build it yourself
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
 | **Relations** | `lookup` — a collection's matching documents attached per row, `limit` counted per parent, chainable to 8 levels |
 | **Functions** | `lower upper len coalesce now timestamp cosine l2 dot norm normalize` + plugins |
-| **Interfaces** | FenecQL · a JS query builder · REST/JSON + SSE · WASM C ABI · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
-| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET |
+| **Interfaces** | FenecQL · a query builder in seven languages · REST/JSON + SSE · WASM C ABI · a native C ABI for apps · change data capture (`/_changes`, every write on disk as a JSON line, resumable) · import from SQLite and PostgreSQL |
+| **Integrations** | LangChain and LlamaIndex vector stores, each passing its framework's own tests · `useLiveQuery` for React, over a database in the page or a synced replica · SDKs for Python, JavaScript, Go and .NET · embedded in Swift, Kotlin and Dart/Flutter apps, live queries as SwiftUI observables, Flows and Streams |
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
@@ -217,6 +237,7 @@ query; it is not a join and is not trying to be one.
 | [How it works](https://fenecdb.com/docs/concepts) | Segments, the offset index, HNSW with a filter, half precision, and why there is no page cache and exactly one writer |
 | [FenecQL](https://fenecdb.com/docs/fenecql) | Statements, types, indexes, operators, parameters, functions |
 | [JavaScript client](https://fenecdb.com/docs/javascript) | The browser client, the immutable query builder, binding it to a transport, live queries as an app's state |
+| [Mobile and native apps](https://fenecdb.com/docs/mobile) | Swift, Kotlin and Dart/Flutter: a file on the device, the builder, live queries driving the UI, where the file lives, durability |
 | [HTTP endpoint](https://fenecdb.com/docs/http) | REST/JSON derived from the schema, vector search over POST, raw FenecQL, SSE |
 | [Server](https://fenecdb.com/docs/server) | Running `fenec-server`: flags, durability, tokens and policies, the audit log, limits, containers |
 | [Replication](https://fenecdb.com/docs/replication) | Read replicas fed the writes on the primary's disk, promotion by hand, what a failover loses, backups and restoring to a moment |

@@ -12,6 +12,8 @@ measurements, as every feature here does.
 | 3 | `in (get ...)` and `@ttl` -- **done** | small each | the reverse of `lookup`; caches and sessions |
 | 4 | TLS 1.3, our own, for HTTP | large | the security story ends at a terminator today |
 | 5 | Official SDKs over HTTP (Phase 53) -- **done** for Go and .NET | medium | every language reaches the server over HTTP since the pg wire went |
+| 6 | Embedded in mobile and native apps (Phase 56) -- **done** | large | the engine's best place after the page: a file on the device, offline |
+| 7 | An app's file synced with a server (Phase 57) | medium | what the page's `FenecSync` does, for an app |
 
 Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
 are the design), the PostgreSQL wire protocol (below), several
@@ -347,6 +349,32 @@ a terminator instead.
 
 ---
 
+## Phase 6: mobile and native apps (Phase 56) -- done
+
+`crates/fenec-ffi` is the engine as a native library, a C ABI with zero
+dependencies, its answers the browser module's (`fenec-abi`, shared), its
+handles numbers, its calls a code and JSON each, a panic caught at the
+boundary. Swift (SwiftPM, an XCFramework for macOS, iOS and the
+simulator), Kotlin (the JVM and an AAR for three Android ABIs, through JNI
+functions the library carries) and Dart (`dart:ffi`, a worker isolate a
+database, and a Flutter plugin bundling the library) each have the query
+builder, held to every golden case, and live queries for their UI
+framework: an `ObservableObject` and an `@Observable`, a `Flow`, a
+`Stream`. Measured: the library 1.51 MB stripped on Apple silicon, 1.68 on
+x86_64 Linux; a buffered put 4.6 us against the server handler's 23.2, a
+`near` 97.8 us against 151.4.
+
+## Phase 7: an app's file synced with a server (Phase 57)
+
+What `FenecSync` does in a page -- a replica of a server's collections that
+reads without the network and writes optimistically -- for an app's file,
+and `Fenec.connect(url)` in each native binding for an app that talks to a
+server without a file of its own. The native library has what it needs:
+the change ring (`fenec_changes`) and the bindings' live queries already
+take a load as "everything".
+
+---
+
 ## Order and what each phase is measured by
 
 1. `alter` and `@unique` -- scan and open benchmarks unchanged; browser size.
@@ -358,3 +386,7 @@ a terminator instead.
    terminator in front of the same server.
 5. SDKs -- each held to the same flow `integrations/languages` runs, in CI,
    against a real server.
+6. Mobile -- each binding's tests in CI, on an iOS simulator and for Android's
+   ABIs; the library's size per target and a call against the server's
+   handler in process (`make ffi-bench`).
+7. Sync for apps -- the page's sync suite, run against each binding.

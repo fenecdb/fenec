@@ -19,6 +19,11 @@ make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.t
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
+make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
+make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
+make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test
+make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
+make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
 make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
 make serve         # wasm + python3 http.server -> http://localhost:8787
@@ -82,7 +87,8 @@ Dependency direction (nothing points back up):
 ```
 fenec-core  (std only, zero deps)
      |
-fenec-ql    (lexer + parser)          fenec-wasm  (C ABI, core+ql)
+fenec-ql    (lexer + parser)          fenec-abi   (the answers both C ABIs give)
+     |                                fenec-wasm  (browser C ABI)   fenec-ffi (native C ABI, apps)
      |
 fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
      |                     \
@@ -134,7 +140,7 @@ image in 129 ms against 76. The OPFS file stays plain: it is `fenec-server`'s.
 
 ## Invariants worth knowing before you change things
 
-**Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-wasm`,
+**Zero dependencies is a hard rule** for `fenec-core`, `fenec-ql`, `fenec-abi`, `fenec-wasm`, `fenec-ffi`,
 `fenec-http`, `fenec-wire`, `fenec-server`, `fenec-import`, `fenec-shard`. The WASM output has to stay small and
 auditable; own codec, own JSON, own HNSW, own SCRAM/crypto, own decimal-to-`f64`
 and back (`str::parse` drags in a 12 KB table, `{}` on a float 20.8 KB of
@@ -1652,6 +1658,58 @@ landing in chunks), it costs a write nothing -- a write no live query reads
 about 2 us in Node, the module 33 bytes, `make wasm-speed`'s `put` as it
 was. A `load` (`restore`, `openFile`) runs every live query, since the
 image's counter may be the cursor's. The client grew 1.9 KB gzip.
+
+**An app keeps its database through `fenec-ffi`.** The engine as a native
+library -- a cdylib and a staticlib, zero dependencies, its header
+`include/fenec.h` written by hand and held to the exports by a test -- for
+the Swift (`integrations/swift`, `Package.swift` at the root since SwiftPM
+fetches a package by its repository), Kotlin (`integrations/kotlin`) and
+Dart/Flutter (`integrations/dart`) bindings -- Maven Central's
+`com.fenecdb:fenecdb` and `com.fenecdb:fenecdb-android`, Kotlin package
+`com.fenecdb`, the JNI symbols `Java_com_fenecdb_FenecNative_*` with it.
+A text is answered through
+`fenec-abi`, the code the browser module answers through too -- prepare,
+the exact pass, the block, the answer's JSON, the change notice -- so a page
+and an app get the same bytes; out of the module's crate the optimizer at
+`opt-level = "z"` kept those functions out of line (+762 bytes), and
+`#[inline(always)]` left the module 161 bytes larger and 216 smaller in
+brotli. A handle is a number into a table of `Arc`s, never a pointer: a use
+after close finds nothing, and a call holds its database while it runs. A
+read takes the shared lock, a write the exclusive one, a lone `create
+index` or `compact` runs beside the database (`Database::maintain`), and a
+write's fsync runs once the lock is let go (`Database::flush`'s
+`Durability`, a failure to `Database::fail`), as a server's do. Every call
+runs under `catch_unwind` and returns a code -- an `Error`'s kind 1-10, or
+`FENEC_PANIC`, `FENEC_MISUSE`, `FENEC_LOCKED` -- with the error's JSON, so
+the library is built in the `ffi` profile, which unwinds. `<file>.lock` is
+`flock`ed while a file is open (a checkpoint renames a new file over the
+database, which a lock on it would not survive): a second open, here or in
+an app extension, is refused. Every write is fsynced unless
+`FENEC_OPEN_NO_SYNC`; `fenec_flush` is `Database::write_out`, the buffer
+written with no fsync; `fenec_close` saves a graph once the file grew three
+times its record since its last save, and syncs. The Kotlin binding's JNI
+functions are the library's (feature `jni`), four entries of the JNI table
+by hand, a call one `byte[]` -- its code, its JSON -- and text as UTF-8
+bytes, since JNI's modified UTF-8 splits an emoji. Each binding runs its
+calls off the main thread (a dispatch queue, `Dispatchers.IO`, a worker
+isolate a database), sends a vector as its `f32` bytes and a json field's
+`exact` refusal again as JSON, holds its builder to every golden case, and
+has live queries as `Lives` has them, the looks of a burst gathered a frame
+(16 ms) and taken once no write is under way. The libraries are built alone
+(`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
+the shared one 4% larger. 1.51 MB stripped on aarch64-apple-darwin, 1.68 on
+x86_64 Linux with JNI; a buffered put of a 128-dim vector 4.6 us against
+the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
+against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
+(`build-xcframework.sh`), so the Command Line Tools build every slice; a
+release's zip is built before its tag (`swift-binary.yml`), since the tag's
+`Package.swift` must name its checksum. Swift links a static library; the
+Flutter plugin vendors a dynamic `FenecFFI.xcframework` (`--dynamic`,
+`FenecFFI.framework` a slice, install name `@rpath/FenecFFI.framework/...`)
+and Dart opens `FenecFFI.framework/FenecFFI`: a static one kept whole with
+`-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
+phase makes with no order declared against it, and `flutter build ios`
+failed on it.
 
 **`integrations/` may use outside packages; the crates may not.** The
 LangChain and LlamaIndex vector stores (`integrations/python`, one package,

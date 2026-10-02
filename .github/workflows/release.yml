@@ -124,6 +124,98 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # The XCFramework SwiftPM fetches by the URL and checksum Package.swift
+  # names at this tag. It was built before the tag (swift-binary.yml), since
+  # the checksum had to be in the tagged manifest: here it is found by that
+  # run and held to the checksum, and the release attaches it. A release
+  # whose manifest names no such zip stops here rather than ship a package
+  # SwiftPM would refuse.
+  apple:
+    name: XCFramework (from swift-binary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Find the zip Package.swift names
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          release=$(sed -n 's/^let release = "\(.*\)"/\1/p' Package.swift)
+          want=$(sed -n 's/^let checksum = "\(.*\)"/\1/p' Package.swift)
+          if [ "$release" != "$version" ]; then
+            echo "::error::Package.swift names release $release, not $version: run swift-binary.yml for $version and merge its pull request before tagging (RELEASING.md)"
+            exit 1
+          fi
+          run=$(gh run list -R "${{ github.repository }}" --workflow swift-binary.yml --status success -L 100 \
+            --json databaseId,displayTitle \
+            -q "[.[] | select(.displayTitle == \"Swift binary for v$version\")][0].databaseId")
+          if [ -z "$run" ]; then
+            echo "::error::no successful swift-binary.yml run for v$version"
+            exit 1
+          fi
+          mkdir -p dist
+          gh run download "$run" -R "${{ github.repository }}" -n "xcframework-v$version" -D dist
+          got=$(sha256sum dist/FenecFFI.xcframework.zip | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then
+            echo "::error::run $run's zip is $got; Package.swift names $want"
+            exit 1
+          fi
+          echo "FenecFFI.xcframework.zip from run $run, checksum $got"
+          # The Flutter plugin's frameworks, built by the same run.
+          test -f dist/FenecFFIDynamic.xcframework.zip || {
+            echo "::error::run $run kept no FenecFFIDynamic.xcframework.zip"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-apple
+          path: |
+            dist/FenecFFI.xcframework.zip
+            dist/FenecFFI.xcframework.zip.checksum
+            dist/FenecFFIDynamic.xcframework.zip
+          if-no-files-found: error
+
+  # The Android AAR: the Kotlin library with the native library for
+  # arm64-v8a, armeabi-v7a and x86_64, built with the runner's NDK.
+  android:
+    name: Android AAR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain and the Android targets
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          integrations/kotlin/build-aar.sh dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-android
+          path: dist/*.aar
+          if-no-files-found: error
+
   image:
     name: image (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
@@ -194,7 +286,7 @@ jobs:
 
   publish:
     name: publish the release
-    needs: [binaries, wasm]
+    needs: [binaries, wasm, apple, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -210,7 +302,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.aar > SHA256SUMS
           cat SHA256SUMS
 
       # A Go module in a subdirectory is fetched by a tag naming its

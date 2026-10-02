@@ -1,12 +1,13 @@
 <!--
 title: Integrations — fenecdb
-description: Vector stores for LangChain, LlamaIndex and LangChain.js, retrieval for the Vercel AI SDK, useLiveQuery for React, and the Go and .NET SDKs.
+description: Vector stores for LangChain, LlamaIndex and LangChain.js, retrieval for the Vercel AI SDK, useLiveQuery for React, the Go and .NET SDKs, and fenecdb embedded in Swift, Kotlin and Dart apps.
 -->
 
 <h1>Integrations</h1>
 <p class="kicker">Use fenecdb from LangChain, LlamaIndex, LangChain.js, the
 Vercel AI SDK and React, each tested the way its framework tests its own,
-and from Go and .NET through their SDKs.</p>
+from Go and .NET through their SDKs, and embedded in Swift, Kotlin and Dart
+apps.</p>
 
 <h2>LangChain</h2>
 
@@ -286,6 +287,30 @@ client's timeout through its context or token, never the HTTP client's own,
 which would cut a subscription short.</p>
 </details>
 
+<h2 id="apps">Swift, Kotlin and Dart</h2>
+
+<p>Not over HTTP: the database in the app, a file on the device, through
+the native library (<code>crates/fenec-ffi</code>). A live query drives the
+UI -- a SwiftUI observable, a Kotlin <code>Flow</code> for Compose, a Dart
+<code>Stream</code> for a <code>StreamBuilder</code>.</p>
+
+<pre data-lang="text">.package(url: "https://github.com/fenecdb/fenec", from: "0.1.7")   // Swift: product FenecDB
+implementation("com.fenecdb:fenecdb-android:0.1.7")           // Kotlin, Android
+flutter pub add fenecdb_flutter                                     // Flutter</pre>
+
+<ul>
+  <li><b>The query builder,</b> the same seven ways, held to the one golden
+    file (<a href="languages.html#builder">The builder</a>).</li>
+  <li><b>Vectors as their bytes:</b> a <code>[Float]</code>,
+    <code>FloatArray</code> or <code>Float32List</code> goes to the library
+    as its <code>f32</code>s, never as digits.</li>
+  <li><b>Live queries,</b> run again once a burst of writes to a collection
+    they read.</li>
+</ul>
+
+<p>The examples, where the file goes and what a write survives are on
+<a href="mobile.html">Mobile and native apps</a>.</p>
+
 <h2>Their tests</h2>
 
 <p>Each integration runs its framework's own tests, or the ones its framework
@@ -303,6 +328,9 @@ holds its integrations to, against a real fenecdb.</p>
 <tr><td>Go</td><td>a primary with a token, a JWT policy and the change stream, a replica and a node of tenants, started by the tests: <code>near</code> with exact scores, parameters of every type, the errors, a batch put back whole, an idempotency key, <code>After</code> on the replica, a subscription, <code>/_changes</code>, a tenant and a scoped token; the query builder against every case of <code>integrations/builder-golden.json</code>, and its queries' answers against the same statements sent as text</td><td><code>make go-test</code></td></tr>
 <tr><td>.NET</td><td>the same, with xunit</td><td><code>make dotnet-test</code></td></tr>
 <tr><td>Python client</td><td>the query builder against every case of <code>integrations/builder-golden.json</code>, sync and async, and its queries' answers against the same statements sent as text</td><td><code>make python-test</code></td></tr>
+<tr><td>Swift</td><td>the engine through the library -- <code>near</code> with exact scores, rows decoded, a json field's list as written, every kind of error, a file opened again and refused a second open, many tasks at once -- the query builder against every case of the golden file and its answers against the statements as text, live queries as a stream and as observables, a burst of writes running each once; on macOS, and in CI on an iOS simulator</td><td><code>make swift-test</code></td></tr>
+<tr><td>Kotlin</td><td>the same with JUnit on the JVM, the library built for Linux with its JNI functions; the AAR built with the NDK in CI</td><td><code>make kotlin-test</code> (Docker)</td></tr>
+<tr><td>Dart and Flutter</td><td>the same with <code>dart test</code>, and the Flutter plugin's test and its example built for Android and the iOS simulator in CI</td><td><code>make dart-test</code></td></tr>
 </tbody>
 </table>
 </div>
