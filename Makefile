@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js builder-golden types types-check docs-typesffi ffi-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
+.PHONY: all test test-js builder-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -256,21 +256,30 @@ ffi:
 ffi-bench:
 	$(CARGO) run --release -p fenec-ffi --example ffi_bench
 
+## What the sync core (fenec_abi::sync) costs a change it applies, against
+## the same rows put straight into the engine: a text row, a 128-dim row
+## under HNSW, changes of one and of 100, a seed of 10 000
+sync-bench:
+	$(CARGO) run --release -p fenec-abi --example sync_bench
+
 ## The Swift package (Package.swift, integrations/swift) on macOS: the
 ## XCFramework's macOS slice for this machine, then swift test -- the
-## engine, the builder over every golden case, live queries
+## engine, the builder over every golden case, live queries, a replica
+## against a fenec-server the tests start
 swift-test:
 	integrations/swift/run-tests.sh
 
 ## The Kotlin library's JVM tests (integrations/kotlin): the native library
-## built for Linux with its JNI functions, then JUnit under Gradle -- in
-## rust and gradle:8-jdk17 containers unless this is Linux with Gradle
+## built for Linux with its JNI functions and the server the sync tests
+## start, then JUnit under Gradle -- in rust and gradle:8-jdk17 containers
+## unless this is Linux with Gradle
 kotlin-test:
 	integrations/kotlin/run-tests.sh
 
 ## The Dart package's tests (integrations/dart): the native library for
-## this machine, then dart test against it -- and flutter test for the
-## plugin where Flutter is installed
+## this machine and the server the sync tests start, then dart test
+## against them -- and flutter test for the plugin where Flutter is
+## installed
 dart-test:
 	integrations/dart/run-tests.sh
 
