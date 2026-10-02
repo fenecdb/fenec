@@ -18,7 +18,7 @@ let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let built = FileManager.default.fileExists(atPath: here.appendingPathComponent(local).path)
 
 let release = "0.1.9"
-let checksum = "993da62c79e8224b5aa42592d40c26abb5b390eb70cd03552914645703232d5f"
+let checksum = "ea7cdd0452e36c2e1af41900579e3fec78d469f8d06e2221e9be0f1901f775f4"
 
 let ffi: Target =
     built
