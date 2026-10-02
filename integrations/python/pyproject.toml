@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fenecdb"
-version = "0.1.7"
+version = "0.1.8"
 description = "fenecdb over HTTP: a client, and vector stores for LangChain and LlamaIndex"
 readme = "README.md"
 license = "Apache-2.0"

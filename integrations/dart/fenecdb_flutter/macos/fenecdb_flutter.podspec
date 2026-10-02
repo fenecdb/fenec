@@ -3,7 +3,7 @@
 # CocoaPods and opened by name from Dart, as on iOS.
 Pod::Spec.new do |s|
   s.name             = 'fenecdb_flutter'
-  s.version          = '0.1.7'
+  s.version          = '0.1.8'
   s.summary          = 'fenecdb in a Flutter app: the native library for macOS.'
   s.homepage         = 'https://github.com/fenecdb/fenec'
   s.license          = { :type => 'Apache-2.0' }
