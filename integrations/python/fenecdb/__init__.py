@@ -58,7 +58,6 @@ __all__ = [
     "Query",
     "and_",
     "collection",
-    "from_",
     "not_",
     "or_",
     "placeholders",
@@ -104,11 +103,6 @@ class Client:
         `near`, `order`, `limit` ... and end with `rows()`, `first()`,
         `count()`, or a write -- `insert`, `update`, `delete`."""
         return Query(name, self)
-
-    # `from` is a keyword in Python, so `db.from("docs")` cannot be written;
-    # a trailing underscore is the usual way round it, and keeps the chain
-    # reading as JavaScript's, Go's and .NET's `from` / `From`.
-    from_ = collection
 
     def query(
         self, fenecql: str, params: Sequence[Any] | None = None, *, after: int | None = None
@@ -263,8 +257,6 @@ class AsyncClient:
         """The query builder, as `Client.collection`, its endpoints awaited."""
         return AsyncQuery(name, self)
 
-    from_ = collection
-
     async def query(self, fenecql: str, params: Sequence[Any] | None = None) -> Any:
         """One FenecQL statement, as `Client.query`."""
         body = {"query": fenecql, "params": list(params or [])}
@@ -359,4 +351,4 @@ def placeholders(start: int, n: int) -> str:
 
 
 # Below FenecError, which the builder raises.
-from .builder import AsyncQuery, Cond, Query, and_, collection, from_, not_, or_, raw  # noqa: E402
+from .builder import AsyncQuery, Cond, Query, and_, collection, not_, or_, raw  # noqa: E402
