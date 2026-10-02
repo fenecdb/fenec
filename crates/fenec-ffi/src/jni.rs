@@ -164,6 +164,52 @@ pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_changes(
     taken(env, code, out)
 }
 
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_syncStart(
+    env: Env,
+    _class: *mut c_void,
+    handle: i64,
+    config: JArray,
+) -> JArray {
+    let config = read(env, config);
+    let mut out = std::ptr::null_mut();
+    let code = crate::fenec_sync_start(
+        handle as u64,
+        config.as_ptr(),
+        config.len(),
+        &mut out,
+        std::ptr::null_mut(),
+    );
+    taken(env, code, out)
+}
+
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_syncFeed(
+    env: Env,
+    _class: *mut c_void,
+    handle: i64,
+    kind: i32,
+    id: i64,
+    status: i32,
+    seq: i64,
+    bytes: JArray,
+) -> JArray {
+    let bytes = read(env, bytes);
+    let mut out = std::ptr::null_mut();
+    let code = crate::fenec_sync_feed(
+        handle as u64,
+        kind as u32,
+        id as u64,
+        status,
+        seq.max(0) as u64,
+        bytes.as_ptr(),
+        bytes.len(),
+        &mut out,
+        std::ptr::null_mut(),
+    );
+    taken(env, code, out)
+}
+
 /// The calls that take a handle alone.
 macro_rules! by_handle {
     ($($java:ident => $call:ident),* $(,)?) => {$(
@@ -181,4 +227,5 @@ by_handle! {
     Java_com_fenecdb_FenecNative_sync => fenec_sync,
     Java_com_fenecdb_FenecNative_flush => fenec_flush,
     Java_com_fenecdb_FenecNative_checkpoint => fenec_checkpoint,
+    Java_com_fenecdb_FenecNative_syncStatus => fenec_sync_status,
 }

@@ -8,6 +8,7 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
+autotests = false
 
 [dependencies]
 # Without the indexes, as fenec-ql takes the core: each binding names the
@@ -17,4 +18,12 @@ fenec-core = { workspace = true, default-features = false }
 fenec-ql.workspace = true
 
 [dev-dependencies]
-fenec-core = { workspace = true, features = ["indexes"] }
+fenec-core = { workspace = true, features = ["indexes", "std-fs"] }
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+[[example]]
+name = "sync_bench"
+path = "examples/sync_bench.rs"

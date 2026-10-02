@@ -335,3 +335,4 @@ mod tests {
         assert!(changes(&db, seq + 1).contains("\"collections\":[]"));
     }
 }
+pub mod sync;
