@@ -654,6 +654,14 @@ fn cors_headers_only_when_configured() {
     assert!(r
         .header("Access-Control-Allow-Methods")
         .is_some_and(|v| v.contains("PATCH")));
+    // A replica in a page sends its writes keyed and reads where each left
+    // the database.
+    assert!(r
+        .header("Access-Control-Allow-Headers")
+        .is_some_and(|v| v.contains("idempotency-key")));
+    assert!(r
+        .header("Access-Control-Expose-Headers")
+        .is_some_and(|v| v.contains("fenec-seq")));
 }
 
 #[test]

@@ -1418,9 +1418,18 @@ fn cors(resp: Response, cfg: &Config) -> Response {
                 "Access-Control-Allow-Methods",
                 "GET, POST, PATCH, DELETE, OPTIONS",
             )
+            // A page's replica sends each write under an `Idempotency-Key`
+            // and reads the `Fenec-Seq` of its answer, which tells it when a
+            // stream is past the write: refused and unread across origins
+            // before, its retries made a row twice and an insert the shape
+            // did not hold kept its temporary row until the next seed.
             .header(
                 "Access-Control-Allow-Headers",
-                "content-type, authorization",
+                "content-type, authorization, idempotency-key, fenec-after, fenec-wait",
+            )
+            .header(
+                "Access-Control-Expose-Headers",
+                "fenec-seq, fenec-next, idempotent-replayed",
             )
             .header("Access-Control-Max-Age", "600")
             .header("Vary", "Origin"),
