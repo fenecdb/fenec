@@ -54,7 +54,7 @@ MAX_LOOKUP_DEPTH = 8
 # What JavaScript's String.prototype.trim takes off, which the JS builder
 # trims an aggregate with: str.strip() also takes U+001C..U+001F and leaves
 # U+FEFF.
-_JS_SPACE = "\t\n\v\f\r                  　﻿"
+_JS_SPACE = "\t\n\v\f\r " + "".join(map(chr, (0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF)))
 
 
 def _err(message: str) -> Exception:
