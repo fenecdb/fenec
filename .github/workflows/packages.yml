@@ -269,10 +269,28 @@ jobs:
         run: |
           set -eu
           token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
-          curl --fail-with-body -sS -X POST \
+          id=$(curl --fail-with-body -sS -X POST \
             -H "Authorization: Bearer $token" \
             -F "bundle=@integrations/kotlin/build/central-bundle.zip" \
-            "https://central.sonatype.com/api/v1/publisher/upload?name=fenecdb-$RELEASE_TAG&publishingType=AUTOMATIC"
+            "https://central.sonatype.com/api/v1/publisher/upload?name=fenecdb-$RELEASE_TAG&publishingType=AUTOMATIC")
+          echo "deployment $id"
+          # The upload answers before the Portal has validated anything: a
+          # bundle it refuses (a missing signature, sources or javadoc jar,
+          # a pom field) would leave this job green and nothing on Central.
+          # So it waits for the deployment to be published, or to fail.
+          for _ in $(seq 1 90); do
+            state=$(curl --fail-with-body -sS -X POST \
+              -H "Authorization: Bearer $token" \
+              "https://central.sonatype.com/api/v1/publisher/status?id=$id" \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["deploymentState"]); [print(e, file=sys.stderr) for e in (d.get("errors") or {}).items()]')
+            echo "$state"
+            case "$state" in
+              PUBLISHED) exit 0 ;;
+              FAILED) echo "::error::Maven Central refused deployment $id"; exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "::warning::deployment $id was not published within 30 minutes: see central.sonatype.com, Deployments"
 
   # pub.dev's `fenecdb` (the Dart package) and then `fenecdb_flutter` (the
   # plugin, which names that version and bundles the native library: the
