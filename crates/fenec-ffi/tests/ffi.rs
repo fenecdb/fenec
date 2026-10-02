@@ -373,6 +373,69 @@ fn an_index_built_beside_the_database_lands_in_the_file() {
     by_handle(fenec_close, h);
 }
 
+fn schema(h: u64, text: &str, mode: u32) -> (i32, String) {
+    let mut out = std::ptr::null_mut();
+    let code = unsafe {
+        fenec_schema(
+            h,
+            text.as_ptr(),
+            text.len(),
+            mode,
+            &mut out,
+            std::ptr::null_mut(),
+        )
+    };
+    taken(code, out)
+}
+
+/// A schema declared in code is compared and applied as the browser module
+/// does it, a file kept between, and described back as it was declared.
+#[test]
+fn a_declared_schema_is_applied_once_and_described() {
+    let path = scratch("schema");
+    let p = path.to_str().unwrap();
+    let todos = r#"{"format":1,"collections":[{"name":"todos","fields":[{"name":"title","type":"text","required":true},{"name":"at","type":"timestamp","index":{"kind":"sorted"}}]}],"migrations":["alter collection todos rename field name to title"]}"#;
+    let h = open(p, 0).unwrap();
+    let (code, plan) = schema(h, todos, FENEC_SCHEMA_PLAN);
+    assert_eq!(code, FENEC_OK, "{plan}");
+    assert!(
+        plan.contains(r#""applied":false"#) && plan.contains("create collection todos"),
+        "{plan}"
+    );
+    assert_eq!(
+        query(h, "collections", ""),
+        r#"{"kind":"schemas","collections":[]}"#
+    );
+    let (code, done) = schema(h, todos, FENEC_SCHEMA_APPLY);
+    assert_eq!(code, FENEC_OK, "{done}");
+    assert!(
+        done.contains(r#""applied":true,"ran":false,"migrations":[1]"#),
+        "{done}"
+    );
+    by_handle(fenec_close, h);
+    let h = open(p, 0).unwrap();
+    let (_, again) = schema(h, todos, FENEC_SCHEMA_APPLY);
+    assert!(
+        again.contains(r#""applied":false"#) && again.contains(r#""statements":[]"#),
+        "{again}"
+    );
+    let (_, described) = schema(h, "", FENEC_SCHEMA_DESCRIBE);
+    assert_eq!(
+        described,
+        r#"{"format":1,"collections":[{"name":"todos","fields":[{"name":"title","type":"text","required":true},{"name":"at","type":"timestamp","index":{"kind":"sorted"}}]}]}"#
+    );
+    // Followed, a field the database lacks is told, and nothing runs.
+    let more = todos.replace(
+        r#"{"name":"at""#,
+        r#"{"name":"due","type":"int"},{"name":"at""#,
+    );
+    let (_, f) = schema(h, &more, FENEC_SCHEMA_FOLLOW);
+    assert!(f.contains(r#""kind":"field_missing""#), "{f}");
+    let (code, bad) = schema(h, "{}", FENEC_SCHEMA_APPLY);
+    assert_eq!(code, FENEC_QUERY, "{bad}");
+    by_handle(fenec_close, h);
+}
+
 /// `include/fenec.h` declares every function the library exports, and only
 /// those: it is written by hand.
 #[test]
@@ -430,6 +493,10 @@ fn the_header_declares_what_the_library_exports() {
         ("FENEC_SYNC_CLOSED", FENEC_SYNC_CLOSED as i32),
         ("FENEC_SYNC_TIMER", FENEC_SYNC_TIMER as i32),
         ("FENEC_SYNC_SIGNAL", FENEC_SYNC_SIGNAL as i32),
+        ("FENEC_SCHEMA_PLAN", FENEC_SCHEMA_PLAN as i32),
+        ("FENEC_SCHEMA_APPLY", FENEC_SCHEMA_APPLY as i32),
+        ("FENEC_SCHEMA_FOLLOW", FENEC_SCHEMA_FOLLOW as i32),
+        ("FENEC_SCHEMA_DESCRIBE", FENEC_SCHEMA_DESCRIBE as i32),
     ] {
         assert!(
             header.contains(&format!("#define {name} {value}")),

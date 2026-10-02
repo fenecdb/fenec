@@ -6,7 +6,8 @@ Every one of the sixteen sets of `vector`, `text`, `sparse` and `sorted` is
 built into target/wasm-sizes and measured raw, under gzip -9, and under
 brotli -q 11 when the `brotli` tool is there. The module with all four is
 what `make wasm` builds; a page that needs fewer loads one built with
-`make wasm FEATURES="text sorted"`.
+`make wasm FEATURES="text sorted"`. Each with the schema check
+(`schema`), as `make wasm` builds it; SCHEMA=0 leaves it out of a module.
 """
 
 import gzip
@@ -40,8 +41,8 @@ def main():
         for chosen in itertools.combinations(FEATURES, n):
             args = [CARGO, "build", "-q", "-p", "fenec-wasm", "--target", "wasm32-unknown-unknown",
                     "--profile", "wasm", "--no-default-features"]
-            if chosen:
-                args += ["--features", ",".join(chosen)]
+            # With the schema check, as `make wasm FEATURES=...` builds them.
+            args += ["--features", ",".join(chosen + ("schema",))]
             subprocess.run(args, check=True, cwd=ROOT, env=dict(os.environ, CARGO_TARGET_DIR=TARGET))
             data = open(OUT, "rb").read()
             rows.append((" ".join(chosen) or "none", len(data), len(gzip.compress(data, 9)), brotli(data)))

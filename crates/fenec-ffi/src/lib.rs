@@ -613,6 +613,72 @@ pub unsafe extern "C" fn fenec_changes(
     })
 }
 
+// ----------------------------------------------------------------- schema
+
+/// The schema modes `fenec_schema` takes.
+pub const FENEC_SCHEMA_PLAN: u32 = 0;
+pub const FENEC_SCHEMA_APPLY: u32 = 1;
+pub const FENEC_SCHEMA_FOLLOW: u32 = 2;
+pub const FENEC_SCHEMA_DESCRIBE: u32 = 3;
+
+/// The database and a schema declared in code -- `text` the description
+/// every SDK's declarations compile to (`fenec_core::declared`), with its
+/// migrations -- as the browser module compares them: `FENEC_SCHEMA_PLAN`
+/// says what an apply would do and writes nothing, `FENEC_SCHEMA_APPLY`
+/// runs the migrations not yet recorded and applies what only adds, one
+/// block, and `FENEC_SCHEMA_FOLLOW` compares a database another owns.
+/// Writes `{"kind":"schema","applied":..,"ran":..,"migrations":[..],
+/// "statements":[..],"refusals":[..]}`. `FENEC_SCHEMA_DESCRIBE` ignores
+/// `text` and writes the database's own schema as a description, what an
+/// SDK makes its declarations from.
+///
+/// # Safety
+/// `text` is null with length 0 or valid for its length; `out` and
+/// `out_len` are null or valid to write.
+#[no_mangle]
+pub unsafe extern "C" fn fenec_schema(
+    handle: u64,
+    text_ptr: *const u8,
+    text_len: usize,
+    mode: u32,
+    out: *mut *mut c_char,
+    out_len: *mut usize,
+) -> i32 {
+    call(out, out_len, || {
+        let n = native(handle)?;
+        let request = text(text_ptr, text_len, "the description")?;
+        let outcome = match mode {
+            FENEC_SCHEMA_DESCRIBE => {
+                let db = n.read()?;
+                let schemas: Vec<_> = db
+                    .collection_names()
+                    .iter()
+                    .filter_map(|c| db.collection(c).ok().map(|c| c.schema.clone()))
+                    .collect();
+                return Ok(Some(fenec_core::declared::describe(&schemas)));
+            }
+            FENEC_SCHEMA_FOLLOW => fenec_abi::follow(&*n.read()?, request),
+            FENEC_SCHEMA_PLAN | FENEC_SCHEMA_APPLY => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64);
+                let mut db = n.write()?;
+                let before = db.change_seq();
+                let r = fenec_abi::schema(&mut db, request, mode == FENEC_SCHEMA_APPLY, Some(now));
+                let durability = match n.durable && db.change_seq() != before {
+                    true => db.flush().map_err(|e| failed(&e))?,
+                    false => None,
+                };
+                drop(db);
+                n.durable(durability).map_err(|e| failed(&e))?;
+                r
+            }
+            _ => return Err(misuse(&format!("no schema mode {mode}"))),
+        };
+        outcome.map(|o| Some(o.json())).map_err(|e| failed(&e))
+    })
+}
+
 // ------------------------------------------------------------- durability
 
 /// Makes every write so far durable: written and fsynced, the fsync with no

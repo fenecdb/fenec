@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-ql.workspace = true
+fenec-abi.workspace = true
 
 [[test]]
 name = "all"

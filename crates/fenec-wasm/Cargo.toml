@@ -23,8 +23,12 @@ fenec-abi = { workspace = true, default-features = false }
 # A page that needs no vector, text or sparse search, or no ordered index,
 # loads a module built without it: `make wasm FEATURES=...`.
 [features]
-default = ["indexes"]
+default = ["indexes", "schema"]
 indexes = ["vector", "text", "sparse", "sorted"]
+# The check a schema declared in code is opened with (`fenec_schema`,
+# `fenec_core::declared`): 27 KB of the module, 8.4 KB brotli, which a page
+# whose code declares none may leave out.
+schema = []
 vector = ["fenec-core/vector"]
 text = ["fenec-core/text"]
 sparse = ["fenec-core/sparse"]
