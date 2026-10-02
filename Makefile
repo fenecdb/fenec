@@ -255,6 +255,12 @@ ffi-bench:
 swift-test:
 	integrations/swift/run-tests.sh
 
+## The Kotlin library's JVM tests (integrations/kotlin): the native library
+## built for Linux with its JNI functions, then JUnit under Gradle -- in
+## rust and gradle:8-jdk17 containers unless this is Linux with Gradle
+kotlin-test:
+	integrations/kotlin/run-tests.sh
+
 ## The Go SDK (integrations/go) against fenec-server processes its tests
 ## start: a primary, a replica of it and a node of tenants
 go-test:

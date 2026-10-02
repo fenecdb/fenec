@@ -20,3 +20,9 @@ integrations/python/build/
 /.swiftpm/
 Package.resolved
 integrations/swift/build/
+# Kotlin: Gradle's and the Kotlin compiler's state, and the builds
+integrations/kotlin/.gradle/
+integrations/kotlin/.kotlin/
+integrations/kotlin/build/
+integrations/kotlin/*/build/
+integrations/kotlin/local.properties
