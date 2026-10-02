@@ -1,0 +1,37 @@
+[package]
+name = "fenec-ffi"
+description = "fenecdb as a native library: a C ABI for apps, under the Swift, Kotlin and Dart bindings"
+version.workspace = true
+edition.workspace = true
+autotests = false
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+# A shared library for Android, the JVM and Dart, a static one for an
+# XCFramework (an iOS app links what it ships), and an rlib for the tests
+# and the bench, which call the functions as Rust.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
+fenec-ql.workspace = true
+fenec-abi.workspace = true
+
+[dev-dependencies]
+# The bench holds a call through the library to the same statement through
+# fenec-server's HTTP handler, in process.
+fenec-http.workspace = true
+
+[features]
+default = []
+# The JNI functions the Kotlin library (integrations/kotlin) calls, written
+# by hand over the JNI function table: no `jni` crate.
+jni = []
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
