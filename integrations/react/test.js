@@ -207,10 +207,10 @@ test(
         return h('p', null, rows === undefined ? 'loading' : rows.map((r) => r.title).join(', '));
       }
       const view = await render(h(FenecProvider, { db }, h(Open)));
-      const until = async (want) => {
+      const until = async (want, v = view) => {
         const deadline = Date.now() + 10000;
-        while (text(view.container) !== want) {
-          assert.ok(Date.now() < deadline, `stayed at "${text(view.container)}", not "${want}"`);
+        while (text(v.container) !== want) {
+          assert.ok(Date.now() < deadline, `stayed at "${text(v.container)}", not "${want}"`);
           await act(async () => new Promise((r) => setTimeout(r, 20)));
         }
       };
@@ -223,6 +223,15 @@ test(
       await until('test the hook');
       await view.unmount();
       db.close();
+
+      // The same component over the server alone -- connect(), no module:
+      // its query runs on the server, again on every write it may read.
+      const http = connect(url);
+      const served = await render(h(FenecProvider, { db: http }, h(Open)));
+      await until('test the hook', served);
+      await remote.from('tasks').insert({ title: 'ship the hook', done: false });
+      await until('ship the hook, test the hook', served);
+      await served.unmount();
     } finally {
       proc.kill('SIGKILL');
       await rm(dir, { recursive: true, force: true });

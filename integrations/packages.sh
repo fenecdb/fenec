@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The packages as the registries would take them, installed where a user
 # would install them, and used: PyPI's `fenecdb`, npm's `@fenecdb/web`,
-# `@fenecdb/react`, `@fenecdb/cloudflare` and `@fenecdb/langchain`. Needs `make wasm wasm-lite` first, since the web
-# package carries both modules. Run by `make packages`, by CI, and by
+# `@fenecdb/react`, `@fenecdb/cloudflare` and `@fenecdb/langchain`. Needs `make wasm wasm-lite wasm-replica`
+# first, since the web package carries the three modules. Run by `make packages`, by CI, and by
 # packages.yml before anything is published.
 set -euo pipefail
 
@@ -14,8 +14,8 @@ mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 mkdir -p "$out/dist" "$out/npm"
 
-for f in fenec.wasm fenec-lite.wasm; do
-  [ -f "$root/web/$f" ] || { echo "web/$f is missing: make wasm wasm-lite" >&2; exit 1; }
+for f in fenec.wasm fenec-lite.wasm fenec-replica.wasm; do
+  [ -f "$root/web/$f" ] || { echo "web/$f is missing: make wasm wasm-lite wasm-replica" >&2; exit 1; }
 done
 [ -d "$root/web/collate" ] || { echo "web/collate is missing: make wasm" >&2; exit 1; }
 
@@ -59,7 +59,7 @@ import { Fenec } from '@fenecdb/web';
 import { useLiveQuery, FenecProvider } from '@fenecdb/react';
 
 const file = (path) => readFile(new URL(import.meta.resolve(`@fenecdb/web/${path}`)));
-for (const module of ['fenec.wasm', 'fenec-lite.wasm']) {
+for (const module of ['fenec.wasm', 'fenec-lite.wasm', 'fenec-replica.wasm']) {
   const db = await Fenec.open(await file(module), {
     collation: (name) => file(`collate/${name}.bin`),
   });

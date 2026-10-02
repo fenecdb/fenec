@@ -21,6 +21,7 @@
     },
     "./fenec.wasm": "./fenec.wasm",
     "./fenec-lite.wasm": "./fenec-lite.wasm",
+    "./fenec-replica.wasm": "./fenec-replica.wasm",
     "./collate/*": "./collate/*",
     "./package.json": "./package.json"
   },
@@ -35,6 +36,7 @@
     "schema.d.ts",
     "fenec.wasm",
     "fenec-lite.wasm",
+    "fenec-replica.wasm",
     "collate/"
   ],
   "sideEffects": false,

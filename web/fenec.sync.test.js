@@ -982,3 +982,42 @@ test("a live query over HTTP follows the server's writes, with no module", { ski
     s.close();
   }
 });
+
+// sync() opens the replica's module unless given one: `./fenec-replica.wasm`,
+// with no graph, whose `near` measures every vector as `exact` does.
+const replicaWasm = await readFile(new URL('./fenec-replica.wasm', import.meta.url)).catch(() => null);
+
+test('sync opens the replica module unless given one, and its near answers', { ...opts, skip: skip || (replicaWasm ? false : 'no web/fenec-replica.wasm (make wasm-replica)') }, async () => {
+  const s = await server();
+  await s.run('create collection docs (key text @hash, title text @text, embed vector<3> @hnsw(cosine))');
+  await s.run(`put docs [{key: "a", title: "east", embed: [1.0, 0.0, 0.0]},
+                         {key: "b", title: "north", embed: [0.0, 1.0, 0.0]},
+                         {key: "c", title: "between", embed: [0.7, 0.7, 0.0]}]`);
+  // The module's URL is asked of fetch, as a page asks it; the rest goes
+  // to the server.
+  const asked = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    if (typeof url === 'string' && url.endsWith('.wasm')) {
+      asked.push(url);
+      return Promise.resolve(new Response(replicaWasm, { headers: { 'content-type': 'application/wasm' } }));
+    }
+    return real(url, init);
+  };
+  let db;
+  try {
+    db = await sync({ url: s.url, leader: false, shapes: [{ collection: 'docs', key: 'key' }] });
+    await db.ready();
+    assert.deepEqual(asked, ['./fenec-replica.wasm']);
+    const near = await db.from('docs').near('embed', [0.9, 0.5, 0.0]).limit(2).rows();
+    assert.deepEqual(near.map((r) => r.key), ['c', 'a']);
+    assert.deepEqual((await db.from('docs').match('title', 'north').rows()).map((r) => r.key), ['b']);
+    // No graph in it: an index of one is refused, naming the feature.
+    db.local.run('create collection own (v vector<2>)');
+    assert.throws(() => db.local.run('create index on own (v) @hnsw(l2)'), /`vector` feature/);
+  } finally {
+    globalThis.fetch = real;
+    db?.close();
+    s.close();
+  }
+});

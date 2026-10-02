@@ -935,9 +935,14 @@ export interface SyncOptions<S extends AnySchema<S> = Schema> {
   /** Server root (`fenec-server --http`). */
   url: string;
   shapes: Shape<any>[];
-  /** An existing local database; otherwise opened from the `wasm` path. */
+  /** An existing local database; otherwise opened from `wasm`. */
   local?: Fenec<S>;
-  wasm?: string | BufferSource;
+  /**
+   * The module the replica is opened with: `./fenec-replica.wasm` unless
+   * given -- no graph, `near` measuring every vector as `exact` does --
+   * or `./fenec.wasm` for a replica whose `near` walks a graph.
+   */
+  wasm?: string | BufferSource | WebAssembly.Module;
   /** Where the local module's collation data comes from (`Fenec.open`). */
   collation?: CollationSource;
   token?: string;

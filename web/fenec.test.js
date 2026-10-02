@@ -632,6 +632,114 @@ test('the module made without indexes and the full one open each other\'s files'
   for (const db of [full, small, fromImage, fromTail]) db.close();
 });
 
+// The module `sync()` loads (`make wasm-replica`): no graph and no schema
+// check, the text, sparse and ordered indexes kept. It opens what the full
+// module wrote and the full one what it wrote, as the one without indexes
+// does, and every index it has answers.
+const replica = await readFile(new URL('./fenec-replica.wasm', import.meta.url)).catch(() => null);
+
+test('the replica module and the full one open each other\'s files', {
+  skip: wasm && replica ? false : 'no web/fenec.wasm and web/fenec-replica.wasm (make wasm wasm-replica)',
+}, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const full = await Fenec.open(wasm);
+  full.run(`create collection d (year int @sorted, title text @text, embed vector<3> @hnsw(cosine), s sparse<10> @inverted)`);
+  full.run(`put d [
+    {year: 2021, title: "rust", embed: [1.0, 0.0, 0.0], s: "{1:0.5}/10"},
+    {year: 1999, title: "wasm", embed: [0.0, 1.0, 0.0], s: "{2:0.5}/10"},
+    {year: 2010, title: "search", embed: [0.0, 0.0, 1.0], s: "{3:0.5}/10"}]`);
+  const small = await Fenec.open(replica);
+  small.load(full.snapshot());
+  // Text, ordered and sparse indexes are there; the graph is not, and
+  // `near` measures every vector.
+  assert.deepEqual(small.rows('get d match title "wasm"').map((r) => r.year), [1999]);
+  assert.deepEqual(small.rows('get d select year where year > 2000 order year desc limit 1').map((r) => r.year), [2021]);
+  assert.deepEqual(small.rows('get d near s "{2:1}/10" limit 1').map((r) => r.year), [1999]);
+  const near = 'get d near embed [0.1, 0.9, 0.2] limit 3';
+  assert.deepEqual(small.run(near), full.run(near.replace(' limit', ' exact limit')));
+  assert.throws(() => small.run('create index on d (year) @hnsw(cosine)'), /`vector` feature/);
+  // No schema check: a replica follows the server's schema, which the
+  // server checks.
+  await assert.rejects(Fenec.open(replica, { schema: 'create collection t (n int)' }), /without the schema check/);
+  small.run('put d {year: 2030, title: "replica", embed: [0.0, 0.6, 0.8], s: "{4:1}/10"}');
+  small.run('del d where year = 2010');
+  const back = await Fenec.open(wasm);
+  back.load(small.snapshot());
+  assert.deepEqual(back.rows('get d near embed [0.0, 0.6, 0.8] limit 1').map((r) => r.title), ['replica']);
+  assert.deepEqual(back.rows('get d match title "replica"').map((r) => r.year), [2030]);
+  for (const db of [full, small, back]) db.close();
+});
+
+// `near` without the graph -- the replica module's and the one without
+// indexes' -- is the full module's `near ... exact`, row for row: the same
+// rows, the same scores to the bit, ties in the same order. Over generated
+// vectors of every metric, halves and codes, a vector held twice, rows
+// written again and deleted, a filter, a page past the first.
+test('near without the graph is the full module\'s near ... exact', {
+  skip: wasm && (replica || lite) ? false : 'no web/fenec.wasm and a module without the graph (make wasm wasm-replica)',
+}, async () => {
+  const { Fenec } = await import('./fenec.js');
+  let seed = 0x2545f491;
+  const rand = () => {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    return (seed >>> 0) / 2 ** 32;
+  };
+  const vec = (dim) => Array.from({ length: dim }, () => Math.fround(rand() * 2 - 1));
+  const decls = [
+    ['vector<16> @hnsw(cosine)', 300],
+    ['vector<16> @hnsw(l2)', 300],
+    ['vector<16> @hnsw(dot)', 300],
+    ['vector<16, f16> @hnsw(cosine)', 300],
+    ['vector<16, f16> @hnsw(l2)', 300],
+    ['vector<16> @hnsw(cosine, quant=int8)', 300],
+    ['vector<16> @hnsw(dot, quant=int8)', 300],
+    ['vector<16> @hnsw(cosine, quant=bit)', 300],
+    // Past the vectors a bit index learns its centres from: codes, and an
+    // exact search reads the documents' own vectors.
+    ['vector<16> @hnsw(cosine, quant=bit)', 2100],
+  ];
+  const others = [replica, lite].filter(Boolean);
+  let compared = 0;
+  for (const [decl, n] of decls) {
+    const full = await Fenec.open(wasm);
+    full.run(`create collection v (k int, e ${decl})`);
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push({ k: i % 5, e: i % 37 === 3 ? rows[i - 3].e : vec(16) });
+    const doc = (r) => `{k: ${r.k}, e: [${r.e.join(', ')}]}`;
+    for (let i = 0; i < n; i += 500) full.run(`put v [${rows.slice(i, i + 500).map(doc).join(', ')}]`);
+    full.run('put v {k: 9}');
+    full.run('set v {e: $1} where id = 7', [vec(16)]);
+    full.run('del v where id = 11 or id = 12');
+    const image = full.snapshot();
+    const without = [];
+    for (const bytes of others) {
+      const db = await Fenec.open(bytes);
+      db.load(image);
+      without.push(db);
+    }
+    for (let t = 0; t < 4; t++) {
+      const q = vec(16);
+      for (const tail of ['limit 10', 'where k = 2 limit 7', 'where k != 1 limit 6 offset 5', 'limit 250']) {
+        const want = full.run(`get v near e $1 exact ${tail}`, [q]);
+        assert.ok(want.rows.length > 0, `${decl} ${tail}`);
+        for (const db of without) {
+          assert.deepEqual(db.run(`get v near e $1 ${tail}`, [q]), want, `${decl} ${tail}`);
+          compared++;
+        }
+      }
+    }
+    // The page past near's ceiling is refused, as with the graph.
+    for (const db of without) {
+      assert.throws(() => db.run('get v near e $1 limit 10001', [vec(16)]), /at most 10000 rows/);
+      db.close();
+    }
+    full.close();
+  }
+  assert.equal(compared, decls.length * 4 * 4 * others.length);
+});
+
 test('in (get ...) and @ttl on wasm, and in the module without indexes', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec, from } = await import('./fenec.js');
   const now = 1_800_000_000_000;
