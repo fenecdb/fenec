@@ -318,7 +318,7 @@ jobs:
           set -eu
           gh release download "$RELEASE_TAG" -R "${{ github.repository }}" -p 'FenecFFIDynamic.xcframework.zip' -p 'fenecdb-android-*.aar' -D assets
           mkdir -p integrations/swift/build integrations/kotlin/android/build/jniLibs
-          unzip -q assets/FenecFFIDynamic.xcframework.zip -d integrations/swift/build
+          unzip -q assets/FenecFFIDynamic.xcframework.zip -d integrations/swift/build/dynamic
           unzip -q assets/fenecdb-android-*.aar 'jni/*' -d assets/aar
           cp -R assets/aar/jni/. integrations/kotlin/android/build/jniLibs/
           integrations/dart/fenecdb_flutter/prepare.sh

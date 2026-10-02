@@ -10,6 +10,6 @@ Pod::Spec.new do |s|
   s.author           = { 'fenecdb' => 'https://github.com/fenecdb' }
   s.source           = { :path => '.' }
   s.platform         = :osx, '12.0'
-  s.vendored_frameworks = 'Frameworks/FenecFFIDynamic.xcframework'
+  s.vendored_frameworks = 'Frameworks/FenecFFI.xcframework'
   s.dependency 'FlutterMacOS'
 end

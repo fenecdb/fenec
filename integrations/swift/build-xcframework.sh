@@ -5,7 +5,7 @@
 #   FenecFFI.xcframework         a static library a slice, with the header and
 #                                a module map: what Package.swift takes in
 #                                place of the release's download
-#   FenecFFIDynamic.xcframework  (--dynamic) FenecFFI.framework a slice, the
+#   dynamic/FenecFFI.xcframework  (--dynamic, zipped as FenecFFIDynamic) FenecFFI.framework a slice, the
 #                                shared library: what the Flutter plugin's
 #                                pods vendor
 #
@@ -53,8 +53,15 @@ for a in "$@"; do
     *) echo "usage: $0 [--macos] [--dynamic] [--zip]" >&2; exit 2 ;;
   esac
 done
-if $dynamic; then NAME=FenecFFIDynamic; else NAME=FenecFFI; fi
-XC="$OUT/$NAME.xcframework"
+# CocoaPods links a vendored XCFramework by its own name, so the dynamic one
+# is called FenecFFI.xcframework too, as the frameworks inside it are --
+# named FenecFFIDynamic, the app's link asked for a framework of that name.
+# It is built in a directory of its own beside the static one, and only its
+# zip carries the other name.
+NAME=FenecFFI
+if $dynamic; then XDIR="$OUT/dynamic"; ZIPNAME=FenecFFIDynamic; else XDIR="$OUT"; ZIPNAME=FenecFFI; fi
+mkdir -p "$XDIR"
+XC="$XDIR/$NAME.xcframework"
 
 # One static library a target, the lib alone: `cargo build` would link the
 # cdylib too, which for iOS needs its SDK.
@@ -248,12 +255,12 @@ if $zip; then
   # keeps a macOS framework's links as links. The static one's checksum is
   # what Package.swift names it by; the dynamic one is the Flutter plugin's
   # and named by nothing.
-  rm -f "$OUT/$NAME.xcframework.zip"
-  (cd "$OUT" && zip -qrXy "$NAME.xcframework.zip" "$NAME.xcframework")
-  echo "$OUT/$NAME.xcframework.zip  $(wc -c < "$OUT/$NAME.xcframework.zip") bytes"
+  rm -f "$OUT/$ZIPNAME.xcframework.zip"
+  (cd "$XDIR" && zip -qrXy "$OUT/$ZIPNAME.xcframework.zip" "$NAME.xcframework")
+  echo "$OUT/$ZIPNAME.xcframework.zip  $(wc -c < "$OUT/$ZIPNAME.xcframework.zip") bytes"
   if ! $dynamic; then
-    sum=$(swift package compute-checksum "$OUT/$NAME.xcframework.zip")
-    echo "$sum" > "$OUT/$NAME.xcframework.zip.checksum"
+    sum=$(swift package compute-checksum "$OUT/$ZIPNAME.xcframework.zip")
+    echo "$sum" > "$OUT/$ZIPNAME.xcframework.zip.checksum"
     echo "checksum $sum"
   fi
 fi

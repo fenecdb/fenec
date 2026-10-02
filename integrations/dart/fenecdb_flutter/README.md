@@ -2,7 +2,7 @@
 
 The `fenecdb` package in a Flutter app, with its native library bundled:
 `FenecFFI.framework`, a dynamic framework, on iOS and macOS (the release's
-`FenecFFIDynamic.xcframework`), `libfenec_ffi.so` for arm64-v8a,
+a dynamic `FenecFFI.xcframework`), `libfenec_ffi.so` for arm64-v8a,
 armeabi-v7a and x86_64 on Android.
 
 ```dart

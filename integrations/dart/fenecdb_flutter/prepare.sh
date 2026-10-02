@@ -8,7 +8,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
-XC="$ROOT/integrations/swift/build/FenecFFIDynamic.xcframework"
+XC="$ROOT/integrations/swift/build/dynamic/FenecFFI.xcframework"
 JNI="$ROOT/integrations/kotlin/android/build/jniLibs"
 
 if [ -d "$XC" ]; then
@@ -18,7 +18,7 @@ if [ -d "$XC" ]; then
     # -R copies a macOS framework's links as links.
     cp -R "$XC" "$HERE/$p/Frameworks/"
   done
-  echo "FenecFFIDynamic.xcframework -> ios/Frameworks, macos/Frameworks"
+  echo "dynamic FenecFFI.xcframework -> ios/Frameworks, macos/Frameworks"
 fi
 if [ -d "$JNI" ]; then
   rm -rf "$HERE/android/src/main/jniLibs"
