@@ -500,11 +500,20 @@ pub unsafe extern "C" fn fenec_add_chunk(ptr: *const u8, len: usize) -> i32 {
 /// What has changed since `since`:
 /// `{"seq":N,"horizon":M,"collections":["a","b"]}`.
 ///
-/// When `collections` is **null**, the cursor fell behind the ring and it
-/// cannot be known which collection changed: the caller must treat
-/// everything as stale. Collection granularity is enough for live queries --
-/// re-running a local query is already sub-millisecond, and incremental
-/// bookkeeping does not pay for itself on that budget.
+/// When `collections` is **null**, the cursor fell behind the ring, or a
+/// collection written since was dropped, and it cannot be known which
+/// collection changed: the caller must treat everything as stale.
+/// Collection granularity is enough for live queries -- re-running a local
+/// query is already sub-millisecond, and incremental bookkeeping does not
+/// pay for itself on that budget.
+///
+/// This is how a caller learns what a statement wrote, rather than the
+/// answer of `fenec_query` carrying it: asked once after a burst of writes
+/// rather than built into every answer, it costs a write nothing, and a
+/// binding with no live query never asks. A block's writes reach the ring
+/// as it lands, so one put back names nothing. A `fenec_load` empties the
+/// ring and sets the counter to the image's, which may be the very number
+/// the caller holds: a load is the caller's to note, as everything stale.
 ///
 /// Why `since` is an `f64`: a JS number is already an `f64` and the change
 /// counter stays exact up to 2^53. As an `i64` it would need a `BigInt`
@@ -802,12 +811,35 @@ mod tests {
         let seq_only = read(at);
         assert!(seq_only.contains("\"collections\":[\"t\"]"), "{seq_only}");
 
+        // A text whose last statement fails is put back whole: nothing to name.
+        run(h, "create collection u (a int)", "", &[]);
+        let seq = seq_of(h);
+        let r = run(h, "put t {a: 1}; put u {a: \"x\"}", "", &[]);
+        assert!(r.contains("error"), "{r}");
+        let out = read(fenec_changes(h, seq as f64));
+        assert!(out.contains("\"collections\":[]"), "{out}");
+        run(h, "put t {a: 1}; put u {a: 2}", "", &[]);
+        let out = read(fenec_changes(h, seq as f64));
+        assert!(out.contains("\"collections\":[\"t\",\"u\"]"), "{out}");
+        // A dropped collection has no name left: everything is stale.
+        let seq = seq_of(h);
+        run(h, "drop collection u", "", &[]);
+        let out = read(fenec_changes(h, seq as f64));
+        assert!(out.contains("\"collections\":null"), "{out}");
+
         // Shrink the ring and overflow it to check that the horizon rises.
         fenec_set_change_capacity(h, 1);
         run(h, "put t [{a: 1}, {a: 2}]", "", &[]);
         let out = read(fenec_changes(h, 0.0));
         assert!(out.contains("\"collections\":null"), "{out}");
         fenec_close(h);
+    }
+
+    /// The change counter, as `changeSeq` reads it.
+    fn seq_of(h: u32) -> u64 {
+        let out = read(fenec_changes(h, f64::MAX));
+        let n = &out["{\"seq\":".len()..];
+        n[..n.find(',').unwrap()].parse().unwrap()
     }
 
     /// Turns a `boxed` buffer into a string (`[u32 len][contents]`).
