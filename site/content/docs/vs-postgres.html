@@ -76,6 +76,9 @@ and is alpha software.</p>
 <tr><td>Full text</td>
   <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
   <td><code>tsvector</code> ranked by <a href="https://www.postgresql.org/docs/current/textsearch-controls.html"><code>ts_rank</code></a>; BM25 through an extension such as <a href="https://github.com/timescale/pg_textsearch">pg_textsearch</a></td></tr>
+<tr><td>Highlights and facets</td>
+  <td><code>highlight()</code>, <code>snippet()</code> and <code>facet</code> (<a href="fenecql.html#highlights">Highlights</a>, <a href="fenecql.html#facets">Facets</a>)</td>
+  <td><a href="https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-HEADLINE"><code>ts_headline</code></a> over a <code>tsquery</code>; a facet is a <code>GROUP BY</code> of its own</td></tr>
 <tr><td>Hybrid search</td>
   <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
   <td>No operator; fusion written in SQL (<a href="https://www.tigerdata.com/blog/introducing-pg_textsearch-true-bm25-ranking-hybrid-retrieval-postgres">an example</a>)</td></tr>

@@ -107,7 +107,8 @@ allowed external crates — that is where `rusqlite`/`postgres` live.
 `fenec-core` modules: `store` (segments, offset index), `declared` (a schema
 declared in code: its description, the plan against a database), `engine` (`Database`,
 `Collection`, replay/snapshot/compact/checkpoint), `vector` (HNSW + distance
-kernels), `text` (tokenizer, inverted index, BM25), `query` (`Statement`, plan
+kernels), `text` (tokenizer, inverted index, BM25), `highlight` (the spans a
+`match`'s terms were read from), `query` (`Statement`, plan
 execution), `schema`, `value`, `codec`, `collate` (ICU's root order and its Turkish
 tailoring, generated tables in chunks),
 `json`, `num` (decimal text to `f64` and back), `case` (a string's Unicode
@@ -1039,8 +1040,8 @@ at 768 dimensions. Neither changes a bit of the graph.
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 173.7 KB
-brotli with all four, 138.2 with none (each with the schema check), and
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 180.7 KB
+brotli with all four, 142.1 with none (each with the schema check), and
 `make wasm-sizes` measures the sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
@@ -1071,9 +1072,9 @@ over none and each alone.
 
 **Three modules and a client entry, by where the queries run.**
 `@fenecdb/web` ships `fenec.wasm` (every index and the schema check,
-173.7 KB brotli), `fenec-replica.wasm` (`make wasm-replica`: text, sparse
-and sorted, no graph and no schema check, 146.9 KB) and `fenec-lite.wasm`
-(no index, no schema check, 130.5 KB), and `@fenecdb/web/client`, which
+180.6 KB brotli), `fenec-replica.wasm` (`make wasm-replica`: text, sparse
+and sorted, no graph and no schema check, 154.0 KB) and `fenec-lite.wasm`
+(no index, no schema check, 134.3 KB), and `@fenecdb/web/client`, which
 is `web/client.js`: the builder (`builder.js`) and the HTTP client
 (`http.js`) re-exported, the two modules `fenec.js` imports beside its
 glue, persistence and sync. The entry's worth is that it cannot pull in
@@ -1517,6 +1518,49 @@ both scores fall (0.688, 0.359). It is built from what the engine already
 had -- both searches, the `HashMap<DocId, u32>` a `DocMap` keeps sparse ids
 in, the text index's `best_first` sort -- because in types of its own it was 11 KB of the
 browser module; this way it is 2.
+
+**`highlight()` reads the text again; `facet` counts beside the rows.**
+`highlight(body)` and `snippet(body, N)` are select-list items (`Mark`,
+its arguments one `Vec<Expr>`: Select's clone of them as fields was 432
+bytes of the browser module), answered under their label, after the fields
+or after `*`; the same one twice is refused, since a JSON row holds a name
+once. They need `match`, and go with `fuse` and `rerank` -- a row only
+`near` found has no marks. Nothing is kept in the index for them: the
+row's text is split again by the tokenizer of the `@text` index the
+`match` searched (`text::terms` hands each term its byte span, which the
+index passes over: the build and `match` measured as before),
+`highlight::Terms` holds the query's terms in the text index's own map (a
+sorted `Vec<String>` was a sort of its own, 3.5 KB), and a span is marked
+where a term the text yields is one of them -- so a mark is what the index
+matched: a word whatever its case, the whole word a `prefix=N` term was cut
+from, the characters of a Han or Thai run's matched pairs or triples,
+overlapping ones merged. A span is widened over the marks of the characters
+at its ends (`highlight::extends`, the blocks a text puts combining marks,
+joiners, selectors and Hangul jamo in, not Unicode's whole table), and the
+offsets go out as UTF-16 code units, what every client but Go's and
+Python's indexes a string by. Without tags a column is `[start, end]`
+pairs, a snippet's `{marks, text}`; with them the marked text, not escaped.
+A snippet is the window of `N` words (a Han character a word) with the most
+marks, centred on them. `facet f [top N]` counts over the rows the query
+selects before `offset` and `limit` -- the filter's, `match`'s
+(`TextIndex::matching`, every row holding a term, the filter tested on
+those), a required `lookup`'s -- and is refused beside `near`, which ranks
+every row the filter passes rather than selecting some. A `@hash` field
+of text, int, bool or timestamp, whose bucket key is the value's encoding,
+counts from the buckets (a bitset of the set when there is a filter); the
+rest reads the field of every row, a list once a row for each value, null
+a value, counted under `codec::encode_value` as `group` keys its rows, so
+`tests/facets.rs` holds a scalar facet to `group ... count` over the same
+filter. Ordered most first, then by value in the field's collation,
+through `order_rows`; past `MAX_FACET_VALUES` (10 000) without `top`
+refused, never cut. The counts live in `ResultSet::facets`, beside `nested`,
+never in a `Value`, and a JSON answer carries them as `"facets"` after the
+rows -- over HTTP the bare array becomes `{"rows", "facets"}` only when a
+query asked for them. Over 100 000 documents a row's marks cost 1 to 3 us,
+a snippet's 2 to 4; a facet over every row 0.01 ms through `@hash` and 6.1 by
+the scan (`make search-bench`). The browser module grew 20.2 KB, 7.0 KB
+brotli; the one without indexes 3.9 KB brotli, which counts facets and
+refuses a `match` and its marks.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending

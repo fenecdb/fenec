@@ -15,6 +15,8 @@ measurements, as every feature here does.
 | 6 | Embedded in mobile and native apps (Phase 56) -- **done** | large | the engine's best place after the page: a file on the device, offline |
 | 7 | An app's file synced with a server (Phase 57) | medium | what the page's `FenecSync` does, for an app |
 | 8 | A schema declared in code (Phase 58) -- **done** for TypeScript, FenecQL text, the server, Python, Go, .NET, Swift, Kotlin and Dart | medium | an app that makes its database declares it once, checked at every open |
+| 9 | Highlights and snippets (Phase 61) -- **done** | small | every search engine marks where the words matched; FTS5 and Turso have `highlight()` |
+| 10 | Facets (Phase 61) -- **done** | small | a filter sidebar's counts over every match, which a `group` a facet could not give beside the page |
 
 Not planned, on purpose: a general JOIN and full SQL (FenecQL and `lookup`
 are the design), the PostgreSQL wire protocol (below), several
@@ -420,6 +422,34 @@ Still to do:
 - Highlighting and facets (Phase 61, on its own branch): once they land,
   the search box of each example shows the matched words and the tags as
   facets with their counts.
+
+## Phase 9 and 10: highlights, snippets and facets (Phase 61) -- done
+
+The two gaps every search engine beside fenecdb closes -- Elasticsearch,
+OpenSearch, Meilisearch, Typesense, Atlas Search, Redis; FTS5 and Turso
+have `highlight()` -- shipped together. `highlight(body)` and `snippet(body,
+N)` are select-list items over a `match`, the row's text read again by the
+index's own tokenizer, so a mark is what the index matched, as UTF-16
+offsets or between tags the query passes; `facet brand top 10` counts each
+value over every row the query selects, beside the page, through a
+`@hash` field's buckets or the scan. No index or file format changed; every
+SDK's builder follows the golden file, and every result type carries the
+facets.
+
+Still to do:
+
+- Numeric ranges as facets (`facet price ranges [0, 100, 500]`): today a
+  number's facet counts each value, and buckets are a `group` the caller
+  writes. Cheap in the engine; left out to keep the surface the SDKs follow
+  small until someone asks.
+- Facets beside `near`: refused, since `near` ranks every row the filter
+  passes. A similarity threshold (`near ... within d`) would give it a set
+  to count over.
+- Disjunctive facets -- a facet's counts ignoring its own filter, so a
+  sidebar shows the other brands while one is picked -- are a second query
+  today, in the same `/batch`.
+- Highlighting over a REST `GET` and the `/near` body: FenecQL alone
+  (`/query`) reaches it, since `match` is not in the query string.
 
 ---
 

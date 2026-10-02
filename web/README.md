@@ -10,9 +10,9 @@ npm, and the `fenec-web` bundle of each release.
 | `client.js` | the two of them, and nothing that could pull in the engine, sync or storage: `@fenecdb/web/client`, 6 KB brotli in an app's bundle |
 | `fenec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fenecdb/web/schema` |
-| `fenec.wasm` | the engine with every index and the schema check: 174 KB brotli |
-| `fenec-replica.wasm` | for a replica that searches no vectors or holds a few thousand, opt-in (`sync({ wasm })`): no graph -- `near` measures every vector, as `exact` does -- and no schema check: 147 KB brotli |
-| `fenec-lite.wasm` | the engine without its four indexes or the schema check: 131 KB brotli |
+| `fenec.wasm` | the engine with every index and the schema check: 181 KB brotli |
+| `fenec-replica.wasm` | for a replica that searches no vectors or holds a few thousand, opt-in (`sync({ wasm })`): no graph -- `near` measures every vector, as `exact` does -- and no schema check: 154 KB brotli |
+| `fenec-lite.wasm` | the engine without its four indexes or the schema check: 134 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js

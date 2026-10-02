@@ -71,10 +71,16 @@ export type FenecSchema = {
   };
 
   products: {
-    /** text */
+    /** text @text(k1=0.9, b=0.4) */
     name: string | null;
     /** int @sorted */
     price: number | null;
+    /** text @hash */
+    brand: string | null;
+    /** text */
+    color: string | null;
+    /** [text] */
+    tags: string[] | null;
   };
 
   reviews: {

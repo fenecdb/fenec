@@ -1,6 +1,6 @@
 <!--
 title: FenecQL — fenecdb
-description: The FenecQL reference: statements, types, indexes, operators, parameters, time and the vector, text and lookup clauses.
+description: The FenecQL reference: statements, types, indexes, operators, parameters, time, the vector, text and lookup clauses, highlights and facets.
 -->
 
 <h1>FenecQL</h1>
@@ -28,7 +28,10 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
            [fuse [k N] [candidates N]]             -- match and near, both ranking
            [order &lt;field&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]
+           [facet &lt;field&gt; [top N], ...]          -- value counts over every matched row
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
+get &lt;name&gt; select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
+           match &lt;field&gt; &lt;text&gt; ...           -- where the words matched
 get &lt;name&gt; where &lt;field&gt; in (get &lt;name&gt; select &lt;field&gt; ...)  -- a subquery's list
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 get &lt;name&gt; select [&lt;key&gt;,] count(*), sum(f), ... [where &lt;expr&gt;]
@@ -82,6 +85,8 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
+<tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
+<tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> in the select list, whole or per <code>group</code> — see <a href="#aggregates">Aggregates</a></td></tr>
 <tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
@@ -213,6 +218,82 @@ the <code>@hnsw</code> graph <code>near</code> walks.</p>
   the middle of both lists starts to outvote the top of one, and at 100 a side
   the two scores fall to 0.688 and 0.359.</p>
 </div>
+</details>
+
+<h2 id="highlights">Highlights and snippets</h2>
+
+<p><code>highlight()</code> and <code>snippet()</code> in the select list
+show where the words of a <code>match</code> are in a row's text, so a
+results page can mark them.</p>
+
+<pre data-lang="fenecql">get articles select title, highlight(body) match body $1 limit 10
+get articles select title, highlight(body, "&lt;mark&gt;", "&lt;/mark&gt;") match body $1 limit 10
+get articles select title, snippet(body, 20, "…") match body $1 limit 10
+get articles select title, snippet(body, 20, $2, $3, $4) match body $1 limit 10
+</pre>
+
+<ul>
+  <li><b>Without tags you get positions</b>: <code>highlight(body)</code> is a
+    list of <code>[start, end]</code> pairs; <code>snippet(body, 20)</code> is
+    <code>{"text": …, "marks": [[start, end], …]}</code>.</li>
+  <li><b>With tags you get the marked text</b>, each mark between the two
+    values you pass — literals or parameters. The engine adds no markup of
+    its own and escapes nothing.</li>
+  <li><b>Offsets count UTF-16 code units</b>, what a JavaScript, Java,
+    Kotlin, C#, Dart or Swift <code>NSString</code> index counts:
+    <code>text.slice(start, end)</code> is the marked word.</li>
+  <li><b>They need <code>match</code></b>, and go with <code>fuse</code> and
+    <code>rerank</code>; a query without <code>match</code> has no words to
+    mark, and is refused.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>A row's text is read again at query time by the tokenizer of the
+<code>@text</code> index the <code>match</code> searched — the same splitting,
+the same folding (<code>İstanbul</code>, <code>ISTANBUL</code> and
+<code>istanbul</code> are one word), the same prefixes and runs of
+characters — and every span a term of the query was read from is marked. So
+a mark is exactly what the index matched: a word; the whole word a prefix
+of <code>@text(prefix=N)</code> was cut from (<code>kitapların</code> for
+<code>kitap</code>); the characters of a pair or a triple of Han, kana,
+Hangul or Thai, overlapping pairs made one mark (<code>東京都</code> for
+<code>東京都</code>). Nothing is kept in the index for it, and the file does
+not change. Marks come in order and never overlap; a mark never ends inside
+a character, and takes the marks that belong to the characters at its ends
+— a combining accent, a Thai tone mark, the variation selector and keycap
+after a digit — so tagged text never splits a letter from its accent.</p>
+
+<p>Any <code>text</code> field can be marked, read by the tokenizer of the
+field <code>match</code> searched: <code>select highlight(title)</code>
+beside <code>match body $1</code> marks the title's words the query holds.
+Under <code>fuse</code> a row only <code>near</code> found holds no word of
+the query and has no marks; a null field is <code>null</code>. Each item
+answers under its label, <code>highlight(body)</code> or
+<code>snippet(body)</code>, after the fields <code>select</code> names, where
+the list puts it — and after every field with <code>select *,
+highlight(body)</code>. The same item twice is refused: the two columns would
+answer to one name.</p>
+
+<p>A snippet is the window of <code>N</code> words holding the most marks,
+centred on the first and the last of them — the first <code>N</code> words
+when none is marked — each character of a run of Han, kana or Hangul counted
+a word. The ellipsis, when given, stands for what it leaves out at either
+end; a window holding the start or the end of the text has none there. Its
+marks count from the start of its <code>text</code>, the ellipsis
+included.</p>
+
+<div class="note">
+  <p><b>The text is not escaped.</b> A page that puts a marked text into
+  HTML lets the text's own <code>&lt;</code> through. Build the page from the
+  offsets instead — the text as text nodes, each mark a
+  <code>&lt;mark&gt;</code> element — or escape the text first and the tags
+  after.</p>
+</div>
+
+<p>Over 100 000 documents of 30 words, a mark costs a row about
+1 to 3 µs (2 to 4 for a snippet) on top of the <code>match</code>; a
+query that asks none runs as it did, <code>match</code> 0.06 ms either way
+(<code>make search-bench</code>).</p>
 </details>
 
 <h2>The lookup clause</h2>
@@ -1196,6 +1277,65 @@ same rows; the whole set's count, sum, minimum and
 maximum, 37 ms; the same groups over the tenth a <code>@sorted</code> range
 found, 9.3 ms. The rows are read, not an index: a filter narrows them, nothing
 precomputes the totals.</p>
+</details>
+
+<h2 id="facets">Facets</h2>
+
+<p><code>facet</code> counts the values of a field over every row the query
+matches — not only the page — for a filter sidebar: how many results each
+brand, color or tag has.</p>
+
+<pre data-lang="fenecql">get products where price &lt; 500 facet brand, color limit 20
+get products match title $1 where price &lt; 500 facet brand top 10, tags limit 20
+get products where category = "phones" count facet brand
+get products facet meta.origin top 5 limit 0
+</pre>
+
+<pre data-lang="json">{"rows": [ ... ],
+ "facets": {"brand": [{"value": "acme", "count": 12}, {"value": "nova", "count": 7}],
+            "color": [{"value": "red", "count": 9}, {"value": null, "count": 2}]}}</pre>
+
+<ul>
+  <li><b>Most first</b>, ties by value; <code>top N</code> keeps the
+    commonest <code>N</code>.</li>
+  <li><b>A list counts each value it holds</b>: a row tagged
+    <code>["sale", "new"]</code> counts once under each.</li>
+  <li><b><code>null</code> is a value</b>, so a field's counts add up to the
+    rows.</li>
+  <li><b>They come back beside the rows</b>, never in one: the answer is
+    <code>{"rows": [...], "facets": {...}}</code> when a query asks for
+    facets, and the bare list of rows when it does not.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The rows counted are the rows the query selects before
+<code>offset</code> and <code>limit</code>: those the <code>where</code>
+keeps, and with <code>match</code>, those holding a word of the query
+(<code>rerank</code> reorders them and counts the same). A
+<code>lookup ... required</code> decides who is counted, as it decides who
+is on the page; with <code>count</code> the facets go beside the number.
+<code>near</code> ranks every row the filter passes rather than selecting
+some, so counts beside it would be the filter's alone whatever the vector:
+a facet with <code>near</code> or <code>fuse</code> is refused. Ask them
+without <code>near</code>, in the same <code>/batch</code>.</p>
+
+<p>A field is a field or a path into a <code>json</code> one. The counts are
+<code>group ... count</code>'s over the same filter, value for value
+(<code>tests/facets.rs</code> holds them to it), but for a list, counted a
+value at a time, and a path, which <code>group</code> does not read. A
+<code>@hash</code> field of text, int, bool or timestamp is counted from its
+buckets — over every row a bucket's length, under a filter how many of a
+bucket's rows the set holds — and anything else reads the field of every
+matched row. Without <code>top</code> a facet answers every value it found,
+and one holding more than 10 000 is refused rather than cut: a list cut where
+it happened to stop is a wrong answer believed right.</p>
+
+<p>Over 100 000 rows (<code>make search-bench</code>): a <code>@hash</code>
+field over every row 0.01 ms, read from every row 6.1 ms
+(a list of tags 17); under a filter keeping half, 5.8
+and 9.3 ms against the filter's own 5.9 ms
+for a <code>count</code>. Beside a <code>match</code> reaching about
+16 667 rows, two facets took a query from 0.06 to 1.6 ms.</p>
 </details>
 
 <h2>Explain</h2>

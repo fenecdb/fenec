@@ -77,6 +77,9 @@ fenecdb is at version 0.1.8, and is alpha software.</p>
 <tr><td>Full text</td>
   <td>BM25, built in (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
   <td>BM25 through the pg_textsearch extension (<a href="https://pglite.dev/extensions/">extensions</a>)</td></tr>
+<tr><td>Highlights and facets</td>
+  <td><code>highlight()</code>, <code>snippet()</code> and <code>facet</code> (<a href="fenecql.html#highlights">Highlights</a>, <a href="fenecql.html#facets">Facets</a>)</td>
+  <td>PostgreSQL's <code>ts_headline</code> over a <code>tsquery</code>; a facet is a <code>GROUP BY</code> of its own</td></tr>
 <tr><td>Hybrid search</td>
   <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
   <td>No operator; written in SQL</td></tr>
@@ -96,7 +99,7 @@ fenecdb is at version 0.1.8, and is alpha software.</p>
   <td>JS/TS, React; Swift, Kotlin, Dart in apps (<a href="languages.html">Your language</a>)</td>
   <td>TypeScript and JavaScript, with React and Vue bindings (<a href="https://pglite.dev/docs/about">about</a>)</td></tr>
 <tr><td>Download, brotli</td>
-  <td>174 KB (<a href="#size">below</a>)</td>
+  <td>181 KB (<a href="#size">below</a>)</td>
   <td>3 740 KB, before pgvector (<a href="#size">below</a>)</td></tr>
 <tr><td>Licence</td>
   <td>Apache-2.0</td>
@@ -140,7 +143,7 @@ PGlite's files are about 21 times fenecdb's module.</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>174 KB</b></td><td class="n"><b>208 KB</b></td></tr>
+<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>181 KB</b></td><td class="n"><b>217 KB</b></td></tr>
 <tr><td>PGlite 0.5.8: <code>pglite.wasm</code></td><td class="n">2 585 KB</td><td class="n">3 310 KB</td></tr>
 <tr><td>… <code>pglite.data</code></td><td class="n">1 038 KB</td><td class="n">1 816 KB</td></tr>
 <tr><td>… <code>initdb.wasm</code></td><td class="n">117 KB</td><td class="n">141 KB</td></tr>

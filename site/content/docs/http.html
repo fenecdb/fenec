@@ -46,6 +46,8 @@ GET    /&lt;name&gt;?&lt;filter&gt;         rows
 GET    /&lt;name&gt;?&lt;filter&gt;&count   number of matching rows
 GET    /&lt;name&gt;?select=status,count(*),sum(total)&group=status&order=sum(total).desc
                                 aggregates, whole or per group
+GET    /&lt;name&gt;?&lt;filter&gt;&facet=brand%20top%205,color
+                                rows, and each value's count beside them
 POST   /&lt;name&gt;                  body: {...} or [{...}] -- an id that is taken: 409
 PATCH  /&lt;name&gt;?&lt;filter&gt;         body: {...}
 DELETE /&lt;name&gt;?&lt;filter&gt;
@@ -191,11 +193,29 @@ Parameters stay parameters.</p>
 </pre>
 
 <ul>
+  <li><b>The answer is the rows</b>, a JSON array — or, when the query asks
+    for <a href="/docs/fenecql#facets">facets</a>,
+    <code>{"rows": [...], "facets": {"brand": [{"value": "acme", "count":
+    12}, ...]}}</code>.</li>
   <li><b>From Python:</b> <code>pip install fenecdb</code> gives a client
     with no dependencies.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
+<p>The counts answer for the whole set the query matched, not for a row, so
+they go beside the rows rather than into one, and a query that asks for none
+keeps the bare array every client reads. The same holds for a line of a
+<code>/batch</code> (<code>{"rows": [...], "facets": {...}}</code>), for
+<code>GET /&lt;name&gt;?facet=...</code>, whose list is FenecQL's
+(<code>facet=brand top 5,color</code>), and beside a count
+(<code>{"count": 3, "facets": {...}}</code>). A <a
+href="#subscriptions">subscription</a> keeps a shape's rows and carries no
+facets; a live query over the server (<code>live</code> on
+<code>connect()</code>, <code>useLiveQuery</code>) runs its query again
+after each write, facets and all. A <a
+href="/docs/fenecql#highlights"><code>highlight()</code></a> is a column
+like any other, under its label.</p>
+
 <p>From Python, <code>pip install fenecdb</code> — the standard library
 alone — makes the same calls, blocking or in an event loop:</p>
 
