@@ -29,8 +29,10 @@ done
 
 # The source is copied inside, so the build and pytest's caches stay there.
 # host.docker.internal is Docker Desktop's name for the machine; a Linux
-# daemon, a CI runner's, only knows it when told.
+# daemon, a CI runner's, only knows it when told. The builder's golden file
+# lies outside the package, and goes in beside it.
 docker run --rm -v "$here:/src:ro" --add-host=host.docker.internal:host-gateway \
+    -v "$root/integrations/builder-golden.json:/golden.json:ro" -e FENEC_GOLDEN=/golden.json \
     -e FENEC_URL="http://host.docker.internal:$port" -e FENEC_TOKEN="$token" \
     python:3.13-slim sh -c \
     "cp -r /src /work && cd /work &&

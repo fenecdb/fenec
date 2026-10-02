@@ -10,6 +10,17 @@ top of it vector stores for LangChain (`fenecdb.langchain`) and LlamaIndex
 
 The client is the standard library alone, as the server is: a statement is
 one `POST /query`, several are one `POST /batch` under one lock.
+
+`collection` starts the query builder, which writes the statement for you
+-- every value a parameter, every name checked -- and makes the same text
+the JavaScript, Go and .NET builders make of the same chain:
+
+    from fenecdb import or_
+    rows = (db.collection("articles").select("title")
+              .where("year", ">=", 2024)
+              .where(or_({"lang": "tr"}, {"tags": {"has": "rust"}}))
+              .near("embed", [0.1, 0.2, 0.3]).limit(5).rows())
+
 `AsyncClient` is the same over asyncio, for an event loop a blocking
 request would stall:
 
@@ -37,11 +48,26 @@ import urllib.parse
 import urllib.request
 from typing import Any, Iterable, Iterator, NamedTuple, Sequence
 
-__all__ = ["AsyncClient", "Changes", "Client", "FenecError", "placeholders"]
+__all__ = [
+    "AsyncClient",
+    "AsyncQuery",
+    "Changes",
+    "Client",
+    "Cond",
+    "FenecError",
+    "Query",
+    "and_",
+    "collection",
+    "not_",
+    "or_",
+    "placeholders",
+    "raw",
+]
 
 
 class FenecError(Exception):
-    """A statement the server refused: its message, and the HTTP status."""
+    """A statement the server refused: its message, and the HTTP status --
+    0 for one the query builder refused before sending anything."""
 
     def __init__(self, message: str, status: int):
         super().__init__(message)
@@ -71,6 +97,12 @@ class Client:
         # The change the last write left the database at (`Fenec-Seq`): a
         # read on a replica passed it as `after` waits for that write.
         self.seq: int | None = None
+
+    def collection(self, name: str) -> Query:
+        """The query builder over collection `name`: chain `select`, `where`,
+        `near`, `order`, `limit` ... and end with `rows()`, `first()`,
+        `count()`, or a write -- `insert`, `update`, `delete`."""
+        return Query(name, self)
 
     def query(
         self, fenecql: str, params: Sequence[Any] | None = None, *, after: int | None = None
@@ -221,6 +253,10 @@ class AsyncClient:
         self._conn: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
         self._lock = asyncio.Lock()
 
+    def collection(self, name: str) -> AsyncQuery:
+        """The query builder, as `Client.collection`, its endpoints awaited."""
+        return AsyncQuery(name, self)
+
     async def query(self, fenecql: str, params: Sequence[Any] | None = None) -> Any:
         """One FenecQL statement, as `Client.query`."""
         body = {"query": fenecql, "params": list(params or [])}
@@ -312,3 +348,7 @@ def placeholders(start: int, n: int) -> str:
     FenecQL binds a parameter to a value, not to a list, so `in` takes one
     per element -- `in [$2, $3, $4]`."""
     return ", ".join(f"${i}" for i in range(start, start + n))
+
+
+# Below FenecError, which the builder raises.
+from .builder import AsyncQuery, Cond, Query, and_, collection, not_, or_, raw  # noqa: E402
