@@ -31,7 +31,7 @@ public sealed class FenecClientOptions
 /// </summary>
 public sealed class FenecClient : IDisposable
 {
-    static readonly JsonSerializerOptions ByName = new() { PropertyNameCaseInsensitive = true };
+    internal static readonly JsonSerializerOptions ByName = new() { PropertyNameCaseInsensitive = true };
 
     readonly HttpClient _http;
     readonly bool _owns;
@@ -93,6 +93,11 @@ public sealed class FenecClient : IDisposable
     /// time and not made twice (<see cref="ExecResult.Replayed"/>). One key per write; the same key with another
     /// request is a 422.</summary>
     public FenecClient WithIdempotencyKey(string key) => new(this, _after, key);
+
+    /// <summary>The query builder over a collection: chain <c>Select</c>, <c>Where</c>, <c>Near</c>, <c>Order</c>,
+    /// <c>Limit</c> ... and end with <c>RowsAsync</c>, <c>FirstAsync</c>, <c>CountAsync</c>, or a write --
+    /// <c>InsertAsync</c>, <c>UpdateAsync</c>, <c>DeleteAsync</c>.</summary>
+    public Query From(string collection) => new(collection, this);
 
     /// <summary>Runs one FenecQL statement and hands back its rows. A statement whose answer is not rows --
     /// a write's <c>{"affected": n}</c>, a create's <c>{"message": ...}</c> -- comes back as one row holding it.</summary>
@@ -262,9 +267,9 @@ public sealed class FenecClient : IDisposable
         if (_owns) _http.Dispose();
     }
 
-    readonly record struct Head(long Seq, bool Replayed, long? Next);
+    internal readonly record struct Head(long Seq, bool Replayed, long? Next);
 
-    Task<(byte[], Head)> RunAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct)
+    internal Task<(byte[], Head)> RunAsync(string query, IReadOnlyList<object?>? parameters, CancellationToken ct)
     {
         using var buf = new MemoryStream();
         Params.WriteBody(buf, query, parameters);
@@ -314,7 +319,7 @@ public sealed class FenecClient : IDisposable
     static string? Header(HttpResponseMessage res, string name) =>
         res.Headers.TryGetValues(name, out var v) ? v.FirstOrDefault() : null;
 
-    static IReadOnlyList<JsonElement> RowsOf(byte[] body)
+    internal static IReadOnlyList<JsonElement> RowsOf(byte[] body)
     {
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;

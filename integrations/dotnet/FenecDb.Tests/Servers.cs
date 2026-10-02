@@ -31,7 +31,7 @@ public sealed class Servers : IDisposable
             "--replication-token", ReplToken, "--jwt-secret", JwtSecret, "--policy", policy, "--sync", "50");
     }
 
-    static string RepoRoot()
+    internal static string RepoRoot()
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
             if (File.Exists(Path.Combine(dir.FullName, "Cargo.toml")) && Directory.Exists(Path.Combine(dir.FullName, "crates")))
