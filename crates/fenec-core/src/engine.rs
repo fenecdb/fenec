@@ -2306,6 +2306,9 @@ pub struct Database {
     landed: Vec<handover::Landed>,
     #[cfg(not(target_arch = "wasm32"))]
     landed_bytes: u64,
+    /// The writes the noted records hold, for [`handover::HANDOVER_DOCS`].
+    #[cfg(not(target_arch = "wasm32"))]
+    landed_writes: u64,
     #[cfg(not(target_arch = "wasm32"))]
     handover_at: u64,
     /// When an open block spills ([`SPILL_AT`] unless set).
@@ -2385,6 +2388,8 @@ impl Database {
             landed: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             landed_bytes: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            landed_writes: 0,
             #[cfg(not(target_arch = "wasm32"))]
             handover_at: HANDOVER_AT,
             #[cfg(not(target_arch = "wasm32"))]
@@ -4031,6 +4036,7 @@ impl Database {
                     at,
                     &bytes[start..pos],
                 );
+                self.landed_writes += notes.len() as u64;
             }
             *self.appended.get_mut() += (pos - start) as u64;
             self.dirty = true;
@@ -4327,6 +4333,8 @@ impl Database {
         let (r, len) = if let Some(landed) = landed {
             landed
         } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            let writes = b.notes.len() as u64;
             let record = b.record();
             let r = self.sink_mut().record(seq, &record);
             // Where its frames are in the file, for the handover: the
@@ -4334,6 +4342,7 @@ impl Database {
             #[cfg(not(target_arch = "wasm32"))]
             if r.is_ok() && self.mapped {
                 handover::note_record(&mut self.landed, &mut self.landed_bytes, at, &record);
+                self.landed_writes += writes;
             }
             (r, record.len())
         };

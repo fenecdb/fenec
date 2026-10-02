@@ -39,6 +39,14 @@ pub(super) struct Landed {
 /// them, 4 MB of notes.
 const HANDOVER_RUNS: usize = 1 << 16;
 
+/// A handover also runs once the noted records hold this many writes. Its
+/// pause is a document's work each -- the frame read and the id pointed at
+/// its place, about 17 ns -- so 16 MB of small documents held the write
+/// lock far past the bytes' measure: 930 000 rows of a text and an int
+/// written 1 000 a block, 16 to 17.5 ms each time, which was the longest
+/// wait of four readers beside them. The same work in pauses of 1 ms.
+pub(super) const HANDOVER_DOCS: u64 = 1 << 16;
+
 /// Notes a run of `len` bytes of collection `cid`'s frames at `at` in the
 /// file.
 pub(super) fn note(landed: &mut Vec<Landed>, bytes: &mut u64, cid: u32, len: usize, at: u64) {
@@ -110,6 +118,7 @@ impl Database {
         };
         let mut landed = std::mem::take(&mut self.landed);
         self.landed_bytes = 0;
+        self.landed_writes = 0;
         // A collection's runs together, in the order they landed.
         landed.sort_by_key(|l| l.cid);
         let mut runs: Vec<(u64, u64)> = Vec::new();
@@ -137,7 +146,10 @@ impl Database {
     /// database's from then on: the next write, and the durability of the
     /// ones before, report it.
     pub(super) fn hand_over_when_due(&mut self) {
-        if self.landed_bytes >= self.handover_at || self.landed.len() >= HANDOVER_RUNS {
+        if self.landed_bytes >= self.handover_at
+            || self.landed.len() >= HANDOVER_RUNS
+            || (self.landed_writes >= HANDOVER_DOCS && self.handover_at != u64::MAX)
+        {
             let _ = self.hand_over();
         }
     }
@@ -308,6 +320,7 @@ impl Database {
     pub(super) fn forget_landed(&mut self) {
         self.landed.clear();
         self.landed_bytes = 0;
+        self.landed_writes = 0;
     }
 
     /// The bytes the notes take.

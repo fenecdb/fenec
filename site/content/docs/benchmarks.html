@@ -303,11 +303,11 @@ that costs when many want to write, and how fast readers go meanwhile.</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">254 / <b>502</b> / 495</td><td class="n">248 / 260 / 248</td></tr>
-<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 425 k</b> / 807 k / 607 k</td><td class="n">121 k / 126 k / 127 k</td></tr>
-<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>7 129 k</b>, p99 0.8 µs</td><td class="n">1 101 k, p99 16.9 µs</td></tr>
-<tr><td>… beside 4 writers</td><td class="n"><b>757 k</b>, p99 72 µs</td><td class="n">383 k, p99 77 µs</td></tr>
-<tr><td>… beside blocks of 1 000 writes</td><td class="n">72 k, the longest 23 ms</td><td class="n"><b>636 k</b>, the longest 0.7 ms</td></tr>
+<tr><td>durable writes/s, 1 / 4 / 16 writers</td><td class="n">252 / 487 / <b>516</b></td><td class="n">248 / 248 / 258</td></tr>
+<tr><td>writes/s without an fsync, 1 / 4 / 16 writers</td><td class="n"><b>1 497 k</b> / 821 k / 611 k</td><td class="n">128 k / 128 k / 126 k</td></tr>
+<tr><td>reads/s from 4 threads, alone</td><td class="n"><b>7 061 k</b>, p99 0.8 µs</td><td class="n">1 111 k, p99 16.5 µs</td></tr>
+<tr><td>… beside 4 writers</td><td class="n"><b>701 k</b>, p99 75 µs</td><td class="n">344 k, p99 79 µs</td></tr>
+<tr><td>… beside blocks of 1 000 writes</td><td class="n">213 k, p99 0.51 ms, the longest 4.8 ms</td><td class="n"><b>632 k</b>, the longest 0.6 ms</td></tr>
 </tbody>
 </table>
 </div>
@@ -340,8 +340,13 @@ write, or a <code>/batch</code> of them, holds the
 lock only while it runs — microseconds for a row — and there is no
 transaction held open across requests to keep the readers or the other
 writers waiting. A block of 1 000 writes — a <code>/batch</code>'s — does
-hold it while it runs, and readers wait for it: 23 ms at the longest, where
-SQLite's WAL reads the last commit meanwhile.</p>
+hold it while it runs, about half a millisecond, and readers wait for it,
+where SQLite's WAL reads the last commit meanwhile. The longest wait was
+17.4 ms until a handover — the documents written since the open pointed at
+their places in the file — also ran by count: it ran once the documents
+reached 16 MB, which for rows this small was 930 000 of them, each a little
+work under the write lock. It runs every 65 536 writes as well now, the same
+work in pauses of about a millisecond.</p>
 </details>
 
 <h2 id="requests">A request over HTTP</h2>

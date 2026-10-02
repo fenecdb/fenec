@@ -318,6 +318,33 @@ fn a_handover_waits_for_its_threshold_and_for_the_block() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Small documents reach the write count long before the bytes: a
+/// handover's pause is a document's work each, so 16 MB of them held the
+/// write lock 16 ms. 70 blocks of 1 000 rows of an int are 70 000 writes and
+/// under a megabyte; the handover after the 66th leaves four blocks held.
+#[test]
+fn small_documents_are_handed_over_by_their_count() {
+    let path = tmp("count");
+    let mut db = open_mapped(&path).unwrap();
+    run(&mut db, "create collection c (n int)");
+    let put = fenec_ql::parse_one("put c {n: $1}").unwrap();
+    for b in 0..70i64 {
+        let args: Vec<[Value; 1]> = (0..1000).map(|i| [Value::Int(b * 1000 + i)]).collect();
+        let stmts: Vec<(&Statement, &[Value])> = args.iter().map(|a| (&put, &a[..])).collect();
+        db.execute_block(&stmts).unwrap();
+    }
+    let per_block = held(&db) / 4;
+    assert!(per_block > 0 && per_block < 20_000, "{}", held(&db));
+    assert_eq!(
+        answer(&db, "get c count").rows[0].values[0],
+        Value::Int(70_000)
+    );
+    drop(db);
+    let db = open_mapped(&path).unwrap();
+    assert_eq!(answer(&db, "get c where n = 69999").rows.len(), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The writes made while a compact wrote its file beside the database are
 /// in that file, inside the image, and the stores hold them in memory as
 /// they would the records of a write: they are handed over the same way.
