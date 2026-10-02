@@ -4,7 +4,7 @@
 
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 192 KB of
+written in Rust with no dependencies. It runs inside a web page as 199 KB of
 gzipped WebAssembly, in a Rust process, or as a server any language reaches
 over HTTP, and it has its own query language (**FenecQL**).
 
@@ -118,7 +118,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-192 KB of gzipped WebAssembly and a 31 KB gzipped client — no wasm-bindgen, no
+199 KB of gzipped WebAssembly and a 31 KB gzipped client — no wasm-bindgen, no
 build step — and smaller built without the four indexes for a page that uses
 none of them (`make wasm FEATURES=none`, or any set of them). [JavaScript client](https://fenecdb.com/docs/javascript).
 
@@ -174,11 +174,12 @@ make docker && make docker-run TOKEN=secret   # or build it yourself
 |---|---|
 | **Documents** | `insert` (refuses a taken id), `put` (upsert), `set` and `del` by filter, a batch landing whole |
 | **Schema** | `alter collection` adds, drops and renames a field without rewriting a document |
+| **Expiry** | `seen timestamp @ttl(30m)` — a row gone that long after its time: out of every read at once, deleted by the server's sweeper as ordinary deletes |
 | **Atomic batches** | `POST /batch` and the browser's `run` of several statements land whole or not at all; an `Idempotency-Key` makes a write once |
 | **Types** | `bool` `int` `float` `text` `bytes` `timestamp` `vector<N[, f16]>` `sparse<N>` `[type]` `json` (objects, lists and scalars; a path such as `meta.source.rank` reads into it in `where`, `select`, `order` and `set`; imported from PostgreSQL's `jsonb`) |
-| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
+| **Indexes** | `@hash`, `@unique` (a second document holding a value refused, `null` aside), `@sorted`, `@ttl(30m)`, `@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8\|bit)`, `@text(k1=.., b=.., prefix=..)`, `@inverted`; `@hash`, `@unique` and `@sorted` on a path into a `json` field too |
 | **Metrics** | `cosine` `l2` `dot` |
-| **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `is null` |
+| **Operators** | `= != < <= > >=`, `~` (text contains, case-insensitive), `has` (list contains), `in [..]`, `in (get ...)` (another collection's rows, run once, up to 100 000 values), `is null` |
 | **Retrieval** | `near` (HNSW; exact by dot product over a `sparse<N>` such as SPLADE's), `match` (BM25), `rerank` (exact vector reordering of `match` candidates, no graph needed), `fuse` (`match` and `near` ranking together, by reciprocal rank) |
 | **Aggregates** | `count(*)` `sum` `avg` `min` `max`, whole or per `group`, ordered and paged by any of them |
 | **Collation** | `order name collate und` — Unicode's order for every script, as ICU's root orders it (PostgreSQL's `und-x-icu`); `collate tr` Turkish (`ç` after `c`, `ı` before `i`, `tr-x-icu`); a field declared in one pages by its last row; bytes otherwise |
@@ -189,13 +190,13 @@ make docker && make docker-run TOKEN=secret   # or build it yourself
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 192 KB gzip wasm + 31 KB gzip client · 1234–1784 KB binary · 2.81 MB container image |
+| **Runtime size** | 199 KB gzip wasm + 31 KB gzip client · 1234–1784 KB binary · 2.81 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 
 What it deliberately does **not** do — no second writer (a batch holds the
 database from its first write to its end), no interactive transactions, no
-SQL and no PostgreSQL wire protocol, no JOIN, no subqueries,
+SQL and no PostgreSQL wire protocol, no JOIN (an uncorrelated `in (get ...)` aside),
 no change of a field's type in place, no multi-writer replication, no decimal
 type, no TLS (a terminator goes in front) — is listed
 with its reasoning in [Limits](https://fenecdb.com/docs/limits), alongside every

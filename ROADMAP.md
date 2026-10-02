@@ -9,7 +9,7 @@ measurements, as every feature here does.
 |---|---|---|---|
 | 1 | `alter` and `@unique` -- **done** | small | expected of any database; both ride on what exists |
 | 2 | Objects (`json` fields, paths) -- **done** | medium | the largest gap for a *document* database |
-| 3 | `in (get ...)` and `@ttl` | small each | the reverse of `lookup`; caches and sessions |
+| 3 | `in (get ...)` and `@ttl` -- **done** | small each | the reverse of `lookup`; caches and sessions |
 | 4 | TLS 1.3, our own, for HTTP | large | the security story ends at a terminator today |
 | 5 | Official SDKs over HTTP (Phase 53) -- **done** for Go and .NET | medium | every language reaches the server over HTTP since the pg wire went |
 
@@ -205,7 +205,69 @@ integrations already flatten metadata into fields to get around it.
 
 ---
 
-## Phase 3: subqueries and expiry
+## Phase 3: subqueries and expiry -- done
+
+Both shipped as designed below, with these changes the code asked for:
+
+- **The inner `get` is answered before the query, as the list it is.**
+  `Expr::InSelect` holds it, and `Database::answered` -- at the top of
+  `query` and `execute_inner`, inside `explain`'s plan -- runs it once and
+  puts an `Expr::In` of its values in its place. Every place a filter goes,
+  the planner's buckets and its "every element resolves" rule take it
+  unchanged; no path of the engine learned a new expression. A `null` in
+  the column is left out of the list: in it, `not ... in` lost every row.
+  Nesting is bounded at 4 (`MAX_SUBQUERY_DEPTH`), in the parser and the
+  engine, and the inner `get` is read one value past 100 000 rather than
+  gathered whole to be refused.
+- **A long `in` list is looked up, not walked.** An `in [..]` compared each
+  row with each value: the 2 000 codes an inner `get` handed a scan of
+  200 000 rows took 2 302 ms. From 8 values over an int, a text, a
+  timestamp, a boolean or `id`, the values are a `HashIndex` made at the
+  first row tested (`Test::InSet`): 16 ms. Made where the filter is bound,
+  it was built for lists a bucket answers whole too, and took one such
+  query 0.93 -> 2.48 ms.
+- **A rule takes no subquery, and a REST shape cannot hold one.** A rule is
+  tested against a document being written on its own (`admits`), where no
+  query runs; a subscription follows its own collection's writes, and an
+  inner set would not follow the other's.
+- **The expiry is `not (seen <= now - ttl)`, not `seen > now - ttl`.**
+  Under `not` the planner never takes it for a range to narrow by -- it is
+  a test of what the rest found -- and a row whose field is `null`, with no
+  time to expire from, lives: `seen > ...` would have hidden it for good
+  and no sweep would have deleted it.
+- **`@ttl` is `@sorted` with an expiry, implied rather than required.** A
+  field has one index, so `IndexKind::Sorted { ttl }`, written as index
+  kind 9 and the milliseconds behind it (`@unique` is kind 8 the same
+  way); a timestamp field's alone. Durations are whole `ms`, `s`, `m`, `h`
+  or `d` -- FenecQL had none -- and print back so (`ttl_text`), a float
+  never: written out as one it brought 18.7 KB of the standard library's
+  float formatting into the browser module.
+- **The sweep is the engine's, not a `del`.** A `del` leaves the rows past
+  their time out, as every read does, and would find none. The sweeper
+  (`fenec_http::sweep`, beside the graph keeper) finds a batch under the
+  read lock (`Database::expired`, the index's range where it is narrow)
+  and deletes it under the write lock (`Database::sweep`, which tests each
+  row's time again: one written since lives).
+- **`create index ... @ttl` and `alter field ... @ttl | @sorted`** set,
+  move and take off an expiry, the ordered index kept (field change 4).
+  `_idempotency` follows `--idempotency-ttl` with it, and one from before,
+  `at int @sorted`, is made again.
+- **The browser module is handed the time** as `fenec_query`'s last
+  argument (`db.now`, `Date.now` unless set), and refuses a read of an
+  expiring collection without it rather than answer at a time it was not.
+
+Measured: `in (get ...)` of one country's 2 000 customers' orders by
+`@hash` 0.83 ms against 0.72 written out, by an unindexed code 16.1 against
+15.9; customers with a rare order 0.20 ms against `lookup ... required`'s
+0.44 (`make subquery-bench`). A million rows half past their time: a
+`count` is a scan, 68.8 ms against 1.1 with no expiry, a filter that
+scanned already 68.5 against 51.9, as the test written out (70.1); a
+collection with no `@ttl` reads as it did -- six scans of a million rows
+within the order the two builds ran in. 100 000 rows past their time out
+of 200 000 swept in 0.56 s, the write lock held 1.06 ms a batch of 1 000
+at the median, 2.3 at most (`make ttl-bench`). The browser module grew
+16.4 KB, 5.7 KB brotli (170 111 against 164 271 bytes), the module without
+indexes 5.5 KB brotli, the client 0.5 KB.
 
 ### `in (get ...)`
 

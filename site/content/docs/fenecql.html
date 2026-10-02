@@ -19,6 +19,7 @@ create index [if not exists] on &lt;name&gt; (&lt;field&gt; | &lt;path&gt;) @ind
 alter collection &lt;name&gt; add field &lt;field&gt; &lt;type&gt; [collate und|tr] [@index]
 alter collection &lt;name&gt; drop field &lt;field&gt;
 alter collection &lt;name&gt; rename field &lt;field&gt; to &lt;new name&gt;
+alter collection &lt;name&gt; alter field &lt;field&gt; @ttl(&lt;duration&gt;) | @sorted
 
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
@@ -28,6 +29,7 @@ get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [fuse [k N] [candidates N]]             -- match and near, both ranking
            [order &lt;field&gt; [collate und|tr] [asc|desc], ...] [limit N] [offset N]
            [lookup &lt;name&gt; on &lt;child&gt; [= &lt;parent&gt;] [required] &lt;clauses...&gt;]...
+get &lt;name&gt; where &lt;field&gt; in (get &lt;name&gt; select &lt;field&gt; ...)  -- a subquery's list
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 get &lt;name&gt; select [&lt;key&gt;,] count(*), sum(f), ... [where &lt;expr&gt;]
            [group &lt;key&gt; [order &lt;column&gt; [desc]] [limit N] [offset N]]
@@ -71,10 +73,10 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tbody>
 <tr><td><b>Types</b></td><td><code>bool</code> <code>int</code> <code>float</code> <code>text</code> <code>bytes</code> <code>timestamp</code> <code>vector&lt;N[, f16]&gt;</code> <code>sparse&lt;N&gt;</code> <code>[type]</code> <code>json</code></td></tr>
 <tr><td><b>Paths</b></td><td><code>meta.source.rank</code> reads into a <code>json</code> field in <code>where</code>, <code>select</code>, <code>order</code> and <code>set</code>, and takes <code>@hash</code>, <code>@unique</code> and <code>@sorted</code> — see <a href="#json">Objects and paths</a></td></tr>
-<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
+<tr><td><b>Indexes</b></td><td><code>@hash</code>, <code>@unique</code>, <code>@sorted</code>, <code>@ttl(30m)</code> (a <code>timestamp</code> field's rows expire — see <a href="#ttl">Rows that expire</a>), <code>@text(k1=.., b=.., prefix=.., chars)</code>, <code>@hnsw(metric, m=.., ef_construction=.., ef_search=.., quant=int8|bit)</code>, <code>@inverted</code> (a <code>sparse&lt;N&gt;</code> field's)</td></tr>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
-<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>is null</code></td></tr>
+<tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>
@@ -82,7 +84,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
 <tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> in the select list, whole or per <code>group</code> — see <a href="#aggregates">Aggregates</a></td></tr>
-<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys — see <a href="limits.html">Limits</a></td></tr>
+<tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
 </table>
 </div>
@@ -367,6 +369,86 @@ transports carry.</p>
   page as 81 separate queries, and <b>0.204 ms</b> for the one HTTP request
   against <b>0.415 ms</b> for two <code>/batch</code> trips — measured on
   loopback, where the extra trip costs almost nothing and still doubles it.</p>
+</div>
+</details>
+
+<h2 id="subqueries">Subqueries</h2>
+
+<p><code>in (get …)</code> filters by rows of another collection: the reverse
+of <code>lookup</code>. The inner <code>get</code> runs once, before the
+query, and the one column it selects is the list.</p>
+
+<pre data-lang="fenecql">get orders where customer in (get customers select id where country = "TR")
+</pre>
+
+<ul>
+  <li><b>It answers as its list written out.</b> One bucket per value over a
+    <code>@hash</code> field or <code>id</code>, a scan otherwise — the
+    <code>in [..]</code> you would have written.</li>
+  <li><b>The inner <code>get</code> selects exactly one column.</b> A field,
+    or one aggregate; no <code>lookup</code> and no <code>count</code>.</li>
+  <li><b>It goes wherever a filter goes</b>: <code>get</code>,
+    <code>count</code>, aggregates, a <code>near</code>'s or a
+    <code>match</code>'s filter, a <code>lookup</code> level's, <code>set …
+    where</code> and <code>del … where</code>.</li>
+  <li><b>At most 100 000 values</b> and 4 levels of nesting; past either the
+    query is an error, never a set cut short.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">get orders where status = "open" and customer in (get customers select id where tier &gt;= $1)
+get orders where not customer in (get customers select id where country = "TR") count
+del sessions where user in (get users select name where banned = true)
+get customers limit 20 lookup orders on customer
+  where id in (get returns select order_id) limit 3
+get orders where customer in (get customers select id
+  where tier in (get tiers select n where active = true))
+</pre>
+
+<p>It is uncorrelated: the inner <code>get</code> reads nothing of the row
+being tested, so it runs once, with the same parameters as the query around
+it — <code>$1</code> inside is the query's <code>$1</code>. Its column is a
+field, or one aggregate (<code>get orders select max(total)</code>); a
+<code>null</code> in it is left out of the list, since it would otherwise find
+the rows whose field is null, and <code>not … in</code> would lose every row.
+<code>not</code> is FenecQL's own <code>not</code>, written before:
+<code>not customer in (get …)</code>; <code>customer not in</code> is not
+FenecQL.</p>
+
+<p>The values become the list an <code>in [..]</code> is answered with, and
+the same rule holds: a list reaches the <code>@hash</code> index only when
+every value is one the field's type can express, or the whole list goes to
+the scan. A long list is looked up rather than walked — a scan of 200 000
+rows by an unindexed field against the 2 000 codes an inner <code>get</code>
+handed it took 2 302 ms compared a value at a time and takes 16. The inner
+<code>get</code> is read one value past the bound, so a set past 100 000 is
+refused without gathering it; a <code>limit</code> inside is the query's own
+cut, and answers. <code>explain</code> names what each inner <code>get</code>
+found.</p>
+
+<p>Over HTTP a scoped token's rules hold the inner <code>get</code> as they
+hold any <code>get</code>: the list holds only rows the token may read, so
+nothing of the others reaches it through what the outer query finds. A
+token's rule itself takes no subquery. The JavaScript builder takes a query
+as an <code>in</code>'s value:
+<code>{ customer: { in: db.from('customers').select('id').where({ country: 'TR' }) } }</code>.
+A subscription's shape takes a list only — its stream follows its own
+collection's writes, and an inner set would not follow the other's.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make subquery-bench</code>, 20 000
+  customers and 200 000 orders, the median of 21). The orders of one
+  country's 2 000 customers by the <code>@hash</code> on
+  <code>customer</code>: 0.83 ms, against 0.72 ms with the 2 000 ids written
+  out; by an unindexed code, 16.1 ms against 15.9. The customers with a rare
+  order — the inner <code>get</code> reading a bucket — 0.20 ms against
+  0.065 written out and 0.44 for <code>lookup orders on customer required
+  where status = "rare"</code>, the same question asked from the other side;
+  with a filter on the customers as well, 0.56 against <code>lookup</code>'s
+  0.95. Where the inner <code>get</code> scans 200 000 orders it is that scan,
+  10.4 ms, and <code>lookup … required</code> probes each customer's orders
+  instead, 32.5. The difference to the list written out is the inner
+  <code>get</code>: a subquery is one round trip where the list is two.</p>
 </div>
 </details>
 
@@ -827,6 +909,76 @@ than gathering and sorting that many ids.</p>
   to 0.88 s, and the index is built from the documents by the first query
   that reads it after an open, like the hash and text indexes — it is never
   written to the file.</p>
+</div>
+</details>
+
+<h2 id="ttl">Rows that expire</h2>
+
+<p><code>@ttl</code> on a <code>timestamp</code> field makes a row expire that
+long after its value — for sessions, caches and anything else kept for a
+while.</p>
+
+<pre data-lang="fenecql">create collection sessions (user text @hash, seen timestamp @ttl(30m))
+</pre>
+
+<ul>
+  <li><b>Reads are exact at once.</b> A row past its time is never returned,
+    even before it is deleted: every read of the collection leaves it out.</li>
+  <li><b>The server deletes it.</b> A primary sweeps once a minute, as
+    ordinary deletes that replicas, <code>/_changes</code>, archives and
+    subscriptions see as any.</li>
+  <li><b>Durations</b> are whole <code>ms</code>, <code>s</code>,
+    <code>m</code>, <code>h</code> or <code>d</code>: <code>@ttl(45s)</code>,
+    <code>@ttl(12h)</code>, <code>@ttl(7d)</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<pre data-lang="fenecql">put sessions {user: "ada", seen: now()}
+set sessions {seen: now()} where user = "ada"        -- seen again: lives on
+get sessions where user = "ada"                       -- nothing once 30 minutes pass
+create index on events (at) @ttl(7d)                  -- an existing timestamp field
+alter collection sessions alter field seen @ttl(1h)   -- another expiry
+alter collection sessions alter field seen @sorted    -- none: the rows live
+</pre>
+
+<p>A read of the collection — <code>get</code>, <code>count</code>, an
+aggregate, <code>near</code>, <code>match</code>, a <code>lookup</code> level,
+an inner <code>get</code>, a <code>set</code> or <code>del</code> by filter,
+and a subscription's shape — has <code>not (seen &lt;= now - ttl)</code>
+added to its filter, the way a token's rule is added: a row is gone at the
+moment its time plus the ttl is reached. A row whose field is
+<code>null</code> has no time to expire from, and lives. In the browser the
+module has no clock: <code>now</code> is the page's, <code>Date.now()</code>
+unless <code>db.now</code> is set, as every time is handed to it; the page
+deletes nothing, and a row past its time stays in its file, out of every
+read. A live query in the page is woken by writes, not by time passing.</p>
+
+<p><code>@ttl</code> is an ordered index whose rows expire, so the field
+also does everything <code>@sorted</code> does, and a collection's rows
+expire by one such field. The sweeper deletes a range
+of it at a time rather than scan for the rows past their time: found under
+the read lock, deleted under the write lock 1 000 at a time, each batch a
+block of ordinary deletes, its fsync run once the lock is let go. A replica
+never sweeps — its writes are its primary's, the sweep's among them — and
+neither does a tenant that follows another node. The server's
+<code>Idempotency-Key</code>s are kept this way.</p>
+
+<p>The ttl is a kind of index in the file (kind 9, the milliseconds behind
+it), so a binary from before it refuses the file rather than hand out the
+rows past their time. A <code>@unique</code> field's value held by a row
+past its time stays taken until the sweep deletes the row; BM25's
+statistics count the row until then too.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make ttl-bench</code>, a million
+  rows, half past their time). A read tests each row's time as part of its
+  filter, as the same test written by hand does: <code>count</code> becomes a
+  scan, 68.8 ms against 1.1 with no expiry, and a filter that scanned
+  already reads one field more, <code>where s = "w7" count</code> 68.5 ms
+  against 51.9 — 70.1 with the test written out. A collection with no
+  <code>@ttl</code> reads as it did. The sweep of 100 000 rows past their
+  time out of a file of 200 000 took 0.56 s in batches of 1 000, each
+  holding the write lock 1.06 ms at the median and 2.3 at most.</p>
 </div>
 </details>
 

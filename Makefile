@@ -11,7 +11,7 @@ WASM_OUT = target/wasm32-unknown-unknown/wasm/fenec_wasm.wasm
 FEATURES ?=
 WASM_FEATURES = $(if $(FEATURES),--no-default-features $(if $(filter none,$(FEATURES)),,--features "$(FEATURES)"),)
 
-.PHONY: all test test-js builder-golden types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench \
+.PHONY: all test test-js builder-golden types types-check wasm wasm-lite wasm-sizes wasm-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench \
 	python-test go-test dotnet-test languages-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -350,6 +350,20 @@ docker-down:
 ## running database: under the write lock, then beside it.
 maintenance-bench:
 	$(CARGO) run --release -p fenec-core --example maintenance -- 100000 128
+
+## `in (get ...)` against the same `in [..]` written out, and against the
+## `lookup ... required` that asks the same question from the other side:
+## 20 000 customers and 200 000 orders.
+subquery-bench:
+	$(CARGO) run --release -p fenec-core --example subquery -- 20000
+
+## `@ttl`: reads of a million rows half past their time against the same
+## rows with no expiry and with the expiry written out by hand, then a
+## sweep of 100 000 expired rows out of a file, the write lock held a batch.
+ttl-bench:
+	$(CARGO) build --release -p fenec-core --example expiry
+	./target/release/examples/expiry reads 1000000
+	./target/release/examples/expiry sweep 100000 1000
 
 ## What opening a file costs, read into memory or mapped: a 1 GB file of
 ## 2.3 million rows, written once, then opened each way in a process of its

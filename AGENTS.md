@@ -48,6 +48,8 @@ make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
 make statements-bench    # what counting a statement by its shape costs
+make subquery-bench      # in (get ...) against its list written out and against lookup ... required
+make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
 ```
 
 Single tests:
@@ -106,7 +108,7 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~368 lines), the query builder,
+The browser client is `web/fenec.js` — WASM glue (~377 lines), the query builder,
 the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
 holds the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
@@ -709,8 +711,9 @@ request's hash beside it -- so the write and its key land together, a
 second request with the key waits for the lock and is handed the answer
 (`Idempotent-Replayed`), the key with another request is 422, a failed
 write keeps none, and a `compact`, which cannot be put back, takes none.
-Kept for `--idempotency-ttl` (a day), let go of a range of the `@sorted`
-`at` at a time, at most once a minute; the change stream leaves them out.
+Kept for `--idempotency-ttl` (a day): `at` is `@ttl`, so a key past its
+time is out of every read and the sweeper deletes it; the change stream
+leaves them out.
 A write without a key is rendered after the lock as before; with one, 16
 200 single puts a second over HTTP against 18 300 -- with its statements
 parsed each time and the collection made if missing every time, 14 600.
@@ -757,6 +760,63 @@ index ... @unique` over a value held twice is refused naming it and two of
 its documents, under the lock or beside the database, where it is asked of
 the index once the writes made meanwhile are in. `Database::apply` builds
 it and asks nothing: the primary did.
+
+**`in (get ...)` is answered before the query, as the list it is.**
+`Expr::InSelect` holds an inner `Select`; `Database::answered` (from
+`query` and `execute_inner`, and `explain` inside its plan) runs each
+inner `get` once, with the statement's parameters, and puts an
+`Expr::In` of its one column's values in its place -- so every place a
+filter goes, and the planner's "every element resolves or the list goes
+to the scan" rule, take it unchanged, and `eval` never meets one. Only
+a statement holding one, or reading a collection whose rows expire, is
+cloned: the rest costs a look at its filters. A null is left out of the
+list; past `MAX_SUBQUERY_VALUES` (100 000) it is a query error, the inner
+`get` read one value past the bound rather than gathered whole; past
+`MAX_SUBQUERY_DEPTH` (4) refused in the parser and the engine. The inner
+`get` selects one column -- a field or one aggregate -- and no `lookup`
+or `count` (`Select::check_subquery`). A scoped token's `scoped()` holds
+each inner `get` to the read rules as any `get` (`Scope::inner`), and a
+rule's filter takes none: `admits` tests a document on its own, where no
+query runs. A long `in` list is looked up, not walked (`Test::InSet`,
+`IN_SET_AT` = 8, over an int, a text, a timestamp or a boolean typed
+field and `id`, the values' encodings in a `HashIndex` made at the first
+row tested): 2 000 codes over a scan of 200 000 rows took 2 302 ms
+compared a value at a time and take 16. One country's 2 000 customers'
+orders by `@hash` take 0.83 ms against 0.72 written out; customers with
+a rare order 0.20 against `lookup ... required`'s 0.44 (`make
+subquery-bench`). A subscription's REST shape cannot hold one, and the
+JS builder's `{ f: { in: query } }` renders one with the outer query's
+parameters.
+
+**`@ttl` is an ordered index whose rows expire, and every read leaves
+them out at once.** `IndexKind::Sorted { ttl }`, written as index kind 9
+and the milliseconds behind it, so a binary from before refuses the
+file rather than hand out rows past their time; a timestamp field's
+alone. Every filter over the collection -- each `lookup` level's, an
+inner `get`'s, a `set`'s and a `del`'s, `changes_since`'s shape -- has
+`not (field <= now - ttl)` ANDed in (`Database::alive`): a `not` so the
+planner never takes it for a range, and a row whose field is null, with
+no time to expire from, lives. `now` is the system's clock natively and
+`Database::set_clock`'s where set -- the browser module's, handed
+`Date.now()` (`db.now`) as `fenec_query`'s last argument, and refused
+without one rather than answered at a time it was not. A server's
+`fenec_http::sweep` looks at every database it serves once a minute and
+deletes what is past its time, a range of the index found under the
+read lock (`Database::expired`) and 1 000 rows deleted under the write
+lock as a block of ordinary deletes (`Database::sweep`, the filter
+written there, since a `del` leaves expired rows out): replicas,
+`/_changes`, archives and subscriptions see deletes. A replica, a
+following tenant and the browser never sweep. 100 000 rows past their
+time out of 200 000 went in 0.56 s, the lock held 1.06 ms a batch at the
+median and 2.3 at most; a read tests each row's time, so a `count` over
+a million rows half past their time is a scan, 68.8 ms against 1.1 with
+no expiry, and a collection with none reads as it did (`make
+ttl-bench`). `create index ... @ttl(d)` gives a timestamp field one, and
+`alter collection c alter field f @ttl(d) | @sorted` sets or takes it
+off (field change 4, the index kept). `_idempotency`'s `at` is the first
+user: its purge on the write path went. The two features cost the browser
+module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
+through a float, which brought the standard library's float formatting.
 
 **`alter collection` rewrites no document; positions are not places.** A
 document is its values in field order, so a field added goes last and a
@@ -908,8 +968,9 @@ Reads and writes are no events. A test that opens the log is a `[[test]]`
 of its own: the log and the counts are the process's.
 
 **Limits error, they do not truncate.** `near` results cap at 10 000 rows
-(`limit + offset`), expression depth at 512 levels and a `lookup` chain at 8;
-all three return a query error, because a silently cut result is a wrong answer
+(`limit + offset`), expression depth at 512 levels, a `lookup` chain at 8 and
+an `in (get ...)` at 100 000 values and 4 levels; all of them return a query
+error, because a silently cut result is a wrong answer
 believed right. Full table in `site/content/docs/limits.html`.
 
 **Threads are `cfg`'d out of WASM.** The parallel HNSW build path must not enter
