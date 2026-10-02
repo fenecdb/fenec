@@ -198,6 +198,18 @@ enum Builder {
         return n
     }
 
+    /// A mark's tags: both or neither, each text.
+    static func tags(_ pre: Value?, _ post: Value?, _ what: String) throws -> (pre: String, post: String)? {
+        guard pre != nil || post != nil else { return nil }
+        guard let pre, let post else { throw FenecError.builder("\(what) takes both pre and post, or neither") }
+        return (try text(pre, "\(what) pre"), try text(post, "\(what) post"))
+    }
+
+    static func text(_ v: Value, _ what: String) throws -> String {
+        guard let s = v.string else { throw FenecError.builder("\(what) must be text: \(v.json)") }
+        return s
+    }
+
     static func node(_ c: Cond) throws -> Node {
         switch c.spec {
         case .or(let items): return .or(try items.map(node))
@@ -348,6 +360,17 @@ public struct Query: Sendable {
         let offset: Int
     }
 
+    /// `highlight(field)` when `words` is nil, `snippet(field, words)`
+    /// otherwise; the tags both or neither.
+    struct Mark: Sendable {
+        let field: String
+        let words: Int?
+        let ellipsis: String?
+        let tags: (pre: String, post: String)?
+
+        var kind: String { words == nil ? "highlight" : "snippet" }
+    }
+
     typealias Exec = @Sendable (String, [Value]) async throws -> Answer
 
     public let collection: String
@@ -364,6 +387,8 @@ public struct Query: Sendable {
     var offset = 0
     var count = false
     var lookups: [Level] = []
+    var marks: [Mark] = []
+    var facets: [(field: String, top: Int?)] = []
     var exec: Exec?
 
     init(collection: String) { self.collection = collection }
@@ -415,6 +440,68 @@ public struct Query: Sendable {
     public func group(_ field: String) throws -> Query {
         let f = try Builder.ident(field)
         return with { $0.group = f }
+    }
+
+    /// `highlight(field)` in the select list: where the terms `match` found
+    /// stand in the field's text -- `[start, end]` pairs of UTF-16 offsets,
+    /// which `NSRange` and `String.UTF16View` take -- or, given `pre` and
+    /// `post`, the text with each mark between them. The text is not
+    /// escaped. Answers under `highlight(field)`, after the fields `select`
+    /// named.
+    ///
+    ///     db.from("docs").select("title").highlight("body", pre: "<b>", post: "</b>").match("body", text)
+    public func highlight(_ field: String, pre: String? = nil, post: String? = nil) throws -> Query {
+        try mark(highlight: field, pre: pre.map(Value.string), post: post.map(Value.string))
+    }
+
+    /// `snippet(field, words)`: the window of `words` words around the
+    /// densest marks, `{"text": ..., "marks": [[start, end], ...]}` -- or the
+    /// marked text, given `pre` and `post` -- with `ellipsis` where it leaves
+    /// text out. Answers under `snippet(field)`.
+    public func snippet(
+        _ field: String, _ words: Int, ellipsis: String? = nil, pre: String? = nil, post: String? = nil
+    ) throws -> Query {
+        try mark(
+            snippet: field, words: words, ellipsis: ellipsis.map(Value.string), pre: pre.map(Value.string),
+            post: post.map(Value.string))
+    }
+
+    // The tags and the ellipsis as values, so the golden runner can hand
+    // over what JavaScript's callers can and be refused by the same message.
+    func mark(highlight field: String, pre: Value?, post: Value?) throws -> Query {
+        try add(Mark(field: try Builder.ident(field), words: nil, ellipsis: nil, tags: try Builder.tags(pre, post, "highlight")))
+    }
+
+    func mark(snippet field: String, words: Int, ellipsis: Value?, pre: Value?, post: Value?) throws -> Query {
+        let f = try Builder.ident(field)
+        let n = try Builder.whole(words, "snippet words")
+        let tags = try Builder.tags(pre, post, "snippet")
+        if n == 0 { throw FenecError.builder("snippet shows at least one word") }
+        let e = try ellipsis.map { try Builder.text($0, "snippet ellipsis") }
+        return try add(Mark(field: f, words: n, ellipsis: e, tags: tags))
+    }
+
+    private func add(_ mark: Mark) throws -> Query {
+        // Each answers under its label, and a row holds a name once.
+        if marks.contains(where: { $0.kind == mark.kind && $0.field == mark.field }) {
+            throw FenecError.builder("\(mark.kind)(\(mark.field)) is asked twice")
+        }
+        return with { $0.marks.append(mark) }
+    }
+
+    /// `facet field [top N]`: each value the field -- or a path into a json
+    /// field -- holds over every row the query matches, not only the page,
+    /// and how many rows hold it, most first; `top` keeps the commonest. A
+    /// list counts once a row for each value. The counts come back beside
+    /// the rows: `answer().facets`.
+    ///
+    ///     db.from("products").match("title", "phone").facet("brand", top: 10).facet("color").limit(20)
+    public func facet(_ field: String, top: Int? = nil) throws -> Query {
+        let f = try Builder.path(field)
+        let t = try top.map { try Builder.whole($0, "facet top") }
+        if t == 0 { throw FenecError.builder("facet \(f) top 0 answers nothing") }
+        if facets.contains(where: { $0.field == f }) { throw FenecError.builder("facet \(f) is asked twice") }
+        return with { $0.facets.append((f, t)) }
     }
 
     /// `field op value`, joined to the conditions before with `and`. The op
@@ -551,6 +638,17 @@ public struct Query: Sendable {
                 throw FenecError.builder("aggregates answer one row; group makes a row per value")
             }
         }
+        if let first = marks.first {
+            if match == nil { throw FenecError.builder("\(first.kind) needs match: it marks the terms match found") }
+            if aggregate { throw FenecError.builder("\(first.kind) marks a row's text; aggregates answer groups") }
+        }
+        if !facets.isEmpty {
+            if near != nil {
+                throw FenecError.builder(
+                    "facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near")
+            }
+            if aggregate { throw FenecError.builder("facet cannot be combined with aggregates: group counts by value") }
+        }
         if rerank != nil, match == nil { throw FenecError.builder("rerank needs match: it reorders what match found") }
         if match != nil, near != nil, fuse == nil {
             throw FenecError.builder("match and near cannot be combined: both order the result; fuse() ranks by both")
@@ -582,7 +680,16 @@ public struct Query: Sendable {
         if count, let extra = extraClause { throw FenecError.builder("count cannot be used with `\(extra)`") }
 
         var sql = "get \(collection)"
-        if let project { sql += " select " + project.joined(separator: ", ") }
+        // The marks after the fields `select` named, or after every field;
+        // their tags bound first, being first in the text.
+        let items = marks.map { m in
+            var s = "\(m.kind)(\(m.field)"
+            if let n = m.words { s += ", \(n)" }
+            if m.ellipsis != nil || (m.words != nil && m.tags != nil) { s += ", \(bind.bind(.string(m.ellipsis ?? "")))" }
+            if let t = m.tags { s += ", \(bind.bind(.string(t.pre))), \(bind.bind(.string(t.post)))" }
+            return s + ")"
+        }
+        if project != nil || !items.isEmpty { sql += " select " + ((project ?? ["*"]) + items).joined(separator: ", ") }
         if let w = try whereOf(cond, bind) { sql += " where \(w)" }
         if let group { sql += " group \(group)" }
         if let near {
@@ -604,6 +711,9 @@ public struct Query: Sendable {
         if let limit { sql += " limit \(limit)" }
         if offset > 0 { sql += " offset \(offset)" }
         if count { sql += " count" }
+        if !facets.isEmpty {
+            sql += " facet " + facets.map { f in f.top.map { "\(f.field) top \($0)" } ?? f.field }.joined(separator: ", ")
+        }
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.
         for l in lookups {
@@ -650,6 +760,7 @@ public struct Query: Sendable {
     private func assertPlain(_ verb: String) throws {
         if let extra = extraClause { throw FenecError.builder("\(verb) cannot be used with `\(extra)`") }
         if !lookups.isEmpty { throw FenecError.builder("\(verb) cannot be used with `lookup`") }
+        if !facets.isEmpty { throw FenecError.builder("\(verb) cannot be used with `facet`") }
         if verb == "insert", !cond.isEmpty { throw FenecError.builder("insert cannot be used with `where`") }
     }
 
@@ -707,6 +818,10 @@ public struct Query: Sendable {
 
     /// Runs the query and hands back its rows.
     public func rows() async throws -> [Row] { try await run(toFenecQL()).rows }
+
+    /// Runs the query and hands back its whole answer: the rows, and what
+    /// `facet` counted beside them (`.facets`).
+    public func answer() async throws -> Answer { try await run(toFenecQL()) }
 
     /// Runs the query and decodes its rows as `T`, field by field.
     public func rows<T: Decodable>(as type: T.Type) async throws -> [T] { try decoded(try await rows()) }

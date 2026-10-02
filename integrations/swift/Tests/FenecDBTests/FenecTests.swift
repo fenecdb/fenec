@@ -159,6 +159,34 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// A mark answers in the row under its label; facets beside the rows,
+    /// counted over every row the query matched.
+    @Test func highlightsInTheRowsAndFacetsBesideThem() async throws {
+        let db = try Fenec.memory()
+        try await db.execute("create collection docs (title text, kind text, body text @text)")
+        let docs = try db.from("docs")
+        try await docs.insert([
+            ["title": "a", "kind": "guide", "body": "rust is fast"] as Value,
+            ["title": "b", "kind": "guide", "body": "rust and go"],
+            ["title": "c", "kind": "news", "body": "go is simple"],
+        ] as Value)
+        let found = try await docs.select("title").highlight("body").match("body", "rust").facet("kind").answer()
+        #expect(found.rows.map { $0["title"] }.sorted { $0!.string! < $1!.string! } == ["a", "b"])
+        #expect(found.rows.allSatisfy { $0["highlight(body)"] == [[0, 4]] })
+        #expect(found.rows.first?.keys == ["title", "highlight(body)", "_score"])
+        #expect(found.facets.fields == ["kind"])
+        #expect(found.facets["kind"] == [FacetCount(value: "guide", count: 2)])
+        // Over every row, not the page; `rows()` hands the rows alone.
+        let page = try docs.facet("kind", top: 1).limit(1)
+        #expect(try await page.answer().facets["kind"] == [FacetCount(value: "guide", count: 2)])
+        #expect(try await page.rows().count == 1)
+        let tagged = try await docs.snippet("body", 2, pre: "[", post: "]").match("body", "fast").rows()
+        #expect(tagged.first?["snippet(body)"]?.string?.contains("[fast]") == true)
+        // No facets asked, none answered.
+        #expect(try await docs.answer().facets.isEmpty)
+        try await db.close()
+    }
+
     @Test func valuesWriteAndReadAsJson() throws {
         let v: Value = ["s": "a\"b\n\u{1}ç", "n": -1, "f": 0.5, "ok": true, "none": nil, "list": [1, 2.5]]
         #expect(v.json == #"{"s":"a\"b\n\u0001ç","n":-1,"f":0.5,"ok":true,"none":null,"list":[1,2.5]}"#)

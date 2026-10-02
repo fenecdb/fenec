@@ -34,22 +34,79 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
 
 /// An answer to a statement: rows, a count of what was written, a word
 /// that it was done, or the schemas `collections` and `describe` give.
+/// Rows carry what `facet` counted beside them -- never in a row, since the
+/// counts are over every row the query matched, not the page.
 public enum Answer: Sendable, Equatable {
-    case rows(columns: [String], rows: [Row])
+    case rows(columns: [String], rows: [Row], facets: Facets = Facets())
     case affected(Int)
     case ok(String)
     case schemas([Row])
 
     /// The rows, or none.
     public var rows: [Row] {
-        if case .rows(_, let r) = self { return r }
+        if case .rows(_, let r, _) = self { return r }
         return []
+    }
+
+    /// What the query's `facet` clauses counted; empty when it asked none.
+    public var facets: Facets {
+        if case .rows(_, _, let f) = self { return f }
+        return Facets()
     }
 
     /// How many documents a write wrote, or 0.
     public var affected: Int {
         if case .affected(let n) = self { return n }
         return 0
+    }
+}
+
+/// One value a `facet` counted and how many matched rows hold it: any value
+/// the field holds, `.null` for the rows where it is null.
+public struct FacetCount: Sendable, Equatable {
+    public let value: Value
+    public let count: Int
+
+    public init(value: Value, count: Int) {
+        self.value = value
+        self.count = count
+    }
+}
+
+/// Each `facet` field's counts, in the order the query asked them, a
+/// field's values most first. Not a dictionary, which would lose that order.
+public struct Facets: Sendable, Equatable, Sequence {
+    public private(set) var fields: [String] = []
+    private var counts: [[FacetCount]] = []
+
+    public init() {}
+
+    public var isEmpty: Bool { fields.isEmpty }
+
+    /// A field's counts, by the name -- or path -- `facet` was given.
+    public subscript(field: String) -> [FacetCount]? {
+        fields.firstIndex(of: field).map { counts[$0] }
+    }
+
+    public func makeIterator() -> AnyIterator<(field: String, counts: [FacetCount])> {
+        var i = 0
+        return AnyIterator {
+            guard i < fields.count else { return nil }
+            defer { i += 1 }
+            return (fields[i], counts[i])
+        }
+    }
+
+    /// `{"brand": [{"value": "acme", "count": 12}, ...], ...}`, as the server
+    /// and the library both answer them; none where it is absent.
+    init(json: Value?) {
+        guard let object = json?.object else { return }
+        for (field, list) in object {
+            fields.append(field)
+            counts.append((list.array ?? []).map {
+                FacetCount(value: $0["value"] ?? .null, count: $0["count"]?.int ?? 0)
+            })
+        }
     }
 }
 
@@ -397,7 +454,8 @@ public final class Fenec: @unchecked Sendable {
             let r = v["result"]
             return .rows(
                 columns: r?["columns"]?.array?.compactMap(\.string) ?? [],
-                rows: r?["rows"]?.array?.compactMap(\.object) ?? []
+                rows: r?["rows"]?.array?.compactMap(\.object) ?? [],
+                facets: Facets(json: r?["facets"])
             )
         case "affected": return .affected(v["count"]?.int ?? 0)
         case "ok": return .ok(v["message"]?.string ?? "")

@@ -86,6 +86,14 @@ import Testing
         case ("match", _): return try q.match(a[0].string!, a[1].string!)
         case ("fuse", _): return try q.fuse(k: opt(a, 0, "k")?.int, candidates: opt(a, 0, "candidates")?.int)
         case ("group", _): return try q.group(a[0].string!)
+        // The tags and the ellipsis as the file holds them, a number too,
+        // so a refusal of one is the JS builder's.
+        case ("highlight", _): return try q.mark(highlight: a[0].string!, pre: opt(a, 1, "pre"), post: opt(a, 1, "post"))
+        case ("snippet", _):
+            return try q.mark(
+                snippet: a[0].string!, words: a[1].int!, ellipsis: opt(a, 2, "ellipsis"), pre: opt(a, 2, "pre"),
+                post: opt(a, 2, "post"))
+        case ("facet", _): return try q.facet(a[0].string!, top: opt(a, 1, "top")?.int)
         case ("order", _):
             return try q.order(a[0].string!, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)

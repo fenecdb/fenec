@@ -25,17 +25,17 @@ final class Lives {
     /// `on` is read and written on the main actor alone; the rest is set
     /// once.
     final class Sub: @unchecked Sendable {
-        let rows: @Sendable () async throws -> [Row]
+        let answer: @Sendable () async throws -> Answer
         let reads: Set<String>?
-        let deliver: @MainActor ([Row]) -> Void
+        let deliver: @MainActor (Answer) -> Void
         let fail: @MainActor (Error) -> Void
         var on = true
 
         init(
-            rows: @escaping @Sendable () async throws -> [Row], reads: Set<String>?,
-            deliver: @escaping @MainActor ([Row]) -> Void, fail: @escaping @MainActor (Error) -> Void
+            answer: @escaping @Sendable () async throws -> Answer, reads: Set<String>?,
+            deliver: @escaping @MainActor (Answer) -> Void, fail: @escaping @MainActor (Error) -> Void
         ) {
-            self.rows = rows
+            self.answer = answer
             self.reads = reads
             self.deliver = deliver
             self.fail = fail
@@ -104,9 +104,9 @@ final class Lives {
 
     private func run(_ s: Sub) async {
         do {
-            let rows = try await s.rows()
+            let answer = try await s.answer()
             // Stopped while it ran: its rows go nowhere.
-            if s.on { s.deliver(rows) }
+            if s.on { s.deliver(answer) }
         } catch {
             if s.on { s.fail(error) }
         }
@@ -134,10 +134,10 @@ extension Fenec {
     @discardableResult
     func subscribe(
         _ target: LiveTarget,
-        deliver: @escaping @MainActor ([Row]) -> Void,
+        deliver: @escaping @MainActor (Answer) -> Void,
         fail: @escaping @MainActor (Error) -> Void
     ) -> LiveHandle {
-        let sub = Lives.Sub(rows: target.rows(on: self), reads: target.reads, deliver: deliver, fail: fail)
+        let sub = Lives.Sub(answer: target.answer(on: self), reads: target.reads, deliver: deliver, fail: fail)
         let lives = self.lives
         Task { @MainActor in await lives.add(sub, db: self) }
         return LiveHandle { Task { @MainActor in lives.remove(sub) } }
@@ -148,6 +148,13 @@ extension Fenec {
     /// letting go of it.
     public func live(_ query: Query) -> AsyncThrowingStream<[Row], Error> {
         stream(LiveTarget(query: query))
+    }
+
+    /// `live`, each run's whole answer: its rows and what `facet` counted
+    /// beside them (`.facets`). A stream of its own rather than a change to
+    /// `live`'s element, which every caller's loop reads as rows.
+    public func liveAnswers(_ query: Query) -> AsyncThrowingStream<Answer, Error> {
+        answers(LiveTarget(query: query))
     }
 
     /// `live`, each row decoded as `T`.
@@ -173,6 +180,13 @@ extension Fenec {
     }
 
     private func stream(_ target: LiveTarget) -> AsyncThrowingStream<[Row], Error> {
+        AsyncThrowingStream { cont in
+            let handle = subscribe(target, deliver: { cont.yield($0.rows) }, fail: { cont.finish(throwing: $0) })
+            cont.onTermination = { _ in handle.stop() }
+        }
+    }
+
+    private func answers(_ target: LiveTarget) -> AsyncThrowingStream<Answer, Error> {
         AsyncThrowingStream { cont in
             let handle = subscribe(target, deliver: { cont.yield($0) }, fail: { cont.finish(throwing: $0) })
             cont.onTermination = { _ in handle.stop() }
@@ -209,12 +223,14 @@ struct LiveTarget: Sendable {
 
     let failure: FenecError?
 
-    func rows(on db: Fenec) -> @Sendable () async throws -> [Row] {
+    /// The whole answer, so the facets reach whoever reads them beside the
+    /// rows.
+    func answer(on db: Fenec) -> @Sendable () async throws -> Answer {
         let (text, params, failure) = (self.text, self.params, self.failure)
         return { [weak db] in
             if let failure { throw failure }
-            guard let db else { return [] }
-            return try await db.run(text, params: params, quiet: true).rows
+            guard let db else { return .rows(columns: [], rows: []) }
+            return try await db.run(text, params: params, quiet: true)
         }
     }
 }
@@ -233,6 +249,9 @@ struct LiveTarget: Sendable {
         @Published public private(set) var error: FenecError?
         /// Whether the first rows came.
         @Published public private(set) var loaded = false
+        /// What the query's `facet` clauses counted at the last run, set
+        /// with `rows`; empty when it asked none.
+        @Published public private(set) var facets = Facets()
         private let handle = HandleBox()
 
         public convenience init(_ db: Fenec, _ query: Query) where Element == Row {
@@ -253,10 +272,14 @@ struct LiveTarget: Sendable {
         init(_ db: Fenec, _ target: LiveTarget, map: @escaping ([Row]) throws -> [Element]) {
             handle.live = db.subscribe(
                 target,
-                deliver: { [weak self] rows in
+                deliver: { [weak self] answer in
                     guard let self else { return }
                     do {
-                        self.rows = try map(rows)
+                        // The facets first: a sink on `rows` reads them
+                        // as its rows arrive.
+                        let rows = try map(answer.rows)
+                        self.facets = answer.facets
+                        self.rows = rows
                         self.error = nil
                     } catch {
                         self.error = FenecError(code: .type, message: "\(error)")
@@ -286,6 +309,9 @@ struct LiveTarget: Sendable {
         public private(set) var rows: [Element] = []
         public private(set) var error: FenecError?
         public private(set) var loaded = false
+        /// What the query's `facet` clauses counted at the last run, set
+        /// with `rows`; empty when it asked none.
+        public private(set) var facets = Facets()
         @ObservationIgnored private let handle = HandleBox()
 
         public convenience init(_ db: Fenec, _ query: Query) where Element == Row {
@@ -299,10 +325,14 @@ struct LiveTarget: Sendable {
         init(_ db: Fenec, _ target: LiveTarget, map: @escaping ([Row]) throws -> [Element]) {
             handle.live = db.subscribe(
                 target,
-                deliver: { [weak self] rows in
+                deliver: { [weak self] answer in
                     guard let self else { return }
                     do {
-                        self.rows = try map(rows)
+                        // The facets first: a sink on `rows` reads them
+                        // as its rows arrive.
+                        let rows = try map(answer.rows)
+                        self.facets = answer.facets
+                        self.rows = rows
                         self.error = nil
                     } catch {
                         self.error = FenecError(code: .type, message: "\(error)")

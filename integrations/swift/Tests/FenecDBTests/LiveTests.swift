@@ -104,6 +104,40 @@ func until(_ what: String, _ done: () -> Bool) async {
         try await db.close()
     }
 
+    /// A live query's facets come with its rows, at the first run and again
+    /// after a write: on the observables and through `liveAnswers`.
+    @Test func aLiveQueryIsHandedItsFacets() async throws {
+        let db = try await todos()
+        let query = try db.from("todos").select("title").facet("done").limit(1)
+        let live = LiveQuery(db, query)
+        var answers: [Answer] = []
+        let reader = Task { @MainActor in
+            for try await a in db.liveAnswers(query) {
+                answers.append(a)
+                if answers.count == 2 { break }
+            }
+        }
+        await until("the first rows") { live.loaded && answers.count == 1 }
+        let before = [FacetCount(value: false, count: 1), FacetCount(value: true, count: 1)]
+        #expect(live.facets["done"] == before)
+        #expect(live.rows.count == 1)
+        #expect(answers.first?.facets["done"] == before)
+        try await db.from("todos").insert(["title": "eggs", "done": false] as Value)
+        await until("the facets after a put") { live.facets["done"]?.first?.count == 2 }
+        let after = [FacetCount(value: false, count: 2), FacetCount(value: true, count: 1)]
+        #expect(live.facets["done"] == after)
+        _ = try await reader.value
+        #expect(answers.last?.facets["done"] == after)
+        if #available(macOS 14, iOS 17, *) {
+            let rows = LiveRows(db, query)
+            await until("the observable's facets") { rows.loaded }
+            #expect(rows.facets["done"] == after)
+            rows.stop()
+        }
+        live.stop()
+        try await db.close()
+    }
+
     /// A text names the collections it reads, or runs after every write; a
     /// drop runs everything, the dropped collection's query to its error.
     @Test func aTextAndADrop() async throws {
