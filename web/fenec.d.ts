@@ -382,6 +382,12 @@ export declare class Query<
 
   /** The query's collection. */
   readonly collection: string;
+  /**
+   * Every collection the query reads -- its own, each `lookup`'s, each inner
+   * query's -- or `null` when a `raw` fragment may read more. A live query
+   * runs again when one of them is written.
+   */
+  readonly reads: string[] | null;
   /** The opaque context carried by `bind` (for subclasses). */
   readonly context: unknown;
   /** The same body as a plain `Query`: bypasses subclass behaviour. */
@@ -490,8 +496,24 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
    */
   now: () => number;
 
+  /** Where a live query's error goes when it has no `onError` of its own. */
+  onError: ((e: unknown) => void) | null;
+
   /** Query builder. */
   from<K extends keyof S & string>(name: K): Query<S[K]>;
+
+  /**
+   * Live query: `cb` is handed the rows now, and again after every write
+   * to a collection the query reads (a `load`, `restore` or `openFile`:
+   * every live query). The writes of one task run it once, in a microtask
+   * after it. Returns the function that stops it.
+   */
+  live<F extends Fields, P, L extends readonly string[]>(
+    query: Query<F, P, L>,
+    cb: (rows: P[]) => void,
+    opts?: LiveOptions,
+  ): () => void;
+  live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void;
 
   /**
    * Raw FenecQL -- synchronous. A statement that compares text in a
@@ -546,6 +568,18 @@ export declare class Fenec<S extends AnySchema<S> = Schema> {
   readonly changeSeq: number;
   /** Entry count of the change ring. */
   setChangeCapacity(n: number): void;
+}
+
+export interface LiveOptions {
+  /** Where an error goes; else the database's `onError`, else thrown. */
+  onError?: (e: unknown) => void;
+  /** A text's parameters, given as a text alone. */
+  params?: unknown[];
+  /**
+   * The collections a text reads: without them, every write runs it again.
+   * Given for a builder query, they stand in for those it names.
+   */
+  collections?: string[];
 }
 
 export interface PersistOptions {
@@ -678,14 +712,15 @@ export declare class FenecSync<S extends AnySchema<S> = Schema> {
   from<K extends keyof S & string>(name: K): Query<S[K]>;
 
   /**
-   * Live query: re-run after every local change.
-   * Returns: the function that ends the subscription.
+   * Live query: re-run after every local change, at the next frame.
+   * `Fenec.live`'s contract. Returns: the function that ends the subscription.
    */
   live<F extends Fields, P, L extends readonly string[]>(
     query: Query<F, P, L>,
     cb: (rows: P[]) => void,
-    opts?: { onError?: (e: unknown) => void },
+    opts?: LiveOptions,
   ): () => void;
+  live(query: string | [sql: string, params: unknown[]], cb: (rows: any[]) => void, opts?: LiveOptions): () => void;
 
   /**
    * Sends several writes in a single round trip, as **one block**: the

@@ -116,6 +116,18 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>(db.load(image) + drained.length);
   expect<number>(db.changes(0).seq + db.changeSeq);
 
+  // Live queries over the database in the page: a builder query's rows typed.
+  const stop = db.live(db.from('articles').select('title').where('year', 2024), (rows) => expect<string>(rows[0].title));
+  stop();
+  db.live('get articles count', (rows) => rows.length, { collections: ['articles'], onError: (e) => e });
+  db.live(['get reviews where stars > $1', [3]], () => {});
+  db.onError = (e: unknown) => console.error(e);
+  expect<string[] | null>(db.from('articles').reads);
+  // @ts-expect-error -- the callback is handed the rows
+  db.live(db.from('articles'), (rows: number) => rows);
+  // @ts-expect-error -- a query, a text, or [text, params]
+  db.live(42, () => {});
+
   await persist(db, 'app');
   expect<boolean>(await restore(db, 'app'));
   db.close();

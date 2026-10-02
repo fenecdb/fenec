@@ -456,3 +456,28 @@ test("a page's file opens in fenec-server, and a server's file in a page", { ski
     await rm(tmp, { recursive: true, force: true });
   }
 });
+
+// In the worker that keeps the file, live queries are the page's own: the
+// file loading runs them, and every write after, appended, runs them again.
+test('openFile runs the live queries, at the load and at each write', { skip }, async () => {
+  const dir = fakeDir();
+  const first = await open();
+  await openFile(first, 'live.fenec', { dir });
+  first.run('create collection docs (title text @hash)');
+  first.run('put docs {title: "a"}');
+
+  dir.restart();
+  const db = await open();
+  const seen = [];
+  db.live('get docs select title order title', (rows) => seen.push(rows.map((r) => r.title)), {
+    collections: ['docs'],
+    onError: () => seen.push('none yet'),
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const file = await openFile(db, 'live.fenec', { dir });
+  await new Promise((r) => setTimeout(r, 0));
+  db.run('put docs {title: "b"}');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(seen, ['none yet', ['a'], ['a', 'b']]);
+  assert.equal(file.size, dir.bytes('live.fenec').length);
+});
