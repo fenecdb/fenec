@@ -252,7 +252,7 @@ that slow with its text. The metrics, a Grafana dashboard and the log are in
 <p>The <code>Dockerfile</code> is two-stage: a static musl build copied into
 <code>scratch</code>. There are no dependencies and the binary runs its own
 health check (<code>--ping</code>), so the runtime image holds nothing but the
-binary — no shell, no package manager, no libc. The image is <b>2.81 MB</b> on
+binary — no shell, no package manager, no libc. The image is <b>2.99 MB</b> on
 amd64 and 2.44 MB on arm64 — since no target is written in, both come out of
 the same file. <code>make docker</code> builds it, and
 <code>docker compose up -d</code> starts the compose file's.</p>

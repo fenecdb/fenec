@@ -1308,7 +1308,7 @@ for, so consecutive code points that alone give consecutive primaries share
 a rank and are told apart by their code points (`BY_CODE_POINT`), a run of
 them one range (`UNIFORM`), and a table's words are written as differences
 in LEB128: 24 931 ranks, 154 KB for every script (324 KB plain), 161 KB of
-`make small`'s 1234. A comparison walks ICU's three levels, letters then
+`make small`'s 1331. A comparison walks ICU's three levels, letters then
 accents then case, over the whole string before it falls back to the
 bytes, so the order is total.
 It starts at the first byte the two strings do not share, stepped back past
@@ -1794,17 +1794,20 @@ apply, follow, describe), the server `GET /_schema`, `POST /_schema/plan`
 token, under the write lock). `Fenec.open`, `restore` and `openFile`
 apply; `sync` follows (the server owns a replica's schema); `connect`
 follows, or applies with `migrate: true`; Python's, Go's and .NET's
-`schema(...)` and Swift's `Fenec.schema(...)` take the text. A `load`
+`schema(...)`, Swift's `Fenec.schema(...)`, Kotlin's and Dart's
+`schema(...)` (JNI's `schema`, Dart's worker op) take the text. A `load`
 adds an image's collections to what a database holds, so one that holds
 only what its schema made, and nothing since, is emptied before a restore
 or an openFile loads into it (`untouched`). `integrations/schema-golden.json`
 holds declarations, texts and plans (`make schema-golden` writes it
 through the module; `fenec-abi`'s tests run every case natively, the JSON
 and the FenecQL form of each). The check costs an open of 10 collections
-0.09 ms in Node and the module 8.4 KB brotli; `fenec.js` grew 1.4 KB
-brotli for the hooks, and `schema.js` is 5.8. `fenec types` reads a
-`.fenecql` as it reads a database, and writes Python, Go and C# rows
-(`--lang`), the tables as code (`--schema`) and the schema as FenecQL
+0.09 ms in Node and the module 7.5 KB brotli (8.1 until the plan's two
+modes were one const generic and its messages one helper each); `fenec.js` grew 1.8 KB
+brotli for the hooks and the check's errors, and `schema.js` is 5.9. `fenec types` reads a
+`.fenecql` as it reads a database, and writes Python, Go, C#, Swift,
+Kotlin and Dart rows (`--lang`; Kotlin's and Dart's tests compile the
+golden file and read a row into it), the tables as code (`--schema`) and the schema as FenecQL
 (`--fenecql`); `integrations/types-golden/` holds each for one schema.
 
 **`integrations/` may use outside packages; the crates may not.** The

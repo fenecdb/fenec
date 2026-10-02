@@ -14,7 +14,7 @@ use fenec_core::value::VecPrec;
 
 const USAGE: &str = "\
 usage: fenec types <file.fenec | schema.fenecql> [-o <out>] [--name <name>]
-       fenec types --lang python|go|csharp <file> [-o <out>] [--name <package>]
+       fenec types --lang python|go|csharp|swift|kotlin|dart <file> [-o <out>] [--name <package>]
        fenec types --schema <file> [-o <schema.ts>] [--import <module>]
        fenec types --fenecql <file> [-o <schema.fenecql>]
 
@@ -24,7 +24,8 @@ usage: fenec types <file.fenec | schema.fenecql> [-o <out>] [--name <name>]
       --name <name>    the generated type (default: FenecSchema), the Go
                        package (fenecschema) or the C# namespace (FenecSchema)
       --lang <lang>    a row of each collection in Python (TypedDict), Go
-                       (structs) or C# (records) rather than TypeScript
+                       (structs), C# (records), Swift (Codable structs), Kotlin
+                       (data classes) or Dart (fromJson) rather than TypeScript
       --schema         the tables as code (@fenecdb/web/schema), for a project
                        that declares its schema from here on
       --import <from>  where --schema's file imports the builders from
@@ -57,7 +58,9 @@ pub fn main(args: &[String]) -> i32 {
                 match args.get(i).map(|l| (l, crate::langs::Lang::named(l))) {
                     Some((_, Some(l))) => lang = Some(l),
                     Some((l, None)) if l == "ts" || l == "typescript" => {}
-                    _ => return fail("--lang expects ts, python, go or csharp"),
+                    _ => {
+                        return fail("--lang expects ts, python, go, csharp, swift, kotlin or dart")
+                    }
                 }
             }
             "--import" => {
@@ -104,7 +107,7 @@ pub fn main(args: &[String]) -> i32 {
         (false, true, None) => render_fenecql(path, &schemas),
         (false, false, Some(lang)) => {
             let default = match lang {
-                crate::langs::Lang::Go => "fenecschema",
+                crate::langs::Lang::Go | crate::langs::Lang::Kotlin => "fenecschema",
                 _ => "FenecSchema",
             };
             crate::langs::render(lang, path, if named { name } else { default }, &schemas)
@@ -708,6 +711,12 @@ mod tests {
                 "FenecSchema.cs",
                 lang(Lang::CSharp, from, "FenecSchema", &schemas),
             ),
+            ("FenecSchema.swift", lang(Lang::Swift, from, "", &schemas)),
+            (
+                "FenecSchema.kt",
+                lang(Lang::Kotlin, from, "fenecschema", &schemas),
+            ),
+            ("fenec_schema.dart", lang(Lang::Dart, from, "", &schemas)),
         ];
         let write = std::env::var("FENEC_TYPES_GOLDEN").is_ok_and(|v| v == "write");
         for (name, made) in &files {
@@ -739,6 +748,28 @@ mod tests {
                 .args(["-c", "import ast,sys; ast.parse(open(sys.argv[1]).read())"])
                 .arg(dir.join("fenec_schema.py")));
             assert!(matches!(r, Ok((true, _))), "python: {r:?}");
+        }
+        if let Ok(o) = std::process::Command::new("swiftc")
+            .args(["-typecheck"])
+            .arg(dir.join("FenecSchema.swift"))
+            .output()
+        {
+            assert!(
+                o.status.success(),
+                "swiftc: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        if let Ok(o) = std::process::Command::new("dart")
+            .args(["analyze", "--fatal-infos"])
+            .arg(dir.join("fenec_schema.dart"))
+            .output()
+        {
+            assert!(
+                o.status.success(),
+                "dart: {}",
+                String::from_utf8_lossy(&o.stdout)
+            );
         }
         if let Ok(o) = std::process::Command::new("gofmt")
             .arg("-d")

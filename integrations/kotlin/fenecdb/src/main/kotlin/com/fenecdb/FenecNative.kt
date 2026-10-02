@@ -44,6 +44,9 @@ internal object FenecNative {
 
     @JvmStatic external fun syncStatus(handle: Long): ByteArray
 
+    /** A schema declared as FenecQL against the database (`fenec_schema`): mode 0 plans, 1 applies. */
+    @JvmStatic external fun schema(handle: Long, request: ByteArray, mode: Int): ByteArray
+
     /** A call's answer: its text, or the error it is thrown as. */
     fun answer(bytes: ByteArray): String {
         val code = bytes[0].toInt()

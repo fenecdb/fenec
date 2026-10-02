@@ -11,6 +11,10 @@ kotlin {
         // Android takes Java 11 bytecode with no desugaring of its own.
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
+    // The rows `fenec types --lang kotlin` writes for
+    // integrations/types-golden's schema: compiled with the tests, which
+    // read one off a row.
+    sourceSets["test"].kotlin.srcDir("../../types-golden")
 }
 
 java {

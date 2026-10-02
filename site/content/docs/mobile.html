@@ -192,6 +192,47 @@ To see the text and parameters a chain builds, for logging or a test,
     .limit(5)
     .rows(as: Note.self)</pre>
 
+<h2 id="schema">The schema in code</h2>
+
+<p>An app that makes its database declares it once, as
+<code>create collection</code> and <code>create index</code> statements --
+a <code>schema.fenecql</code> in the app's resources -- and hands it to
+<code>schema</code> after each open. The engine compares the file with it:
+what only adds (a collection, a field, an index) is made, the migrations
+not yet recorded run first, in order, and are kept in
+<code>_migrations</code>, all one block; a field the text lacks, a type or
+an index changed, is refused with what resolves it, and nothing is written.
+It is the check the browser's <code>Fenec.open({ schema })</code> and the
+server's <code>/_schema</code> run (<a href="javascript.html#schema">Schema in
+code</a>).</p>
+
+<div class="langs" data-langs>
+
+<div class="lang" data-name="Swift">
+<pre data-lang="swift" data-label="App.swift">let plan = try await db.schema(schemaText, migrations: [
+    "alter collection notes rename field title to name",
+])</pre>
+</div>
+
+<div class="lang" data-name="Kotlin">
+<pre data-lang="kotlin" data-label="App.kt">val plan = db.schema(schemaText, migrations = listOf(
+    "alter collection notes rename field title to name",
+))</pre>
+</div>
+
+<div class="lang" data-name="Dart">
+<pre data-lang="dart" data-label="main.dart">final plan = await db.schema(schemaText, migrations: [
+  'alter collection notes rename field title to name',
+]);</pre>
+</div>
+
+</div>
+
+<p><code>fenec types --lang swift|kotlin|dart schema.fenecql</code> writes
+a row of each collection as the language reads it: a <code>Codable</code>
+struct, a data class with <code>from(row)</code>, a class with
+<code>fromJson</code>.</p>
+
 <h2 id="live">Live queries</h2>
 
 <p>A live query hands over its rows at once, and again after a write to a
