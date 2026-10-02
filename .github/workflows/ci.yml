@@ -311,6 +311,9 @@ jobs:
   mobile-android:
     name: mobile (Android, JVM, Dart, Flutter)
     runs-on: ubuntu-latest
+    # About 10 minutes warm: a hang fails within the hour rather than at
+    # the runner's six.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -342,6 +345,7 @@ jobs:
       # the sync tests start here and runs JUnit on the runner, no
       # container.
       - name: Kotlin (JVM tests)
+        timeout-minutes: 20
         run: make kotlin-test
 
       - name: Android AAR
@@ -354,6 +358,7 @@ jobs:
       # (FENEC_LOCAL): the JVM CLI's smoke against the library built above,
       # then the Compose app built as an APK.
       - name: Notes (Kotlin, Compose)
+        timeout-minutes: 20
         run: examples/kotlin-android/run-smoke.sh
 
       - name: The library's size on Android and Linux
@@ -370,6 +375,7 @@ jobs:
       # The Dart package under Flutter's own Dart -- its sync tests against
       # a server run-tests.sh builds -- then the plugin's test.
       - name: Dart and the Flutter plugin
+        timeout-minutes: 20
         run: make dart-test
 
       - name: The Flutter plugin in an Android app
@@ -385,6 +391,7 @@ jobs:
       # The Notes example: its logic's smoke under flutter test, then the
       # app built as an APK, on this checkout's packages (pub overrides).
       - name: Notes (Flutter)
+        timeout-minutes: 20
         run: examples/flutter/run-tests.sh apk
 
       - uses: actions/upload-artifact@v7
@@ -400,6 +407,9 @@ jobs:
   mobile-apple:
     name: mobile (Swift, iOS, XCFramework)
     runs-on: macos-latest
+    # About 13 minutes warm. A hung `swift test` held this runner for six
+    # hours; the steps that run tests are bounded on their own as well.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -429,17 +439,28 @@ jobs:
       # Package.swift takes the XCFramework just built; the sync tests
       # start a fenec-server, kill it and start it again.
       - name: Swift (macOS)
+        timeout-minutes: 20
         run: |
           cargo build -p fenec-server
           swift test
 
+      # The same tests with Swift's cooperative pool cut to one thread: a
+      # call that blocks a thread of it hangs there at once, where on this
+      # three-core runner it hung now and then -- the run that held it for
+      # six hours. The script samples every thread of a run that hangs.
+      - name: Swift (macOS, one cooperative thread)
+        timeout-minutes: 10
+        run: integrations/swift/test-strict.sh
+
       - name: Swift (iOS simulator)
+        timeout-minutes: 20
         run: integrations/swift/test-ios.sh
 
       # The Notes example on the package at the root (FENEC_LOCAL): the
       # SwiftUI app and the CLI built, the CLI's smoke run, and the views'
       # library built for the iOS simulator.
       - name: Notes (Swift)
+        timeout-minutes: 20
         working-directory: examples/swift
         env:
           FENEC_LOCAL: '1'
