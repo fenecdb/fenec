@@ -261,6 +261,195 @@ pub fn changes(db: &Database, since: u64) -> String {
     s
 }
 
+// ------------------------------------------------------------------ schema
+
+/// What [`schema`] found and did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Outcome {
+    pub plan: declared::Plan,
+    /// The migrations recorded (or, planned, to be), by number from 1.
+    pub migrations: Vec<usize>,
+    /// Whether those migrations' statements ran (or would run): a database
+    /// made from the description holds what they lead to already, and
+    /// records them without running them.
+    pub ran: bool,
+    /// Whether anything was written.
+    pub applied: bool,
+}
+
+impl Outcome {
+    /// `{"kind":"schema","applied":..,"ran":..,"migrations":[..],
+    /// "statements":[..],"refusals":[..]}`
+    pub fn json(&self) -> String {
+        let yes = |b: bool| if b { "true" } else { "false" };
+        let mut out = String::from("{\"kind\":\"schema\",\"applied\":");
+        out.push_str(yes(self.applied));
+        out.push_str(",\"ran\":");
+        out.push_str(yes(self.ran));
+        out.push_str(",\"migrations\":[");
+        for (i, n) in self.migrations.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&n.to_string());
+        }
+        out.push_str("],");
+        self.plan.json_into(&mut out);
+        out.push('}');
+        out
+    }
+}
+
+use fenec_core::declared;
+
+/// A description read, its collections out of their FenecQL text where
+/// it holds them so (`"fenecql"`).
+pub fn read(request: &str) -> Result<declared::Declared> {
+    let mut d = declared::parse(request)?;
+    if let Some(text) = d.text.take() {
+        d.collections = fenec_ql::schema_text(&text)?;
+    }
+    Ok(d)
+}
+
+/// Every collection the database holds, its own among them.
+fn schemas(db: &Database) -> Vec<Schema> {
+    db.collection_names()
+        .iter()
+        .filter_map(|n| db.collection(n).ok().map(|c| c.schema.clone()))
+        .collect()
+}
+
+/// `(n, text)` of each migration `_migrations` records, ascending.
+/// Read through the write path's `execute_with`, the one a schema change
+/// takes anyway: through `query`, the browser module grew 0.8 KB for it.
+fn recorded(db: &mut Database) -> Result<Vec<(i64, String)>> {
+    if db.collection(declared::MIGRATIONS).is_err() {
+        return Ok(Vec::new());
+    }
+    let stmt = fenec_ql::parse_one("get _migrations select n, text order n")?;
+    let Response::Rows(rs) = db.execute_with(&stmt, &[])? else {
+        return Ok(Vec::new());
+    };
+    Ok(rs
+        .rows
+        .into_iter()
+        .filter_map(|r| match <[Value; 2]>::try_from(r.values) {
+            Ok([Value::Int(n), Value::Text(t)]) => Some((n, t)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Runs FenecQL inside the block [`schema`] holds open: a compact, which
+/// cannot be put back, is refused.
+fn exec(db: &mut Database, text: &str, params: &[Value]) -> Result<()> {
+    for s in fenec_ql::parse(text)? {
+        if !s.fits_block() {
+            return Err(Error::Query(
+                "a migration cannot compact: a compact is not put back with the rest".into(),
+            ));
+        }
+        db.execute_with(&s, params)?;
+    }
+    Ok(())
+}
+
+/// A migration's error, saying which migration it was.
+fn in_migration(n: usize, e: Error) -> Error {
+    let at = |m: String| format!("migration {n}: {m}");
+    match e {
+        Error::Query(m) => Error::Query(at(m)),
+        Error::Type(m) => Error::Type(at(m)),
+        Error::NotFound(m) => Error::NotFound(at(m)),
+        Error::Exists(m) => Error::Exists(at(m)),
+        Error::Duplicate(m) => Error::Duplicate(at(m)),
+        other => other,
+    }
+}
+
+/// The database compared with a schema declared in code -- a description
+/// (`fenec_core::declared`), with its migrations -- and brought to it as
+/// `mode` says. Under [`true`] the migrations not yet recorded
+/// run in order, each recorded in `_migrations` with `now`, and then what
+/// only adds is applied, all of it one block; anything refused puts the
+/// block back, so a database is either brought to the code or left as it
+/// was. A database holding none of its own collections yet is made from
+/// the description, and its migrations recorded without running: they lead
+/// from schemas it never had. Not `apply`, it says what an apply would do
+/// and writes nothing: the migrations still to run run in a block put back,
+/// so the plan is the one they lead to.
+///
+/// A database another owns -- a server a replica follows -- is compared by
+/// [`follow`], apart: the browser module, which applies, carries none of it.
+pub fn schema(db: &mut Database, request: &str, apply: bool, now: Option<i64>) -> Result<Outcome> {
+    let d = read(request)?;
+    let texts = declared::migration_texts(&d)?;
+    let done = declared::applied(&recorded(db)?, &texts)?;
+    let pending = done..texts.len();
+    let fresh = done == 0 && db.collection_names().iter().all(|n| declared::own(n));
+    if pending.is_empty() {
+        let plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        if !apply || !plan.refusals.is_empty() || plan.statements.is_empty() {
+            return Ok(Outcome {
+                plan,
+                ..Outcome::default()
+            });
+        }
+    }
+    db.begin()?;
+    let mut run = || -> Result<declared::Plan> {
+        if !pending.is_empty() {
+            exec(db, declared::MIGRATIONS_DDL, &[])?;
+        }
+        for i in pending.clone() {
+            if !fresh {
+                exec(db, &texts[i], &[]).map_err(|e| in_migration(i + 1, e))?;
+            }
+            let at = now.map_or(Value::Null, Value::Timestamp);
+            let row = [Value::Int(i as i64 + 1), Value::Text(texts[i].clone()), at];
+            exec(db, "put _migrations {n: $1, text: $2, at: $3}", &row)?;
+        }
+        let plan = declared::plan(&schemas(db), &d.collections, declared::Mode::Apply);
+        if apply && plan.refusals.is_empty() {
+            for s in &plan.statements {
+                exec(db, s, &[])?;
+            }
+        }
+        Ok(plan)
+    };
+    let plan = match run() {
+        Ok(plan) => plan,
+        Err(e) => {
+            db.rollback();
+            return Err(e);
+        }
+    };
+    let applied = apply && plan.refusals.is_empty();
+    match applied {
+        true => db.commit()?,
+        false => db.rollback(),
+    }
+    Ok(Outcome {
+        plan,
+        migrations: pending.map(|i| i + 1).collect(),
+        ran: !fresh,
+        applied,
+    })
+}
+
+/// The database compared with a description as another's: everything the
+/// code declares must be there as declared, what is there beside it is its
+/// owner's, nothing runs -- and the migrations are not read, since only the
+/// owner runs them. Through `&Database`: a reader beside the others.
+pub fn follow(db: &Database, request: &str) -> Result<Outcome> {
+    let d = read(request)?;
+    Ok(Outcome {
+        plan: declared::plan(&schemas(db), &d.collections, declared::Mode::Follow),
+        ..Outcome::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +522,261 @@ mod tests {
         let r = run(&mut db, "put t {a: 1}; put u {a: \"x\"}", "", &[]);
         assert!(r.contains("error"), "{r}");
         assert!(changes(&db, seq + 1).contains("\"collections\":[]"));
+    }
+
+    fn described(collections: &str, migrations: &str) -> String {
+        format!(r#"{{"format":1,"collections":{collections},"migrations":{migrations}}}"#)
+    }
+
+    const TODOS: &str = r#"[{"name":"todos","fields":[{"name":"title","type":"text","required":true},{"name":"done","type":"bool","index":{"kind":"hash"}}]}]"#;
+
+    /// A database made from the description; opened again, nothing to do.
+    #[test]
+    fn a_description_makes_a_database_and_then_nothing() {
+        let mut db = Database::new();
+        let req = described(
+            TODOS,
+            r#"["alter collection todos rename field name to title"]"#,
+        );
+        let o = schema(&mut db, &req, true, Some(5)).unwrap();
+        assert!(o.applied && !o.ran, "{o:?}");
+        assert_eq!(o.migrations, [1]);
+        assert_eq!(
+            o.plan.statements,
+            ["create collection todos (title text required, done bool @hash)"]
+        );
+        // Recorded, not run: the field it renames never was.
+        assert_eq!(
+            recorded(&mut db).unwrap(),
+            [(
+                1,
+                "alter collection todos rename field name to title".into()
+            )]
+        );
+        let seq = db.change_seq();
+        let o = schema(&mut db, &req, true, Some(6)).unwrap();
+        assert_eq!(o, Outcome::default());
+        assert_eq!(db.change_seq(), seq);
+    }
+
+    /// A field added in the code is added; a field dropped is refused,
+    /// with nothing written, until a migration says what it means.
+    #[test]
+    fn additions_apply_and_a_drop_waits_for_its_migration() {
+        let mut db = Database::new();
+        schema(&mut db, &described(TODOS, "[]"), true, None).unwrap();
+        run(&mut db, "put todos {title: \"a\", done: false}", "", &[]);
+        let more = r#"[{"name":"todos","fields":[{"name":"name","type":"text","required":true},{"name":"done","type":"bool","index":{"kind":"hash"}},{"name":"at","type":"timestamp","index":{"kind":"sorted"}}]}]"#;
+        let seq = db.change_seq();
+        let o = schema(&mut db, &described(more, "[]"), true, None).unwrap();
+        assert!(!o.applied);
+        let kinds: Vec<_> = o.plan.refusals.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, ["required_added", "field_not_declared"]);
+        assert_eq!(db.change_seq(), seq);
+        // The rename, as a migration: run once, recorded, and the rest applied.
+        let req = described(
+            more,
+            r#"["alter collection todos rename field title to name"]"#,
+        );
+        let plan = schema(&mut db, &req, false, None).unwrap();
+        assert!(
+            !plan.applied && plan.ran && plan.plan.refusals.is_empty(),
+            "{plan:?}"
+        );
+        assert_eq!(
+            plan.plan.statements,
+            ["alter collection todos add field at timestamp @sorted"]
+        );
+        assert_eq!(db.change_seq(), seq, "a plan writes nothing");
+        let o = schema(&mut db, &req, true, Some(7)).unwrap();
+        assert!(o.applied && o.ran, "{o:?}");
+        let r = run(&mut db, "get todos select name, at", "", &[]);
+        assert!(r.contains(r#"{"name":"a","at":null}"#), "{r}");
+        assert_eq!(
+            schema(&mut db, &req, true, Some(8)).unwrap(),
+            Outcome::default()
+        );
+        // A migration changed after it ran is refused.
+        let changed = described(
+            more,
+            r#"["alter collection todos rename field title to nom"]"#,
+        );
+        let e = schema(&mut db, &changed, true, None).unwrap_err();
+        assert!(
+            e.to_string().contains("not the one the database applied"),
+            "{e}"
+        );
+    }
+
+    /// A rebuild makes a field again as declared, its values kept.
+    #[test]
+    fn a_rebuild_changes_an_index() {
+        let mut db = Database::new();
+        let tags =
+            r#"[{"name":"tags","fields":[{"name":"name","type":"text","index":{"kind":"hash"}}]}]"#;
+        schema(&mut db, &described(tags, "[]"), true, None).unwrap();
+        run(&mut db, "put tags [{name: \"b\"}, {name: \"a\"}]", "", &[]);
+        let sorted = tags.replace(r#""kind":"hash""#, r#""kind":"sorted""#);
+        let o = schema(&mut db, &described(&sorted, "[]"), true, None).unwrap();
+        assert_eq!(o.plan.refusals[0].kind, "index_changed");
+        let req = described(
+            &sorted,
+            r#"[{"rebuild":{"collection":"tags","field":"name"}}]"#,
+        );
+        let o = schema(&mut db, &req, true, None).unwrap();
+        assert!(o.applied, "{o:?}");
+        let r = run(&mut db, "explain get tags where name > \"a\"", "", &[]);
+        assert!(r.contains("ordered index on name"), "{r}");
+        let r = run(&mut db, "get tags select name order name", "", &[]);
+        assert!(r.contains(r#"[{"name":"a"},{"name":"b"}]"#), "{r}");
+        let again = schema(&mut db, &req, true, None).unwrap();
+        assert_eq!(again, Outcome::default());
+    }
+
+    /// Followed, nothing is written and only what the code lacks is told.
+    #[test]
+    fn a_followed_database_is_compared_only() {
+        let mut db = Database::new();
+        run(
+            &mut db,
+            "create collection todos (title text required, done bool @hash, extra int)",
+            "",
+            &[],
+        );
+        let o = follow(&db, &described(TODOS, "[]")).unwrap();
+        assert_eq!(o, Outcome::default());
+        let more = TODOS.replace(
+            r#"{"name":"done""#,
+            r#"{"name":"due","type":"timestamp"},{"name":"done""#,
+        );
+        let o = follow(&db, &described(&more, "[]")).unwrap();
+        assert_eq!(o.plan.refusals[0].kind, "field_missing");
+        assert!(o.plan.statements.is_empty() && !o.applied);
+    }
+
+    /// integrations/schema-golden.json, which every SDK that declares a
+    /// schema is held to (`web/schema-golden.mjs` writes it): each
+    /// declaration's description reads, and each plan is the one the
+    /// engine makes here, natively, of the same database and description.
+    #[test]
+    fn the_schema_golden_file_is_the_engines() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../integrations/schema-golden.json"
+        );
+        let golden = json::parse_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let list = |key: &str| match golden.member(key) {
+            Some(Value::List(l)) => l.clone(),
+            _ => panic!("no {key}"),
+        };
+        let text = |v: &Value, key: &str| {
+            v.member(key)
+                .and_then(Value::as_text)
+                .unwrap_or("")
+                .to_string()
+        };
+        let (mut read, mut planned) = (0, 0);
+        for case in list("declarations") {
+            let Some(c) = case.member("collection") else {
+                continue;
+            };
+            let one = format!(r#"{{"format":1,"collections":[{}]}}"#, json::to_string(c));
+            let d =
+                declared::parse(&one).unwrap_or_else(|e| panic!("{}: {e}", text(&case, "name")));
+            // Described again, it reads as the same collection; written as
+            // FenecQL, the declaration's text and the engine's both read as it.
+            assert_eq!(
+                declared::parse(&declared::describe(&d.collections))
+                    .unwrap()
+                    .collections,
+                d.collections
+            );
+            let written = fenec_ql::schema_text(&text(&case, "fenecql")).unwrap();
+            assert_eq!(written, d.collections, "{}", text(&case, "name"));
+            assert_eq!(
+                fenec_ql::schema_text(&declared::fenecql(&d.collections)).unwrap(),
+                d.collections
+            );
+            read += 1;
+        }
+        // A schema written as FenecQL: what an empty database is made with, or the refusal.
+        let mut texts = 0;
+        for case in list("texts") {
+            let name = text(&case, "name");
+            let request = format!(
+                r#"{{"format":1,"fenecql":{}}}"#,
+                json::to_string(case.member("fenecql").unwrap())
+            );
+            match (
+                schema(&mut Database::new(), &request, false, None),
+                case.member("error"),
+            ) {
+                (Ok(o), None) => {
+                    let made = json::parse_json(&o.json()).unwrap();
+                    assert_eq!(
+                        made.member("statements"),
+                        case.member("statements"),
+                        "{name}"
+                    );
+                }
+                (Err(e), Some(want)) => {
+                    assert_eq!(e.to_string(), want.as_text().unwrap(), "{name}")
+                }
+                (got, _) => panic!("{name}: {got:?}"),
+            }
+            texts += 1;
+        }
+        for case in list("plans") {
+            let name = text(&case, "name");
+            let mut db = Database::new();
+            if let Some(Value::List(statements)) = case.member("db") {
+                for s in statements {
+                    let r = run(&mut db, s.as_text().unwrap(), "", &[]);
+                    assert!(!r.contains("\"error\""), "{name}: {r}");
+                }
+            }
+            let seq = db.change_seq();
+            let description = json::to_string(case.member("description").unwrap());
+            let o = schema(&mut db, &description, false, None);
+            // The same schema as FenecQL text plans the same.
+            let mut as_text = format!(
+                r#"{{"format":1,"fenecql":{}"#,
+                json::to_string(case.member("fenecql").unwrap())
+            );
+            if let Some(m) = case
+                .member("description")
+                .and_then(|d| d.member("migrations"))
+            {
+                as_text.push_str(&format!(r#","migrations":{}"#, json::to_string(m)));
+            }
+            as_text.push('}');
+            let t = schema(&mut db, &as_text, false, None);
+            assert_eq!(db.change_seq(), seq, "{name}: a plan writes nothing");
+            match (o, t, case.member("error")) {
+                (Err(e), Err(f), Some(want)) => {
+                    assert_eq!(e.to_string(), want.as_text().unwrap(), "{name}");
+                    assert_eq!(f.to_string(), e.to_string(), "{name}");
+                }
+                (Ok(o), Ok(t), None) => {
+                    assert_eq!(t, o, "{name}");
+                    let made = json::parse_json(&o.json()).unwrap();
+                    let mut want = case.member("plan").unwrap().clone();
+                    if let Value::Object(m) = &mut want {
+                        m.push(("applied".into(), Value::Bool(false)));
+                        m.push(("kind".into(), Value::Text("schema".into())));
+                        m.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                    assert_eq!(made, want, "{name}");
+                }
+                (o, t, _) => panic!("{name}: {o:?} / {t:?}"),
+            }
+            planned += 1;
+        }
+        assert!(texts > 10, "{texts} texts");
+        assert!(
+            read > 10 && planned > 10,
+            "{read} declarations, {planned} plans"
+        );
     }
 }
 #[cfg(feature = "sync")]
