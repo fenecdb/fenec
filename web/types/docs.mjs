@@ -81,10 +81,11 @@ for (const page of found) {
   const dir = join(out, page.name);
   mkdirSync(dir, { recursive: true });
   // What an example imports by a relative path, as a page beside the module
-  // would: './fenec.js', './schema.js' and the schema `fenec types` wrote
+  // would: './fenec.js', './schema.js', './client.js' and the schema `fenec types` wrote
   // beside it.
   writeFileSync(join(dir, 'fenec.d.ts'), `export * from '${up(dir, join(root, 'web/fenec.js'))}';\n`);
   writeFileSync(join(dir, 'schema.d.ts'), `export * from '${up(dir, join(root, 'web/schema.js'))}';\n`);
+  writeFileSync(join(dir, 'client.d.ts'), `export * from '${up(dir, join(root, 'web/client.js'))}';\n`);
   // The tables an example declared above it, as the app keeps them in a module of its own.
   writeFileSync(join(dir, 'tables.d.ts'), `export * from '${up(dir, join(here, 'docs/tables.js'))}';\n`);
   writeFileSync(join(dir, 'fenec-schema.d.ts'), `export * from '${up(dir, join(here, 'docs/fenec-schema.js'))}';\n`);
@@ -116,6 +117,7 @@ for (const page of found) {
       paths: {
         '@fenecdb/web': [up(dir, join(root, 'web/fenec.d.ts'))],
         '@fenecdb/web/schema': [up(dir, join(root, 'web/schema.d.ts'))],
+        '@fenecdb/web/client': [up(dir, join(root, 'web/client.d.ts'))],
         '@fenecdb/react': [up(dir, join(root, 'integrations/react/index.d.ts'))],
         '@fenecdb/cloudflare': [up(dir, join(root, 'integrations/cloudflare/index.d.ts'))],
         react: [up(dir, join(modules, '@types/react/index.d.ts'))],

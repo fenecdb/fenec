@@ -225,15 +225,33 @@ function Open() {
   <li><b>No server needed:</b> <code>&lt;FenecProvider db={await Fenec.open()}&gt;</code>
     makes the page's own database the app's state
     (<a href="javascript.html#state">State in the page</a>).</li>
+  <li><b>No module needed:</b> <code>&lt;FenecProvider db={connect(url)}&gt;</code>,
+    from <code>@fenecdb/web/client</code>, runs each query on the server and
+    again after every write to a collection it reads.</li>
   <li><b>It is <code>undefined</code></b> until the first answer.</li>
   <li><b>A failing query throws</b> to the nearest error boundary.</li>
 </ul>
 
+<div class="tbl">
+<table>
+<thead><tr><th>Provider</th><th>Where a query runs</th><th>A render after a write</th><th>Loads</th></tr></thead>
+<tbody>
+<tr><td><code>connect(url)</code>, <code>@fenecdb/web/client</code></td><td>on the server, each time</td><td>waits for the server: the subscription's change, then the query's round trip</td><td>no module, 6 KB brotli of client</td></tr>
+<tr><td><code>sync({ url, shapes })</code></td><td>in the page, over the replica</td><td>waits for nothing: this tab's write is local, another client's arrives on the stream</td><td><code>fenec-replica.wasm</code>, 147 KB brotli</td></tr>
+<tr><td><code>Fenec.open()</code></td><td>in the page, over its own database</td><td>waits for nothing</td><td><code>fenec.wasm</code>, 174 KB brotli</td></tr>
+</tbody>
+</table>
+</div>
+
 <details class="deep"><summary>Details</summary>
-<p>The rows come from the database in the page, so no render waits on the
-network: <code>live</code> runs the query again after every write it may
-read — a write of this tab's, or one the server streamed into a replica from
-another client — and the component renders what it answers. A FenecQL text
+<p>Over a replica or a database in the page the rows come from the page, so
+no render waits on the network: <code>live</code> runs the query again after
+every write it may read — a write of this tab's, or one the server streamed
+into a replica from another client — and the component renders what it
+answers. Over <code>connect</code> the query runs on the server, again after
+each write the server's subscriptions report to a collection it reads; a
+FenecQL text names those with <code>{ collections }</code> there, since
+nothing in the page can know what a text reads. A FenecQL text
 works too, on the provider's database:
 <code>useLiveQuery('get todos count', { collections: ['todos'] })</code>. <code>useLiveQuery</code> is
 <code>undefined</code> until the first answer, and subscribes by the query's
@@ -328,7 +346,7 @@ holds its integrations to, against a real fenecdb.</p>
 <tr><td>LlamaIndex</td><td>the tests LlamaIndex's own vector store integrations run — the class, a write and a nearest match, deletion by document, nodes by id and by filter, every filter operator, an index on top — and the text search and hybrid modes</td></tr>
 <tr><td>LangChain.js</td><td>what LangChain.js's own vector store integrations are held to — documents in and found again with their ids and scores, replaced under an id, deleted, filtered, <code>fromTexts</code>, a retriever — and the text and hybrid modes, each over a database in the page and over fenec-server's HTTP endpoint; LangChain.js publishes no standard suite</td><td><code>make langchain-test</code></td></tr>
 <tr><td>Vercel AI SDK</td><td>the SDK's own mock models: documents embedded with <code>embedMany</code> and found again with <code>near</code>, kept to a source and fused with the words, and a model that calls the search tool in <code>generateText</code> and answers from what it returned</td><td><code>make ai-sdk-test</code></td></tr>
-<tr><td>React</td><td>a stand-in database for the contract, and a real fenec-server and replica for a row another client writes</td><td><code>make react-test</code></td></tr>
+<tr><td>React</td><td>a stand-in database for the contract, and a real fenec-server, a replica and <code>connect</code> for a row another client writes</td><td><code>make react-test</code></td></tr>
 <tr><td>Go</td><td>a primary with a token, a JWT policy and the change stream, a replica and a node of tenants, started by the tests: <code>near</code> with exact scores, parameters of every type, the errors, a batch put back whole, an idempotency key, <code>After</code> on the replica, a subscription, <code>/_changes</code>, a tenant and a scoped token; the query builder against every case of <code>integrations/builder-golden.json</code>, and its queries' answers against the same statements sent as text</td><td><code>make go-test</code></td></tr>
 <tr><td>.NET</td><td>the same, with xunit</td><td><code>make dotnet-test</code></td></tr>
 <tr><td>Python client</td><td>the query builder against every case of <code>integrations/builder-golden.json</code>, sync and async, and its queries' answers against the same statements sent as text</td><td><code>make python-test</code></td></tr>

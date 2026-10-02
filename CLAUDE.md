@@ -16,9 +16,11 @@ make test          # cargo test (no fenec-bench, no examples), fenec-core withou
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
+make wasm-replica  # the module sync() loads: no graph, no schema check, to web/fenec-replica.wasm
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
+make wasm-exact-speed   # near without the graph (the replica's module), 1k-50k rows x 128/384, against the graph and exact
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
@@ -122,9 +124,11 @@ case, as the standard library's, without its code), `time` (calendar arithmetic)
 `std-fs` feature), `off` (what stands in for an index a build is made
 without).
 
-The browser client is `web/fenec.js` — WASM glue (~480 lines), the query builder,
-the HTTP client and the sync layer, in one dependency-free ES module. `web/fenec.d.ts`
-holds the types; `fenec types <file>` generates schema-specific declarations.
+The browser client is `web/fenec.js` — WASM glue (~480 lines), persistence and
+the sync layer -- with the query builder (`web/builder.js`) and the HTTP client
+(`web/http.js`) in dependency-free ES modules of their own, which it imports
+and re-exports, and `web/client.js` the two alone (`@fenecdb/web/client`).
+`web/fenec.d.ts` and `web/client.d.ts` hold the types; `fenec types <file>` generates schema-specific declarations.
 `persist`/`restore` keep a database in IndexedDB as a file would hold it: an
 image, then the writes since as chunks, from the journal `fenec_journal` starts
 and `fenec_drain` empties (off until asked for -- a page that never drains would
@@ -1042,17 +1046,18 @@ at 768 dimensions. Neither changes a bit of the graph.
 **The indexes are features, and a build without one opens a file that
 declares it.** `fenec-core`'s `vector`, `text`, `sparse` and `sorted` (the
 four are `indexes`, on by default) are what a browser module may leave out:
-`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 138.1 KB
-brotli with all four, 106.1 with none, and `make wasm-sizes` measures the
-sixteen sets. What stands in for a missing one is a type of no value with
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none -- 173.7 KB
+brotli with all four, 138.2 with none (each with the schema check), and
+`make wasm-sizes` measures the sixteen sets. What stands in for a missing one is a type of no value with
 the real one's methods (`off.rs`: a field of an empty enum), so the engine
 compiles unchanged and the compiler drops every path through it; only the
 places that make one are `cfg`'d (`Collection::new`,
 `reset_index_structures`, `build_index`, the maintenance build). The file
 does not change with the build: a collection declaring the index is made
-and opened and its documents read and written, `near`, `match` and a sparse
-`near` over it are refused naming the feature (`not_built`), and so is a
-`create index` of its kind -- while one replayed from the log is taken and
+and opened and its documents read and written, a `near` over it measures
+every vector and a sparse `near` scores every document, as `exact` does
+(below), a `match` over it is refused naming the feature (`not_built`), and
+so is a `create index` of its kind -- while one replayed from the log is taken and
 not built, since refusing it would refuse the file. A `@sorted` field's
 comparisons and orders are the scan's, the same rows, so which types it
 takes is the type's answer in both builds (`sorted::orderable`). A graph in
@@ -1067,9 +1072,54 @@ itself (the workspace takes it without default features), and `fenec-ql`
 only as a dev dependency -- in its normal ones it would put them back into
 every browser module.
 `tests/features.rs` and the unit tests run without them in `make test`,
-`web/fenec.test.js` hands files between the full module and the one
-`make wasm-lite` makes, both ways, and CI runs clippy over none and each
-alone.
+`web/fenec.test.js` hands files between the full module and the ones
+`make wasm-lite` and `make wasm-replica` make, both ways, and CI runs clippy
+over none and each alone.
+
+**Three modules and a client entry, by where the queries run.**
+`@fenecdb/web` ships `fenec.wasm` (every index and the schema check,
+173.7 KB brotli), `fenec-replica.wasm` (`make wasm-replica`: text, sparse
+and sorted, no graph and no schema check, 146.9 KB) and `fenec-lite.wasm`
+(no index, no schema check, 130.5 KB), and `@fenecdb/web/client`, which
+is `web/client.js`: the builder (`builder.js`) and the HTTP client
+(`http.js`) re-exported, the two modules `fenec.js` imports beside its
+glue, persistence and sync -- an app bundling `connect` and a builder
+query's rows is 5.7 KB brotli through it and 8.2 through `fenec.js`,
+whose `Fenec` class a bundler cannot drop (its static block is a side
+effect). `web/fenec.client.test.js` walks the client's imports and fails
+if they reach anything but those three files or hold the module's glue,
+`FenecSync`, IndexedDB or files. `FenecHttp.live` is `Fenec.live`'s
+contract over a server: a subscription to each collection the query reads
+of a shape that holds nothing (`select=id&where=false`), every change a
+write to it, the query run again on the server; the first rows wait for
+every seed, a stream that ends is opened again and its seed runs the
+query, and a text names what it reads or is refused -- so `useLiveQuery`
+takes `connect()` as it takes `sync()`. `FenecHttp` calls `fetch` on its
+own (`#request`): as its method, a browser's `fetch` throws "Illegal
+invocation", which Node's does not. `sync()` opens
+`./fenec-replica.wasm` unless given `wasm` or `local`. Without `vector`,
+`near` over a field declaring `@hnsw` is `Database::near_stored`: every
+vector read out of the store and measured as the full build's exact
+search measures its arena (`vector::search_stored`: made a unit one as
+`Arena::push` makes it, halved for f16, the same kernel, the page kept
+through `best_first`, ties in id order -- the arena's when its nodes are
+in id order), or over codes by `order_exactly` as the full build's exact
+search over codes is, a bit index taken to hold its vectors whole while
+fewer than `BIT_TRAIN` distinct ones are stored (`stored_hash`); its
+tombstones, which count there, are not known here. Without `sparse`, a
+sparse `near` takes the `exact` scan. `match` without `text` is refused:
+BM25 needs the index's statistics. `web/fenec.test.js` holds the replica
+and lite modules' `near` to the full one's `near ... exact` over 9
+declarations, filters and pages, row for row and score for score. The scan
+costs the modules without the graph 2.2 KB brotli; at 10 000 x 128 it takes
+3.4 ms against 0.3 through a graph and 0.7 for the full module's exact
+scan, at 50 000 x 384 40, 1.0 and 5.3 (`make wasm-exact-speed`): each
+vector is read out of its document and made a unit one per query, four
+lengths summed side by side (`flat_sqs4`; 4.3 -> 3.3 ms), where the arena
+holds them made. An f16 field's vector goes into the arena as its record
+holds it (`VectorIndex::as_held` in `place`): placed as written, cosine
+made other unit vectors than an open did, and `near ... exact` scored
+differently after a reopen.
 
 **The browser module holds one copy of a generic where it can.** Every
 type a sort, a map or a `collect` is compiled for is its own copy of the

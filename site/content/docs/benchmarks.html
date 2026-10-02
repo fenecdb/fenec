@@ -49,14 +49,18 @@ pgvector</a>).</p>
 </div>
 
 <p><b>What the browser downloads:</b> the WebAssembly module and the
-JavaScript client (<a href="#binary-size">Binary size</a>).</p>
+JavaScript client, or the client alone for an app whose queries run on a
+server (<a href="#binary-size">Binary size</a>, <a
+href="javascript.html#packages">Which package</a>).</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>What the page loads</th><th class="n">gzip</th></tr></thead>
+<thead><tr><th>What the page loads</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td>The WebAssembly module</td><td class="n"><b>180 KB</b></td></tr>
-<tr><td>The JavaScript client</td><td class="n">30 KB</td></tr>
+<tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>174 KB</b></td><td class="n">208 KB</td></tr>
+<tr><td>A replica's module, <code>fenec-replica.wasm</code></td><td class="n">147 KB</td><td class="n">176 KB</td></tr>
+<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">36 KB</td><td class="n">42 KB</td></tr>
+<tr><td>The client alone in an app's bundle, <code>@fenecdb/web/client</code></td><td class="n">6 KB</td><td class="n">—</td></tr>
 </tbody>
 </table>
 </div>
@@ -714,7 +718,8 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>209 KB brotli</b>.</p>
+the browser pays is <b>210 KB brotli</b>; for an app whose queries run on a
+server, the client alone in its bundle.</p>
 
 <div class="tbl">
 <table>
@@ -724,8 +729,11 @@ the browser pays is <b>209 KB brotli</b>.</p>
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1607 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>523 KB</b></td><td class="n"><b>174 KB</b></td><td class="n">208 KB</td></tr>
-<tr><td><code>web/fenec.js</code>, the client</td><td class="n">129 KB</td><td class="n">35 KB</td><td class="n">41 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>524 KB</b></td><td class="n"><b>174 KB</b></td><td class="n">208 KB</td></tr>
+<tr><td>wasm32, <code>fenec-replica.wasm</code>, no graph</td><td class="n">438 KB</td><td class="n">147 KB</td><td class="n">176 KB</td></tr>
+<tr><td>wasm32, <code>fenec-lite.wasm</code>, no index</td><td class="n">381 KB</td><td class="n">131 KB</td><td class="n">155 KB</td></tr>
+<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">136 KB</td><td class="n">36 KB</td><td class="n">42 KB</td></tr>
+<tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -734,7 +742,7 @@ the browser pays is <b>209 KB brotli</b>.</p>
 <details class="deep"><summary>Method and details</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>209 KB brotli</b> for both together. A binary you execute and an image
+<b>210 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 
@@ -810,30 +818,33 @@ WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 
 <h2 id="module-features">The browser module, index by index</h2>
 
-<p>A page that does not search vectors, or text, can load a smaller module
-built without that index. Leaving all four indexes out saves 32.1 KB
-brotli, 23% of the module.</p>
+<p>A page that does not search text, or needs no graph behind its vector
+search, can load a smaller module built without that index. Leaving all four
+indexes out saves 35.5 KB brotli, 20% of the module; without the graph a
+<code>near</code> still answers, every vector measured, which is what a
+replica's module does (<code>fenec-replica.wasm</code>: text, sparse and
+sorted, no schema check).</p>
 
 <div class="tbl">
 <table>
 <thead><tr><th>Built with</th><th class="n">On disk, KB</th><th class="n">Brotli, KB</th><th class="n">gzip, KB</th><th class="n">Brotli saved</th></tr></thead>
 <tbody>
-<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">415.7</td><td class="n">138.1</td><td class="n">164.5</td><td class="n">—</td></tr>
-<tr><td><code>vector text sparse</code></td><td class="n">388.6</td><td class="n">131.2</td><td class="n">155.6</td><td class="n">7.0</td></tr>
-<tr><td><code>vector text sorted</code></td><td class="n">411.3</td><td class="n">136.8</td><td class="n">162.9</td><td class="n">1.3</td></tr>
-<tr><td><code>vector sparse sorted</code></td><td class="n">399.9</td><td class="n">133.9</td><td class="n">159.2</td><td class="n">4.2</td></tr>
-<tr><td><code>text sparse sorted</code></td><td class="n">361.2</td><td class="n">121.4</td><td class="n">144.0</td><td class="n">16.8</td></tr>
-<tr><td><code>vector text</code></td><td class="n">383.1</td><td class="n">129.6</td><td class="n">153.2</td><td class="n">8.6</td></tr>
-<tr><td><code>vector sparse</code></td><td class="n">372.0</td><td class="n">126.7</td><td class="n">149.7</td><td class="n">11.5</td></tr>
-<tr><td><code>vector sorted</code></td><td class="n">393.1</td><td class="n">131.8</td><td class="n">156.5</td><td class="n">6.3</td></tr>
-<tr><td><code>text sparse</code></td><td class="n">333.3</td><td class="n">114.0</td><td class="n">134.9</td><td class="n">24.1</td></tr>
-<tr><td><code>text sorted</code></td><td class="n">355.8</td><td class="n">119.7</td><td class="n">141.8</td><td class="n">18.5</td></tr>
-<tr><td><code>sparse sorted</code></td><td class="n">342.7</td><td class="n">116.0</td><td class="n">137.4</td><td class="n">22.1</td></tr>
-<tr><td><code>vector</code></td><td class="n">365.0</td><td class="n">124.3</td><td class="n">146.8</td><td class="n">13.9</td></tr>
-<tr><td><code>text</code></td><td class="n">327.6</td><td class="n">112.2</td><td class="n">132.4</td><td class="n">26.0</td></tr>
-<tr><td><code>sparse</code></td><td class="n">314.7</td><td class="n">108.5</td><td class="n">128.0</td><td class="n">29.7</td></tr>
-<tr><td><code>sorted</code></td><td class="n">335.7</td><td class="n">113.7</td><td class="n">134.7</td><td class="n">24.4</td></tr>
-<tr><td>none, <code>FEATURES=none</code></td><td class="n">307.5</td><td class="n">106.1</td><td class="n">124.8</td><td class="n">32.1</td></tr>
+<tr><td><code>vector text sparse sorted</code>, <code>make wasm</code></td><td class="n">523.6</td><td class="n">173.7</td><td class="n">208.5</td><td class="n">—</td></tr>
+<tr><td><code>vector text sparse</code></td><td class="n">493.1</td><td class="n">165.5</td><td class="n">198.1</td><td class="n">8.2</td></tr>
+<tr><td><code>vector text sorted</code></td><td class="n">519.1</td><td class="n">172.3</td><td class="n">206.6</td><td class="n">1.4</td></tr>
+<tr><td><code>vector sparse sorted</code></td><td class="n">507.8</td><td class="n">169.3</td><td class="n">203.0</td><td class="n">4.4</td></tr>
+<tr><td><code>text sparse sorted</code></td><td class="n">460.4</td><td class="n">154.6</td><td class="n">184.9</td><td class="n">19.1</td></tr>
+<tr><td><code>vector text</code></td><td class="n">487.4</td><td class="n">163.7</td><td class="n">195.4</td><td class="n">10.0</td></tr>
+<tr><td><code>vector sparse</code></td><td class="n">476.6</td><td class="n">160.9</td><td class="n">192.0</td><td class="n">12.8</td></tr>
+<tr><td><code>vector sorted</code></td><td class="n">501.0</td><td class="n">167.2</td><td class="n">200.3</td><td class="n">6.5</td></tr>
+<tr><td><code>text sparse</code></td><td class="n">429.1</td><td class="n">146.0</td><td class="n">173.9</td><td class="n">27.8</td></tr>
+<tr><td><code>text sorted</code></td><td class="n">455.0</td><td class="n">152.9</td><td class="n">182.7</td><td class="n">20.8</td></tr>
+<tr><td><code>sparse sorted</code></td><td class="n">442.8</td><td class="n">149.5</td><td class="n">178.4</td><td class="n">24.2</td></tr>
+<tr><td><code>vector</code></td><td class="n">469.3</td><td class="n">158.6</td><td class="n">189.0</td><td class="n">15.1</td></tr>
+<tr><td><code>text</code></td><td class="n">423.2</td><td class="n">143.9</td><td class="n">171.3</td><td class="n">29.9</td></tr>
+<tr><td><code>sparse</code></td><td class="n">411.3</td><td class="n">140.8</td><td class="n">167.5</td><td class="n">32.9</td></tr>
+<tr><td><code>sorted</code></td><td class="n">435.7</td><td class="n">147.1</td><td class="n">175.6</td><td class="n">26.6</td></tr>
+<tr><td>none, <code>FEATURES=none</code></td><td class="n">403.9</td><td class="n">138.2</td><td class="n">164.2</td><td class="n">35.5</td></tr>
 </tbody>
 </table>
 </div>
@@ -846,10 +857,39 @@ smaller module</a>): <code>make wasm FEATURES="text sorted"</code>, and
 What stands in for a missing index is a type no value can have, so the
 compiler drops the index whole, and the engine's paths through it with it.</p>
 
-<p>Left out alone, the graph saves 16.8 KB brotli, the ordered index 7.0,
-the text index 4.2 and the sparse index 1.3, since the sort and the map it
-ranks through are the other indexes' too; built alone it adds 2.4. All four
-save 32.1 KB, 23% of the module. Making them optional cost the module with
-every index nothing: it came out the size it had been before any could be
-left out, to the byte.</p>
+<p>Left out alone, the graph saves 19.1 KB brotli, the ordered index 8.2,
+the text index 4.4 and the sparse index 1.4, since the sort and the map it
+ranks through are the other indexes' too; built alone it adds 2.6. All four
+save 35.5 KB, 20% of the module. Each row is built with the schema check,
+as <code>make wasm</code> builds it; <code>fenec-lite.wasm</code> leaves
+that out too. Making the indexes optional cost the module with every index
+nothing: it came out the size it had been before any could be left out, to
+the byte.</p>
+
+<p>Without the graph a <code>near</code> measures every vector, as
+<code>near ... exact</code> does in the full module, with the same rows and
+scores: the scan cost the modules without it 2.2 KB brotli. Measured with
+<code>make wasm-exact-speed</code> in Node, the median of 50 queries,
+<code>limit 10</code>, over clustered vectors under cosine:</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Rows × dimensions</th><th class="n">Through the graph</th><th class="n">Exact, full module</th><th class="n">No graph, <code>fenec-replica.wasm</code></th></tr></thead>
+<tbody>
+<tr><td>1 000 × 128</td><td class="n">0.27 ms</td><td class="n">0.24 ms</td><td class="n">0.54 ms</td></tr>
+<tr><td>10 000 × 128</td><td class="n">0.32 ms</td><td class="n">0.69 ms</td><td class="n">3.4 ms</td></tr>
+<tr><td>50 000 × 128</td><td class="n">0.45 ms</td><td class="n">2.6 ms</td><td class="n">16.4 ms</td></tr>
+<tr><td>1 000 × 384</td><td class="n">0.66 ms</td><td class="n">0.63 ms</td><td class="n">1.2 ms</td></tr>
+<tr><td>10 000 × 384</td><td class="n">0.68 ms</td><td class="n">1.5 ms</td><td class="n">8.5 ms</td></tr>
+<tr><td>50 000 × 384</td><td class="n">0.98 ms</td><td class="n">5.3 ms</td><td class="n">39.6 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The full module's exact scan reads its arena, the vectors already made
+unit ones; without the graph each is read out of its document and made one
+for the query, four lengths summed side by side, which is the rest of the
+difference. A replica's shape of a few thousand rows answers in a
+millisecond or two; past tens of thousands, <code>sync({ wasm:
+'./fenec.wasm' })</code> keeps the graph.</p>
 </details>

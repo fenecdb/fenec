@@ -112,16 +112,19 @@ Five minutes from clone to a vector query:
 ./target/release/fenec data.fenec -c 'get docs limit 5'
 ```
 
-**Browser.** One dependency-free ES module and the wasm file beside it:
+**Browser.** Dependency-free ES modules and the wasm file beside them:
 
 ```js
 import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-208 KB of gzipped WebAssembly and a 41 KB gzipped client — no wasm-bindgen, no
-build step — and smaller built without the four indexes for a page that uses
-none of them (`make wasm FEATURES=none`, or any set of them). With live
+208 KB of gzipped WebAssembly and a 42 KB gzipped client — no wasm-bindgen, no
+build step. A synced replica loads a module without the graph, whose `near`
+measures every vector (`fenec-replica.wasm`), a page that uses no index one
+without any (`fenec-lite.wasm`), and an app whose queries run on a server no
+module at all: `@fenecdb/web/client`, 6 KB brotli in its bundle
+([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
 no server: [state in the page](https://fenecdb.com/docs/javascript#state). [JavaScript client](https://fenecdb.com/docs/javascript).
 
@@ -220,7 +223,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 208 KB gzip wasm + 41 KB gzip client · 1331–1897 KB binary · 2.99 MB container image |
+| **Runtime size** | 208 KB gzip wasm + 42 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

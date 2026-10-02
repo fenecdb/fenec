@@ -31,10 +31,34 @@ const stop = db.live(db.from('tasks').order('priority', 'desc'), draw);
 await db.from('tasks').insert({ title: 'new', status: 'open' });
 </pre>
 
+<ul>
+  <li><b>The replica loads <code>fenec-replica.wasm</code></b> unless given
+    a module: 147 KB brotli against the full module's 174, with no graph.
+    Its <code>near</code> measures every vector of the shape, as
+    <code>near ... exact</code> does, and answers the same rows and scores;
+    <code>match</code>, sparse <code>near</code> and ordered indexes are all
+    there (<a href="javascript.html#packages">Which package</a>).</li>
+  <li><b>A shape of tens of thousands of vectors</b> wants the graph back:
+    <code>sync({ wasm: './fenec.wasm', ... })</code>. A <code>near</code>
+    measured over 50 000 rows of 384 dimensions takes 40 ms, against 1.0
+    through a graph.</li>
+</ul>
+
 <details class="deep"><summary>Details</summary>
 <p>A copy on the client, changes streaming from the server, optimistic
 writes. In fenecdb that is not a library — it is an endpoint and a transport,
 because the same engine already runs on both sides.</p>
+
+<p>The replica's module is the engine built with the text, sparse and
+ordered indexes and without the HNSW graph and the check of a schema
+declared in code, which a replica asks of the server: <code>make
+wasm-replica</code>. A file moves between it and the full module both
+ways, so <code>persist</code> and <code>openFile</code> keep a replica
+either one can open. With no module given, <code>sync</code> opens
+<code>./fenec-replica.wasm</code> beside the page, its collation data from
+<code>collate/</code> beside it; <code>wasm</code> takes another URL, the
+bytes or a compiled module, and <code>local</code> a database already
+open.</p>
 
 <p>The query code does not change. <code>db.from(...)</code> is the same
 builder producing the same FenecQL; the only difference is where it is
