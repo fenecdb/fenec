@@ -72,3 +72,7 @@ package by its repository, so the manifest lives there. It takes the
 XCFramework from `integrations/swift/build/` when it is there and from the
 release's download otherwise. `build-xcframework.sh` alone builds every
 slice: macOS (arm64, x86_64), iOS, and the simulator (arm64, x86_64).
+It then runs the tests again with Swift's cooperative pool cut to one
+thread (`test-strict.sh`, `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`), where
+a call that blocks a thread of the pool hangs at once rather than now and
+then on a device of few cores; a run that hangs is sampled and fails.

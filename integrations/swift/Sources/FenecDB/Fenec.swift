@@ -103,7 +103,7 @@ public final class Fenec: @unchecked Sendable {
         if !closed {
             // The session holds its delegate, the replica, until it is let
             // go of: left running, its streams outlived the database.
-            replicaSync?.stop()
+            replicaSync?.stopNow()
             var out: UnsafeMutablePointer<CChar>?
             _ = fenec_close(handle, &out, nil)
             fenec_free_string(out)
@@ -272,7 +272,7 @@ public final class Fenec: @unchecked Sendable {
     /// Waits for the calls under way.
     public func close() async throws {
         if markClosed() { return }
-        syncing?.stop()
+        await syncing?.stop()
         await lives.clear()
         try await byHandle(.close)
     }

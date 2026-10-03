@@ -56,10 +56,15 @@ jobs:
       # The zip just built, linked into the tests on macOS and on a
       # simulator before its checksum goes anywhere. The sync tests start a
       # fenec-server, as ci.yml's do.
+      # Bounded: a hung `swift test` held a runner for six hours.
+      # test-strict.sh runs them again with Swift's cooperative pool cut to
+      # one thread, where a call blocking a thread of it hangs at once.
       - name: Swift (macOS, iOS simulator)
+        timeout-minutes: 30
         run: |
           cargo build -p fenec-server
           swift test
+          integrations/swift/test-strict.sh
           integrations/swift/test-ios.sh
 
       - uses: actions/upload-artifact@v7

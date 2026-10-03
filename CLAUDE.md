@@ -25,7 +25,7 @@ make ffi           # the native library for apps (crates/fenec-ffi) for this mac
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
 make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
-make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server)
+make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server), then again on one cooperative thread
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
 make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
