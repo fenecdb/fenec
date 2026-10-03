@@ -142,7 +142,7 @@ description: One database from the screen to the server: state your screens foll
       for state that outlives a keystroke: keep a text box's typing in the
       component, and write when the user saves.</p>
 
-    <pre data-lang="ts">// React
+    <pre data-lang="text">// React
 const open = useLiveQuery(db.from('todos').where('done', false));
 
 // SwiftUI: a LiveQuery is an ObservableObject
