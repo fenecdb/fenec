@@ -68,16 +68,17 @@ description: One database from the screen to the server: state your screens foll
             <rect x="-60" y="-60" width="600" height="520" fill="url(#fade)"/>
           </mask>
         </defs>
-        <!-- The rings: one from each ear, a fainter one behind it. The ear tips
+        <!-- The rings: one from each ear, a fainter one behind it, each a faint
+             line with the mark's light running around it. The ear tips
              are the mark's (6 4) and (58 4) at the scale below. -->
         <g class="ears-moving" mask="url(#reach)">
-          <g transform="translate(172.4 132.2)"><circle class="ring" r="250"/><circle class="ring late" r="250"/></g>
-          <g transform="translate(307.6 132.2)"><circle class="ring" r="250"/><circle class="ring late" r="250"/></g>
+          <g transform="translate(172.4 132.2)"><g class="ring"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g><g class="ring late"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g></g>
+          <g transform="translate(307.6 132.2)"><g class="ring right"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g><g class="ring right late"><circle class="ring-line" r="250"/><circle class="ring-light" r="250" pathLength="1"/></g></g>
         </g>
         <!-- Reduced motion: the rings where they stand a moment after leaving. -->
         <g class="ears-still" mask="url(#reach)">
-          <g transform="translate(172.4 132.2)"><circle class="ring" r="100"/><circle class="ring far" r="200"/></g>
-          <g transform="translate(307.6 132.2)"><circle class="ring" r="100"/><circle class="ring far" r="200"/></g>
+          <g transform="translate(172.4 132.2)"><g class="ring"><circle class="ring-line" r="100"/><circle class="ring-light" r="100" pathLength="1"/></g><g class="ring far"><circle class="ring-line" r="200"/><circle class="ring-light" r="200" pathLength="1"/></g></g>
+          <g transform="translate(307.6 132.2)"><g class="ring"><circle class="ring-line" r="100"/><circle class="ring-light" r="100" pathLength="1"/></g><g class="ring far"><circle class="ring-line" r="200"/><circle class="ring-light" r="200" pathLength="1"/></g></g>
         </g>
         <circle class="tip" cx="172.4" cy="132.2" r="5"/>
         <circle class="tip" cx="307.6" cy="132.2" r="5"/>
@@ -117,6 +118,7 @@ description: One database from the screen to the server: state your screens foll
         <!-- The fennec, from the logo's own table (fennec.js). -->
         <g transform="translate(156.8 121.8) scale(2.6)">
           <path class="fennec" d="{{mark_lines}}"/>
+          {{mark_light}}
         </g>
       </svg>
     </div>

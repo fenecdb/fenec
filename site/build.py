@@ -725,6 +725,9 @@ MARK = _mark("mark-detail.svg", "mark")
 # and in its own line weight: the same table, so the two cannot drift.
 MARK_LINES = re.search(r'<path d="([^"]+)"', open(os.path.join(ROOT, "mark.svg"), encoding="utf-8").read()).group(1)
 MARK_DETAIL = _mark("mark-detail.svg", "mark mark-detail")
+# The light that runs through the mark's edges, each with its delay, for the
+# hero to run again every cycle as the header runs it once.
+MARK_LIGHT = re.search(r'<g class="mark-light".*?</g>', open(os.path.join(ROOT, "mark-detail.svg"), encoding="utf-8").read(), re.S).group(0)
 
 
 def build():
@@ -875,7 +878,7 @@ def build():
             shell = f'<main id="content">{body}</main>'
         page = page.replace("{{content}}", shell)
         page = page.replace("{{mark}}", MARK).replace("{{mark_detail}}", MARK_DETAIL)
-        page = page.replace("{{mark_lines}}", MARK_LINES)
+        page = page.replace("{{mark_lines}}", MARK_LINES).replace("{{mark_light}}", MARK_LIGHT)
 
         for plain, hashed in assets.items():
             page = page.replace(plain, hashed)
