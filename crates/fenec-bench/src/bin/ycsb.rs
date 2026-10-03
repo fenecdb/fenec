@@ -444,6 +444,11 @@ trait System {
     fn load(&mut self, records: u64);
     fn set_mode(&mut self, mode: Mode);
     fn client(&self) -> Box<dyn Client>;
+    /// The bytes the data takes on disk, where they can be read: an
+    /// engine that writes a record again elsewhere grows by every update.
+    fn size(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A record's values: the same for every system, drawn from its key.
@@ -513,7 +518,13 @@ impl System for FenecLocal {
     fn name(&self) -> &'static str {
         "fenec"
     }
+    fn size(&self) -> Option<u64> {
+        std::fs::metadata(self.dir.join("ycsb.fenec")).ok().map(|m| m.len())
+    }
     fn load(&mut self, records: u64) {
+        // A load starts afresh: the syncer holds the database it replaces.
+        self.stop_syncer();
+        self.db = None;
         let path = self.dir.join("ycsb.fenec");
         let _ = std::fs::remove_file(&path);
         let mut db = fenec_core::fs::open(&path).unwrap();
@@ -684,6 +695,14 @@ fn sqlite_conn(path: &Path, durable: bool) -> rusqlite::Connection {
 impl System for Sqlite {
     fn name(&self) -> &'static str {
         "sqlite"
+    }
+    fn size(&self) -> Option<u64> {
+        let len = |ext: &str| {
+            std::fs::metadata(format!("{}{ext}", self.path.display()))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        Some(len("") + len("-wal"))
     }
     fn load(&mut self, records: u64) {
         for ext in ["", "-wal", "-shm"] {
@@ -885,6 +904,15 @@ impl System for Server {
             "server"
         }
     }
+    fn size(&self) -> Option<u64> {
+        // The container's file is in the VM's volume, out of reach here.
+        match self.docker {
+            true => None,
+            false => std::fs::metadata(self.dir.join("ycsb-server.fenec"))
+                .ok()
+                .map(|m| m.len()),
+        }
+    }
     fn load(&mut self, records: u64) {
         if self.docker {
             self.stop();
@@ -1056,6 +1084,15 @@ impl System for Pg {
     fn name(&self) -> &'static str {
         "pg"
     }
+    fn size(&self) -> Option<u64> {
+        // The table, its TOAST and its primary key; the WAL apart.
+        let mut c = postgres::Client::connect(&self.url, postgres::NoTls).ok()?;
+        let n: i64 = c
+            .query_one("SELECT pg_total_relation_size('usertable')", &[])
+            .ok()?
+            .get(0);
+        Some(n as u64)
+    }
     fn load(&mut self, records: u64) {
         let mut c = postgres::Client::connect(&self.url, postgres::NoTls).unwrap();
         let fields: Vec<String> = (0..FIELDS).map(|i| format!("field{i} text")).collect();
@@ -1218,6 +1255,23 @@ fn mongo_doc(key: u64, values: &[String]) -> Document {
 impl System for Mongo {
     fn name(&self) -> &'static str {
         "mongo"
+    }
+    fn size(&self) -> Option<u64> {
+        // The collection's files and its _id index, as WiredTiger holds
+        // them compressed.
+        let d = self
+            .client
+            .database("ycsb")
+            .run_command(doc! {"collStats": "usertable"})
+            .run()
+            .ok()?;
+        let num = |k: &str| match d.get(k) {
+            Some(mongodb::bson::Bson::Int32(n)) => *n as u64,
+            Some(mongodb::bson::Bson::Int64(n)) => *n as u64,
+            Some(mongodb::bson::Bson::Double(n)) => *n as u64,
+            _ => 0,
+        };
+        Some(num("storageSize") + num("totalIndexSize"))
     }
     fn load(&mut self, records: u64) {
         let coll = self.coll(false);
@@ -1557,92 +1611,161 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
     std::fs::create_dir_all(&dir).unwrap();
     let mut sys = make_system(name, &dir, cfg);
     assert_eq!(sys.name(), name);
-    let ratio = cool(base, Duration::from_secs(5));
-    eprintln!("{name}: loading {} records", cfg.records);
-    let t = Instant::now();
-    sys.load(cfg.records);
-    let secs = t.elapsed().as_secs_f64();
-    let rate = cfg.records as f64 / secs;
-    eprintln!("{name}: loaded at {rate:.0} records/s");
-    append(
-        &cfg.out,
-        &format!(
-            "{}\t{name}\t-\tload\t1\t{}\t{secs:.2}\t{}\t{rate:.0}\t{ratio:.3}",
-            cfg.run_id, cfg.records, cfg.records
-        ),
-    );
-    // The round trip of the least request, 2 000 of them after 200.
-    let mut c = sys.client();
-    if c.ping() {
-        let mut h = Hist::new();
-        for i in 0..2_200 {
-            let t = Instant::now();
-            c.ping();
-            if i >= 200 {
-                h.record(t.elapsed().as_nanos() as u64);
-            }
-        }
-        eprintln!("{name}: the least request's round trip p50 {:.1} us, p99 {:.1}", h.pct(0.5), h.pct(0.99));
-        let mut line = format!("{}\t{name}\t-\tping\t1\t{}\t0\t{}\t0\t{ratio:.3}", cfg.run_id, cfg.records, h.n);
-        write!(line, "\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}", h.n, h.pct(0.5), h.pct(0.95), h.pct(0.99), h.max as f64 / 1e3).unwrap();
-        for _ in 1..OPS.len() {
-            line.push_str("\t0\t\t\t\t");
-        }
-        append(&cfg.out, &line);
-    }
-    drop(c);
-    let mut records = cfg.records;
+    let mut pinged = false;
     for &mode in &cfg.modes {
-        sys.set_mode(mode);
-        for w in WORKLOADS.iter().filter(|w| cfg.workloads.contains(&w.name)) {
-            // C writes nothing: one mode measures it.
-            if w.name == 'C' && mode == Mode::Durable && cfg.modes.contains(&Mode::Buffered) {
+        // YCSB's own sequence: load, then A, B, C, F and D over that
+        // data, then load afresh for E. Run after the others, E's scans
+        // read records an update rewrote somewhere else -- fenecdb writes
+        // the whole record again at its file's end -- and measured that
+        // rather than the workload: its buffered scans went 3 108 -> 795
+        // ops/s in the run that showed it.
+        for phase in ["ABCFD", "E"] {
+            let order: Vec<&Workload> = phase
+                .chars()
+                .filter(|c| cfg.workloads.contains(c))
+                // C writes nothing: one mode measures it.
+                .filter(|c| {
+                    !(*c == 'C' && mode == Mode::Durable && cfg.modes.contains(&Mode::Buffered))
+                })
+                .map(|c| WORKLOADS.iter().find(|w| w.name == c).unwrap())
+                .collect();
+            if order.is_empty() {
                 continue;
             }
-            for &threads in &cfg.threads {
-                let ratio = cool(base, cfg.gap);
-                let (cell, now) = run_cell(sys.as_ref(), w, threads, records, cfg);
-                records = now;
-                let secs = cfg.run.as_secs_f64();
-                let mut line = format!(
-                    "{}\t{name}\t{}\t{}\t{threads}\t{records}\t{secs:.0}\t{}\t{:.0}\t{ratio:.3}",
+            let ratio = cool(base, cfg.gap);
+            eprintln!("{name}: loading {} records", cfg.records);
+            let t = Instant::now();
+            sys.load(cfg.records);
+            let secs = t.elapsed().as_secs_f64();
+            let rate = cfg.records as f64 / secs;
+            eprintln!("{name}: loaded at {rate:.0} records/s");
+            append(
+                &cfg.out,
+                &format!(
+                    "{}\t{name}\t{}\tload\t1\t{}\t{secs:.2}\t{}\t{rate:.0}\t{ratio:.3}",
                     cfg.run_id,
                     mode.name(),
-                    w.name,
-                    cell.ops,
-                    cell.ops as f64 / secs
-                );
-                let mut summary = String::new();
-                for op in OPS {
-                    match cell.hist.get(&op) {
-                        Some(h) if h.n > 0 => {
-                            write!(
-                                line,
-                                "\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
-                                h.n,
-                                h.pct(0.5),
-                                h.pct(0.95),
-                                h.pct(0.99),
-                                h.max as f64 / 1e3
-                            )
-                            .unwrap();
-                            write!(summary, " {} p99 {:.0}us", op.name(), h.pct(0.99)).unwrap();
-                        }
-                        _ => line.push_str("\t0\t\t\t\t"),
-                    }
+                    cfg.records,
+                    cfg.records
+                ),
+            );
+            if !pinged {
+                pinged = true;
+                ping(sys.as_ref(), name, cfg, ratio);
+            }
+            sys.set_mode(mode);
+            let mut records = cfg.records;
+            for w in order {
+                for &threads in &cfg.threads {
+                    let ratio = cool(base, cfg.gap);
+                    let (cell, now) = run_cell(sys.as_ref(), w, threads, records, cfg);
+                    records = now;
+                    write_cell(name, mode, w, threads, records, &cell, ratio, cfg, run);
                 }
-                append(&cfg.out, &line);
-                eprintln!(
-                    "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2})",
-                    mode.name(),
-                    w.name,
-                    cell.ops as f64 / secs
+            }
+            if let Some(bytes) = sys.size() {
+                eprintln!("{name}: {} MB on disk after {phase}", bytes >> 20);
+                append(
+                    &cfg.out,
+                    &format!(
+                        "{}\t{name}\t{}\tsize-{phase}\t1\t{records}\t0\t{bytes}\t0\t0",
+                        cfg.run_id,
+                        mode.name()
+                    ),
                 );
             }
         }
     }
     drop(sys);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The round trip of the least request, 2 000 of them after 200.
+fn ping(sys: &dyn System, name: &str, cfg: &Config, ratio: f64) {
+    let mut c = sys.client();
+    if !c.ping() {
+        return;
+    }
+    let mut h = Hist::new();
+    for i in 0..2_200 {
+        let t = Instant::now();
+        c.ping();
+        if i >= 200 {
+            h.record(t.elapsed().as_nanos() as u64);
+        }
+    }
+    eprintln!(
+        "{name}: the least request's round trip p50 {:.1} us, p99 {:.1}",
+        h.pct(0.5),
+        h.pct(0.99)
+    );
+    let mut line = format!(
+        "{}\t{name}\t-\tping\t1\t{}\t0\t{}\t0\t{ratio:.3}",
+        cfg.run_id, cfg.records, h.n
+    );
+    write!(
+        line,
+        "\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+        h.n,
+        h.pct(0.5),
+        h.pct(0.95),
+        h.pct(0.99),
+        h.max as f64 / 1e3
+    )
+    .unwrap();
+    for _ in 1..OPS.len() {
+        line.push_str("\t0\t\t\t\t");
+    }
+    append(&cfg.out, &line);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_cell(
+    name: &str,
+    mode: Mode,
+    w: &Workload,
+    threads: usize,
+    records: u64,
+    cell: &Cell,
+    ratio: f64,
+    cfg: &Config,
+    run: usize,
+) {
+    let secs = cfg.run.as_secs_f64();
+    let mut line = format!(
+        "{}\t{name}\t{}\t{}\t{threads}\t{records}\t{secs:.0}\t{}\t{:.0}\t{ratio:.3}",
+        cfg.run_id,
+        mode.name(),
+        w.name,
+        cell.ops,
+        cell.ops as f64 / secs
+    );
+    let mut summary = String::new();
+    for op in OPS {
+        match cell.hist.get(&op) {
+            Some(h) if h.n > 0 => {
+                write!(
+                    line,
+                    "\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}",
+                    h.n,
+                    h.pct(0.5),
+                    h.pct(0.95),
+                    h.pct(0.99),
+                    h.max as f64 / 1e3
+                )
+                .unwrap();
+                write!(summary, " {} p99 {:.0}us", op.name(), h.pct(0.99)).unwrap();
+            }
+            _ => line.push_str("\t0\t\t\t\t"),
+        }
+    }
+    append(&cfg.out, &line);
+    eprintln!(
+        "run {run} {name} {} {} x{threads}: {:.0} ops/s{summary} (probe {ratio:.2})",
+        mode.name(),
+        w.name,
+        cell.ops as f64 / secs
+    );
 }
 
 // ----------------------------------------------------------------- report
