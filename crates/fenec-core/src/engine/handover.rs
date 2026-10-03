@@ -34,6 +34,13 @@ pub(super) struct Landed {
     at: u64,
 }
 
+impl Landed {
+    /// The collection, the run's length and where it starts.
+    pub(super) fn run(&self) -> (u32, u64, u64) {
+        (self.cid, self.len, self.at)
+    }
+}
+
 /// A handover also runs once this many runs are noted: a run is 24 bytes,
 /// and 16 MB of 100-byte documents written one at a time are 168 000 of
 /// them, 4 MB of notes.

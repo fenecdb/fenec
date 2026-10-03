@@ -34,6 +34,15 @@ pub(super) struct Tails {
 }
 
 impl Tails {
+    /// The ids written under the maintenance `token` since it was watched or
+    /// last drained, taken out of its tail; `None` once its collection's
+    /// schema changed or it is gone, which the maintenance will refuse.
+    #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+    fn drain(&mut self, token: u64) -> Option<Vec<DocId>> {
+        let t = self.list.iter_mut().find(|t| t.token == token)?;
+        (!t.schema).then(|| std::mem::take(&mut t.ids))
+    }
+
     /// Every collection changed under the maintenances: an image adopted.
     pub(super) fn all_changed(&mut self) {
         for t in &mut self.list {
@@ -136,6 +145,11 @@ struct Beside {
     /// it measures begins.
     head_at: u64,
     body_at: u64,
+    /// Where the records of the writes made meanwhile hold each store's
+    /// frames, as they are copied in: what the database hands over to its
+    /// file once the side file is.
+    landed: Vec<super::handover::Landed>,
+    landed_bytes: u64,
 }
 
 /// One collection of a [`Beside`], as it stood.
@@ -710,6 +724,8 @@ impl Database {
             reclaimed,
             head_at: 0,
             body_at: 0,
+            landed: Vec::new(),
+            landed_bytes: 0,
         }))
     }
 
@@ -736,31 +752,14 @@ impl Database {
                 "the collections changed while they were compacted; run `compact` again".into(),
             ));
         }
-        // Each document written meanwhile takes the state it has now, over
-        // the one the image holds, in a data record after it: inside the
-        // image, where the counter's header says it stands. The stores hold
-        // those frames alone in memory, and hand them over as the ones of a
-        // record appended later ([`Database::hand_over`]).
-        let (mut landed, mut landed_bytes) = (Vec::new(), 0);
+        // What was written since the last round of catching up: the rest of
+        // the image.
         for (p, t) in b.parts.iter_mut().zip(tails) {
             let live = &self.collections[&p.name];
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
-            let mut frames = Vec::new();
-            for id in ids {
-                match live.store.raw(id)? {
-                    Some(payload) => frames.extend(p.store.append(OP_PUT, id, payload)),
-                    None if p.store.contains(id) => frames.extend(p.store.append(OP_DEL, id, &[])),
-                    None => {}
-                }
-            }
-            if !frames.is_empty() {
-                b.side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
-                let at = b.side.at();
-                super::handover::note(&mut landed, &mut landed_bytes, p.cid, frames.len(), at);
-                b.side.write(&frames)?;
-            }
+            copy_writes(live, p, &ids, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
             // An id handed out and deleted meanwhile left no record; it must
             // not come back.
             let next = live.store.next_id();
@@ -786,8 +785,8 @@ impl Database {
         // A database read into memory hands nothing over to its file.
         match b.mapped {
             true => {
-                self.landed = landed;
-                self.landed_bytes = landed_bytes;
+                self.landed = std::mem::take(&mut b.landed);
+                self.landed_bytes = b.landed_bytes;
             }
             false => self.forget_landed(),
         }
@@ -823,8 +822,118 @@ impl Database {
     }
 }
 
+/// Copies into a rewrite written beside the database the writes made since
+/// it was taken, or since the last round: the ids drained from the tails at
+/// once, their documents copied a few thousand at a time under the read
+/// lock, which keeps the writers out -- and the readers behind a writer
+/// waiting for it, the lock being fair to writers: one round of 408 708
+/// ids held it 592 ms. A document written again after its copy is in the
+/// tail again, for the next round. How many ids it copied; the next round
+/// takes those written meanwhile, and the write lock only the last few.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
+    let drained: Vec<Option<Vec<DocId>>> = {
+        let g = read(db);
+        g.refuse_if_failed()?;
+        let mut tails = g.tails.lock().unwrap_or_else(|e| e.into_inner());
+        b.parts.iter().map(|p| tails.drain(p.token)).collect()
+    };
+    let mut copied = 0;
+    for (p, ids) in b.parts.iter_mut().zip(drained) {
+        // A schema change, or a collection gone: the finish refuses it.
+        let Some(mut ids) = ids else {
+            return Ok(0);
+        };
+        ids.sort_unstable();
+        ids.dedup();
+        copied += ids.len();
+        for chunk in ids.chunks(CATCH_UP_CHUNK) {
+            // The pages the chunk reads, brought in with no lock held: read
+            // under it, each a wait on the disk, a chunk of 4 096 held the
+            // read lock up to 291 ms, and the readers waited behind the
+            // writer waiting for it.
+            let places = read(db)
+                .collections
+                .get(&p.name)
+                .and_then(|c| c.store.places(chunk));
+            if let Some((base, at)) = places {
+                crate::fs::touch_at(&base, &at);
+            }
+            let g = read(db);
+            let Some(live) = g.collections.get(&p.name).filter(|c| c.id == p.cid) else {
+                return Ok(0);
+            };
+            copy_writes(live, p, chunk, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
+        }
+    }
+    Ok(copied)
+}
+
+/// Each document of `ids` (ascending, once each) takes the state it has
+/// now in `live`, over the
+/// one the image holds, in a data record appended to the side file: inside
+/// the image, where the counter's header says it stands. The store holds
+/// those frames alone in memory, and hands them over as the ones of a
+/// record appended later ([`Database::hand_over`]).
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+fn copy_writes(
+    live: &Collection,
+    p: &mut BesidePart,
+    ids: &[DocId],
+    side: &mut crate::fs::SideFile,
+    landed: &mut Vec<super::handover::Landed>,
+    landed_bytes: &mut u64,
+) -> Result<()> {
+    let mut frames = Vec::new();
+    for &id in ids {
+        match live.store.raw(id)? {
+            Some(payload) => frames.extend(p.store.append(OP_PUT, id, payload)),
+            None if p.store.contains(id) => frames.extend(p.store.append(OP_DEL, id, &[])),
+            None => {}
+        }
+    }
+    if !frames.is_empty() {
+        side.write(&record_head(REC_DATA, p.cid, frames.len()))?;
+        let at = side.at();
+        super::handover::note(landed, landed_bytes, p.cid, frames.len(), at);
+        side.write(&frames)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 impl Beside {
+    /// Hands the frames the catch-up copied into each store over to the
+    /// side file, as the database hands its own over to its file, with no
+    /// lock held. Left to the database, the first write after the swap
+    /// handed over the 400 MB the rounds had copied, under the write lock:
+    /// readers waited 158 ms.
+    fn hand_over(&mut self) -> Result<()> {
+        if !self.mapped || self.landed.is_empty() {
+            return Ok(());
+        }
+        let base = self.side.map()?;
+        let mut runs = Vec::new();
+        for p in &mut self.parts {
+            runs.clear();
+            runs.extend(
+                self.landed
+                    .iter()
+                    .map(|l| l.run())
+                    .filter(|r| r.0 == p.cid)
+                    .map(|(_, len, at)| (len, at)),
+            );
+            // A store that refuses keeps its frames, and its runs stay noted
+            // for the database's next handover.
+            if !runs.is_empty() && p.store.hand_over(&base, &runs) {
+                let cid = p.cid;
+                self.landed.retain(|l| l.run().0 != cid);
+            }
+        }
+        self.landed_bytes = self.landed.iter().map(|l| l.run().1).sum();
+        Ok(())
+    }
+
     /// Writes the image into the side file, with no lock held, in the
     /// layout `Database::image_into` writes, and points each store at it.
     fn write(&mut self) -> Result<()> {
@@ -886,6 +995,13 @@ impl Beside {
             return Ok(());
         }
         let base = side.map()?;
+        // Every page of the new file is touched here, with no lock held: left
+        // to the readers, the first read of each after the swap waited on its
+        // fault, the read p50 went from 2 to 100 us for two seconds and the
+        // updates from 150k to 4k a second. Touched here, 1.3 GB in 2.8 s.
+        if self.mapped {
+            crate::fs::touch(&base);
+        }
         for (p, at) in self.parts.iter_mut().zip(placed) {
             match at {
                 Some(at) if p.compact => p.store.relocate_live(&base, at),
@@ -1043,6 +1159,18 @@ fn compact_online(
     }
 }
 
+/// Rounds of catching up with the writes made meanwhile before the write
+/// lock is taken for the rest; each takes those written during the one
+/// before, and a round under `CATCH_UP_DONE` ids ends them.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+const CATCH_UP_ROUNDS: usize = 16;
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+const CATCH_UP_DONE: usize = 1_000;
+/// The documents a catch-up copies under one hold of the read lock: 4 096
+/// of 1 KB, about 6 ms.
+#[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
+const CATCH_UP_CHUNK: usize = 4_096;
+
 /// The rewrite a compact of a mapped file ends with: the live records
 /// written into a side file beside the database, the writes made meanwhile
 /// added under the write lock, and the side file put in the file's place.
@@ -1070,6 +1198,19 @@ fn rewrite_beside(
             };
             during();
             b.write()?;
+            // The writes made while the image was written are copied in under
+            // the read lock, a round at a time, and the side file synced with
+            // no lock held, until a round finds few: taken under the write
+            // lock all at once, the 200 000 updates a 4 s compact of a 1 GB
+            // file met held every reader 409 to 811 ms.
+            for _ in 0..CATCH_UP_ROUNDS {
+                let copied = catch_up(db, &mut b)?;
+                b.side.sync()?;
+                if copied < CATCH_UP_DONE {
+                    break;
+                }
+            }
+            b.hand_over()?;
             // The guard goes at the end of the statement, and the stores it
             // handed back after it.
             let r = write(db).finish_beside(b);
