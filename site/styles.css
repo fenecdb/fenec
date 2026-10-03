@@ -320,89 +320,12 @@ a:hover { color: var(--sun-hot); }
 }
 .btn-line:hover { border-color: var(--sun); background: rgba(244,169,60,.12); }
 
-/* ====================================================== the live instrument */
-
-.rig {
-  position: relative; z-index: 6;
-  margin: clamp(-120px, -14vw, -80px) auto 0; max-width: 1180px;
-  background: linear-gradient(160deg, var(--panel-2), var(--panel));
-  border: 1px solid var(--rule-hot); border-radius: 14px;
-  box-shadow: 0 40px 90px -30px rgba(0,0,0,.95), 0 0 0 1px rgba(244,169,60,.07) inset;
-  overflow: hidden;
-}
-/* Under its own heading in a section, the rig sits in the flow: the pull
-   upward is for a rig that overlaps the band above it, and here it covered
-   the heading. */
-.sub + .rig { margin-top: 0; }
-.rig-bar {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 13px 18px; border-bottom: 1px solid var(--rule);
-  font: 500 13px/1 var(--mono); color: var(--sand-dim);
-  background: rgba(0,0,0,.25);
-}
-.rig-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--sand-dim); flex: none; }
-.rig[data-state="running"] .rig-dot {
-  background: var(--sun); box-shadow: 0 0 0 0 rgba(244,169,60,.7); animation: pulse 1.3s infinite;
-}
+/* The playground's busy light. */
 @keyframes pulse {
   0%   { box-shadow: 0 0 0 0 rgba(244,169,60,.7); }
   70%  { box-shadow: 0 0 0 9px rgba(244,169,60,0); }
   100% { box-shadow: 0 0 0 0 rgba(244,169,60,0); }
 }
-.rig[data-state="done"] .rig-dot { background: var(--oasis); box-shadow: 0 0 12px rgba(79,224,196,.8); }
-.rig[data-state="failed"] .rig-dot { background: var(--ember); }
-.rig-note { margin-left: auto; }
-
-.rig-main { display: grid; grid-template-columns: minmax(0, 1fr) 268px; }
-@media (max-width: 900px) { .rig-main { grid-template-columns: 1fr; } }
-
-.field-wrap {
-  position: relative; border-right: 1px solid var(--rule);
-  aspect-ratio: 16 / 9; min-height: 300px;
-  background:
-    radial-gradient(75% 75% at 50% 50%, rgba(51,26,58,.7), transparent 70%),
-    #0A0717;
-}
-@media (max-width: 900px) { .field-wrap { border-right: 0; border-bottom: 1px solid var(--rule); } }
-.field { position: absolute; inset: 0; width: 100%; height: 100%; }
-.field-cap {
-  position: absolute; left: 16px; bottom: 13px; z-index: 2;
-  font: 400 12px/1.5 var(--mono); color: var(--sand-dim); pointer-events: none;
-  text-shadow: 0 1px 8px #000;
-}
-
-.rig-stats { display: grid; grid-auto-rows: 1fr; }
-.stat {
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 20px; border-bottom: 1px solid var(--rule);
-  position: relative; overflow: hidden;
-}
-.rig-stats .stat:last-child { border-bottom: 0; }
-.stat dt { color: var(--sand-dim); font: 400 13px/1.35 var(--mono); flex: 1; }
-.stat dd {
-  margin: 0; font: 500 24px/1 var(--mono); color: var(--sun-hot);
-  font-variant-numeric: tabular-nums; letter-spacing: -.03em;
-  text-shadow: 0 0 22px rgba(244,169,60,.5);
-}
-.stat dd.idle { color: var(--rule-hot); text-shadow: none; }
-.stat dd small { font-size: 12.5px; color: var(--sand-dim); font-weight: 400; margin-left: 4px; text-shadow: none; }
-.stat.lit::before {
-  content: ""; position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(244,169,60,.16), transparent);
-  animation: sweep .85s var(--ease);
-}
-@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
-
-.rig-log {
-  margin: 0; padding: 16px 20px 20px; border-top: 1px solid var(--rule);
-  font: 400 13px/1.85 var(--mono); color: var(--sand-2);
-  white-space: pre-wrap; word-break: break-word;
-  max-height: 210px; overflow-y: auto;
-  background: rgba(0,0,0,.22);
-}
-.rig-log b { color: var(--oasis); font-weight: 500; }
-.rig-log i { color: var(--sand-dim); font-style: normal; }
-.rig-log em { color: var(--sun); font-style: normal; font-weight: 500; }
 
 /* ================================================================ sections */
 
@@ -819,7 +742,7 @@ tbody tr:last-child td { border-bottom: 0; }
    (`mark_lines` in build.py, from `fennec.js`), rings leaving its ears, and a phone,
    a browser, a server and tenant files around it, each lighting as a ring
    reaches it -- a write landing. CSS alone, one 8 s cycle: a ring grows
-   250 px in 5.6 s, and each glyph's `--hit` is when it gets there. Only
+   250 px in 1.12 s of a 3.2 s cycle (speed is the point), and each glyph's `--hit` is when it gets there. Only
    transform and opacity move. */
 
 .hero-in.has-mark { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); }
@@ -841,9 +764,9 @@ tbody tr:last-child td { border-bottom: 0; }
    going round as it grows. The right ear's turn the other way. */
 .ears .ring {
   opacity: 0; transform: scale(.02); transform-box: fill-box; transform-origin: center;
-  animation: ring 8s linear infinite;
+  animation: ring 3.2s linear infinite;
 }
-.ears .ring.late { animation-delay: .5s; }
+.ears .ring.late { animation-delay: .18s; }
 .ears .ring-line, .ears .ring-light { fill: none; stroke: var(--oasis); }
 /* The line keeps its width as the ring grows; the light does not, since
    Chrome measures a non-scaling stroke's dashes on the screen, not along
@@ -852,33 +775,33 @@ tbody tr:last-child td { border-bottom: 0; }
 .ears .ring-light {
   stroke-width: 3; stroke-linecap: round; stroke-dasharray: .07 .43;
   filter: drop-shadow(0 0 2px rgba(79,224,196,.95));
-  animation: ring-run 8s linear infinite;
+  animation: ring-run 3.2s linear infinite;
 }
-.ears .late .ring-light { stroke-width: 1.7; animation-delay: .5s; }
+.ears .late .ring-light { stroke-width: 1.7; animation-delay: .18s; }
 .ears .right .ring-light { animation-name: ring-run-back; }
 @keyframes ring {
   0%   { transform: scale(.02); opacity: 1; }
-  35%  { opacity: .85; }
-  70%  { transform: scale(1);   opacity: 0; }
+  18%  { opacity: .85; }
+  35%  { transform: scale(1);   opacity: 0; }
   100% { transform: scale(1);   opacity: 0; }
 }
-@keyframes ring-run      { from { stroke-dashoffset: 0; } 70%, to { stroke-dashoffset: -.5; } }
-@keyframes ring-run-back { from { stroke-dashoffset: 0; } 70%, to { stroke-dashoffset: .5; } }
+@keyframes ring-run      { from { stroke-dashoffset: 0; } 35%, to { stroke-dashoffset: -.5; } }
+@keyframes ring-run-back { from { stroke-dashoffset: 0; } 35%, to { stroke-dashoffset: .5; } }
 /* The fennec runs the header mark's light every cycle, from the right ear's
-   tip through every edge, as the rings leave: 0.3 s an edge of the 8 s. */
-.ears .mark-light path { animation: hero-run 8s cubic-bezier(.4, 0, .6, 1) infinite; }
+   tip through every edge, as the rings leave: 0.3 s an edge of the 3.2 s. */
+.ears .mark-light path { animation: hero-run 3.2s cubic-bezier(.4, 0, .6, 1) infinite; }
 @keyframes hero-run {
   0%           { stroke-dashoffset: .55; }
-  3.75%, 100%  { stroke-dashoffset: -1.1; }
+  9.4%, 100%  { stroke-dashoffset: -1.1; }
 }
-.ears .tip { fill: var(--oasis); opacity: 0; animation: tip 8s ease-out infinite; }
+.ears .tip { fill: var(--oasis); opacity: 0; animation: tip 3.2s ease-out infinite; }
 @keyframes tip { 0% { opacity: .9; } 12%, 100% { opacity: 0; } }
 .ears .glyph rect, .ears .glyph path {
   fill: rgba(21,15,38,.7); stroke: var(--sand-2); stroke-width: 1.6;
   stroke-linecap: round; stroke-linejoin: round;
-  animation: lit 8s ease-out infinite; animation-delay: var(--hit);
+  animation: lit 3.2s ease-out infinite; animation-delay: var(--hit);
 }
-.ears .halo { fill: url(#halo); opacity: 0; animation: halo 8s ease-out infinite; animation-delay: var(--hit); }
+.ears .halo { fill: url(#halo); opacity: 0; animation: halo 3.2s ease-out infinite; animation-delay: var(--hit); }
 @keyframes lit {
   0%, 10% { stroke: var(--oasis); }
   30%, 100% { stroke: var(--sand-2); }
@@ -966,9 +889,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .race-foot { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .race-foot .race-replay { margin: 0; }
 
-/* ------------------------------------------------------------ screencast */
+/* -------------------------------------------------------------- sessions */
 
-.cast { margin: 0 0 clamp(56px, 7vw, 88px); }
 .cast-screen {
   border: 1px solid var(--rule-hot); border-radius: 10px; overflow: hidden;
   background: #0A0716; box-shadow: 0 40px 90px -40px rgba(255,122,61,.35);
@@ -984,53 +906,85 @@ tbody tr:last-child td { border-bottom: 0; }
   margin-right: 38px;
 }
 .cast-out {
-  margin: 0; padding: 18px 20px; height: clamp(300px, 46vh, 420px); overflow: auto;
-  font: 400 13.5px/1.62 var(--mono); color: var(--sand-2); white-space: pre;
+  margin: 0; padding: 18px 20px; overflow: hidden;
+  font: 400 13.5px/1.62 var(--mono); color: var(--sand-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.cast-out .p { color: var(--sun); }
-.cast-out .c { color: var(--star); }
-.cast-out .o { color: var(--sand-dim); }
-.cast-controls { display: flex; align-items: stretch; gap: 14px; margin-top: 14px; }
-.cast-play {
-  flex: none; width: 46px; border-radius: 8px; cursor: pointer;
-  border: 1px solid var(--rule-hot); background: rgba(244,169,60,.08); color: var(--sun);
-  display: grid; place-items: center;
+@media (max-width: 640px) { .cast-out { padding: 14px; font-size: 12px; } }
+/* A session in each language: a row of marks, and one panel that types
+   the selected one's session. On a phone the marks scroll inside their own
+   row and the panel wraps its lines, so the page never scrolls sideways. */
+.sessions { margin: 0 0 clamp(28px, 4vw, 48px); min-width: 0; }
+.session-marks {
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 0 0 16px;
 }
-.cast-play svg { width: 16px; height: 16px; fill: currentColor; }
-.cast-play .i-play, .cast.paused .cast-play .i-pause { display: none; }
-.cast.paused .cast-play .i-play { display: inline; }
-.cast-play:hover { background: rgba(244,169,60,.16); border-color: var(--sun); }
-.cast-chapters {
-  list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0;
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px;
+.session-marks button {
+  position: relative; overflow: hidden; flex: none; width: 82px; cursor: pointer;
+  display: grid; justify-items: center; gap: 7px; padding: 10px 4px 11px;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 10px;
+  color: var(--sand-dim); font: 500 12.5px/1.2 var(--sans); white-space: nowrap;
+  transition: color .3s, border-color .3s, box-shadow .3s;
 }
-.cast-chapters button {
-  position: relative; width: 100%; height: 100%; min-height: 46px; overflow: hidden;
-  padding: 8px 12px; text-align: left; cursor: pointer;
-  font: 500 14px/1.25 var(--sans); color: var(--sand-dim);
-  background: var(--panel); border: 1px solid var(--rule); border-radius: 8px;
+.session-marks .glyph {
+  display: grid; place-items: center; min-width: 36px; height: 36px; padding: 0 5px;
+  border: 1.5px solid currentColor; border-radius: 9px;
+  font: 500 12.5px/1 var(--mono); letter-spacing: -.02em;
 }
-.cast-chapters button[aria-current] { color: var(--star); border-color: var(--rule-hot); }
-.cast-fill {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
-  background: var(--sun); transform-origin: left; transform: scaleX(0);
-  transition: transform .3s linear;
+.session-marks button:hover { color: var(--sand); }
+.session-marks button[aria-pressed="true"] {
+  color: var(--oasis); border-color: rgba(79,224,196,.7);
+  box-shadow: 0 0 22px -6px rgba(79,224,196,.75);
 }
-.cast-chapters button:hover { color: var(--sand); }
-/* The transcript is the page without script; the player replaces it. */
-.cast-script { list-style: none; margin: 0; padding: 0; }
-.cast-script li::before { content: attr(data-title); display: block; color: var(--star); font-weight: 600; margin: 18px 0 6px; }
-.cast-script pre { margin: 0; padding: 14px; overflow-x: auto; background: #0A0716; border: 1px solid var(--rule); border-radius: 8px; font: 400 13px/1.6 var(--mono); color: var(--sand-2); }
-.cast:not(.on) .cast-screen, .cast:not(.on) .cast-controls { display: none; }
-.cast.on .cast-script { display: none; }
-@media (max-width: 640px) { .cast-out { font-size: 12px; } }
+.session-marks button[aria-pressed="true"] .glyph { box-shadow: 0 0 12px -2px rgba(79,224,196,.8), inset 0 0 8px -3px rgba(79,224,196,.8); }
+.session-marks .fill {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: var(--oasis); transform-origin: left; transform: scaleX(0);
+}
+.session-group {
+  align-self: center; margin: 0 4px 0 10px; padding-left: 14px; border-left: 1px solid var(--rule-hot);
+  font: 400 12.5px/1.2 var(--mono); color: var(--sand-dim); white-space: nowrap;
+}
+.session-out { box-sizing: border-box; transition: height .35s var(--ease); }
+@media (prefers-reduced-motion: reduce) { .session-out { transition: none; } }
+.session-out .given { color: var(--sand-dim); }
+.session-out .given span { color: inherit; font-style: normal; }
+.session-out .answer {
+  display: inline-block; margin-top: 2px; padding: 8px 14px; border-radius: 8px;
+  border: 1px solid rgba(79,224,196,.45); color: var(--oasis);
+  box-shadow: 0 0 22px -10px rgba(79,224,196,.9);
+}
+.session-out .caret {
+  display: inline-block; width: .55em; height: 1.1em; margin-left: 1px; vertical-align: -.2em;
+  background: var(--sun); animation: caret 1s steps(1) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .session-out .caret { display: none; } }
+/* Without script: every session, one under another, each under its name. */
+.session-script { list-style: none; margin: 0; padding: 0; }
+.session-script li::before { content: attr(data-name); display: block; color: var(--star); font-weight: 600; margin: 18px 0 6px; }
+.session-script pre { margin: 0; padding: 14px; white-space: pre-wrap; overflow-wrap: anywhere; background: #0A0716; border: 1px solid var(--rule); font: 400 13px/1.6 var(--mono); color: var(--sand-2); }
+.session-script .given { border-radius: 8px 8px 0 0; border-bottom: 0; color: var(--sand-dim); }
+.session-script .typed { border-radius: 0 0 8px 8px; }
+.session-script .given + .typed { border-top: 1px dashed var(--rule); }
+.session-script li > .typed:first-child { border-radius: 8px; }
+.sessions:not(.on) .session-marks, .sessions:not(.on) .cast-screen { display: none; }
+.sessions.on .session-script { display: none; }
+@media (max-width: 600px) {
+  .session-marks {
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    scrollbar-width: none; padding-bottom: 2px;
+    margin-left: calc(-1 * var(--gutter)); margin-right: calc(-1 * var(--gutter));
+    padding-left: var(--gutter); padding-right: var(--gutter);
+  }
+  .session-marks::-webkit-scrollbar { display: none; }
+  .session-marks button { width: 72px; }
+}
 
 /* What it leaves out: a term and one line each. */
 .gaps { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 32px; }
 .gaps div { padding: 18px 0; border-top: 1px solid var(--rule); }
 .gaps dt { color: var(--star); font-weight: 600; font-size: 18px; margin-bottom: 4px; }
 .gaps dd { margin: 0; color: var(--sand-2); }
-.cast-play { height: 46px; align-self: start; }
 /* A phone's first screen holds the head, the claim and the two ways in; the
    query and the four links would run down into the dunes. */
 @media (max-width: 600px) {
@@ -1073,38 +1027,8 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 1080px) { .caps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 680px) { .caps { grid-template-columns: repeat(2, minmax(0, 1fr)); } .caps li { padding: 16px 14px; } }
 
-/* The live panel's chapters: where the run is, filling as it goes. */
-.rig-steps {
-  list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-top: 1px solid var(--rule);
-}
-.rig-steps li {
-  --k: 0; position: relative; padding: 11px 16px 13px; color: var(--sand-dim);
-  font: 500 13.5px/1.2 var(--sans); border-right: 1px solid var(--rule);
-}
-.rig-steps li:last-child { border-right: 0; }
-.rig-steps li::after {
-  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
-  background: var(--sun); transform-origin: left; transform: scaleX(var(--k));
-  transition: transform .5s var(--ease);
-}
-.rig-steps li[aria-current] { color: var(--star); }
-.rig-steps li[aria-current]:last-child::after { background: var(--oasis); }
-@media (max-width: 600px) { .rig-steps li { font-size: 12px; padding: 9px 8px 11px; } }
-
-
 .caps.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 860px) { .caps.three { grid-template-columns: 1fr; } }
-
-/* Compatibility: the names a reader will look for, grouped by what they are. */
-.works { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px clamp(24px, 4vw, 56px); }
-.works h3 { margin: 0 0 12px; font: 600 17px/1.3 var(--sans); color: var(--star); }
-.chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
-.chips li {
-  padding: 7px 13px; border-radius: 999px; font-size: 15px; color: var(--sand);
-  background: var(--panel); border: 1px solid var(--rule);
-}
-@media (max-width: 760px) { .works { grid-template-columns: 1fr; } }
 
 /* ================================================================ docs, plain
    A page reads top-down as a guide: a line of what, a short example, the
@@ -1154,15 +1078,11 @@ details.deep p, details.deep li { font-size: 15.5px; }
 .btn-line, .btn-line:hover { color: var(--sand); }
 .doc td.n + td, .doc th.n + th { padding-left: 24px; }
 
-/* On a phone a scene drawn for a wide stage turns its words to specks, and
-   the cards beside it already say what it shows: it is left out, and so is
-   the work of drawing it (site.js loads scenes only as they come into view). */
-/* The flow's scene says its three steps in its last frame; a phone, which
-   has no scene, gets the three as words. */
-.flow-alt { display: none; }
+/* A phone draws each scene on a narrow stage of its own (`stage` in
+   motion.js), its words at a size a phone can read; site.js sets the
+   canvas's shape to it. */
 @media (max-width: 600px) {
-  .motion { display: none; }
-  .flow-alt { display: flex; flex-direction: column; align-items: flex-start; margin: 0 0 8px; }
+  .motion canvas { aspect-ratio: 480 / 720; }
   .steps-doc > li { padding-left: 34px; }
 }
 

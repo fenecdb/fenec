@@ -21,10 +21,8 @@ make site-serve    # build, then http://localhost:8788
 make site-deploy   # build, then wrangler deploy
 ```
 
-All three depend on `make wasm`: the console on the home page runs the real
-engine, so `build.py` copies `web/fenec.js` and `web/fenec.wasm` into the
-output. Without them the console falls back to the published measurements and
-says so on screen.
+All three depend on `make wasm`: the playground runs the real engine, so
+`build.py` copies `web/fenec.js` and `web/fenec.wasm` into the output.
 
 Because it has the module in hand, `build.py` also checks the numbers the prose
 puts on it. The module's size is written into eight files and had drifted by
@@ -79,12 +77,12 @@ site/
   build.py        the generator
   template.html   the page shell; {{placeholders}} are filled per page
   styles.css      the whole design system
-  site.js         the sky, the live console, the scenes, the screencast, docs navigation
+  site.js         the sky, the scenes, the language sessions, the playground, docs navigation
   fennec.js       the mark: one table of points and edges
   motion.js       each section's scenes, drawn from their time alone
   mark.svg        the mark, written by `node site/fennec.js`: the favicon
   mark-detail.svg the same with its running light: header and footer
-  engine-worker.js  the engine off the main thread: home console, playground
+  engine-worker.js  the engine off the main thread, for the playground
   content/
     index.html    the home page
     404.html      served by not_found_handling
@@ -160,31 +158,49 @@ said "vector database" before a word was read.
 
 ## Moving pictures
 
-A section shows its feature working, on a canvas between its heading and
-its detail. The home page has two: a write made on a phone with no network,
-kept in its file, sent once under its key and drawn on another screen
-(`flow`), and replicas and tenants failing over (`scale`). A phone shows no
-scene: the flow's three steps are words there (`.flow-alt`). `motion.js` draws any moment of a scene from the scene's time
-alone, so a section loops its scenes while in view, stops when it is not, and
-steps between them on a click; under reduced motion each shows its last frame.
-It loads as the first such section comes near. Every number in it is one
-the docs measure.
+Each of the home page's six sections tells its story as a scene, not as
+code: a canvas between its heading and its detail, the measured numbers in
+the text beside it. A write redrawing the three screens that read it while a
+fourth is not run (`state`); a write made offline, sent once and drawn on
+another screen (`flow`); sixteen writers through one lock into one file, an
+fsync covering several writes, readers going on beside them (`writers`);
+requests straight to the server and its mapped file, the cache crossed out
+(`traffic`); tenants moved and failed over onto their copies (`scale`); and a
+question finding its documents by meaning and by its words, the two lists
+fused (`search`). What moves is the mark's own light, the teal with its glow,
+so the scenes and the logo read as one.
 
-## The screencast
+`motion.js` draws any moment of a scene from the scene's time alone, so a
+section plays its scene while in view and the tab is shown, and stops
+otherwise. A story (state, sync, tenants, search) plays once, holds its last
+frame still moving where it moves, and fades into its start; a stream
+(writers, traffic, security) opens and then runs on for good, each event
+drawn from its own number (`hash`), so it never starts again. The stars run
+on the figure's own clock: on the scene's they jumped at every start. Under
+reduced motion each shows the one frame that says everything it does
+(`still`). A scene has two stages, 1280 wide and 480 wide (`stage`): a phone
+draws the narrow one, the same story laid out taller, since the wide stage
+scaled to a phone turned its words to specks. It loads as the first scene
+comes near. Every number in it is one the docs measure; the tasks, the
+documents and their places are only examples.
 
-The home page's "A real session, recorded" plays a session as text: commands typed, output
-a line at a time, chapters to jump between, paused while off screen. The
-transcript is the `<ol class="cast-script">` in `content/index.html`, and every
-line of output in it came from a real `fenec-server`, `curl` and the `fenecdb` Python client --
-re-record it rather than edit an output by hand. Without script the transcript
-is the page.
+## The language sessions
+
+The home page's "Your language" plays one small session in each language:
+the setup shows at once, the statements are typed, then the rows land; it
+goes through the languages on its own, each fading into the next, and a
+click on a mark picks one and stays there. Each session is the docs' own
+example (`docs/languages.html`, `integrations/languages`) and the rows are
+the answer the docs show: change one there, then here. The frameworks and
+the imports play when picked. Without script the list in
+`content/index.html` is the section.
 
 ## Motion, and what it costs
 
 `prefers-reduced-motion` is honoured throughout: the sky canvases stop, the
 hero's rings are drawn still, the mark's light is hidden, the
-headline appears whole, each scene shows its last frame, the screencast
-waits to be played, and nothing translates.
+headline appears whole, each scene shows its still frame, a session shows
+whole, and nothing translates.
 
 Two things were measured and fixed, and are worth not reintroducing:
 
