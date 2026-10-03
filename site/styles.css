@@ -1154,15 +1154,11 @@ details.deep p, details.deep li { font-size: 15.5px; }
 .btn-line, .btn-line:hover { color: var(--sand); }
 .doc td.n + td, .doc th.n + th { padding-left: 24px; }
 
-/* On a phone a scene drawn for a wide stage turns its words to specks, and
-   the cards beside it already say what it shows: it is left out, and so is
-   the work of drawing it (site.js loads scenes only as they come into view). */
-/* The flow's scene says its three steps in its last frame; a phone, which
-   has no scene, gets the three as words. */
-.flow-alt { display: none; }
+/* A phone draws each scene on a narrow stage of its own (`stage` in
+   motion.js), its words at a size a phone can read; site.js sets the
+   canvas's shape to it. */
 @media (max-width: 600px) {
-  .motion { display: none; }
-  .flow-alt { display: flex; flex-direction: column; align-items: flex-start; margin: 0 0 8px; }
+  .motion canvas { aspect-ratio: 480 / 720; }
   .steps-doc > li { padding-left: 34px; }
 }
 

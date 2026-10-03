@@ -1,19 +1,29 @@
 /* The page's moving pictures: each section shows its feature working.
 
    A scene is a function of its own time alone, drawn onto the canvas in its
-   section, so a section loops its scenes while it is in view and stops when
-   it is not, and a reader can step between them. Every number on screen is
-   one the docs measure. The section's heading carries the words; the scene
-   carries the picture. */
+   section, so a section loops its scene while it is in view and stops when
+   it is not. Every number on screen is one the docs measure; the words and
+   the measurements stay in the section's text, and the scene shows them
+   happening. What moves is the mark's own light: the teal that runs through
+   the logo, with its glow, so a write, a request and a search all travel the
+   same way.
+
+   Each scene is drawn on one of two stages: 1280 wide for a screen, 480 wide
+   for a phone, where the same story is laid out narrower and taller so its
+   words stay readable (a wide stage scaled to a phone turned them to specks).
+   The last frame says everything the scene does at once, for a reader who
+   asked for no motion. */
 
 import { POINTS, EDGES, FLOW, RUN, COLORS } from './fennec.js';
 
-const W = 1280, H = 720;
+const W = 1280, NW = 480;
 const P = {
   night: '#070A18', night2: '#1B1233', panel: '#150F26', panel2: '#1D1430', rule: '#3A2A3F',
   sun: '#F4A93C', hot: '#FFCE73', ember: '#FF7A3D', oasis: '#4FE0C4', star: '#FFF4DC',
   sand: '#F0E2C4', sand2: '#CDB894', dim: '#96856A', purple: '#C79BF2', red: '#FF6B5B',
+  deep: '#100B20',
 };
+const GLOW = 'rgba(79,224,196,.95)';
 const SANS = '"Bricolage Grotesque", system-ui, sans-serif';
 const MONO = '"IBM Plex Mono", ui-monospace, monospace';
 
@@ -22,12 +32,15 @@ const span = (t, a, b) => clamp((t - a) / (b - a));
 const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);
 const inOut = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
 const lerp = (a, b, k) => a + (b - a) * k;
+// A flash that rises at `a` and settles to `rest` over `len` seconds.
+const flash = (t, a, len = 0.9, rest = 0) => t < a ? 0 : lerp(1, rest, ease((t - a) / len));
 
 function rng(seed) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
 
 /* --------------------------------------------------------------- drawing */
 
 function text(c, s, x, y, { size = 22, weight = 400, color = P.sand, font = SANS, align = 'left', alpha = 1, base = 'alphabetic' } = {}) {
+  if (alpha <= 0) return;
   c.save();
   c.globalAlpha *= alpha;
   c.font = `${weight} ${size}px ${font}`;
@@ -37,18 +50,26 @@ function text(c, s, x, y, { size = 22, weight = 400, color = P.sand, font = SANS
   c.fillText(s, x, y);
   c.restore();
 }
+const mono = (c, s, x, y, o = {}) => text(c, s, x, y, { size: 14, font: MONO, color: P.dim, ...o });
 
-function box(c, x, y, w, h, { r = 12, fill = P.panel, stroke = P.rule, alpha = 1, line = 1.5 } = {}) {
+// `glow` lights the outline with the mark's light, 0 to 1.
+function box(c, x, y, w, h, { r = 12, fill = P.panel, stroke = P.rule, alpha = 1, line = 1.5, glow = 0, dash = null } = {}) {
+  if (alpha <= 0) return;
   c.save();
   c.globalAlpha *= alpha;
   c.beginPath();
   c.roundRect(x, y, w, h, r);
   if (fill) { c.fillStyle = fill; c.fill(); }
-  if (stroke) { c.strokeStyle = stroke; c.lineWidth = line; c.stroke(); }
+  if (stroke) {
+    if (glow > 0) { c.shadowColor = GLOW; c.shadowBlur = 20 * glow; }
+    if (dash) c.setLineDash(dash);
+    c.strokeStyle = stroke; c.lineWidth = line; c.stroke();
+  }
   c.restore();
 }
 
 function dot(c, x, y, r, color, alpha = 1) {
+  if (alpha <= 0) return;
   c.save();
   c.globalAlpha *= alpha;
   c.fillStyle = color;
@@ -58,31 +79,83 @@ function dot(c, x, y, r, color, alpha = 1) {
   c.restore();
 }
 
-function line(c, x1, y1, x2, y2, color, width = 1.5, alpha = 1, dash = null) {
+function wire(c, pts, color = P.rule, width = 1.5, alpha = 1, dash = null) {
+  if (alpha <= 0) return;
   c.save();
   c.globalAlpha *= alpha;
   c.strokeStyle = color;
   c.lineWidth = width;
+  c.lineJoin = 'round';
   if (dash) c.setLineDash(dash);
   c.beginPath();
-  c.moveTo(x1, y1);
-  c.lineTo(x2, y2);
+  pts.forEach((p, i) => (i ? c.lineTo(...p) : c.moveTo(...p)));
   c.stroke();
   c.restore();
 }
+const line = (c, x1, y1, x2, y2, ...o) => wire(c, [[x1, y1], [x2, y2]], ...o);
 
-function chip(c, s, x, y, { color = P.sand, fill = P.panel2, size = 17, alpha = 1, stroke = P.rule, font = SANS, weight = 500 } = {}) {
+function chip(c, s, x, y, { color = P.sand, fill = P.panel2, size = 17, alpha = 1, stroke = P.rule, font = SANS, weight = 500, center = false } = {}) {
   c.font = `${weight} ${size}px ${font}`;
   const w = c.measureText(s).width + size * 1.4;
   const h = size * 2;
+  if (center) x -= w / 2;
   box(c, x, y - h / 2, w, h, { r: h / 2, fill, stroke, alpha });
   text(c, s, x + size * 0.7, y + size * 0.36, { size, weight, color, alpha, font });
   return w;
 }
 
+/* The light: a point of the mark's teal with its glow, and the same light
+   running along a wire, a short bright stretch that crosses it and trails
+   off its end as `run` goes from 0 to 1. */
+function glow(c, x, y, r = 5, alpha = 1) {
+  if (alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  const g = c.createRadialGradient(x, y, 0, x, y, r * 3.4);
+  g.addColorStop(0, 'rgba(79,224,196,.42)');
+  g.addColorStop(1, 'rgba(79,224,196,0)');
+  c.fillStyle = g;
+  c.beginPath(); c.arc(x, y, r * 3.4, 0, 7); c.fill();
+  c.shadowColor = GLOW; c.shadowBlur = r * 1.6;
+  c.fillStyle = P.oasis;
+  c.beginPath(); c.arc(x, y, r, 0, 7); c.fill();
+  c.restore();
+}
+
+function along(pts, k) {
+  const len = [];
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += len[i - 1] = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  let d = clamp(k) * total;
+  for (let i = 0; i < len.length; i++) {
+    if (d <= len[i] || i === len.length - 1) {
+      const f = len[i] ? Math.min(1, d / len[i]) : 0;
+      return [lerp(pts[i][0], pts[i + 1][0], f), lerp(pts[i][1], pts[i + 1][1], f)];
+    }
+    d -= len[i];
+  }
+  return pts[0];
+}
+
+function streak(c, pts, run, { alpha = 1, tail = 0.22, w = 3 } = {}) {
+  const k = run * (1 + tail);   // `run` 0 to 1: the head across, then the tail off the end
+  if (k <= 0 || k >= 1 + tail || alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  c.strokeStyle = P.oasis; c.lineWidth = w; c.lineCap = 'round'; c.lineJoin = 'round';
+  c.shadowColor = GLOW; c.shadowBlur = 8;
+  const a = Math.max(0, k - tail), b = Math.min(1, k);
+  c.beginPath();
+  for (let i = 0; i <= 12; i++) { const p = along(pts, lerp(a, b, i / 12)); i ? c.lineTo(...p) : c.moveTo(...p); }
+  c.stroke();
+  c.restore();
+  if (k < 1) glow(c, ...along(pts, k), w + 1.5, alpha);
+}
+
 // The mark, from the table the logo is drawn from, its light running through
 // it once as the page's own mark's does (`t` in seconds).
 function mark(c, x, y, s, alpha = 1, t = 0) {
+  if (alpha <= 0) return;
   c.save();
   c.globalAlpha *= alpha;
   c.translate(x - 32 * s, y - 32 * s);
@@ -97,6 +170,7 @@ function mark(c, x, y, s, alpha = 1, t = 0) {
   // The light, as the page's own mark runs it: out from the right ear
   // through every edge, wave by wave, once (`t` from the scene's start).
   c.strokeStyle = COLORS.light;
+  c.shadowColor = GLOW; c.shadowBlur = 4;
   c.lineWidth = 3;
   c.beginPath();
   for (const { from, to, delay } of FLOW) {
@@ -111,184 +185,646 @@ function mark(c, x, y, s, alpha = 1, t = 0) {
   c.restore();
 }
 
+// A file, as the hero draws one: a page with its corner folded.
+function file(c, x, y, s, { stroke = P.sun, alpha = 1, glow: g = 0, dash = null } = {}) {
+  if (alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  c.translate(x, y);
+  c.scale(s, s);
+  c.lineJoin = 'round';
+  c.beginPath();
+  c.moveTo(-12, -16); c.lineTo(3, -16); c.lineTo(12, -7); c.lineTo(12, 16); c.lineTo(-12, 16); c.closePath();
+  c.fillStyle = P.panel2; c.fill();
+  c.moveTo(3, -16); c.lineTo(3, -7); c.lineTo(12, -7);
+  if (g > 0) { c.shadowColor = GLOW; c.shadowBlur = 14 * g; }
+  if (dash) c.setLineDash(dash);
+  c.strokeStyle = stroke; c.lineWidth = 1.8 / s * 1.2; c.stroke();
+  c.restore();
+}
+
+// A client: a small screen on a stand.
+function client(c, x, y, { stroke = P.rule, alpha = 1, glow: g = 0 } = {}) {
+  box(c, x - 14, y - 11, 28, 20, { r: 4, fill: P.panel, stroke, alpha, glow: g });
+  line(c, x - 6, y + 13, x + 6, y + 13, stroke, 1.5, alpha);
+}
+
+function disk(c, x, y, { alpha = 1, glow: g = 0 } = {}) {
+  if (alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  c.strokeStyle = g > 0.05 ? P.oasis : P.sand2;
+  c.lineWidth = 1.8;
+  if (g > 0) { c.shadowColor = GLOW; c.shadowBlur = 18 * g; }
+  c.fillStyle = P.panel;
+  c.beginPath();
+  c.ellipse(x, y + 14, 34, 9, 0, 0, Math.PI);
+  c.lineTo(x - 34, y - 14);
+  c.ellipse(x, y - 14, 34, 9, 0, Math.PI, 0, true);
+  c.closePath();
+  c.fill(); c.stroke();
+  c.beginPath(); c.ellipse(x, y - 14, 34, 9, 0, 0, Math.PI * 2); c.stroke();
+  c.restore();
+}
+
+// A text whose words light as `lit` rises when they are among `terms`.
+function words(c, s, x, y, { size = 16, lit = 0, terms, color = P.sand, alpha = 1 } = {}) {
+  c.font = `400 ${size}px ${SANS}`;
+  const space = c.measureText(' ').width;
+  for (const w of s.split(' ')) {
+    const hit = terms.has(w.toLowerCase());
+    text(c, w, x, y, { size, color: hit && lit > 0.5 ? P.oasis : color, alpha });
+    if (hit && lit > 0) {
+      c.font = `400 ${size}px ${SANS}`;
+      const ww = c.measureText(w).width;
+      c.save(); c.shadowColor = GLOW; c.shadowBlur = 6;
+      line(c, x, y + 4, x + ww, y + 4, P.oasis, 2, alpha * lit);
+      c.restore();
+    }
+    c.font = `400 ${size}px ${SANS}`;
+    x += c.measureText(w).width + space;
+  }
+}
+
 /* --------------------------------------------------------------- scenes */
 
 const SCENES = [
   {
-    key: 'scale',
-    title: 'Replicate and scale out',
-    sub: 'Replicas follow in 0.2 ms. Tenants move and fail over on their own.',
-    d: 9,
-    draw(c, t) {
-      // A primary feeding two replicas.
-      const k = ease(span(t, 0.2, 0.8));
-      const node = (x, y, label, col, a, sub) => {
-        box(c, x - 90, y - 40, 180, 80, { fill: P.panel, stroke: col, alpha: a, line: 2 });
-        text(c, label, x, y + 2, { size: 20, weight: 600, color: P.star, align: 'center', alpha: a });
-        if (sub) text(c, sub, x, y + 26, { size: 14, font: MONO, color: P.dim, align: 'center', alpha: a });
+    /* One write in the app's database, and every screen whose live query
+       reads what it wrote is drawn again: the light runs out to each of them
+       and the new row lights in place. A screen over another collection is
+       not run at all. All four are screens of one app, over one database: a
+       write reaches another device through sync, which is the next section. */
+    key: 'state',
+    d: 8,
+    h: 560, nh: 720,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const L = n ? {
+        fx: 140, fy: 108, fw: 200, fh: 62, mx: 240, my: 48, ms: 0.9, chipY: 214,
+        cards: [[20, 290], [250, 290], [20, 500], [250, 500]], cw: 210, ch: 180, rh: 28, rg: 6,
+      } : {
+        fx: 90, fy: 250, fw: 200, fh: 64, mx: 190, my: 165, ms: 1.35, chipY: 372,
+        cards: [[400, 180], [615, 180], [830, 180], [1045, 180]], cw: 195, ch: 260, rh: 36, rg: 10,
       };
-      const part1 = 1 - ease(span(t, 4.2, 4.8));
-      node(260, 330, 'primary', P.sun, k * part1, 'writes');
-      [[620, 230], [620, 430]].forEach(([x, y], i) => {
-        const a = ease(span(t, 0.5 + i * 0.2, 1 + i * 0.2)) * part1;
-        node(x, y, 'replica', P.oasis, a, 'reads');
-        line(c, 350, 330, x - 92, y, P.rule, 2, a);
-        for (let j = 0; j < 3; j++) {
-          const ph = (t * 0.9 + j / 3) % 1;
-          dot(c, lerp(350, x - 92, ph), lerp(330, y, ph), 5, P.sun, a * (t > 1 ? 1 : 0));
-        }
-      });
-      chip(c, '0.20 ms behind, median', 780, 330, { color: P.oasis, size: 18, alpha: ease(span(t, 1.6, 2.2)) * part1 });
-      chip(c, 'no acknowledged write lost in ten failovers', 780, 390, { color: P.sand, size: 17, alpha: ease(span(t, 2.2, 2.8)) * part1 });
+      const fcx = L.fx + L.fw / 2;
+      // Each card's wire from the file, along a bus so none crosses a card.
+      const paths = n ? [
+        [[340, 139], [466, 139], [466, 262], [125, 262], [125, 290]],
+        [[340, 139], [466, 139], [466, 262], [355, 262], [355, 290]],
+        [[340, 139], [466, 139], [466, 262], [8, 262], [8, 590], [20, 590]],
+        [[340, 139], [474, 139], [474, 590], [460, 590]],
+      ] : L.cards.map(([x, y]) => [[L.fx + L.fw, 282], [345, 282], [345, 130], [x + L.cw / 2, 130], [x + L.cw / 2, y]]);
 
-      // Then tenants, a file each, spread across nodes behind a router.
-      const b = ease(span(t, 4.6, 5.2));
-      if (b <= 0) return;
-      box(c, 540, 175, 200, 56, { fill: P.panel2, stroke: P.sun, alpha: b, line: 2 });
-      text(c, 'router', 640, 211, { size: 20, weight: 600, color: P.star, align: 'center', alpha: b });
-      const failed = ease(span(t, 6.4, 6.9));
-      const nodes = [300, 640, 980];
-      nodes.forEach((x, i) => {
-        const down = i === 1 ? failed : 0;
-        box(c, x - 140, 300, 280, 250, { fill: P.panel, stroke: down ? P.red : P.rule, alpha: b * (1 - down * 0.5), line: 2 });
-        text(c, `node ${i + 1}`, x - 120, 334, { size: 18, weight: 600, color: down ? P.red : P.sand, alpha: b });
-        line(c, 640, 231, x, 300, P.rule, 1.5, b * (1 - down * 0.7));
-        if (down) {
-          line(c, x - 30, 410, x + 30, 470, P.red, 5, down);
-          line(c, x + 30, 410, x - 30, 470, P.red, 5, down);
+      // The database: the mark over the app's file.
+      const landed = 1.7;
+      mark(c, L.mx, L.my, L.ms, a, t - (landed - 0.6));
+      box(c, L.fx, L.fy, L.fw, L.fh, { r: 10, fill: P.deep, stroke: P.sun, alpha: a, line: 1.8, glow: flash(t, landed, 1, 0) });
+      mono(c, 'app.fenec', fcx, L.fy + L.fh / 2 + 6, { size: 16, color: P.hot, align: 'center', alpha: a });
+
+      // The write: a new task, into the file.
+      const w = ease(span(t, 0.7, 1.1));
+      chip(c, 'a write: “Rest at noon”', fcx, L.chipY, { size: 16, center: true, alpha: w, color: P.hot });
+      streak(c, [[fcx, L.chipY - 17], [fcx, L.fy + L.fh]], span(t, 1.25, landed), { tail: 0.4 });
+
+      // The screens. Three read the tasks; the fourth reads the notes.
+      const cards = [
+        { title: 'Tasks', coll: 'todos', rows: ['Pack water', 'Feed the camels'] },
+        { title: 'Open', coll: 'todos', count: true },
+        { title: 'Today', coll: 'todos', rows: ['Pack water'] },
+        { title: 'Notes', coll: 'notes', rows: ['Oasis at dawn', 'Map of the dunes'], other: true },
+      ];
+      cards.forEach((cd, i) => {
+        const [x, y] = L.cards[i];
+        const go = landed + 0.5 + i * 0.12;
+        const arrive = go + 0.7;
+        const lit = ease(span(t, arrive, arrive + 0.35));
+        const ca = a * (cd.other ? 0.55 : 1);
+        wire(c, paths[i], P.rule, 1.5, a * (cd.other ? 0.6 : 1), cd.other ? [4, 6] : null);
+        if (!cd.other) streak(c, paths[i], span(t, go, arrive), { tail: 0.18 });
+        box(c, x, y, L.cw, L.ch, {
+          r: 14, fill: P.deep, alpha: ca, line: 1.6,
+          stroke: !cd.other && lit > 0 ? P.oasis : P.rule, glow: cd.other ? 0 : flash(t, arrive, 1.2, 0.3) * lit,
+        });
+        text(c, cd.title, x + 16, y + 30, { size: n ? 17 : 18, weight: 600, color: cd.other ? P.sand2 : P.star, alpha: ca });
+        mono(c, cd.coll, x + L.cw - 14, y + 29, { size: 13, align: 'right', alpha: ca });
+        const rx = x + 12, rw = L.cw - 24;
+        if (cd.count) {
+          const k = lit;
+          text(c, '2', x + L.cw / 2, y + L.ch / 2 + 22 - k * 16, { size: n ? 54 : 64, weight: 650, color: P.star, align: 'center', alpha: ca * (1 - k) });
+          text(c, '3', x + L.cw / 2, y + L.ch / 2 + 38 - k * 16, { size: n ? 54 : 64, weight: 650, color: P.oasis, align: 'center', alpha: ca * k });
+          mono(c, 'open tasks', x + L.cw / 2, y + L.ch / 2 + (n ? 48 : 58), { size: 13, align: 'center', alpha: ca });
+        } else {
+          cd.rows.forEach((s, j) => {
+            const ry = y + 44 + j * (L.rh + L.rg);
+            box(c, rx, ry, rw, L.rh, { r: 7, fill: P.panel, alpha: ca });
+            text(c, s, rx + 12, ry + L.rh / 2 + 5, { size: n ? 14 : 15.5, color: P.sand, alpha: ca });
+          });
+          if (!cd.other) {
+            const ry = y + 44 + cd.rows.length * (L.rh + L.rg) + (1 - lit) * 8;
+            box(c, rx, ry, rw, L.rh, { r: 7, fill: P.panel, stroke: P.oasis, alpha: ca * lit, glow: flash(t, arrive, 1.4, 0.4) });
+            text(c, 'Rest at noon', rx + 12, ry + L.rh / 2 + 5, { size: n ? 14 : 15.5, color: P.oasis, alpha: ca * lit });
+          }
         }
+        // Whether its query ran again.
+        const said = ease(span(t, arrive + 0.5, arrive + 1));
+        mono(c, cd.other ? 'not run' : 'ran again', x + L.cw - 14, y + L.ch - 14, { size: 13, align: 'right', color: cd.other ? P.dim : P.oasis, alpha: ca * said });
       });
-      // Nine tenants; node 2's three move to the others when it fails.
-      for (let n = 0; n < 9; n++) {
-        const home = n % 3, slot = Math.floor(n / 3);
-        let x = nodes[home] - 90 + slot * 90, y = 400;
-        if (home === 1) {
-          const to = n === 1 ? 0 : n === 4 ? 2 : 0;
-          const mv = inOut(span(t, 6.9 + slot * 0.15, 7.6 + slot * 0.15));
-          const tx = nodes[to] - 90 + slot * 90, ty = 480;
-          x = lerp(x, tx, mv); y = lerp(y, ty, mv);
-        }
-        box(c, x - 34, y - 26, 68, 52, { r: 8, fill: P.panel2, stroke: P.sun, alpha: b });
-        text(c, `t${n + 1}`, x, y + 7, { size: 17, font: MONO, color: P.hot, align: 'center', alpha: b });
+
+      const end = ease(span(t, 4.4, 5));
+      if (n) mono(c, 'React · SwiftUI · Compose · Flutter', 240, 702, { size: 14, align: 'center', color: P.sand2, alpha: end });
+      else {
+        mono(c, 'each screen a live query', fcx, 446, { size: 15, align: 'center', color: P.sand2, alpha: end });
+        mono(c, 'React · SwiftUI · Compose · Flutter', fcx, 472, { size: 14, align: 'center', alpha: end });
       }
-      chip(c, '20 tenants failed over in 60 ms', 470, 610, { color: P.oasis, size: 18, alpha: ease(span(t, 7.6, 8.1)) });
     },
   },
   {
     /* One write from a phone with no network to another device's screen:
        kept in the phone's file, sent once under its key when the network is
-       back, and streamed out by the server. The last frame says all three
-       at once, for a reader who asked for no motion. */
+       back, and streamed out by the server. */
     key: 'flow',
-    title: 'Local and server, one flow',
-    sub: 'A write made offline, sent once, on the other screen.',
     d: 9,
-    draw(c, t) {
+    h: 560, nh: 820,
+    draw(c, t, n) {
       const a = ease(span(t, 0.1, 0.8));
-      const LINE_Y = 405;
       const TASKS = ['Pack water', 'Check the compass', 'Feed the camels'];
       const NEW = 'Rest at noon';
+      // The wide stage keeps the layout it was drawn with, 150 px lower.
+      if (!n) c.translate(0, -150);
+      const L = n ? {
+        px: 20, py: 20, pw: 200, ph: 420,
+        sx: 270, sy: 50, sw: 190, sh: 150,
+        bx: 250, by: 350, bw: 210, bh: 330,
+        w1: [[220, 125], [270, 125]],
+        w2: [[460, 125], [472, 125], [472, 420], [460, 420]],
+        net: [365, 228], req: [[365, 228], [365, 250]], get: [355, 336], ans: [365, 276],
+        under: [[240, 718], [240, 758], [240, 798]],
+      } : {
+        px: 80, py: 186, pw: 220, ph: 440,
+        sx: 540, sy: 330, sw: 200, sh: 150,
+        bx: 940, by: 200, bw: 260, bh: 360,
+        w1: [[300, 405], [540, 405]],
+        w2: [[740, 405], [940, 405]],
+        net: [420, 389], req: [[420, 361], [420, 387]], get: [840, 387], ans: [640, 516],
+        under: [[190, 668], [640, 668], [1070, 668]],
+      };
+      const { px, py, pw, ph, sx, sy, sw, sh, bx, by, bw, bh } = L;
+      const ms = n ? 0.95 : 1.05;
       const online = t >= 3.6;
       const tap = ease(span(t, 1.0, 1.4));
       const queued = t >= 1.7 && t < 5.4 ? 1 : 0;
       const answered = ease(span(t, 5.2, 5.6));
       const arrived = ease(span(t, 6.8, 7.2));
-      const under = (s, x, alpha, color = P.sand) => {
-        c.font = `500 17px ${SANS}`;
-        const w = c.measureText(s).width + 17 * 1.4;
-        chip(c, s, x - w / 2, 668, { size: 17, color, alpha });
-      };
+      const under = (s, [x, y], alpha) => chip(c, s, x, y, { size: 17, alpha, center: true });
       const rows = (x, y, w, alpha) => TASKS.forEach((s, i) => {
         box(c, x, y + i * 54, w, 44, { r: 8, fill: P.panel, alpha });
-        text(c, s, x + 14, y + i * 54 + 28, { size: 17, color: P.sand, alpha });
+        text(c, s, x + 14, y + i * 54 + 28, { size: n ? 15 : 17, color: P.sand, alpha });
       });
 
       // The phone, its list, and the file it keeps on the device.
-      const px = 80, py = 186, pw = 220, ph = 440;
-      box(c, px, py, pw, ph, { r: 30, fill: '#100B20', stroke: P.rule, alpha: a, line: 2 });
+      box(c, px, py, pw, ph, { r: 30, fill: P.deep, stroke: P.rule, alpha: a, line: 2 });
       box(c, px + pw / 2 - 34, py + 12, 68, 14, { r: 7, fill: P.panel2, stroke: null, alpha: a });
-      text(c, '9:41', px + 22, py + 44, { size: 14, font: MONO, color: P.dim, alpha: a });
+      mono(c, '9:41', px + 22, py + 44, { alpha: a });
       dot(c, px + pw - 90, py + 39, 5, online ? P.oasis : P.ember, a);
-      text(c, online ? 'online' : 'offline', px + pw - 20, py + 44, { size: 14, font: MONO, color: online ? P.oasis : P.ember, align: 'right', alpha: a });
+      mono(c, online ? 'online' : 'offline', px + pw - 20, py + 44, { color: online ? P.oasis : P.ember, align: 'right', alpha: a });
       text(c, 'Tasks', px + 16, py + 80, { size: 20, weight: 600, color: P.star, alpha: a });
       rows(px + 16, py + 94, pw - 32, a);
       const ny = py + 94 + 3 * 54;
       box(c, px + 16, ny + (1 - tap) * 8, pw - 32, 44, { r: 8, fill: P.panel, stroke: answered > 0.5 ? P.oasis : P.sun, alpha: tap });
-      text(c, NEW, px + 30, ny + 28 + (1 - tap) * 8, { size: 17, color: P.hot, alpha: tap });
-      text(c, answered > 0.5 ? 'synced' : 'queued', px + pw - 28, ny + 27, { size: 13, font: MONO, color: answered > 0.5 ? P.oasis : P.dim, align: 'right', alpha: tap });
+      text(c, NEW, px + 30, ny + 28 + (1 - tap) * 8, { size: n ? 15 : 17, color: P.hot, alpha: tap });
+      mono(c, answered > 0.5 ? 'synced' : 'queued', px + pw - (n ? 24 : 28), ny + 27, { size: n ? 11.5 : 13, color: answered > 0.5 ? P.oasis : P.dim, align: 'right', alpha: tap });
       // Into the file: the queue is a collection of the replica's own.
       const fy = py + ph - 96;
-      box(c, px + 16, fy, pw - 32, 70, { r: 8, fill: '#0C0819', alpha: a });
-      text(c, 'app.fenec', px + 30, fy + 26, { size: 14, font: MONO, color: P.dim, alpha: a });
-      text(c, '_sync_queue', px + 30, fy + 52, { size: 15, font: MONO, color: P.sand, alpha: a });
-      text(c, String(queued), px + pw - 30, fy + 52, { size: 15, font: MONO, color: queued ? P.sun : P.dim, align: 'right', alpha: a });
-      const sink = span(t, 1.3, 1.7);
-      if (sink > 0 && sink < 1) dot(c, px + pw / 2, lerp(ny + 44, fy + 8, inOut(sink)), 5, P.sun, 1 - sink * 0.4);
-      under('written offline, kept in the file', px + pw / 2, ease(span(t, 1.8, 2.4)));
+      box(c, px + 16, fy, pw - 32, 70, { r: 8, fill: '#0C0819', alpha: a, glow: flash(t, 1.7, 0.8) });
+      mono(c, 'app.fenec', px + 30, fy + 26, { alpha: a });
+      mono(c, '_sync_queue', px + 30, fy + 52, { size: 15, color: P.sand, alpha: a });
+      mono(c, String(queued), px + pw - 30, fy + 52, { size: 15, color: queued ? P.oasis : P.dim, align: 'right', alpha: a });
+      streak(c, [[px + pw / 2, ny + 44], [px + pw / 2, fy]], span(t, 1.3, 1.7), { tail: 0.5 });
+      under('written offline, kept in the file', L.under[0], ease(span(t, 1.8, 2.4)));
 
       // The way to the server: nothing while there is no network.
-      const sx = 540, sw = 200, sy = 330, sh = 150;
       const off = a * (1 - ease(span(t, 3.6, 4)));
-      line(c, px + pw, LINE_Y, sx, LINE_Y, P.rule, 2, a, online ? null : [5, 7]);
-      text(c, 'no network', (px + pw + sx) / 2, LINE_Y - 16, { size: 15, font: MONO, color: P.ember, align: 'center', alpha: off * 0.9 });
-      const req = ease(span(t, 4, 4.4));
-      text(c, 'POST /query', (px + pw + sx) / 2, LINE_Y - 44, { size: 15, font: MONO, color: P.sand2, align: 'center', alpha: req });
-      text(c, 'Idempotency-Key: 7f3a9c', (px + pw + sx) / 2, LINE_Y - 18, { size: 15, font: MONO, color: P.sun, align: 'center', alpha: req });
-      const go = span(t, 4.2, 5);
-      if (go > 0 && go < 1) dot(c, lerp(px + pw, sx, inOut(go)), LINE_Y, 7, P.sun);
+      wire(c, L.w1, P.rule, 2, a, online ? null : [5, 7]);
+      mono(c, 'no network', L.net[0], L.net[1], { size: 15, color: P.ember, align: 'center', alpha: off * 0.9 });
+      const req = ease(span(t, 4, 4.4)) * (n ? 1 - ease(span(t, 5.3, 5.6)) : 1);
+      mono(c, 'POST /query', L.req[0][0], L.req[0][1], { size: 15, color: P.sand2, align: 'center', alpha: req });
+      mono(c, 'Idempotency-Key: 7f3a9c', L.req[1][0], L.req[1][1], { size: 15, color: P.sun, align: 'center', alpha: req });
+      streak(c, L.w1, span(t, 4.2, 5));
 
       // The server: its ears catch the write as it lands.
-      const flash = Math.sin(Math.PI * span(t, 5, 5.6));
-      box(c, sx, sy, sw, sh, { r: 16, fill: P.panel, stroke: flash > 0 ? P.oasis : P.sun, alpha: a, line: 2 });
-      mark(c, sx + sw / 2, sy + 62, 1.05, a, t - 4.5);
-      text(c, 'fenec-server', sx + sw / 2, sy + sh - 18, { size: 18, font: MONO, color: P.hot, align: 'center', alpha: a });
-      text(c, '200  Fenec-Seq: 4182', sx + sw / 2, sy + sh + 36, { size: 15, font: MONO, color: P.oasis, align: 'center', alpha: answered });
-      const back = span(t, 5, 5.4);
-      if (back > 0 && back < 1) dot(c, lerp(sx, px + pw, inOut(back)), LINE_Y + 14, 5, P.oasis);
-      under('sent once, under its key', sx + sw / 2, ease(span(t, 5.6, 6.2)));
+      box(c, sx, sy, sw, sh, { r: 16, fill: P.panel, stroke: P.sun, alpha: a, line: 2, glow: flash(t, 5, 0.9) });
+      mark(c, sx + sw / 2, sy + 62, ms, a, t - 4.4);
+      mono(c, 'fenec-server', sx + sw / 2, sy + sh - 18, { size: n ? 16 : 18, color: P.hot, align: 'center', alpha: a });
+      mono(c, '200  Fenec-Seq: 4182', L.ans[0], L.ans[1], { size: 15, color: P.oasis, align: 'center', alpha: answered });
+      streak(c, [...L.w1].reverse().map(([x, y]) => [x, y + 14]), span(t, 5, 5.4), { w: 2 });
+      under('sent once, under its key', L.under[1], ease(span(t, 5.6, 6.2)));
 
       // The other device, subscribed all along: the change reaches its list.
-      const bx = 940, by = 200, bw = 260, bh = 360;
-      line(c, sx + sw, LINE_Y, bx, LINE_Y, P.rule, 2, a);
-      text(c, 'GET /tasks/changes', (sx + sw + bx) / 2, LINE_Y - 18, { size: 15, font: MONO, color: P.sand2, align: 'center', alpha: a });
-      const out = span(t, 5.8, 6.8);
-      if (out > 0 && out < 1) dot(c, lerp(sx + sw, bx, inOut(out)), LINE_Y, 7, P.oasis);
-      box(c, bx, by, bw, bh, { r: 16, fill: '#100B20', alpha: a });
+      wire(c, L.w2, P.rule, 2, a);
+      mono(c, 'GET /tasks/changes', L.get[0], L.get[1], { size: 15, color: P.sand2, align: 'center', alpha: a });
+      streak(c, L.w2, span(t, 5.8, 6.8));
+      box(c, bx, by, bw, bh, { r: 16, fill: P.deep, alpha: a, glow: flash(t, 6.8, 1, 0) });
       box(c, bx, by, bw, 44, { r: 16, fill: P.panel2, alpha: a });
       [P.ember, P.sun, P.oasis].forEach((col, i) => dot(c, bx + 22 + i * 16, by + 22, 5, col, a));
-      text(c, 'my-app.com', bx + 80, by + 28, { size: 14, font: MONO, color: P.dim, alpha: a });
+      mono(c, 'my-app.com', bx + 80, by + 28, { alpha: a });
       text(c, 'Tasks', bx + 20, by + 84, { size: 20, weight: 600, color: P.star, alpha: a });
       rows(bx + 20, by + 100, bw - 40, a);
       const ry = by + 100 + 3 * 54;
-      box(c, bx + 20, ry + (1 - arrived) * 8, bw - 40, 44, { r: 8, fill: P.panel, stroke: P.sun, alpha: arrived });
-      text(c, NEW, bx + 34, ry + 28 + (1 - arrived) * 8, { size: 17, color: P.hot, alpha: arrived });
-      under('on the other screen', bx + bw / 2, ease(span(t, 7.2, 7.8)));
+      box(c, bx + 20, ry + (1 - arrived) * 8, bw - 40, 44, { r: 8, fill: P.panel, stroke: P.oasis, alpha: arrived, glow: flash(t, 7, 1.2, 0.35) * arrived });
+      text(c, NEW, bx + 34, ry + 28 + (1 - arrived) * 8, { size: n ? 15 : 17, color: P.oasis, alpha: arrived });
+      under('on the other screen', L.under[2], ease(span(t, 7.2, 7.8)));
+    },
+  },
+  {
+    /* Sixteen writers and one file. A write takes the lock for a moment and
+       goes in, one at a time and quickly; its fsync runs after the lock is
+       let go, so the writes that landed while the disk was busy are covered
+       by the next one together. The readers beside them never stop. */
+    key: 'writers',
+    d: 9,
+    h: 560, nh: 600,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const N = 28, T0 = 1.0, DT = 0.2;          // write i lands at T0 + i * DT
+      const SYNC = [1.7, 2.9, 4.1, 5.3, 6.6];     // each fsync covers what landed before it
+      const lands = (i) => T0 + i * DT;
+      const synced = (i) => SYNC.find((s) => s > lands(i) + 0.05);
+      const L = n ? {
+        writer: (k) => [44 + (k % 8) * 56, 58 + Math.floor(k / 8) * 50], wl: [240, 24],
+        gate: [240, 172], fx: 34, fy: 220, fw: 412, fh: 70, cx: 48,
+        disk: [116, 410], readers: [270, 330, 390, 450].map((x) => [x, 470]),
+        from: (r) => [r[0], 290], to: (r) => [r[0], 455], rl: [360, 520], gl: [300, 177], chip: 568,
+      } : {
+        writer: (k) => [70 + (k % 4) * 56, 172 + Math.floor(k / 4) * 56], wl: [154, 136],
+        gate: [390, 255], fx: 470, fy: 220, fw: 400, fh: 70, cx: 484,
+        disk: [670, 410], readers: [176, 236, 296, 356].map((y) => [1120, y]),
+        from: () => [870, 255], to: (r) => [r[0] - 18, r[1]], rl: [1120, 136], gl: [390, 208], chip: 500,
+      };
+      const cell = (i) => L.cx + i * 13;
+      const fmid = L.fy + L.fh / 2;
+
+      // The file, and the disk under it.
+      mono(c, 'app.fenec', L.fx, L.fy - 12, { size: 15, color: P.hot, alpha: a });
+      box(c, L.fx, L.fy, L.fw, L.fh, { r: 10, fill: P.deep, stroke: P.sun, alpha: a, line: 1.8 });
+      disk(c, ...L.disk, { alpha: a, glow: Math.max(0, ...SYNC.map((s) => flash(t, s, 0.7) * (t >= s ? 1 : 0))) });
+      mono(c, 'disk', L.disk[0], L.disk[1] + 46, { align: 'center', alpha: a });
+
+      // The lock: one write through at a time.
+      const [gx, gy] = L.gate;
+      if (n) { line(c, gx - 40, gy, gx - 9, gy, P.sand2, 3, a); line(c, gx + 9, gy, gx + 40, gy, P.sand2, 3, a); }
+      else { line(c, gx, gy - 40, gx, gy - 9, P.sand2, 3, a); line(c, gx, gy + 9, gx, gy + 40, P.sand2, 3, a); }
+      mono(c, 'one at a time', L.gl[0], L.gl[1], { align: n ? 'left' : 'center', color: P.sand2, alpha: a });
+
+      // The writers, each lit once its write is on disk.
+      mono(c, '16 writers', L.wl[0], L.wl[1], { align: 'center', color: P.sand2, alpha: a });
+      for (let k = 0; k < 16; k++) {
+        const [x, y] = L.writer(k);
+        let g = 0, waiting = false;
+        for (let i = 0; i < N; i++) {
+          if ((i * 7) % 16 !== k) continue;
+          const s = synced(i);
+          if (t >= lands(i) - 0.7 && t < s) waiting = true;
+          if (t >= s) g = Math.max(g, flash(t, s, 0.8, 0.3));
+        }
+        client(c, x, y, { stroke: g > 0.05 ? P.oasis : P.sand2, alpha: a, glow: g });
+        if (waiting) dot(c, x + 12, y - 10, 3, P.sun, a);
+      }
+
+      // The writes: to the lock, through it, and into the file.
+      for (let i = 0; i < N; i++) {
+        const [wx, wy] = L.writer((i * 7) % 16);
+        const T = lands(i);
+        const into = n ? [[gx, gy - 12], [gx, gy + 12], [cell(i) + 5, L.fy]] : [[gx - 12, gy], [gx + 12, gy], [cell(i), fmid]];
+        const k1 = span(t, T - 0.7, T - 0.12);
+        if (k1 > 0 && k1 < 1) glow(c, ...along([[wx, wy], into[0]], inOut(k1)), 4);
+        streak(c, into, span(t, T - 0.12, T), { tail: 0.3, w: 2.5 });
+        if (t >= T) {
+          const s = synced(i), on = ease(span(t, s, s + 0.25));
+          box(c, cell(i), L.fy + 12, 10, L.fh - 24, { r: 2, fill: on > 0 ? `rgba(79,224,196,${0.85 * on})` : null, stroke: on > 0.5 ? P.oasis : P.sand, alpha: a, line: 1.2 });
+        }
+      }
+
+      // Each fsync: one flash to the disk for every write since the last.
+      SYNC.forEach((s) => {
+        const ids = [...Array(N).keys()].filter((i) => synced(i) === s);
+        if (!ids.length || t < s) return;
+        const x1 = cell(ids[0]), x2 = cell(ids[ids.length - 1]) + 10;
+        const by = L.fy + L.fh + 8;
+        wire(c, [[x1, by - 3], [x1, by], [x2, by], [x2, by - 3]], P.oasis, 2, a * (0.35 + 0.65 * flash(t, s, 1.2)));
+        streak(c, [[(x1 + x2) / 2, by], L.disk.map((v, q) => v - (q ? 24 : 0))], span(t, s, s + 0.35), { tail: 0.5 });
+      });
+      chip(c, 'one fsync covers several writes', L.disk[0] + (n ? 124 : 0), L.chip, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 3.1, 3.7)) });
+
+      // The readers: a shared lock each, reading all along.
+      mono(c, n ? 'readers keep reading' : '4 readers', L.rl[0], L.rl[1], { align: 'center', color: P.sand2, alpha: a });
+      L.readers.forEach((r, q) => {
+        client(c, ...r, { stroke: P.oasis, alpha: a, glow: 0.3 });
+        const pts = [L.from(r), L.to(r)];
+        wire(c, pts, P.rule, 1.2, a * 0.7);
+        for (let j = 0; j < 3; j++) {
+          const ph = (t * 1.1 + q * 0.27 + j / 3) % 1;
+          if (t > 0.6) glow(c, ...along(pts, ph), 2.6, a * 0.9);
+        }
+      });
+      if (!n) chip(c, 'readers keep reading', 1120, 420, { size: 15, center: true, alpha: ease(span(t, 2, 2.6)) });
+    },
+  },
+  {
+    /* Requests straight to the server and its mapped file: the cache a
+       database usually wants in front is crossed out and gone, and each
+       answer comes back decoded from the file's own bytes. */
+    key: 'traffic',
+    d: 9,
+    h: 560, nh: 690,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const L = n ? {
+        client: (k) => [44 + k * 56, 46], cache: [150, 112, 180, 70],
+        sx: 140, sy: 226, sw: 200, sh: 130, mark: [240, 270, 0.85],
+        fx: 50, fy: 440, fw: 380, fh: 180, page: (p) => [80 + (p % 6) * 56, 478 + Math.floor(p / 6) % 3 * 40],
+        in: [240, 226], out: [240, 356], said: [240, 420], end: 664,
+      } : {
+        client: (k) => [100, 130 + k * 44], cache: [250, 220, 150, 120],
+        sx: 520, sy: 210, sw: 200, sh: 140, mark: [620, 260, 1.0],
+        fx: 880, fy: 170, fw: 320, fh: 220, page: (p) => [906 + (p % 6) * 48, 212 + Math.floor(p / 6) % 4 * 38],
+        in: [520, 280], out: [720, 280], said: [1040, 150], end: 490,
+      };
+      const pages = n ? 18 : 24, PW = n ? 44 : 38, PH = 30;
+
+      // The clients and their wires to the server.
+      for (let k = 0; k < 8; k++) {
+        const [x, y] = L.client(k);
+        wire(c, [[x + (n ? 0 : 16), y + (n ? 14 : 0)], L.in], P.rule, 1.2, a * 0.8);
+        client(c, x, y, { stroke: P.sand2, alpha: a });
+      }
+
+      // The server, and the mapped file behind it with nothing between.
+      box(c, L.sx, L.sy, L.sw, L.sh, { r: 16, fill: P.panel, stroke: P.sun, alpha: a, line: 2 });
+      mark(c, ...L.mark, a, t - 1.6);
+      mono(c, 'fenec-server', L.sx + L.sw / 2, L.sy + L.sh - 18, { size: n ? 15 : 17, color: P.hot, align: 'center', alpha: a });
+      wire(c, [L.out, n ? [240, L.fy] : [L.fx, 280]], P.rule, 2, a);
+      box(c, L.fx, L.fy, L.fw, L.fh, { r: 14, fill: P.deep, stroke: P.sun, alpha: a, line: 1.8 });
+      mono(c, 'app.fenec', L.fx + 16, L.fy + 26, { size: 15, color: P.hot, alpha: a });
+      mono(c, 'mapped into memory', L.fx + L.fw - 16, L.fy + 26, { size: 13, align: 'right', alpha: a });
+
+      // Requests: in as sand, answered in the mark's light.
+      const reqs = 62, R0 = 2.2, RD = 0.1;   // until the last frame: traffic never stops
+      const lit = new Array(pages).fill(0);
+      for (let j = 0; j < reqs; j++) {
+        const T = R0 + j * RD, [cx, cy] = L.client((j * 3) % 8), p = (j * 5) % pages;
+        const [px, py] = L.page(p), pc = [px + PW / 2, py + PH / 2];
+        const from = [cx + (n ? 0 : 16), cy + (n ? 14 : 0)];
+        const k1 = span(t, T, T + 0.4);
+        if (k1 > 0 && k1 < 1) dot(c, ...along([from, L.in], inOut(k1)), 3.2, P.sand, a);
+        streak(c, [L.out, pc], span(t, T + 0.4, T + 0.55), { tail: 0.4, w: 2 });
+        lit[p] = Math.max(lit[p], t > T + 0.55 ? flash(t, T + 0.55, 0.7) : 0);
+        const k2 = span(t, T + 0.6, T + 1.0);
+        if (k2 > 0 && k2 < 1) glow(c, ...along([L.in, from], inOut(k2)), 3.6, a);
+      }
+      for (let p = 0; p < pages; p++) {
+        const [x, y] = L.page(p);
+        box(c, x, y, PW, PH, { r: 4, fill: lit[p] > 0.02 ? `rgba(79,224,196,${0.55 * lit[p]})` : P.panel, stroke: lit[p] > 0.3 ? P.oasis : P.rule, alpha: a, line: 1.2 });
+      }
+      mono(c, 'a row decoded from the file’s bytes', L.said[0], L.said[1], { size: n ? 13 : 15, align: 'center', color: P.sand2, alpha: ease(span(t, 3.2, 3.8)) });
+
+      // The cache that is not there: shown, crossed out, gone.
+      const [qx, qy, qw, qh] = L.cache;
+      const ca = a * (1 - ease(span(t, 1.5, 2.2)));
+      box(c, qx, qy, qw, qh, { r: 12, fill: P.night, stroke: P.dim, alpha: ca, dash: [6, 6] });
+      mono(c, 'cache', qx + qw / 2, qy + qh / 2 + 6, { size: 17, align: 'center', alpha: ca });
+      const x1 = ease(span(t, 0.7, 1.1));
+      if (x1 > 0) {
+        line(c, qx + 14, qy + 14, lerp(qx + 14, qx + qw - 14, x1), lerp(qy + 14, qy + qh - 14, x1), P.red, 3, ca * 0.8);
+        line(c, qx + qw - 14, qy + 14, lerp(qx + qw - 14, qx + 14, x1), lerp(qy + 14, qy + qh - 14, x1), P.red, 3, ca * 0.8);
+      }
+      chip(c, 'no cache to warm, evict or keep in step', n ? 240 : 640, L.end, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 4.2, 4.8)) });
+    },
+  },
+  {
+    /* Tenants, a file each, on nodes behind a router; each has a copy that
+       follows it on another node. A tenant moves to another node; then a
+       node's lease lapses, it stops writing, and its tenants' copies are
+       promoted where they are. */
+    key: 'scale',
+    d: 10,
+    h: 560, nh: 800,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const L = n ? {
+        router: [160, 14, 160, 50], node: (i) => [20, 104 + i * 220, 440, 200],
+        slot: (i, row, s) => [150 + s * 80, 104 + i * 220 + (row ? 150 : 72)],
+        rows: [80, 156], path: (i, x, y) => [[160, 39], [8, 39], [8, y], [x - 20, y]], end: 772,
+      } : {
+        router: [540, 24, 200, 56], node: (i) => [85 + i * 390, 150, 330, 310],
+        slot: (i, row, s) => [85 + i * 390 + 85 + s * 70, row ? 376 : 232],
+        rows: [210, 330], path: (i, x, y) => [[640, 80], [250 + i * 390, 150], [x, y - 26]], end: 512,
+      };
+      // Where each tenant lives, and where its copy follows it: three
+      // copies a node, none on its own tenant's node.
+      const T = [
+        { n: 't1', home: [0, 0], copy: [1, 0] }, { n: 't4', home: [0, 1], copy: [2, 0] }, { n: 't7', home: [0, 2], copy: [2, 2] },
+        { n: 't2', home: [1, 0], copy: [0, 0] }, { n: 't5', home: [1, 1], copy: [2, 1] }, { n: 't8', home: [1, 2], copy: [0, 1] },
+        { n: 't3', home: [2, 0], copy: [1, 1] }, { n: 't6', home: [2, 1], copy: [0, 2] }, { n: 't9', home: [2, 2], copy: [1, 2] },
+      ];
+      const MOVE = [3.2, 4.4], FAIL = 5.4, PROMOTE = 6.4;
+      const down = ease(span(t, FAIL, FAIL + 0.5));
+      const fs = n ? 1.0 : 1.1;
+      const named = (s, x, y, o) => mono(c, s, x, y + (n ? 32 : 36), { size: 13, align: 'center', ...o });
+
+      // The router and its wires.
+      const [rx, ry, rw, rh] = L.router;
+      box(c, rx, ry, rw, rh, { r: 12, fill: P.panel2, stroke: P.sun, alpha: a, line: 2 });
+      mono(c, 'router', rx + rw / 2, ry + rh / 2 + 6, { size: 17, color: P.hot, align: 'center', alpha: a });
+      [0, 1, 2].forEach((i) => {
+        const [x, y, w, h] = L.node(i);
+        const d = i === 1 ? down : 0;
+        const pts = n ? L.path(i, 40, y + 100) : [[640, 80], [x + w / 2, y]];
+        wire(c, pts, d > 0.5 ? P.red : P.rule, 1.5, a * (1 - d * 0.5), d > 0.5 ? [4, 6] : null);
+        box(c, x, y, w, h, { r: 16, fill: P.panel, stroke: d > 0.5 ? P.red : P.rule, alpha: a, line: 2 });
+        text(c, `node ${i + 1}`, x + 18, y + 30, { size: 18, weight: 600, color: d > 0.5 ? P.red : P.sand, alpha: a });
+        mono(c, 'tenants', n ? x + 16 : x + w - 18, n ? y + L.rows[0] - 4 : y + 30, { size: 13, align: n ? 'left' : 'right', alpha: a });
+        mono(c, 'copies', n ? x + 16 : x + w - 18, n ? y + L.rows[1] - 4 : y + 172, { size: 13, align: n ? 'left' : 'right', alpha: a * 0.8 });
+        if (!n) line(c, x + 18, y + 150, x + w - 18, y + 150, P.rule, 1, a * 0.6, [3, 5]);
+        if (d > 0) mono(c, 'lease lapsed, stopped writing', n ? x + w - 16 : x + w / 2, n ? y + 30 : y + h - 16, { size: 13, align: n ? 'right' : 'center', color: P.red, alpha: a * d });
+      });
+
+      // The tenants and their copies.
+      T.forEach((tn, k) => {
+        const [hi, hs] = tn.home;
+        let [x, y] = L.slot(hi, 0, hs);
+        const moved = tn.n === 't1';
+        if (moved) {
+          const m = inOut(span(t, ...MOVE));
+          const [tx, ty] = L.slot(2, 0, 3);
+          const arc = Math.sin(Math.PI * m) * (n ? 70 : 150);
+          x = lerp(x, tx, m) + (n ? arc : 0); y = lerp(y, ty, m) - (n ? 0 : arc);
+          if (m > 0 && m < 1) glow(c, x, y, 6);
+        }
+        const gone = hi === 1 ? down : 0;
+        // A request routed to it, early on.
+        const ask = [1.1, 1.5, 1.9, 2.3][[0, 4, 8, 1].indexOf(k)];
+        if (ask !== undefined) streak(c, L.path(hi, x, y), span(t, ask, ask + 0.6), { tail: 0.25, w: 2.5 });
+        const hit = ask !== undefined ? flash(t, ask + 0.6, 0.8) * (t > ask + 0.6 ? 1 : 0) : 0;
+        file(c, x, y, fs, { stroke: gone > 0.5 ? P.red : P.sun, alpha: a * (1 - gone * 0.6), glow: hit + (moved ? flash(t, MOVE[1], 1) * (t > MOVE[1] ? 1 : 0) : 0) });
+        named(tn.n, x, y, { color: P.hot, alpha: a * (1 - gone * 0.6) });
+        if (moved) mono(c, 'moved', x, y - (n ? 26 : 30), { align: 'center', size: 12, color: P.oasis, alpha: ease(span(t, MOVE[1], MOVE[1] + 0.4)) });
+
+        // Its copy; a copy of a failed node's tenant is promoted.
+        const [ci, cs] = tn.copy;
+        const [cx, cy] = L.slot(ci, 1, cs);
+        const up = hi === 1 ? ease(span(t, PROMOTE + cs * 0.25, PROMOTE + 0.5 + cs * 0.25)) : 0;
+        const gp = hi === 1 ? flash(t, PROMOTE + cs * 0.25 + 0.6, 1.4, 0.45) * (t > PROMOTE + cs * 0.25 + 0.6 ? 1 : 0) : 0;
+        if (hi === 1) streak(c, L.path(ci, cx, cy), span(t, PROMOTE + cs * 0.25, PROMOTE + 0.6 + cs * 0.25), { tail: 0.25, w: 2.5 });
+        file(c, cx, cy, fs * 0.9, { stroke: up > 0.5 ? P.oasis : P.dim, alpha: a * (0.6 + 0.4 * up), glow: gp, dash: up > 0.5 ? null : [3, 3] });
+        named(tn.n, cx, cy, { color: up > 0.5 ? P.oasis : P.dim, alpha: a * (0.7 + 0.3 * up) });
+        if (hi === 1) named('promoted', cx, cy + 16, { size: 12, color: P.oasis, alpha: up });
+      });
+
+      // What is happening, a line at a time.
+      const say = [
+        ['a file a tenant, each with a copy on another node', 0.9, MOVE[0] - 0.2],
+        ['a tenant moved to another node', MOVE[0], FAIL - 0.2],
+        ['node 2 stops writing as its lease lapses', FAIL, PROMOTE + 0.3],
+        ['its tenants take writes on their copies', PROMOTE + 0.5, 99],
+      ];
+      for (const [s, from, to] of say) {
+        const k = ease(span(t, from, from + 0.4)) * (1 - ease(span(t, to, to + 0.3)));
+        chip(c, s, n ? 240 : 640, L.end, { size: n ? 15 : 17, center: true, color: to === 99 ? P.oasis : P.sand, alpha: k });
+      }
+    },
+  },
+  {
+    /* A question in plain words. `near` finds the documents nearest it by
+       meaning; `match` finds the ones holding its words, which light; and
+       `fuse` adds each one's 1 / (60 + rank) from both lists, so what both
+       found comes first. The documents, their places and both rankings are
+       an example; the arithmetic of the fusion is fenecdb's. */
+    key: 'search',
+    d: 10,
+    h: 560, nh: 830,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const terms = new Set(['warm', 'places', 'to', 'sleep', 'outdoors']);
+      // Where each document sits by meaning; the query's place is Q.
+      const DOCS = {
+        1: ['Sleep outdoors', 300, 305, 'up'], 2: ['Down bag', 330, 360, 'right'],
+        3: ['Warm places', 215, 250, 'up'], 4: ['Heated tent', 265, 365, 'left'],
+        5: ['Campfire', 370, 310, 'right'], 6: ['Warm soup', 110, 170, 'up'],
+        8: ['Quiet places', 450, 150, 'up'],
+      };
+      const NEAR = [2, 4, 1, 5, 3], MATCH = [1, 3, 6, 8];
+      const fused = Object.keys(DOCS).map(Number).map((id) => {
+        const r1 = NEAR.indexOf(id) + 1, r2 = MATCH.indexOf(id) + 1;
+        return { id, r1, r2, s: (r1 ? 1 / (60 + r1) : 0) + (r2 ? 1 / (60 + r2) : 0) };
+      }).sort((x, y) => y.s - x.s || x.id - y.id).slice(0, 5);
+
+      const k = n ? 0.82 : 1, ox = n ? -6 : 0, oy = n ? -6 : 0;
+      const at = (x, y) => [ox + x * k, oy + y * k + (n ? 20 : 0)];
+      const Q = at(300, 350);
+      const COL = n ? [10, 167, 324] : [600, 830, 1060], cw = n ? 146 : 200;
+      const top = n ? 448 : 112, row0 = n ? 506 : 172, step = n ? 52 : 60, rh = n ? 44 : 50;
+      const ts = n ? 13.5 : 16;
+
+      // The question.
+      const qa = ease(span(t, 0.3, 0.9));
+      chip(c, '“warm places to sleep outdoors”', n ? 240 : 30, n ? 28 : 46, { size: n ? 15 : 18, color: P.star, alpha: qa, center: n });
+
+      // The documents, by meaning: a sky of them, these few named.
+      const r = rng(11);
+      for (let i = 0; i < 46; i++) {
+        let x, y;
+        do { x = 40 + r() * 490; y = 100 + r() * 410; } while (Math.hypot(x - 300, y - 350) < 150);
+        dot(c, ...at(x, y), 2.2, P.sand2, a * 0.45);
+      }
+      const nearK = (id) => { const i = NEAR.indexOf(id); return i < 0 ? 0 : ease(span(t, 1.9 + i * 0.18, 2.3 + i * 0.18)); };
+      const matchK = (id) => { const i = MATCH.indexOf(id); return i < 0 ? 0 : ease(span(t, 3.9 + i * 0.25, 4.2 + i * 0.25)); };
+      for (const [id, [s, x0, y0, side]] of Object.entries(DOCS)) {
+        const [x, y] = at(x0, y0);
+        const nk = nearK(+id), mk = matchK(+id);
+        streak(c, [Q, [x, y]], span(t, 1.7 + NEAR.indexOf(+id) * 0.18, 2.1 + NEAR.indexOf(+id) * 0.18), { tail: 0.5, w: 2 });
+        if (nk > 0.5) line(c, ...Q, x, y, P.oasis, 1, a * 0.35);
+        if (mk > 0) box(c, x - 9, y - 9, 18, 18, { r: 9, fill: null, stroke: P.sun, alpha: a * mk, line: 1.4 });
+        if (nk > 0) glow(c, x, y, 4, a * nk); else dot(c, x, y, 4, P.sand, a);
+        const o = { size: n ? 12 : 13, color: nk > 0.5 ? P.oasis : P.sand2, alpha: a };
+        if (side === 'up') mono(c, s, x, y - 13, { ...o, align: 'center' });
+        else if (side === 'left') mono(c, s, x - 12, y + 18, { ...o, align: 'right' });
+        else mono(c, s, x + 12, y + 5, o);
+      }
+      // The query lands among them, and its rings go out.
+      const land = ease(span(t, 1.0, 1.5));
+      if (land > 0) {
+        streak(c, [n ? [240, 46] : [180, 64], Q], span(t, 1.0, 1.5), { tail: 0.4, w: 2.5 });
+        for (const d of [0, 0.35]) {
+          const rr = span(t, 1.5 + d, 2.6 + d);
+          if (rr > 0 && rr < 1) box(c, Q[0] - 90 * k * rr, Q[1] - 90 * k * rr, 180 * k * rr, 180 * k * rr, { r: 90 * k * rr, fill: null, stroke: P.oasis, alpha: (1 - rr) * 0.8, line: 1.5 });
+        }
+        if (t > 1.5) glow(c, ...Q, 6, a);
+      }
+
+      // The three rankings.
+      const head = [['near', 'by meaning'], ['match', 'by the words'], ['fuse', '1 / (60 + rank), added']];
+      head.forEach(([h, sub], i) => {
+        const ha = ease(span(t, [1.8, 3.7, 5.3][i], [2.2, 4.1, 5.7][i]));
+        text(c, h, COL[i], top, { size: n ? 16 : 19, weight: 600, color: i === 2 ? P.oasis : P.star, alpha: ha });
+        mono(c, sub, COL[i], top + (n ? 18 : 22), { size: n ? 10.5 : 13, alpha: ha });
+      });
+      const rowAt = (col, i) => [COL[col], row0 + i * step];
+      const card = (x, y, id, rank, alpha, { lit = 0, stroke = P.rule, score = null, g = 0 } = {}) => {
+        box(c, x, y, cw, rh, { r: 8, fill: P.panel, stroke, alpha, glow: g });
+        mono(c, String(rank), x + 10, y + (score ? 20 : rh / 2 + 5), { size: 12, alpha });
+        words(c, DOCS[id][0], x + (n ? 24 : 30), y + (score ? 20 : rh / 2 + 5), { size: ts, lit, terms, alpha });
+        if (score) mono(c, score, x + (n ? 24 : 30), y + rh - 9, { size: n ? 10.5 : 12, color: P.oasis, alpha });
+      };
+      NEAR.forEach((id, i) => card(...rowAt(0, i), id, i + 1, ease(span(t, 2.3 + i * 0.15, 2.6 + i * 0.15)), { stroke: P.rule }));
+      MATCH.forEach((id, i) => {
+        const ma = ease(span(t, 3.9 + i * 0.25, 4.2 + i * 0.25));
+        card(...rowAt(1, i), id, i + 1, ma, { lit: ease(span(t, 4.2 + i * 0.25, 4.6 + i * 0.25)) });
+      });
+      // Fusion: each document flies in from the lists it is on.
+      fused.forEach((f, i) => {
+        const go = 5.6 + i * 0.25, m = inOut(span(t, go, go + 0.7));
+        if (m <= 0) return;
+        const [tx, ty] = rowAt(2, i);
+        for (const [col, rank] of [[0, f.r1], [1, f.r2]]) {
+          if (!rank || m >= 1) continue;
+          const [sx, sy] = rowAt(col, rank - 1);
+          box(c, lerp(sx, tx, m), lerp(sy, ty, m), cw, rh, { r: 8, fill: P.panel2, stroke: P.oasis, alpha: 0.7 * (1 - m * 0.5), glow: 0.5 });
+        }
+        if (m < 1) return;
+        const both = f.r1 && f.r2;
+        const parts = [f.r1 && `1/${60 + f.r1}`, f.r2 && `1/${60 + f.r2}`].filter(Boolean).join(' + ');
+        card(tx, ty, f.id, i + 1, a, { lit: 1, stroke: both ? P.oasis : P.rule, g: both ? flash(t, go + 0.7, 1, 0.4) : 0, score: parts });
+      });
+      chip(c, 'found by both, ranked first', n ? 240 : 920, n ? 800 : 500, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 7.4, 8)) });
     },
   },
 ];
 
 const STARS = (() => {
   const r = rng(3);
-  return Array.from({ length: 160 }, () => [r() * W, r() * H, r() * 1.3 + 0.3, r() * 6.28]);
+  return Array.from({ length: 160 }, () => [r(), r(), r() * 1.3 + 0.3, r() * 6.28]);
 })();
-
-/* The frame a section shows: the scenes' 1280 x 720 stage less the band a
-   title took, so it sits under the section's own heading. */
-export const FRAME = { w: W, h: 560, top: 150 };
 
 export const SCENE = Object.fromEntries(SCENES.map((s) => [s.key, s]));
 
+/* The stage scene `key` is drawn on: a screen's, or a phone's. */
+export function stage(key, narrow) {
+  const s = SCENE[key];
+  return narrow ? { w: NW, h: s.nh } : { w: W, h: s.h };
+}
+
 /* Draws scene `key` at `t` seconds of its own into a context of any size. */
-export function render(c, key, t, width, height) {
+export function render(c, key, t, width, height, narrow = false) {
   const scene = SCENE[key];
-  const s = Math.min(width / FRAME.w, height / FRAME.h);
+  const { w, h } = stage(key, narrow);
+  const s = Math.min(width / w, height / h);
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, width, height);
-  c.setTransform(s, 0, 0, s, (width - FRAME.w * s) / 2, (height - FRAME.h * s) / 2);
-  for (const [x, y, r, ph] of STARS) if (y < FRAME.h) dot(c, x, y, r, P.star, 0.14 + 0.12 * Math.sin(t * 1.3 + ph));
-  c.translate(0, -FRAME.top);
+  c.setTransform(s, 0, 0, s, (width - w * s) / 2, (height - h * s) / 2);
+  for (const [x, y, r, ph] of STARS) dot(c, x * w, y * h, r, P.star, 0.14 + 0.12 * Math.sin(t * 1.3 + ph));
   c.save();
   c.globalAlpha = ease(span(t, 0, 0.45)) * (1 - ease(span(t, scene.d - 0.4, scene.d)));
-  scene.draw(c, t);
+  scene.draw(c, t, narrow);
   c.restore();
 }

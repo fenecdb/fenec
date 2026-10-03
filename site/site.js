@@ -969,11 +969,16 @@ if (motions.length) {
     const keys = fig.dataset.scenes.split(' ');
     let mod, at = 0, t = 0, playing = false, last = 0, steps = [], inView = false;
 
+    // A phone gets the scene's narrow stage: the wide one scaled down to a
+    // phone turned its words to specks.
+    const narrow = matchMedia('(max-width: 600px)');
     const fit = () => {
       const dpr = Math.min(devicePixelRatio || 1, 2);
+      const { w: sw, h: sh } = mod.stage(keys[at], narrow.matches);
+      canvas.style.aspectRatio = `${sw} / ${sh}`;
       const w = canvas.getBoundingClientRect().width;
       canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(w * dpr * mod.FRAME.h / mod.FRAME.w);
+      canvas.height = Math.round(w * dpr * sh / sw);
     };
     // A scene plays to just before its fade, holds there, then fades out.
     const local = () => {
@@ -981,7 +986,7 @@ if (motions.length) {
       return t < d - 0.4 ? t : t < d - 0.4 + HOLD ? d - 0.41 : t - HOLD;
     };
     const draw = () => {
-      mod.render(canvas.getContext('2d'), keys[at], local(), canvas.width, canvas.height);
+      mod.render(canvas.getContext('2d'), keys[at], local(), canvas.width, canvas.height, narrow.matches);
       const d = mod.SCENE[keys[at]].d + HOLD;
       steps.forEach((b, i) => {
         b.toggleAttribute('aria-current', i === at);
@@ -1023,6 +1028,7 @@ if (motions.length) {
       if (still) t = mod.SCENE[keys[0]].d - 0.5;
       draw();
       addEventListener('resize', () => { fit(); draw(); }, { passive: true });
+      narrow.addEventListener('change', () => { fit(); draw(); });
       if (still) return;
       new IntersectionObserver((e) => {
         inView = e.some((x) => x.isIntersecting);

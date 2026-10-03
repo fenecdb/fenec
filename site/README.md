@@ -160,15 +160,26 @@ said "vector database" before a word was read.
 
 ## Moving pictures
 
-A section shows its feature working, on a canvas between its heading and
-its detail. The home page has two: a write made on a phone with no network,
-kept in its file, sent once under its key and drawn on another screen
-(`flow`), and replicas and tenants failing over (`scale`). A phone shows no
-scene: the flow's three steps are words there (`.flow-alt`). `motion.js` draws any moment of a scene from the scene's time
-alone, so a section loops its scenes while in view, stops when it is not, and
-steps between them on a click; under reduced motion each shows its last frame.
-It loads as the first such section comes near. Every number in it is one
-the docs measure.
+Each of the home page's six sections tells its story as a scene, not as
+code: a canvas between its heading and its detail, the measured numbers in
+the text beside it. A write redrawing the three screens that read it while a
+fourth is not run (`state`); a write made offline, sent once and drawn on
+another screen (`flow`); sixteen writers through one lock into one file, an
+fsync covering several writes, readers going on beside them (`writers`);
+requests straight to the server and its mapped file, the cache crossed out
+(`traffic`); tenants moved and failed over onto their copies (`scale`); and a
+question finding its documents by meaning and by its words, the two lists
+fused (`search`). What moves is the mark's own light, the teal with its glow,
+so the scenes and the logo read as one.
+
+`motion.js` draws any moment of a scene from the scene's time alone, so a
+section loops its scene while in view and stops when it is not; under
+reduced motion each shows its last frame, which says everything the scene
+does. A scene has two stages, 1280 wide and 480 wide (`stage`): a phone
+draws the narrow one, the same story laid out taller, since the wide stage
+scaled to a phone turned its words to specks. It loads as the first scene
+comes near. Every number in it is one the docs measure; the tasks, the
+documents and their places are only examples.
 
 ## The screencast
 

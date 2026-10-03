@@ -144,17 +144,9 @@ description: One database from the screen to the server: state your screens foll
       for state that outlives a keystroke: keep a text box's typing in the
       component, and write when the user saves.</p>
 
-    <pre data-lang="text">// React
-const open = useLiveQuery(db.from('todos').where('done', false));
-
-// SwiftUI: a LiveQuery is an ObservableObject
-@StateObject var open: LiveQuery<Todo>
-
-// Jetpack Compose: a live query is a Flow
-val open by model.open.collectAsState(emptyList())
-
-// Flutter: a live query is a Stream
-StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: list)</pre>
+    <figure class="motion rise" data-scenes="state">
+      <canvas role="img" aria-label="A new task is written into the app's file. The mark's light runs from the file to the three screens that read the tasks, a list, an open count and today's list, and each redraws with the new row lit. A fourth screen, reading the notes, is not run and stays as it was."></canvas>
+    </figure>
 
     <p class="after rise">Running a query again is the query itself: a page
       of 50 open todos out of 1 000 to 3 000, ordered by an index, took 0.19 ms,
@@ -182,7 +174,6 @@ StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: l
     <figure class="motion rise" data-scenes="flow">
       <canvas role="img" aria-label="A phone with no network writes a task: it shows on the phone at once and waits in the queue in the phone's file. When the network is back, the write goes to fenec-server once, under its Idempotency-Key, and the server's change stream puts the task on another device's screen."></canvas>
     </figure>
-    <ul class="chips flow-alt rise" aria-hidden="true"><li>Written offline, kept in the file</li><li>Sent once, under its key</li><li>On the other screen</li></ul>
 
     <p class="after rise">The browser's sync and the native one in Swift,
       Kotlin and Dart are held to the same 55 scenarios: offline writes,
@@ -202,17 +193,17 @@ StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: l
       is let go, so writers waiting on the disk share one. Readers take a
       shared lock and run beside them.</p>
 
-    <div class="bars rise" role="img" aria-label="Durable writes a second: fenecdb 252 with one writer and 516 with sixteen; SQLite 248 and 258.">
-      <div class="lane fenec done"><div class="lane-name"><b>fenecdb</b>1 writer</div><div class="lane-track"><div class="lane-fill" style="right: 51%"></div></div><div class="lane-time">252/s</div></div>
-      <div class="lane fenec done"><div class="lane-name"><b>fenecdb</b>16 writers</div><div class="lane-track"><div class="lane-fill" style="right: 0"></div></div><div class="lane-time">516/s</div></div>
-      <div class="lane done"><div class="lane-name"><b>SQLite</b>1 writer</div><div class="lane-track"><div class="lane-fill" style="right: 52%"></div></div><div class="lane-time">248/s</div></div>
-      <div class="lane done"><div class="lane-name"><b>SQLite</b>16 writers</div><div class="lane-track"><div class="lane-fill" style="right: 50%"></div></div><div class="lane-time">258/s</div></div>
-    </div>
+    <figure class="motion rise" data-scenes="writers">
+      <canvas role="img" aria-label="Sixteen writers send writes to one file. They pass the lock one at a time and land quickly; each fsync to the disk covers every write that landed since the last, so several writers are answered by one. Four readers beside them keep reading the whole time."></canvas>
+    </figure>
+    <dl class="versus rise">
+      <div><dt>Durable writes, 1 writer to 16</dt><dd><b>252 → 516/s</b><span>SQLite 248 → 258</span></dd></div>
+      <div><dt>Rows read beside four writers</dt><dd><b>701 000/s</b><span>SQLite 344 000</span></dd></div>
+    </dl>
 
-    <p class="after rise">Durable writes, an fsync each, in one process on an
-      M1. Beside four writers, four threads still read 701 000 rows a second,
-      against SQLite's 344 000. A block of 1 000 writes does hold readers for
-      the half millisecond it runs. <a href="docs/benchmarks.html#concurrency">Method
+    <p class="after rise">Durable writes, an fsync each, and four reading
+      threads, in one process on an M1. A block of 1 000 writes does hold
+      readers for the half millisecond it runs. <a href="docs/benchmarks.html#concurrency">Method
       and the rest of the table</a></p>
   </div>
 </section>
@@ -229,9 +220,9 @@ StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: l
       warm, evict or keep in step with the database, so the server can take
       the reads you would have put a cache in front of.</p>
 
-    <pre data-lang="bash">$ curl -X POST localhost:8080/query \
-       -d '{"query": "get users where id = $1", "params": [42]}'
-[{"id":42,"name":"Ayşe","plan":"pro"}]</pre>
+    <figure class="motion rise" data-scenes="traffic">
+      <canvas role="img" aria-label="A cache in front of the server is crossed out and fades away. Requests from eight clients go straight to fenec-server, which reads each row from its file mapped into memory, and the answers come back in the mark's light."></canvas>
+    </figure>
 
     <dl class="versus rise">
       <div><dt>A row by id over HTTP</dt><dd><b>0.022 ms</b><span>median, one client</span></dd></div>
@@ -256,7 +247,7 @@ StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: l
       tenants are promoted, so no tenant has two primaries. The limit is
       plain: one tenant lives whole on one machine.</p>
     <figure class="motion rise" data-scenes="scale">
-      <canvas role="img" aria-label="A primary streams its writes to two replicas; then a router places tenants on three nodes, one node fails, and its tenants move to the other two."></canvas>
+      <canvas role="img" aria-label="A router in front of three nodes, each holding three tenants, a file each, and copies of three tenants from the other nodes. Requests reach their tenants; one tenant moves to another node; then node 2 stops writing as its lease lapses, and its three tenants are promoted on their copies on the other two nodes."></canvas>
     </figure>
     <dl class="versus rise">
       <div><dt>A 58.7 MB tenant moved</dt><dd><b>under 0.3 s</b></dd></div>
@@ -283,9 +274,9 @@ StreamBuilder(stream: db.live(db.from('todos').where('done', false)), builder: l
       in a browser tab, on a phone and on the server, and in the page it is
       217 KB of gzipped WebAssembly with no dependencies.</p>
 
-    <pre data-lang="fenecql">create collection docs (title text, body text @text, embed vector<384> @hnsw(cosine))
-
-get docs select title match body $1 near embed $2 fuse limit 10</pre>
+    <figure class="motion rise" data-scenes="search">
+      <canvas role="img" aria-label="The question &ldquo;warm places to sleep outdoors&rdquo; lands among documents placed by meaning, and its five nearest light: near. The documents holding its words are ranked by them, the words lit: match. Then fuse adds one over sixty plus each rank from both lists, and the two documents both found rank first."></canvas>
+    </figure>
 
     <p class="after rise">At a million 128-dim vectors, fenec-server over HTTP
       answers the nearest ten at 99.1% recall in 0.141 ms; PostgreSQL with
