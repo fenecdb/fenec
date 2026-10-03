@@ -284,32 +284,9 @@ description: One database from the screen to the server: state your screens foll
       <a href="docs/benchmarks.html#scale">Method</a>, and fenecdb beside
       <a href="docs/vs-postgres.html">PostgreSQL</a>,
       <a href="docs/vs-sqlite.html">SQLite</a> and
-      <a href="docs/vs-pglite.html">PGlite</a></p>
-
-    <h3 class="sub rise">Or measure it here, in this tab</h3>
-    <div class="rig" id="rig" data-state="idle">
-      <div class="rig-bar">
-        <span class="rig-dot" aria-hidden="true"></span>
-        <span>fenec.wasm</span>
-        <span class="rig-note">waiting</span>
-      </div>
-      <div class="rig-main">
-        <div class="field-wrap">
-          <canvas class="field"></canvas>
-          <p class="field-cap">waiting to run</p>
-        </div>
-        <dl class="rig-stats">
-          <div class="stat"><dt>open</dt><dd class="idle" data-stat="boot">—</dd></div>
-          <div class="stat"><dt>documents</dt><dd class="idle" data-stat="rows">—</dd></div>
-          <div class="stat"><dt>index build</dt><dd class="idle" data-stat="build">—</dd></div>
-          <div class="stat"><dt>ann top-10, p50</dt><dd class="idle" data-stat="query">—</dd></div>
-          <div class="stat"><dt>recall@10</dt><dd class="idle" data-stat="recall">—</dd></div>
-        </dl>
-      </div>
-      <ol class="rig-steps" aria-hidden="true">
-        <li>Open the engine</li><li>Write 5,000 rows</li><li>Link the index</li><li>Search, replayed</li>
-      </ol>
-    </div>
+      <a href="docs/vs-pglite.html">PGlite</a>. The
+      <a href="playground.html">playground</a> runs the same engine in this
+      tab.</p>
   </div>
 </section>
 
@@ -318,6 +295,10 @@ description: One database from the screen to the server: state your screens foll
     <h2 class="rise">Security</h2>
     <p class="lede rise">Every request passes the same checks, from the login to
       the disk.</p>
+
+    <figure class="motion rise" data-scenes="security">
+      <canvas role="img" aria-label="Two users, ada and ben, send requests carrying tokens signed with the server's key. Each passes the token check and the rules, and each reads back only the rows it owns; the other user's rows stay dark. A write of a row owned by the other user is refused with 403. A request with a token signed with another key is held at the door, refused with 401 after a wait that doubles with each attempt, from 100 ms up to 5 s, and each refusal is written to the audit log. Meanwhile backups leave the file sealed, a lock on each, on their way to a bucket."></canvas>
+    </figure>
     <ul class="caps three rise">
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><b>Sign in safely</b><span>A token for the server, a read-only token for a dashboard. Repeated failures slow down.</span></li>
       <li><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11V7a5 5 0 0 1 10 0v4"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M12 15v2"/></svg><b>Your sign-in provider</b><span>Tokens from Auth0, Clerk or Firebase work as they are. Keys rotate without a restart.</span></li>
@@ -333,78 +314,331 @@ description: One database from the screen to the server: state your screens foll
   <path d="M0 62 C 210 30 330 80 500 54 C 690 24 810 74 990 46 C 1160 20 1290 62 1440 38 L1440 90 L0 90 Z" fill="#1B1233"/>
 </svg>
 
-<section class="band lit" id="compatibility">
+<section class="band lit" id="languages">
   <div class="band-in">
     <h2 class="rise">Your language</h2>
     <p class="lede rise">Every language reaches the server over plain HTTP and
-      JSON, and Swift, Kotlin and Dart keep the database in the app. Your AI
-      framework and your data from PostgreSQL or SQLite come with it.</p>
-    <div class="works rise">
-      <div><h3>Your language</h3><ul class="chips"><li>Python</li><li>JavaScript</li><li>Go</li><li>.NET</li><li>Rust</li><li>Java</li><li>PHP</li><li>Ruby</li><li>curl</li></ul></div>
-      <div><h3>Your app</h3><ul class="chips"><li>React</li><li>SwiftUI</li><li>Jetpack Compose</li><li>Flutter</li><li>Cloudflare Durable Objects</li></ul></div>
-      <div><h3>Your AI code</h3><ul class="chips"><li>LangChain</li><li>LlamaIndex</li><li>LangChain.js</li><li>Vercel AI SDK</li></ul></div>
-      <div><h3>Your data</h3><ul class="chips"><li>SQLite files</li><li>PostgreSQL tables</li><li>PostgreSQL, kept in sync live</li></ul></div>
-    </div>
-    <p class="after rise">Each example runs against a real server on every
-      change, and Python, JavaScript, Go and .NET have official clients.
-      <a href="docs/languages.html">Examples in your language</a> and
-      <a href="docs/integrations.html">every integration</a></p>
-  </div>
-</section>
+      JSON, and Swift, Kotlin and Dart can also keep the database in the app.
+      Your AI framework and your data from PostgreSQL or SQLite come with it.
+      Each session is the same flow against <code>fenec-server</code>: make a
+      collection, write two rows, ask for the nearest.</p>
 
-<section class="band" id="session">
-  <div class="band-in">
-    <h2 class="rise">A real session, recorded</h2>
-    <p class="lede rise">A server started, loaded over HTTP, searched from
-      Python, written to and followed. Every line of output came from a real
-      run.</p>
-    <div class="cast rise" id="cast">
+    <!-- Each session is the docs' own example for its language
+         (docs/languages.html, integrations/languages), and the rows are the
+         answer the docs show; the player types them, and without script
+         this list is the section. -->
+    <div class="sessions rise" id="sessions">
+      <div class="session-marks" role="group" aria-label="Language"></div>
       <div class="cast-screen">
-        <div class="cast-bar"><span class="cast-title">fenec-server</span></div>
-        <pre class="cast-out" aria-live="off" data-bare></pre>
-      </div>
-      <div class="cast-controls">
-        <button class="cast-play" type="button" aria-label="Pause">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path class="i-pause" d="M4 3h3v10H4zM9 3h3v10H9z"/><path class="i-play" d="M5 3l8 5-8 5z"/></svg>
-        </button>
-        <ol class="cast-chapters"></ol>
+        <div class="cast-bar"><span class="cast-title"></span></div>
+        <pre class="cast-out session-out" aria-live="off" data-bare></pre>
       </div>
 
-      <ol class="cast-script">
-        <li data-title="Start a server">
-<pre data-bare>$ fenec-server --file app.fenec --http 127.0.0.1:8080 --cdc
-opened: app.fenec
-fenec-server 0.1.6: app.fenec  [sync=250 ms]
-fenec-http 0.1.6 listening on: http://127.0.0.1:8080  [no auth]</pre>
-        </li>
-        <li data-title="Load over HTTP">
-<pre data-bare>$ curl -X POST localhost:8080/query \
-       -d '{"query":"create collection docs (title text, lang text @hash, embed vector&lt;64&gt; @hnsw(cosine))"}'
+      <pre class="session-rows" hidden data-bare>
+title                 _score
+Night at the oasis    0.9999999
+Dunes                 0.3246547</pre>
+
+      <ol class="session-script">
+<li data-name="Python" data-mark="py" data-file="search.py">
+<pre class="given" data-lang="python" data-bare>
+from fenecdb import Client
+
+db = Client("http://127.0.0.1:8080", token="secret")
+</pre>
+<pre class="typed" data-lang="python" data-bare>
+db.query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
+db.query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
+rows = db.query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+</pre>
+</li>
+<li data-name="JS / TS" data-mark="js" data-file="client.mjs">
+<pre class="given" data-lang="js" data-bare>
+import { connect } from '@fenecdb/web';
+
+const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+</pre>
+<pre class="typed" data-lang="js" data-bare>
+await db.run('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+await db.from('docs').insert({ title: 'Night at the oasis', embed: [0.1, 0.2, 0.3] });
+await db.from('docs').insert({ title: 'Dunes', embed: [0.9, 0.1, 0.0] });
+const rows = await db.from('docs').select('title').near('embed', [0.1, 0.2, 0.3]).limit(5).rows();
+</pre>
+</li>
+<li data-name="Go" data-mark="go" data-file="main.go">
+<pre class="given" data-lang="go" data-bare>
+import fenecdb "github.com/fenecdb/fenec/integrations/go"
+
+db := fenecdb.New("http://127.0.0.1:8080", fenecdb.WithToken("secret"))
+</pre>
+<pre class="typed" data-lang="go" data-bare>
+db.Exec(ctx, "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.Exec(ctx, "put docs {title: $1, embed: $2}", "Night at the oasis", []float32{0.1, 0.2, 0.3})
+db.Exec(ctx, "put docs {title: $1, embed: $2}", "Dunes", []float32{0.9, 0.1, 0.0})
+rows, err := db.Query(ctx, "get docs select title near embed $1 limit 5", []float32{0.1, 0.2, 0.3})
+</pre>
+</li>
+<li data-name=".NET" data-mark="C#" data-file="Program.cs">
+<pre class="given" data-bare>
+using FenecDb;
+
+using var db = new FenecClient("http://127.0.0.1:8080", new() { Token = "secret" });
+</pre>
+<pre class="typed" data-bare>
+await db.ExecAsync("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))");
+await db.ExecAsync("put docs {title: $1, embed: $2}", ["Night at the oasis", new[] { 0.1f, 0.2f, 0.3f }]);
+await db.ExecAsync("put docs {title: $1, embed: $2}", ["Dunes", new[] { 0.9f, 0.1f, 0.0f }]);
+var rows = await db.QueryAsync("get docs select title near embed $1 limit 5", [new[] { 0.1f, 0.2f, 0.3f }]);
+</pre>
+</li>
+<li data-name="Rust" data-mark="rs" data-file="main.rs">
+<pre class="given" data-lang="rust" data-bare>
+use serde_json::{json, Value};
+
+fn query(q: &amp;str, params: Value) -> Result&lt;Value, ureq::Error&gt; {
+    Ok(ureq::post("http://127.0.0.1:8080/query")
+        .set("Authorization", "Bearer secret")
+        .send_json(json!({"query": q, "params": params}))?
+        .into_json()?)
+}
+</pre>
+<pre class="typed" data-lang="rust" data-bare>
+query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))", json!([]))?;
+query("put docs {title: $1, embed: $2}", json!(["Night at the oasis", [0.1, 0.2, 0.3]]))?;
+query("put docs {title: $1, embed: $2}", json!(["Dunes", [0.9, 0.1, 0.0]]))?;
+let rows = query("get docs select title near embed $1 limit 5", json!([[0.1, 0.2, 0.3]]))?;
+</pre>
+</li>
+<li data-name="Java" data-mark="jv" data-file="Search.java">
+<pre class="given" data-bare>
+static HttpResponse&lt;String&gt; query(String json) throws Exception {
+    var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8080/query"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer secret")
+        .POST(HttpRequest.BodyPublishers.ofString(json))
+        .build();
+    return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+}
+</pre>
+<pre class="typed" data-bare>
+query("""
+    {"query": "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}""");
+query("""
+    {"query": "put docs {title: $1, embed: $2}", "params": ["Night at the oasis", [0.1, 0.2, 0.3]]}""");
+query("""
+    {"query": "put docs {title: $1, embed: $2}", "params": ["Dunes", [0.9, 0.1, 0.0]]}""");
+String rows = query("""
+    {"query": "get docs select title near embed $1 limit 5", "params": [[0.1, 0.2, 0.3]]}""").body();
+</pre>
+</li>
+<li data-name="PHP" data-mark="php" data-file="search.php">
+<pre class="given" data-bare>
+function query(string $q, array $params = []) {
+    $ch = curl_init('http://127.0.0.1:8080/query');
+    curl_setopt_array($ch, [
+        CURLOPT_POST =&gt; true,
+        CURLOPT_RETURNTRANSFER =&gt; true,
+        CURLOPT_HTTPHEADER =&gt; ['Content-Type: application/json', 'Authorization: Bearer secret'],
+        CURLOPT_POSTFIELDS =&gt; json_encode(['query' =&gt; $q, 'params' =&gt; $params]),
+    ]);
+    $body = json_decode(curl_exec($ch), true);
+    $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    if ($status &gt;= 300) {
+        throw new RuntimeException($body['error'], $status);
+    }
+    return $body;
+}
+</pre>
+<pre class="typed" data-bare>
+query('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
+query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
+$rows = query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);
+</pre>
+</li>
+<li data-name="Ruby" data-mark="rb" data-file="search.rb">
+<pre class="given" data-bare>
+def query(q, params = [])
+  req = Net::HTTP::Post.new(URI.join(URL, "/query"), "Content-Type" =&gt; "application/json")
+  req["Authorization"] = "Bearer secret"
+  req.body = JSON.generate(query: q, params: params)
+  res = Net::HTTP.start(URL.host, URL.port) { |http| http.request(req) }
+  body = JSON.parse(res.body)
+  raise "#{res.code}: #{body["error"]}" unless res.is_a?(Net::HTTPSuccess)
+  body
+end
+</pre>
+<pre class="typed" data-bare>
+query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
+query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])
+rows = query("get docs select title near embed $1 limit 5", [[0.1, 0.2, 0.3]])
+</pre>
+</li>
+<li data-name="Swift" data-mark="sw" data-file="Search.swift">
+<pre class="given" data-lang="swift" data-bare>
+import FenecDB
+
+// Or Fenec.open(path: path): the database in a file the app holds.
+let db = Fenec.connect(url: "http://127.0.0.1:8080", token: "secret")
+</pre>
+<pre class="typed" data-lang="swift" data-bare>
+try await db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+try await db.execute("put docs {title: $1, embed: $2}", "Night at the oasis", [Float(0.1), 0.2, 0.3])
+try await db.execute("put docs {title: $1, embed: $2}", "Dunes", [Float(0.9), 0.1, 0.0])
+let rows = try await db.query("get docs select title near embed $1 limit 5", [Float(0.1), 0.2, 0.3])
+</pre>
+</li>
+<li data-name="Kotlin" data-mark="kt" data-file="Search.kt">
+<pre class="given" data-lang="kotlin" data-bare>
+import com.fenecdb.*
+
+// Or Fenec.openAsync(path): the database in a file the app holds.
+val db = Fenec.connect("http://127.0.0.1:8080", token = "secret")
+</pre>
+<pre class="typed" data-lang="kotlin" data-bare>
+db.execute("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
+db.execute("put docs {title: \$1, embed: \$2}", "Night at the oasis", floatArrayOf(0.1f, 0.2f, 0.3f))
+db.execute("put docs {title: \$1, embed: \$2}", "Dunes", floatArrayOf(0.9f, 0.1f, 0f))
+val rows = db.query("get docs select title near embed \$1 limit 5", floatArrayOf(0.1f, 0.2f, 0.3f))
+</pre>
+</li>
+<li data-name="Dart" data-mark="dart" data-file="search.dart">
+<pre class="given" data-lang="dart" data-bare>
+import 'package:fenecdb/fenecdb.dart';
+
+// Or Fenec.open(path): the database in a file the app holds.
+final db = Fenec.connect('http://127.0.0.1:8080', token: 'secret');
+</pre>
+<pre class="typed" data-lang="dart" data-bare>
+await db.execute('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
+await db.execute(r'put docs {title: $1, embed: $2}', ['Night at the oasis', Float32List.fromList([0.1, 0.2, 0.3])]);
+await db.execute(r'put docs {title: $1, embed: $2}', ['Dunes', Float32List.fromList([0.9, 0.1, 0.0])]);
+final rows = await db.query(r'get docs select title near embed $1 limit 5', [Float32List.fromList([0.1, 0.2, 0.3])]);
+</pre>
+</li>
+<li data-name="curl" data-mark="$_" data-file="shell" data-shell>
+<pre class="given" data-lang="bash" data-bare>
+$ fenec-server --file app.fenec --http 127.0.0.1:8080 --http-token secret
+</pre>
+<pre class="typed" data-lang="bash" data-bare>
+$ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
+  -d '{"query":"create collection docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}'
 {"message":"collection `docs` created"}
-$ curl -X POST localhost:8080/docs --data-binary @docs.json
-{"inserted":50000}
-$ curl -X POST localhost:8080/query -d '{"query":"get docs count"}'
-[{"count":50000}]</pre>
-        </li>
-        <li data-title="Search from Python">
-<pre data-bare>$ python search.py
-('Night well ridge', 0.45985866)
-('Wind star oasis', 0.45463508)
-('Night fox well', 0.39427233)</pre>
-        </li>
-        <li data-title="Write over HTTP">
-<pre data-bare>$ curl -X POST localhost:8080/query \
-       -d '{"query":"put docs {title: \"Night well\", lang: \"tr\"}"}'
+$ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
+  -d '{"query":"put docs {title: $1, embed: $2}","params":["Night at the oasis",[0.1,0.2,0.3]]}'
 {"affected":1}
-$ curl 'localhost:8080/docs?lang=eq.tr&amp;select=id,title&amp;limit=2'
-[{"id":2,"title":"Star night wind"},{"id":8,"title":"Lantern oasis oasis"}]</pre>
-        </li>
-        <li data-title="Follow the changes">
-<pre data-bare>$ curl 'localhost:8080/_changes?since=50001'
-{"seq":50002,"at":1790885306824,"collection":"docs","op":"put","id":50001,"doc":{"id":50001,"title":"Night well","lang":"tr","embed":null}}</pre>
-        </li>
+$ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
+  -d '{"query":"put docs {title: $1, embed: $2}","params":["Dunes",[0.9,0.1,0.0]]}'
+{"affected":1}
+$ curl -X POST localhost:8080/query -H 'authorization: Bearer secret' \
+  -d '{"query":"get docs select title near embed $1 limit 5","params":[[0.1,0.2,0.3]]}'
+[{"title":"Night at the oasis","_score":0.9999999},{"title":"Dunes","_score":0.3246547}]
+</pre>
+</li>
+<li data-name="LangChain" data-mark="lc" data-file="store.py" data-group="Your AI code">
+<pre class="given" data-lang="python" data-bare>
+from fenecdb.langchain import FenecVectorStore
+</pre>
+<pre class="typed" data-lang="python" data-bare>
+store = FenecVectorStore(
+    embeddings, "handbook",
+    url="http://127.0.0.1:8080", token="...",
+    metadata_fields={"source": "text", "year": "int"},
+)
+store.add_documents(documents)
+store.similarity_search("how do I compact", k=4, filter={"source": "ops"})
+</pre>
+</li>
+<li data-name="LlamaIndex" data-mark="li" data-file="index.py" data-group="Your AI code">
+<pre class="given" data-lang="python" data-bare>
+from fenecdb.llama_index import FenecVectorStore
+from llama_index.core import StorageContext, VectorStoreIndex
+</pre>
+<pre class="typed" data-lang="python" data-bare>
+store = FenecVectorStore("handbook", url="http://127.0.0.1:8080", token="...",
+                         metadata_fields={"author": "text", "year": "int"})
+index = VectorStoreIndex.from_documents(
+    documents, storage_context=StorageContext.from_defaults(vector_store=store)
+)
+index.as_retriever(similarity_top_k=4).retrieve("how do I compact")
+</pre>
+</li>
+<li data-name="LangChain.js" data-mark="lc.js" data-file="store.js" data-group="Your AI code">
+<pre class="given" data-lang="js" data-bare>
+import { connect } from '@fenecdb/web';
+import { FenecVectorStore } from '@fenecdb/langchain';
+</pre>
+<pre class="typed" data-lang="js" data-bare>
+const db = connect('http://127.0.0.1:8080');
+const store = new FenecVectorStore(embeddings, {
+  client: db,
+  collection: 'handbook',
+  metadataFields: { source: 'text' },
+  fullText: true,
+});
+await store.addDocuments(documents);
+await store.search('compact', 4, { mode: 'hybrid' });
+</pre>
+</li>
+<li data-name="AI SDK" data-mark="ai" data-file="rag.js" data-group="Your AI code">
+<pre class="given" data-lang="js" data-bare>
+import { generateText, stepCountIs } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { connect } from '@fenecdb/web';
+import { index, searchTool } from './rag.js';   // integrations/ai-sdk/rag.js
+</pre>
+<pre class="typed" data-lang="js" data-bare>
+const db = connect('http://127.0.0.1:8080', { token: 'secret' });
+const model = openai.textEmbeddingModel('text-embedding-3-small');
+await index(db, { collection: 'docs', model, documents });
+
+const { text } = await generateText({
+  model: openai('gpt-4.1'),
+  tools: { search: searchTool(db, { collection: 'docs', model }) },
+  stopWhen: stepCountIs(4),
+  prompt: 'How do I compact the database?',
+});
+</pre>
+</li>
+<li data-name="SQLite" data-mark="sq" data-file="shell" data-shell data-group="Your data">
+<pre class="typed" data-lang="bash" data-bare>
+$ fenec import data.sqlite --table docs --into articles --vector embed:3 --dry-run
+source   data.sqlite -&gt; docs
+target   articles.fenec -&gt; articles
+
+create collection articles (
+  title     text           &lt;- text
+  category  text           &lt;- text
+  score     int            &lt;- int
+  published timestamp      &lt;- datetime
+  embed     vector&lt;3&gt;      &lt;- blob
+)
+  id  &lt;- id (INTEGER PRIMARY KEY)
+create index on articles (embed) @hnsw(cosine, m=16, ef_construction=200, ef_search=100)
+</pre>
+</li>
+<li data-name="PostgreSQL" data-mark="pg" data-file="shell" data-shell data-group="Your data">
+<pre class="typed" data-lang="bash" data-bare>
+$ fenec import postgres://app@db:5432/app --table docs --into articles \
+    --index "embed@hnsw(cosine)" --follow
+follow   slot fenec_articles (created), publication fenec_articles (created)
+copying  there is none yet
+100000 records, articles.fenec (3.1s)
+following docs: ctrl-c stops, and the same command resumes
+42 transactions, 57 changes, at 0/1B0E7F0
+</pre>
+</li>
       </ol>
     </div>
+
+    <p class="after rise">Each language's example runs against a real server
+      on every change, and Python, JavaScript, Go and .NET have official
+      clients. <a href="docs/languages.html">Examples in your language</a>,
+      <a href="docs/mobile.html">the database in an app</a>,
+      <a href="docs/integrations.html">every integration</a> and
+      <a href="docs/import.html">import</a></p>
   </div>
 </section>
 

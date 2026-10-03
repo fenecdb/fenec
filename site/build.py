@@ -768,7 +768,7 @@ def build():
     for name in CLIENT_MODULES + ("fenec.wasm",):
         src = os.path.join(REPO, "web", name)
         if not os.path.exists(src):
-            print(f"  note: web/{name} missing -- run `make wasm` for the live demo")
+            print(f"  note: web/{name} missing -- run `make wasm` for the playground")
             continue
         shutil.copy(src, os.path.join(OUT, name))
         if name.endswith(".js"):
@@ -890,7 +890,7 @@ def build():
 
     # Cloudflare reads this from the asset directory; it is not served itself.
     # Hashed assets can be cached forever because a change gives a new name --
-    # that now includes the engine the live console and the playground load.
+    # that now includes the engine the playground loads.
     # The stable `fenec.js` / `fenec.wasm` names exist for the docs links, and
     # those revalidate: a stale engine would silently be the wrong one.
     rules = ["/*",

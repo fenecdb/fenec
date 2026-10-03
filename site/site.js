@@ -269,370 +269,6 @@ function countUp(el, value, unit, ms = 900) {
   setTimeout(land, ms + 150);
 }
 
-/* ============================================ the vector field visualisation */
-
-function vectorField(canvas, onQuery) {
-  /* The live run, played like a film of itself. The points are the real
-     5 000 vectors' 2D shadow; each stage plays as the engine reaches it: rows
-     stream in from the left, the graph links as the index builds, and then
-     the queries the engine ran replay one after another -- each one entering
-     the graph, walking it toward its answer, and lighting the ten rows the
-     engine returned, with the time it took and how many of the ten an exact
-     scan agrees with. It loops while in view and stops when it is not. */
-  let ctx, w, h, pts = [], nb = [], edges = [], hubs = [], hubNb = new Map();
-  let loaded = 0, linked = 0, queries = [], qi = 0, qt = 0, playing = false, inView = true;
-  let last = 0, raf = 0;
-  const HUES = ['#F4A93C', '#FF7A3D', '#E86A8A', '#B97BE0', '#4FE0C4', '#FFCE73'];
-  const STEP = 0.12;            // seconds a hop of the walk takes
-  const QUERY_FOR = 6.2;        // seconds each replayed query holds the stage
-
-  const fit = () => { ({ ctx, w, h } = fitCanvas(canvas)); };
-  fit();
-  addEventListener('resize', () => { fit(); paint(); }, { passive: true });
-
-  // Each point's two nearest in the shadow, found through a grid: the graph
-  // the picture draws. The engine's own graph is in 128 dimensions; this is
-  // how such a graph looks, not a copy of it.
-  const link = () => {
-    const G = 48, cells = new Map(), key = (x, y) => x * 1000 + y;
-    pts.forEach((p, i) => {
-      const k = key(Math.floor(p.x * G), Math.floor(p.y * G));
-      (cells.get(k) || cells.set(k, []).get(k)).push(i);
-    });
-    nb = pts.map((p, i) => {
-      const cx = Math.floor(p.x * G), cy = Math.floor(p.y * G), near = [];
-      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-        for (const j of cells.get(key(cx + dx, cy + dy)) || []) {
-          if (j !== i) near.push([(pts[j].x - p.x) ** 2 + (pts[j].y - p.y) ** 2, j]);
-        }
-      }
-      near.sort((a, b) => a[0] - b[0]);
-      return near.slice(0, 3).map(([, j]) => j);
-    });
-    // An upper layer, as HNSW keeps: one point in forty, each linked to its
-    // four nearest of the others, so a walk crosses the field in long steps
-    // and then closes in through the fine graph.
-    hubs = pts.map((_, i) => i).filter((i) => i % 40 === 0);
-    hubNb = new Map(hubs.map((i) => [i, hubs.filter((j) => j !== i)
-      .map((j) => [(pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2, j])
-      .sort((a, b) => a[0] - b[0]).slice(0, 4).map(([, j]) => j)]));
-    edges = [];
-    nb.forEach((list, i) => list.slice(0, 2).forEach((j) => { if (i < j || !nb[j].includes(i)) edges.push([i, j]); }));
-    // Linked in the order the build sweeps them: left to right.
-    edges.sort((a, b) => pts[a[0]].x - pts[b[0]].x);
-  };
-
-  // A query's walk: from a far entry, across the upper layer to whichever
-  // neighbour is closer to the query, then down through the fine graph the
-  // same way until none is closer; then to the nearest row the engine found.
-  const walk = (q) => {
-    const d = (i) => (pts[i].x - q.x) ** 2 + (pts[i].y - q.y) ** 2;
-    let at = hubs[0];
-    for (const h of hubs) if (d(h) > d(at)) at = h;
-    const path = [at];
-    const greedy = (next) => {
-      for (let g = 0; g < 30; g++) {
-        let best = at;
-        for (const n of next(at)) if (d(n) < d(best)) best = n;
-        if (best === at) return;
-        path.push((at = best));
-      }
-    };
-    greedy((i) => hubNb.get(i) || []);
-    greedy((i) => nb[i]);
-    if (q.idx.length && q.idx[0] !== at) path.push(q.idx[0]);
-    return path;
-  };
-
-  const X = (i) => pts[i].x * w, Y = (i) => pts[i].y * h;
-
-  const paint = () => {
-    if (!ctx) return;
-    ctx.clearRect(0, 0, w, h);
-    const q = queries.length ? queries[qi] : null;
-    // How far into its replay the current query is.
-    const hops = q ? q.path.length : 0;
-    const walked = q ? Math.max(0, (qt - 0.5) / STEP) : 0;
-    const litFrom = 0.6 + hops * STEP;
-    const fade = q ? 1 - Math.min(1, Math.max(0, (qt - (QUERY_FOR - 0.5)) / 0.5)) : 0;
-
-    // The graph, as far as it is linked.
-    if (linked > 0) {
-      const n = Math.floor(edges.length * linked);
-      ctx.globalAlpha = 0.16;
-      ctx.strokeStyle = '#CDB894';
-      ctx.lineWidth = 0.6;
-      ctx.beginPath();
-      for (let e = 0; e < n; e++) {
-        const [a, b] = edges[e];
-        ctx.moveTo(X(a), Y(a));
-        ctx.lineTo(X(b), Y(b));
-      }
-      ctx.stroke();
-    }
-
-    // The rows: streaming in from the left as they are written.
-    const lit = new Set();
-    if (q) q.idx.forEach((i, k) => { if (qt > litFrom + k * 0.09) lit.add(i); });
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      const k = Math.min(1, Math.max(0, loaded * 1.25 - p.order * 0.25));
-      if (k <= 0) continue;
-      const e = 1 - Math.pow(1 - k, 3);
-      const x = (p.x * e - 0.08 * (1 - e)) * w;
-      const on = lit.has(i);
-      ctx.globalAlpha = on ? fade : 0.5 * e;
-      ctx.fillStyle = on ? '#FFF4DC' : HUES[p.c % HUES.length];
-      ctx.beginPath();
-      ctx.arc(x, p.y * h, on ? 3.6 : 1.55, 0, 7);
-      ctx.fill();
-    }
-
-    if (q) {
-      const qx = q.x * w, qy = q.y * h;
-      const appear = Math.min(1, qt / 0.4) * fade;
-      // The walk, a hop at a time.
-      ctx.globalAlpha = 0.95 * fade;
-      ctx.strokeStyle = '#4FE0C4';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let k = 0; k < hops - 1 && k < walked; k++) {
-        const a = q.path[k], b = q.path[k + 1];
-        const f = Math.min(1, walked - k);
-        ctx.moveTo(X(a), Y(a));
-        ctx.lineTo(X(a) + (X(b) - X(a)) * f, Y(a) + (Y(b) - Y(a)) * f);
-      }
-      ctx.stroke();
-      for (let k = 0; k < hops && k <= walked; k++) {
-        ctx.globalAlpha = 0.9 * fade;
-        ctx.fillStyle = '#4FE0C4';
-        ctx.beginPath();
-        ctx.arc(X(q.path[k]), Y(q.path[k]), 3.2, 0, 7);
-        ctx.fill();
-      }
-      // The ten found, joined to the query.
-      ctx.globalAlpha = 0.5 * fade;
-      ctx.strokeStyle = '#FFCE73';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (const i of lit) { ctx.moveTo(qx, qy); ctx.lineTo(X(i), Y(i)); }
-      ctx.stroke();
-      for (const i of lit) {
-        ctx.globalAlpha = 0.25 * fade;
-        ctx.fillStyle = '#FFF4DC';
-        ctx.beginPath();
-        ctx.arc(X(i), Y(i), 9, 0, 7);
-        ctx.fill();
-      }
-      // The query itself, arriving with a ring.
-      if (qt < 1.2) {
-        ctx.globalAlpha = (1 - qt / 1.2) * 0.7;
-        ctx.strokeStyle = '#4FE0C4';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(qx, qy, 6 + qt * 70, 0, 7);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = appear;
-      ctx.fillStyle = '#4FE0C4';
-      ctx.beginPath();
-      ctx.arc(qx, qy, 5, 0, 7);
-      ctx.fill();
-      ctx.globalAlpha = 0.3 * appear;
-      ctx.beginPath();
-      ctx.arc(qx, qy, 14, 0, 7);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  };
-
-  const frame = (now) => {
-    raf = 0;
-    const dt = Math.min(0.1, (now - last) / 1000);
-    last = now;
-    if (queries.length && playing) {
-      const before = qt;
-      qt += dt;
-      if (before === 0) onQuery?.(queries[qi], qi, queries.length);
-      if (qt >= QUERY_FOR) { qt = 0; qi = (qi + 1) % queries.length; }
-    }
-    paint();
-    if (playing && inView && !document.hidden) raf = requestAnimationFrame(frame);
-  };
-  const run = () => { if (!raf && !still) { last = performance.now(); raf = requestAnimationFrame(frame); } };
-
-  const animate = (ms, set) => new Promise((done) => {
-    if (still) { set(1); paint(); done(); return; }
-    const t0 = performance.now();
-    const step = (now) => {
-      const k = Math.min((now - t0) / ms, 1);
-      set(1 - Math.pow(1 - k, 3));
-      paint();
-      if (k < 1) requestAnimationFrame(step); else done();
-    };
-    requestAnimationFrame(step);
-  });
-
-  if (typeof IntersectionObserver === 'function') {
-    new IntersectionObserver((e) => {
-      inView = e.some((x) => x.isIntersecting);
-      if (inView && playing) run();
-    }).observe(canvas);
-  }
-  addEventListener('visibilitychange', () => { if (!document.hidden && playing) run(); });
-
-  return {
-    /* `points` are already projected into the unit square. */
-    seed(points) {
-      pts = points;
-      // Rows arrive left to right, a little out of order, as a stream does.
-      pts.forEach((p, i) => { p.order = Math.min(1, p.x * 0.85 + ((i * 7919) % 100) / 100 * 0.15); });
-      link();
-      loaded = 0; linked = 0; queries = []; paint();
-    },
-    load(ms) { return animate(ms, (v) => { loaded = v; }); },
-    build(ms) { return animate(ms, (v) => { linked = v; }); },
-    /* Replays the engine's queries in turn, from the first. */
-    play(list) {
-      queries = list.filter((q) => q.idx.length).map((q) => ({ ...q, path: walk(q) }));
-      qi = 0; qt = still ? QUERY_FOR - 1 : 0; playing = queries.length > 0;
-      if (still) { paint(); if (queries.length) onQuery?.(queries[0], 0, queries.length); }
-      else run();
-    },
-  };
-}
-
-/* ============================================================== the console */
-
-const rig = document.getElementById('rig');
-if (rig) {
-  let started = false;
-  const start = () => { if (!started) { started = true; runDemo(rig); } };
-  if (typeof IntersectionObserver === 'function') {
-    const watch = new IntersectionObserver((e) => {
-      if (!e.some((x) => x.isIntersecting)) return;
-      watch.disconnect();
-      requestAnimationFrame(() => requestAnimationFrame(start));
-    }, { rootMargin: '0px 0px -100px 0px' });
-    watch.observe(rig);
-  } else start();
-}
-
-async function runDemo(el) {
-  const log = el.querySelector('.rig-log');
-  const note = el.querySelector('.rig-note');
-  const cap = el.querySelector('.field-cap');
-  const steps = [...el.querySelectorAll('.rig-steps li')];
-  // The strip under the picture: which stage the run is at, as a film's
-  // chapters show where it is. The search stage counts the replayed queries.
-  let reached = 0;
-  const stage = (n, k = 1) => {
-    if (n < reached) return;   // a stage's animation can end after the next began
-    reached = n;
-    steps.forEach((s, i) => {
-      s.toggleAttribute('aria-current', i === n);
-      s.style.setProperty('--k', i < n ? 1 : i === n ? k : 0);
-    });
-  };
-  const field = vectorField(el.querySelector('.field'), (q, i, n) => {
-    stage(3, (i + 1) / n);
-    const agrees = q.found == null ? '' : `, ${q.found} of 10 as an exact scan finds them`;
-    // A worker's clock steps by 0.1 ms unless the page is cross-origin
-    // isolated: a query under a step reads as 0, which it was not.
-    const took = q.ms < 0.1 ? 'under 0.1 ms' : `${q.ms.toFixed(2)} ms`;
-    cap.textContent = `query ${i + 1} of ${n}: ${took}${agrees}`;
-  });
-  stage(0, 0.5);
-
-  const lines = [];
-  // The log is the page's to show or not; the home page shows the steps and
-  // the numbers instead.
-  const paint = () => { if (log) { log.innerHTML = lines.join('\n'); log.scrollTop = log.scrollHeight; } };
-  const put = (k, v, unit) => {
-    const dd = el.querySelector(`[data-stat="${k}"]`);
-    if (!dd) return;
-    countUp(dd, v, unit);
-    const row = dd.closest('.stat');
-    row.classList.remove('lit');
-    void row.offsetWidth;
-    row.classList.add('lit');
-  };
-
-  el.dataset.state = 'running';
-  note.textContent = 'running in this tab';
-  lines.push('<i>starting the engine in a worker</i>');
-  paint();
-
-  let worker;
-  try {
-    worker = new Worker(new URL('./engine-worker.js', import.meta.url), { type: 'module' });
-  } catch {
-    return offline(el, field, 'this browser cannot start a module worker');
-  }
-  worker.onerror = () => offline(el, field, 'the engine worker failed to load');
-
-  worker.onmessage = async (e) => {
-    const m = e.data;
-    switch (m.t) {
-      case 'log': lines.push(m.html); paint(); break;
-      case 'amend': lines[lines.length - 1] += m.html; paint(); break;
-      case 'stat': put(m.k, m.v, m.unit); break;
-      case 'points': {
-        const pts = new Array(m.n);
-        for (let i = 0; i < m.n; i++) {
-          pts[i] = { x: m.xy[i * 2], y: m.xy[i * 2 + 1], nx: m.xy[i * 2], c: m.cl[i] };
-        }
-        field.seed(pts);
-        stage(0);
-        cap.textContent = `${m.n.toLocaleString()} vectors of 128 dimensions, their 2D shadow`;
-        break;
-      }
-      case 'phase':
-        if (m.name === 'scatter') { stage(1, 0.5); cap.textContent = 'writing the rows'; field.load(1600).then(() => stage(1)); }
-        if (m.name === 'build') { stage(2, 0.5); cap.textContent = 'linking the hnsw graph'; field.build(1400).then(() => stage(2)); }
-        break;
-      case 'queries':
-        field.play(m.list);
-        break;
-      case 'done':
-        el.dataset.state = 'done';
-        note.textContent = m.note;
-        worker.terminate();
-        break;
-      case 'failed':
-        worker.terminate();
-        offline(el, field, m.message);
-        break;
-    }
-  };
-
-  worker.postMessage({ cmd: 'demo' });
-}
-
-/* Without the engine the panel still has something true to show: the numbers
-   the benchmark harness measured, clearly labelled as such. */
-function offline(el, field, reason) {
-  const log = el.querySelector('.rig-log');
-  el.dataset.state = 'failed';
-  el.querySelector('.rig-note').textContent = 'published measurements';
-  el.querySelector('.field-cap').textContent = 'the live run did not start';
-  if (log) log.innerHTML = [
-    `<i>the live run stopped: ${escapeHtml(reason)}</i>`,
-    '<i>WebAssembly needs an http origin — a page opened from disk cannot</i>',
-    '<i>stream the module. the numbers beside this are the measured ones</i>',
-    '<i>from the benchmark harness: Apple M-series, 100 000 × 128.</i>',
-  ].join('\n');
-  const put = (k, v, u) => {
-    const dd = el.querySelector(`[data-stat="${k}"]`);
-    if (dd) countUp(dd, v, u);
-  };
-  put('boot', '110', 'ms');
-  put('rows', '100000', ' × 128');
-  put('build', '10.2', 's');
-  put('query', '0.139', 'ms');
-  put('recall', '100', '%');
-}
-
 /* ============================================================== the race */
 
 const race = document.querySelector('.race');
@@ -835,125 +471,157 @@ function playground(el) {
   });
 }
 
-/* ============================================================ the screencast */
+/* ============================================================== sessions */
 
-/* A recorded session, played back as text: the commands are typed, their
-   output lands a line at a time. Text rather than a video file -- a few
-   hundred bytes instead of megabytes, sharp at any size, and selectable.
-   Without script the transcript underneath is the page. */
-const cast = document.getElementById('cast');
-if (cast) {
-  const out = cast.querySelector('.cast-out');
-  const bar = cast.querySelector('.cast-chapters');
-  const btn = cast.querySelector('.cast-play');
-  const PROMPT = /^(\$ |fenec[=-]# )/;
+/* One small session in each language, played as text: what is set up shows
+   at once, the statements are typed, then the answer lands. Text rather than
+   a video -- a few hundred bytes each, sharp at any size, and selectable. It
+   goes through the languages on its own, each fading into the next, and a
+   click on a mark picks one and stays there. Without script the list under
+   it is the section. */
+const sessions = document.getElementById('sessions');
+if (sessions) {
+  const marks = sessions.querySelector('.session-marks');
+  const out = sessions.querySelector('.session-out');
+  const title = sessions.querySelector('.cast-title');
+  const rows = sessions.querySelector('.session-rows');
+  const CPS = 140;          // characters a second, typed
+  const LINE = 0.18;        // the pause at the end of a typed line
+  const LANDS = 0.35;       // the pause before output lands
+  const HOLD = 3.6;         // the whole session, held before the next
+  const FADE = 0.35;
 
-  const chapters = [...cast.querySelectorAll('.cast-script li')].map((li) => {
-    const lines = li.querySelector('pre').textContent.replace(/\n$/, '').split('\n');
-    const steps = [];
-    let typing = false;
-    for (const line of lines) {
-      const m = line.match(PROMPT);
-      if (m) steps.push({ prompt: m[0], cmd: line.slice(m[0].length) });
-      else if (typing) steps.push({ prompt: '', cmd: line });
-      else steps.push({ text: line });
-      typing = (m || typing) && /\\$/.test(line);
-    }
-    return { title: li.dataset.title, steps };
-  });
+  // A highlighted <pre> as runs of [class, text], so a prefix of it can be
+  // drawn with its colours.
+  const runs = (pre) => pre ? [...pre.childNodes].map((n) => [n.nodeType === 1 ? n.className : '', n.textContent]) : [];
+  const html = (rs) => rs.map(([c, s]) => c ? `<span class="${c}">${escapeHtml(s)}</span>` : escapeHtml(s)).join('');
 
-  bar.innerHTML = chapters.map((c, i) =>
-    `<li><button type="button" data-i="${i}"><span class="cast-fill"></span>${escapeHtml(c.title)}</button></li>`).join('');
-  const fills = [...bar.querySelectorAll('.cast-fill')];
-  const buttons = [...bar.querySelectorAll('button')];
-  cast.classList.add('on');
-
-  let at = 0, playing = false, run = 0;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const line = (cls) => { const s = document.createElement('span'); s.className = cls; out.append(s); return s; };
-  const mark = (i, k) => {
-    fills.forEach((f, j) => { f.style.transform = `scaleX(${j < i ? 1 : j === i ? k : 0})`; });
-    buttons.forEach((b, j) => b.toggleAttribute('aria-current', j === i));
-  };
-
-  // Shows chapter `i` whole, at once: reduced motion, or a jump while paused.
-  const show = (i) => {
-    out.textContent = '';
-    for (const s of chapters[i].steps) {
-      if (s.text !== undefined) line('o').textContent = s.text + '\n';
-      else { line('p').textContent = s.prompt; line('c').textContent = s.cmd + '\n'; }
-    }
-    mark(i, 1);
-  };
-
-  const play = async (i) => {
-    const me = ++run;
-    const alive = () => me === run && playing;
-    for (; ; i = (i + 1) % chapters.length) {
-      at = i;
-      out.textContent = '';
-      const { steps } = chapters[i];
-      for (let k = 0; k < steps.length; k++) {
-        const s = steps[k];
-        if (s.text !== undefined) {
-          line('o').textContent = s.text + '\n';
-          await sleep(45);
-        } else {
-          line('p').textContent = s.prompt;
-          const c = line('c');
-          for (let j = 0; j < s.cmd.length; j += 2) {
-            c.textContent = s.cmd.slice(0, j + 2);
-            await sleep(26);
-            if (!alive()) return;
-          }
-          c.textContent = s.cmd + '\n';
-          await sleep(s.cmd.endsWith('\\') ? 120 : 520);
-        }
-        if (!alive()) return;
-        out.scrollTop = out.scrollHeight;
-        mark(i, (k + 1) / steps.length);
+  const list = [...sessions.querySelectorAll('.session-script > li')].map((li) => {
+    const shell = li.hasAttribute('data-shell');
+    const typed = runs(li.querySelector('.typed'));
+    // When each character of the typed text is drawn: a shell's output
+    // lines land whole, a pause after the command; the rest is typed.
+    const text = typed.map(([, s]) => s).join('');
+    const at = new Float32Array(text.length + 1);
+    let t = 0.5, start = 0, typing = false;
+    for (const ln of text.split('\n')) {
+      const cmd = !shell || ln.startsWith('$ ') || typing;
+      typing = shell && cmd && ln.endsWith('\\');
+      if (!cmd) t += LANDS;
+      for (let i = 0; i <= ln.length; i++) {
+        if (cmd && i < ln.length) t += 1 / CPS;
+        at[start + i] = t;
       }
-      await sleep(2600);
-      if (!alive()) return;
+      if (cmd) t += LINE;
+      start += ln.length + 1;
     }
+    const answer = shell || li.dataset.group ? null : rows.textContent.replace(/^\n/, '');
+    return {
+      li, typed, at, shell,
+      name: li.dataset.name, mark: li.dataset.mark, file: li.dataset.file, group: li.dataset.group || '',
+      given: html(runs(li.querySelector('.given'))),
+      answer, answerAt: t + LANDS, end: t + LANDS + HOLD,
+    };
+  });
+  // The cycle goes through the languages; the frameworks and the imports
+  // play when picked.
+  const cycle = list.filter((s) => !s.group).length;
+
+  let group = '';
+  marks.innerHTML = list.map((s, i) => {
+    const head = s.group !== group ? `<span class="session-group">${escapeHtml((group = s.group))}</span>` : '';
+    return `${head}<button type="button" data-i="${i}"><span class="glyph">${escapeHtml(s.mark)}</span>${escapeHtml(s.name)}<span class="fill"></span></button>`;
+  }).join('');
+  const buttons = [...marks.querySelectorAll('button')];
+  sessions.classList.add('on');
+
+  // The panel takes each session's whole height as it begins, while it is
+  // faded out, and holds it while it types, so nothing below moves as the
+  // lines come in. Held at the tallest one, PHP's helper left a phone's
+  // panel two thirds empty for every other language.
+  const draw = (s, t) => {
+    let n = 0;
+    while (n < s.at.length - 1 && s.at[n] <= t) n++;
+    let left = n, typed = '';
+    for (const [c, txt] of s.typed) {
+      if (left <= 0) break;
+      const part = txt.slice(0, left);
+      left -= part.length;
+      typed += c ? `<span class="${c}">${escapeHtml(part)}</span>` : escapeHtml(part);
+    }
+    const done = t >= s.answerAt;
+    out.innerHTML = (s.given ? `<span class="given">${s.given}</span>\n\n` : '') + typed +
+      (n < s.at.length - 1 || !s.answer ? '<span class="caret"></span>' : '') +
+      (s.answer && done ? `\n\n<span class="answer">${escapeHtml(s.answer)}</span>` : '');
+  };
+  let heights = [];
+  const fit = () => {
+    out.style.height = '';
+    heights = list.map((s) => { draw(s, Infinity); return out.scrollHeight; });
+    shown = -1;
   };
 
-  const set = (on) => {
-    playing = on;
-    cast.classList.toggle('paused', !on);
-    btn.setAttribute('aria-label', on ? 'Pause' : 'Play');
-    if (on) play(at); else run++;
+  let at = 0, t = 0, auto = !still, playing = false, last = 0, inView = false, shown = -1;
+  const show = () => {
+    const s = list[at];
+    if (shown !== at) {
+      shown = at;
+      out.style.height = `${heights[at]}px`;
+      title.textContent = s.file;
+      buttons.forEach((b, j) => b.setAttribute('aria-pressed', String(j === at)));
+      // Keep the mark in sight in its own row, without moving the page.
+      const b = buttons[at];
+      const left = b.offsetLeft - (marks.clientWidth - b.offsetWidth) / 2;
+      marks.scrollTo({ left: Math.max(0, left), behavior: still ? 'auto' : 'smooth' });
+    }
+    draw(s, still ? Infinity : t);
+    out.style.opacity = still ? 1 : Math.min(1, t / FADE, auto ? (s.end - t) / FADE + 1 : 1);
+    buttons.forEach((b, j) => {
+      b.lastChild.style.transform = `scaleX(${j === at ? Math.min(1, t / s.end) : 0})`;
+    });
   };
-  btn.addEventListener('click', () => set(!playing));
-  bar.addEventListener('click', (e) => {
+  const frame = (now) => {
+    if (!playing) return;
+    t += Math.min(0.1, (now - last) / 1000);
+    last = now;
+    if (auto && t >= list[at].end + FADE) { at = (at + 1) % cycle; t = 0; }
+    show();
+    requestAnimationFrame(frame);
+  };
+  const set = (on) => {
+    if (on === playing || still) return;
+    playing = on;
+    if (on) { last = performance.now(); requestAnimationFrame(frame); }
+  };
+  marks.addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    at = +b.dataset.i;
-    if (playing) play(at); else show(at);
+    at = +b.dataset.i; t = 0; auto = false;
+    show();
   });
 
-  show(0);
-  set(false);
+  fit();
+  show();
+  addEventListener('resize', () => { fit(); show(); }, { passive: true });
   if (!still) {
-    // Starts the first time it is in view, and stops while it is not.
-    let started = false;
     new IntersectionObserver((e) => {
-      const on = e.some((x) => x.isIntersecting);
-      if (on && !started) { started = true; set(true); }
-      else if (!on && playing) set(false), started = false;
-    }, { threshold: 0.45 }).observe(cast);
+      inView = e.some((x) => x.isIntersecting);
+      set(inView && !document.hidden);
+    }, { threshold: 0.35 }).observe(sessions);
+    addEventListener('visibilitychange', () => set(inView && !document.hidden));
   }
 }
 
 /* ========================================================== moving pictures */
 
-/* Each section's scenes (`motion.js`) on a canvas of its own: they loop while
-   the section is in view and stop when it is not. A scene holds its last
-   frame a moment before the next begins, and with more than one the steps
-   under the picture show which is playing and jump to another. */
+/* Each section's scenes (`motion.js`) on a canvas of its own: they play while
+   the section is in view and the tab is shown, and stop otherwise. A story
+   holds its last frame a moment, still moving where it moves, and fades into
+   its start again; a stream runs on and never starts again. With more than
+   one scene the steps under the picture show which is playing and jump to
+   another. */
 const motions = [...document.querySelectorAll('.motion[data-scenes]')];
 if (motions.length) {
-  const HOLD = 2.2;
   let M = null;
   const load = () => (M ??= Promise.all([
     import('./motion.js'),
@@ -967,7 +635,9 @@ if (motions.length) {
   for (const fig of motions) {
     const canvas = fig.querySelector('canvas');
     const keys = fig.dataset.scenes.split(' ');
-    let mod, at = 0, t = 0, playing = false, last = 0, steps = [], inView = false;
+    // `t` is the scene's own time; `clock` the figure's, which runs on
+    // across a scene's start so nothing drawn by it jumps there.
+    let mod, at = 0, t = 0, clock = 0, playing = false, last = 0, steps = [], inView = false;
 
     // A phone gets the scene's narrow stage: the wide one scaled down to a
     // phone turned its words to specks.
@@ -980,14 +650,9 @@ if (motions.length) {
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(w * dpr * sh / sw);
     };
-    // A scene plays to just before its fade, holds there, then fades out.
-    const local = () => {
-      const d = mod.SCENE[keys[at]].d;
-      return t < d - 0.4 ? t : t < d - 0.4 + HOLD ? d - 0.41 : t - HOLD;
-    };
     const draw = () => {
-      mod.render(canvas.getContext('2d'), keys[at], local(), canvas.width, canvas.height, narrow.matches);
-      const d = mod.SCENE[keys[at]].d + HOLD;
+      mod.render(canvas.getContext('2d'), keys[at], t, canvas.width, canvas.height, narrow.matches, clock);
+      const d = mod.cycle(keys[at]);
       steps.forEach((b, i) => {
         b.toggleAttribute('aria-current', i === at);
         b.firstChild.style.transform = `scaleX(${i < at ? 1 : i === at ? Math.min(1, t / d) : 0})`;
@@ -995,9 +660,13 @@ if (motions.length) {
     };
     const frame = (now) => {
       if (!playing) return;
-      t += Math.min(0.1, (now - last) / 1000);
+      const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
-      if (t >= mod.SCENE[keys[at]].d + HOLD) { t = 0; at = (at + 1) % keys.length; }
+      t += dt; clock += dt;
+      if (t >= mod.cycle(keys[at])) {
+        t = 0;
+        if (keys.length > 1) { at = (at + 1) % keys.length; fit(); }
+      }
       draw();
       requestAnimationFrame(frame);
     };
@@ -1019,13 +688,13 @@ if (motions.length) {
         ol.addEventListener('click', (e) => {
           const b = e.target.closest('button');
           if (!b) return;
-          at = +b.dataset.i; t = still ? mod.SCENE[keys[at]].d - 0.5 : 0;
-          draw();
+          at = +b.dataset.i; t = still ? mod.still(keys[at]) : 0;
+          fit(); draw();
         });
       }
       fit();
-      // Still: each scene as it ends, whole, and nothing moves.
-      if (still) t = mod.SCENE[keys[0]].d - 0.5;
+      // Still: the frame that says everything the scene does, and nothing moves.
+      if (still) t = clock = mod.still(keys[0]);
       draw();
       addEventListener('resize', () => { fit(); draw(); }, { passive: true });
       narrow.addEventListener('change', () => { fit(); draw(); });

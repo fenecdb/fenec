@@ -1,8 +1,11 @@
 /* The page's moving pictures: each section shows its feature working.
 
    A scene is a function of its own time alone, drawn onto the canvas in its
-   section, so a section loops its scene while it is in view and stops when
-   it is not. Every number on screen is one the docs measure; the words and
+   section, so a section plays its scene while it is in view and stops when
+   it is not. A story (a write reaching the screens, a tenant moved) plays
+   once, holds its last frame and starts again; a stream (writers, traffic,
+   security) opens and then runs on, each event drawn from its own number,
+   so it never starts again and never jumps. Every number on screen is one the docs measure; the words and
    the measurements stay in the section's text, and the scene shows them
    happening. What moves is the mark's own light: the teal that runs through
    the logo, with its glow, so a write, a request and a search all travel the
@@ -11,8 +14,8 @@
    Each scene is drawn on one of two stages: 1280 wide for a screen, 480 wide
    for a phone, where the same story is laid out narrower and taller so its
    words stay readable (a wide stage scaled to a phone turned them to specks).
-   The last frame says everything the scene does at once, for a reader who
-   asked for no motion. */
+   One frame says everything the scene does at once, for a reader who asked
+   for no motion: a story's last, a stream's `still`. */
 
 import { POINTS, EDGES, FLOW, RUN, COLORS } from './fennec.js';
 
@@ -34,6 +37,10 @@ const inOut = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.p
 const lerp = (a, b, k) => a + (b - a) * k;
 // A flash that rises at `a` and settles to `rest` over `len` seconds.
 const flash = (t, a, len = 0.9, rest = 0) => t < a ? 0 : lerp(1, rest, ease((t - a) / len));
+
+// A number in [0, 1) for event `i` of stream `s`: the same on every frame,
+// so a stream drawn from it is a function of its time alone.
+const hash = (i, s = 0) => { const x = Math.sin(i * 127.1 + s * 311.7) * 43758.5453; return x - Math.floor(x); };
 
 function rng(seed) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
 
@@ -224,6 +231,34 @@ function disk(c, x, y, { alpha = 1, glow: g = 0 } = {}) {
   c.closePath();
   c.fill(); c.stroke();
   c.beginPath(); c.ellipse(x, y - 14, 34, 9, 0, 0, Math.PI * 2); c.stroke();
+  c.restore();
+}
+
+// A padlock, closed: a sealed file's.
+function lock(c, x, y, color, alpha = 1) {
+  if (alpha <= 0) return;
+  box(c, x - 6, y - 2, 12, 9, { r: 2, fill: P.panel, stroke: color, alpha, line: 1.6 });
+  c.save();
+  c.globalAlpha *= alpha;
+  c.strokeStyle = color; c.lineWidth = 1.6;
+  c.beginPath(); c.arc(x, y - 3, 3.6, Math.PI, 0); c.stroke();
+  c.restore();
+}
+
+// A bucket: object storage, where a sync tool copies the archive.
+function bucket(c, x, y, { alpha = 1, glow: g = 0 } = {}) {
+  if (alpha <= 0) return;
+  c.save();
+  c.globalAlpha *= alpha;
+  c.strokeStyle = g > 0.05 ? P.oasis : P.sand2;
+  c.lineWidth = 1.8; c.lineJoin = 'round';
+  if (g > 0) { c.shadowColor = GLOW; c.shadowBlur = 18 * g; }
+  c.fillStyle = P.panel;
+  c.beginPath();
+  c.moveTo(x - 22, y - 16); c.lineTo(x - 16, y + 20); c.lineTo(x + 16, y + 20); c.lineTo(x + 22, y - 16);
+  c.ellipse(x, y - 16, 22, 6, 0, 0, Math.PI, true);
+  c.fill(); c.stroke();
+  c.beginPath(); c.ellipse(x, y - 16, 22, 6, 0, 0, Math.PI * 2); c.stroke();
   c.restore();
 }
 
@@ -437,19 +472,37 @@ const SCENES = [
     },
   },
   {
-    /* Sixteen writers and one file. A write takes the lock for a moment and
-       goes in, one at a time and quickly; its fsync runs after the lock is
-       let go, so the writes that landed while the disk was busy are covered
-       by the next one together. The readers beside them never stop. */
+    /* Sixteen writers and one file, as a stream that does not end: a write
+       comes from whichever writer has one, takes the lock for a moment and
+       goes in, one at a time; each fsync runs after the lock is let go, so
+       the writes that landed while the disk was busy are covered by the next
+       one together. The readers beside them never stop. Every event is
+       drawn from its own number, so the scene never starts again. */
     key: 'writers',
-    d: 9,
+    stream: true, still: 9.05,
     h: 560, nh: 600,
     draw(c, t, n) {
       const a = ease(span(t, 0.1, 0.8));
-      const N = 28, T0 = 1.0, DT = 0.2;          // write i lands at T0 + i * DT
-      const SYNC = [1.7, 2.9, 4.1, 5.3, 6.6];     // each fsync covers what landed before it
-      const lands = (i) => T0 + i * DT;
-      const synced = (i) => SYNC.find((s) => s > lands(i) + 0.05);
+      // Write i lands near T0 + i * DT, in bursts and lulls, and always after
+      // write i - 1 (the wobble's slope stays under one): one at a time.
+      const T0 = 1.0, DT = 0.2;
+      const lands = (i) => T0 + DT * (i + 1.4 * Math.sin(i * 0.3) + 0.35 * (hash(i, 1) - 0.5));
+      const by = (i) => Math.floor(hash(i, 2) * 16);
+      // Fsync k near S0 + k * SD; each covers what landed before it.
+      const S0 = 1.7, SD = 1.2;
+      const syncAt = (k) => S0 + k * SD + (hash(k, 3) - 0.5) * 0.5;
+      const synced = (i) => {
+        let k = Math.max(0, Math.floor((lands(i) - S0) / SD) - 1);
+        while (syncAt(k) <= lands(i) + 0.05) k++;
+        return syncAt(k);
+      };
+      const recent = [];
+      for (let i = Math.max(0, Math.floor((t - 3.2 - T0) / DT - 2)); i <= (t + 0.8 - T0) / DT + 2; i++) {
+        if (lands(i) >= t - 3.2 && lands(i) <= t + 0.8) recent.push(i);
+      }
+      const syncs = [];
+      for (let k = Math.max(0, Math.floor((t - 1.6 - S0) / SD) - 1); syncAt(k) <= t; k++) if (syncAt(k) > t - 1.6) syncs.push(syncAt(k));
+
       const L = n ? {
         writer: (k) => [44 + (k % 8) * 56, 58 + Math.floor(k / 8) * 50], wl: [240, 24],
         gate: [240, 172], fx: 34, fy: 220, fw: 412, fh: 70, cx: 48,
@@ -461,13 +514,21 @@ const SCENES = [
         disk: [670, 410], readers: [176, 236, 296, 356].map((y) => [1120, y]),
         from: () => [870, 255], to: (r) => [r[0] - 18, r[1]], rl: [1120, 136], gl: [390, 208], chip: 500,
       };
-      const cell = (i) => L.cx + i * 13;
+      // The file's tail: the newest write at the right, the older ones
+      // sliding out to the left as each lands.
+      const cap = Math.floor((L.fw - 28) / 13);
+      let last = -1;
+      for (const i of recent) if (lands(i) <= t) last = i;
+      const head = last < 0 ? 0 : last + ease((t - lands(last)) / 0.25);
+      const scroll = Math.max(0, head - cap);
+      const cell = (i) => L.cx + (i - scroll) * 13;
       const fmid = L.fy + L.fh / 2;
+      const inside = (x) => clamp(x, L.fx + 8, L.fx + L.fw - 8);
 
       // The file, and the disk under it.
       mono(c, 'app.fenec', L.fx, L.fy - 12, { size: 15, color: P.hot, alpha: a });
       box(c, L.fx, L.fy, L.fw, L.fh, { r: 10, fill: P.deep, stroke: P.sun, alpha: a, line: 1.8 });
-      disk(c, ...L.disk, { alpha: a, glow: Math.max(0, ...SYNC.map((s) => flash(t, s, 0.7) * (t >= s ? 1 : 0))) });
+      disk(c, ...L.disk, { alpha: a, glow: Math.max(0, ...syncs.map((s) => flash(t, s, 0.7))) });
       mono(c, 'disk', L.disk[0], L.disk[1] + 46, { align: 'center', alpha: a });
 
       // The lock: one write through at a time.
@@ -476,44 +537,47 @@ const SCENES = [
       else { line(c, gx, gy - 40, gx, gy - 9, P.sand2, 3, a); line(c, gx, gy + 9, gx, gy + 40, P.sand2, 3, a); }
       mono(c, 'one at a time', L.gl[0], L.gl[1], { align: n ? 'left' : 'center', color: P.sand2, alpha: a });
 
-      // The writers, each lit once its write is on disk.
+      // The writers: a dot while a write waits, lit once it is on disk.
       mono(c, '16 writers', L.wl[0], L.wl[1], { align: 'center', color: P.sand2, alpha: a });
+      const lit = new Array(16).fill(0), waiting = new Array(16).fill(false);
+      for (const i of recent) {
+        const k = by(i), s = synced(i);
+        if (t >= lands(i) - 0.7 && t < s) waiting[k] = true;
+        if (t >= s) lit[k] = Math.max(lit[k], flash(t, s, 0.8) * 0.8);
+      }
       for (let k = 0; k < 16; k++) {
         const [x, y] = L.writer(k);
-        let g = 0, waiting = false;
-        for (let i = 0; i < N; i++) {
-          if ((i * 7) % 16 !== k) continue;
-          const s = synced(i);
-          if (t >= lands(i) - 0.7 && t < s) waiting = true;
-          if (t >= s) g = Math.max(g, flash(t, s, 0.8, 0.3));
-        }
-        client(c, x, y, { stroke: g > 0.05 ? P.oasis : P.sand2, alpha: a, glow: g });
-        if (waiting) dot(c, x + 12, y - 10, 3, P.sun, a);
+        client(c, x, y, { stroke: lit[k] > 0.05 ? P.oasis : P.sand2, alpha: a, glow: lit[k] });
+        if (waiting[k]) dot(c, x + 12, y - 10, 3, P.sun, a);
       }
 
       // The writes: to the lock, through it, and into the file.
-      for (let i = 0; i < N; i++) {
-        const [wx, wy] = L.writer((i * 7) % 16);
+      for (const i of recent) {
+        const [wx, wy] = L.writer(by(i));
         const T = lands(i);
-        const into = n ? [[gx, gy - 12], [gx, gy + 12], [cell(i) + 5, L.fy]] : [[gx - 12, gy], [gx + 12, gy], [cell(i), fmid]];
+        const x = inside(cell(i));
+        const into = n ? [[gx, gy - 12], [gx, gy + 12], [x + 5, L.fy]] : [[gx - 12, gy], [gx + 12, gy], [x, fmid]];
         const k1 = span(t, T - 0.7, T - 0.12);
         if (k1 > 0 && k1 < 1) glow(c, ...along([[wx, wy], into[0]], inOut(k1)), 4);
         streak(c, into, span(t, T - 0.12, T), { tail: 0.3, w: 2.5 });
-        if (t >= T) {
-          const s = synced(i), on = ease(span(t, s, s + 0.25));
-          box(c, cell(i), L.fy + 12, 10, L.fh - 24, { r: 2, fill: on > 0 ? `rgba(79,224,196,${0.85 * on})` : null, stroke: on > 0.5 ? P.oasis : P.sand, alpha: a, line: 1.2 });
-        }
       }
+      c.save();
+      c.beginPath(); c.rect(L.fx + 8, L.fy, L.fw - 16, L.fh); c.clip();
+      for (let i = Math.max(0, Math.floor(scroll) - 1); i <= last; i++) {
+        const s = synced(i), on = ease(span(t, s, s + 0.25));
+        box(c, cell(i), L.fy + 12, 10, L.fh - 24, { r: 2, fill: on > 0 ? `rgba(79,224,196,${0.85 * on})` : null, stroke: on > 0.5 ? P.oasis : P.sand, alpha: a, line: 1.2 });
+      }
+      c.restore();
 
       // Each fsync: one flash to the disk for every write since the last.
-      SYNC.forEach((s) => {
-        const ids = [...Array(N).keys()].filter((i) => synced(i) === s);
-        if (!ids.length || t < s) return;
-        const x1 = cell(ids[0]), x2 = cell(ids[ids.length - 1]) + 10;
-        const by = L.fy + L.fh + 8;
-        wire(c, [[x1, by - 3], [x1, by], [x2, by], [x2, by - 3]], P.oasis, 2, a * (0.35 + 0.65 * flash(t, s, 1.2)));
-        streak(c, [[(x1 + x2) / 2, by], L.disk.map((v, q) => v - (q ? 24 : 0))], span(t, s, s + 0.35), { tail: 0.5 });
-      });
+      for (const s of syncs) {
+        const ids = recent.filter((i) => synced(i) === s);
+        if (!ids.length) continue;
+        const x1 = inside(cell(ids[0])), x2 = inside(cell(ids[ids.length - 1]) + 10);
+        const yb = L.fy + L.fh + 8;
+        wire(c, [[x1, yb - 3], [x1, yb], [x2, yb], [x2, yb - 3]], P.oasis, 2, a * flash(t, s, 1.5));
+        streak(c, [[(x1 + x2) / 2, yb], L.disk.map((v, q) => v - (q ? 24 : 0))], span(t, s, s + 0.35), { tail: 0.5 });
+      }
       chip(c, 'one fsync covers several writes', L.disk[0] + (n ? 124 : 0), L.chip, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 3.1, 3.7)) });
 
       // The readers: a shared lock each, reading all along.
@@ -522,10 +586,7 @@ const SCENES = [
         client(c, ...r, { stroke: P.oasis, alpha: a, glow: 0.3 });
         const pts = [L.from(r), L.to(r)];
         wire(c, pts, P.rule, 1.2, a * 0.7);
-        for (let j = 0; j < 3; j++) {
-          const ph = (t * 1.1 + q * 0.27 + j / 3) % 1;
-          if (t > 0.6) glow(c, ...along(pts, ph), 2.6, a * 0.9);
-        }
+        for (let j = 0; j < 3; j++) glow(c, ...along(pts, (t * 1.1 + q * 0.27 + j / 3) % 1), 2.6, a * 0.9);
       });
       if (!n) chip(c, 'readers keep reading', 1120, 420, { size: 15, center: true, alpha: ease(span(t, 2, 2.6)) });
     },
@@ -533,9 +594,11 @@ const SCENES = [
   {
     /* Requests straight to the server and its mapped file: the cache a
        database usually wants in front is crossed out and gone, and each
-       answer comes back decoded from the file's own bytes. */
+       answer comes back decoded from the file's own bytes. After that the
+       requests never stop: each is drawn from its own number, from whichever
+       client sent it to whichever row it asked for. */
     key: 'traffic',
-    d: 9,
+    stream: true, still: 7.3,
     h: 560, nh: 690,
     draw(c, t, n) {
       const a = ease(span(t, 0.1, 0.8));
@@ -568,17 +631,21 @@ const SCENES = [
       mono(c, 'app.fenec', L.fx + 16, L.fy + 26, { size: 15, color: P.hot, alpha: a });
       mono(c, 'mapped into memory', L.fx + L.fw - 16, L.fy + 26, { size: 13, align: 'right', alpha: a });
 
-      // Requests: in as sand, answered in the mark's light.
-      const reqs = 62, R0 = 2.2, RD = 0.1;   // until the last frame: traffic never stops
+      // Requests: in as sand, answered in the mark's light. Request j is
+      // sent near R0 + j * RD, in bursts and lulls.
+      const R0 = 2.2, RD = 0.1;
+      const sent = (j) => R0 + RD * (j + 1.2 * Math.sin(j * 0.21) + 0.3 * (hash(j, 4) - 0.5));
       const lit = new Array(pages).fill(0);
-      for (let j = 0; j < reqs; j++) {
-        const T = R0 + j * RD, [cx, cy] = L.client((j * 3) % 8), p = (j * 5) % pages;
+      for (let j = Math.max(0, Math.floor((t - 1.4 - R0) / RD) - 2); j <= (t - R0) / RD + 2; j++) {
+        const T = sent(j);
+        if (T > t || T < t - 1.4) continue;
+        const [cx, cy] = L.client(Math.floor(hash(j, 5) * 8)), p = Math.floor(hash(j, 6) * pages);
         const [px, py] = L.page(p), pc = [px + PW / 2, py + PH / 2];
         const from = [cx + (n ? 0 : 16), cy + (n ? 14 : 0)];
         const k1 = span(t, T, T + 0.4);
         if (k1 > 0 && k1 < 1) dot(c, ...along([from, L.in], inOut(k1)), 3.2, P.sand, a);
         streak(c, [L.out, pc], span(t, T + 0.4, T + 0.55), { tail: 0.4, w: 2 });
-        lit[p] = Math.max(lit[p], t > T + 0.55 ? flash(t, T + 0.55, 0.7) : 0);
+        if (t > T + 0.55) lit[p] = Math.max(lit[p], flash(t, T + 0.55, 0.7));
         const k2 = span(t, T + 0.6, T + 1.0);
         if (k2 > 0 && k2 < 1) glow(c, ...along([L.in, from], inOut(k2)), 3.6, a);
       }
@@ -799,6 +866,178 @@ const SCENES = [
       chip(c, 'found by both, ranked first', n ? 240 : 920, n ? 800 : 500, { size: n ? 15 : 17, center: true, color: P.oasis, alpha: ease(span(t, 7.4, 8)) });
     },
   },
+  {
+    /* Security, as a stream: two users' requests carry tokens signed with
+       the server's key, pass the token check and then the rules, and each
+       reads back only its own rows; a write of a row outside its rules is
+       refused (403). A token signed with another key is refused at the door
+       (401), and each refusal from that address waits twice as long as the
+       last, 100 ms up to 5 s, and goes into the audit log. Meanwhile sealed
+       backups leave for a bucket. The waits are the server's own, in real
+       seconds; the users, the rows and the address are an example. */
+    key: 'security',
+    stream: true, still: 17.6,
+    h: 560, nh: 860,
+    draw(c, t, n) {
+      const a = ease(span(t, 0.1, 0.8));
+      const OWNERS = ['ada', 'ben', 'ada', 'ben', 'ben', 'ada'];
+      const L = n ? {
+        user: [[80, 60], [240, 60], [400, 60]],
+        path: ([x, y]) => [[x, y + 16], [x, 128], [240, 170]],
+        sx: 110, sy: 170, sw: 260, sh: 150, mark: [240, 226, 0.8], G: [240, 170], R: [240, 320],
+        fx: 30, fy: 392, fw: 420, fh: 172, row: (r) => [48 + (r % 2) * 200, 412 + Math.floor(r / 2) * 48, 184, 36],
+        toFile: [[240, 320], [240, 392]],
+        seal: [[300, 564], [300, 604], [396, 604]], bucket: [424, 600], sealSay: [36, 608],
+        lx: 30, ly: 672, lw: 420, said: [240, 846], refuse: [258, 374],
+      } : {
+        user: [[120, 140], [120, 270], [120, 420]],
+        path: ([x, y]) => [[x + 18, y], [380, y], [470, 265]],
+        sx: 470, sy: 150, sw: 230, sh: 230, mark: [585, 222, 1.05], G: [470, 265], R: [700, 265],
+        fx: 840, fy: 140, fw: 310, fh: 262, row: (r) => [858, 158 + r * 38, 274, 30],
+        toFile: [[700, 265], [840, 265]],
+        seal: [[995, 406], [995, 470], [1180, 470]], bucket: [1212, 468], sealSay: [1090, 504],
+        lx: 440, ly: 410, lw: 290, said: [995, 96], refuse: [770, 300],
+      };
+      const [G, R] = [L.G, L.R];
+
+      // Reads and writes from the two users, one every 1.5 s or so; one in
+      // four is a write of the other user's row, which the rules refuse.
+      const A0 = 1.1, AG = 1.5;
+      const ask = (m) => A0 + m * AG + (hash(m, 7) - 0.5) * 0.6;
+      const asks = [];
+      for (let m = Math.max(0, Math.floor((t - 2.4 - A0) / AG)); m <= (t - A0) / AG + 1; m++) {
+        const T = ask(m);
+        if (T <= t && T > t - 2.4) asks.push({ T, who: hash(m, 8) < 0.5 ? 0 : 1, bad: m > 2 && hash(m, 9) < 0.25 });
+      }
+      // The token signed with another key: refused, and each refusal waits
+      // twice the last, 5 s at most. Attempt k starts at `tries[k]`.
+      const wait = (k) => Math.min(5, 0.1 * 2 ** k);
+      const tries = [2.4];
+      for (let k = 0; k < 8; k++) tries.push(tries[k] + 0.6 + wait(k) + 0.6 + 0.8);
+      const tryAt = (k) => k < 8 ? tries[k] : tries[7] + (k - 7) * (0.6 + 5 + 0.6 + 0.8);
+      let k = 0;
+      while (tryAt(k + 1) <= t) k++;
+      const refusedAt = (j) => tryAt(j) + 0.6 + wait(j);
+      // Sealed backups, one every 2.6 s or so.
+      const B0 = 1.6, BG = 2.6;
+      const sealAt = (b) => B0 + b * BG + (hash(b, 10) - 0.5) * 0.8;
+
+      // The server: the token checked at its door, the rules at its back.
+      box(c, L.sx, L.sy, L.sw, L.sh, { r: 16, fill: P.panel, stroke: P.sun, alpha: a, line: 2 });
+      mark(c, ...L.mark, a, t - 0.4);
+      mono(c, 'fenec-server', L.sx + L.sw / 2, L.sy + L.sh - (n ? 16 : 22), { size: n ? 15 : 17, color: P.hot, align: 'center', alpha: a });
+      const okG = Math.max(0, ...asks.map((q) => t > q.T + 0.5 ? flash(t, q.T + 0.5, 0.6) : 0));
+      const badR = Math.max(0, ...asks.filter((q) => q.bad).map((q) => t > q.T + 0.8 ? flash(t, q.T + 0.8, 0.9) : 0));
+      const okR = Math.max(0, ...asks.filter((q) => !q.bad).map((q) => t > q.T + 0.8 ? flash(t, q.T + 0.8, 0.6) : 0));
+      const noG = t > refusedAt(k) ? flash(t, refusedAt(k), 0.9) : 0;
+      // A door is a bar across the way in; its name sits outside the box.
+      const door = (p, lit, bad, label, side) => {
+        const [x, y] = p, v = !n;
+        line(c, x - (v ? 0 : 22), y - (v ? 22 : 0), x + (v ? 0 : 22), y + (v ? 22 : 0), bad > lit ? P.ember : lit > 0.05 ? P.oasis : P.sand2, 4, a);
+        if (Math.max(lit, bad) > 0) glow(c, x, y, 5, Math.max(lit, bad) * 0.8);
+        mono(c, label, x + (n ? 30 : 14 * side), y + (n ? (side < 0 ? -8 : 18) : -30), { size: 12.5, align: n || side > 0 ? 'left' : 'right', color: P.sand2, alpha: a });
+      };
+      door(G, okG, noG, 'token', -1);
+      door(R, okR, badR, 'rules', 1);
+
+      // The rows, a user's each, in the app's file.
+      mono(c, 'app.fenec', L.fx, L.fy - 12, { size: 15, color: P.hot, alpha: a });
+      mono(c, 'notes', L.fx + L.fw, L.fy - 12, { size: 13, align: 'right', alpha: a });
+      box(c, L.fx, L.fy, L.fw, L.fh, { r: 12, fill: P.deep, stroke: P.sun, alpha: a, line: 1.8 });
+      wire(c, L.toFile, P.rule, 2, a);
+      const rowLit = OWNERS.map((o) => Math.max(0, ...asks.filter((q) => !q.bad && ['ada', 'ben'][q.who] === o)
+        .map((q) => t > q.T + 1.0 ? flash(t, q.T + 1.0, 1.4) : 0)));
+      OWNERS.forEach((o, r) => {
+        const [x, y, w, h] = L.row(r), on = rowLit[r];
+        box(c, x, y, w, h, { r: 6, fill: on > 0.02 ? `rgba(79,224,196,${0.32 * on})` : P.panel, stroke: on > 0.3 ? P.oasis : P.rule, alpha: a, glow: on * 0.6 });
+        mono(c, `owner ${o}`, x + 12, y + h / 2 + 5, { size: 12.5, color: on > 0.3 ? P.oasis : P.dim, alpha: a });
+        line(c, x + (n ? 104 : 120), y + h / 2, x + w - 14, y + h / 2, on > 0.3 ? P.oasis : P.rule, 4, a * 0.8);
+      });
+      text(c, 'each token reads its own rows', ...L.said, { size: n ? 15 : 16, align: 'center', color: P.oasis, alpha: ease(span(t, 2.6, 3.2)) });
+
+      // The users, their tokens on them.
+      const names = ['ada', 'ben', 'another key'];
+      L.user.forEach((u, q) => {
+        const [x, y] = u;
+        wire(c, L.path(u), P.rule, 1.2, a * 0.8, q === 2 ? [4, 6] : null);
+        const back = q < 2 ? Math.max(0, ...asks.filter((e) => e.who === q && !e.bad).map((e) => t > e.T + 1.6 ? flash(t, e.T + 1.6, 1) : 0)) : 0;
+        client(c, x, y, { stroke: back > 0.05 ? P.oasis : P.sand2, alpha: a, glow: back });
+        // The token: a ticket, the server's key's in sand, another's in ember.
+        box(c, x + 16, y - 26, 22, 13, { r: 3, fill: P.panel2, stroke: q === 2 ? P.ember : P.sand, alpha: a, line: 1.3, dash: q === 2 ? [3, 2] : null });
+        dot(c, x + 22, y - 19.5, 2, q === 2 ? P.ember : P.sand, a);
+        mono(c, names[q], x, y + (n ? 34 : 38), { size: 13, align: 'center', color: q === 2 ? P.ember : P.sand2, alpha: a });
+      });
+
+      // The two users' requests: in to the door, through the rules, to
+      // their rows and back in the mark's light, or refused at the rules.
+      for (const q of asks) {
+        const pts = L.path(L.user[q.who]), T = q.T;
+        const k1 = span(t, T, T + 0.5);
+        if (k1 > 0 && k1 < 1) dot(c, ...along(pts, inOut(k1)), 3.6, q.bad ? P.sun : P.sand, a);
+        streak(c, [G, R], span(t, T + 0.5, T + 0.8), { tail: 0.4, w: 2.5 });
+        if (q.bad) {
+          // WITH CHECK: the row it writes is not its own, refused (403).
+          const back = span(t, T + 0.8, T + 1.5);
+          if (back > 0 && back < 1) dot(c, ...along([R, G, ...[...pts].reverse()], inOut(back)), 3.6, P.ember, a);
+          const say = ease(span(t, T + 0.8, T + 1.0)) * (1 - ease(span(t, T + 2.0, T + 2.3)));
+          mono(c, '403: not its row',...L.refuse, { size: 13, align: n ? 'left' : 'center', color: P.ember, alpha: a * say });
+        } else {
+          streak(c, L.toFile, span(t, T + 0.8, T + 1.0), { tail: 0.4, w: 2.5 });
+          streak(c, [...[...L.toFile].reverse(), G, ...[...pts].reverse()], span(t, T + 1.05, T + 1.6), { tail: 0.25, w: 2.5 });
+        }
+      }
+
+      // The other key: to the door, held there while the refusal waits,
+      // then sent back with 401.
+      const op = L.path(L.user[2]);
+      for (let j = Math.max(0, k - 1); j <= k; j++) {
+        const T = tryAt(j), d = wait(j), at = T + 0.6, out = at + d;
+        const k1 = span(t, T, at);
+        if (k1 > 0 && k1 < 1) dot(c, ...along(op, inOut(k1)), 3.6, P.ember, a);
+        if (t >= at && t < out) {
+          // The wait, as a ring closing around the held request.
+          const [hx, hy] = along(op, 0.93), f = (t - at) / d;
+          dot(c, hx, hy, 3.6, P.ember, a);
+          c.save(); c.globalAlpha *= a; c.strokeStyle = P.ember; c.lineWidth = 2;
+          c.beginPath(); c.arc(hx, hy, 11, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2); c.stroke(); c.restore();
+        }
+        const back = span(t, out, out + 0.6);
+        if (back > 0 && back < 1) dot(c, ...along([...op].reverse(), inOut(back)), 3.6, P.ember, a);
+        const say = ease(span(t, at, at + 0.2)) * (1 - ease(span(t, out + 0.9, out + 1.2)));
+        const ms = d < 1 ? `${Math.round(d * 1000)} ms` : `${d} s`;
+        const [wx, wy] = n ? [L.user[2][0] - 2, 128] : [300, L.user[2][1] + 30];
+        mono(c, t < out ? `waits ${ms}` : `401 after ${ms}`, wx, wy, { size: 13, align: n ? 'right' : 'center', color: P.ember, alpha: a * say });
+      }
+      if (!n) mono(c, 'each refusal waits twice the last, 5 s at most', 40, L.user[2][1] + 84, { size: 12.5, color: P.dim, alpha: ease(span(t, 4, 4.6)) });
+
+      // The audit log: a line for each refusal of a token.
+      const lh = 22, rows = 3;
+      box(c, L.lx, L.ly, L.lw, 38 + rows * lh, { r: 10, fill: '#0C0819', stroke: P.rule, alpha: a });
+      mono(c, 'audit log', L.lx + 14, L.ly + 24, { size: 13, color: P.sand2, alpha: a });
+      const logged = [];
+      for (let j = 0; j <= k; j++) if (refusedAt(j) <= t) logged.push(j);
+      logged.slice(-rows).reverse().forEach((j, i) => {
+        const fresh = flash(t, refusedAt(j), 1.2);
+        mono(c, 'refused  GET /notes  198.51.100.4', L.lx + 14, L.ly + 50 + i * lh, { size: n ? 12.5 : 12, color: fresh > 0.2 ? P.ember : P.dim, alpha: a * ease((t - refusedAt(j)) / 0.3) });
+      });
+
+      // Backups: sealed with a key you hold, on their way to a bucket.
+      const [bx, by] = L.bucket;
+      wire(c, L.seal, P.rule, 1.2, a * 0.6, [3, 5]);
+      let landed = 0;
+      for (let b = Math.max(0, Math.floor((t - 2.4 - B0) / BG)); b <= (t - B0) / BG + 1; b++) {
+        const T = sealAt(b), m = span(t, T, T + 2.0);
+        if (t > T + 2.0) landed = Math.max(landed, flash(t, T + 2.0, 1));
+        if (m <= 0 || m >= 1) continue;
+        const [x, y] = along(L.seal, m);
+        const sealed = ease(span(t, T + 0.15, T + 0.45));
+        file(c, x, y, 0.7, { stroke: P.sand2, alpha: a });
+        lock(c, x + 6, y + 4, P.oasis, a * sealed);
+      }
+      bucket(c, bx, by, { alpha: a, glow: landed });
+      mono(c, 'sealed backups, to a bucket', ...L.sealSay, { size: 13, align: n ? 'left' : 'center', color: P.sand2, alpha: a });
+    },
+  },
 ];
 
 const STARS = (() => {
@@ -808,23 +1047,42 @@ const STARS = (() => {
 
 export const SCENE = Object.fromEntries(SCENES.map((s) => [s.key, s]));
 
+/* How long scene `key` runs before it starts again: its story, then its last
+   frame held, still moving where it moves (a frozen hold was the stutter
+   before each start); a stream never starts again. */
+const HOLD = 2.2;
+export function cycle(key) {
+  const s = SCENE[key];
+  return s.stream ? Infinity : s.d + HOLD;
+}
+
+/* The moment that says everything the scene does, for a reader who asked
+   for no motion. */
+export function still(key) {
+  const s = SCENE[key];
+  return s.stream ? s.still : s.d;
+}
+
 /* The stage scene `key` is drawn on: a screen's, or a phone's. */
 export function stage(key, narrow) {
   const s = SCENE[key];
   return narrow ? { w: NW, h: s.nh } : { w: W, h: s.h };
 }
 
-/* Draws scene `key` at `t` seconds of its own into a context of any size. */
-export function render(c, key, t, width, height, narrow = false) {
+/* Draws scene `key` at `t` seconds of its own into a context of any size.
+   The stars twinkle by `clock`, the figure's own time, which runs on across
+   a scene's start: by the scene's they jumped as it began again. */
+export function render(c, key, t, width, height, narrow = false, clock = t) {
   const scene = SCENE[key];
   const { w, h } = stage(key, narrow);
   const s = Math.min(width / w, height / h);
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, width, height);
   c.setTransform(s, 0, 0, s, (width - w * s) / 2, (height - h * s) / 2);
-  for (const [x, y, r, ph] of STARS) dot(c, x * w, y * h, r, P.star, 0.14 + 0.12 * Math.sin(t * 1.3 + ph));
+  for (const [x, y, r, ph] of STARS) dot(c, x * w, y * h, r, P.star, 0.14 + 0.12 * Math.sin(clock * 1.3 + ph));
   c.save();
-  c.globalAlpha = ease(span(t, 0, 0.45)) * (1 - ease(span(t, scene.d - 0.4, scene.d)));
+  const end = cycle(key);
+  c.globalAlpha = ease(span(t, 0, 0.45)) * (1 - ease(span(t, end - 0.6, end)));
   scene.draw(c, t, narrow);
   c.restore();
 }
