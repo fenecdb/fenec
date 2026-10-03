@@ -464,6 +464,16 @@ fn print_response(r: &Response, took: std::time::Duration) {
                 }
             }
             println!("({} rows, {:.2?})", rs.rows.len(), took);
+            // What `facet` counted, a line a field: over every matched row,
+            // so after the page rather than in it.
+            for f in &rs.facets {
+                let values: Vec<String> = f
+                    .values
+                    .iter()
+                    .map(|(v, n)| format!("{} {n}", cell(v)))
+                    .collect();
+                println!("facet {}: {}", f.field, values.join(", "));
+            }
         }
     }
 }

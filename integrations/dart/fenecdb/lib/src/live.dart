@@ -4,9 +4,9 @@ import 'fenec.dart';
 import 'query.dart';
 
 class _Sub {
-  final Future<List<Map<String, Object?>>> Function() rows;
+  final Future<Rows> Function() rows;
   final Set<String>? reads;
-  final StreamController<List<Map<String, Object?>>> out;
+  final StreamController<Rows> out;
   var on = true;
   _Sub(this.rows, this.reads, this.out);
 }
@@ -53,9 +53,9 @@ class Lives {
     return next;
   }
 
-  Stream<List<Map<String, Object?>>> stream(String text, List<Object?> params, Set<String>? reads, Object? failure) {
+  Stream<Rows> stream(String text, List<Object?> params, Set<String>? reads, Object? failure) {
     late final _Sub sub;
-    final out = StreamController<List<Map<String, Object?>>>(
+    final out = StreamController<Rows>(
       onListen: () => _serial(() async {
         // With none before it no look has kept the cursor up: it starts here,
         // where the first run reads.
@@ -120,8 +120,9 @@ class Lives {
 extension LiveQueries on Fenec {
   /// The rows of [query] now, and again after every write to a collection it
   /// reads -- the writes of a burst run it once. An error ends the stream;
-  /// a `StreamBuilder` takes it as it is.
-  Stream<List<Map<String, Object?>>> live(Query query) {
+  /// a `StreamBuilder` takes it as it is. The rows carry what a `facet`
+  /// counted as their [Rows.facets].
+  Stream<Rows> live(Query query) {
     try {
       final s = query.toFenecQL();
       return lives.stream(s.text, s.params, query.reads?.toSet(), null);
@@ -134,7 +135,6 @@ extension LiveQueries on Fenec {
 
   /// A live FenecQL text: run again after every write to [collections], or
   /// to anything when it names none.
-  Stream<List<Map<String, Object?>>> liveText(String text,
-          {List<Object?> params = const [], List<String>? collections}) =>
+  Stream<Rows> liveText(String text, {List<Object?> params = const [], List<String>? collections}) =>
       lives.stream(text, params, collections?.toSet(), null);
 }

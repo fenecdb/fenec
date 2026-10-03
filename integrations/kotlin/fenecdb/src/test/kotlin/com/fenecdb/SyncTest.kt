@@ -236,8 +236,25 @@ class SyncTest {
         assertEquals(FenecException.Code.DUPLICATE, e.code)
     }
 
+    /** `/query` answers `{"rows": [...], "facets": {...}}` when the query asked facets, the bare array otherwise. */
     @Test
-    fun statusFlowsAsAStateFlow() = runBlocking {
+    fun highlightsAndFacetsOverHttp() = runBlocking {
+        val s = server("facets")
+        s.run("create collection docs (body text @text, kind text)")
+        s.run("""put docs [{body: "rust is fast", kind: "lang"}, {body: "go is simple", kind: "lang"}, {body: "rust never sleeps", kind: "song"}]""")
+        val db = Fenec.connect(s.url)
+        val marked = db.from("docs").select("body").highlight("body").match("body", "rust").rows()
+        assertEquals(2, marked.size)
+        for (r in marked) assertEquals(listOf(listOf(0L, 4L)), r["highlight(body)"])
+        val a = db.from("docs").where("kind", "!=", "none").facet("kind", top = 1).limit(1).answer()
+        assertEquals(1, a.rows.size)
+        assertEquals(mapOf("kind" to listOf(FacetCount("lang", 2))), a.facets)
+        assertEquals(3, db.from("tasks").rows().size)
+        assertEquals(emptyMap(), db.from("tasks").answer().facets)
+    }
+
+    @Test
+    fun statusFlowsAsAStateFlow()= runBlocking {
         val s = server("status")
         val db = Fenec.sync(url = s.url, shapes = listOf(open), path = path("status"))
         withTimeout(10_000) { db.replica!!.status.first { it.state == SyncStatus.State.ONLINE } }

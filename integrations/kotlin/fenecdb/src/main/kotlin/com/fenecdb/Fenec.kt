@@ -30,9 +30,39 @@ class FenecException internal constructor(
     }
 }
 
+/**
+ * One value a `facet` counted and how many rows hold it. The value is any
+ * JSON value the field holds -- a [String], a [Long], a [Row] for an
+ * object -- and `null` counts the rows whose field is null.
+ */
+data class FacetCount(val value: Any?, val count: Long)
+
+/**
+ * A query's rows, and what its `facet` clause counted beside them as
+ * [facets] -- empty when it asked none. A `List<Row>` itself, equal to any
+ * list of the same rows, so a caller that took a list from [Query.rows] or
+ * a live query takes this unchanged.
+ */
+class Rows(private val rows: List<Row>, val facets: Map<String, List<FacetCount>> = emptyMap()) : List<Row> by rows {
+    override fun equals(other: Any?): Boolean = rows == other
+
+    override fun hashCode(): Int = rows.hashCode()
+
+    override fun toString(): String = rows.toString()
+}
+
 /** An answer to a statement. */
 sealed class Answer {
-    data class Rows(val columns: List<String>, override val rows: List<Row>) : Answer()
+    /**
+     * Rows, and what the query's `facet` clause counted beside them: each
+     * field asked, in the order asked, its values most first. Empty when
+     * the query asked none.
+     */
+    data class Rows @JvmOverloads constructor(
+        val columns: List<String>,
+        override val rows: List<Row>,
+        override val facets: Map<String, List<FacetCount>> = emptyMap(),
+    ) : Answer()
 
     data class Affected(val count: Long) : Answer()
 
@@ -43,8 +73,26 @@ sealed class Answer {
     /** The rows, or none. */
     open val rows: List<Row> get() = emptyList()
 
+    /** What `facet` counted, by field; none unless the query asked. */
+    open val facets: Map<String, List<FacetCount>> get() = emptyMap()
+
+    /** The rows with the facets beside them. */
+    // Named whole: inside Answer, `Rows` is the nested answer.
+    val page: com.fenecdb.Rows get() = com.fenecdb.Rows(rows, facets)
+
     /** How many documents a write wrote, or 0. */
     val affected: Long get() = (this as? Affected)?.count ?: 0
+}
+
+/** `{"brand": [{"value": "acme", "count": 12}, ...], ...}` as the library's, the fields in the order asked. */
+internal fun facetsOf(v: Row?): Map<String, List<FacetCount>> {
+    if (v == null) return emptyMap()
+    return v.entries.associateTo(LinkedHashMap()) { (field, counts) ->
+        field to (counts as? List<*> ?: emptyList<Any?>()).map {
+            val c = it as Row
+            FacetCount(c["value"], c.long("count") ?: 0)
+        }
+    }
 }
 
 /** What [Fenec.changes] answers: the counter now, and the collections written -- `null`, everything stale. */
@@ -208,6 +256,7 @@ class Fenec private constructor(internal val handle: Long) : AutoCloseable {
             Answer.Rows(
                 r?.list("columns")?.map { it as String } ?: emptyList(),
                 r?.list("rows")?.map { it as Row } ?: emptyList(),
+                facetsOf(r?.row("facets")),
             )
         }
         "affected" -> Answer.Affected(v.long("count") ?: 0)

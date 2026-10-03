@@ -34,6 +34,7 @@ pub mod collate;
 pub mod declared;
 pub mod engine;
 pub mod error;
+pub mod highlight;
 pub mod history;
 pub mod json;
 pub mod maps;

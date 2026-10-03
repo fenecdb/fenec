@@ -1067,6 +1067,11 @@ impl HashIndex {
         self.map.len()
     }
 
+    /// Each value's encoding and the documents under it.
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Vec<DocId>)> {
+        self.map.iter()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -1887,6 +1892,91 @@ fn source_or_err<'a>(
     }
 }
 
+/// What a column of a select reads: the id, a field or a path into one
+/// ([`source`]), or the `highlight()` or `snippet()` of the list at that
+/// place.
+enum Source<'a> {
+    Id,
+    At((usize, Option<&'a str>)),
+    Mark(usize),
+}
+
+/// A `highlight()` or `snippet()` worked out for a query.
+struct MarkPlan {
+    /// The text field it marks.
+    pos: usize,
+    snippet: Option<usize>,
+    tags: Option<(String, String)>,
+    ellipsis: String,
+}
+
+impl MarkPlan {
+    /// Its column for document `id`: the marks of the field's text -- as
+    /// `[start, end]` pairs of UTF-16 offsets, or the text with the tags
+    /// around them -- or a snippet's window, and `null` where the field is.
+    fn value(&self, terms: &crate::highlight::Terms, store: &Store, id: DocId) -> Result<Value> {
+        use crate::highlight::{marked, utf16_len, window};
+        let Some(Value::Text(text)) = store.read_field(id, self.pos)? else {
+            return Ok(Value::Null);
+        };
+        let spans = terms.spans(&text);
+        let Some(words) = self.snippet else {
+            return Ok(match &self.tags {
+                Some((pre, post)) => Value::Text(marked(&text, &spans, pre, post)),
+                None => Value::List(offsets(&text, &spans, 0)),
+            });
+        };
+        let (from, to) = window(&text, &spans, words);
+        let cut = text.get(from..to).unwrap_or("");
+        // The spans the window holds, from where it starts.
+        let inside: Vec<(usize, usize)> = spans
+            .iter()
+            .filter(|s| s.1 > from && s.0 < to)
+            .map(|s| (s.0.max(from) - from, s.1.min(to) - from))
+            .collect();
+        let before = if from > 0 { self.ellipsis.as_str() } else { "" };
+        let after = if to < text.len() {
+            self.ellipsis.as_str()
+        } else {
+            ""
+        };
+        Ok(match &self.tags {
+            Some((pre, post)) => {
+                let mut s = String::from(before);
+                s.push_str(&marked(cut, &inside, pre, post));
+                s.push_str(after);
+                Value::Text(s)
+            }
+            None => {
+                let mut s = String::with_capacity(before.len() + cut.len() + after.len());
+                s.push_str(before);
+                s.push_str(cut);
+                s.push_str(after);
+                let marks = Value::List(offsets(cut, &inside, utf16_len(before)));
+                Value::Object(vec![
+                    ("marks".to_string(), marks),
+                    ("text".to_string(), Value::Text(s)),
+                ])
+            }
+        })
+    }
+}
+
+/// `spans` of `text` as `[start, end]` pairs of UTF-16 offsets, each moved
+/// on by `shift`.
+fn offsets(text: &str, spans: &[(usize, usize)], shift: usize) -> Vec<Value> {
+    let mut at: Vec<usize> = spans.iter().flat_map(|s| [s.0, s.1]).collect();
+    crate::highlight::utf16(text, &mut at);
+    at.chunks(2)
+        .map(|p| {
+            Value::List(vec![
+                Value::Int((p[0] + shift) as i64),
+                Value::Int((p[1] + shift) as i64),
+            ])
+        })
+        .collect()
+}
+
 /// The value of document `id` at a [`source`], `null` where it has none.
 fn read_source(store: &Store, id: DocId, (pos, keys): (usize, Option<&str>)) -> Result<Value> {
     Ok(match keys {
@@ -2637,6 +2727,7 @@ impl Database {
                 columns,
                 rows,
                 nested: None,
+                facets: Vec::new(),
             },
             dels,
             schema_changed,
@@ -6964,6 +7055,7 @@ impl Database {
                 })
                 .collect(),
             nested: None,
+            facets: Vec::new(),
         })
     }
 
@@ -6989,6 +7081,8 @@ impl Database {
                 ids = self.retain_with_children(c, l, ids, &ctx)?;
             }
             let n = ids.len();
+            let all = sel.filter.is_none() && sel.lookup.is_none();
+            let facets = self.facets(c, sel, &ids, all)?;
             return Ok(ResultSet {
                 columns: vec![COUNT_COLUMN.to_string()],
                 rows: vec![Row {
@@ -6997,27 +7091,51 @@ impl Database {
                     score: None,
                 }],
                 nested: None,
+                facets,
             });
         }
 
-        let columns = projection_columns(&c.schema, &sel.project);
-        // Each column's field, or the path into one, found once a query.
+        let mut columns = projection_columns(&c.schema, &sel.project);
+        // `select *` puts the marks after every field.
+        if sel.project.is_none() {
+            for m in &sel.marks {
+                columns.push(m.label());
+            }
+        }
+        // Each column's field, or the path into one, or the mark it is,
+        // found once a query.
         let mut sources = Vec::with_capacity(columns.len());
+        let mut taken = vec![false; sel.marks.len()];
         for col in &columns {
-            sources.push(match col == "id" {
-                true => None,
-                false => Some(source_or_err(&c.schema, col, "")?),
+            let mark = (0..sel.marks.len()).find(|&i| !taken[i] && sel.marks[i].label() == *col);
+            sources.push(match (mark, col == "id") {
+                (Some(i), _) => {
+                    taken[i] = true;
+                    Source::Mark(i)
+                }
+                (None, true) => Source::Id,
+                (None, false) => Source::At(source_or_err(&c.schema, col, "")?),
             });
         }
-
         let limit = sel.limit.unwrap_or(usize::MAX);
         let scored: Vec<(DocId, Option<f32>)>;
+        // The rows `facet` counts over, when it is asked: every row the
+        // filter and `match` select, before `offset` and `limit`. `all`:
+        // every row of the collection, which a hash index's buckets count
+        // without a look at the rows.
+        let mut facet_ids: Option<Vec<DocId>> = None;
+        let wants_facets = !sel.facets.is_empty();
+        let required = sel.lookup.as_ref().is_some_and(|l| l.required);
+        let all = sel.filter.is_none() && !required && sel.matcher.is_none();
 
         if let (Some(m), Some(near), Some(f)) = (&sel.matcher, &sel.near, &sel.fuse) {
             scored = with_scores(self.run_fuse(c, sel, m, near, f, params, &ctx)?);
         } else if let Some(m) = &sel.matcher {
             let want = ranked_rows(sel, "match", MAX_MATCH_ROWS)?;
             scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
+            if wants_facets {
+                facet_ids = Some(self.matched_set(c, sel, m, &ctx)?);
+            }
         } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
             // rejected explicitly rather than ignored silently.
@@ -7031,17 +7149,31 @@ impl Database {
             scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
         } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
             scored = ids.into_iter().map(|id| (id, None)).collect();
+            if wants_facets && !all {
+                let mut set = self.matching_ids(&sel.collection, &sel.filter, params)?;
+                if let Some(l) = sel.lookup.as_ref().filter(|l| l.required) {
+                    set = self.retain_with_children(c, l, set, &ctx)?;
+                }
+                facet_ids = Some(set);
+            }
         } else {
             // With no ordering the page is the first `offset + limit` matches
             // in id order, so the scan can stop there. `required` drops
-            // parents after the filter and so still needs every candidate.
-            let required = sel.lookup.as_ref().is_some_and(|l| l.required);
+            // parents after the filter and so still needs every candidate,
+            // and so do facets, which count every one -- the page is then
+            // the front of what they count.
             let cap = if sel.order.is_empty() && !required {
                 sel.limit.map(|l| l.saturating_add(sel.offset))
             } else {
                 None
             };
-            let mut ids = self.matching_ids_capped(&sel.collection, &sel.filter, params, cap)?;
+            let counted = wants_facets && !all;
+            let mut ids = self.matching_ids_capped(
+                &sel.collection,
+                &sel.filter,
+                params,
+                if counted { None } else { cap },
+            )?;
             // `required` decides who is on the page, so it runs before the
             // ordering and before `limit`. Dropping rows afterwards would
             // answer a request for twenty with however many happened to
@@ -7049,6 +7181,12 @@ impl Database {
             if let Some(l) = &sel.lookup {
                 if l.required {
                     ids = self.retain_with_children(c, l, ids, &ctx)?;
+                }
+            }
+            if counted {
+                facet_ids = Some(ids.clone());
+                if let Some(k) = cap {
+                    ids.truncate(k);
                 }
             }
             if !sel.order.is_empty() {
@@ -7089,6 +7227,12 @@ impl Database {
             scored = ids.into_iter().map(|id| (id, None)).collect();
         }
 
+        // Worked out once `match` has run, which refused what it could not
+        // search: a field with no text index, a query that is not text.
+        let (terms, marks) = match (&sel.matcher, sel.marks.is_empty()) {
+            (Some(m), false) => self.mark_plans(c, sel, m, &ctx)?,
+            _ => (None, Vec::new()),
+        };
         let mut rows = Vec::new();
         for (id, score) in scored.into_iter().skip(sel.offset) {
             if rows.len() >= limit {
@@ -7097,12 +7241,23 @@ impl Database {
             let mut values = Vec::with_capacity(columns.len());
             for src in &sources {
                 values.push(match src {
-                    None => Value::Int(id as i64),
-                    Some(at) => read_source(&c.store, id, *at)?,
+                    Source::Id => Value::Int(id as i64),
+                    Source::At(at) => read_source(&c.store, id, *at)?,
+                    // Without the text index no `match` ran, and the marking
+                    // is left out of the build.
+                    Source::Mark(i) => match (&terms, cfg!(feature = "text")) {
+                        (Some(t), true) => marks[*i].value(t, &c.store, id)?,
+                        _ => Value::Null,
+                    },
                 });
             }
             rows.push(Row { id, values, score });
         }
+        let facets = match (wants_facets, &facet_ids) {
+            (false, _) => Vec::new(),
+            (true, Some(ids)) => self.facets(c, sel, ids, false)?,
+            (true, None) => self.facets(c, sel, &[], true)?,
+        };
 
         // Children are attached after the parent page is decided, so a
         // `limit 20` probes twenty buckets and not one per matching row.
@@ -7121,7 +7276,257 @@ impl Database {
             columns,
             rows,
             nested,
+            facets,
         })
+    }
+
+    /// What each `highlight()` and `snippet()` of the list needs once a
+    /// query: its field, the query's terms as the index on the field
+    /// `match` searched reads them, and its arguments' values. Asked after
+    /// `match` ran, which refused a field with no text index and a query
+    /// that is not text -- and in a build without the index, every `match`.
+    fn mark_plans(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        m: &Match,
+        ctx: &EvalCtx,
+    ) -> Result<(Option<crate::highlight::Terms>, Vec<MarkPlan>)> {
+        let index = c.schema.field(&m.field).map(|f| &f.index);
+        let (true, Some(IndexKind::Text(spec)), Value::Text(query)) = (
+            cfg!(feature = "text"),
+            index,
+            eval(&m.query, &mut NoRow, ctx)?,
+        ) else {
+            return Ok((None, Vec::new()));
+        };
+        let terms = crate::highlight::Terms::new(&query, *spec);
+        let text = |e: &Expr, what: &str| -> Result<String> {
+            match eval(e, &mut NoRow, ctx)? {
+                Value::Text(t) => Ok(t),
+                other => Err(Error::Type(format!(
+                    "{what} is text, found {}",
+                    other.type_name()
+                ))),
+            }
+        };
+        let mut out = Vec::with_capacity(sel.marks.len());
+        for mark in &sel.marks {
+            let pos = c
+                .schema
+                .field_pos(&mark.field)
+                .ok_or_else(|| Error::NotFound(format!("field `{}`", mark.field)))?;
+            let ty = &c.schema.fields[pos].ty;
+            if *ty != DataType::Text {
+                return Err(Error::Type(format!(
+                    "`{}` marks text, and `{}` is {}",
+                    mark.label(),
+                    mark.field,
+                    ty.name()
+                )));
+            }
+            let (ellipsis, tags) = mark.parts();
+            let tags = match tags {
+                Some((pre, post)) => Some((text(pre, "a tag")?, text(post, "a tag")?)),
+                None => None,
+            };
+            let ellipsis = match ellipsis {
+                Some(e) => text(e, "an ellipsis")?,
+                None => String::new(),
+            };
+            out.push(MarkPlan {
+                pos,
+                snippet: mark.snippet,
+                tags,
+                ellipsis,
+            });
+        }
+        Ok((Some(terms), out))
+    }
+
+    /// Every row `match` selects: each holding a term of the query, the
+    /// filter tested on those alone -- what `facet` counts over, where the
+    /// ranking keeps only the page.
+    fn matched_set(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        m: &Match,
+        ctx: &EvalCtx,
+    ) -> Result<Vec<DocId>> {
+        let Some(ix) = c.text(&m.field)? else {
+            return Ok(Vec::new());
+        };
+        let query = match eval(&m.query, &mut NoRow, ctx)? {
+            Value::Text(t) => t,
+            _ => return Ok(Vec::new()),
+        };
+        let mut ids = ix.matching(&query);
+        if let Some(f) = &sel.filter {
+            let test = Filter::new(c, f, ctx);
+            let mut kept = Vec::with_capacity(ids.len());
+            for id in ids {
+                if test.matches(id, ctx)? {
+                    kept.push(id);
+                }
+            }
+            ids = kept;
+        }
+        Ok(ids)
+    }
+
+    /// The values each `facet` field holds over `ids` -- every row of the
+    /// collection when `all` -- and how many rows hold each, most first,
+    /// then by value in the field's order.
+    ///
+    /// A field with a hash index over a type whose bucket is exactly its
+    /// value -- text, int, bool, timestamp -- is counted from the buckets:
+    /// each bucket's length over every row, or how many of its documents
+    /// the set holds. Anything else, a path or a list among them, reads the
+    /// field of every row, a list counting once a row for each value it
+    /// holds. `null` is a value: a row whose field is null is counted
+    /// under it, so a scalar field's counts add up to the rows.
+    fn facets(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        ids: &[DocId],
+        all: bool,
+    ) -> Result<Vec<FacetValues>> {
+        let mut out = Vec::with_capacity(sel.facets.len());
+        let rows = if all { c.store.len() } else { ids.len() } as u64;
+        // Which rows the set holds, for the buckets: made once, for the
+        // first field that reads them.
+        let mut member: Option<Vec<u64>> = None;
+        for f in &sel.facets {
+            let (pos, keys) = source_or_err(&c.schema, &f.field, "")?;
+            let field = &c.schema.fields[pos];
+            let bucketed = keys.is_none()
+                && matches!(
+                    field.ty,
+                    DataType::Text | DataType::Int | DataType::Bool | DataType::Timestamp
+                );
+            let mut counted: Vec<(Value, u64)> = Vec::new();
+            let ix = bucketed.then(|| c.hash(&f.field)).transpose()?.flatten();
+            if let Some(ix) = ix {
+                if !all && member.is_none() {
+                    let top = ids.last().map_or(0, |&d| d as usize + 1);
+                    let mut bits = vec![0u64; top.div_ceil(64)];
+                    for &d in ids {
+                        bits[d as usize / 64] |= 1 << (d % 64);
+                    }
+                    member = Some(bits);
+                }
+                let mut held = 0u64;
+                for (key, docs) in ix.iter() {
+                    let mut n = docs.len() as u64;
+                    if let (Some(bits), false) = (&member, all) {
+                        n = 0;
+                        for &d in docs {
+                            let w = bits.get(d as usize / 64).copied().unwrap_or(0);
+                            n += (w >> (d % 64)) & 1;
+                        }
+                    }
+                    let value = crate::codec::decode_value(key, &mut 0)?;
+                    if n > 0 && !value.is_null() {
+                        held += n;
+                        counted.push((value, n));
+                    }
+                }
+                if rows > held {
+                    counted.push((Value::Null, rows - held));
+                }
+            } else {
+                // Every row of the collection, when the set is all of it.
+                let every;
+                let ids = match all {
+                    true => {
+                        every = c.store.ids();
+                        &every
+                    }
+                    false => ids,
+                };
+                // A value's number under its encoding, and the row it was
+                // last counted for: a list holding a value twice counts its
+                // row once. The hash index's own map type.
+                let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
+                let mut last: Vec<usize> = Vec::new();
+                let mut key = Vec::new();
+                let mut slot = vec![Value::Null];
+                let place = [c.schema.place(pos)];
+                for (row, &id) in ids.iter().enumerate() {
+                    let found = match keys {
+                        None => c.store.read_fields(id, &place, &mut slot)?,
+                        Some(k) => c.store.read_paths(id, &[(pos, k)], &mut slot)?,
+                    };
+                    let values = match (&slot[0], found) {
+                        (_, false) => &[],
+                        (Value::List(items), true) => items.as_slice(),
+                        (_, true) => std::slice::from_ref(&slot[0]),
+                    };
+                    for v in values {
+                        key.clear();
+                        crate::codec::encode_value(&mut key, v);
+                        let at = match index.get(&key) {
+                            Some(n) => n[0] as usize,
+                            None => {
+                                index
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .push(counted.len() as DocId);
+                                counted.push((v.clone(), 0));
+                                last.push(usize::MAX);
+                                counted.len() - 1
+                            }
+                        };
+                        if last[at] != row {
+                            last[at] = row;
+                            counted[at].1 += 1;
+                        }
+                    }
+                }
+            }
+            plan(|| {
+                let how = if ix.is_some() {
+                    "its hash index"
+                } else {
+                    "read"
+                };
+                format!(
+                    "facet {}: {how}, {} values over {rows} rows",
+                    f.field,
+                    counted.len()
+                )
+            });
+            let n = counted.len();
+            if f.top.is_none() && n > MAX_FACET_VALUES {
+                return Err(Error::Query(format!(
+                    "`facet {}` holds {n} values, past the {MAX_FACET_VALUES} one answers with: \
+                     `top <n>` names how many",
+                    f.field
+                )));
+            }
+            // Most first, then by value -- in the field's collation when it
+            // has one -- through the one sort `order` and `group` use.
+            let collate = keys.is_none().then_some(field.collate).flatten();
+            let order: [OrderKey; 2] = [(None, false, None, None), (None, true, collate, None)];
+            let mut flat = Vec::with_capacity(n * 2);
+            for (v, k) in &counted {
+                flat.push(Value::Int(*k as i64));
+                flat.push(v.clone());
+            }
+            let k = f.top.unwrap_or(n).min(n);
+            let picked = order_rows(&flat, 2, n, &order, k);
+            let mut values = Vec::with_capacity(picked.len());
+            for i in picked {
+                values.push(std::mem::replace(&mut counted[i], (Value::Null, 0)));
+            }
+            out.push(FacetValues {
+                field: f.field.clone(),
+                values,
+            });
+        }
+        Ok(out)
     }
 
     /// An aggregating select: the rows the filter finds -- through the same
@@ -7313,6 +7718,7 @@ impl Database {
             columns,
             rows,
             nested: None,
+            facets: Vec::new(),
         })
     }
 

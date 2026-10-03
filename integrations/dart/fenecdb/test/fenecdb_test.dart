@@ -82,6 +82,39 @@ void main() {
     await db.close();
   });
 
+  test('marks answer in the row, facets beside the rows', () async {
+    final db = await Fenec.memory();
+    await db.execute('create collection docs (body text @text, kind text)');
+    await db.execute('put docs [{body: "rust is fast", kind: "a"}, {body: "rust and go", kind: "a"}, '
+        '{body: "python", kind: "b"}]');
+    final docs = db.from('docs');
+    final hits = await docs.highlight('body').match('body', 'rust').rows();
+    expect([
+      for (final r in hits) r['highlight(body)']
+    ], [
+      [
+        [0, 4]
+      ],
+      [
+        [0, 4]
+      ]
+    ]);
+    final tagged = await docs.select(['kind']).highlight('body', pre: '[', post: ']').match('body', 'fast').rows();
+    expect(tagged.single['highlight(body)'], 'rust is [fast]');
+    final snip = await docs.snippet('body', 2).match('body', 'fast').first();
+    expect((snip!['snippet(body)'] as Map)['marks'], isNotEmpty);
+    expect(hits.facets, isNull);
+    final a = await docs.facet('kind').limit(1).answer();
+    expect(a.rows, hasLength(1));
+    expect(a.facets, {
+      'kind': [const FacetCount('a', 2), const FacetCount('b', 1)]
+    });
+    expect((await docs.where('kind', 'b').facet('kind').rows()).facets, {
+      'kind': [const FacetCount('b', 1)]
+    });
+    await db.close();
+  });
+
   test('a json field takes its list as written', () async {
     final db = await Fenec.memory();
     await db.execute('create collection t (meta json)');

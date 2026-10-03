@@ -97,11 +97,13 @@ public final class FenecRemote: @unchecked Sendable {
         }
     }
 
-    /// The endpoint's answer as the library's: rows come as an array.
+    /// The endpoint's answer as the library's: rows come as an array, or --
+    /// when the query asked for facets -- as `{"rows": [...], "facets":
+    /// {...}}`, the counts beside the rows rather than in one.
     static func answer(_ v: Value) -> Answer {
-        if let rows = v.array {
+        if let rows = v.array ?? v["rows"]?.array {
             let objects = rows.compactMap(\.object)
-            return .rows(columns: objects.first?.keys ?? [], rows: objects)
+            return .rows(columns: objects.first?.keys ?? [], rows: objects, facets: Facets(json: v["facets"]))
         }
         if let n = v["affected"]?.int { return .affected(n) }
         if let c = v["collections"]?.array { return .schemas(c.compactMap(\.object)) }

@@ -3,7 +3,7 @@
 // whose queries run on a server loads this and not the module
 // (`@fenecdb/web/client`).
 
-import { FenecError, Query, checked, declared, ident, nameOf, normalize } from './builder.js';
+import { FenecError, Query, checked, declared, ident, nameOf, normalize, rowsOf } from './builder.js';
 
 // ----------------------------------------------------------- HTTP endpoint
 //
@@ -72,7 +72,7 @@ export class FenecHttp {
   }
 
   async rows(sql, params = []) {
-    return (await this.run(sql, params)).rows ?? [];
+    return rowsOf(await this.run(sql, params));
   }
 
   /**
@@ -128,7 +128,7 @@ export class FenecHttp {
     } else {
       const [sql, params] = typeof query === 'string' ? [query, opts.params ?? []] : Array.isArray(query) ? query : [];
       if (typeof sql !== 'string') throw new FenecError('live: a Query, a FenecQL text, or [text, params]');
-      rows = async () => (await this.run(sql, params ?? [])).rows ?? [];
+      rows = async () => rowsOf(await this.run(sql, params ?? []));
       reads = null;
     }
     if (opts.collections) reads = opts.collections.map((c) => ident(c, 'collection'));

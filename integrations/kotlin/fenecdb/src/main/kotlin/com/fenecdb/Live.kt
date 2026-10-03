@@ -31,9 +31,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal class Lives(private val db: Fenec) {
     class Sub(
-        val rows: suspend () -> List<Row>,
+        val rows: suspend () -> Rows,
         val reads: Set<String>?,
-        val deliver: (List<Row>) -> Unit,
+        val deliver: (Rows) -> Unit,
         val fail: (Throwable) -> Unit,
     ) {
         @Volatile var on = true
@@ -113,12 +113,12 @@ internal class Lives(private val db: Fenec) {
      * falls behind sees the latest rows, and an error ends it. Collected as
      * Compose state with `collectAsState(emptyList())`.
      */
-    fun flow(text: String, params: List<Any?>, reads: Set<String>?, failure: Throwable?): Flow<List<Row>> =
+    fun flow(text: String, params: List<Any?>, reads: Set<String>?, failure: Throwable?): Flow<Rows> =
         callbackFlow {
             val sub = Sub(
                 rows = {
                     if (failure != null) throw failure
-                    db.answerBlocking(text, params, quiet = true).rows
+                    db.answerBlocking(text, params, quiet = true).page
                 },
                 reads = reads,
                 deliver = { trySend(it) },
@@ -137,7 +137,7 @@ internal class Lives(private val db: Fenec) {
  * val open by db.live(db.from("todos").where("done", false)).collectAsState(emptyList())
  * ```
  */
-fun Fenec.live(query: Query): Flow<List<Row>> {
+fun Fenec.live(query: Query): Flow<Rows> {
     val (text, params, failure) = try {
         val (t, p) = query.toFenecQL()
         Triple(t, p, null)
@@ -153,5 +153,5 @@ fun Fenec.live(query: Query): Flow<List<Row>> {
  * A live FenecQL text: run again after every write to [collections], or to
  * anything when it names none.
  */
-fun Fenec.live(text: String, vararg params: Any?, collections: List<String>? = null): Flow<List<Row>> =
+fun Fenec.live(text: String, vararg params: Any?, collections: List<String>? = null): Flow<Rows> =
     lives.flow(text, params.toList(), collections?.toSet(), null)

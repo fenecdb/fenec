@@ -52,6 +52,22 @@ class LiveTest {
         db.close()
     }
 
+    /** A live query's rows carry what its `facet` counted, over every row and not the page alone. */
+    @Test
+    fun aLiveQueryIsHandedItsFacets() = runBlocking {
+        val db = todos()
+        val seen = Collections.synchronizedList(ArrayList<Rows>())
+        val job = launch(Dispatchers.IO) { db.live(db.from("todos").facet("done").limit(1)).collect { seen.add(it) } }
+        until("the first rows") { seen.size == 1 }
+        assertEquals(1, seen[0].size)
+        assertEquals(setOf(FacetCount(false, 1), FacetCount(true, 1)), seen[0].facets["done"]!!.toSet())
+        db.from("todos").insert(mapOf("title" to "eggs", "done" to false))
+        until("the rows after a put") { seen.size == 2 }
+        assertEquals(listOf(FacetCount(false, 2), FacetCount(true, 1)), seen[1].facets["done"])
+        job.cancel()
+        db.close()
+    }
+
     /** The writes of a burst -- several at once, and a text of several statements -- run the query once. */
     @Test
     fun aBurstOfWritesRunsItOnce() = runBlocking {

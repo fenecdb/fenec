@@ -170,6 +170,24 @@
                 try await db.from("tasks").insert(["key": "z", "title": "again"] as Value)
             }
         }
+
+        /// `/query` answers `{"rows", "facets"}` when facets were asked, and
+        /// the bare array otherwise; a mark is a column of the rows either way.
+        @Test func connectReadsFacetsAndMarks() async throws {
+            let s = try await Server("facets")
+            defer { s.stop() }
+            try await s.run("create collection docs (kind text, body text @text)")
+            try await s.run(#"put docs [{kind: "a", body: "rust is fast"}, {kind: "a", body: "rust"}, {kind: "b", body: "go"}]"#)
+            let db = Fenec.connect(url: s.url)
+            let got = try await db.from("docs").highlight("body").match("body", "rust").facet("kind").answer()
+            #expect(got.rows.count == 2)
+            #expect(got.rows.allSatisfy { $0["highlight(body)"] == [[0, 4]] })
+            #expect(got.facets["kind"] == [FacetCount(value: "a", count: 2)])
+            let all = try await db.from("docs").facet("kind").limit(1).answer()
+            #expect(all.rows.count == 1)
+            #expect(all.facets["kind"] == [FacetCount(value: "a", count: 2), FacetCount(value: "b", count: 1)])
+            #expect(try await db.from("docs").answer().facets.isEmpty)
+        }
     }
 
     /// A value the tests' tasks share.

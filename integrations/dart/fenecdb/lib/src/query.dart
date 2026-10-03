@@ -298,6 +298,27 @@ class _Level {
       this.offset);
 }
 
+/// A `highlight` (no [words]) or a `snippet` in the select list.
+class _Mark {
+  final String field;
+  final int? words;
+  final String? ellipsis, pre, post;
+  _Mark(this.field, this.words, this.ellipsis, this.pre, this.post);
+  String get kind => words == null ? 'highlight' : 'snippet';
+}
+
+/// A mark's tags: both or neither, each text. Taken as any value so that a
+/// value read out of JSON is refused with the JS builder's message, not a
+/// cast error.
+(String?, String?) _tags(Object? pre, Object? post, String what) {
+  if (pre == null && post == null) return (null, null);
+  if (pre == null || post == null) throw _refuse('$what takes both pre and post, or neither');
+  return (_textOf(pre, '$what pre'), _textOf(post, '$what post'));
+}
+
+String _textOf(Object? v, String what) =>
+    v is String ? v : throw _refuse('$what must be text: ${writeJson(normalize(v))}');
+
 /// A query over one collection, made by [Fenec.from] or [Query.from].
 /// Immutable: each call hands back a new one, so a base query can be kept
 /// and branched from.
@@ -317,6 +338,8 @@ class Query {
   final int _offset;
   final bool _count;
   final List<_Level> _lookups;
+  final List<_Mark> _marks;
+  final List<(String, int?)> _facets;
 
   Query._(this.collection,
       {Exec? exec,
@@ -332,7 +355,9 @@ class Query {
       int? limit,
       int offset = 0,
       bool count = false,
-      List<_Level> lookups = const []})
+      List<_Level> lookups = const [],
+      List<_Mark> marks = const [],
+      List<(String, int?)> facets = const []})
       : _exec = exec,
         _project = project,
         _aggregate = aggregate,
@@ -346,7 +371,9 @@ class Query {
         _limit = limit,
         _offset = offset,
         _count = count,
-        _lookups = lookups;
+        _lookups = lookups,
+        _marks = marks,
+        _facets = facets;
 
   /// A query bound to no database: for its text alone, [toFenecQL].
   static Query from(String collection) => Query._(_identOf(collection, 'collection'));
@@ -370,6 +397,8 @@ class Query {
     int? offset,
     bool? count,
     List<_Level>? lookups,
+    List<_Mark>? marks,
+    List<(String, int?)>? facets,
   }) =>
       Query._(collection,
           exec: identical(exec, _keep) ? _exec : exec as Exec?,
@@ -385,7 +414,9 @@ class Query {
           limit: identical(limit, _keep) ? _limit : limit as int?,
           offset: offset ?? _offset,
           count: count ?? _count,
-          lookups: lookups ?? _lookups);
+          lookups: lookups ?? _lookups,
+          marks: marks ?? _marks,
+          facets: facets ?? _facets);
 
   /// The query bound to whatever runs a text and its parameters.
   Query bind(Exec exec) => _with(exec: exec);
@@ -450,6 +481,56 @@ class Query {
   /// `rerank field $n [candidates N]`: reorders what [match] found by exact distance.
   Query rerank(String field, Object? vector, {int? candidates}) => _with(
       rerank: _Vector(_identOf(field), vector, candidates == null ? null : _whole(candidates, 'candidates'), false));
+
+  /// `highlight(field)` in the select list: where the terms [match] found
+  /// stand in the field's text -- `[start, end]` pairs of UTF-16 offsets,
+  /// which a Dart `String` indexes by -- or, given [pre] and [post], the
+  /// text with each mark between them. The text is not escaped. Answers
+  /// under `highlight(field)`, after the fields [select] named.
+  ///
+  ///     db.from('docs').select(['title']).highlight('body', pre: '<mark>', post: '</mark>')
+  ///         .match('body', text)
+  Query highlight(String field, {Object? pre, Object? post}) {
+    final (p, q) = _tags(pre, post, 'highlight');
+    return _mark(_Mark(_identOf(field), null, null, p, q));
+  }
+
+  /// `snippet(field, words)`: the window of [words] words around the
+  /// densest marks, `{text, marks}` -- or the marked text, given [pre] and
+  /// [post] -- with [ellipsis] where it leaves text out. Answers under
+  /// `snippet(field)`.
+  Query snippet(String field, int words, {Object? ellipsis, Object? pre, Object? post}) {
+    final f = _identOf(field);
+    final n = _whole(words, 'snippet words');
+    final (p, q) = _tags(pre, post, 'snippet');
+    if (n == 0) throw _refuse('snippet shows at least one word');
+    final e = ellipsis == null ? null : _textOf(ellipsis, 'snippet ellipsis');
+    return _mark(_Mark(f, n, e, p, q));
+  }
+
+  Query _mark(_Mark mark) {
+    // Each answers under its label, and a row holds a name once.
+    if (_marks.any((m) => m.kind == mark.kind && m.field == mark.field)) {
+      throw _refuse('${mark.kind}(${mark.field}) is asked twice');
+    }
+    return _with(marks: [..._marks, mark]);
+  }
+
+  /// `facet field [top N]`: each value the field -- or a path into a json
+  /// field -- holds over every row the query matches, not only the page,
+  /// and how many rows hold it, most first; [top] keeps the commonest. The
+  /// counts come back beside the rows: [answer]'s [Answer.facets], and
+  /// [rows]'s [Rows.facets].
+  ///
+  ///     db.from('products').match('title', 'phone').where('price', '<', 500)
+  ///         .facet('brand', top: 10).facet('color').limit(20)
+  Query facet(String field, {int? top}) {
+    final f = _pathOf(field);
+    final n = top == null ? null : _whole(top, 'facet top');
+    if (n == 0) throw _refuse('facet $f top 0 answers nothing');
+    if (_facets.any((g) => g.$1 == f)) throw _refuse('facet $f is asked twice');
+    return _with(facets: [..._facets, (f, n)]);
+  }
 
   /// `lookup name on child [= parent] ...`: each row's children, attached to
   /// it. [on] names the child's field, [parentKey] the parent's (`id` unless
@@ -523,6 +604,18 @@ class Query {
         throw _refuse('aggregates answer one row; group makes a row per value');
       }
     }
+    if (_marks.isNotEmpty) {
+      final what = _marks[0].kind;
+      if (_match == null) throw _refuse('$what needs match: it marks the terms match found');
+      if (_aggregate) throw _refuse("$what marks a row's text; aggregates answer groups");
+    }
+    if (_facets.isNotEmpty) {
+      if (_near != null) {
+        throw _refuse(
+            'facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near');
+      }
+      if (_aggregate) throw _refuse('facet cannot be combined with aggregates: group counts by value');
+    }
     if (_rerank != null && _match == null) throw _refuse('rerank needs match: it reorders what match found');
     if (_match != null && _near != null && _fuse == null) {
       throw _refuse('match and near cannot be combined: both order the result; fuse() ranks by both');
@@ -562,7 +655,14 @@ class Query {
     }
 
     final sql = StringBuffer('get $collection');
-    if (_project != null) sql.write(' select ${_project.join(', ')}');
+    // The marks after the fields `select` named, or after every field, each
+    // binding its ellipsis and tags in the order written.
+    final items = [for (final m in _marks) _markText(m, bind)];
+    final select = [
+      ...?_project ?? (items.isEmpty ? null : const ['*']),
+      ...items
+    ];
+    if (select.isNotEmpty) sql.write(' select ${select.join(', ')}');
     final w = _whereOf(_cond, bind);
     if (w != null) sql.write(' where $w');
     if (_group != null) sql.write(' group $_group');
@@ -585,6 +685,9 @@ class Query {
     if (_limit != null) sql.write(' limit $_limit');
     if (_offset > 0) sql.write(' offset $_offset');
     if (_count) sql.write(' count');
+    if (_facets.isNotEmpty) {
+      sql.write(' facet ${_facets.map((f) => f.$2 == null ? f.$1 : '${f.$1} top ${f.$2}').join(', ')}');
+    }
     // Terminal, so every clause after it is the child's -- and last, so its
     // parameters come after the parent's.
     for (final l in _lookups) {
@@ -599,6 +702,15 @@ class Query {
       if (l.offset > 0) sql.write(' offset ${l.offset}');
     }
     return sql.toString();
+  }
+
+  static String _markText(_Mark m, String Function(Object?) bind) {
+    final s = StringBuffer('${m.kind}(${m.field}');
+    if (m.words != null) s.write(', ${m.words}');
+    // A snippet's tags come after its ellipsis: tags alone bind '' for it.
+    if (m.ellipsis != null || (m.words != null && m.pre != null)) s.write(', ${bind(m.ellipsis ?? '')}');
+    if (m.pre != null) s.write(', ${bind(m.pre)}, ${bind(m.post)}');
+    return (s..write(')')).toString();
   }
 
   static void _orderText(StringBuffer sql, List<_Key> keys) {
@@ -638,6 +750,7 @@ class Query {
     final extra = _extraClause();
     if (extra != null) throw _refuse('$verb cannot be used with `$extra`');
     if (_lookups.isNotEmpty) throw _refuse('$verb cannot be used with `lookup`');
+    if (_facets.isNotEmpty) throw _refuse('$verb cannot be used with `facet`');
     if (verb == 'insert' && _cond.isNotEmpty) throw _refuse('insert cannot be used with `where`');
   }
 
@@ -693,8 +806,13 @@ class Query {
     return exec(s.text, s.params);
   }
 
-  /// Runs the query and hands back its rows.
-  Future<List<Map<String, Object?>>> rows() async => (await _run(toFenecQL())).rows;
+  /// Runs the query and hands back its rows -- with what [facet] counted
+  /// as their [Rows.facets].
+  Future<Rows> rows() async => (await _run(toFenecQL())).rows;
+
+  /// Runs the query and hands back its whole answer: the rows, their
+  /// columns, and the facets beside them.
+  Future<Answer> answer() => _run(toFenecQL());
 
   /// The first row with `limit 1`, or null.
   Future<Map<String, Object?>?> first() async {

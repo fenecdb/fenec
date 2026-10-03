@@ -165,4 +165,34 @@ class FenecTest {
         assertEquals("1969-12-31T23:59:59.999Z", Json.iso(-1))
         assertTrue(Fenec.version.split('.').size == 3)
     }
+
+    /** `highlight` answers marks in a row, `facet` counts beside the rows -- over every match, not the page. */
+    @Test
+    fun highlightsAndFacets() = runBlocking {
+        val db = Fenec.memory()
+        db.execute("create collection docs (body text @text, kind text)")
+        db.from("docs").insert(
+            listOf(
+                mapOf("body" to "rust is fast", "kind" to "lang"),
+                mapOf("body" to "rust never sleeps", "kind" to "song"),
+                mapOf("body" to "go is simple", "kind" to "lang"),
+            ),
+        )
+        val marked = db.from("docs").select("body").highlight("body").match("body", "rust").rows()
+        assertEquals(2, marked.size)
+        for (r in marked) assertEquals(listOf(listOf(0L, 4L)), r["highlight(body)"])
+        val tagged = db.from("docs").highlight("body", "[", "]").match("body", "rust").rows()
+        assertEquals(setOf("[rust] is fast", "[rust] never sleeps"), tagged.map { it.string("highlight(body)") }.toSet())
+        val snip = db.from("docs").select("body").snippet("body", 2).match("body", "rust").first()!!.row("snippet(body)")!!
+        assertEquals(listOf(listOf(0L, 4L)), snip["marks"])
+        assertTrue(snip.string("text")!!.startsWith("rust"))
+
+        val a = db.from("docs").facet("kind").order("body").limit(1).answer()
+        assertEquals(1, a.rows.size)
+        assertEquals(mapOf("kind" to listOf(FacetCount("lang", 2), FacetCount("song", 1))), a.facets)
+        // Rows alone stay rows; a query without facets answers none.
+        assertEquals(1, db.from("docs").facet("kind").limit(1).rows().size)
+        assertEquals(emptyMap(), db.from("docs").answer().facets)
+        db.close()
+    }
 }

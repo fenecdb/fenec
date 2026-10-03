@@ -243,6 +243,39 @@ void main() {
     );
     db.close();
   });
+
+  test('a server answers marks in the row and facets beside the rows', () async {
+    final s = await server('search');
+    await s.run('create collection docs (body text @text, kind text)');
+    await s.run('put docs [{body: "rust is fast", kind: "a"}, {body: "rust and go", kind: "a"}, '
+        '{body: "python", kind: "b"}]');
+    final db = Fenec.connect(s.url);
+    final hits = await db.from('docs').select(['kind']).highlight('body').match('body', 'rust').rows();
+    expect([
+      for (final r in hits) r['highlight(body)']
+    ], [
+      [
+        [0, 4]
+      ],
+      [
+        [0, 4]
+      ]
+    ]);
+    expect(hits.facets, isNull);
+    // `/query` answers an object here: the rows, and the counts of every
+    // matching row beside them.
+    final a = await db.from('docs').facet('kind').limit(1).answer();
+    expect(a.rows, hasLength(1));
+    expect(a.facets, {
+      'kind': [const FacetCount('a', 2), const FacetCount('b', 1)]
+    });
+    final rows = await db.from('docs').where('kind', 'a').facet('kind', top: 1).rows();
+    expect(rows, hasLength(2));
+    expect(rows.facets, {
+      'kind': [const FacetCount('a', 2)]
+    });
+    db.close();
+  });
 }
 
 extension<T> on T {

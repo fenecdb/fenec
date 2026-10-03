@@ -76,13 +76,19 @@ class FenecRemote {
         _ => FenecCode.io,
       };
 
-  /// The endpoint's answer as the library's: rows come as an array.
+  /// The endpoint's answer as the library's: rows come as an array, or --
+  /// when the query asked for facets, which belong to no row -- as an
+  /// object holding them beside the rows.
   static Answer _answer(Object? v) {
-    if (v is List) {
-      final rows = v.cast<Map<String, Object?>>();
+    if (v is List || (v is Map && v['rows'] is List)) {
+      final rows = ((v is List ? v : (v as Map)['rows']) as List).cast<Map<String, Object?>>();
       return Answer.of({
         'kind': 'rows',
-        'result': {'columns': rows.isEmpty ? <String>[] : rows.first.keys.toList(), 'rows': rows},
+        'result': {
+          'columns': rows.isEmpty ? <String>[] : rows.first.keys.toList(),
+          'rows': rows,
+          if (v is Map) 'facets': v['facets'],
+        },
       });
     }
     if (v is Map<String, Object?>) {

@@ -240,6 +240,42 @@ c('rerank without a budget', docs, ['match', 'body', 'x'], ['rerank', 'embed', [
 c('rerank needs match', docs, ['rerank', 'embed', [1, 0, 0]], Q);
 c('a negative rerank budget is refused', docs, ['match', 'body', 'x'], ['rerank', 'embed', [1], { candidates: -5 }], Q);
 
+// highlight and snippet: select-list items, their tags parameters.
+c('highlight after the fields select names', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'rust'], ['limit', 10], Q);
+c('highlight with tags', docs, ['highlight', 'body', { pre: '<mark>', post: '</mark>' }], ['match', 'body', 'rust'], Q);
+c('a snippet of twenty words', docs, ['select', 'title'], ['snippet', 'body', 20], ['match', 'body', 'business trip'], Q);
+c('a snippet with an ellipsis and tags', docs, ['snippet', 'body', 12, { ellipsis: '…', pre: '<b>', post: '</b>' }], ['match', 'body', 'x'], Q);
+c('a snippet with tags and no ellipsis', docs, ['snippet', 'body', 5, { pre: '[', post: ']' }], ['match', 'body', 'x'], Q);
+c('a snippet with an ellipsis alone', docs, ['snippet', 'body', 5, { ellipsis: '...' }], ['match', 'body', 'x'], Q);
+c('marks after every field, in the order called', docs, ['highlight', 'title'], ['snippet', 'body', 8], ['where', 'year', 2024], ['match', 'body', 'x'], Q);
+c('marks go with fuse', docs, ['select', 'title'], ['highlight', 'body'], ['match', 'body', 'rust'], ['near', 'embed', [1, 0]], ['fuse'], ['limit', 5], Q);
+c('highlight needs match', docs, ['highlight', 'body'], Q);
+c('highlight takes no near alone', docs, ['highlight', 'body'], ['near', 'embed', [1, 0]], Q);
+c('a snippet needs match', docs, ['snippet', 'body', 3], Q);
+c('highlight takes both tags or neither', docs, ['highlight', 'body', { pre: '<b>' }], ['match', 'body', 'x'], Q);
+c('a tag is text', docs, ['highlight', 'body', { pre: 1, post: 2 }], ['match', 'body', 'x'], Q);
+c('a snippet of no words is refused', docs, ['snippet', 'body', 0], ['match', 'body', 'x'], Q);
+c('a snippet of negative words is refused', docs, ['snippet', 'body', -2], ['match', 'body', 'x'], Q);
+c('an ellipsis is text', docs, ['snippet', 'body', 4, { ellipsis: 3 }], ['match', 'body', 'x'], Q);
+c('a highlight asked twice is refused', docs, ['highlight', 'body'], ['highlight', 'body', { pre: '<b>', post: '</b>' }], ['match', 'body', 'x'], Q);
+c('a highlight field is a name, not a path', docs, ['highlight', 'meta.text'], ['match', 'body', 'x'], Q);
+
+// facet: counts over every matched row, beside the page.
+c('facet', docs, ['where', 'year', '>=', 2024], ['facet', 'brand'], ['facet', 'color', { top: 5 }], ['limit', 20], Q);
+c('facet of a path', docs, ['facet', 'meta.lang', { top: 3 }], Q);
+c('facet beside match and a page', docs, ['select', 'title'], ['match', 'body', 'phone'], ['where', 'price', '<', 500], ['facet', 'brand', { top: 10 }], ['limit', 20], ['offset', 20], Q);
+c('facet beside a lookup', ['from', 'products'], ['facet', 'brand'], ['lookup', 'reviews', { on: 'product_id', limit: 2 }], Q);
+c('facet beside count', docs, ['where', 'year', 2024], ['facet', 'brand'], ['count']);
+c('rows sends facets', docs, ['facet', 'brand'], ['limit', 5], ['rows']);
+c('facet takes no near', docs, ['near', 'embed', [1, 0]], ['facet', 'brand'], Q);
+c('facet takes no fuse', docs, ['match', 'body', 'x'], ['near', 'embed', [1, 0]], ['fuse'], ['facet', 'brand'], Q);
+c('a facet asked twice is refused', docs, ['facet', 'brand'], ['facet', 'brand', { top: 2 }], Q);
+c('a facet of top 0 is refused', docs, ['facet', 'brand', { top: 0 }], Q);
+c('a negative facet top is refused', docs, ['facet', 'brand', { top: -1 }], Q);
+c('a facet name is checked', docs, ['facet', 'brand; del docs'], Q);
+c('facet takes no aggregate', ['from', 'orders'], ['select', 'status', 'count(*)'], ['group', 'status'], ['facet', 'status'], Q);
+c('delete takes no facet', docs, ['where', 'a', 1], ['facet', 'b'], ['toDelete']);
+
 // Aggregates and group.
 c('aggregates grouped, ordered by one', ['from', 'orders'], ['select', 'status', 'count(*)', 'SUM(total)', 'avg(total)'], ['where', 'year', 2024], ['group', 'status'], ['order', 'sum(total)', 'desc'], ['limit', 3], Q);
 c('aggregates over the whole collection', ['from', 'orders'], ['select', 'min(at)', 'max(at)', 'Count()'], Q);

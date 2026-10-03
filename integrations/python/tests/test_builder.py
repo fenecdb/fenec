@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import TOKEN, URL, fresh
-from fenecdb import AsyncClient, FenecError, Query, and_, collection, not_, or_, raw
+from fenecdb import AsyncClient, FacetCount, FenecError, Query, and_, collection, not_, or_, raw
 
 # run-tests.sh mounts the file beside the package in its container.
 GOLDEN = Path(os.environ.get("FENEC_GOLDEN") or Path(__file__).parents[2] / "builder-golden.json")
@@ -117,6 +117,12 @@ def step_of(q, op, args):
         return q.lookup(args[0], **kwargs(args[1] if len(args) > 1 else None))
     if op == "order":
         return q.order(*args[:2], **kwargs(args[2] if len(args) > 2 else None))
+    if op == "highlight":
+        return q.highlight(args[0], **kwargs(args[1] if len(args) > 1 else None))
+    if op == "snippet":
+        return q.snippet(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
+    if op == "facet":
+        return q.facet(args[0], **kwargs(args[1] if len(args) > 1 else None))
     if op in ("match", "group", "limit", "offset"):
         return getattr(q, op)(*args)
     raise AssertionError(f"no builder step {op}")
@@ -254,3 +260,62 @@ def test_the_async_builder_awaits_the_same_answers(client, shelf):
             assert await db.collection(notes).where("stars", "<=", 2).delete() == 2
 
     asyncio.run(go())
+
+
+def test_marks_and_facets_come_back_where_the_server_puts_them(client):
+    name = fresh("marks")
+    client.query(f"create collection {name} (body text @text, kind text, meta json)")
+    try:
+        client.collection(name).insert(
+            [
+                {"body": "rust and go", "kind": "lang", "meta": {"lang": "en"}},
+                {"body": "rust compiler", "kind": "tool", "meta": {"lang": "en"}},
+                {"body": "python", "kind": "lang", "meta": {"lang": "tr"}},
+            ]
+        )
+        docs = client.collection(name)
+        rows = docs.select("kind").highlight("body").match("body", "rust").rows()
+        # Offsets into the text, UTF-16 code units: `rust` is the first four.
+        assert sorted((r["kind"], r["highlight(body)"]) for r in rows) == [
+            ("lang", [[0, 4]]),
+            ("tool", [[0, 4]]),
+        ]
+        assert rows.facets == {}
+        tagged = docs.select("kind").highlight("body", pre="<b>", post="</b>").match("body", "rust")
+        assert sorted(r["highlight(body)"] for r in tagged.rows()) == [
+            "<b>rust</b> and go",
+            "<b>rust</b> compiler",
+        ]
+        snip = docs.snippet("body", 5).match("body", "compiler").first()["snippet(body)"]
+        assert snip == {"marks": [[5, 13]], "text": "rust compiler"}
+
+        # Counted over every row matched, the page holding one of them.
+        page = docs.select("kind").facet("kind").facet("meta.lang", top=1).order("kind").limit(1).rows()
+        assert page == [{"kind": "lang"}]
+        assert page.facets == {
+            "kind": [FacetCount("lang", 2), FacetCount("tool", 1)],
+            "meta.lang": [FacetCount("en", 2)],
+        }
+        assert docs.facet("kind").count() == 3
+        # The client hands the same: `Rows` for a query with facets, the
+        # bare list for one without, and a batch's result as it came.
+        got = client.query(f"get {name} select kind order kind limit 1 facet kind")
+        assert got == [{"kind": "lang"}] and got.facets["kind"][0] == ("lang", 2)
+        assert type(client.query(f"get {name} select kind")) is list
+        out = client.batch([(f"get {name} select kind limit 1 facet kind", [])])
+        assert out["results"][0]["facets"]["kind"] == [
+            {"value": "lang", "count": 2},
+            {"value": "tool", "count": 1},
+        ]
+
+        async def go():
+            async with AsyncClient(URL, TOKEN) as db:
+                got = await db.collection(name).where("kind", "lang").facet("meta.lang").rows()
+                assert len(got) == 2
+                assert sorted(got.facets["meta.lang"]) == [("en", 1), ("tr", 1)]
+                raw = await db.query(f"get {name} limit 1 facet kind top 1")
+                assert raw.facets == {"kind": [FacetCount("lang", 2)]}
+
+        asyncio.run(go())
+    finally:
+        client.query(f"drop collection if exists {name}")

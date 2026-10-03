@@ -12,6 +12,9 @@ declare const year: number | undefined;
 declare const tag: string | undefined;
 declare const userId: string;
 declare const passphrase: string;
+/** The search page's list and sidebar. */
+declare const results: HTMLElement;
+declare const sidebar: HTMLElement;
 /** The page's own drawing, handed the rows. */
 declare function draw(rows: { title: string | null }[]): void;
 /** React's root (`createRoot`) and the component the example above defined. */

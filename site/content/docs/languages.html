@@ -483,8 +483,9 @@ message. Python's builder starts with <code>collection</code>, since
 <code>where</code> with every operator, <code>in</code>, <code>null</code>,
 paths into a json field and <code>or</code>, <code>and</code>,
 <code>not</code> and <code>raw</code>; <code>near</code>, <code>match</code>,
-<code>fuse</code> and <code>rerank</code>; <code>lookup</code> and its
-chains; <code>order</code> with a collation; <code>limit</code> and
+<code>fuse</code> and <code>rerank</code>; <code>highlight</code>,
+<code>snippet</code> and <code>facet</code>, the facets beside the rows;
+<code>lookup</code> and its chains; <code>order</code> with a collation; <code>limit</code> and
 <code>offset</code>; and the writes, an <code>update</code> or
 <code>delete</code> with no filter refused unless it says <code>all</code>.
 A query is immutable, so a base query can be kept and branched from.</p>

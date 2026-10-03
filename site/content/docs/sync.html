@@ -36,7 +36,7 @@ await db.from('tasks').insert({ title: 'new', status: 'open' });
     unless given another, so its <code>near</code> walks a graph.</li>
   <li><b>A replica that searches no vectors, or holds a few thousand,</b>
     can load the smaller one: <code>sync({ wasm: './fenec-replica.wasm', ... })</code>,
-    147 KB brotli against the full module's 174, with no graph. Its
+    154 KB brotli against the full module's 181, with no graph. Its
     <code>near</code> measures every vector of the shape, as <code>near ...
     exact</code> does, the same rows and scores: 0.54 ms over 1 000 rows of
     128 dimensions against 0.27 through the graph, 8.5 ms over 10 000 of 384

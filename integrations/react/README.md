@@ -51,7 +51,14 @@ again on every render does not subscribe again unless it asks something
 else. A query built with `db.from(...)` brings its database along; a FenecQL
 text runs on the provider's, and names what it reads:
 `useLiveQuery('get todos count', { collections: ['todos'] })`. A query that
-fails throws while rendering, to the nearest error boundary.
+fails throws while rendering, to the nearest error boundary. A query that
+asks for facets has them on its rows, counted over every match, so a
+results list and its filter sidebar come from one hook:
+
+```js
+const rows = useLiveQuery(db.from('products').match('title', text).facet('brand').limit(20));
+// rows.facets.brand: [{ value: 'acme', count: 12 }, ...]
+```
 
 React is the one peer dependency; the database is `@fenecdb/web`'s.
 Full reference: https://fenecdb.com/docs/javascript#state and

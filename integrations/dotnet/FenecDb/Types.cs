@@ -7,11 +7,58 @@ namespace FenecDb;
 /// replayed for its key), and whether the answer is the one kept for its idempotency key.</summary>
 public sealed record ExecResult(long Affected, string? Message, long Seq, bool Replayed);
 
+/// <summary>One value a <c>facet</c> counted and how many of the rows the query matched hold it. The value is any
+/// JSON value a field holds -- null too, for the rows whose field is null.</summary>
+public sealed record FacetCount(JsonElement Value, long Count);
+
+/// <summary>
+/// A query's rows, and what its <c>facet</c> clauses counted beside them: each field asked, in the order asked,
+/// its values most first. The counts cover every row the query matched, not the page, which is why they come
+/// beside the rows and never in one. Empty when the query asked none.
+/// </summary>
+public sealed record Answer(IReadOnlyList<JsonElement> Rows, IReadOnlyDictionary<string, IReadOnlyList<FacetCount>> Facets)
+{
+    static readonly IReadOnlyDictionary<string, IReadOnlyList<FacetCount>> None =
+        new Dictionary<string, IReadOnlyList<FacetCount>>();
+
+    /// <summary>An answer as the server writes it: a bare array of rows, <c>{"rows": [...], "facets": {...}}</c>
+    /// when the query asked facets -- what <c>/query</c> answers, and each rows item of a batch's
+    /// <see cref="BatchResult.Results"/>. Any other object, a write's <c>{"affected": n}</c>, is one row
+    /// holding it.</summary>
+    public static Answer Of(JsonElement body)
+    {
+        if (body.ValueKind == JsonValueKind.Array) return new(body.EnumerateArray().Select(e => e.Clone()).ToList(), None);
+        if (IsAnswer(body))
+            return new(body.GetProperty("rows").EnumerateArray().Select(e => e.Clone()).ToList(), FacetsOf(body));
+        return new([body.Clone()], None);
+    }
+
+    // `{"rows": [...]}` with `facets` at most beside it: a write's answer or a create's message is an object too,
+    // and stays the one row it was.
+    static bool IsAnswer(JsonElement body) =>
+        body.ValueKind == JsonValueKind.Object
+        && body.EnumerateObject().All(p => p.Name is "rows" or "facets")
+        && body.TryGetProperty("rows", out var v) && v.ValueKind == JsonValueKind.Array;
+
+    static IReadOnlyDictionary<string, IReadOnlyList<FacetCount>> FacetsOf(JsonElement body)
+    {
+        if (!body.TryGetProperty("facets", out var f) || f.ValueKind != JsonValueKind.Object) return None;
+        // A Dictionary nothing is removed from enumerates in the order it was filled: the order asked.
+        var facets = new Dictionary<string, IReadOnlyList<FacetCount>>();
+        foreach (var p in f.EnumerateObject())
+            facets[p.Name] = p.Value.EnumerateArray()
+                .Select(c => new FacetCount(c.GetProperty("value").Clone(), c.GetProperty("count").GetInt64()))
+                .ToList();
+        return facets;
+    }
+}
+
 /// <summary>One statement of a batch.</summary>
 public sealed record Statement(string Query, IReadOnlyList<object?>? Parameters = null);
 
 /// <summary>What a batch answers: how many statements ran, each one's answer -- <c>{"affected": n}</c> or
-/// <c>{"rows": [...]}</c> -- and the change the batch left the database at.</summary>
+/// <c>{"rows": [...]}</c>, with <c>"facets"</c> beside the rows when it asked them (<see cref="Answer.Of"/> reads
+/// either) -- and the change the batch left the database at.</summary>
 public sealed record BatchResult(int Ok, IReadOnlyList<JsonElement> Results, long Seq, bool Replayed);
 
 /// <summary>

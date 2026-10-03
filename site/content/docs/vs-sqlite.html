@@ -80,6 +80,12 @@ and is alpha software.</p>
 <tr><td>Full text</td>
   <td>BM25 (<a href="fenecql.html#the-text-clause">The text clause</a>)</td>
   <td>FTS5 with <code>bm25()</code>; unicode61, ascii, porter and trigram tokenizers (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Highlights and snippets</td>
+  <td><code>highlight()</code> and <code>snippet()</code>, as UTF-16 offsets or between tags, by the index's own tokenizer (<a href="fenecql.html#highlights">Highlights and snippets</a>)</td>
+  <td>FTS5's <code>highlight()</code> and <code>snippet()</code>, the marked text between tags (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
+<tr><td>Facets</td>
+  <td><code>facet</code>, each value's count over every match, beside the page (<a href="fenecql.html#facets">Facets</a>)</td>
+  <td>None built in; a <code>GROUP BY</code> a facet, a query each</td></tr>
 <tr><td>Hybrid search</td>
   <td><code>fuse</code>, reciprocal rank fusion (<a href="fenecql.html#hybrid">Hybrid search</a>)</td>
   <td>None built in; FTS5's page has no vector search (<a href="https://sqlite.org/fts5.html">FTS5</a>)</td></tr>
@@ -99,7 +105,7 @@ and is alpha software.</p>
   <td>JS/TS, Python, Go, .NET, Swift, Kotlin, Dart; any language over HTTP (<a href="languages.html">Your language</a>)</td>
   <td>Bindings in nearly every language; sqlite-vec packages for Python, Node.js, Ruby, Go and Rust (<a href="https://github.com/asg017/sqlite-vec">README</a>)</td></tr>
 <tr><td>Browser module, brotli</td>
-  <td>174 KB (<a href="#size">below</a>)</td>
+  <td>181 KB (<a href="#size">below</a>)</td>
   <td>341 KB, without sqlite-vec (<a href="#size">below</a>)</td></tr>
 <tr><td>Licence</td>
   <td>Apache-2.0</td>
@@ -210,7 +216,7 @@ the way a static file is served.</p>
 <table>
 <thead><tr><th>&nbsp;</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>174 KB</b></td><td class="n"><b>208 KB</b></td></tr>
+<tr><td>fenecdb's module, <code>fenec.wasm</code> 0.1.8</td><td class="n"><b>181 KB</b></td><td class="n"><b>217 KB</b></td></tr>
 <tr><td>SQLite's official build, <code>sqlite3.wasm</code> 3.53.4-build2</td><td class="n">341 KB</td><td class="n">393 KB</td></tr>
 </tbody>
 </table>

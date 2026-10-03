@@ -193,6 +193,9 @@ impl TextIndex {
     {
         match self.never {}
     }
+    pub fn matching(&self, query: &str) -> Vec<DocId> {
+        match self.never {}
+    }
 }
 
 pub struct SparseIndex {

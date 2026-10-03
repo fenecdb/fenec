@@ -271,9 +271,22 @@ test(
       renders.theme++;
       return h('p', { id: 'theme' }, rows === undefined ? '' : rows.map((r) => r.theme).join());
     }
-    const view = await render(h('div', null, h(FenecProvider, { db }, h(Open), h(Count)), h(Theme)));
+    // A sidebar: the facets come on the rows, counted over every match.
+    function Sidebar() {
+      const rows = useLiveQuery(useFenec().from('todos').facet('done').limit(0));
+      return h(
+        'p',
+        { id: 'facets' },
+        rows === undefined ? '' : rows.facets.done.map((f) => `${f.value}:${f.count}`).join(' '),
+      );
+    }
+    const view = await render(
+      h('div', null, h(FenecProvider, { db }, h(Open), h(Count), h(Sidebar)), h(Theme)),
+    );
     const shown = () => ['open', 'count', 'theme'].map((id) => view.container.querySelector(`#${id}`).textContent);
+    const sidebar = () => view.container.querySelector('#facets').textContent;
     assert.deepEqual(shown(), ['write the hook', '1', '']);
+    assert.equal(sidebar(), 'false:1');
 
     // What an onClick does: writes, and nothing else.
     await act(async () => {
@@ -281,6 +294,7 @@ test(
       db.run('set todos {done: true} where title = "write the hook"');
     });
     assert.deepEqual(shown(), ['test the hook', '2', '']);
+    assert.equal(sidebar(), 'false:1 true:1');
 
     // A write to another collection renders only what reads it.
     const before = { ...renders };
@@ -300,6 +314,7 @@ test(
       db.load(other.snapshot());
     });
     assert.deepEqual(shown(), ['restored', '1', '']);
+    assert.equal(sidebar(), 'false:1');
 
     await view.unmount();
     // Unmounted, nothing is subscribed: a write renders nothing.

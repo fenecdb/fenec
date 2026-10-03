@@ -529,9 +529,10 @@ func render(c *node, b *binder, parent string) (string, error) {
 
 // Opt is an option of a builder step: Ef and Exact for Near, K and
 // Candidates for Fuse and Rerank, Collate for Order and Sort, All for
-// Update and Delete, and On, ParentKey, Select, Where, Required, Sort,
-// Limit and Offset for Lookup. A step reads the ones it has and passes
-// over the rest, as the JS builder's option objects do.
+// Update and Delete, Pre, Post (or Tags) and Ellipsis for Highlight and
+// Snippet, Top for Facet, and On, ParentKey, Select, Where, Required,
+// Sort, Limit and Offset for Lookup. A step reads the ones it has and
+// passes over the rest, as the JS builder's option objects do.
 type Opt func(*opts)
 
 type opts struct {
@@ -542,6 +543,12 @@ type opts struct {
 	selSet                           bool
 	where                            *Cond
 	sort                             []sortOpt
+	top                              *int
+	// A mark's tags and a snippet's ellipsis, and whether each was given:
+	// held as any, as a value of Where is, so a tag that is not text is
+	// refused by the JS builder's message rather than left to the compiler.
+	pre, post, ellipsis          any
+	preSet, postSet, ellipsisSet bool
 }
 
 type sortOpt struct {
@@ -575,6 +582,21 @@ func ParentKey(field string) Opt { return func(o *opts) { o.parentKey = strp(fie
 func Required() Opt              { return func(o *opts) { o.required = true } }
 func Limit(n int) Opt            { return func(o *opts) { o.limit = intp(n) } }
 func Offset(n int) Opt           { return func(o *opts) { o.offset = intp(n) } }
+func Top(n int) Opt              { return func(o *opts) { o.top = intp(n) } }
+
+// Pre and Post are what Highlight and Snippet put before and after each
+// mark, both or neither: given, the field answers as the marked text
+// rather than the marks' offsets. Text, bound as a parameter.
+func Pre(text any) Opt  { return func(o *opts) { o.pre, o.preSet = text, true } }
+func Post(text any) Opt { return func(o *opts) { o.post, o.postSet = text, true } }
+
+// Tags is Pre and Post at once.
+func Tags(pre, post string) Opt {
+	return func(o *opts) { o.pre, o.preSet, o.post, o.postSet = pre, true, post, true }
+}
+
+// Ellipsis is what Snippet writes where its window leaves text out.
+func Ellipsis(text any) Opt { return func(o *opts) { o.ellipsis, o.ellipsisSet = text, true } }
 
 // Select names a lookup's fields; "*" or none is every field.
 func Select(cols ...string) Opt {
@@ -620,6 +642,28 @@ type lookupLevel struct {
 	offset                 int
 }
 
+// mark is a highlight (words < 0) or a snippet of words words.
+type mark struct {
+	field       string
+	words       int
+	pre, post   string
+	tagged      bool
+	ellipsis    string
+	hasEllipsis bool
+}
+
+func (m mark) kind() string {
+	if m.words < 0 {
+		return "highlight"
+	}
+	return "snippet"
+}
+
+type facetClause struct {
+	field string
+	top   int // -1 when not given
+}
+
 type vectorClause struct {
 	field  string
 	vector any
@@ -646,6 +690,8 @@ type Builder struct {
 	offset     int
 	count      bool
 	lookups    []lookupLevel
+	marks      []mark
+	facets     []facetClause
 }
 
 // From is the query builder over a collection, bound to no client: for its
@@ -674,6 +720,8 @@ func (b *Builder) step(change func(*Builder) error) *Builder {
 	d.cond = slices.Clip(d.cond)
 	d.order = slices.Clip(d.order)
 	d.lookups = slices.Clip(d.lookups)
+	d.marks = slices.Clip(d.marks)
+	d.facets = slices.Clip(d.facets)
 	if d.err == nil {
 		d.err = change(&d)
 	}
@@ -704,6 +752,132 @@ func (b *Builder) Select(cols ...string) *Builder {
 			project[i], aggregate = t, aggregate || agg
 		}
 		d.project, d.aggregate = project, aggregate
+		return nil
+	})
+}
+
+// Highlight is `highlight(field)` in the select list: where the terms
+// Match found stand in the field's text, [start, end] pairs of UTF-16
+// offsets -- or, given Pre and Post (Tags), the text with each mark
+// between them, not escaped. It answers under `highlight(field)`, after
+// the fields Select named; it needs Match.
+//
+//	db.From("docs").Select("title").Highlight("body", fenecdb.Tags("<mark>", "</mark>")).Match("body", text)
+func (b *Builder) Highlight(field string, options ...Opt) *Builder {
+	return b.step(func(d *Builder) error {
+		m := mark{words: -1}
+		var err error
+		if m.field, err = ident(field, "field"); err != nil {
+			return err
+		}
+		if err := tags(&m, gather(options), "highlight"); err != nil {
+			return err
+		}
+		return d.mark(m)
+	})
+}
+
+// Snippet is `snippet(field, words)`: the window of words words around the
+// densest marks, {"marks": [[s, e], ...], "text": ...} -- or the marked
+// text, given Pre and Post -- with Ellipsis where it leaves text out. It
+// answers under `snippet(field)`; it needs Match.
+func (b *Builder) Snippet(field string, words int, options ...Opt) *Builder {
+	return b.step(func(d *Builder) error {
+		var m mark
+		var err error
+		if m.field, err = ident(field, "field"); err != nil {
+			return err
+		}
+		if m.words, err = whole(words, "snippet words"); err != nil {
+			return err
+		}
+		o := gather(options)
+		if err := tags(&m, o, "snippet"); err != nil {
+			return err
+		}
+		if m.words == 0 {
+			return refuse("snippet shows at least one word")
+		}
+		if o.ellipsisSet {
+			if m.ellipsis, err = text(o.ellipsis, "snippet ellipsis"); err != nil {
+				return err
+			}
+			m.hasEllipsis = true
+		}
+		return d.mark(m)
+	})
+}
+
+// mark adds one: each answers under its label, and a row holds a name once.
+func (b *Builder) mark(m mark) error {
+	for _, x := range b.marks {
+		if x.kind() == m.kind() && x.field == m.field {
+			return refuse("%s(%s) is asked twice", m.kind(), m.field)
+		}
+	}
+	b.marks = append(b.marks, m)
+	return nil
+}
+
+// tags reads a mark's Pre and Post: both or neither, each text.
+func tags(m *mark, o opts, what string) (err error) {
+	if !o.preSet && !o.postSet {
+		return nil
+	}
+	if !o.preSet || !o.postSet {
+		return refuse("%s takes both pre and post, or neither", what)
+	}
+	if m.pre, err = text(o.pre, what+" pre"); err != nil {
+		return err
+	}
+	if m.post, err = text(o.post, what+" post"); err != nil {
+		return err
+	}
+	m.tagged = true
+	return nil
+}
+
+// text is a value that must be a string, refused as JSON.stringify writes
+// it, which the JS builder's message quotes.
+func text(v any, what string) (string, error) {
+	s, ok := v.(string)
+	if !ok {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			raw = []byte(fmt.Sprint(v))
+		}
+		return "", refuse("%s must be text: %s", what, raw)
+	}
+	return s, nil
+}
+
+// Facet is `facet field [top N]`: each value the field -- or a path into a
+// json field -- holds over every row the query matches, not only the page,
+// and how many rows hold it, most first; Top keeps the commonest. The
+// counts come back beside the rows: Answer's Facets.
+//
+//	db.From("products").Match("title", "phone").Facet("brand", fenecdb.Top(10)).Facet("color").Limit(20)
+func (b *Builder) Facet(field string, options ...Opt) *Builder {
+	return b.step(func(d *Builder) error {
+		f := facetClause{top: -1}
+		var err error
+		if f.field, err = fieldPath(field); err != nil {
+			return err
+		}
+		if o := gather(options); o.top != nil {
+			if f.top, err = whole(*o.top, "facet top"); err != nil {
+				return err
+			}
+			if f.top == 0 {
+				return refuse("facet %s top 0 answers nothing", f.field)
+			}
+		}
+		for _, g := range d.facets {
+			if g.field == f.field {
+				return refuse("facet %s is asked twice", f.field)
+			}
+		}
+		d.facets = append(d.facets, f)
 		return nil
 	})
 }
@@ -963,6 +1137,23 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 			return "", nil, refuse("aggregates answer one row; group makes a row per value")
 		}
 	}
+	if len(b.marks) > 0 {
+		what := b.marks[0].kind()
+		if b.match == nil {
+			return "", nil, refuse("%s needs match: it marks the terms match found", what)
+		}
+		if b.aggregate {
+			return "", nil, refuse("%s marks a row's text; aggregates answer groups", what)
+		}
+	}
+	if len(b.facets) > 0 {
+		if b.near != nil {
+			return "", nil, refuse("facet counts the rows a filter or match selects, and near ranks every row: ask the facets without near")
+		}
+		if b.aggregate {
+			return "", nil, refuse("facet cannot be combined with aggregates: group counts by value")
+		}
+	}
 	if b.rerank != nil && b.match == nil {
 		return "", nil, refuse("rerank needs match: it reorders what match found")
 	}
@@ -1010,8 +1201,28 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	bind := &binder{params: []any{}}
 	var sql strings.Builder
 	sql.WriteString("get " + b.collection)
-	if len(b.project) > 0 {
-		sql.WriteString(" select " + strings.Join(b.project, ", "))
+	// The marks after the fields Select named, or after every field; bound
+	// here, so their tags are the first parameters.
+	items := slices.Clone(b.project)
+	if len(items) == 0 && len(b.marks) > 0 {
+		items = []string{"*"}
+	}
+	for _, m := range b.marks {
+		s := m.kind() + "(" + m.field
+		if m.words >= 0 {
+			s += fmt.Sprintf(", %d", m.words)
+		}
+		// A snippet's tags come after its ellipsis, so tags alone bind ''.
+		if m.hasEllipsis || (m.words >= 0 && m.tagged) {
+			s += ", " + bind.bind(m.ellipsis)
+		}
+		if m.tagged {
+			s += ", " + bind.bind(m.pre) + ", " + bind.bind(m.post)
+		}
+		items = append(items, s+")")
+	}
+	if len(items) > 0 {
+		sql.WriteString(" select " + strings.Join(items, ", "))
 	}
 	where, err := whereOf(b.cond, bind)
 	if err != nil {
@@ -1059,6 +1270,17 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	}
 	if b.count {
 		sql.WriteString(" count")
+	}
+	for i, f := range b.facets {
+		if i == 0 {
+			sql.WriteString(" facet ")
+		} else {
+			sql.WriteString(", ")
+		}
+		sql.WriteString(f.field)
+		if f.top >= 0 {
+			fmt.Fprintf(&sql, " top %d", f.top)
+		}
 	}
 	// Terminal, so every clause after it is the child's -- and last, so its
 	// parameters come after the parent's.
@@ -1141,6 +1363,9 @@ func (b *Builder) assertPlain(verb string) error {
 	}
 	if len(b.lookups) > 0 {
 		return refuse("%s cannot be used with `lookup`", verb)
+	}
+	if len(b.facets) > 0 {
+		return refuse("%s cannot be used with `facet`", verb)
 	}
 	if verb == "insert" && len(b.cond) > 0 {
 		return refuse("insert cannot be used with `where`")
@@ -1348,6 +1573,16 @@ func (b *Builder) Rows(ctx context.Context) ([]Row, error) {
 	return rowsOf(raw)
 }
 
+// Answer runs the query and hands back its rows and what Facet counted
+// over every row it matched.
+func (b *Builder) Answer(ctx context.Context) (Answer, error) {
+	raw, err := b.answer(ctx)
+	if err != nil {
+		return Answer{}, err
+	}
+	return answerOf(raw)
+}
+
 // RowsAs runs the query and decodes its rows into T by their json tags, as
 // QueryAs does.
 func RowsAs[T any](ctx context.Context, b *Builder) ([]T, error) {
@@ -1355,11 +1590,7 @@ func RowsAs[T any](ctx context.Context, b *Builder) ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []T
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("fenecdb: the answer is not rows: %w", err)
-	}
-	return out, nil
+	return rowsAs[T](raw)
 }
 
 // First runs the query with Limit(1) and hands back its row, or nil.

@@ -19,9 +19,9 @@ replica loads the full module unless told otherwise, so its
 <thead><tr><th>For</th><th>What it imports and loads</th><th class="n">Brotli</th><th>What it can do</th><th>What it cannot</th></tr></thead>
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">6 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
-<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">174 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
-<tr><td>A replica that searches no vectors, or holds a few thousand</td><td><code>sync({ wasm: './fenec-replica.wasm' })</code></td><td class="n">147 KB</td><td>what the full module does, <code>match</code>, sparse <code>near</code> and ordered indexes among it; <code>near</code> measures every vector, as <code>exact</code> does, the same rows and scores</td><td>walk an HNSW graph: a <code>near</code> is 2 to 40 times slower (below)</td></tr>
-<tr><td>A page that needs no index</td><td><code>Fenec.open('./fenec-lite.wasm')</code></td><td class="n">131 KB</td><td>documents, filters, <code>order</code>, <code>lookup</code>, collations, persistence; <code>near</code> and a sparse <code>near</code> measuring every vector</td><td><code>match</code>, which needs the text index's statistics; the schema check; an index made</td></tr>
+<tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">181 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
+<tr><td>A replica that searches no vectors, or holds a few thousand</td><td><code>sync({ wasm: './fenec-replica.wasm' })</code></td><td class="n">154 KB</td><td>what the full module does, <code>match</code>, sparse <code>near</code> and ordered indexes among it; <code>near</code> measures every vector, as <code>exact</code> does, the same rows and scores</td><td>walk an HNSW graph: a <code>near</code> is 2 to 40 times slower (below)</td></tr>
+<tr><td>A page that needs no index</td><td><code>Fenec.open('./fenec-lite.wasm')</code></td><td class="n">134 KB</td><td>documents, filters, <code>order</code>, <code>lookup</code>, collations, persistence; <code>near</code> and a sparse <code>near</code> measuring every vector</td><td><code>match</code>, which needs the text index's statistics; the schema check; an index made</td></tr>
 </tbody>
 </table>
 </div>
@@ -52,7 +52,7 @@ the median of 50 queries in Node (<code>make wasm-exact-speed</code>):</p>
 </div>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
-imports, 36 KB brotli as they are served with no build step; a bundler keeps
+imports, 38 KB brotli as they are served with no build step; a bundler keeps
 what the app uses of them. An app whose queries run on a server can import
 the client entry instead:</p>
 
@@ -649,11 +649,11 @@ rest. The release ships <code>fenec-lite.wasm</code>, built without any,
 and <code>fenec-replica.wasm</code>, without the graph, beside
 <code>fenec.wasm</code>.</p>
 
-<pre data-lang="bash">make wasm                          # every index: 174 KB brotli
-make wasm FEATURES="text sorted"   # no graph, no sparse index: 153 KB
-make wasm FEATURES=none            # none of the four: 138 KB
-make wasm-replica                  # a replica's, opt-in: no graph, no schema check: 147 KB
-make wasm-lite                     # no index, no schema check: 131 KB
+<pre data-lang="bash">make wasm                          # every index: 181 KB brotli
+make wasm FEATURES="text sorted"   # no graph, no sparse index: 160 KB
+make wasm FEATURES=none            # none of the four: 142 KB
+make wasm-replica                  # a replica's, opt-in: no graph, no schema check: 154 KB
+make wasm-lite                     # no index, no schema check: 134 KB
 </pre>
 
 <div class="tbl">
@@ -831,6 +831,77 @@ db.from('articles')
 <p><code>raw</code> covers what the builder cannot express, which in practice
 today means function calls. Its <code>?</code> placeholders bind to parameters
 in order, so the escape hatch does not become string concatenation either.</p>
+</details>
+
+<h2 id="search">A search page</h2>
+
+<p>A results list with the words marked, and a sidebar counting each brand
+and color over every match, from one query:
+<code>highlight()</code> and <code>facet()</code>.</p>
+
+<pre data-lang="ts">import type { Mark } from '@fenecdb/web';
+
+/** The text with each mark in a &lt;mark&gt;, as text nodes: nothing in it is HTML. */
+function marked(text: string, marks: Mark[]): DocumentFragment {
+  const out = document.createDocumentFragment();
+  let at = 0;
+  for (const [start, end] of marks) {
+    const m = document.createElement('mark');
+    m.textContent = text.slice(start, end);
+    out.append(text.slice(at, start), m);
+    at = end;
+  }
+  out.append(text.slice(at));
+  return out;
+}
+
+async function search(words: string, brand: string | null = null) {
+  let q = db.from('products')
+    .select('name', 'price')
+    .highlight('name')
+    .match('name', words)
+    .facet('brand', { top: 10 })
+    .facet('color')
+    .limit(20);
+  if (brand) q = q.where('brand', brand);
+  const rows = await q.rows();
+
+  results.replaceChildren(...rows.map((r) => {
+    const li = document.createElement('li');
+    li.append(marked(r.name ?? '', r['highlight(name)'] ?? []), ` ${r.price}`);
+    return li;
+  }));
+  sidebar.replaceChildren(...rows.facets.brand.map((f) => {
+    const b = document.createElement('button');
+    b.textContent = `${f.value ?? 'no brand'} (${f.count})`;
+    b.onclick = () => search(words, f.value);
+    return b;
+  }));
+}
+</pre>
+
+<ul>
+  <li><b>The offsets are a JavaScript string's own</b> (UTF-16), so
+    <code>text.slice(start, end)</code> is the marked word, past an emoji
+    or an accent.</li>
+  <li><b><code>rows.facets</code> counts every match</b>, not only the
+    twenty on the page; typed by the fields: <code>f.value</code> is a
+    <code>string | null</code> here.</li>
+  <li><b>The same query live</b>: <code>useLiveQuery(q)</code> hands rows
+    with their <code>facets</code>, as <code>db.live</code> does.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><code>.highlight(field, { pre, post })</code> answers the marked text
+instead of the offsets, and <code>.snippet(field, words, { ellipsis, pre,
+post })</code> a window of that many words around the marks — see <a
+href="/docs/fenecql#highlights">Highlights and snippets</a>. Text with
+tags is not escaped, which is why the page above builds its nodes from the
+offsets. <code>.facet(field, { top })</code> takes a field or a path into a
+<code>json</code> one, and <code>run()</code> hands the counts as its
+<code>facets</code> too — see <a href="/docs/fenecql#facets">Facets</a>.
+A facet beside <code>near</code> is refused: <code>near</code> ranks every
+row rather than selecting some, so the counts would be the filter's alone.</p>
 </details>
 
 <h2>Seeing what it produces</h2>

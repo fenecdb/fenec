@@ -43,6 +43,9 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,
   `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup`. An object condition is `Fields` and `Ops`,
   names and values in turn, and a document a `D(...)` in its order, a map in its sorted keys, or a struct.
+- `Highlight(field, Tags(pre, post))` and `Snippet(field, words, Ellipsis("…"))` answer a `match`'s marks under
+  `highlight(field)` and `snippet(field)`; `Facet(field, Top(n))` counts values over every matched row, which
+  `q.Answer(ctx)` (or `db.QueryAnswer`, a `BatchItem`'s `Facets`) hands back beside the rows, `Facets.Of(field)`.
 - To see the text and parameters a chain builds, for logging or a test, `q.ToFenecQL()` returns them and runs
   nothing; a query needs no call to it before it runs.
 

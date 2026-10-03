@@ -66,6 +66,36 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   // @ts-expect-error -- `match` takes a text field
   db.from('articles').match('year', 'x');
 
+  // Marks answer under their labels, typed by their tags; facets beside
+  // the rows, typed by the field's values -- a list's one by one.
+  const found = await db
+    .from('articles')
+    .select('title')
+    .highlight('title')
+    .highlight('body', { pre: '<mark>', post: '</mark>' })
+    .snippet('body', 20, { ellipsis: '…' })
+    .match('body', 'rust')
+    .facet('year', { top: 5 })
+    .facet('tags')
+    .facet('meta.lang')
+    .limit(10)
+    .rows();
+  expect<[number, number][] | null>(found[0]['highlight(title)']);
+  expect<string | null>(found[0]['highlight(body)']);
+  expect<string | undefined>(found[0]['snippet(body)']?.text);
+  expect<number | null | undefined>(found.facets.year[0]?.value);
+  expect<string | null | undefined>(found.facets.tags[0]?.value);
+  expect<number>(found.facets['meta.lang'][0].count);
+  // @ts-expect-error -- not asked for
+  void found.facets.title;
+  // @ts-expect-error -- a query without facets has none
+  void (await db.from('articles').rows()).facets;
+  // @ts-expect-error -- marks are of a text field
+  db.from('articles').highlight('year');
+  // @ts-expect-error -- both tags, or neither
+  db.from('articles').highlight('body', { pre: '<b>' });
+  db.live(db.from('articles').facet('year'), (rows) => expect<number>(rows.facets.year.length));
+
   await db.from('articles').where('tags', 'has', 'rust').where('year', 'in', [2023, 2024]).count();
   // `in` takes a query whose one column is the list: `in (get ...)`.
   await db.from('articles').where({ year: { in: db.from('reviews').select('stars') } }).count();

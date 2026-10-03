@@ -12,7 +12,10 @@
 //!            [match <field> <text>] [rerank <field> <vector> [candidates N]]
 //!            [fuse [k N] [candidates N]]     -- match and near, by reciprocal rank
 //!            [order <field> [collate und|tr] [asc|desc], ...] [limit N] [offset N] [count]
+//!            [facet <field> [top N], ...]   -- value counts over every matched row
 //!            [lookup <name> on <child> [= <parent>] [required] <clauses...>]
+//! get    <name> select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis [, pre, post]])
+//!            match <field> <text> ...       -- the spans the match's terms were read from
 //! where  <field> in (get <name> select <field> ...)  -- the inner get's one column, run once
 //! alter  collection <name> alter field <field> @ttl(<duration>) | @sorted
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
@@ -161,10 +164,21 @@ fn one(mut s: Vec<Statement>) -> Result<Statement> {
     Ok(s.remove(0))
 }
 
+/// A select list as `get ... select` reads one.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SelectList {
+    /// The columns, a mark's under its label; `None` for `*`.
+    pub project: Option<Vec<String>>,
+    /// The aggregates, when the list has any: then there are no columns.
+    pub aggregate: Vec<Agg>,
+    /// `highlight()` and `snippet()`, in the order written.
+    pub marks: Vec<Mark>,
+}
+
 /// A select list on its own -- `status, sum(total), count(*)` -- as `get
 /// ... select` reads one: the fields, or the aggregates when it has any.
 /// For a caller that assembles a select from parts, such as a query string.
-pub fn parse_select_list(src: &str) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
+pub fn parse_select_list(src: &str) -> Result<SelectList> {
     let mut p = Parser {
         toks: tokenize(src)?,
         i: 0,
@@ -175,6 +189,23 @@ pub fn parse_select_list(src: &str) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
     let list = p.select_list()?;
     if !p.at_eof() {
         return p.err("a select list ends where the text does");
+    }
+    Ok(list)
+}
+
+/// A facet list on its own -- `brand top 5, color` -- as `get ... facet`
+/// reads one, for a query string's `facet=`.
+pub fn parse_facet_list(src: &str) -> Result<Vec<Facet>> {
+    let mut p = Parser {
+        toks: tokenize(src)?,
+        i: 0,
+        depth: 0,
+        subqueries: 0,
+        exact: false,
+    };
+    let list = p.facet_list()?;
+    if !p.at_eof() {
+        return p.err("a facet list ends where the text does");
     }
     Ok(list)
 }
@@ -807,12 +838,11 @@ impl Parser {
                      // title`), so the decision is made by backtracking: if the name list
                      // is followed by `from` it is a projection, otherwise the first name
                      // is the collection.
-        let mut project = None;
-        let mut aggregate = Vec::new();
+        let mut list = SelectList::default();
         if !self.peek_kw("from") {
             let save = self.i;
             match self.projection_before_from() {
-                Some((cols, aggs)) => (project, aggregate) = (cols, aggs),
+                Some(l) => list = l,
                 None => self.i = save,
             }
         }
@@ -820,14 +850,20 @@ impl Parser {
         let collection = self.ident()?;
         let mut sel = Select {
             collection,
-            project,
-            aggregate,
+            project: list.project,
+            aggregate: list.aggregate,
+            marks: list.marks,
             ..Default::default()
         };
 
         loop {
             if self.eat_kw("select") {
-                (sel.project, sel.aggregate) = self.select_list()?;
+                let l = self.select_list()?;
+                (sel.project, sel.aggregate, sel.marks) = (l.project, l.aggregate, l.marks);
+                continue;
+            }
+            if self.eat_kw("facet") {
+                sel.facets = self.facet_list()?;
                 continue;
             }
             if self.eat_kw("group") {
@@ -1094,25 +1130,84 @@ impl Parser {
         Ok(l)
     }
 
-    fn projection_before_from(&mut self) -> Option<(Option<Vec<String>>, Vec<Agg>)> {
+    fn projection_before_from(&mut self) -> Option<SelectList> {
         let list = self.select_list().ok()?;
         self.eat_kw("from").then_some(list)
+    }
+
+    /// `brand top 5, color`: each field or path, and how many of its
+    /// commonest values.
+    fn facet_list(&mut self) -> Result<Vec<Facet>> {
+        let mut out = Vec::new();
+        loop {
+            let field = self.path()?;
+            let top = match self.eat_kw("top") {
+                true => Some(self.int()?.max(0) as usize),
+                false => None,
+            };
+            out.push(Facet { field, top });
+            if !matches!(self.peek(), Tok::Comma) {
+                break;
+            }
+            self.next();
+        }
+        Ok(out)
+    }
+
+    /// `highlight(body [, pre, post])` or `snippet(body, words [, ellipsis
+    /// [, pre, post]])`, its `(` read: the field, a snippet's words, and
+    /// the values -- each a literal or a parameter -- that go around a
+    /// mark and stand for what a snippet leaves out.
+    /// The arguments' count is `Select::check`'s to judge, with the rest.
+    fn mark(&mut self, snippet: bool) -> Result<Mark> {
+        let field = self.ident()?;
+        let mut words = None;
+        if snippet {
+            self.expect(Tok::Comma)?;
+            words = Some(self.int()?.max(0) as usize);
+        }
+        let mut args = Vec::new();
+        while matches!(self.peek(), Tok::Comma) {
+            self.next();
+            args.push(self.expr()?);
+        }
+        self.expect(Tok::RParen)?;
+        Ok(Mark {
+            field,
+            snippet: words,
+            args,
+        })
     }
 
     /// A select list: `*`, fields, or -- once any item is an aggregate
     /// call -- an aggregating list, whose plain fields are the group's key.
     /// `count` needs its parentheses there: bare, it is a field of that
-    /// name.
-    fn select_list(&mut self) -> Result<(Option<Vec<String>>, Vec<Agg>)> {
-        if matches!(self.peek(), Tok::Star) {
+    /// name. `highlight()` and `snippet()` go among the fields, or after a
+    /// `*`.
+    fn select_list(&mut self) -> Result<SelectList> {
+        let mut out = SelectList::default();
+        let star = matches!(self.peek(), Tok::Star);
+        if star {
             self.next();
-            return Ok((None, Vec::new()));
+            if !matches!(self.peek(), Tok::Comma) {
+                return Ok(out);
+            }
+            self.next();
         }
         let mut items = Vec::new();
         let mut aggregates = false;
         loop {
             let name = self.path()?;
-            if matches!(self.peek(), Tok::LParen) {
+            let low = name.to_ascii_lowercase();
+            if matches!(self.peek(), Tok::LParen) && matches!(low.as_str(), "highlight" | "snippet")
+            {
+                self.next();
+                let mark = self.mark(low == "snippet")?;
+                items.push(Agg::Key(mark.label()));
+                out.marks.push(mark);
+            } else if star {
+                return self.err("after `*` the list takes `highlight()` and `snippet()` alone");
+            } else if matches!(self.peek(), Tok::LParen) {
                 self.next();
                 let arg = if matches!(self.peek(), Tok::Star | Tok::RParen) {
                     if matches!(self.peek(), Tok::Star) {
@@ -1151,10 +1246,13 @@ impl Parser {
             self.next();
         }
         if aggregates {
-            return Ok((None, items));
+            out.aggregate = items;
+            return Ok(out);
         }
-        let fields = items.into_iter().map(|a| a.label()).collect();
-        Ok((Some(fields), Vec::new()))
+        if !star {
+            out.project = Some(items.into_iter().map(|a| a.label()).collect());
+        }
+        Ok(out)
     }
 
     fn set(&mut self) -> Result<Statement> {

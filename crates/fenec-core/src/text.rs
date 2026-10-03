@@ -72,7 +72,7 @@ use std::collections::BinaryHeap;
 /// letters were 0.495 at a query three times as slow, too common to tell
 /// documents apart.
 pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
-    terms(text, false, &mut f);
+    terms(text, false, &mut |t, _, _| f(t));
 }
 
 /// [`for_each_term`], each character of a run of Han, kana or Hangul handed
@@ -81,20 +81,28 @@ pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
 /// `f` is a trait object: generic over it, the tokenizer was compiled once
 /// for every caller -- insert, remove and search, with prefixes and without
 /// -- six copies and 8 KB of the browser module.
-fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
+///
+/// Each term comes with where it stands in `text`, its first byte and the
+/// one past its last: what highlighting marks (`highlight.rs`), so that a
+/// marked span is exactly the text a term the index matched was read from.
+/// The index passes them over.
+pub(crate) fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str, usize, usize)) {
     let mut buf = String::new();
     // U+0307 is not alphanumeric, so a plain `is_alphanumeric` split would cut
     // `I\u{307}stanbul` -- the decomposed spelling of `İstanbul`, and what the
     // default mapping leaves behind -- into two terms. Keep it inside the
     // word; it is dropped below. So are a Thai or a Khmer word's marks, some
     // of which are not letters: split at them, `ไม่` lost its tone mark.
-    for raw in text.split(|c: char| !c.is_alphanumeric() && c != '\u{0307}' && !marked(c)) {
+    for raw in text.split(splits_words) {
         if raw.is_empty() || raw.chars().all(|c| c == '\u{0307}') {
             continue;
         }
+        // `split` hands out slices of `text`, so where one starts is how far
+        // its pointer is past the text's.
+        let base = raw.as_ptr() as usize - text.as_ptr() as usize;
         // Already-lowercase ASCII is its own answer -- `i` folds to `i`.
         if raw.is_ascii() && !raw.bytes().any(|b| b.is_ascii_uppercase()) {
-            f(raw);
+            f(raw, base, base + raw.len());
             continue;
         }
         // A run of a script written without spaces is its runs of characters
@@ -109,9 +117,10 @@ fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
             // Checked, though `end` is a boundary: `split_at`'s panic formats
             // the character it would cut into.
             let (run, after) = rest.split_at_checked(end).unwrap_or((rest, ""));
+            let at = base + (raw.len() - rest.len());
             rest = after;
             if n > 0 {
-                grams(run, n, chars && n == 2, f);
+                grams(run, at, n, chars && n == 2, f);
                 continue;
             }
             if run.chars().all(|c| c == '\u{0307}') {
@@ -134,7 +143,7 @@ fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
                     _ => buf.extend(c.to_lowercase()),
                 }
             }
-            f(&buf);
+            f(&buf, at, at + run.len());
         }
     }
 }
@@ -142,7 +151,8 @@ fn terms(text: &str, chars: bool, f: &mut dyn FnMut(&str)) {
 /// Every overlapping run of `n` characters in `run` -- the whole of it when it
 /// is shorter -- and each character as well with `chars`. The starts of the
 /// last `n` characters are held in a ring, so a run allocates nothing.
-fn grams(run: &str, n: usize, chars: bool, f: &mut dyn FnMut(&str)) {
+/// `at` is where the run starts in the text the spans are of.
+fn grams(run: &str, at: usize, n: usize, chars: bool, f: &mut dyn FnMut(&str, usize, usize)) {
     let mut starts = [0usize; 3];
     let mut seen = 0;
     for (i, c) in run.char_indices() {
@@ -150,25 +160,32 @@ fn grams(run: &str, n: usize, chars: bool, f: &mut dyn FnMut(&str)) {
         // `get`: the ends are the characters' own, and an index would keep
         // its panic's formatting of a `char` in the browser module.
         if chars {
-            f(run.get(i..end).unwrap_or(""));
+            f(run.get(i..end).unwrap_or(""), at + i, at + end);
         }
         starts[seen % n] = i;
         seen += 1;
         if seen >= n {
             // The oldest of the last `n` characters: the one `n` back.
-            f(run.get(starts[seen % n]..end).unwrap_or(""));
+            let from = starts[seen % n];
+            f(run.get(from..end).unwrap_or(""), at + from, at + end);
         }
     }
     if seen < n && !(chars && seen == 1) {
-        f(run);
+        f(run, at, at + run.len());
     }
+}
+
+/// Where text is cut into words: at what is neither a letter nor a digit,
+/// a stray dot above or a mark a word of a script holds.
+pub(crate) fn splits_words(c: char) -> bool {
+    !c.is_alphanumeric() && c != '\u{0307}' && !marked(c)
 }
 
 /// How a run of `c`'s script is indexed: in overlapping runs of 2
 /// characters for Han, kana and Hangul, whose characters are syllables or
 /// words, and of 3 for Thai, Lao, Khmer and Myanmar, whose are letters; 0
 /// for a script that spaces its words, whose words are the terms.
-fn gram(c: char) -> usize {
+pub(crate) fn gram(c: char) -> usize {
     match c as u32 {
         0x0E00..=0x0EFF      // Thai, Lao
         | 0x1000..=0x109F    // Myanmar
@@ -212,13 +229,23 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// is what keeps BM25's normalisation meaningful: every document grows by
 /// roughly the same factor, so `dl / avgdl` is where it was.
 pub fn for_each_indexed_term(text: &str, spec: &TextIndexSpec, mut f: impl FnMut(&str)) {
+    indexed_terms(text, spec, &mut |t, _, _| f(t));
+}
+
+/// [`for_each_indexed_term`], each term with the span of `text` it was read
+/// from: a prefix the span of its whole word, which is what it matched.
+pub(crate) fn indexed_terms(
+    text: &str,
+    spec: &TextIndexSpec,
+    f: &mut dyn FnMut(&str, usize, usize),
+) {
     let Some(prefixes) = spec.prefixes() else {
-        terms(text, spec.chars, &mut f);
+        terms(text, spec.chars, f);
         return;
     };
     let mut buf = String::new();
-    terms(text, spec.chars, &mut |w| {
-        f(w);
+    terms(text, spec.chars, &mut |w, from, to| {
+        f(w, from, to);
         // `chars`, not bytes: a Turkish word is not one byte per letter, and
         // slicing it as if it were would panic on a boundary.
         let n = w.chars().count();
@@ -229,7 +256,7 @@ pub fn for_each_indexed_term(text: &str, spec: &TextIndexSpec, mut f: impl FnMut
             buf.clear();
             buf.push('^');
             buf.extend(w.chars().take(k));
-            f(&buf);
+            f(&buf, from, to);
         }
     });
 }
@@ -456,6 +483,30 @@ impl TextIndex {
         let n = self.lengths.len() as f32;
         let df = df as f32;
         (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+    }
+
+    /// Every document holding a term of `query`, ascending: the set a
+    /// `match` ranks, which `facet` counts over. The lists are ascending
+    /// already, so one alone is copied as it is; more are put together
+    /// through the engine's one sort of ids.
+    pub fn matching(&self, query: &str) -> Vec<DocId> {
+        let mut lists: Vec<&Postings> = Vec::new();
+        for_each_indexed_term(query, &self.spec, |t| {
+            if let Some(list) = self.postings.get(t) {
+                if !lists.iter().any(|l| std::ptr::eq(*l, list)) {
+                    lists.push(list);
+                }
+            }
+        });
+        let mut out: Vec<DocId> = Vec::new();
+        for l in &lists {
+            out.extend_from_slice(&l.docs);
+        }
+        if lists.len() > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+        out
     }
 
     /// Top `k` documents for `query`, best first.

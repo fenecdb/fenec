@@ -33,8 +33,8 @@ use std::sync::Arc;
 /// Query keys that are read as clauses rather than as filters. A field with
 /// the same name cannot be filtered over HTTP (the FenecQL and `fenec-server` paths
 /// are unaffected).
-const RESERVED: [&str; 8] = [
-    "select", "order", "limit", "offset", "count", "where", "lookup", "group",
+const RESERVED: [&str; 9] = [
+    "select", "order", "limit", "offset", "count", "where", "lookup", "group", "facet",
 ];
 
 /// On the subscription endpoint `since` is a clause as well. It is a
@@ -177,6 +177,14 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
             "limit" => sel.limit = Some(number(v, "limit")?),
             "offset" => sel.offset = number(v, "offset")?,
             "count" => sel.count = truthy(v),
+            // `facet=brand top 5,color`: FenecQL's list, read by its parser.
+            "facet" => {
+                sel.facets = fenec_ql::parse_facet_list(v)
+                    .map_err(|e| Error::Query(format!("`facet`: {e}")))?;
+                for f in &sel.facets {
+                    field(schema, &f.field)?;
+                }
+            }
             _ => {}
         }
     }
@@ -293,8 +301,9 @@ fn projection(schema: &Schema, raw: &str) -> Result<Vec<String>> {
 /// `select=status,sum(total),count(*)` -> the fields and aggregates, in
 /// order. The list is FenecQL's, parsed by FenecQL's parser.
 fn aggregates(schema: &Schema, raw: &str) -> Result<Vec<Agg>> {
-    let (_, list) =
-        fenec_ql::parse_select_list(raw).map_err(|e| Error::Query(format!("`select`: {e}")))?;
+    let list = fenec_ql::parse_select_list(raw)
+        .map_err(|e| Error::Query(format!("`select`: {e}")))?
+        .aggregate;
     for f in list.iter().filter_map(Agg::field) {
         field(schema, f)?;
     }
@@ -1055,7 +1064,8 @@ fn result_json(out: &mut String, resp: &Response2) {
     match resp {
         Response2::Rows(rs) => {
             out.push_str("{\"rows\":");
-            out.push_str(&rows_json(rs));
+            json::rows_array_into(out, rs);
+            json::facets_into(out, rs);
             out.push('}');
         }
         Response2::Affected(n) => out.push_str(&format!("{{\"affected\":{n}}}")),
@@ -1130,7 +1140,10 @@ pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
                 .and_then(|r| r.values.first())
                 .map(json::to_string)
                 .unwrap_or_else(|| "0".into());
-            Response::json(200, format!("{{\"count\":{n}}}"))
+            let mut out = format!("{{\"count\":{n}");
+            json::facets_into(&mut out, rs);
+            out.push('}');
+            Response::json(200, out)
         }
         (Shape::Affected(name, status), Response2::Affected(n)) => {
             Response::json(*status, format!("{{\"{name}\":{n}}}"))
@@ -1157,9 +1170,20 @@ pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
 /// `fenec_core::query::Response` -- renamed so it does not clash with `http::Response`.
 pub use fenec_core::query::Response as Response2;
 
+/// The rows as a JSON array -- or, when the query asked for facets,
+/// `{"rows": [...], "facets": {...}}`: the counts answer for the whole
+/// set, so they go beside the rows rather than into one, and a query that
+/// asks none keeps the bare array every client reads.
 pub fn rows_json(rs: &ResultSet) -> String {
     let mut out = String::new();
+    if rs.facets.is_empty() {
+        json::rows_array_into(&mut out, rs);
+        return out;
+    }
+    out.push_str("{\"rows\":");
     json::rows_array_into(&mut out, rs);
+    json::facets_into(&mut out, rs);
+    out.push('}');
     out
 }
 
