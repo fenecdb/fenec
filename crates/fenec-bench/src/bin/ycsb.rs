@@ -51,6 +51,17 @@
 //!
 //! Each cell's line goes to a TSV file (`--out`); `ycsb report <file>`
 //! prints the median of the runs of each cell.
+//!
+//! `--verify <file>` logs every operation and what it was answered, and
+//! after each cell holds every read, scan and write to what was written
+//! (`check`), the verdict a line of `<file>`. A read under concurrent
+//! writes is right if it returns any value a write that could have been
+//! the last one left, so judging it needs every write's span, not a
+//! sample: each thread logs into its own `Vec` and the check runs once
+//! the cell has ended. A client keeps its last answer either way, so the
+//! timed path is the one measured without `--verify`; a verifying run
+//! times a read-modify-write's digests too and its figures are not the
+//! published ones.
 
 #[path = "../http.rs"]
 mod http;
@@ -408,12 +419,23 @@ impl Hist {
 // ---------------------------------------------------------------- clients
 
 /// What a client thread asks of a system. Each checks its answer enough to
-/// know the work was done: a read found the record, a scan its rows.
+/// know the work was done -- a read found a record, a scan its rows -- and
+/// keeps what it was answered, which `--verify` reads after the timed span
+/// (`got`, `affected`) and holds to what was written (`Check`).
 trait Client: Send {
     fn read(&mut self, key: u64);
     fn update(&mut self, key: u64, field: usize, value: &str);
     fn insert(&mut self, key: u64, values: &[String]);
     fn scan(&mut self, key: u64, len: u64);
+    /// The rows the last read or scan was answered, in the order they came:
+    /// each one's key and its fields' digests (`digest`, 0 for a field the
+    /// row did not hold).
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])>;
+    /// The records the last write's answer said it wrote, where the client
+    /// does not hold it to 1 itself.
+    fn affected(&mut self) -> u64 {
+        1
+    }
     /// The least the system can be asked over its wire -- an empty query,
     /// a health check -- or false in process: what the network alone
     /// costs a request, printed beside the cells.
@@ -461,6 +483,33 @@ fn record_values(key: u64) -> Vec<String> {
             s
         })
         .collect()
+}
+
+/// A field's value as `--verify` keeps it: FNV-1a over its bytes. The
+/// values are 100 random characters, so two that differ share one with a
+/// chance of 2^-64 and a wrong value never passes for the right one.
+fn digest(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    for &x in b {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x100_0000_01B3);
+    }
+    h
+}
+
+/// A record's fields in one: what a scan's row is held to.
+fn combine(fields: &[u64; FIELDS]) -> u64 {
+    fields
+        .iter()
+        .fold(0x9E37_79B9_7F4A_7C15, |h, d| (h ^ d).wrapping_mul(0x100_0000_01B3).rotate_left(29))
+}
+
+fn base_digests(key: u64) -> [u64; FIELDS] {
+    let mut out = [0; FIELDS];
+    for (o, v) in out.iter_mut().zip(record_values(key)) {
+        *o = digest(v.as_bytes());
+    }
+    out
 }
 
 // ---- fenecdb in process
@@ -597,6 +646,7 @@ impl System for FenecLocal {
                 .collect(),
             insert: stmt(&insert_text()),
             args: Vec::with_capacity(FIELDS + 1),
+            last: None,
         })
     }
 }
@@ -609,6 +659,8 @@ struct FenecLocalClient {
     set: Vec<Statement>,
     insert: Statement,
     args: Vec<Value>,
+    /// The last read's or scan's answer, kept rather than dropped.
+    last: Option<Response>,
 }
 
 impl FenecLocalClient {
@@ -642,7 +694,7 @@ impl Client for FenecLocalClient {
             .unwrap();
         let rows = out.rows().unwrap();
         assert!(rows.rows.len() == 1 && rows.rows[0].values.len() > FIELDS);
-        std::hint::black_box(out);
+        self.last = Some(out);
     }
     fn update(&mut self, key: u64, field: usize, value: &str) {
         self.args.clear();
@@ -667,7 +719,27 @@ impl Client for FenecLocalClient {
         let rows = out.rows().unwrap();
         assert!(!rows.rows.is_empty() && rows.rows[0].id == key);
         assert!(rows.rows.windows(2).all(|w| w[0].id < w[1].id));
-        std::hint::black_box(out);
+        self.last = Some(out);
+    }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        let Some(rs) = self.last.as_ref().and_then(|o| o.rows()) else {
+            return Vec::new();
+        };
+        let at: Vec<Option<usize>> = (0..FIELDS)
+            .map(|i| rs.columns.iter().position(|c| *c == format!("field{i}")))
+            .collect();
+        rs.rows
+            .iter()
+            .map(|r| {
+                let mut d = [0; FIELDS];
+                for (o, a) in d.iter_mut().zip(&at) {
+                    if let Some(Value::Text(t)) = a.and_then(|a| r.values.get(a)) {
+                        *o = digest(t.as_bytes());
+                    }
+                }
+                (r.id, d)
+            })
+            .collect()
     }
 }
 
@@ -743,6 +815,7 @@ impl System for Sqlite {
     fn client(&self) -> Box<dyn Client> {
         Box::new(SqliteClient {
             c: sqlite_conn(&self.path, self.durable),
+            last: Vec::new(),
         })
     }
 }
@@ -759,14 +832,28 @@ fn sqlite_insert() -> String {
 
 struct SqliteClient {
     c: rusqlite::Connection,
+    last: Vec<(i64, [String; FIELDS])>,
 }
 
-fn sqlite_row(r: &rusqlite::Row) -> rusqlite::Result<[String; FIELDS]> {
+fn sqlite_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, [String; FIELDS])> {
     let mut out: [String; FIELDS] = Default::default();
     for (i, o) in out.iter_mut().enumerate() {
         *o = r.get(i + 1)?;
     }
-    Ok(out)
+    Ok((r.get(0)?, out))
+}
+
+/// Rows read into strings, as every client reads them, to their digests.
+fn digests_of(rows: &[(i64, [String; FIELDS])]) -> Vec<(u64, [u64; FIELDS])> {
+    rows.iter()
+        .map(|(k, f)| {
+            let mut d = [0; FIELDS];
+            for (o, v) in d.iter_mut().zip(f) {
+                *o = digest(v.as_bytes());
+            }
+            (*k as u64, d)
+        })
+        .collect()
 }
 
 impl Client for SqliteClient {
@@ -776,7 +863,8 @@ impl Client for SqliteClient {
             .prepare_cached("select * from usertable where ycsb_key = ?1")
             .unwrap();
         let row = s.query_row([key as i64], sqlite_row).unwrap();
-        std::hint::black_box(row);
+        self.last.clear();
+        self.last.push(row);
     }
     fn update(&mut self, key: u64, field: usize, value: &str) {
         let mut s = self
@@ -801,13 +889,16 @@ impl Client for SqliteClient {
                 "select * from usertable where ycsb_key >= ?1 order by ycsb_key limit ?2",
             )
             .unwrap();
-        let rows: Vec<[String; FIELDS]> = s
+        let rows: Vec<(i64, [String; FIELDS])> = s
             .query_map([key as i64, len as i64], sqlite_row)
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert!(!rows.is_empty());
-        std::hint::black_box(rows);
+        self.last = rows;
+    }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        digests_of(&self.last)
     }
 }
 
@@ -1030,6 +1121,62 @@ impl Client for ServerClient {
         let out = self.c.query(&self.scan[len as usize - 1], &key.to_string());
         expect(out, b"\"field9\"");
     }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        json_rows(self.c.body())
+    }
+    fn affected(&mut self) -> u64 {
+        // `{"affected":1}`, all of it.
+        let b = self.c.body();
+        b.strip_prefix(b"{\"affected\":")
+            .and_then(|r| r.strip_suffix(b"}"))
+            .and_then(|n| std::str::from_utf8(n).ok()?.parse().ok())
+            .unwrap_or(u64::MAX)
+    }
+}
+
+/// The rows of an answer to `get`, `[{"id":1,"field0":"..",..},..]`: each
+/// one's `id` and its fields' digests. The values are letters and digits,
+/// so a string ends at the next quote; anything else in the body is no row.
+fn json_rows(body: &[u8]) -> Vec<(u64, [u64; FIELDS])> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(open) = body[i..].iter().position(|&b| b == b'{') {
+        let start = i + open + 1;
+        let Some(close) = body[start..].iter().position(|&b| b == b'}') else {
+            break;
+        };
+        let obj = &body[start..start + close];
+        i = start + close + 1;
+        let mut key = u64::MAX;
+        let mut d = [0; FIELDS];
+        for pair in obj.split(|&b| b == b',') {
+            let Some(colon) = pair.iter().position(|&b| b == b':') else {
+                continue;
+            };
+            let (name, value) = (&pair[..colon], &pair[colon + 1..]);
+            let name = name.strip_prefix(b"\"").and_then(|n| n.strip_suffix(b"\""));
+            match name {
+                Some(b"id") => {
+                    key = std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(u64::MAX)
+                }
+                Some(n) if n.starts_with(b"field") => {
+                    let f: Option<usize> = std::str::from_utf8(&n[5..]).ok().and_then(|f| f.parse().ok());
+                    let v = value.strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\""));
+                    if let (Some(f), Some(v)) = (f, v) {
+                        if f < FIELDS {
+                            d[f] = digest(v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push((key, d));
+    }
+    out
 }
 
 // ---- PostgreSQL
@@ -1176,6 +1323,7 @@ impl System for Pg {
             .unwrap();
         Box::new(PgClient {
             c,
+            last: Vec::new(),
             read,
             scan,
             set,
@@ -1186,18 +1334,19 @@ impl System for Pg {
 
 struct PgClient {
     c: postgres::Client,
+    last: Vec<(i64, [String; FIELDS])>,
     read: postgres::Statement,
     scan: postgres::Statement,
     set: Vec<postgres::Statement>,
     insert: postgres::Statement,
 }
 
-fn pg_fields(r: &postgres::Row) -> [String; FIELDS] {
+fn pg_fields(r: &postgres::Row) -> (i64, [String; FIELDS]) {
     let mut out: [String; FIELDS] = Default::default();
     for (i, o) in out.iter_mut().enumerate() {
         *o = r.get(i + 1);
     }
-    out
+    (r.get(0), out)
 }
 
 impl Client for PgClient {
@@ -1207,7 +1356,8 @@ impl Client for PgClient {
     }
     fn read(&mut self, key: u64) {
         let r = self.c.query_one(&self.read, &[&(key as i64)]).unwrap();
-        std::hint::black_box(pg_fields(&r));
+        self.last.clear();
+        self.last.push(pg_fields(&r));
     }
     fn update(&mut self, key: u64, field: usize, value: &str) {
         let n = self
@@ -1231,8 +1381,10 @@ impl Client for PgClient {
             .query(&self.scan, &[&(key as i64), &(len as i64)])
             .unwrap();
         assert!(!rows.is_empty());
-        let rows: Vec<_> = rows.iter().map(pg_fields).collect();
-        std::hint::black_box(rows);
+        self.last = rows.iter().map(pg_fields).collect();
+    }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        digests_of(&self.last)
     }
 }
 
@@ -1314,6 +1466,7 @@ impl System for Mongo {
             admin: self.client.database("admin"),
             coll: self.coll(self.durable),
             fields: (0..FIELDS).map(|i| format!("field{i}")).collect(),
+            last: Vec::new(),
         })
     }
 }
@@ -1322,6 +1475,7 @@ struct MongoClient {
     admin: mongodb::sync::Database,
     coll: mongodb::sync::Collection<Document>,
     fields: Vec<String>,
+    last: Vec<Document>,
 }
 
 impl Client for MongoClient {
@@ -1337,7 +1491,8 @@ impl Client for MongoClient {
             .unwrap()
             .expect("the record");
         assert_eq!(d.len(), FIELDS + 1);
-        std::hint::black_box(d);
+        self.last.clear();
+        self.last.push(d);
     }
     fn update(&mut self, key: u64, field: usize, value: &str) {
         let mut set = Document::new();
@@ -1363,7 +1518,21 @@ impl Client for MongoClient {
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert!(!docs.is_empty());
-        std::hint::black_box(docs);
+        self.last = docs;
+    }
+    fn got(&mut self) -> Vec<(u64, [u64; FIELDS])> {
+        self.last
+            .iter()
+            .map(|d| {
+                let mut out = [0; FIELDS];
+                for (o, f) in out.iter_mut().zip(&self.fields) {
+                    if let Ok(v) = d.get_str(f) {
+                        *o = digest(v.as_bytes());
+                    }
+                }
+                (d.get_i64("_id").map(|k| k as u64).unwrap_or(u64::MAX), out)
+            })
+            .collect()
     }
 }
 
@@ -1386,12 +1555,16 @@ struct Config {
     turn_gap: Duration,
     image: String,
     run_id: String,
+    /// Where `--verify` writes each cell's verdict; every operation is
+    /// then logged and held to what was written (`check`).
+    verify: Option<PathBuf>,
 }
 
-/// What a cell measured.
+/// What a cell measured, and with `--verify` what each thread logged.
 struct Cell {
     ops: u64,
     hist: BTreeMap<Op, Hist>,
+    logs: Vec<Vec<Entry>>,
 }
 
 fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cfg: &Config) -> (Cell, u64) {
@@ -1406,11 +1579,14 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
     let base_latest = Zipfian::new(records_now);
     let measuring = AtomicBool::new(false);
     let stop = AtomicBool::new(false);
+    let verify = cfg.verify.is_some();
     let clients: Vec<Box<dyn Client>> = (0..threads).map(|_| sys.client()).collect();
     let mut cell = Cell {
         ops: 0,
         hist: BTreeMap::new(),
+        logs: Vec::new(),
     };
+    let t0 = Instant::now();
     std::thread::scope(|s| {
         let handles: Vec<_> = clients
             .into_iter()
@@ -1430,6 +1606,8 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
                     let mut hist: BTreeMap<Op, Hist> = BTreeMap::new();
                     let mut value = String::with_capacity(FIELD_LEN);
                     let mut ops = 0u64;
+                    let mut log = Vec::new();
+                    let at = |i: Instant| (i - t0).as_nanos() as u64;
                     while !stop.load(Ordering::Relaxed) {
                         let mut u = rng.f64();
                         let mut op = mix[mix.len() - 1].0;
@@ -1440,23 +1618,41 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
                             }
                             u -= p;
                         }
+                        let key: u64;
+                        let (mut field, mut len, mut seen) = (0usize, 0u64, 0u64);
+                        // A read-modify-write's read, its end and its rows,
+                        // which the update's answer would put out of reach.
+                        let mut rmw_read = None;
                         let start = Instant::now();
                         match op {
-                            Op::Read => client.read(chooser.next(&mut rng, keys)),
+                            Op::Read => {
+                                key = chooser.next(&mut rng, keys);
+                                client.read(key)
+                            }
                             Op::Update => {
-                                let k = chooser.next(&mut rng, keys);
+                                key = chooser.next(&mut rng, keys);
                                 rng.value(&mut value);
-                                client.update(k, rng.below(FIELDS as u64) as usize, &value);
+                                field = rng.below(FIELDS as u64) as usize;
+                                client.update(key, field, &value);
                             }
                             Op::Rmw => {
-                                let k = chooser.next(&mut rng, keys);
-                                client.read(k);
+                                key = chooser.next(&mut rng, keys);
+                                client.read(key);
+                                if verify {
+                                    rmw_read = Some((Instant::now(), client.got()));
+                                }
                                 rng.value(&mut value);
-                                client.update(k, rng.below(FIELDS as u64) as usize, &value);
+                                field = rng.below(FIELDS as u64) as usize;
+                                client.update(key, field, &value);
                             }
                             Op::Scan => {
-                                let k = chooser.next(&mut rng, keys);
-                                client.scan(k, rng.below(MAX_SCAN) + 1);
+                                key = chooser.next(&mut rng, keys);
+                                len = rng.below(MAX_SCAN) + 1;
+                                if verify {
+                                    // The key was in when it was drawn.
+                                    seen = keys.last().max(key);
+                                }
+                                client.scan(key, len);
                             }
                             Op::Insert => {
                                 // Published before the key is taken, a
@@ -1464,19 +1660,52 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
                                 // key handed out sees this too.
                                 let below = keys.next.load(Ordering::SeqCst);
                                 keys.in_flight[t].store(below, Ordering::SeqCst);
-                                let k = keys.next.fetch_add(1, Ordering::SeqCst);
-                                keys.in_flight[t].store(k, Ordering::SeqCst);
-                                client.insert(k, &record_values(k));
+                                key = keys.next.fetch_add(1, Ordering::SeqCst);
+                                keys.in_flight[t].store(key, Ordering::SeqCst);
+                                client.insert(key, &record_values(key));
                                 keys.in_flight[t].store(u64::MAX, Ordering::SeqCst);
                             }
                         }
+                        let end = Instant::now();
                         if measuring.load(Ordering::Relaxed) {
-                            let ns = start.elapsed().as_nanos() as u64;
+                            let ns = (end - start).as_nanos() as u64;
                             hist.entry(op).or_insert_with(Hist::new).record(ns);
                             ops += 1;
                         }
+                        if !verify {
+                            continue;
+                        }
+                        // What the operation was answered, kept after the
+                        // timed span; the warm-up's writes are logged too,
+                        // since the reads after them see them.
+                        let (s, e) = (at(start), at(end));
+                        let write = |client: &mut Box<dyn Client>, s, field: usize, d| Entry::Write {
+                            key,
+                            field: field as u8,
+                            value: d,
+                            s,
+                            e,
+                            affected: client.affected(),
+                        };
+                        match op {
+                            Op::Read => log.push(Entry::read(key, s, e, client.got())),
+                            Op::Rmw => {
+                                let (mid, rows) = rmw_read.take().unwrap();
+                                log.push(Entry::read(key, s, at(mid), rows));
+                                log.push(write(&mut client, at(mid), field, digest(value.as_bytes())));
+                            }
+                            Op::Update => log.push(write(&mut client, s, field, digest(value.as_bytes()))),
+                            Op::Insert => log.push(write(&mut client, s, FIELDS, 0)),
+                            Op::Scan => log.push(Entry::Scan {
+                                key,
+                                len,
+                                seen,
+                                next: keys.next.load(Ordering::SeqCst),
+                                rows: client.got().iter().map(|(k, d)| (*k, combine(d))).collect(),
+                            }),
+                        }
                     }
-                    (ops, hist)
+                    (ops, hist, log)
                 })
             })
             .collect();
@@ -1486,15 +1715,279 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
         measuring.store(false, Ordering::Relaxed);
         stop.store(true, Ordering::Relaxed);
         for h in handles {
-            let (ops, hist) = h.join().unwrap();
+            let (ops, hist, log) = h.join().unwrap();
             cell.ops += ops;
             for (op, h) in hist {
                 cell.hist.entry(op).or_insert_with(Hist::new).merge(&h);
             }
+            cell.logs.push(log);
         }
     });
     let inserted = keys.next.load(Ordering::Acquire) - (records_now + 1);
     (cell, records_now + inserted)
+}
+
+// ----------------------------------------------------------------- verify
+
+/// An operation as `--verify` logged it, its span in ns from the cell's
+/// start: what it asked and what it was answered.
+enum Entry {
+    /// A read: the rows it was answered, the first one's key and digests.
+    Read {
+        key: u64,
+        s: u64,
+        e: u64,
+        rows: usize,
+        got: (u64, [u64; FIELDS]),
+    },
+    /// A scan: the highest key every key below which was in the database
+    /// when it began (`seen`), the next key to be handed out when it ended,
+    /// and each row's key and record digest.
+    Scan {
+        key: u64,
+        len: u64,
+        seen: u64,
+        next: u64,
+        rows: Vec<(u64, u64)>,
+    },
+    /// An update of one field, or an insert (`field` = `FIELDS`) of the
+    /// record `record_values` draws for its key.
+    Write {
+        key: u64,
+        field: u8,
+        value: u64,
+        s: u64,
+        e: u64,
+        affected: u64,
+    },
+}
+
+impl Entry {
+    fn read(key: u64, s: u64, e: u64, rows: Vec<(u64, [u64; FIELDS])>) -> Entry {
+        Entry::Read {
+            key,
+            s,
+            e,
+            rows: rows.len(),
+            got: rows.first().copied().unwrap_or((u64::MAX, [0; FIELDS])),
+        }
+    }
+}
+
+/// A write to one field as the checker holds it.
+#[derive(Clone, Copy)]
+struct W {
+    s: u64,
+    e: u64,
+    d: u64,
+}
+
+/// The writes a cell made to one field of one record, by when they ended,
+/// and the latest start among the first `i + 1` of them.
+struct Reg {
+    ws: Vec<W>,
+    smax: Vec<u64>,
+}
+
+impl Reg {
+    /// The latest start of a write that ended before `t`, if one did.
+    fn latest_start_before(&self, t: u64) -> Option<u64> {
+        let n = self.ws.partition_point(|w| w.e < t);
+        n.checked_sub(1).map(|i| self.smax[i])
+    }
+}
+
+/// What each field holds as a cell begins, where a cell before it in the
+/// phase wrote it: the values it can hold, more than one only where the
+/// writes that could have been the last overlapped.
+#[derive(Default)]
+struct Model {
+    fields: std::collections::HashMap<(u64, u8), Vec<u64>>,
+    base: std::collections::HashMap<u64, [u64; FIELDS]>,
+}
+
+impl Model {
+    fn initial(&mut self, key: u64, field: u8) -> Vec<u64> {
+        if let Some(v) = self.fields.get(&(key, field)) {
+            return v.clone();
+        }
+        vec![self.base(key)[field as usize]]
+    }
+    fn base(&mut self, key: u64) -> [u64; FIELDS] {
+        *self.base.entry(key).or_insert_with(|| base_digests(key))
+    }
+}
+
+#[derive(Default)]
+struct Verdict {
+    reads: u64,
+    scans: u64,
+    rows: u64,
+    writes: u64,
+    mismatches: u64,
+    /// Scan rows whose fields could have been too many combinations of
+    /// overlapping writes to try; none in YCSB's E, which updates nothing.
+    undecided: u64,
+    examples: Vec<String>,
+}
+
+impl Verdict {
+    fn wrong(&mut self, what: String) {
+        self.mismatches += 1;
+        if self.examples.len() < 8 {
+            self.examples.push(what);
+        }
+    }
+}
+
+/// Holds every logged operation to what was written: a read answered the
+/// record it asked for, each field the value of a write that could have
+/// been the last before it -- one that ended before the read began and was
+/// not followed by another that also did, or one that overlapped it -- or
+/// the value the field held as the cell began where no write had ended; a
+/// scan answered consecutive keys from its own as far as every key it
+/// could see, no more than it asked for, each record as written; a write
+/// wrote one record. A key's value is FNV-1a of its bytes (`digest`).
+/// The model is moved on to what the fields hold after the cell.
+fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
+    let mut v = Verdict::default();
+    // Every write, into its field's register.
+    let mut regs: std::collections::HashMap<(u64, u8), Reg> = std::collections::HashMap::new();
+    for e in logs.iter().flatten() {
+        if let Entry::Write { key, field, value, s, e, affected } = *e {
+            v.writes += 1;
+            if affected != 1 {
+                v.wrong(format!("write of {key} answered {affected} records"));
+            }
+            let mut put = |f: u8, d: u64| {
+                regs.entry((key, f))
+                    .or_insert_with(|| Reg { ws: Vec::new(), smax: Vec::new() })
+                    .ws
+                    .push(W { s, e, d })
+            };
+            if field as usize == FIELDS {
+                for (f, d) in model.base(key).into_iter().enumerate() {
+                    put(f as u8, d);
+                }
+            } else {
+                put(field, value);
+            }
+        }
+    }
+    let mut by_value: std::collections::HashMap<u64, ((u64, u8), usize)> = std::collections::HashMap::new();
+    for (r, reg) in regs.iter_mut() {
+        reg.ws.sort_by_key(|w| (w.e, w.s));
+        let mut m = 0;
+        reg.smax = reg.ws.iter().map(|w| { m = m.max(w.s); m }).collect();
+        for (i, w) in reg.ws.iter().enumerate() {
+            by_value.insert(w.d, (*r, i));
+        }
+    }
+    // Whether `d` is a value the field `r` could hold to a read over [s, e].
+    let may_hold = |model: &mut Model, r: (u64, u8), s: u64, e: u64, d: u64| -> bool {
+        let reg = regs.get(&r);
+        let none_ended = reg.is_none_or(|g| g.latest_start_before(s).is_none());
+        if none_ended && model.initial(r.0, r.1).contains(&d) {
+            return true;
+        }
+        let (Some(reg), Some(&(at, i))) = (reg, by_value.get(&d)) else {
+            return false;
+        };
+        if at != r {
+            return false;
+        }
+        let w = reg.ws[i];
+        let overlaps = w.s <= e && w.e >= s;
+        // Ended before the read, and no write began after it ended and
+        // ended before the read too.
+        let last = w.e < s && reg.latest_start_before(s).is_some_and(|m| m <= w.e);
+        overlaps || last
+    };
+    for e in logs.iter().flatten() {
+        match e {
+            Entry::Read { key, s, e, rows, got } => {
+                v.reads += 1;
+                if *rows != 1 || got.0 != *key {
+                    v.wrong(format!("read of {key} answered {rows} rows, the first {}", got.0));
+                    continue;
+                }
+                for f in 0..FIELDS {
+                    if !may_hold(model, (*key, f as u8), *s, *e, got.1[f]) {
+                        v.wrong(format!("read of {key} [{s}, {e}] ns: field{f} holds no value written to it"));
+                        break;
+                    }
+                }
+            }
+            Entry::Scan { key, len, seen, next, rows } => {
+                v.scans += 1;
+                v.rows += rows.len() as u64;
+                let visible = (seen + 1).saturating_sub(*key).min(*len);
+                if (rows.len() as u64) < visible || rows.len() as u64 > *len {
+                    v.wrong(format!("scan of {len} from {key} answered {} rows, {visible} visible", rows.len()));
+                    continue;
+                }
+                for (i, (k, c)) in rows.iter().enumerate() {
+                    let i = i as u64;
+                    let in_order = if i < visible {
+                        *k == key + i
+                    } else {
+                        *k > rows[i as usize - 1].0 && *k < *next
+                    };
+                    if !in_order {
+                        v.wrong(format!("scan from {key}: row {i} is key {k}"));
+                        break;
+                    }
+                    // The record as written: each field's starting value or
+                    // any written to it in the cell, every combination
+                    // tried up to a bound.
+                    let cands: Vec<Vec<u64>> = (0..FIELDS as u8)
+                        .map(|f| {
+                            let mut c = model.initial(*k, f);
+                            if let Some(g) = regs.get(&(*k, f)) {
+                                c.extend(g.ws.iter().map(|w| w.d));
+                            }
+                            c
+                        })
+                        .collect();
+                    if cands.iter().map(Vec::len).product::<usize>() > 4096 {
+                        v.undecided += 1;
+                        continue;
+                    }
+                    let mut pick = [0usize; FIELDS];
+                    let found = 'combos: loop {
+                        let mut d = [0; FIELDS];
+                        for f in 0..FIELDS {
+                            d[f] = cands[f][pick[f]];
+                        }
+                        if combine(&d) == *c {
+                            break true;
+                        }
+                        for f in 0..=FIELDS {
+                            if f == FIELDS {
+                                break 'combos false;
+                            }
+                            pick[f] += 1;
+                            if pick[f] < cands[f].len() {
+                                break;
+                            }
+                            pick[f] = 0;
+                        }
+                    };
+                    if !found {
+                        v.wrong(format!("scan from {key}: the record of {k} is not as written"));
+                        break;
+                    }
+                }
+            }
+            Entry::Write { .. } => {}
+        }
+    }
+    // What each field written holds now: the writes no other began after.
+    for (r, reg) in regs {
+        let last = *reg.smax.last().unwrap();
+        model.fields.insert(r, reg.ws.iter().filter(|w| w.e >= last).map(|w| w.d).collect());
+    }
+    v
 }
 
 /// A fixed piece of work on one core, the best of three, in ms: the
@@ -1671,12 +2164,50 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
             }
             sys.set_mode(mode);
             let mut records = cfg.records;
+            // What the load wrote, which each cell's writes move on.
+            let mut model = Model::default();
             for w in order {
                 for &threads in &cfg.threads {
                     let ratio = cool(base, cfg.gap);
                     let (cell, now) = run_cell(sys.as_ref(), w, threads, records, cfg);
                     records = now;
                     write_cell(name, mode, w, threads, records, &cell, ratio, cfg, run);
+                    if let Some(path) = &cfg.verify {
+                        let v = check(&cell.logs, &mut model);
+                        eprintln!(
+                            "verify {name} {} {} x{threads}: {} reads, {} scans ({} rows), {} writes: {} mismatches, {} undecided",
+                            mode.name(),
+                            w.name,
+                            v.reads,
+                            v.scans,
+                            v.rows,
+                            v.writes,
+                            v.mismatches,
+                            v.undecided
+                        );
+                        for e in &v.examples {
+                            eprintln!("  {e}");
+                        }
+                        let new = !path.exists();
+                        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                        if new {
+                            writeln!(f, "run\tsystem\tmode\tworkload\tthreads\treads\tscans\tscan_rows\twrites\tmismatches\tundecided").unwrap();
+                        }
+                        writeln!(
+                            f,
+                            "{}\t{name}\t{}\t{}\t{threads}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            cfg.run_id,
+                            mode.name(),
+                            w.name,
+                            v.reads,
+                            v.scans,
+                            v.rows,
+                            v.writes,
+                            v.mismatches,
+                            v.undecided
+                        )
+                        .unwrap();
+                    }
                 }
             }
             if let Some(bytes) = sys.size() {
@@ -1793,16 +2324,24 @@ fn report(path: &Path) {
     let mut lines = text.lines();
     let head: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |name: &str| head.iter().position(|h| *h == name).unwrap();
-    let mut cells: BTreeMap<(String, String, String, usize), Vec<Vec<String>>> = BTreeMap::new();
+    // A run's cell measured again -- a run cut short and completed by a
+    // later invocation with its `--run-id` loads and pings again -- counts
+    // once, as its last line: the file is only ever appended to.
+    let mut latest: BTreeMap<(String, String, String, String, usize), Vec<String>> = BTreeMap::new();
     for l in lines {
         let f: Vec<String> = l.split('\t').map(str::to_string).collect();
         let key = (
             f[col("system")].clone(),
             f[col("mode")].clone(),
             f[col("workload")].clone(),
+            f[col("run")].clone(),
             f[col("threads")].parse().unwrap(),
         );
-        cells.entry(key).or_default().push(f);
+        latest.insert(key, f);
+    }
+    let mut cells: BTreeMap<(String, String, String, usize), Vec<Vec<String>>> = BTreeMap::new();
+    for ((sys, mode, wl, _, threads), f) in latest {
+        cells.entry((sys, mode, wl, threads)).or_default().push(f);
     }
     let median = |v: &mut Vec<f64>| -> Option<f64> {
         if v.is_empty() {
@@ -1866,6 +2405,7 @@ fn main() {
         turn_gap: Duration::from_secs(180),
         image: "fenecdb-ycsb".into(),
         run_id: String::new(),
+        verify: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -1891,6 +2431,7 @@ fn main() {
             "--turn-gap" => cfg.turn_gap = Duration::from_secs(v.parse().unwrap()),
             "--image" => cfg.image = v,
             "--run-id" => cfg.run_id = v,
+            "--verify" => cfg.verify = Some(PathBuf::from(&v)),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -1923,5 +2464,81 @@ fn main() {
             }
             run_system(name, &cfg, base, run);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(key: u64, s: u64, e: u64, fields: [u64; FIELDS]) -> Entry {
+        Entry::read(key, s, e, vec![(key, fields)])
+    }
+
+    fn update(key: u64, field: u8, value: u64, s: u64, e: u64) -> Entry {
+        Entry::Write { key, field, value, s, e, affected: 1 }
+    }
+
+    #[test]
+    fn a_read_sees_the_last_write_or_one_beside_it() {
+        let base = base_digests(7);
+        let mut new = base;
+        new[3] = 42;
+        let w = || update(7, 3, 42, 10, 20);
+        // After the write ended: its value, never the one before it.
+        let ok = check(&[vec![w(), read(7, 30, 40, new)]], &mut Model::default());
+        assert_eq!(ok.mismatches, 0);
+        let stale = check(&[vec![w(), read(7, 30, 40, base)]], &mut Model::default());
+        assert_eq!(stale.mismatches, 1);
+        // Overlapping it, either.
+        for got in [base, new] {
+            let v = check(&[vec![w()], vec![read(7, 15, 25, got)]], &mut Model::default());
+            assert_eq!(v.mismatches, 0);
+        }
+        // A write followed by another that ended before the read is gone.
+        let v = check(
+            &[vec![w(), update(7, 3, 43, 21, 25), read(7, 30, 40, new)]],
+            &mut Model::default(),
+        );
+        assert_eq!(v.mismatches, 1);
+        // Another field's or another record's value is no value of this one.
+        let mut moved = base;
+        moved[4] = 42;
+        let v = check(&[vec![w(), read(7, 30, 40, moved)]], &mut Model::default());
+        assert_eq!(v.mismatches, 1);
+        let v = check(&[vec![Entry::read(7, 1, 2, vec![(8, base_digests(8))])]], &mut Model::default());
+        assert_eq!(v.mismatches, 1);
+    }
+
+    #[test]
+    fn the_model_carries_a_cell_into_the_next() {
+        let mut model = Model::default();
+        check(&[vec![update(7, 3, 42, 10, 20)]], &mut model);
+        let mut new = base_digests(7);
+        new[3] = 42;
+        assert_eq!(check(&[vec![read(7, 1, 2, new)]], &mut model).mismatches, 0);
+        assert_eq!(check(&[vec![read(7, 1, 2, base_digests(7))]], &mut model).mismatches, 1);
+    }
+
+    #[test]
+    fn a_scan_answers_every_key_it_could_see_in_order() {
+        let row = |k: u64| (k, combine(&base_digests(k)));
+        let scan = |rows: Vec<(u64, u64)>| Entry::Scan { key: 5, len: 3, seen: 100, next: 101, rows };
+        let mut m = Model::default();
+        assert_eq!(check(&[vec![scan(vec![row(5), row(6), row(7)])]], &mut m).mismatches, 0);
+        assert_eq!(check(&[vec![scan(vec![row(5), row(7), row(8)])]], &mut m).mismatches, 1);
+        assert_eq!(check(&[vec![scan(vec![row(5), row(6)])]], &mut m).mismatches, 1);
+        assert_eq!(check(&[vec![scan(vec![row(5), row(6), (7, 1)])]], &mut m).mismatches, 1);
+    }
+
+    #[test]
+    fn the_servers_rows_are_read_as_written() {
+        let v = record_values(3);
+        let mut body = String::from("[{\"id\":3");
+        for (i, f) in v.iter().enumerate() {
+            body.push_str(&format!(",\"field{i}\":\"{f}\""));
+        }
+        body.push_str("}]");
+        assert_eq!(json_rows(body.as_bytes()), vec![(3, base_digests(3))]);
     }
 }

@@ -87,6 +87,11 @@ impl Http {
         self.post("/query", "application/json", body.as_bytes())
     }
 
+    /// The last answer's body, kept until the next request.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// GETs `path`; anything but a 2xx is the bench's end.
     pub fn get(&mut self, path: &str) -> &[u8] {
         let (status, out) = self.request("GET", path, "text/plain", b"");
