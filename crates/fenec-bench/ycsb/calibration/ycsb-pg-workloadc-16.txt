@@ -1,0 +1,10 @@
+Command line: -t -db site.ycsb.db.JdbcDBClient -P ycsb-jdbc-binding-0.17.0/workloads/workloadc -p recordcount=100000 -p operationcount=1000000000 -p maxexecutiontime=30 -threads 16 -s -p db.driver=org.postgresql.Driver -p db.url=jdbc:postgresql://127.0.0.1:55433/ycsb -p db.user=postgres -p db.passwd=fenec
+[OVERALL], RunTime(ms), 30006
+[OVERALL], Throughput(ops/sec), 18762.8474305139
+[READ], Operations, 562998
+[READ], AverageLatency(us), 842.5222682851448
+[READ], MinLatency(us), 190
+[READ], MaxLatency(us), 106175
+[READ], 95thPercentileLatency(us), 1583
+[READ], 99thPercentileLatency(us), 2773
+[READ], Return=OK, 562998

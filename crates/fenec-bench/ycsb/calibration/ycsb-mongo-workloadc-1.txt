@@ -1,0 +1,10 @@
+Command line: -t -db site.ycsb.db.MongoDbClient -P ycsb-mongodb-binding-0.17.0/workloads/workloadc -p recordcount=100000 -p operationcount=1000000000 -p maxexecutiontime=30 -threads 1 -s -p mongodb.url=mongodb://127.0.0.1:27018/ycsb?w=1&journal=true
+[OVERALL], RunTime(ms), 30007
+[OVERALL], Throughput(ops/sec), 2481.121071749925
+[READ], Operations, 74451
+[READ], AverageLatency(us), 396.78556365931956
+[READ], MinLatency(us), 211
+[READ], MaxLatency(us), 42399
+[READ], 95thPercentileLatency(us), 606
+[READ], 99thPercentileLatency(us), 1297
+[READ], Return=OK, 74451
