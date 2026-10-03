@@ -28,7 +28,10 @@
 //!   * `fenec`: fenec-core in process, reads under the shared lock and
 //!     writes under the exclusive one, as the server takes them. Durable is
 //!     a flush after each write and its fsync outside the lock; buffered a
-//!     flush every 250 ms, as `--sync 250` does;
+//!     flush every 250 ms, as `--sync 250` does. A `Compactor` compacts the
+//!     file beside the database once half of it is dead, as the native
+//!     library and the server do unless told not to (`--no-auto-compact`
+//!     for neither);
 //!   * `sqlite`: SQLite through rusqlite, a connection a thread, WAL,
 //!     `synchronous=FULL` with `fullfsync` or `synchronous=NORMAL`, the file
 //!     mapped (`mmap_size`) as fenecdb's is;
@@ -519,6 +522,10 @@ struct FenecLocal {
     db: Option<Arc<RwLock<Database>>>,
     durable: bool,
     syncer: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
+    /// What an app's database has unless it opts out: the file compacted
+    /// beside the queries once half of it is dead.
+    auto_compact: bool,
+    compactor: Option<fenec_core::engine::Compactor>,
 }
 
 fn stmt(src: &str) -> Statement {
@@ -541,12 +548,14 @@ fn insert_text() -> String {
 }
 
 impl FenecLocal {
-    fn new(dir: &Path) -> FenecLocal {
+    fn new(dir: &Path, auto_compact: bool) -> FenecLocal {
         FenecLocal {
             dir: dir.to_path_buf(),
             db: None,
             durable: false,
             syncer: None,
+            auto_compact,
+            compactor: None,
         }
     }
     fn stop_syncer(&mut self) {
@@ -573,6 +582,7 @@ impl System for FenecLocal {
     fn load(&mut self, records: u64) {
         // A load starts afresh: the syncer holds the database it replaces.
         self.stop_syncer();
+        self.compactor = None;
         self.db = None;
         let path = self.dir.join("ycsb.fenec");
         let _ = std::fs::remove_file(&path);
@@ -604,7 +614,13 @@ impl System for FenecLocal {
             key = end;
         }
         db.sync().unwrap();
-        self.db = Some(Arc::new(RwLock::new(db)));
+        let db = Arc::new(RwLock::new(db));
+        if self.auto_compact {
+            self.compactor = Some(
+                fenec_core::engine::Compactor::start(&db, Default::default()).unwrap(),
+            );
+        }
+        self.db = Some(db);
     }
     fn set_mode(&mut self, mode: Mode) {
         self.stop_syncer();
@@ -911,6 +927,9 @@ struct Server {
     port: u16,
     proc: Option<http::Server>,
     image: String,
+    /// `--auto-compact off` when the run says so; the server's default
+    /// otherwise.
+    auto_compact: bool,
 }
 
 const DOCKER_SERVER: &str = "fenecycsb-server";
@@ -921,7 +940,11 @@ impl Server {
         self.stop();
         if !self.docker {
             let file = self.dir.join("ycsb-server.fenec");
-            self.proc = Some(http::start_fenec(&file, self.port, "ycsb", &["--sync", sync]));
+            let mut args = vec!["--sync", sync];
+            if !self.auto_compact {
+                args.extend(["--auto-compact", "off"]);
+            }
+            self.proc = Some(http::start_fenec(&file, self.port, "ycsb", &args));
             return;
         }
         let st = std::process::Command::new("docker")
@@ -931,6 +954,10 @@ impl Server {
             .arg(&self.image)
             .args(["--http", "0.0.0.0:8080", "--insecure", "--no-checkpoint"])
             .args(["--file", "/data/ycsb.fenec", "--sync", sync])
+            .args(match self.auto_compact {
+                true => &[][..],
+                false => &["--auto-compact", "off"][..],
+            })
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();
@@ -1558,6 +1585,9 @@ struct Config {
     /// Where `--verify` writes each cell's verdict; every operation is
     /// then logged and held to what was written (`check`).
     verify: Option<PathBuf>,
+    /// fenecdb's files compacted on their own, in process and in the
+    /// server, as each ships; `--no-auto-compact` for the runs before.
+    auto_compact: bool,
 }
 
 /// What a cell measured, and with `--verify` what each thread logged.
@@ -2050,7 +2080,7 @@ fn append(path: &Path, line: &str) {
 
 fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
     match name {
-        "fenec" => Box::new(FenecLocal::new(dir)),
+        "fenec" => Box::new(FenecLocal::new(dir, cfg.auto_compact)),
         "sqlite" => Box::new(Sqlite {
             path: dir.join("ycsb.sqlite"),
             durable: false,
@@ -2061,6 +2091,7 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
             port: http::free_port(),
             proc: None,
             image: cfg.image.clone(),
+            auto_compact: cfg.auto_compact,
         }),
         "pg" => {
             // A server of the reader's own when named, else a container
@@ -2406,9 +2437,15 @@ fn main() {
         image: "fenecdb-ycsb".into(),
         run_id: String::new(),
         verify: None,
+        auto_compact: true,
     };
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--no-auto-compact" {
+            cfg.auto_compact = false;
+            i += 1;
+            continue;
+        }
         let v = args.get(i + 1).cloned().unwrap_or_default();
         match args[i].as_str() {
             "--records" => cfg.records = v.parse().unwrap(),
