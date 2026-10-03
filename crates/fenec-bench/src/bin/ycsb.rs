@@ -834,7 +834,7 @@ impl Server {
             return;
         }
         let st = std::process::Command::new("docker")
-            .args(["run", "-d", "--rm", "--name", DOCKER_SERVER])
+            .args(["run", "-d", "--name", DOCKER_SERVER])
             .args(["-p", &format!("127.0.0.1:{}:8080", self.port)])
             .args(["-v", &format!("{DOCKER_VOLUME}:/data")])
             .arg(&self.image)
@@ -888,12 +888,31 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop();
         if self.docker {
-            let _ = std::process::Command::new("docker")
-                .args(["volume", "rm", "-f", DOCKER_VOLUME])
-                .stdout(std::process::Stdio::null())
-                .status();
+            remove_volume();
         }
     }
+}
+
+/// Removes the server's volume, waiting for the container that held it to
+/// go: started with `--rm`, a container was still being removed when
+/// `docker rm -f` returned, its volume stayed, and the next load found the
+/// collection made (409) -- or a GB or more stayed in the VM after a run.
+/// The container is started without it now, which makes the removal
+/// synchronous; the wait stays for a daemon that answers late.
+fn remove_volume() {
+    for _ in 0..40 {
+        let gone = std::process::Command::new("docker")
+            .args(["volume", "rm", "-f", DOCKER_VOLUME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if gone {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    panic!("the volume {DOCKER_VOLUME} is still in use");
 }
 
 impl System for Server {
@@ -916,10 +935,7 @@ impl System for Server {
     fn load(&mut self, records: u64) {
         if self.docker {
             self.stop();
-            let _ = std::process::Command::new("docker")
-                .args(["volume", "rm", "-f", DOCKER_VOLUME])
-                .stdout(std::process::Stdio::null())
-                .status();
+            remove_volume();
         } else {
             let _ = std::fs::remove_file(self.dir.join("ycsb-server.fenec"));
         }
@@ -1797,7 +1813,9 @@ fn report(path: &Path) {
     };
     println!("system\tmode\tworkload\tthreads\truns\tops_s\tREAD_p99\tUPDATE_p99\tINSERT_p99\tSCAN_p99\tRMW_p99\tREAD_p50\tUPDATE_p50\tINSERT_p50\tSCAN_p50\tRMW_p50\tprobe_max");
     for ((sys, mode, wl, threads), runs) in cells {
-        let num = |f: &Vec<String>, c: &str| f[col(c)].parse::<f64>().ok();
+        // A size line stops at the probe's column: what it has not got is
+        // no figure.
+        let num = |f: &Vec<String>, c: &str| f.get(col(c))?.parse::<f64>().ok();
         let mut ops: Vec<f64> = runs.iter().filter_map(|f| num(f, "ops_s")).collect();
         let mut probe: Vec<f64> = runs.iter().filter_map(|f| num(f, "probe")).collect();
         probe.sort_by(|a, b| a.total_cmp(b));
