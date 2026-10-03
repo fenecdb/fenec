@@ -155,11 +155,14 @@ paint, and not where `saveData` is set.
 
 ## Moving pictures
 
-Each section shows its feature working, on a canvas between its heading and
-its detail: rows becoming points and a query walking the graph to them, the
-race against pgvector, a request passing the checks, every language and
-integration sending requests over HTTP, replicas and tenants failing over, the tab keeping its own copy and
-redrawing live. `motion.js` draws any moment of a scene from the scene's time
+A section shows its feature working, on a canvas between its heading and
+its detail. The home page has two: a write made on a phone with no network,
+kept in its file, sent once under its key and drawn on another screen
+(`flow`), and replicas and tenants failing over (`scale`). The others in
+`motion.js` -- rows becoming points, the race against pgvector, a request
+passing the checks, every language over HTTP, the tab keeping its own copy
+-- are drawn by no page now and wait for one. A phone shows no scene: the
+flow's three steps are words there (`.flow-alt`). `motion.js` draws any moment of a scene from the scene's time
 alone, so a section loops its scenes while in view, stops when it is not, and
 steps between them on a click; under reduced motion each shows its last frame.
 It loads as the first such section comes near, 8 KB gzipped. Every number in
@@ -167,7 +170,7 @@ it is one the docs measure, and `build.py` checks the sizes it quotes.
 
 ## The screencast
 
-The Developer section plays a recorded session as text: commands typed, output
+The home page's "A real session, recorded" plays a session as text: commands typed, output
 a line at a time, chapters to jump between, paused while off screen. The
 transcript is the `<ol class="cast-script">` in `content/index.html`, and every
 line of output in it came from a real `fenec-server`, `curl` and the `fenecdb` Python client --

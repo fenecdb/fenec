@@ -334,6 +334,10 @@ a:hover { color: var(--sun-hot); }
   box-shadow: 0 40px 90px -30px rgba(0,0,0,.95), 0 0 0 1px rgba(244,169,60,.07) inset;
   overflow: hidden;
 }
+/* Under its own heading in a section, the rig sits in the flow: the pull
+   upward is for a rig that overlaps the band above it, and here it covered
+   the heading. */
+.sub + .rig { margin-top: 0; }
 .rig-bar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 13px 18px; border-bottom: 1px solid var(--rule);
@@ -488,6 +492,11 @@ a:hover { color: var(--sun-hot); }
 .lane.done .lane-time { color: var(--sun-hot); }
 .lane.fenec.done .lane-time { color: var(--oasis); }
 .race-foot { margin: 20px 0 0; color: var(--sand-dim); font-size: 14.5px; max-width: var(--measure); }
+/* The race's lanes standing still: a measurement drawn once, each fill set
+   where it ends. */
+.bars { display: grid; gap: 14px; margin: 8px 0 0; max-width: 880px; }
+.bars .lane-track { height: 26px; }
+.bars + .after { margin-top: 22px; }
 .race-replay {
   margin-top: 16px; font: 500 14px/1 var(--sans); color: var(--sand);
   background: rgba(244,169,60,.08); border: 1px solid var(--rule-hot);
@@ -860,7 +869,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .pillars a .ic { margin-bottom: 6px; }
 .pillars b { font: 650 18px/1.2 var(--sans); color: var(--star); letter-spacing: -.01em; }
 .pillars a:hover { border-color: var(--sun); transform: translateY(-2px); }
-@media (max-width: 940px) { .pillars { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* The home page's six: two rows of three, so each item keeps room for its line. */
+.pillars.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 940px) { .pillars, .pillars.six { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) { .pillars { gap: 10px; } .pillars a { padding: 16px; } .pillars span { font-size: 14px; } }
 
 /* A pillar's name is the heading, set large: it is the page's structure. */
@@ -1089,8 +1100,12 @@ details.deep p, details.deep li { font-size: 15.5px; }
 /* On a phone a scene drawn for a wide stage turns its words to specks, and
    the cards beside it already say what it shows: it is left out, and so is
    the work of drawing it (site.js loads scenes only as they come into view). */
+/* The flow's scene says its three steps in its last frame; a phone, which
+   has no scene, gets the three as words. */
+.flow-alt { display: none; }
 @media (max-width: 600px) {
   .motion { display: none; }
+  .flow-alt { display: flex; flex-direction: column; align-items: flex-start; margin: 0 0 8px; }
   .steps-doc > li { padding-left: 34px; }
 }
 
@@ -1116,22 +1131,32 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 }
 
 /* The claim in two lines on a wide screen: the text column takes more of
-   the row and the type steps down a little, so "that fits in a browser
-   tab." holds on one line. A phone wraps it as it falls. */
-.hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+   the row and the type steps down a little. Only past the phone layout --
+   unscoped, it came after that layout's one column and put a phone's
+   headline in a 200 px column beside an empty one. A phone wraps it as it
+   falls. */
+@media (min-width: 941px) {
+  .hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+}
 .has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
 @media (max-width: 940px) { .hero-say br.wide { display: none; } }
 
-/* The home page's first screen holds the four ways in: the hero stops a
-   card's height short of the window (header 66 px, cards about 190), so
-   they are on screen and clickable without a scroll. The dune band shrinks
+/* The home page's first screen holds the first row of the six ways in: the
+   hero stops a card's height short of the window (header 66 px, a row of
+   cards under 200), so they are on screen and clickable without a scroll. The dune band shrinks
    with it. */
 .home .hero:not(.lost) {
   --fold: clamp(520px, calc(100svh - 66px - 200px), 820px);
   --dune-h: clamp(150px, 22svh, 260px);
   padding-bottom: clamp(110px, 13vw, 190px);
 }
-@media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }
+/* A phone's hero is as tall as its copy. The fold is then the hero's own
+   height, not `auto`: every place that measures from it (the dunes, the
+   sky, the floor) is a calc(), and with `auto` in it each was dropped and
+   the dunes stood at the top of the hero, over the fennec. */
+@media (max-width: 940px) {
+  .home .hero:not(.lost) { --fold: 100%; min-height: 0; padding-bottom: calc(var(--dune-h) - 10px); }
+}
 
 /* The header is one surface on every page: opaque, the night's own colour,
    with the rule under it. Half see-through, it showed whatever scrolled
