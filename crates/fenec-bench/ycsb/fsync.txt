@@ -1,0 +1,17 @@
+What an fsync costs where each system ran, 2026-10-04, the M1 Air.
+
+On macOS, natively (python3 fsync.py <file> full|fsync <n>), a 1 KB append
+and its sync:
+  F_FULLFSYNC (fenecdb, SQLite fullfsync): p50 3 904 us, mean 3 752 us, 267/s
+  fsync (does not flush the drive):        p50 23 us, mean 26 us, 38 369/s
+
+In Docker's Linux VM, on a named volume as PostgreSQL's and MongoDB's data
+(docker run postgres:17 pg_test_fsync -s 5 -f /data/pgtest.out), one 8 kB
+write and its sync:
+  open_datasync 70 us/op, fdatasync 76 us/op, fsync 103 us/op
+  fsync_writethrough n/a
+dd if=/dev/zero bs=1k count=5000 oflag=dsync: 5 000 synced 1 KB writes in
+1.74 s, 348 us each.
+
+So a durable write in the VM waits about 0.1 ms for its sync and one on
+the Mac 3.9 ms: the VM's fsync is not the Mac's F_FULLFSYNC.
