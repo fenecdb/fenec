@@ -1,0 +1,16 @@
+# What `flutter create .` and `flutter pub get` make here.
+.dart_tool/
+build/
+android/
+ios/
+macos/
+linux/
+windows/
+web/
+.metadata
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+pubspec_overrides.yaml
+*.iml
+.idea/

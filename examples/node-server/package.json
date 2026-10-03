@@ -1,0 +1,18 @@
+{
+  "name": "fenecdb-notes-node",
+  "private": true,
+  "type": "module",
+  "description": "Notes on a fenec-server, from Node, through @fenecdb/web/client: no WebAssembly",
+  "scripts": {
+    "start": "tsx src/notes.ts",
+    "smoke": "tsc --noEmit && tsx src/notes.ts smoke"
+  },
+  "dependencies": {
+    "@fenecdb/web": "^0.1.9"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

@@ -408,6 +408,19 @@ Still to do:
 - The module's 7.5 KB brotli for the check, kept in the published module:
   a page that declares nothing may build without it (`make wasm SCHEMA=0`).
 
+## The examples: one app, Notes, in every language -- done, with what follows
+
+`examples/`: the browser, React (local, or synced by one line), Node over
+the client entry, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
+Flutter, each the same collection, seeds and toy embedding, each with a
+`smoke` CI runs on this checkout's build (`make examples-test`).
+
+Still to do:
+
+- Highlighting and facets (Phase 61, on its own branch): once they land,
+  the search box of each example shows the matched words and the tags as
+  facets with their counts.
+
 ---
 
 ## Order and what each phase is measured by

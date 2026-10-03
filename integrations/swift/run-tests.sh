@@ -17,9 +17,13 @@ DEV=$(xcode-select -p 2>/dev/null || true)
 case "$DEV" in
   */CommandLineTools)
     F="$DEV/Library/Developer/Frameworks"
-    exec swift test -Xswiftc -F -Xswiftc "$F" -Xlinker -F -Xlinker "$F" -Xlinker -rpath -Xlinker "$F" "$@"
+    swift test -Xswiftc -F -Xswiftc "$F" -Xlinker -F -Xlinker "$F" -Xlinker -rpath -Xlinker "$F" "$@"
     ;;
   *)
-    exec swift test "$@"
+    swift test "$@"
     ;;
 esac
+# Again with Swift's cooperative pool cut to one thread, where a call that
+# blocks a thread of it hangs at once rather than now and then on a machine
+# of few cores (test-strict.sh).
+"$ROOT/integrations/swift/test-strict.sh"

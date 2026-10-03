@@ -29,7 +29,7 @@
             #expect(try await titles(db) == ["one", "two"])
             #expect(db.replica!.status.state == .online)
             // Reads are the file's: the server gone, they go on.
-            s.kill()
+            await s.kill()
             #expect(try await db.from("tasks").count() == 2)
             try await db.close()
         }
@@ -103,12 +103,12 @@
             defer { s.stop() }
             let db = try await Fenec.sync(url: s.url, shapes: [open], path: try scratch("sync-restart"))
             await db.replica!.ready()
-            s.kill()
+            await s.kill()
             try await eventually("offline") { db.replica!.status.state == .offline }
             // A write while it is down waits in the file.
             try await db.from("tasks").insert(["title": "while down", "status": "open"] as Value)
             #expect(await db.replica!.refresh().pending == 1)
-            try s.restart()
+            try await s.restart()
             try await s.run(#"put tasks {key: "e", title: "after", status: "open"}"#)
             db.replica!.resume()
             try await eventually("caught up both ways") {
@@ -124,7 +124,7 @@
             let path = try scratch("sync-reopen")
             var db = try await Fenec.sync(url: s.url, shapes: [open], path: path)
             await db.replica!.ready()
-            s.kill()
+            await s.kill()
             try await db.from("tasks").insert(["title": "kept", "status": "open"] as Value)
             try await db.from("tasks").where("key", "a").update(["title": "ONE"] as Value)
             #expect(await db.replica!.refresh().pending == 2)
@@ -133,7 +133,7 @@
             db = try await Fenec.sync(url: s.url, shapes: [open], path: path)
             #expect(await db.replica!.refresh().pending == 2)
             #expect(try await titles(db) == ["ONE", "kept", "two"])
-            try s.restart()
+            try await s.restart()
             db.replica!.resume()
             try await eventually("the queue sent") { db.replica!.status.pending == 0 }
             #expect(try await s.run(#"get tasks where title = "kept""#).rows.count == 1)

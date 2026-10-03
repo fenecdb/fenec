@@ -1,0 +1,21 @@
+{
+  "name": "fenecdb-notes-web",
+  "private": true,
+  "type": "module",
+  "description": "Notes in the page: a local fenecdb kept in IndexedDB, live queries and search",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "smoke": "tsx test/smoke.ts"
+  },
+  "dependencies": {
+    "@fenecdb/web": "^0.1.9"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "fake-indexeddb": "^6.2.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  }
+}

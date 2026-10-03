@@ -173,6 +173,7 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         self.token = token
         self.provider = provider
         super.init()
+        queue.setSpecific(key: Replica.onQueue, value: true)
         let ops = OperationQueue()
         ops.underlyingQueue = queue
         ops.maxConcurrentOperationCount = 1
@@ -287,21 +288,45 @@ public final class Replica: NSObject, URLSessionDataDelegate, @unchecked Sendabl
         queue.async { self.feed(UInt32(FENEC_SYNC_POLL), 0) }
     }
 
-    func stop() {
-        queue.sync {
-            guard !stopped else { return }
-            feed(UInt32(FENEC_SYNC_SIGNAL), 0, bytes: Array(#"{"stop":true}"#.utf8))
-            stopped = true
-            for t in tasks.values { t.cancel() }
-            tasks.removeAll()
-            session.invalidateAndCancel()
-            lock.lock()
-            watchers.values.forEach { $0.finish() }
-            refusalWatchers.values.forEach { $0.finish() }
-            watchers.removeAll()
-            refusalWatchers.removeAll()
-            lock.unlock()
+    /// Stopped from a task (`close()`): the queue is waited for without
+    /// holding a thread of Swift's cooperative pool, which has a thread a
+    /// core -- what the queue is doing may be a native call waiting for the
+    /// database's write lock, or an fsync.
+    func stop() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            queue.async {
+                self.stopHere()
+                cont.resume()
+            }
         }
+    }
+
+    /// Stopped from the database's `deinit`, which runs on whichever thread
+    /// let it go -- the queue's own among them, where `perform` holds it a
+    /// moment, and where a `queue.sync` would be a deadlock.
+    func stopNow() {
+        if DispatchQueue.getSpecific(key: Replica.onQueue) != nil {
+            stopHere()
+        } else {
+            queue.sync { stopHere() }
+        }
+    }
+
+    private static let onQueue = DispatchSpecificKey<Bool>()
+
+    private func stopHere() {
+        guard !stopped else { return }
+        feed(UInt32(FENEC_SYNC_SIGNAL), 0, bytes: Array(#"{"stop":true}"#.utf8))
+        stopped = true
+        for t in tasks.values { t.cancel() }
+        tasks.removeAll()
+        session.invalidateAndCancel()
+        lock.lock()
+        watchers.values.forEach { $0.finish() }
+        refusalWatchers.values.forEach { $0.finish() }
+        watchers.removeAll()
+        refusalWatchers.removeAll()
+        lock.unlock()
     }
 
     private func signal(_ fields: Row) {

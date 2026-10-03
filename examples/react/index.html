@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  form, .filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  input:not([type=checkbox]) { flex: 1; min-width: 8rem; padding: .4rem; }
+  ul { list-style: none; padding: 0; }
+  li { padding: .5rem 0; border-bottom: 1px solid #ddd; cursor: pointer; }
+  li.done b { text-decoration: line-through; color: #888; }
+  li p { margin: .2rem 0 0; color: #555; }
+  .tags { color: #36c; font-size: .85em; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

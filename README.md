@@ -105,6 +105,11 @@ make serve    # builds the wasm and serves the browser console on :8787
 Five minutes from clone to a vector query:
 **[Quickstart](https://fenecdb.com/docs/quickstart)**.
 
+**[Examples](examples/)**: one small app, Notes, in every language -- the
+browser, React, Node, Python, Go, .NET, Rust, SwiftUI, Jetpack Compose and
+Flutter -- each a folder to open and run, with full-text and vector search,
+filters and a live list.
+
 **Shell.** `cargo build --release -p fenec-cli`, then:
 
 ```bash

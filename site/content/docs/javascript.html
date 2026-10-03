@@ -26,6 +26,14 @@ replica loads the full module unless told otherwise, so its
 </table>
 </div>
 
+<p>Each way has a full example in the repository, the same Notes app:
+queries on a server from Node through the client entry
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/node-server">node-server</a>),
+a database in the page kept in IndexedDB
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a>),
+and a React app over either that or a synced replica
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>).</p>
+
 <p>What a <code>near</code> costs without the graph, <code>limit 10</code>,
 the median of 50 queries in Node (<code>make wasm-exact-speed</code>):</p>
 
@@ -325,6 +333,11 @@ const db = await sync({
 });
 root.render(&lt;FenecProvider db={db}&gt;&lt;Todos /&gt;&lt;/FenecProvider&gt;);
 </pre>
+
+<p>The whole of it is the repository's
+<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>
+example: its database opens in the page or as a replica by one line of
+<code>src/db.ts</code>, and the components are the same.</p>
 
 <ul>
   <li><b>One run per task:</b> the writes made in one task, such as a
