@@ -1,9 +1,9 @@
 # The fenecdb website
 
-Dusk in the dune field. The fennec is a desert fox — nocturnal, very fast — so
-the site is a night sky over lit dunes, with the vector space drawn as the star
-field it mathematically resembles. Everything that moves is either the real
-engine running or a real measurement being drawn.
+Dusk in the dune field. The fennec is a desert fox -- small, tough, and all
+ears -- so the site is a night sky over lit dunes, and the fox at its top
+hears every write. Everything that moves is the real engine running, a real
+measurement being drawn, or what the database does, drawn plainly.
 
 The generator (`build.py`) is standard library only, in keeping with the repo's
 zero-dependency rule; it exists so that page chrome lives in one place instead
@@ -81,7 +81,6 @@ site/
   styles.css      the whole design system
   site.js         the sky, the live console, the scenes, the screencast, docs navigation
   fennec.js       the mark: one table of points and edges
-  scene.js        the hero in WebGL: documents gathering into an index
   motion.js       each section's scenes, drawn from their time alone
   mark.svg        the mark, written by `node site/fennec.js`: the favicon
   mark-detail.svg the same with its running light: header and footer
@@ -146,27 +145,30 @@ same lines, and runs the same light once, on its canvases.
 
 ## The hero
 
-Documents gathering into an index: each star leaves its place for one of three
-neighbourhoods, the edges light as both ends arrive, and now and then a query enters from a star beside the cloud
-and walks the edges greedily to its nearest, as a search walks an HNSW graph.
-`scene.js`, plain WebGL: three.js was measured for the same scene at 100 KB
-brotli after tree-shaking. It loads on the home page alone, after the first
-paint, and not where `saveData` is set.
+The fennec hearing everything: the mark's lines in the middle, rings
+travelling out from its ears, and a phone, a browser window, a server and
+three tenant files around it, each lighting as a ring reaches it -- a write
+landing everywhere it is read. It is an inline SVG in `content/index.html`
+and CSS alone, one 8 s cycle: a ring grows 250 px in 5.6 s, and each glyph
+lights at its `--hit`, its distance from the nearer ear at that pace. The
+mark's path comes from `fennec.js` through `mark.svg` (`{{mark_lines}}` in
+the page, filled by `build.py`), so it cannot drift from the logo. Only
+transform and opacity move; `site.js` pauses it while the hero is off
+screen, and under reduced motion it is a still frame with the rings drawn.
+It replaced a WebGL cloud of documents gathering into an HNSW index, which
+said "vector database" before a word was read.
 
 ## Moving pictures
 
 A section shows its feature working, on a canvas between its heading and
 its detail. The home page has two: a write made on a phone with no network,
 kept in its file, sent once under its key and drawn on another screen
-(`flow`), and replicas and tenants failing over (`scale`). The others in
-`motion.js` -- rows becoming points, the race against pgvector, a request
-passing the checks, every language over HTTP, the tab keeping its own copy
--- are drawn by no page now and wait for one. A phone shows no scene: the
-flow's three steps are words there (`.flow-alt`). `motion.js` draws any moment of a scene from the scene's time
+(`flow`), and replicas and tenants failing over (`scale`). A phone shows no
+scene: the flow's three steps are words there (`.flow-alt`). `motion.js` draws any moment of a scene from the scene's time
 alone, so a section loops its scenes while in view, stops when it is not, and
 steps between them on a click; under reduced motion each shows its last frame.
-It loads as the first such section comes near, 8 KB gzipped. Every number in
-it is one the docs measure, and `build.py` checks the sizes it quotes.
+It loads as the first such section comes near. Every number in it is one
+the docs measure.
 
 ## The screencast
 
@@ -180,7 +182,7 @@ is the page.
 ## Motion, and what it costs
 
 `prefers-reduced-motion` is honoured throughout: the sky canvases stop, the
-hero's index is drawn once, whole, the mark's light is hidden, the
+hero's rings are drawn still, the mark's light is hidden, the
 headline appears whole, each scene shows its last frame, the screencast
 waits to be played, and nothing translates.
 

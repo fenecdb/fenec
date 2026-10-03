@@ -187,24 +187,16 @@ if (ridges.length && !still) {
   move();
 }
 
-/* ====================================================== the fennec in space */
+/* ========================================================= the fennec's ears */
 
-/* WebGL draws the head where the layout left room for it; the SVG in that
-   room is what shows until the first frame, and what stays where WebGL
-   cannot run or the visitor asked for less motion and less data. */
-const space = document.querySelector('.space');
-const markRoom = document.querySelector('.hero-mark');
-if (space && markRoom && !navigator.connection?.saveData) {
-  const go = () => import('./scene.js').then(({ start }) => {
-    const scene = start(space, markRoom, {
-      still,
-      onFirstFrame: () => document.querySelector('.hero').classList.add('gl'),
-    });
-    if (scene) document.addEventListener('hero-typed', () => scene.ask());
-  }).catch(() => {});
-  // After the first paint: the headline and the SVG mark come first.
-  if ('requestIdleCallback' in window) requestIdleCallback(go, { timeout: 600 });
-  else setTimeout(go, 200);
+/* The hero's rings are CSS, so they cost no script; this only stops them
+   while the hero is off screen, where they would keep repainting a picture
+   no one sees. */
+const ears = document.querySelector('.ears');
+if (ears && !still) {
+  new IntersectionObserver((e) => {
+    ears.classList.toggle('paused', !e.some((x) => x.isIntersecting));
+  }).observe(ears);
 }
 
 /* ====================================================== typing the headline */

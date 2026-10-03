@@ -173,7 +173,7 @@ a:hover { color: var(--sun-hot); }
 .hero.lost { justify-content: center; min-height: calc(100svh - 66px); padding-bottom: clamp(140px, 22vh, 260px); }
 .hero.lost .hero-q { color: var(--sand-dim); }
 
-.sky, .stars, .space, .sandfield {
+.sky, .stars, .sandfield {
   position: absolute; top: 0; left: 0; right: 0; height: var(--fold);
   width: 100%;
 }
@@ -183,10 +183,6 @@ a:hover { color: var(--sun-hot); }
     radial-gradient(150% 100% at 50% 100%, var(--night-3) 0%, var(--night-2) 32%, var(--night-1) 60%, var(--night-0) 100%);
 }
 .sandfield { z-index: 2; }
-/* The WebGL canvas covers the whole hero, so the head can stand anywhere the
-   layout puts its room; above the dunes' first ridge in depth order it is
-   not, so the head rises out of the dune field. */
-.space { z-index: 1; height: 100%; }
 
 /* The sun sits just under the ridge: the light is there, the disc is not. */
 /* The glow sits low, inside the dune band. Any higher and it rises behind the
@@ -819,8 +815,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .pg-foot { margin: 26px 0 0; max-width: var(--measure); color: var(--sand-dim); font-size: 15px; }
 
 /* ============================================================== the redesign
-   The home page's hero holds the fennec: an SVG first, then the WebGL head
-   built out of the same table (`fennec.js`) once it has drawn a frame. */
+   The home page's hero is the fennec hearing everything: the mark's lines
+   (`mark_lines` in build.py, from `fennec.js`), rings leaving its ears, and a phone,
+   a browser, a server and tenant files around it, each lighting as a ring
+   reaches it -- a write landing. CSS alone, one 8 s cycle: a ring grows
+   250 px in 5.6 s, and each glyph's `--hit` is when it gets there. Only
+   transform and opacity move. */
 
 .hero-in.has-mark { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); }
 .has-mark .hero-q {
@@ -830,24 +830,57 @@ tbody tr:last-child td { border-bottom: 0; }
   background: linear-gradient(90deg, rgba(21,15,38,.75), rgba(21,15,38,0));
   border-radius: 0 6px 6px 0; max-width: 100%;
 }
-.hero-mark {
-  justify-self: center; width: min(100%, 46vh, 520px); aspect-ratio: 1;
-  position: relative;
+.hero-mark { justify-self: center; width: min(100%, 58vh, 560px); position: relative; }
+.ears { display: block; width: 100%; height: auto; overflow: visible; }
+.ears .fennec {
+  fill: none; stroke: var(--sun); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  filter: drop-shadow(0 0 14px rgba(244,169,60,.35));
 }
-.hero-mark .mark {
-  width: 100%; height: 100%; display: block;
-  filter: drop-shadow(0 30px 60px rgba(255,122,61,.25));
-  transition: opacity .9s var(--ease);
+.ears .ring {
+  fill: none; stroke: var(--oasis); stroke-width: 1.4; vector-effect: non-scaling-stroke;
+  opacity: 0; transform: scale(.02); transform-box: fill-box; transform-origin: center;
+  animation: ring 8s linear infinite;
 }
-/* Once WebGL draws, the SVG steps aside; it keeps its room for the layout. */
-.hero.gl .hero-mark .mark { opacity: 0; }
-/* The cloud can be turned by hand once WebGL draws it. */
-.hero.gl .hero-mark.turnable { cursor: grab; touch-action: pan-y; }
-.hero.gl .hero-mark.grabbing { cursor: grabbing; }
+.ears .ring.late { animation-delay: .5s; stroke-width: 1; }
+@keyframes ring {
+  0%   { transform: scale(.02); opacity: .7; }
+  70%  { transform: scale(1);   opacity: 0; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+.ears .tip { fill: var(--oasis); opacity: 0; animation: tip 8s ease-out infinite; }
+@keyframes tip { 0% { opacity: .9; } 12%, 100% { opacity: 0; } }
+.ears .glyph rect, .ears .glyph path {
+  fill: rgba(21,15,38,.7); stroke: var(--sand-2); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+  animation: lit 8s ease-out infinite; animation-delay: var(--hit);
+}
+.ears .halo { fill: url(#halo); opacity: 0; animation: halo 8s ease-out infinite; animation-delay: var(--hit); }
+@keyframes lit {
+  0%, 10% { stroke: var(--oasis); }
+  30%, 100% { stroke: var(--sand-2); }
+}
+@keyframes halo { 0% { opacity: 1; } 30%, 100% { opacity: 0; } }
+.ears text { fill: var(--sand-dim); font: 400 11px var(--mono); text-anchor: middle; }
+.ears text.aside { text-anchor: start; }
+.ears-still { display: none; }
+.ears.paused * { animation-play-state: paused; }
+/* Still: the rings drawn where they stand a moment after leaving the ears,
+   and the two glyphs the first has reached lit. */
+@media (prefers-reduced-motion: reduce) {
+  .ears-moving, .ears .tip { display: none; }
+  .ears-still { display: inline; }
+  .ears-still .ring { animation-name: none !important; transform: none; opacity: .45; }
+  .ears-still .ring.far { opacity: .2; }
+  .ears .glyph *, .ears .halo { animation-name: none !important; }
+  .ears .glyph.near rect, .ears .glyph.near path { stroke: var(--oasis); }
+  .ears .glyph.near .halo { opacity: .8; }
+}
 @media (max-width: 940px) {
   .hero-in.has-mark { grid-template-columns: 1fr; }
-  .hero-mark { order: -1; width: min(62vw, 300px); margin-bottom: -8px; }
+  .hero-mark { order: -1; width: min(88vw, 380px); margin-bottom: -8px; }
 }
+/* On a phone the labels would be 8 px: the glyphs say it alone. */
+@media (max-width: 600px) { .ears text { display: none; } }
 
 /* Four ways in, just under the hero, on the page's own night: the page's
    table of contents, each with its mark. */

@@ -6,7 +6,6 @@ description: One database from the screen to the server: state your screens foll
 <section class="hero">
   <div class="scene" aria-hidden="true">
     <div class="sky"></div>
-    <canvas class="space"></canvas>
     <canvas class="sandfield"></canvas>
     <svg class="dunes" viewBox="0 0 1440 420" preserveAspectRatio="none">
       <defs>
@@ -53,7 +52,74 @@ description: One database from the screen to the server: state your screens foll
         <a class="btn btn-line" href="playground.html">Try it in the browser</a>
       </p>
     </div>
-    <div class="hero-mark" aria-hidden="true"></div>
+    <div class="hero-mark" role="img" aria-label="The fennec at the centre; rings travel out from its ears to a phone, a browser window, a server and three tenant files, and each lights as a ring reaches it.">
+      <svg class="ears" viewBox="0 0 480 400" aria-hidden="true">
+        <defs>
+          <radialGradient id="halo">
+            <stop offset="0" stop-color="#4FE0C4" stop-opacity=".38"/>
+            <stop offset="1" stop-color="#4FE0C4" stop-opacity="0"/>
+          </radialGradient>
+          <!-- The rings fade out toward the picture's edge rather than stop at it. -->
+          <radialGradient id="fade" gradientUnits="userSpaceOnUse" cx="240" cy="200" r="250">
+            <stop offset=".7" stop-color="#fff"/>
+            <stop offset="1" stop-color="#000"/>
+          </radialGradient>
+          <mask id="reach" maskUnits="userSpaceOnUse" x="-60" y="-60" width="600" height="520">
+            <rect x="-60" y="-60" width="600" height="520" fill="url(#fade)"/>
+          </mask>
+        </defs>
+        <!-- The rings: one from each ear, a fainter one behind it. The ear tips
+             are the mark's (6 4) and (58 4) at the scale below. -->
+        <g class="ears-moving" mask="url(#reach)">
+          <g transform="translate(172.4 132.2)"><circle class="ring" r="250"/><circle class="ring late" r="250"/></g>
+          <g transform="translate(307.6 132.2)"><circle class="ring" r="250"/><circle class="ring late" r="250"/></g>
+        </g>
+        <!-- Reduced motion: the rings where they stand a moment after leaving. -->
+        <g class="ears-still" mask="url(#reach)">
+          <g transform="translate(172.4 132.2)"><circle class="ring" r="100"/><circle class="ring far" r="200"/></g>
+          <g transform="translate(307.6 132.2)"><circle class="ring" r="100"/><circle class="ring far" r="200"/></g>
+        </g>
+        <circle class="tip" cx="172.4" cy="132.2" r="5"/>
+        <circle class="tip" cx="307.6" cy="132.2" r="5"/>
+
+        <!-- Each glyph lights as the nearer ear's ring reaches it: its
+             distance from that ear, less its own half-width, at 44.6 px
+             a second (the ring grows 250 px in 5.6 s). -->
+        <g class="glyph near" transform="translate(70 120)" style="--hit: 1.95s">
+          <circle class="halo" r="38"/>
+          <rect x="-13" y="-21" width="26" height="42" rx="5"/><path d="M-4 15h8"/>
+          <text y="40">phone</text>
+        </g>
+        <g class="glyph near" transform="translate(410 110)" style="--hit: 1.99s">
+          <circle class="halo" r="40"/>
+          <rect x="-26" y="-18" width="52" height="36" rx="5"/><path d="M-26 -8h52M-19 -13h.01M-14 -13h.01M-9 -13h.01"/>
+          <text y="38">browser</text>
+        </g>
+        <g class="glyph" transform="translate(420 300)" style="--hit: 4.17s">
+          <circle class="halo" r="40"/>
+          <rect x="-24" y="-19" width="48" height="17" rx="3"/><rect x="-24" y="2" width="48" height="17" rx="3"/><path d="M-16 -10.5h.01M-16 10.5h.01"/>
+          <text y="39">server</text>
+        </g>
+        <g class="glyph" transform="translate(62 296)" style="--hit: 4.17s">
+          <circle class="halo" r="34"/>
+          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
+        </g>
+        <g class="glyph" transform="translate(110 340)" style="--hit: 4.72s">
+          <circle class="halo" r="34"/>
+          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
+        </g>
+        <g class="glyph" transform="translate(162 362)" style="--hit: 5.02s">
+          <circle class="halo" r="34"/>
+          <path d="M-12 -16h15l9 9v23h-24z M3 -16v9h9"/>
+          <text class="aside" x="24" y="5">tenants</text>
+        </g>
+
+        <!-- The fennec, from the logo's own table (fennec.js). -->
+        <g transform="translate(156.8 121.8) scale(2.6)">
+          <path class="fennec" d="{{mark_lines}}"/>
+        </g>
+      </svg>
+    </div>
   </div>
 
 </section>

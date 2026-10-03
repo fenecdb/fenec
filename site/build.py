@@ -374,8 +374,6 @@ CLAIMS = [
     ("site/content/index.html", r"(\d+) KB of gzipped WebAssembly with no", "kb_gz", 0),
     ("site/content/playground.html", r"\((\d+) KB\s+gzipped\)", "kb_gz", 0),
     ("site/content/docs/index.html", r"(\d+) KB gzip<br><small>the wasm", "kb_gz", 0),
-    ("site/motion.js", r"(\d+) KB of gzipped WebAssembly\. No server", "kb_gz", 0),
-    ("site/motion.js", r"'(\d+) KB gzipped'", "kb_gz", 0),
     ("site/content/docs/benchmarks.html",
      r'wasm32, browser</td><td class="n"><b>(\d+) KB</b>', "kb", 0),
     ("site/content/docs/benchmarks.html",
@@ -723,6 +721,9 @@ def _mark(name, cls):
 
 
 MARK = _mark("mark-detail.svg", "mark")
+# The mark's lines alone, for the home page's hero to draw at its own size
+# and in its own line weight: the same table, so the two cannot drift.
+MARK_LINES = re.search(r'<path d="([^"]+)"', open(os.path.join(ROOT, "mark.svg"), encoding="utf-8").read()).group(1)
 MARK_DETAIL = _mark("mark-detail.svg", "mark mark-detail")
 
 
@@ -809,17 +810,14 @@ def build():
                                 f"Fenec.open('./{engine['fenec.wasm']}'{collation})")
     worker_name = emit("engine-worker.js", worker)
 
-    # The mark's table, then the hero scene that imports it, then the page
-    # script that imports the scene: each named by its hash, inside out.
+    # The mark's table, then the scenes that import it, then the page
+    # script that imports them: each named by its hash, inside out.
     mark_js = emit("fennec.js", open(os.path.join(ROOT, "fennec.js"), encoding="utf-8").read())
-    scene = open(os.path.join(ROOT, "scene.js"), encoding="utf-8").read()
-    scene_js = emit("scene.js", scene.replace("'./fennec.js'", f"'./{mark_js}'"))
     motion = open(os.path.join(ROOT, "motion.js"), encoding="utf-8").read()
     motion_js = emit("motion.js", motion.replace("'./fennec.js'", f"'./{mark_js}'"))
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("./engine-worker.js", "./" + worker_name)
-    script = script.replace("'./scene.js'", f"'./{scene_js}'")
     script = script.replace("'./motion.js'", f"'./{motion_js}'")
     emit("site.js", script)
 
@@ -877,6 +875,7 @@ def build():
             shell = f'<main id="content">{body}</main>'
         page = page.replace("{{content}}", shell)
         page = page.replace("{{mark}}", MARK).replace("{{mark_detail}}", MARK_DETAIL)
+        page = page.replace("{{mark_lines}}", MARK_LINES)
 
         for plain, hashed in assets.items():
             page = page.replace(plain, hashed)
