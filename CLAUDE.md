@@ -656,6 +656,27 @@ Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
 runs within 4% of its idle time (`cool`), the probe's ratio written with
 the cell; the systems take turns with three idle minutes between them.
 Latencies go into a log-linear histogram, 64 steps an octave.
+`--verify` holds every answer to what was written (`check`): each
+thread logs its operations and answers into its own `Vec`, and after the
+cell a read must hold, field by field, a value a write that could have
+been the last one left (one ended before it and not followed by another
+that did, or one overlapping it), a scan consecutive keys as far as it
+could see, a write one record -- every write logged, since a read under
+concurrent writes is judged by every write's span, and nothing compared
+in an operation's time. A pass over all six systems found no mismatch
+(`ycsb/verify.tsv`). `ycsb/results.tsv` is the three runs the site
+quotes, appended to and never rewritten -- a run's cell measured again
+counts as its last line -- and `site/build.py` holds every YCSB figure on
+the site to its median there, the full grid row by row. Docker's VM syncs a
+write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9
+(`ycsb/fsync.txt`), so the durable server comparison is `server-docker`
+against PostgreSQL and MongoDB, all in the VM, the native server beside
+them. fenecdb's buffered reads lose to SQLite's after the updates for the
+engine's reason, not the harness's: an update writes the record again at
+the file's end, the file outgrew the page cache, and a profile put 86% of
+a one-thread read on its page coming in (`ycsb/profile-c1.txt`). Official
+YCSB 0.17.0 against the same containers came within -14% to +2% of the
+harness (`ycsb/calibration/`).
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's

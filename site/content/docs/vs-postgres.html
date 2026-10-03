@@ -152,7 +152,27 @@ below.</p>
 </table>
 </div>
 
+<p>YCSB's core workloads over a million records, fenec-server over HTTP
+against PostgreSQL 17, both in Docker on the Mac, durable, operations a
+second, the median of three runs (<a href="benchmarks.html#ycsb">every
+cell, and MongoDB</a>):</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>YCSB, 1 000 000 records</th><th class="n">fenec-server, HTTP</th><th class="n">PostgreSQL</th></tr></thead>
+<tbody>
+<tr><td>B, 95% reads, 16 clients</td><td class="n"><b>16.3 k</b></td><td class="n">14.0 k</td></tr>
+<tr><td>A, 50% updates, 16 clients</td><td class="n">10.8 k</td><td class="n">10.4 k</td></tr>
+<tr><td>A, 50% updates, one client</td><td class="n">2.16 k</td><td class="n"><b>2.49 k</b></td></tr>
+</tbody>
+</table>
+</div>
+
 <ul>
+  <li><b>Both in Docker,</b> because the VM's fsync takes a tenth of a
+    millisecond where the Mac's <code>F_FULLFSYNC</code> takes four, and
+    its network a quarter of a millisecond a request: fenec-server on the
+    Mac against PostgreSQL in Docker would compare those, not the two.</li>
   <li><b>One machine, one run of each side.</b> An Apple M1 MacBook Air;
     PostgreSQL ran in Docker.</li>
   <li><b>Every figure, and the 768-dim run,</b> is in
@@ -192,8 +212,8 @@ make load-bench
 </ul>
 
 <p><b>Not measured yet:</b> a Linux machine, PostgreSQL outside Docker,
-data larger than memory, pgvectorscale, and several clients writing at
-once.</p>
+data larger than memory and pgvectorscale. Several clients writing at once
+are <a href="benchmarks.html#ycsb">YCSB's</a>.</p>
 </details>
 
 <h2 id="moving">Moving from PostgreSQL</h2>

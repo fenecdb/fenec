@@ -101,7 +101,10 @@ keeps it following the table's commits.
 The numbers behind the comparison, and the method that produced them, are in
 [Benchmarks](https://fenecdb.com/docs/benchmarks) -- with `fenec-server` over
 HTTP against PostgreSQL and pgvector over its own protocol, at a million
-vectors ([At scale](https://fenecdb.com/docs/benchmarks#scale)).
+vectors ([At scale](https://fenecdb.com/docs/benchmarks#scale)). On YCSB's
+workloads in process, fenecdb does B with 16 threads at 78.6 k operations a
+second against SQLite's 47.9 k, and loses C on one thread, 30.1 k against
+279 k, once updates have grown its file ([YCSB](https://fenecdb.com/docs/benchmarks#ycsb)).
 
 ---
 
