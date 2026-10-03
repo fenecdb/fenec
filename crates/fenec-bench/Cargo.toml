@@ -19,6 +19,11 @@ postgres = "0.19"
 # pgvector's own types for the `postgres` crate, in pgvector's binary
 # format: PostgreSQL's side of `scale`.
 pgvector = { version = "0.4", features = ["postgres"] }
+# MongoDB's official driver, its blocking API, for YCSB's MongoDB arm.
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "sync"] }
+# Its blocking API runs a Tokio runtime it makes with `Runtime::new`, which
+# needs this feature and does not ask for it.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[bin]]
 name = "fenec-bench"

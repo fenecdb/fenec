@@ -218,6 +218,16 @@ impl Server {
     pub fn pid(&self) -> u32 {
         self.0.id()
     }
+
+    /// Stops it as a supervisor does, with SIGTERM, and waits for it: its
+    /// last writes are synced on the way down, where a kill under `--sync
+    /// <ms>` loses those of the last interval.
+    pub fn terminate(mut self) {
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
+        let _ = self.0.wait();
+    }
 }
 impl Drop for Server {
     fn drop(&mut self) {

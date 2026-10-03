@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -512,6 +512,19 @@ SCALE_DIM ?= 128
 scale-bench:
 	$(CARGO) build --release -p fenec-server -p fenec-bench --bin fenec-server --bin scale
 	./target/release/scale $(SCALE_ROWS) $(SCALE_DIM) $(SCALE_ARGS)
+
+## YCSB's core workloads A-F (crates/fenec-bench/src/bin/ycsb.rs): fenecdb in
+## process against SQLite, fenec-server over HTTP against PostgreSQL 17 and
+## MongoDB 8, each in a container the bench starts and removes in its turn.
+## 1 000 000 records, 1/4/16 threads, durable and buffered, 30 s a cell after
+## a 5 s warm-up, each cell after the CPU has cooled; a line a cell into
+## ycsb.tsv, `./target/release/ycsb report ycsb.tsv` the medians. Narrow it
+## with YCSB_ARGS, e.g. "--records 100000 --systems fenec,sqlite --workloads
+## AC --threads 1,16 --runs 3". --systems server-docker runs the server in a
+## container too, from `docker build -t fenecdb-ycsb .`.
+ycsb:
+	$(CARGO) build --release -p fenec-server -p fenec-bench --bin fenec-server --bin ycsb
+	./target/release/ycsb $(YCSB_ARGS)
 
 ## Memory footprint (for calibrating --max-memory)
 memory:

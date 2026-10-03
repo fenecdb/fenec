@@ -61,6 +61,7 @@ make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
+make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL and MongoDB in Docker, durable and buffered (YCSB_ARGS)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan
@@ -628,6 +629,33 @@ measured on is a fanless M1 Air, which slows to a third under minutes of
 load on every core: a comparison runs its sides in turns (`--only fenec`,
 then `--only pg`), each after idle minutes, and a figure from a hot run is
 not one.
+
+**`make ycsb` is fenecdb as a general database.** YCSB's core workloads
+A-F written in the bench crate (`fenec-bench/src/bin/ycsb.rs`) rather than
+run through the Java YCSB, to its definitions: ten fields of 100 random
+characters, a read the whole record, an update one field, its scrambled
+zipfian (0.99, FNV-hashed over ten billion items), its skewed-latest for
+D, scans of 1 to 100 records for E. The key is an integer from 1
+(`insertorder=ordered`, no `user` prefix), so each system keys by what it
+keys best by: `id`, `INTEGER PRIMARY KEY`, a `bigint` primary key,
+`_id`; E's scan is `where id >= $1 limit n`, the id index walked from
+the key, no `@sorted`. A key not yet acknowledged is never drawn: an
+insert publishes a bound below its key before it takes one (`Keys`).
+fenecdb in process against SQLite (a connection a thread, WAL, mapped),
+fenec-server over HTTP against PostgreSQL 17 and MongoDB 8, each started
+in a container for its turn and removed with its volume, so the VM holds
+one at a time; `server-docker` is the same server in a container, which
+shows Docker's share -- its network, and an fsync in the VM that is not
+macOS's `F_FULLFSYNC`. Durable is an fsync a write in each engine's own
+terms (a flush and its durability, `synchronous=FULL` with `fullfsync`,
+`synchronous_commit=on`, `j: true`), buffered its default
+(`--sync 250`, `NORMAL`, `off`, `j: false`); C writes nothing and runs
+once. A server switching modes is stopped with SIGTERM, which syncs: a
+kill lost the last 250 ms of the load, and the next update found no row.
+Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
+runs within 4% of its idle time (`cool`), the probe's ratio written with
+the cell; the systems take turns with three idle minutes between them.
+Latencies go into a log-linear histogram, 64 steps an octave.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's
