@@ -984,12 +984,12 @@ test("a live query over HTTP follows the server's writes, with no module", { ski
   }
 });
 
-// sync() opens the full module unless given one, and the replica's --
-// `./fenec-replica.wasm`, no graph, whose `near` measures every vector as
-// `exact` does -- when asked.
-const replicaWasm = await readFile(new URL('./fenec-replica.wasm', import.meta.url)).catch(() => null);
+// sync() opens the full module unless given one, and the module it is
+// given by URL when asked: here the one without indexes, whose `near`
+// measures every vector as `exact` does.
+const liteWasm = await readFile(new URL('./fenec-lite.wasm', import.meta.url)).catch(() => null);
 
-test('sync opens the full module by default, and the replica module when asked', { ...opts, skip: skip || (replicaWasm ? false : 'no web/fenec-replica.wasm (make wasm-replica)') }, async () => {
+test('sync opens the full module by default, and the module it is given', { ...opts, skip: skip || (liteWasm ? false : 'no web/fenec-lite.wasm (make wasm-lite)') }, async () => {
   const s = await server();
   await s.run('create collection docs (key text @hash, title text @text, embed vector<3> @hnsw(cosine))');
   await s.run(`put docs [{key: "a", title: "east", embed: [1.0, 0.0, 0.0]},
@@ -1002,7 +1002,7 @@ test('sync opens the full module by default, and the replica module when asked',
   globalThis.fetch = (url, init) => {
     if (typeof url === 'string' && url.endsWith('.wasm')) {
       asked.push(url);
-      const bytes = url.endsWith('fenec-replica.wasm') ? replicaWasm : wasm;
+      const bytes = url.endsWith('fenec-lite.wasm') ? liteWasm : wasm;
       return Promise.resolve(new Response(bytes, { headers: { 'content-type': 'application/wasm' } }));
     }
     return real(url, init);
@@ -1017,12 +1017,11 @@ test('sync opens the full module by default, and the replica module when asked',
     full.local.run('create index on own (v) @hnsw(l2)');
     full.close();
 
-    db = await sync({ url: s.url, leader: false, shapes, wasm: './fenec-replica.wasm' });
+    db = await sync({ url: s.url, leader: false, shapes, wasm: './fenec-lite.wasm' });
     await db.ready();
-    assert.deepEqual(asked, ['./fenec.wasm', './fenec-replica.wasm']);
+    assert.deepEqual(asked, ['./fenec.wasm', './fenec-lite.wasm']);
     const near = await db.from('docs').near('embed', [0.9, 0.5, 0.0]).limit(2).rows();
     assert.deepEqual(near.map((r) => r.key), ['c', 'a']);
-    assert.deepEqual((await db.from('docs').match('title', 'north').rows()).map((r) => r.key), ['b']);
     // No graph in it: an index of one is refused, naming the feature.
     db.local.run('create collection own (v vector<2>)');
     assert.throws(() => db.local.run('create index on own (v) @hnsw(l2)'), /`vector` feature/);

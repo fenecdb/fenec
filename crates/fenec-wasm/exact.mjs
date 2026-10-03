@@ -1,6 +1,6 @@
 // `near` in a module without the graph, in Node: `make wasm-exact-speed`.
 //
-// A module made without `vector` -- the replica's, `make wasm-replica` --
+// A module made without `vector` -- the lite one, `make wasm-lite` --
 // answers `near` by measuring every vector, as `near ... exact` does in the
 // full one. This is what that costs as a collection grows: 1 000, 10 000 and
 // 50 000 clustered vectors of 128 and 384 dimensions, a `limit 10` each,
@@ -50,7 +50,7 @@ function median(db, sql, qs) {
 
 const here = (p) => new URL(p, import.meta.url).pathname;
 const [fullPath = here('../../web/fenec.wasm'), ...barePaths] = process.argv.slice(2);
-if (barePaths.length === 0) barePaths.push(here('../../web/fenec-replica.wasm'));
+if (barePaths.length === 0) barePaths.push(here('../../web/fenec-lite.wasm'));
 const fullBytes = await readFile(fullPath);
 const bares = await Promise.all(barePaths.map((p) => readFile(p)));
 const sizes = (process.env.ROWS ?? '1000,10000,50000').split(',').map(Number);

@@ -13,8 +13,8 @@ standard library is split by what it is for: float formatting, the rest of
 `core::fmt`, Unicode tables, the sort, `HashMap`, drop glue, the allocator,
 panics.
 
-The lite and the replica module (`make wasm-lite`, `make wasm-replica`) are
-built too, and their sizes listed after, against the base's.
+The lite module (`make wasm-lite`) is built too, and its sizes listed
+after, against the base's.
 
 gzip and brotli move by up to 0.3 KB with nothing but the layout of the bytes
 changed -- two lines of comment at the top of engine.rs moved brotli 46 bytes,
@@ -304,8 +304,8 @@ def part_of(home):
 
 
 # The modules the package ships beside the full one, by the features each
-# is built with: `make wasm-lite` and `make wasm-replica`.
-OTHERS = [("fenec-lite.wasm", []), ("fenec-replica.wasm", ["text", "sparse", "sorted"])]
+# is built with: `make wasm-lite`.
+OTHERS = [("fenec-lite.wasm", [])]
 
 
 def build(root, target, features=None):
@@ -627,7 +627,7 @@ def others(root, target):
 
 
 def others_report(head, base=None):
-    """Markdown: the lite and the replica module, against the base's."""
+    """Markdown: the lite module, against the base's."""
     out = ["| module | raw | gzip | brotli |" + (" against the base, bytes |" if base else ""),
            "| --- | ---: | ---: | ---: |" + (" ---: |" if base else "")]
     for name, sizes in head.items():
@@ -795,7 +795,7 @@ def main():
             shutil.rmtree(os.path.dirname(tree), ignore_errors=True)
     title = "## The browser module" + (f", against `{called}`" if base_ref else "")
     text = title + "\n\n" + report(head, base) + "\n"
-    text += ("\n## The lite and the replica module" + (f", against `{called}`" if base_ref else "")
+    text += ("\n## The lite module" + (f", against `{called}`" if base_ref else "")
              + "\n\n" + others_report(head_others, base_others) + "\n")
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

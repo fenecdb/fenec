@@ -16,11 +16,10 @@ make test          # cargo test (no fenec-bench, no examples), fenec-core withou
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
 make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
-make wasm-replica  # a replica's module, opt-in (sync({ wasm })): no graph, no schema check, to web/fenec-replica.wasm
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
-make wasm-exact-speed   # near without the graph (the replica's module), 1k-50k rows x 128/384, against the graph and exact
+make wasm-exact-speed   # near without the graph (the lite module), 1k-50k rows x 128/384, against the graph and exact
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
@@ -1075,15 +1074,14 @@ itself (the workspace takes it without default features), and `fenec-ql`
 only as a dev dependency -- in its normal ones it would put them back into
 every browser module.
 `tests/features.rs` and the unit tests run without them in `make test`,
-`web/fenec.test.js` hands files between the full module and the ones
-`make wasm-lite` and `make wasm-replica` make, both ways, and CI runs clippy
-over none and each alone.
+`web/fenec.test.js` hands files between the full module and the one
+`make wasm-lite` makes, both ways, and CI runs clippy over none and each
+alone.
 
-**Three modules and a client entry, by where the queries run.**
+**Two modules and a client entry, by where the queries run.**
 `@fenecdb/web` ships `fenec.wasm` (every index and the schema check,
-180.6 KB brotli), `fenec-replica.wasm` (`make wasm-replica`: text, sparse
-and sorted, no graph and no schema check, 154.0 KB) and `fenec-lite.wasm`
-(no index, no schema check, 134.3 KB), and `@fenecdb/web/client`, which
+180.6 KB brotli) and `fenec-lite.wasm` (no index, no schema check, 134.3
+KB), and `@fenecdb/web/client`, which
 is `web/client.js`: the builder (`builder.js`) and the HTTP client
 (`http.js`) re-exported, the two modules `fenec.js` imports beside its
 glue, persistence and sync. The entry's worth is that it cannot pull in
@@ -1103,12 +1101,12 @@ query, and a text names what it reads or is refused -- so `useLiveQuery`
 takes `connect()` as it takes `sync()`. `FenecHttp` calls `fetch` on its
 own (`#request`): as its method, a browser's `fetch` throws "Illegal
 invocation", which Node's does not. `sync()` opens
-the full `./fenec.wasm` unless given `wasm` or `local`: the owner's
-call, since without the graph a replica's `near` is 2 to 40 times slower
-(0.27 -> 0.54 ms at 1 000 x 128, 0.68 -> 8.5 at 10 000 x 384, 0.98 -> 40
-at 50 000 x 384), and the rule is no performance loss. The replica module
-is opt-in, for a size-sensitive page whose replica searches no vectors or
-holds a few thousand. Without `vector`,
+the full `./fenec.wasm` unless given `wasm` or `local`. A replica's module
+was shipped beside them for a while (text, sparse and sorted, no graph and
+no schema check, 154.0 KB) and taken out: it left out too much for 27 KB
+brotli -- no graph, so a `near` 2 to 40 times slower (0.27 -> 0.54 ms at
+1 000 x 128, 0.68 -> 8.5 at 10 000 x 384, 0.98 -> 40 at 50 000 x 384), no
+schema check, `create index @hnsw` refused. Without `vector`,
 `near` over a field declaring `@hnsw` is `Database::near_stored`: every
 vector read out of the store and measured as the full build's exact
 search measures its arena (`vector::search_stored`: made a unit one as
@@ -1119,12 +1117,13 @@ search over codes is, a bit index taken to hold its vectors whole while
 fewer than `BIT_TRAIN` distinct ones are stored (`stored_hash`); its
 tombstones, which count there, are not known here. Without `sparse`, a
 sparse `near` takes the `exact` scan. `match` without `text` is refused:
-BM25 needs the index's statistics. `web/fenec.test.js` holds the replica
-and lite modules' `near` to the full one's `near ... exact` over 9
+BM25 needs the index's statistics. `web/fenec.test.js` holds the lite
+module's `near` to the full one's `near ... exact` over 9
 declarations, filters and pages, row for row and score for score. The scan
-costs the modules without the graph 2.2 KB brotli; at 10 000 x 128 it takes
-3.4 ms against 0.3 through a graph and 0.7 for the full module's exact
-scan, at 50 000 x 384 40, 1.0 and 5.3 (`make wasm-exact-speed`): each
+costs the modules without the graph 2.2 KB brotli; in the lite module at
+10 000 x 128 it takes 2.4 ms against 0.22 through a graph and 0.49 for the
+full module's exact scan, at 50 000 x 384 29, 0.75 and 3.9 (`make
+wasm-exact-speed`): each
 vector is read out of its document and made a unit one per query, four
 lengths summed side by side (`flat_sqs4`; 4.3 -> 3.3 ms), where the arena
 holds them made. An f16 field's vector goes into the arena as its record

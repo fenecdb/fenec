@@ -136,10 +136,9 @@ const db = await Fenec.open('./fenec.wasm');
 ```
 
 217 KB of gzipped WebAssembly and a 44 KB gzipped client — no wasm-bindgen, no
-build step. Smaller modules are opt-in: one without the graph, whose `near`
-measures every vector, for a replica that searches no vectors or holds a few
-thousand (`fenec-replica.wasm`, 8.5 ms a `near` over 10 000 x 384 against
-0.68 with the graph), and one without any index (`fenec-lite.wasm`). An app
+build step. A smaller module without any index is opt-in
+(`fenec-lite.wasm`): its `near` measures every vector, 6.2 ms over 10 000 x
+384 against 0.51 with the graph. An app
 whose queries run on a server can import `@fenecdb/web/client`, 6 KB brotli
 in its bundle, which cannot pull in the engine, sync or storage
 ([which package](https://fenecdb.com/docs/javascript#packages)). With live
