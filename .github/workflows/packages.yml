@@ -49,7 +49,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: |
-          make wasm wasm-lite
+          make wasm wasm-lite wasm-replica
           integrations/packages.sh dist-packages
 
       - uses: actions/upload-artifact@v7
@@ -268,6 +268,13 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: |
           set -eu
+          # A dispatch after a run that went part of the way finds the
+          # version on Central already; the Portal would refuse it, and the
+          # wait below would read that as a failure.
+          if curl -sf "https://repo1.maven.org/maven2/com/fenecdb/fenecdb/${RELEASE_TAG#v}/" >/dev/null; then
+            echo "com.fenecdb:fenecdb ${RELEASE_TAG#v} is on Maven Central already"
+            exit 0
+          fi
           token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
           id=$(curl --fail-with-body -sS -X POST \
             -H "Authorization: Bearer $token" \
@@ -371,4 +378,11 @@ jobs:
             rm -f "$out/pubspec_overrides.yaml"
             cp LICENSE "$out/"
             (cd "$out" && flutter pub publish --force)
+            # pub.dev's index shows a version some seconds after the upload,
+            # and the plugin, next, resolves `fenecdb` against it: 0.1.9's
+            # plugin was refused ("doesn't match any versions") for that.
+            for _ in $(seq 1 30); do
+              curl -sf "https://pub.dev/api/packages/$pkg/versions/$version" >/dev/null && break
+              sleep 10
+            done
           done
