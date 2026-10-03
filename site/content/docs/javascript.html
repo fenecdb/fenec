@@ -20,8 +20,7 @@ replica loads the full module unless told otherwise, so its
 <tbody>
 <tr><td>Queries on a server</td><td><code>@fenecdb/web/client</code>: <code>connect</code>, no module</td><td class="n">6 KB</td><td>every query and write over HTTP through the builder, live queries over the server's subscriptions, the code's schema checked against the server's</td><td>answer without the network, or keep data in the page</td></tr>
 <tr><td>A database in the page, or a synced replica</td><td><code>Fenec.open('./fenec.wasm')</code>; <code>sync()</code> loads it too</td><td class="n">181 KB</td><td>everything: the graph, every index, the schema check, persistence and files</td><td>—</td></tr>
-<tr><td>A replica that searches no vectors, or holds a few thousand</td><td><code>sync({ wasm: './fenec-replica.wasm' })</code></td><td class="n">154 KB</td><td>what the full module does, <code>match</code>, sparse <code>near</code> and ordered indexes among it; <code>near</code> measures every vector, as <code>exact</code> does, the same rows and scores</td><td>walk an HNSW graph: a <code>near</code> is 2 to 40 times slower (below), and <code>create index ... @hnsw</code> is refused; check a schema in code (<code>Fenec.open({ schema })</code>) for collections of the page's own beside the replica, whose own schema comes from its server</td></tr>
-<tr><td>A page that needs no index</td><td><code>Fenec.open('./fenec-lite.wasm')</code></td><td class="n">134 KB</td><td>documents, filters, <code>order</code>, <code>lookup</code>, collations, persistence; <code>near</code> and a sparse <code>near</code> measuring every vector</td><td><code>match</code>, which needs the text index's statistics; the schema check; an index made</td></tr>
+<tr><td>A page that needs no index</td><td><code>Fenec.open('./fenec-lite.wasm')</code></td><td class="n">134 KB</td><td>documents, filters, <code>order</code>, <code>lookup</code>, collations, persistence; <code>near</code> and a sparse <code>near</code> measuring every vector, as <code>exact</code> does, the same rows and scores (2 to 40 times slower, below)</td><td><code>match</code>, which needs the text index's statistics; the schema check; an index made</td></tr>
 </tbody>
 </table>
 </div>
@@ -39,7 +38,7 @@ the median of 50 queries in Node (<code>make wasm-exact-speed</code>):</p>
 
 <div class="tbl">
 <table>
-<thead><tr><th>Rows × dimensions</th><th class="n"><code>fenec.wasm</code>, through the graph</th><th class="n"><code>fenec-replica.wasm</code></th></tr></thead>
+<thead><tr><th>Rows × dimensions</th><th class="n"><code>fenec.wasm</code>, through the graph</th><th class="n"><code>fenec-lite.wasm</code></th></tr></thead>
 <tbody>
 <tr><td>1 000 × 128</td><td class="n">0.27 ms</td><td class="n">0.54 ms</td></tr>
 <tr><td>10 000 × 128</td><td class="n">0.32 ms</td><td class="n">3.4 ms</td></tr>
@@ -95,16 +94,6 @@ a burst of writes runs it once after the run under way, and a stream that
 ends is opened again, its seed running the query, since writes may have
 come between. <code>useLiveQuery</code> takes the endpoint as it takes a
 replica.</p>
-
-<p>The replica's module is built with <code>make wasm-replica</code>: the
-text, sparse and ordered indexes, no graph and no schema check — a
-replica asks the server about its schema (<a href="sync.html#schema">The
-server owns the schema</a>). Its <code>near</code> reads every vector of the
-shape and measures it as the full module's exact search measures its
-arena, so the rows, the scores to the bit and the order of ties are that
-search's, and a file moves between the modules both ways. It is 27 KB
-brotli smaller than the full module; whether that is worth the slower
-<code>near</code> is the table above's question.</p>
 </details>
 
 <h2>Opening a database</h2>
@@ -646,13 +635,11 @@ version's tables is refused: its ranks would mean something else.</p>
 
 <p>A page that does not use every index can load a module built without the
 rest. The release ships <code>fenec-lite.wasm</code>, built without any,
-and <code>fenec-replica.wasm</code>, without the graph, beside
-<code>fenec.wasm</code>.</p>
+beside <code>fenec.wasm</code>.</p>
 
 <pre data-lang="bash">make wasm                          # every index: 181 KB brotli
 make wasm FEATURES="text sorted"   # no graph, no sparse index: 160 KB
 make wasm FEATURES=none            # none of the four: 142 KB
-make wasm-replica                  # a replica's, opt-in: no graph, no schema check: 154 KB
 make wasm-lite                     # no index, no schema check: 134 KB
 </pre>
 
