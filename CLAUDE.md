@@ -1120,9 +1120,10 @@ sparse `near` takes the `exact` scan. `match` without `text` is refused:
 BM25 needs the index's statistics. `web/fenec.test.js` holds the lite
 module's `near` to the full one's `near ... exact` over 9
 declarations, filters and pages, row for row and score for score. The scan
-costs the modules without the graph 2.2 KB brotli; at 10 000 x 128 it takes
-3.4 ms against 0.3 through a graph and 0.7 for the full module's exact
-scan, at 50 000 x 384 40, 1.0 and 5.3 (`make wasm-exact-speed`): each
+costs the modules without the graph 2.2 KB brotli; in the lite module at
+10 000 x 128 it takes 2.4 ms against 0.22 through a graph and 0.49 for the
+full module's exact scan, at 50 000 x 384 29, 0.75 and 3.9 (`make
+wasm-exact-speed`): each
 vector is read out of its document and made a unit one per query, four
 lengths summed side by side (`flat_sqs4`; 4.3 -> 3.3 ms), where the arena
 holds them made. An f16 field's vector goes into the arena as its record

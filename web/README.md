@@ -60,9 +60,9 @@ text index behind `match` and `rerank`, no sparse index behind a
 (the scan answers a `@sorted` field's comparisons and orders, with the same
 rows), and no check of a schema declared in code (`Fenec.open`'s `schema`
 is refused). A page that uses none of them saves 43 KB brotli with it,
-though a `near` without the graph takes 0.54 ms over 1 000 x 128 against
-0.27, 8.5 ms over 10 000 x 384 against 0.68 and 40 over 50 000 x 384
-against 1.0. A `match` or a `create index` that needs a missing index throws
+though a `near` without the graph takes 0.38 ms over 1 000 x 128 against
+0.20, 6.2 ms over 10 000 x 384 against 0.51 and 29 over 50 000 x 384
+against 0.75. A `match` or a `create index` that needs a missing index throws
 a `FenecError` naming it, and the file is the same either way: a store one
 module wrote opens in the other. A page that needs some of the
 indexes builds its module with them alone: `make wasm FEATURES="text sorted"`,

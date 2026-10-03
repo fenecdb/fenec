@@ -137,8 +137,8 @@ const db = await Fenec.open('./fenec.wasm');
 
 217 KB of gzipped WebAssembly and a 44 KB gzipped client — no wasm-bindgen, no
 build step. A smaller module without any index is opt-in
-(`fenec-lite.wasm`): its `near` measures every vector, 8.5 ms over 10 000 x
-384 against 0.68 with the graph. An app
+(`fenec-lite.wasm`): its `near` measures every vector, 6.2 ms over 10 000 x
+384 against 0.51 with the graph. An app
 whose queries run on a server can import `@fenecdb/web/client`, 6 KB brotli
 in its bundle, which cannot pull in the engine, sync or storage
 ([which package](https://fenecdb.com/docs/javascript#packages)). With live
