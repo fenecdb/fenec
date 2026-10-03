@@ -137,6 +137,10 @@ public final class Fenec: @unchecked Sendable {
         /// iOS's `complete` protection class, whose pages become unreadable
         /// as the device locks -- a mapped page read then is the app's end.
         public static let inMemory = Options(rawValue: UInt32(FENEC_OPEN_IN_MEMORY))
+        /// No compact on its own. Without it the library compacts the file
+        /// beside the calls once half of it is dead records -- versions
+        /// updates and deletes left behind -- and at least 64 MB.
+        public static let noAutoCompact = Options(rawValue: UInt32(FENEC_OPEN_NO_AUTO_COMPACT))
     }
 
     let handle: UInt64

@@ -143,6 +143,13 @@ class Fenec private constructor(internal val handle: Long) : AutoCloseable {
          */
         const val IN_MEMORY = 2
 
+        /**
+         * No compact on its own. Without it the library compacts the file
+         * beside the calls once half of it is dead records -- versions
+         * updates and deletes left behind -- and at least 64 MB.
+         */
+        const val NO_AUTO_COMPACT = 4
+
         /** The library's version. */
         @JvmStatic
         val version: String get() = String(FenecNative.version(), 1, FenecNative.version().size - 1, Charsets.UTF_8)

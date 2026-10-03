@@ -35,3 +35,9 @@ jni = []
 [[test]]
 name = "all"
 path = "tests/all.rs"
+
+# Sets the process's compact policy for its few megabytes: beside the
+# others it would compact their files under them.
+[[test]]
+name = "compact"
+path = "tests/compact.rs"
