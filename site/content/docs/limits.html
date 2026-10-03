@@ -58,9 +58,14 @@ predicate no way to say it reads two collections. That stays a second
 query.</p>
 
 <p>Replication exists in <b>one direction only</b>: the server is
-authoritative and clients read it. Multi-writer merging, CRDTs and a long-lived
-offline write queue are out of scope — that is what fits the single-writer
-model, and the other would be a different database.</p>
+authoritative and clients read it. A replica's writes wait in a queue kept in
+its own file (<code>_sync_queue</code>), in the browser and on a phone, and
+reach the server one at a time, each once under its
+<code>Idempotency-Key</code>; the server answers each, and a write it refuses
+is put back (<a href="sync.html#refusals-retries-and-offline">Sync</a>,
+<a href="mobile.html#sync">mobile</a>). Multi-writer merging and CRDTs are out
+of scope — that is what fits the single-writer model, and the other would be
+a different database.</p>
 
 <p>There are deliberate gaps in the type system too:</p>
 

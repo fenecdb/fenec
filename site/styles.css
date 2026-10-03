@@ -173,7 +173,7 @@ a:hover { color: var(--sun-hot); }
 .hero.lost { justify-content: center; min-height: calc(100svh - 66px); padding-bottom: clamp(140px, 22vh, 260px); }
 .hero.lost .hero-q { color: var(--sand-dim); }
 
-.sky, .stars, .space, .sandfield {
+.sky, .stars, .sandfield {
   position: absolute; top: 0; left: 0; right: 0; height: var(--fold);
   width: 100%;
 }
@@ -183,10 +183,6 @@ a:hover { color: var(--sun-hot); }
     radial-gradient(150% 100% at 50% 100%, var(--night-3) 0%, var(--night-2) 32%, var(--night-1) 60%, var(--night-0) 100%);
 }
 .sandfield { z-index: 2; }
-/* The WebGL canvas covers the whole hero, so the head can stand anywhere the
-   layout puts its room; above the dunes' first ridge in depth order it is
-   not, so the head rises out of the dune field. */
-.space { z-index: 1; height: 100%; }
 
 /* The sun sits just under the ridge: the light is there, the disc is not. */
 /* The glow sits low, inside the dune band. Any higher and it rises behind the
@@ -334,6 +330,10 @@ a:hover { color: var(--sun-hot); }
   box-shadow: 0 40px 90px -30px rgba(0,0,0,.95), 0 0 0 1px rgba(244,169,60,.07) inset;
   overflow: hidden;
 }
+/* Under its own heading in a section, the rig sits in the flow: the pull
+   upward is for a rig that overlaps the band above it, and here it covered
+   the heading. */
+.sub + .rig { margin-top: 0; }
 .rig-bar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 13px 18px; border-bottom: 1px solid var(--rule);
@@ -488,6 +488,11 @@ a:hover { color: var(--sun-hot); }
 .lane.done .lane-time { color: var(--sun-hot); }
 .lane.fenec.done .lane-time { color: var(--oasis); }
 .race-foot { margin: 20px 0 0; color: var(--sand-dim); font-size: 14.5px; max-width: var(--measure); }
+/* The race's lanes standing still: a measurement drawn once, each fill set
+   where it ends. */
+.bars { display: grid; gap: 14px; margin: 8px 0 0; max-width: 880px; }
+.bars .lane-track { height: 26px; }
+.bars + .after { margin-top: 22px; }
 .race-replay {
   margin-top: 16px; font: 500 14px/1 var(--sans); color: var(--sand);
   background: rgba(244,169,60,.08); border: 1px solid var(--rule-hot);
@@ -810,8 +815,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .pg-foot { margin: 26px 0 0; max-width: var(--measure); color: var(--sand-dim); font-size: 15px; }
 
 /* ============================================================== the redesign
-   The home page's hero holds the fennec: an SVG first, then the WebGL head
-   built out of the same table (`fennec.js`) once it has drawn a frame. */
+   The home page's hero is the fennec hearing everything: the mark's lines
+   (`mark_lines` in build.py, from `fennec.js`), rings leaving its ears, and a phone,
+   a browser, a server and tenant files around it, each lighting as a ring
+   reaches it -- a write landing. CSS alone, one 8 s cycle: a ring grows
+   250 px in 5.6 s, and each glyph's `--hit` is when it gets there. Only
+   transform and opacity move. */
 
 .hero-in.has-mark { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); }
 .has-mark .hero-q {
@@ -821,24 +830,57 @@ tbody tr:last-child td { border-bottom: 0; }
   background: linear-gradient(90deg, rgba(21,15,38,.75), rgba(21,15,38,0));
   border-radius: 0 6px 6px 0; max-width: 100%;
 }
-.hero-mark {
-  justify-self: center; width: min(100%, 46vh, 520px); aspect-ratio: 1;
-  position: relative;
+.hero-mark { justify-self: center; width: min(100%, 58vh, 560px); position: relative; }
+.ears { display: block; width: 100%; height: auto; overflow: visible; }
+.ears .fennec {
+  fill: none; stroke: var(--sun); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  filter: drop-shadow(0 0 14px rgba(244,169,60,.35));
 }
-.hero-mark .mark {
-  width: 100%; height: 100%; display: block;
-  filter: drop-shadow(0 30px 60px rgba(255,122,61,.25));
-  transition: opacity .9s var(--ease);
+.ears .ring {
+  fill: none; stroke: var(--oasis); stroke-width: 1.4; vector-effect: non-scaling-stroke;
+  opacity: 0; transform: scale(.02); transform-box: fill-box; transform-origin: center;
+  animation: ring 8s linear infinite;
 }
-/* Once WebGL draws, the SVG steps aside; it keeps its room for the layout. */
-.hero.gl .hero-mark .mark { opacity: 0; }
-/* The cloud can be turned by hand once WebGL draws it. */
-.hero.gl .hero-mark.turnable { cursor: grab; touch-action: pan-y; }
-.hero.gl .hero-mark.grabbing { cursor: grabbing; }
+.ears .ring.late { animation-delay: .5s; stroke-width: 1; }
+@keyframes ring {
+  0%   { transform: scale(.02); opacity: .7; }
+  70%  { transform: scale(1);   opacity: 0; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+.ears .tip { fill: var(--oasis); opacity: 0; animation: tip 8s ease-out infinite; }
+@keyframes tip { 0% { opacity: .9; } 12%, 100% { opacity: 0; } }
+.ears .glyph rect, .ears .glyph path {
+  fill: rgba(21,15,38,.7); stroke: var(--sand-2); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+  animation: lit 8s ease-out infinite; animation-delay: var(--hit);
+}
+.ears .halo { fill: url(#halo); opacity: 0; animation: halo 8s ease-out infinite; animation-delay: var(--hit); }
+@keyframes lit {
+  0%, 10% { stroke: var(--oasis); }
+  30%, 100% { stroke: var(--sand-2); }
+}
+@keyframes halo { 0% { opacity: 1; } 30%, 100% { opacity: 0; } }
+.ears text { fill: var(--sand-dim); font: 400 11px var(--mono); text-anchor: middle; }
+.ears text.aside { text-anchor: start; }
+.ears-still { display: none; }
+.ears.paused * { animation-play-state: paused; }
+/* Still: the rings drawn where they stand a moment after leaving the ears,
+   and the two glyphs the first has reached lit. */
+@media (prefers-reduced-motion: reduce) {
+  .ears-moving, .ears .tip { display: none; }
+  .ears-still { display: inline; }
+  .ears-still .ring { animation-name: none !important; transform: none; opacity: .45; }
+  .ears-still .ring.far { opacity: .2; }
+  .ears .glyph *, .ears .halo { animation-name: none !important; }
+  .ears .glyph.near rect, .ears .glyph.near path { stroke: var(--oasis); }
+  .ears .glyph.near .halo { opacity: .8; }
+}
 @media (max-width: 940px) {
   .hero-in.has-mark { grid-template-columns: 1fr; }
-  .hero-mark { order: -1; width: min(62vw, 300px); margin-bottom: -8px; }
+  .hero-mark { order: -1; width: min(88vw, 380px); margin-bottom: -8px; }
 }
+/* On a phone the labels would be 8 px: the glyphs say it alone. */
+@media (max-width: 600px) { .ears text { display: none; } }
 
 /* Four ways in, just under the hero, on the page's own night: the page's
    table of contents, each with its mark. */
@@ -860,7 +902,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .pillars a .ic { margin-bottom: 6px; }
 .pillars b { font: 650 18px/1.2 var(--sans); color: var(--star); letter-spacing: -.01em; }
 .pillars a:hover { border-color: var(--sun); transform: translateY(-2px); }
-@media (max-width: 940px) { .pillars { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* The home page's six: two rows of three, so each item keeps room for its line. */
+.pillars.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 940px) { .pillars, .pillars.six { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) { .pillars { gap: 10px; } .pillars a { padding: 16px; } .pillars span { font-size: 14px; } }
 
 /* A pillar's name is the heading, set large: it is the page's structure. */
@@ -1089,8 +1133,12 @@ details.deep p, details.deep li { font-size: 15.5px; }
 /* On a phone a scene drawn for a wide stage turns its words to specks, and
    the cards beside it already say what it shows: it is left out, and so is
    the work of drawing it (site.js loads scenes only as they come into view). */
+/* The flow's scene says its three steps in its last frame; a phone, which
+   has no scene, gets the three as words. */
+.flow-alt { display: none; }
 @media (max-width: 600px) {
   .motion { display: none; }
+  .flow-alt { display: flex; flex-direction: column; align-items: flex-start; margin: 0 0 8px; }
   .steps-doc > li { padding-left: 34px; }
 }
 
@@ -1116,22 +1164,32 @@ html { scrollbar-color: var(--rule-hot) transparent; }
 }
 
 /* The claim in two lines on a wide screen: the text column takes more of
-   the row and the type steps down a little, so "that fits in a browser
-   tab." holds on one line. A phone wraps it as it falls. */
-.hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+   the row and the type steps down a little. Only past the phone layout --
+   unscoped, it came after that layout's one column and put a phone's
+   headline in a 200 px column beside an empty one. A phone wraps it as it
+   falls. */
+@media (min-width: 941px) {
+  .hero-in.has-mark { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); }
+}
 .has-mark .hero-say { max-width: none; font-size: clamp(30px, 3.7vw, 54px); }
 @media (max-width: 940px) { .hero-say br.wide { display: none; } }
 
-/* The home page's first screen holds the four ways in: the hero stops a
-   card's height short of the window (header 66 px, cards about 190), so
-   they are on screen and clickable without a scroll. The dune band shrinks
+/* The home page's first screen holds the first row of the six ways in: the
+   hero stops a card's height short of the window (header 66 px, a row of
+   cards under 200), so they are on screen and clickable without a scroll. The dune band shrinks
    with it. */
 .home .hero:not(.lost) {
   --fold: clamp(520px, calc(100svh - 66px - 200px), 820px);
   --dune-h: clamp(150px, 22svh, 260px);
   padding-bottom: clamp(110px, 13vw, 190px);
 }
-@media (max-width: 940px) { .home .hero:not(.lost) { --fold: auto; min-height: 0; } }
+/* A phone's hero is as tall as its copy. The fold is then the hero's own
+   height, not `auto`: every place that measures from it (the dunes, the
+   sky, the floor) is a calc(), and with `auto` in it each was dropped and
+   the dunes stood at the top of the hero, over the fennec. */
+@media (max-width: 940px) {
+  .home .hero:not(.lost) { --fold: 100%; min-height: 0; padding-bottom: calc(var(--dune-h) - 10px); }
+}
 
 /* The header is one surface on every page: opaque, the night's own colour,
    with the rule under it. Half see-through, it showed whatever scrolled
