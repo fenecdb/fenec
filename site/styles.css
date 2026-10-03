@@ -836,16 +836,40 @@ tbody tr:last-child td { border-bottom: 0; }
   fill: none; stroke: var(--sun); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
   filter: drop-shadow(0 0 14px rgba(244,169,60,.35));
 }
+/* A ring is drawn as the mark is: a faint line, and the mark's light --
+   the same teal, the same glow -- running along it, two short lights a ring
+   going round as it grows. The right ear's turn the other way. */
 .ears .ring {
-  fill: none; stroke: var(--oasis); stroke-width: 1.4; vector-effect: non-scaling-stroke;
   opacity: 0; transform: scale(.02); transform-box: fill-box; transform-origin: center;
   animation: ring 8s linear infinite;
 }
-.ears .ring.late { animation-delay: .5s; stroke-width: 1; }
+.ears .ring.late { animation-delay: .5s; }
+.ears .ring-line, .ears .ring-light { fill: none; stroke: var(--oasis); }
+/* The line keeps its width as the ring grows; the light does not, since
+   Chrome measures a non-scaling stroke's dashes on the screen, not along
+   the path's length of 1, and the lights came out a quarter of the ring. */
+.ears .ring-line { stroke-width: 1; opacity: .3; vector-effect: non-scaling-stroke; }
+.ears .ring-light {
+  stroke-width: 3; stroke-linecap: round; stroke-dasharray: .07 .43;
+  filter: drop-shadow(0 0 2px rgba(79,224,196,.95));
+  animation: ring-run 8s linear infinite;
+}
+.ears .late .ring-light { stroke-width: 1.7; animation-delay: .5s; }
+.ears .right .ring-light { animation-name: ring-run-back; }
 @keyframes ring {
-  0%   { transform: scale(.02); opacity: .7; }
+  0%   { transform: scale(.02); opacity: 1; }
+  35%  { opacity: .85; }
   70%  { transform: scale(1);   opacity: 0; }
   100% { transform: scale(1);   opacity: 0; }
+}
+@keyframes ring-run      { from { stroke-dashoffset: 0; } 70%, to { stroke-dashoffset: -.5; } }
+@keyframes ring-run-back { from { stroke-dashoffset: 0; } 70%, to { stroke-dashoffset: .5; } }
+/* The fennec runs the header mark's light every cycle, from the right ear's
+   tip through every edge, as the rings leave: 0.3 s an edge of the 8 s. */
+.ears .mark-light path { animation: hero-run 8s cubic-bezier(.4, 0, .6, 1) infinite; }
+@keyframes hero-run {
+  0%           { stroke-dashoffset: .55; }
+  3.75%, 100%  { stroke-dashoffset: -1.1; }
 }
 .ears .tip { fill: var(--oasis); opacity: 0; animation: tip 8s ease-out infinite; }
 @keyframes tip { 0% { opacity: .9; } 12%, 100% { opacity: 0; } }
@@ -869,8 +893,8 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (prefers-reduced-motion: reduce) {
   .ears-moving, .ears .tip { display: none; }
   .ears-still { display: inline; }
-  .ears-still .ring { animation-name: none !important; transform: none; opacity: .45; }
-  .ears-still .ring.far { opacity: .2; }
+  .ears-still .ring, .ears-still .ring-light { animation-name: none !important; transform: none; opacity: .8; }
+  .ears-still .ring.far { opacity: .35; }
   .ears .glyph *, .ears .halo { animation-name: none !important; }
   .ears .glyph.near rect, .ears .glyph.near path { stroke: var(--oasis); }
   .ears .glyph.near .halo { opacity: .8; }
