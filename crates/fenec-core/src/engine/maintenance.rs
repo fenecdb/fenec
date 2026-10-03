@@ -34,6 +34,13 @@ pub(super) struct Tails {
 }
 
 impl Tails {
+    /// Every collection changed under the maintenances: an image adopted.
+    pub(super) fn all_changed(&mut self) {
+        for t in &mut self.list {
+            t.schema = true;
+        }
+    }
+
     pub(super) fn note(&mut self, cid: u32, id: DocId) {
         for t in self.list.iter_mut().filter(|t| t.cid == cid) {
             if id == SCHEMA_MARK {
@@ -80,7 +87,9 @@ struct BuiltIndex {
 }
 
 /// A collection being compacted: its live documents in a fresh store, and
-/// once built, every index over them.
+/// once built, every index over them: the browser module's compact, which
+/// has no file to write beside.
+#[cfg(target_arch = "wasm32")]
 struct Part {
     token: u64,
     name: String,
@@ -116,6 +125,10 @@ impl Drop for Watching<'_> {
 #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
 struct Beside {
     side: crate::fs::SideFile,
+    /// Whether the stores read their records from the mapped file, and are
+    /// pointed at the new one; a database read into memory keeps its live
+    /// records in fresh segments instead.
+    mapped: bool,
     parts: Vec<BesidePart>,
     history: Option<Vec<u8>>,
     reclaimed: usize,
@@ -464,6 +477,7 @@ impl Database {
         })
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn begin_compact(&self, which: Option<&str>) -> Result<Vec<Part>> {
         self.may_write(true)?;
         let targets: Vec<String> = match which {
@@ -493,6 +507,7 @@ impl Database {
         Ok(parts)
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn finish_compact(&mut self, parts: Vec<Part>) -> Result<Response> {
         let tails: Vec<Option<Tail>> = parts.iter().map(|p| self.unwatch(p.token)).collect();
         self.refuse_if_failed()?;
@@ -551,6 +566,8 @@ impl Database {
         };
         self.storage(r)?;
         self.rewrote(len);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.compacted_to(len);
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))
@@ -687,6 +704,7 @@ impl Database {
         }
         Ok(Some(Beside {
             side,
+            mapped: self.mapped,
             parts,
             history,
             reclaimed,
@@ -701,7 +719,8 @@ impl Database {
     /// A collection created, dropped or altered meanwhile leaves the image
     /// not fitting, and the compact says so rather than put it in place.
     #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
-    fn finish_beside(&mut self, mut b: Beside) -> Result<Response> {
+    fn finish_beside(&mut self, mut b: Beside) -> Result<(Response, Vec<Store>)> {
+        let began = std::time::Instant::now();
         let tails: Vec<Option<Tail>> = b.parts.iter().map(|p| self.unwatch(p.token)).collect();
         self.refuse_if_failed()?;
         let history = (self.history.following || !self.history.lineage.is_empty())
@@ -764,11 +783,22 @@ impl Database {
         self.storage(r)?;
         b.side.adopted();
         *self.appended.get_mut() = len;
-        self.landed = landed;
-        self.landed_bytes = landed_bytes;
+        // A database read into memory hands nothing over to its file.
+        match b.mapped {
+            true => {
+                self.landed = landed;
+                self.landed_bytes = landed_bytes;
+            }
+            false => self.forget_landed(),
+        }
+        // The stores they replace go back to the caller, to be let go of
+        // once the lock is: their index, their segments and the old file's
+        // mapping, the last of which unmapped the file -- 10 to 15 ms of a
+        // 19 to 31 ms swap over a 1 GB file.
+        let mut retired = Vec::with_capacity(b.parts.len());
         for p in b.parts {
             let c = self.collections.get_mut(&p.name).unwrap();
-            c.store = p.store;
+            retired.push(std::mem::replace(&mut c.store, p.store));
             // Each graph is as its record left it, and changed by the
             // writes after it.
             for (field, graph, changes) in &p.graphs {
@@ -783,10 +813,13 @@ impl Database {
             }
         }
         self.dirty = false;
-        Ok(Response::Ok(format!(
+        self.compacted_to(len);
+        self.swap_held = began.elapsed();
+        let done = Response::Ok(format!(
             "compaction done, {} bytes reclaimed",
             b.reclaimed
-        )))
+        ));
+        Ok((done, retired))
     }
 }
 
@@ -802,6 +835,14 @@ impl Beside {
         self.body_at = side.at();
         if let Some(h) = &self.history {
             side.write(h)?;
+        }
+        // Read into memory, the live records are copied into fresh segments
+        // here, with no lock held, and stay there: the database keeps them
+        // in memory, as it was opened to.
+        if !self.mapped {
+            for p in self.parts.iter_mut().filter(|p| p.compact) {
+                p.store = p.store.compacted()?;
+            }
         }
         let mut placed = Vec::with_capacity(self.parts.len());
         for p in &self.parts {
@@ -841,6 +882,9 @@ impl Beside {
         // The image on disk now, so that the fsync under the lock covers
         // only what is added there.
         side.sync()?;
+        if !self.mapped {
+            return Ok(());
+        }
         let base = side.map()?;
         for (p, at) in self.parts.iter_mut().zip(placed) {
             match at {
@@ -948,22 +992,25 @@ fn compact_online(
 ) -> Result<Response> {
     // A dropped field's places are taken out of each document, which the
     // copies made beside the database -- the records as they stand -- do
-    // not do: that compact holds the lock, as one in a shell does.
-    {
+    // not do: that compact holds the lock, as one in a shell does. Asked
+    // under the read lock first: a host compacting on its own looks every
+    // few seconds, and took the write lock for nothing each time.
+    if read(db).drops_in(which)? {
         let mut g = write(db);
         if g.drops_in(which)? {
             g.may_write(true)?;
             return g.compact(which, true);
         }
     }
-    // A mapped database copies no record: the graphs holding tombstones are
-    // rebuilt here, beside it, and the rewrite -- the live records streamed
-    // from the old file into the new one, 2.1 s for 1 GB -- is left to the
-    // write lock. Copying every record into a fresh store, as the rest of
-    // this does, took a 427 MB file to +899 MB of heap and left the
-    // collection in memory until the process ended.
+    // No record is copied under a lock: the graphs holding tombstones are
+    // rebuilt here, beside the database, and the rewrite -- the live records
+    // streamed into a new file, 2.1 s for 1 GB -- is written beside it too.
+    // Copying every record into a fresh store under the read lock and
+    // building every index again, as a database read into memory once did,
+    // took a 427 MB file to +899 MB of heap; the indexes are keyed by id, and
+    // the documents are the same ones.
     #[cfg(not(target_arch = "wasm32"))]
-    if read(db).mapped {
+    {
         let copies = read(db).begin_graphs(which)?;
         let mut watching = Watching {
             db,
@@ -974,23 +1021,26 @@ fn compact_online(
         let r = write(db).finish_graphs(built);
         watching.tokens.clear();
         r?;
-        return rewrite_beside(db, which, during);
+        rewrite_beside(db, which, during)
     }
-    let mut parts = read(db).begin_compact(which)?;
-    let mut watching = Watching {
-        db,
-        tokens: parts.iter().map(|p| p.token).collect(),
-    };
-    during();
-    for p in &mut parts {
-        let c = &mut p.collection;
-        for pos in 0..c.schema.fields.len() {
-            build_index(c, pos)?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut parts = read(db).begin_compact(which)?;
+        let mut watching = Watching {
+            db,
+            tokens: parts.iter().map(|p| p.token).collect(),
+        };
+        during();
+        for p in &mut parts {
+            let c = &mut p.collection;
+            for pos in 0..c.schema.fields.len() {
+                build_index(c, pos)?;
+            }
         }
+        let r = write(db).finish_compact(parts);
+        watching.tokens.clear();
+        r
     }
-    let r = write(db).finish_compact(parts);
-    watching.tokens.clear();
-    r
 }
 
 /// The rewrite a compact of a mapped file ends with: the live records
@@ -1020,9 +1070,11 @@ fn rewrite_beside(
             };
             during();
             b.write()?;
+            // The guard goes at the end of the statement, and the stores it
+            // handed back after it.
             let r = write(db).finish_beside(b);
             watching.tokens.clear();
-            return r;
+            return r.map(|(done, _retired)| done);
         }
     }
     let _ = during;

@@ -673,7 +673,9 @@ fn open_in_memory_into(
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
     let (mut sink, existing) = FileSink::open(path)?;
-    if existing.len() > MAGIC.len() {
+    // A new file is loaded too, as a mapped one is: it holds the magic by
+    // now, which the bytes the database counts as its file's must include.
+    if existing.len() >= MAGIC.len() {
         let whole = db.load(&existing)?;
         if whole < existing.len() {
             sink.cut(whole)?;

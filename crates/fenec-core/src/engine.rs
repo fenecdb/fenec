@@ -20,8 +20,16 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
+mod garbage;
+#[cfg(not(target_arch = "wasm32"))]
 mod handover;
 mod maintenance;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use garbage::{
+    compact_when_due, CompactPolicy, Compactor, Garbage, AUTO_COMPACT_EVERY, AUTO_COMPACT_FLOOR,
+    AUTO_COMPACT_RATIO,
+};
 
 pub const MAGIC: &[u8; 8] = b"FENECDB\x01";
 
@@ -2430,6 +2438,18 @@ pub struct Database {
     /// module has no clock and sets it before each statement, as it is
     /// handed every time; a test pins it.
     clock: Option<i64>,
+    /// What the last compact left in the file besides the documents --
+    /// schemas, counters, graphs -- which the next would write again
+    /// ([`Self::garbage`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    kept: u64,
+    /// The compacts that rewrote the file since the open.
+    #[cfg(not(target_arch = "wasm32"))]
+    compactions: u64,
+    /// How long the last compact held the write lock to put its file in
+    /// place: what every read and write waited out at most.
+    #[cfg(not(target_arch = "wasm32"))]
+    swap_held: std::time::Duration,
 }
 
 /// A server appends a graph to its file's tail ([`Database::save_graphs`])
@@ -2508,6 +2528,12 @@ impl Database {
             #[cfg(all(feature = "std-fs", unix, target_pointer_width = "64"))]
             beside: std::sync::atomic::AtomicBool::new(false),
             clock: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            kept: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            compactions: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            swap_held: std::time::Duration::ZERO,
         }
     }
 
@@ -2833,9 +2859,13 @@ impl Database {
 
     /// [`Self::snapshot`] written into `out` as it is produced: the records
     /// of a collection go straight through, so the image is never a second
-    /// copy of the data (`Sink::rewrite_with`).
+    /// copy of the data (`Sink::rewrite_with`). The live records alone: the
+    /// image is what a page persists, a replica or a moved tenant is sent
+    /// and an archive keeps, and written with the versions every update
+    /// left behind it grew with them -- a page's image by every write since
+    /// the page was first opened.
     pub fn snapshot_into(&self, out: &mut dyn ImageOut) -> Result<()> {
-        self.image_into(out, &[], &mut Vec::new())
+        self.image_into(out, &self.order, &mut Vec::new())
     }
 
     /// [`Self::snapshot_into`], leaving out the dead records of the named
@@ -4388,6 +4418,17 @@ impl Database {
         self.changes = fresh.changes;
         self.changes.set_capacity(cap);
         self.adoptions += 1;
+        // Every collection is another now, whatever its name and id: a
+        // maintenance running beside it -- a replica's compact -- would put
+        // back what it copied before the image came.
+        self.tails
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .all_changed();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.kept = 0;
+        }
         // The image is the file now: a mapped database reads the documents
         // from there rather than holding the copy it was handed. Written
         // elsewhere, it is walked to find them.
@@ -7846,6 +7887,8 @@ impl Database {
     /// rebuilt here -- a compact beside the database has rebuilt them
     /// already, without the lock.
     fn compact(&mut self, which: Option<&str>, graphs: bool) -> Result<Response> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let began = std::time::Instant::now();
         let targets: Vec<String> = match which {
             Some(n) => {
                 self.collection(n)?;
@@ -7915,6 +7958,11 @@ impl Database {
         self.rewrote(len);
         #[cfg(not(target_arch = "wasm32"))]
         self.repoint(Some(&placed), compacting)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.compacted_to(len);
+            self.swap_held = began.elapsed();
+        }
         Ok(Response::Ok(format!(
             "compaction done, {reclaimed} bytes reclaimed"
         )))

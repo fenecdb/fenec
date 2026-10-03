@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -435,6 +435,16 @@ docker-compact:
 
 docker-down:
 	-docker rm -f fenecdb
+
+## A file under updates, compacted on its own or not: YCSB's 1 KB records,
+## a field updated at a time while a thread reads whole records, the file's
+## size, the reads' latency during and after each compact and how long its
+## swap held the write lock, a line a second. COMPACT_ARGS, e.g.
+## "--updates 5000000 --mode durable --writers 16 --auto off".
+COMPACT_ARGS ?= --records 1000000 --updates 5000000
+compact-bench:
+	$(CARGO) build --release -p fenec-core --example compaction
+	./target/release/examples/compaction $(COMPACT_ARGS)
 
 ## What `create index` and `compact` cost the readers and writers of a
 ## running database: under the write lock, then beside it.
