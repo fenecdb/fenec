@@ -122,6 +122,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends brotli
           npm install -g esbuild@0.28.2
           python3 site/build.py
+          # The playground's live highlighter is written from build.py's rules
+          # and must colour every statement as the docs do.
+          python3 site/test_highlight.py
 
       # Rust first, then the JS tests -- `cargo test` is also what builds the
       # fenec-server binary that the sync tests run against.
