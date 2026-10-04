@@ -55,6 +55,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
 make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
@@ -332,6 +333,45 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 <ms>` flushes the same way, a database's and each of a node's tenants'
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
+
+**A durable write syncs a log beside the file, not the file**
+(`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
+fsync of a file whose length changed commits the journal too: in Docker's
+VM a 300-byte append and its `fdatasync` took 356 us, the same bytes
+written into room the file already had and synced 65 -- why PostgreSQL
+fills its WAL segments first. So `FileSink`'s sync writes what the file
+took since the last one into `<file>.sync` (the whole name and `.sync`:
+with the extension replaced, `x.db` and `x.fenec` shared one, as they
+shared `.compacting` and `.beside` -- `fs::beside` names all three), 4 KB
+of header and 256 KB of entries written once at full size and never
+grown, and syncs that alone (`Tail`). The file is fsynced when an entry
+would not fit, a sync holds more than 64 KB, or the sink is new to the
+file -- whose bytes an earlier process may have left unsynced -- and the
+log then begins a generation from where the file stands. An entry is the
+file's bytes at a place, with its generation and a hash, so a cut one
+ends the log; the header names the generation, where the file stood
+synced, the file's device and inode, and a hash of the 4 KB before that
+point, so a log is applied to its own file alone -- not to one renamed
+into the place, even one holding the same bytes. `create` applies it
+before the file is read or mapped (`synclog::recover`), fsyncs the file
+and wipes the header, so a file cut below the log's end after that open
+is not written over at the next. Everything that renames a file into a
+database's place removes the log first and makes the removal durable --
+`swap_in` after syncing the file it replaces, a restore, a backup
+unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
+the file and removes it, so a node keeps none beside a closed tenant, and
+`Tenants::stats` counts it; a log that cannot be made is not tried again
+until the next open, each try being 260 KB of writes. `open_read_only`
+applies none: after a power loss, `fenec types` or a raw copy taken
+before the next open may lack the last durable writes. On macOS
+`F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
+there is no log (`ENABLED`; `fs::keep_sync_log` has a test thread keep
+one). In Docker a durable update went 624 -> 325 us p50 (`make
+roundtrip-bench`), against PostgreSQL's 378; `tests/synclog.rs` crashes
+the machine (the process forgotten, the file cut back to the log's
+start) through a full log, a sync past an entry, a torn header, a file
+renamed in, a second open and two files of one stem, and fenec-core's
+and fenec-http's tests pass on Linux, where every file keeps one.
 
 **Replication ships only what is on disk, numbered by the change counter.**
 A primary (`--replication-token`) writes through a `Tee`
@@ -736,7 +776,17 @@ library does, `--no-auto-compact` for neither): C at one thread 30.1k ->
 ahead of SQLite in every in-process cell; the buffered file stood at 3.7-4.0
 GB after D, between compacts of a file A grows by 100 MB a second. Official
 YCSB 0.17.0 against the same containers came within -14% to +2% of the
-harness (`ycsb/calibration/`).
+harness (`ycsb/calibration/`). Docker's network moves from day to day --
+PostgreSQL's C at one client was 3.34 k, 3.00 k and 3.53 k on three -- so
+the one-client server cells were measured again on 2026-10-04 with
+PostgreSQL beside them in turns, under the same run ids (`c1`-`c3`,
+`r1`-`r3`), each cell counting as its run's last line. `make
+roundtrip-bench` took the round trip apart: of a 0.29 ms read in Docker
+about 0.25 is Docker's port forwarding, the server's part 0.023 ms and
+PostgreSQL's bind and execute 0.016, so the published guess that a binary
+protocol answers sooner was not the cause; the durable gap was the fsync
+of a growing file (the sync log, above): durable A 2.24 k -> 3.27 k at one
+client against PostgreSQL's 2.60 k, even at 16.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's

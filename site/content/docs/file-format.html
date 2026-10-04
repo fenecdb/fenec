@@ -61,6 +61,21 @@ sit close together, and a small gap takes a byte.</p>
 <p>A crash in the middle of an append leaves the last record cut short, in its
 header or its body: the open loads everything before it and cuts it off the
 file, so there is no separate recovery step after a crash.</p>
+
+<p>On Linux a sync goes to <code>&lt;file&gt;.sync</code> beside the
+file: a log of fixed size holding what the file took since its last own
+fsync. An fsync of a file that grew commits ext4's journal as well, 356 us
+against 65 for bytes written where the file already reached, so a durable
+write syncs the log and the file is synced once the log is full. An open
+writes back into the file what the log holds and the file lost, before it
+reads it, then wipes the log's header; an entry carries a hash and the log
+names the file it was written for (its inode, and a hash of the bytes
+before the log's start), so an entry cut short ends it and a log beside
+another file -- one a restore or an import renamed into the place -- is
+ignored. A clean close syncs the file and removes the log. A tool that only
+reads the file (<code>fenec types</code>) applies none: after a power loss,
+open the database before you copy or inspect it. The file's format is the
+same with it or without.</p>
 </details>
 
 <h2>The graph record</h2>

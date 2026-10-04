@@ -15,6 +15,11 @@ fenec-core = { workspace = true, features = ["std-fs", "indexes"] }
 fenec-ql.workspace = true
 fenec-abi.workspace = true
 
+[features]
+# `timing`: where a request's time goes, phase by phase, at `GET /_timing`
+# (`src/timing.rs`); off, none of it is compiled.
+timing = []
+
 [[test]]
 name = "all"
 path = "tests/all.rs"

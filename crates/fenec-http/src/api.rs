@@ -890,7 +890,10 @@ pub fn parse_query(body: &str) -> Result<(Arc<Statement>, Vec<Value>)> {
         Some(Value::List(items)) => items.clone(),
         Some(other) => vec![other.clone()],
     };
-    Ok((parsed(&sql)?, params))
+    crate::timing::lap(crate::timing::Phase::Json);
+    let stmt = parsed(&sql)?;
+    crate::timing::lap(crate::timing::Phase::Cache);
+    Ok((stmt, params))
 }
 
 /// The statement and parameters of a `POST /query` body as a json field
@@ -1084,7 +1087,7 @@ fn result_json(out: &mut String, resp: &Response2) {
 }
 
 /// `{"ok":N,"results":[...]}`
-pub fn render_batch(results: &[Response2], version: &str) -> Response {
+pub fn render_batch(results: &[Response2], version: &'static str) -> Response {
     let mut out = format!("{{\"ok\":{},\"results\":[", results.len());
     for (i, r) in results.iter().enumerate() {
         if i > 0 {
@@ -1093,28 +1096,33 @@ pub fn render_batch(results: &[Response2], version: &str) -> Response {
         result_json(&mut out, r);
     }
     out.push_str("]}");
-    Response::json(200, out).header("X-Fenecdb-Version", version)
+    Response::json(200, out).versioned(version)
 }
 
 /// A batch that stopped: we **have to say** what was applied -- nothing for
 /// a block, the statements before the error otherwise. A silent error would
 /// permanently separate the client's optimistic local state from the
 /// server.
-pub fn render_batch_error(e: &Error, completed: usize, version: &str) -> Response {
+pub fn render_batch_error(e: &Error, completed: usize, version: &'static str) -> Response {
     render_batch_stop(status_of(e), &e.to_string(), completed, version)
 }
 
 /// A batch stopped at statement `completed` with `status` and `why`: an
 /// error, or a write the data ceiling refused.
-pub fn render_batch_stop(status: u16, why: &str, completed: usize, version: &str) -> Response {
+pub fn render_batch_stop(
+    status: u16,
+    why: &str,
+    completed: usize,
+    version: &'static str,
+) -> Response {
     let mut out = String::from("{\"error\":");
     json::escape_into(&mut out, why);
     out.push_str(&format!(",\"completed\":{completed}}}"));
-    Response::json(status, out).header("X-Fenecdb-Version", version)
+    Response::json(status, out).versioned(version)
 }
 
 /// The JSON form of a raw query response: the shape follows the statement.
-pub fn render_any(resp: &Response2, version: &str) -> Response {
+pub fn render_any(resp: &Response2, version: &'static str) -> Response {
     match resp {
         Response2::Rows(rs) => Response::json(200, rows_json(rs)),
         Response2::Affected(n) => Response::json(200, format!("{{\"affected\":{n}}}")),
@@ -1126,12 +1134,12 @@ pub fn render_any(resp: &Response2, version: &str) -> Response {
         }
         Response2::Schemas(list) => Response::json(200, schemas_json(list)),
     }
-    .header("X-Fenecdb-Version", version)
+    .versioned(version)
 }
 
 // --------------------------------------------------------------- response
 
-pub fn render(resp: &Response2, shape: &Shape, version: &str) -> Response {
+pub fn render(resp: &Response2, shape: &Shape, version: &'static str) -> Response {
     match (shape, resp) {
         (Shape::Rows, Response2::Rows(rs)) => Response::json(200, rows_json(rs)),
         (Shape::Count, Response2::Rows(rs)) => {
@@ -1176,7 +1184,22 @@ pub use fenec_core::query::Response as Response2;
 /// set, so they go beside the rows rather than into one, and a query that
 /// asks none keeps the bare array every client reads.
 pub fn rows_json(rs: &ResultSet) -> String {
-    let mut out = String::new();
+    // Room for the rows as the first one goes: grown from nothing, the
+    // answer to a read by id of a 1 KB record was copied eight times.
+    let first: usize = rs.rows.first().map_or(0, |r| {
+        r.values
+            .iter()
+            .zip(&rs.columns)
+            .map(|(v, c)| {
+                c.len()
+                    + match v {
+                        Value::Text(s) => s.len() + 8,
+                        _ => 24,
+                    }
+            })
+            .sum()
+    });
+    let mut out = String::with_capacity((first * rs.rows.len()).min(1 << 20) + 16);
     if rs.facets.is_empty() {
         json::rows_array_into(&mut out, rs);
         return out;

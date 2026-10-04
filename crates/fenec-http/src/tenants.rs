@@ -815,7 +815,12 @@ impl Tenants {
                 f.write_all(image)?;
                 f.sync_all()
             });
-            if let Err(e) = written.and_then(|_| std::fs::rename(&tmp, &path)) {
+            // A log a tenant of this name left (`fenec_core::fs`) is not
+            // this image's: gone, durably, before the rename.
+            let written = written
+                .and_then(|_| fenec_core::fs::forget_sync_log(&path))
+                .and_then(|_| std::fs::rename(&tmp, &path));
+            if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(Refused(
                     500,
@@ -845,6 +850,10 @@ impl Tenants {
             std::fs::remove_file(&path)
                 .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
             let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
+            // The sync log beside it (`fenec_core::fs`): a log names the
+            // file it was written for, and is kept from a tenant made
+            // again under the name that way too.
+            let _ = fenec_core::fs::forget_sync_log(&path);
             let _ = std::fs::remove_file(self.follows_path(name));
             Ok(())
         })
@@ -883,9 +892,12 @@ impl Tenants {
             .map(|t| t.read().unlinked())
             .sum();
         let names = self.names();
+        // Each file and the sync log beside it, where one is kept.
         let disk = names
             .iter()
-            .filter_map(|n| std::fs::metadata(self.path(n)).ok())
+            .map(|n| self.path(n))
+            .flat_map(|p| [fenec_core::fs::beside(&p, "sync"), p])
+            .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
         Stats {

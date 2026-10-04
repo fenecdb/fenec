@@ -48,8 +48,11 @@ commits each batch once the loop comes back for the next:
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
+import select
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -107,7 +110,12 @@ class Changes(NamedTuple):
 
 
 class Client:
-    """fenec-server's HTTP endpoint, one statement a request."""
+    """fenec-server's HTTP endpoint, one statement a request.
+
+    A statement goes over a connection kept alive, one a thread: through
+    `urlopen`, which opens one a request, a read by id took 152 us against
+    57 over the one connection, the server starting a thread for each.
+    """
 
     def __init__(
         self,
@@ -115,12 +123,20 @@ class Client:
         token: str | None = None,
         timeout: float = 30.0,
     ):
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            raise ValueError(f"not an http(s) URL: {url!r}")
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
         # The change the last write left the database at (`Fenec-Seq`): a
         # read on a replica passed it as `after` waits for that write.
         self.seq: int | None = None
+        self._host = parts.hostname or "127.0.0.1"
+        self._port = parts.port or (443 if parts.scheme == "https" else 80)
+        self._tls = parts.scheme == "https"
+        self._base = parts.path.rstrip("/")
+        self._local = threading.local()
 
     def collection(self, name: str) -> Query:
         """The query builder over collection `name`: chain `select`, `where`,
@@ -231,28 +247,60 @@ class Client:
     def _post(
         self, path: str, body: bytes, content_type: str, after: int | None = None, accept: int = 0
     ) -> Any:
-        req = urllib.request.Request(self.url + path, data=body, method="POST")
-        req.add_header("Content-Type", content_type)
+        headers = {"Content-Type": content_type}
         if self.token:
-            req.add_header("Authorization", f"Bearer {self.token}")
+            headers["Authorization"] = f"Bearer {self.token}"
         if after is not None:
-            req.add_header("Fenec-After", str(after))
+            headers["Fenec-After"] = str(after)
+        status, seq, raw = self._send("POST", self._base + path, body, headers)
+        if seq is not None and 200 <= status < 300:
+            self.seq = int(seq)
+        # An answer that is no error: a schema's refusals (409).
+        if status == accept:
+            return json.loads(raw)
+        return _answer(status, raw)
+
+    def _send(self, method: str, path: str, body: bytes, headers: dict) -> tuple:
+        """A request over this thread's connection: its status, `Fenec-Seq`
+        and body. A kept connection the server closed while it was idle is
+        found so before the request goes -- its socket reads as ready, the
+        end of the stream -- and a new one is opened in its place. Nothing
+        is sent again once sent: a write the server read and answered on a
+        connection that then broke would run twice."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None and _closed(conn):
+            conn.close()
+            conn = None
+        if conn is None:
+            conn = self._connect()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                seq = resp.headers.get("Fenec-Seq")
-                if seq is not None:
-                    self.seq = int(seq)
-                return json.load(resp)
-        except urllib.error.HTTPError as e:
-            raw = e.read()
-            # An answer that is no error: a schema's refusals (409).
-            if e.code == accept:
-                return json.loads(raw)
-            try:
-                message = json.loads(raw).get("error", raw.decode(errors="replace"))
-            except (ValueError, AttributeError):
-                message = raw.decode(errors="replace")
-            raise FenecError(message, e.code) from None
+            conn.request(method, path, body, headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+        except BaseException:
+            conn.close()
+            self._local.conn = None
+            raise
+        if resp.will_close:
+            conn.close()
+            self._local.conn = None
+        else:
+            self._local.conn = conn
+        return resp.status, resp.getheader("Fenec-Seq"), raw
+
+    def _connect(self) -> http.client.HTTPConnection:
+        if self._tls:
+            return http.client.HTTPSConnection(
+                self._host, self._port, timeout=self.timeout, context=ssl.create_default_context()
+            )
+        return http.client.HTTPConnection(self._host, self._port, timeout=self.timeout)
+
+    def close(self) -> None:
+        """Closes this thread's connection; the next request opens another."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
 
 
 def _seg(name: str) -> str:
@@ -268,6 +316,20 @@ def _faceted(answer: Any) -> Any:
     if isinstance(answer, dict) and "facets" in answer and isinstance(answer.get("rows"), list):
         return _rows(answer)
     return answer
+
+
+def _closed(conn: http.client.HTTPConnection) -> bool:
+    """Whether a kept connection can no longer take a request: the server
+    closed it (its socket reads as ready, at the end of the stream) or sent
+    what no request asked for. Between requests nothing is due on it."""
+    sock = conn.sock
+    if sock is None:
+        return True
+    try:
+        ready, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(ready)
 
 
 def _answer(status: int, raw: bytes) -> Any:

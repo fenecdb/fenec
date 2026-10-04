@@ -57,6 +57,7 @@ pub mod sse;
 pub mod statements;
 pub mod sweep;
 pub mod tenants;
+pub mod timing;
 
 use access::Who;
 use fenec_core::prelude::*;
@@ -435,6 +436,14 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
     };
 
     loop {
+        // With the `timing` feature the clock starts once the request's
+        // first bytes are in, not while the connection waits for them.
+        #[cfg(feature = "timing")]
+        {
+            use std::io::BufRead as _;
+            let _ = reader.fill_buf();
+            timing::begin();
+        }
         let mut req = match http::read_request(&mut reader, ceiling) {
             Ok(Some(req)) => req,
             Ok(None) => return,
@@ -445,6 +454,19 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         };
         let keep_alive = req.keep_alive;
         let head_only = req.method == Method::Head;
+        timing::lap(timing::Phase::Http);
+        #[cfg(feature = "timing")]
+        if req.segments() == ["_timing"] {
+            timing::end();
+            if timing::handle(&req)
+                .write(&mut out, keep_alive, head_only)
+                .is_err()
+                || !keep_alive
+            {
+                return;
+            }
+            continue;
+        }
 
         // `fenec-server --ping` and a container's health check: answered
         // with no token and no lock, before any routing. A probe that ran a
@@ -617,6 +639,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
             }
             continue;
         }
+        timing::lap(timing::Phase::Route);
         let started = std::time::Instant::now();
         let resp = match &tenant {
             None => handle(db, cfg, &req),
@@ -634,9 +657,12 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         drop(tenant);
         audit::http(&req, resp.status, peer);
         let resp = cors(resp, cfg);
+        timing::lap(timing::Phase::Books);
         if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
             return;
         }
+        timing::lap(timing::Phase::Write);
+        timing::end();
     }
 }
 
@@ -1046,9 +1072,11 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(b) => b,
         Err(_) => return Response::error(400, "the body is not UTF-8"),
     };
-    let (stmt, params) = match api::parse_query(body)
-        .and_then(|(stmt, params)| api::exactly(db, body, stmt, params))
-    {
+    let (stmt, params) = match api::parse_query(body).and_then(|(stmt, params)| {
+        let exact = api::exactly(db, body, stmt, params);
+        timing::lap(timing::Phase::Exactly);
+        exact
+    }) {
         Ok(v) => v,
         Err(e) => return error_response(&e),
     };
@@ -1094,7 +1122,9 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
     let result = if stmt.is_read_only() {
-        held::read(db).query(&stmt, &params)
+        let r = held::read(db).query(&stmt, &params);
+        timing::lap(timing::Phase::Execute);
+        r
     } else if let Some(built) = Database::maintain(db, &stmt) {
         // `create index` and `compact` are built beside the database, with
         // no lock held; the index's record then waits for the disk as any
@@ -1126,19 +1156,23 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
             Err(_) => None,
         };
         drop(guard);
+        timing::lap(timing::Phase::Execute);
         if let Err(e) = await_durable(db, durability) {
             return error_response(&e);
         }
+        timing::lap(timing::Phase::Durable);
         r
     };
-    match result {
+    let resp = match result {
         Ok(resp) => {
             let resp = visible(who, resp);
             statements::rows(counted(&resp));
             with_seq(api::render_any(&resp, fenec_core::VERSION), seq)
         }
         Err(e) => error_response(&e),
-    }
+    };
+    timing::lap(timing::Phase::Render);
+    resp
 }
 
 /// A keyed statement of `/query`: under the write lock, in a block that

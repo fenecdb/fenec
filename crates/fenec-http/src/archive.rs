@@ -567,6 +567,9 @@ impl Archive {
             .and_then(|_| db.checkpoint())
             .map_err(|e| io::Error::other(e.to_string()))?;
         drop(db);
+        // A log left beside `out` by a database there before would be
+        // another file's (`fenec_core::fs`): gone before the rename.
+        fenec_core::fs::forget_sync_log(out)?;
         fs::rename(&tmp, out)?;
         Ok(r)
     }
@@ -962,6 +965,7 @@ pub fn backup(upstream: &Upstream, out: &Path, key: Option<&Key>) -> io::Result<
         let mut f = File::create(&tmp)?;
         f.write_all(&bytes)?;
         f.sync_all()?;
+        fenec_core::fs::forget_sync_log(out)?;
         fs::rename(&tmp, out)?;
     }
     Ok(seq)
@@ -979,6 +983,7 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
         .map_err(|e| corrupt(format!("{}: {e}", sealed.display())))?
         .change_seq();
     File::open(&tmp)?.sync_all()?;
+    fenec_core::fs::forget_sync_log(out)?;
     fs::rename(&tmp, out)?;
     Ok(seq)
 }

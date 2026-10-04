@@ -255,6 +255,7 @@ pub(crate) fn handle(cfg: &Config, req: &Request, source: Source) -> Response {
         content_type: "text/plain; version=0.0.4; charset=utf-8",
         extra: Vec::new(),
         seq: None,
+        version: None,
     }
 }
 

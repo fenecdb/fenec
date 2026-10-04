@@ -58,6 +58,182 @@ struct Disk {
     /// A failed write or fsync. The kernel may have dropped the pages it
     /// could not write, so nothing is reported durable after one.
     failed: Option<crate::error::Error>,
+    /// What a sync writes into the sync log rather than fsync the file.
+    #[cfg(unix)]
+    tail: Tail,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static KEEP_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Has the files this thread opens keep a sync log ([`crate::synclog`])
+/// where the platform would not -- macOS, whose `F_FULLFSYNC` costs the
+/// same either way -- so that a test there goes through it.
+#[doc(hidden)]
+#[cfg(unix)]
+pub fn keep_sync_log(on: bool) {
+    KEEP_LOG.with(|k| k.set(on));
+}
+
+/// The bytes written since the last sync, which the next one puts into the
+/// sync log ([`crate::synclog`]) and syncs there, rather than fsync the
+/// file: on ext4 an fsync of a file that grew commits the journal, 356 us
+/// in Docker's VM where the log's takes 65.
+#[cfg(unix)]
+struct Tail {
+    /// Whether this sink keeps a log (`synclog::ENABLED`, or a test's).
+    keeps: bool,
+    log_path: PathBuf,
+    /// Opened at the first sync that begins a generation; `None` where it
+    /// could not be made, and every sync then fsyncs the file.
+    log: Option<crate::synclog::SyncLog>,
+    /// The log could not be made: not tried again until the next open,
+    /// since each try writes its 260 KB -- on a full disk, at every sync.
+    unmade: bool,
+    /// The file's length: where the next byte written goes.
+    end: u64,
+    /// The bytes written since the last sync and where they start, while
+    /// they fit an entry.
+    since: Vec<u8>,
+    since_at: u64,
+    /// The next sync fsyncs the file itself and begins a generation: what
+    /// was written since outgrew an entry, or the file is new to the sink
+    /// -- whose bytes an earlier process may have left unsynced.
+    direct: bool,
+}
+
+#[cfg(unix)]
+impl Tail {
+    fn new(path: &Path, end: u64) -> Tail {
+        Tail {
+            keeps: crate::synclog::ENABLED || KEEP_LOG.with(|k| k.get()),
+            log_path: crate::synclog::path_for(path),
+            log: None,
+            unmade: false,
+            end,
+            since: Vec::new(),
+            since_at: end,
+            direct: true,
+        }
+    }
+
+    /// `bytes` reached the file.
+    fn wrote(&mut self, bytes: &[u8]) {
+        self.end += bytes.len() as u64;
+        if !self.keeps || self.direct {
+            return;
+        }
+        if self.since.len() + bytes.len() > crate::synclog::ENTRY_MAX {
+            self.direct = true;
+            self.since = Vec::new();
+        } else {
+            self.since.extend_from_slice(bytes);
+        }
+    }
+
+    /// The file starts again at `end`, synced: a cut, a rewrite.
+    fn reset(&mut self, end: u64) {
+        self.end = end;
+        self.since.clear();
+        self.since_at = end;
+        self.direct = true;
+    }
+
+    /// Makes what was written since the last sync durable: through the log
+    /// while it fits there, else by an fsync of the file, after which the
+    /// log begins a generation from where the file now stands.
+    fn sync(&mut self, file: &File) -> std::io::Result<()> {
+        if self.keeps && !self.direct {
+            if self.since.is_empty() {
+                return Ok(());
+            }
+            if let Some(log) = self
+                .log
+                .as_mut()
+                .filter(|l| l.takes(self.since_at, self.since.len()))
+            {
+                log.append(self.since_at, &self.since)?;
+                self.since.clear();
+                self.since_at = self.end;
+                return Ok(());
+            }
+        }
+        file.sync_data()?;
+        self.since.clear();
+        self.since_at = self.end;
+        if self.keeps {
+            if self.log.is_none() && !self.unmade {
+                self.log = crate::synclog::SyncLog::open(&self.log_path).ok();
+                self.unmade = self.log.is_none();
+            }
+            if let Some(log) = &mut self.log {
+                log.begin(file, self.end)?;
+                self.direct = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets the log go before another file is renamed into this one's
+    /// place: the file is synced first, so that nothing is durable only in
+    /// the log, and the removal is made durable before the rename, so that
+    /// no crash leaves the log beside the file that replaced this one.
+    fn forget(&mut self, file: &File) -> std::io::Result<()> {
+        if self.log.is_none() && !self.log_path.is_file() {
+            return Ok(());
+        }
+        file.sync_data()?;
+        self.log = None;
+        remove_synced(&self.log_path)
+    }
+
+    /// The database closes: the file is synced and its log removed, so a
+    /// node keeps no 260 KB beside each tenant that has closed. A crash
+    /// leaves it, and the next open applies it.
+    fn close(&mut self, file: &File) {
+        let kept = self.log.take().is_some() || (self.keeps && self.log_path.is_file());
+        if kept && file.sync_data().is_ok() {
+            let _ = std::fs::remove_file(&self.log_path);
+        }
+    }
+}
+
+/// `path` with `.suffix` after its whole name: the files a database keeps
+/// beside its own. Its extension replaced (`with_extension`), `x.db` and
+/// `x.fenec` would share them.
+pub fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Removes the file at `path`, if there is one, and makes its removal
+/// durable.
+#[cfg(unix)]
+fn remove_synced(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_dir(path).map_err(|e| std::io::Error::other(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Removes the sync log beside `path` ([`crate::synclog`]), durably: what
+/// renames another file into a database's place -- a restore, a backup
+/// unsealed, a tenant's import -- does it first, so that the log of the
+/// file that was there is not applied to the new one. Nothing where the
+/// platform keeps no logs.
+pub fn forget_sync_log(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return remove_synced(&crate::synclog::path_for(path));
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -76,6 +252,8 @@ impl Disk {
             return Err(self.failed.clone().unwrap());
         }
         self.written += bytes.len() as u64;
+        #[cfg(unix)]
+        self.tail.wrote(&bytes);
         Ok(())
     }
 
@@ -88,6 +266,8 @@ impl Disk {
             return Err(self.failed.clone().unwrap());
         }
         self.written += bytes.len() as u64;
+        #[cfg(unix)]
+        self.tail.wrote(bytes);
         Ok(())
     }
 
@@ -100,7 +280,11 @@ impl Disk {
             return Ok(());
         }
         self.write_pending(pending)?;
-        if let Err(e) = self.file.sync_data() {
+        #[cfg(unix)]
+        let synced = self.tail.sync(&self.file);
+        #[cfg(not(unix))]
+        let synced = self.file.sync_data();
+        if let Err(e) = synced {
             self.failed = Some(e.into());
             return Err(self.failed.clone().unwrap());
         }
@@ -120,6 +304,8 @@ impl FileSink {
     /// sink failed, so nothing waiting is told its write is durable.
     fn swap_in(&self, disk: &mut Disk, from: &Path) -> Result<()> {
         let swapped = (|| -> Result<File> {
+            #[cfg(unix)]
+            disk.tail.forget(&disk.file)?;
             std::fs::rename(from, &self.path)?;
             sync_dir(&self.path)?;
             let mut f = OpenOptions::new().read(true).write(true).open(&self.path)?;
@@ -131,6 +317,8 @@ impl FileSink {
             Ok(f) => {
                 // Everything appended so far is in the image, and the image
                 // is on disk.
+                #[cfg(unix)]
+                disk.tail.reset(f.metadata().map_or(0, |m| m.len()));
                 disk.file = f;
                 disk.written = self.appended;
                 disk.synced = self.appended;
@@ -163,15 +351,25 @@ impl FileSink {
             .truncate(false)
             .open(&path)?;
         if file.metadata()?.len() == 0 {
+            // A log left beside a file of that name is not this one's.
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
             file.write_all(&MAGIC[..])?;
             file.flush()?;
             file.seek(SeekFrom::Start(0))?;
+        } else {
+            // What the last process made durable through the sync log and
+            // the machine lost from the file goes back before it is read.
+            #[cfg(unix)]
+            crate::synclog::recover(&file, &crate::synclog::path_for(&path))?;
         }
         Ok((file, path))
     }
 
     /// A sink appending to `file`, which is positioned at its end.
     fn over(file: File, path: PathBuf) -> FileSink {
+        #[cfg(unix)]
+        let end = file.metadata().map_or(0, |m| m.len());
         FileSink {
             pending: Arc::new(Mutex::new(Vec::new())),
             appended: 0,
@@ -182,6 +380,8 @@ impl FileSink {
                 #[cfg(test)]
                 fsyncs: 0,
                 failed: None,
+                #[cfg(unix)]
+                tail: Tail::new(&path, end),
             })),
             path,
             #[cfg(all(unix, target_pointer_width = "64"))]
@@ -202,6 +402,8 @@ impl FileSink {
         disk.file.set_len(len as u64)?;
         disk.file.sync_data()?;
         disk.file.seek(SeekFrom::End(0))?;
+        #[cfg(unix)]
+        disk.tail.reset(len as u64);
         Ok(())
     }
 }
@@ -253,7 +455,7 @@ impl Sink for FileSink {
         if let Some(e) = &disk.failed {
             return Err(e.clone());
         }
-        let tmp = self.path.with_extension("fenec.compacting");
+        let tmp = beside(&self.path, "compacting");
         let written = (|| -> Result<()> {
             let mut out = FileImage {
                 w: BufWriter::with_capacity(WRITE_BUF, File::create(&tmp)?),
@@ -279,7 +481,7 @@ impl Sink for FileSink {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn side(&self) -> Option<PathBuf> {
-        Some(self.path.with_extension("fenec.beside"))
+        Some(beside(&self.path, "beside"))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -397,7 +599,14 @@ impl ImageOut for FileImage {
 impl Drop for FileSink {
     fn drop(&mut self) {
         // Do not let buffered leftovers vanish silently.
-        let _ = lock(&self.disk).write_pending(&self.pending);
+        let mut disk = lock(&self.disk);
+        let written = disk.write_pending(&self.pending);
+        #[cfg(unix)]
+        if written.is_ok() && disk.failed.is_none() {
+            let Disk { tail, file, .. } = &mut *disk;
+            tail.close(file);
+        }
+        let _ = written;
     }
 }
 
@@ -757,6 +966,13 @@ fn open_mapped_into(
 /// with: from outside, a record the server is in the middle of appending
 /// looks torn, and cutting it there destroyed that write, and the file with
 /// it once the server's next append landed past the cut.
+///
+/// Nor is the sync log beside it applied ([`crate::synclog`]): writing it
+/// back is a write. While the process that keeps the log runs, or after it
+/// ended on its own, the file holds those writes already; after the machine
+/// went down, they are in the log until the file is opened to be written
+/// -- so `fenec types`, or a raw copy of the file, taken then and before a
+/// server or the library opens it again, may lack the last durable writes.
 pub fn open_read_only(path: impl AsRef<Path>) -> Result<Database> {
     let mut db = Database::new();
     #[cfg(all(unix, target_pointer_width = "64"))]
@@ -836,6 +1052,47 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
     }
 
+    /// With a sync log, durabilities handed out together share one entry
+    /// as they share an fsync; and a log that cannot be written fails the
+    /// sink as a file that cannot be synced does -- nothing after it is
+    /// told it is durable.
+    #[cfg(unix)]
+    #[test]
+    fn durabilities_share_a_log_entry_and_a_failed_one_stops_the_sink() {
+        let dir = std::env::temp_dir().join(format!("fenecdb-fs-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("share.fenec");
+        keep_sync_log(true);
+        let (mut sink, _) = FileSink::open(&path).unwrap();
+        keep_sync_log(false);
+        let log = crate::synclog::path_for(&path);
+
+        sink.append(b"zero ").unwrap();
+        sink.sync().unwrap();
+        sink.append(b"one ").unwrap();
+        sink.sync().unwrap();
+        assert_eq!(crate::synclog::SyncLog::entries(&log), 1);
+        sink.append(b"two ").unwrap();
+        let first = sink.flush().unwrap().unwrap();
+        sink.append(b"three ").unwrap();
+        let second = sink.flush().unwrap().unwrap();
+        second().unwrap();
+        first().unwrap();
+        assert_eq!(crate::synclog::SyncLog::entries(&log), 2);
+        assert_eq!(lock(&sink.disk).fsyncs, 3);
+
+        if let Some(l) = lock(&sink.disk).tail.log.as_mut() {
+            l.break_writes(&log);
+        }
+        sink.append(b"four ").unwrap();
+        assert!(sink.sync().is_err());
+        sink.append(b"five ").unwrap();
+        assert!(sink.sync().is_err(), "the sink stays failed");
+        drop(sink);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A record appended for its durability waits for it, however far past
     /// the buffer it goes, and the durability puts it on disk in its place;
     /// a plain append that far past is written there and then.
@@ -888,7 +1145,7 @@ mod tests {
         assert!(err.is_err());
         durable().unwrap();
         assert!(std::fs::read(&path).unwrap().ends_with(b"kept"));
-        assert!(!path.with_extension("fenec.compacting").exists());
+        assert!(!beside(&path, "compacting").exists());
         // The sink is not failed: the next append and sync go on.
         sink.append(b" more").unwrap();
         sink.sync().unwrap();

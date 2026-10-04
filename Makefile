@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -241,6 +241,19 @@ counters-bench:
 requests-bench:
 	$(CARGO) build --release -p fenec-server
 	$(CARGO) run --release -p fenec-bench --bin requests
+
+## One client's round trip taken apart (crates/fenec-bench/src/bin/roundtrip.rs):
+## YCSB's read by key and update of a field against fenec-server natively and
+## in Docker -- built with `--features timing`, whose GET /_timing has each
+## phase inside it -- and PostgreSQL 17 in Docker, its bind and execute
+## logged. RT_ARGS: --systems server,server-docker,pg --modes always,250
+## --records 100000 --ops 20000 --strace (the servers' system calls an op).
+roundtrip-bench:
+	$(CARGO) build --release -p fenec-server --features timing --target-dir target/timing
+	$(CARGO) build --release -p fenec-bench --bin roundtrip
+	docker build --build-arg FEATURES=timing -t fenecdb-timing .
+	printf 'FROM alpine:3\nRUN apk add --no-cache strace\n' | docker build -t fenec-strace -
+	./target/release/roundtrip $(RT_ARGS)
 
 ## What loading 100 000 rows costs each way a client can send them: in
 ## process, and over HTTP as a REST array, a /batch and a /query put of
