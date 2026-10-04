@@ -23,6 +23,9 @@ jobs:
 
       - run: cargo fmt --all --check
 
+      - name: AGENTS.md is CLAUDE.md under its own title
+        run: python3 tools/agents_md.py --check
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

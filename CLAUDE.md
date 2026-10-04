@@ -8,6 +8,9 @@ speaks HTTP; every language reaches it that way, Python, JavaScript, Go and
 .NET through official clients. The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
+`AGENTS.md` is this file for other agents, the same text under its own title
+and first line: `make agents-md` writes it from `CLAUDE.md`
+(`tools/agents_md.py`), and CI fails when the two differ, so edit `CLAUDE.md`.
 
 ## Commands
 
@@ -29,6 +32,7 @@ make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
 make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
+make agents-md     # AGENTS.md written again from this file (CI fails when they differ)
 make serve         # wasm + python3 http.server -> http://localhost:8787
 make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
