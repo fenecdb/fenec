@@ -24,6 +24,9 @@ pub enum Tok {
     Colon,
     At,
     Star,
+    Plus,
+    Minus,
+    Slash,
     Lt,
     Le,
     Gt,
@@ -57,6 +60,9 @@ impl Tok {
             Tok::Colon => "`:`".into(),
             Tok::At => "`@`".into(),
             Tok::Star => "`*`".into(),
+            Tok::Plus => "`+`".into(),
+            Tok::Minus => "`-`".into(),
+            Tok::Slash => "`/`".into(),
             Tok::Lt => "`<`".into(),
             Tok::Le => "`<=`".into(),
             Tok::Gt => "`>`".into(),
@@ -73,6 +79,27 @@ impl Tok {
 pub struct Token {
     pub tok: Tok,
     pub pos: usize,
+}
+
+/// Whether a `-` after `last` takes something away (`n - 1`, `n-1`)
+/// rather than starting a negative number (`= -1`, `[1, -2]`): it does
+/// after what ends a value -- a name, a literal, a parameter, a closing
+/// bracket. After a keyword, which is a name too, `-1` is a `-` and a `1`,
+/// which the parser folds back into the number (`where x > 0 and -1 < y`).
+fn subtracts(last: Option<&Token>) -> bool {
+    matches!(
+        last.map(|t| &t.tok),
+        Some(
+            Tok::Ident(_)
+                | Tok::Str(_)
+                | Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::Param(_)
+                | Tok::Vector(_)
+                | Tok::RParen
+                | Tok::RBracket
+        )
+    )
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
@@ -293,6 +320,18 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
             '~' => {
                 i += 1;
                 Tok::Tilde
+            }
+            '+' => {
+                i += 1;
+                Tok::Plus
+            }
+            '/' => {
+                i += 1;
+                Tok::Slash
+            }
+            '-' if !digit_at(i + 1) || subtracts(out.last()) => {
+                i += 1;
+                Tok::Minus
             }
             ';' => {
                 i += 1;
@@ -583,6 +622,18 @@ mod tests {
                 '~' => {
                     i += 1;
                     Tok::Tilde
+                }
+                '+' => {
+                    i += 1;
+                    Tok::Plus
+                }
+                '/' => {
+                    i += 1;
+                    Tok::Slash
+                }
+                '-' if !(i + 1 < b.len() && b[i + 1].is_ascii_digit()) || subtracts(out.last()) => {
+                    i += 1;
+                    Tok::Minus
                 }
                 ';' => {
                     i += 1;

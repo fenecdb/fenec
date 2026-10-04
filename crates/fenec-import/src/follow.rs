@@ -397,6 +397,7 @@ fn write_marker(
         collection: MARKER.to_string(),
         docs: vec![doc],
         insert: false,
+        if_absent: false,
     })?;
     db.sync()?;
     let marker = read_marker(db, collection)?;
@@ -1071,6 +1072,7 @@ impl<'a> Mirror<'a> {
                 let ctx = EvalCtx {
                     params: &[],
                     registry: &self.registry,
+                    clock: None,
                 };
                 load::keep(f, &doc, &ctx, self.rows)?
             }
@@ -1208,6 +1210,7 @@ impl<'a> Mirror<'a> {
                         collection: collection.clone(),
                         docs,
                         insert: false,
+                        if_absent: false,
                     }
                 }
                 Op::Delete(_) => {

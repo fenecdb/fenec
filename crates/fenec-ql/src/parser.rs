@@ -21,7 +21,9 @@
 //! get    <name> select [<key>,] count(*) | sum(f) | avg(f) | min(f) | max(f), ...
 //!            [where <expr>] [group <key> [order <column> [desc]] [limit N] [offset N]]
 //! select a, b from <name> ...            -- the classic SQL order works too
-//! set    <name> { k: v, ... } [where <expr>]
+//! put    <name> { ... } if absent         -- a document whose id or @unique value is held is passed over
+//! set    <name> { k: v, ... } [where <expr>] -- v may read the row: {n: n + 1, at: now()}
+//! <expr> + - * / <expr>                  -- numbers, or a timestamp and milliseconds
 //! del    <name> [where <expr>]
 //! collections | describe <name> | compact [<name>]
 //! ```
@@ -796,10 +798,17 @@ impl Parser {
         if docs.is_empty() {
             return self.err("put expects at least one document");
         }
+        // `if absent`: a document whose id or `@unique` value is held is
+        // passed over, and the answer counts what was written.
+        let if_absent = self.eat_kw("if");
+        if if_absent {
+            self.expect_kw("absent")?;
+        }
         Ok(Statement::Put {
             collection,
             docs,
-            insert,
+            insert: insert || if_absent,
+            if_absent,
         })
     }
 
@@ -1289,7 +1298,7 @@ impl Parser {
     // or      := and ( "or" and )*
     // and     := not ( "and" not )*
     // not     := "not" not | cmp
-    // cmp     := primary ( op primary )?
+    // cmp     := arith ( op arith )?   (arith below)
     // primary := literal | ident | call | "(" expr ")" | list
 
     /// Errors when the depth counter exceeds `MAX_EXPR_DEPTH`.
@@ -1370,7 +1379,7 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self) -> Result<Expr> {
-        let left = self.primary()?;
+        let left = self.arith()?;
 
         let op = match self.peek() {
             Tok::Eq => Some(CmpOp::Eq),
@@ -1383,17 +1392,17 @@ impl Parser {
         };
         if let Some(op) = op {
             self.next();
-            let right = self.primary()?;
+            let right = self.arith()?;
             return Ok(Expr::Cmp(op, Box::new(left), Box::new(right)));
         }
         if matches!(self.peek(), Tok::Tilde) {
             self.next();
-            let right = self.primary()?;
+            let right = self.arith()?;
             return Ok(Expr::Like(Box::new(left), Box::new(right)));
         }
         if self.peek_kw("has") {
             self.next();
-            let right = self.primary()?;
+            let right = self.arith()?;
             return Ok(Expr::Has(Box::new(left), Box::new(right)));
         }
         if self.peek_kw("in") {
@@ -1424,6 +1433,75 @@ impl Parser {
             return Ok(if negated { Expr::Not(Box::new(e)) } else { e });
         }
         Ok(left)
+    }
+
+    // arith   := term ( ("+" | "-") term )*
+    // term    := operand ( ("*" | "/") operand )*
+    // operand := "-"* primary
+    //
+    // One frame for both levels, by precedence climbing over a pending sum,
+    // rather than a function a level: depth is stack depth (see
+    // `MAX_EXPR_DEPTH`), and each frame more a level of parentheses was
+    // more stack for the same 512 levels. Every operator counts as a level,
+    // as `or` does, since evaluation recurses down the tree it makes.
+
+    /// `n + 1`, `price * (1 - $1)`: the operands a comparison takes, or a
+    /// value in a `set`. Without an operator, the operand alone.
+    fn arith(&mut self) -> Result<Expr> {
+        let mark = self.depth;
+        let out = self.arith_level(false);
+        self.depth = mark;
+        out
+    }
+
+    /// A sum of products (`product` false), or a product of operands.
+    fn arith_level(&mut self, product: bool) -> Result<Expr> {
+        let mut left = match product {
+            true => self.operand()?,
+            false => self.arith_level(true)?,
+        };
+        loop {
+            let op = match (self.peek(), product) {
+                (Tok::Plus, false) => ArithOp::Add,
+                (Tok::Minus, false) => ArithOp::Sub,
+                (Tok::Star, true) => ArithOp::Mul,
+                (Tok::Slash, true) => ArithOp::Div,
+                _ => return Ok(left),
+            };
+            self.next();
+            self.deepen()?;
+            let right = match product {
+                true => self.operand()?,
+                false => self.arith_level(true)?,
+            };
+            left = Expr::Arith(op, Box::new(left), Box::new(right));
+        }
+    }
+
+    /// A primary, after any `-`s: a number's folded into it, as the lexer
+    /// would have read `-1` where nothing before it ends a value. Out of
+    /// line, so that `primary` is in one place.
+    #[inline(never)]
+    fn operand(&mut self) -> Result<Expr> {
+        let mut minus = 0;
+        while matches!(self.peek(), Tok::Minus) {
+            self.next();
+            self.deepen()?;
+            minus += 1;
+        }
+        let mut e = self.primary()?;
+        for _ in 0..minus {
+            e = match e {
+                Expr::Lit(Value::Int(i)) if i != i64::MIN => Expr::Lit(Value::Int(-i)),
+                Expr::Lit(Value::Float(f)) => Expr::Lit(Value::Float(-f)),
+                e => Expr::Arith(
+                    ArithOp::Mul,
+                    Box::new(Expr::Lit(Value::Int(-1))),
+                    Box::new(e),
+                ),
+            };
+        }
+        Ok(e)
     }
 
     /// `(get <collection> select <field> ...)` after `in`: a query whose one

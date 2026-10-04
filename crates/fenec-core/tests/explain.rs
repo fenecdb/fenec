@@ -100,6 +100,7 @@ fn db() -> Database {
         collection: "a".into(),
         docs,
         insert: false,
+        if_absent: false,
     })
     .unwrap();
     let children: Vec<Vec<(String, Expr)>> = (0..4000usize)
@@ -117,6 +118,7 @@ fn db() -> Database {
         collection: "r".into(),
         docs: children,
         insert: false,
+        if_absent: false,
     })
     .unwrap();
     db

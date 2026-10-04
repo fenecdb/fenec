@@ -539,6 +539,7 @@ fn bind(e: &Expr, values: &[Value]) -> Expr {
         Expr::Cmp(op, x, y) => Expr::Cmp(*op, b(x), b(y)),
         Expr::Like(x, y) => Expr::Like(b(x), b(y)),
         Expr::Has(x, y) => Expr::Has(b(x), b(y)),
+        Expr::Arith(op, x, y) => Expr::Arith(*op, b(x), b(y)),
         Expr::In(x, items) => Expr::In(b(x), items.iter().map(|i| bind(i, values)).collect()),
         // A rule holds none ([`rule`]).
         Expr::InSelect(..) => e.clone(),
@@ -666,6 +667,7 @@ impl Scope {
                 collection,
                 mut docs,
                 insert,
+                if_absent,
             } => {
                 let f = self.writable(&collection)?;
                 let mut pins = Vec::new();
@@ -691,6 +693,7 @@ impl Scope {
                     collection,
                     docs,
                     insert,
+                    if_absent,
                 }
             }
             Statement::Update {
@@ -742,6 +745,7 @@ impl Scope {
                 let ctx = EvalCtx {
                     params: &[],
                     registry,
+                    clock: None,
                 };
                 Ok(truthy(&eval(&f, &mut Written(doc, schema), &ctx)?))
             }

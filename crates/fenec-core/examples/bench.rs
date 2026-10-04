@@ -135,6 +135,7 @@ fn main() {
             collection: "bench".into(),
             docs,
             insert: false,
+            if_absent: false,
         })
         .unwrap();
     }

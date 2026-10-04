@@ -91,6 +91,7 @@ fn measure(
                     .map(|d| d.into_iter().map(|(k, v)| (k, Expr::Lit(v))).collect())
                     .collect(),
                 insert: false,
+                if_absent: false,
             };
             db.execute_with(&put, &[]).unwrap();
         }
