@@ -30,6 +30,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -545,6 +546,7 @@ type opts struct {
 	where                            *Cond
 	sort                             []sortOpt
 	top                              *int
+	require                          *int
 	// A mark's tags and a snippet's ellipsis, and whether each was given:
 	// held as any, as a value of Where is, so a tag that is not text is
 	// refused by the JS builder's message rather than left to the compiler.
@@ -1587,8 +1589,26 @@ func renderDoc(doc any, bind *binder, write string) (string, error) {
 // so a lock taken answers 1 and one held 0.
 func IfAbsent() Opt { return func(o *opts) { o.ifAbsent = true } }
 
+// Require, on any write (among an insert's documents, or Update's and
+// Delete's options), is ... require n: unless the write wrote exactly n
+// rows it is refused (412, CodeUnmet) and its batch put back.
+func Require(n int) Opt { return func(o *opts) { o.require = intp(n) } }
+
+// requireClause is " require n" for Require: a whole number from 0 written
+// into the text -- not a parameter, as limit is not, so a statement keeps
+// its shape.
+func requireClause(o opts) (string, error) {
+	if o.require == nil {
+		return "", nil
+	}
+	if *o.require < 0 {
+		return "", refuse("require takes a count of rows, a whole number from 0 (got %d)", *o.require)
+	}
+	return " require " + strconv.Itoa(*o.require), nil
+}
+
 // ToInsert is the put of the documents, not sent. An Opt among them --
-// IfAbsent -- is an option, not a document.
+// IfAbsent, Require -- is an option, not a document.
 func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err := b.assertPlain("insert"); err != nil {
 		return "", nil, err
@@ -1618,10 +1638,15 @@ func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if len(list) > 1 {
 		body = "[" + body + "]"
 	}
-	if gather(options).ifAbsent {
+	o := gather(options)
+	if o.ifAbsent {
 		body += " if absent"
 	}
-	return "put " + b.collection + " " + body, bind.params, nil
+	required, err := requireClause(o)
+	if err != nil {
+		return "", nil, err
+	}
+	return "put " + b.collection + " " + body + required, bind.params, nil
 }
 
 // ToUpdate is the set of the rows the filter names, not sent; with no
@@ -1639,7 +1664,11 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "set " + b.collection + " " + body + where, bind.params, nil
+	required, err := requireClause(gather(options))
+	if err != nil {
+		return "", nil, err
+	}
+	return "set " + b.collection + " " + body + where + required, bind.params, nil
 }
 
 // ToDelete is the del of the rows the filter names, not sent; with no
@@ -1653,7 +1682,11 @@ func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "del " + b.collection + where, bind.params, nil
+	required, err := requireClause(gather(options))
+	if err != nil {
+		return "", nil, err
+	}
+	return "del " + b.collection + where + required, bind.params, nil
 }
 
 // ------------------------------------------------------------- endpoints

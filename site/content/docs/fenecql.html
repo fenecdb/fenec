@@ -41,6 +41,7 @@ explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
 set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value may read the row: {n: n + 1}
 del &lt;name&gt; [where &lt;expr&gt;]
+&lt;put | insert | set | del ...&gt; require N    -- refused, and its batch put back, unless it wrote N rows
 
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
 
@@ -57,6 +58,10 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     <code>set hits {n: n + 1} where key = "ip1"</code> is an increment, made
     under the write lock — see <a href="#writes">Writes that read the
     row</a>.</li>
+  <li><b><code>require N</code> makes a count a condition.</b> A write that
+    does not write exactly <code>N</code> rows is refused, and the batch it
+    is in is put back whole — see <a href="#require">Writes that must find
+    their rows</a>.</li>
   <li><b><code>alter collection</code> rewrites no document.</b> A field
     added reads <code>null</code> in the documents already there; a field's
     type does not change — see <a href="#changing-a-collection">Changing a
@@ -1511,6 +1516,79 @@ nothing — it is out of every read — so a write takes its place.</p>
   clients the same against <code>fenec-server</code>, 102 000 a second.</p>
 </div>
 </details>
+
+<h2 id="require">Writes that must find their rows</h2>
+
+<p>A write that matches no row is no error: it answers
+<code>{"affected": 0}</code>, and a <code>/batch</code> goes on to the next
+statement. <code>require N</code> after a <code>set</code>, a
+<code>del</code>, a <code>put</code> or an <code>insert</code> makes the
+count a condition: unless the statement wrote exactly <code>N</code> rows
+it is refused, and the block it is in — a <code>/batch</code>, a run of
+several in the page, a keyed write — is put back whole, as on any other
+error.</p>
+
+<pre data-lang="fenecql">set accounts {balance: balance - $1} where name = $2 and balance &gt;= $1 require 1
+del holds where order_ref = $1 and state = "held" require 1
+put locks {name: "nightly", owner: $1} if absent require 1      -- refused while it is held
+</pre>
+
+<ul>
+  <li><b>Refused over HTTP with 412</b>, the error naming the statement:
+    <code>`set accounts` wrote 0 rows, and requires 1</code>. A
+    <code>/batch</code> also says which statement stopped it
+    (<code>"at"</code>, from 0). Every SDK has its own kind for it
+    (<code>unmet</code>), and every builder an option:
+    <code>.update(patch, { require: 1 })</code>.</li>
+  <li><b>The count is the write's own</b>, taken under the write lock that
+    made it, so nothing can come between the check and the write. A scoped
+    token's count is of the rows its rules let it write.</li>
+  <li><b><code>require 0</code></b> asserts that nothing matches.</li>
+</ul>
+
+<h3 id="transfers">Transfers</h3>
+
+<p>Moving money between two accounts is a debit where the money is, a
+credit where the account is, and a journal of both, as one
+<code>/batch</code>. Without <code>require</code> an overdraft's debit
+matched nothing, answered 0, and the credit went ahead: the sum of the
+balances grew with every refused transfer. With it, a debit that finds too
+little money or a credit that finds no account puts the whole transfer
+back, journal and all:</p>
+
+<pre data-lang="fenecql">create collection accounts (name text @unique, balance int)
+create collection journal (tx text @hash, account text @hash, amount int)
+
+set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1
+set accounts {balance: balance + $3} where name = $2 require 1
+insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]
+</pre>
+
+<pre data-lang="bash">printf '%s\n' \
+  '{"query":"set accounts {balance: balance - $3} where name = $1 and balance &gt;= $3 require 1","params":["ada","bob",30,"t1"]}' \
+  '{"query":"set accounts {balance: balance + $3} where name = $2 require 1","params":["ada","bob",30,"t1"]}' \
+  '{"query":"insert journal [{tx: $4, account: $1, amount: 0 - $3}, {tx: $4, account: $2, amount: $3}]","params":["ada","bob",30,"t1"]}' |
+curl -s -X POST localhost:8080/batch -H "Idempotency-Key: t1" --data-binary @-
+# an overdraft: 412 {"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":0}
+</pre>
+
+<ul>
+  <li><b>Amounts are whole minor units</b> in an <code>int</code>, so a
+    sum is exact.</li>
+  <li><b>An <code>Idempotency-Key</code></b> makes a retry after a timeout
+    answer what the first try did, rather than move the money twice
+    (<a href="/docs/http#idempotency">Retrying a write</a>).</li>
+  <li><b>Who may move what is the app's.</b> The credit is another user's
+    row, which a scoped token may not write: transfers go through an app
+    server holding the server's token.</li>
+  <li><b>Held to it:</b> eight threads making 4 800 random transfers among
+    six accounts in process, and eight clients making 2 400 as
+    <code>/batch</code>es over HTTP, an eighth of them to an account that
+    is not there, leave the sum where it started, no balance below zero,
+    and a journal that accounts for every balance
+    (<code>crates/fenec-core/tests/require.rs</code>,
+    <code>crates/fenec-http/tests/require.rs</code>).</li>
+</ul>
 
 <h2>Time</h2>
 

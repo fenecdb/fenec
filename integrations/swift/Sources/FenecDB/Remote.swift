@@ -93,6 +93,7 @@ public final class FenecRemote: @unchecked Sendable {
         case 401, 403: return .denied
         case 404: return .notFound
         case 409: return .duplicate
+        case 412: return .unmet
         default: return .io
         }
     }

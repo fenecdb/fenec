@@ -73,6 +73,7 @@ class FenecRemote {
         401 || 403 => FenecCode.denied,
         404 => FenecCode.notFound,
         409 => FenecCode.duplicate,
+        412 => FenecCode.unmet,
         _ => FenecCode.io,
       };
 

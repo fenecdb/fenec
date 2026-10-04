@@ -22,7 +22,10 @@ class FenecException internal constructor(
 
     enum class Code(val value: Int) {
         TYPE(1), NOT_FOUND(2), EXISTS(3), DUPLICATE(4), CORRUPT(5), QUERY(6), IO(7), PLUGIN(8), READ_ONLY(9),
-        DENIED(10), PANIC(11), MISUSE(12), LOCKED(13), BUILDER(100);
+        DENIED(10), PANIC(11), MISUSE(12), LOCKED(13),
+        /** A write's `require n` not met: it wrote another count, and was put back. */
+        UNMET(14),
+        BUILDER(100);
 
         companion object {
             fun of(value: Int): Code = entries.firstOrNull { it.value == value } ?: PANIC

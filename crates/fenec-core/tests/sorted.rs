@@ -120,6 +120,7 @@ fn twins(docs: usize) -> (Database, Database) {
             docs: batch.clone(),
             insert: false,
             if_absent: false,
+            require: None,
         })
         .unwrap();
     }

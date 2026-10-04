@@ -380,6 +380,17 @@ c('insert if absent', ['from', 'locks'], ['insert', { name: 'job', owner: 'a', a
 c('insert of several if absent', ['from', 'locks'], ['toInsert', [{ id: 1, owner: 'a' }, { id: 2, owner: 'a' }], { ifAbsent: true }]);
 c('insert with ifAbsent false is a put', ['from', 'locks'], ['toInsert', { id: 1 }, { ifAbsent: false }]);
 
+// `{ require: n }`: the write must write exactly n rows, or it and its
+// batch are put back (412).
+c('update require', ['from', 'accounts'], ['where', 'name', 'a'], ['where', 'balance', { gte: 5 }], ['toUpdate', { balance: { $inc: -5 } }, { require: 1 }]);
+c('update require through the endpoint', ['from', 'accounts'], ['where', 'name', 'b'], ['update', { balance: { $inc: 5 } }, { require: 1 }]);
+c('update of every row require', ['from', 'accounts'], ['toUpdate', { frozen: true }, { all: true, require: 3 }]);
+c('delete require', docs, ['where', 'id', 7], ['toDelete', { require: 1 }]);
+c('delete require none', docs, ['where', 'a', { lt: 0 }], ['delete', { require: 0 }]);
+c('insert require', ['from', 'journal'], ['toInsert', [{ tx: 1, amount: -5 }, { tx: 1, amount: 5 }], { require: 2 }]);
+c('insert if absent require', ['from', 'locks'], ['insert', { name: 'job', owner: 'a' }, { ifAbsent: true, require: 1 }]);
+c('require takes no negative', docs, ['where', 'id', 1], ['toDelete', { require: -1 }]);
+
 // ------------------------------------------------------------------ writing
 
 async function generate() {

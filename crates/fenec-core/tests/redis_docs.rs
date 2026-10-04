@@ -40,6 +40,14 @@ fn every_recipe_runs_and_answers_what_the_page_says() {
             };
             let st = fenec_ql::parse_one(code)
                 .unwrap_or_else(|e| panic!("`{code}` does not parse: {e}"));
+            // `-- → refused`: a write whose `require` the page says is not met.
+            if expect.is_some_and(|e| e.starts_with("refused")) {
+                let e = db.execute(&st).expect_err(code);
+                assert!(matches!(e, Error::Unmet(_)), "`{code}`: {e}");
+                statements += 1;
+                checked += 1;
+                continue;
+            }
             let answer = db
                 .execute(&st)
                 .unwrap_or_else(|e| panic!("`{code}` failed: {e}"));

@@ -92,6 +92,7 @@ fn measure(
                     .collect(),
                 insert: false,
                 if_absent: false,
+                require: None,
             };
             db.execute_with(&put, &[]).unwrap();
         }

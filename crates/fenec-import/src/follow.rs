@@ -398,6 +398,7 @@ fn write_marker(
         docs: vec![doc],
         insert: false,
         if_absent: false,
+        require: None,
     })?;
     db.sync()?;
     let marker = read_marker(db, collection)?;
@@ -1211,6 +1212,7 @@ impl<'a> Mirror<'a> {
                         docs,
                         insert: false,
                         if_absent: false,
+                        require: None,
                     }
                 }
                 Op::Delete(_) => {
@@ -1222,6 +1224,7 @@ impl<'a> Mirror<'a> {
                     Statement::Delete {
                         collection: collection.clone(),
                         filter: Some(Expr::In(Box::new(Expr::Field("id".into())), ids)),
+                        require: None,
                     }
                 }
                 Op::Truncate => {
@@ -1229,6 +1232,7 @@ impl<'a> Mirror<'a> {
                     Statement::Delete {
                         collection: collection.clone(),
                         filter: None,
+                        require: None,
                     }
                 }
             };

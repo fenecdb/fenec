@@ -138,6 +138,7 @@ fn main() {
             docs,
             insert: true,
             if_absent: false,
+            require: None,
         })
         .unwrap();
         key = end;

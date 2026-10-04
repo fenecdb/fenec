@@ -804,12 +804,28 @@ impl Parser {
         if if_absent {
             self.expect_kw("absent")?;
         }
+        let require = self.require()?;
         Ok(Statement::Put {
             collection,
             docs,
             insert: insert || if_absent,
             if_absent,
+            require,
         })
+    }
+
+    /// `require <n>` after a write: it must write exactly `n` rows, or it is
+    /// refused and its block put back. A clause of the write rather than an
+    /// `assert` statement of its own: the count is the write's, known under
+    /// the lock that wrote it, with no second read to race or to scope.
+    fn require(&mut self) -> Result<Option<u64>> {
+        if !self.eat_kw("require") {
+            return Ok(None);
+        }
+        match self.int()? {
+            n if n >= 0 => Ok(Some(n as u64)),
+            n => self.err(format!("`require` takes a count of rows, not {n}")),
+        }
     }
 
     /// `{k: v, ...}`: a document's fields, a `set`'s, or an object's
@@ -1278,6 +1294,7 @@ impl Parser {
             collection,
             set,
             filter,
+            require: self.require()?,
         })
     }
 
@@ -1290,7 +1307,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Delete { collection, filter })
+        Ok(Statement::Delete {
+            collection,
+            filter,
+            require: self.require()?,
+        })
     }
 
     // -------------------------------------------------------- expression grammar

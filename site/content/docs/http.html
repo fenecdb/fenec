@@ -293,14 +293,25 @@ nothing matched, and a chain nests all the way down.</p>
 all-or-nothing write. If one fails, the ones before it are undone and the
 answer says so.</p>
 
-<pre data-lang="json">{"error":"collection `tasks` has no field `nofield`","completed":0}
+<pre data-lang="json">{"error":"collection `tasks` has no field `nofield`","completed":0,"at":1}
+</pre>
+
+<p>A statement that matches no row is no error, and the batch goes on. To
+make a count a condition, end the write with <code>require N</code>: unless
+it wrote exactly <code>N</code> rows the batch stops with
+<b>412</b> and is put back, a transfer's debit and its credit together
+(<a href="/docs/fenecql#transfers">Transfers</a>).</p>
+
+<pre data-lang="json">{"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":1}
 </pre>
 
 <details class="deep"><summary>Details</summary>
 <p><code>POST /batch</code> takes one query body per line as NDJSON. The
 statements run in order under a single write lock, as one block: their writes
 land in the file as one record, or none of them do. The first error puts back
-what the statements before it did, and the answer says so.</p>
+what the statements before it did, and the answer says so: <code>at</code>
+is the statement that stopped it, counted from 0, and <code>completed</code>
+how many stay applied — none of a block.</p>
 
 <p>No other writer slips in between, a read in the batch sees the writes
 before it, and a subscriber is woken once, for all of them. A

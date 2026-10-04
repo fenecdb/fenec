@@ -124,6 +124,30 @@ public sealed class ClientTests(Servers servers)
     }
 
     [Fact]
+    public async Task AWriteThatMissesItsCountIsRefusedAndPutBack()
+    {
+        using var db = Root();
+        var name = Fresh("require");
+        await db.ExecAsync($"create collection {name} (name text, balance int)");
+        var accounts = db.From(name);
+        await accounts.InsertAsync(new Dictionary<string, object?> { ["name"] = "a", ["balance"] = 10 });
+        var e = await Assert.ThrowsAsync<FenecException>(() =>
+            accounts.Where("name", "=", "nobody").UpdateAsync(new { balance = 0 }, require: 1));
+        Assert.Equal((412, "unmet"), (e.Status, e.Code));
+        Assert.Contains("requires 1", e.Message);
+        var met = await accounts.Where("name", "=", "a").UpdateAsync(new { balance = 5 }, require: 1);
+        Assert.Equal(1, met.Affected);
+
+        // A batch whose second write is unmet keeps nothing of the first.
+        var (debit, debitParams) = accounts.Where("name", "=", "a").ToUpdate(new { balance = 0 }, require: 1);
+        var (gone, goneParams) = accounts.Where("name", "=", "nobody").ToDelete(require: 1);
+        e = await Assert.ThrowsAsync<FenecException>(() => db.BatchAsync([new(debit, debitParams), new(gone, goneParams)]));
+        Assert.Equal((412, "unmet", 0), (e.Status, e.Code, e.Completed));
+        var rows = await db.QueryAsync($"get {name} select balance");
+        Assert.Equal([5L], rows.Select(r => r.GetProperty("balance").GetInt64()));
+    }
+
+    [Fact]
     public async Task ABatchLandsWholeOrNotAtAll()
     {
         using var db = Root();

@@ -770,6 +770,7 @@ impl Scope {
                 mut docs,
                 insert,
                 if_absent,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 let mut pins = Vec::new();
@@ -796,12 +797,15 @@ impl Scope {
                     docs,
                     insert,
                     if_absent,
+                    require,
                 }
             }
+            // `require` counts the rows the token's filter let it write.
             Statement::Update {
                 collection,
                 set,
                 mut filter,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 self.inner(&mut filter)?;
@@ -809,17 +813,20 @@ impl Scope {
                     collection,
                     set,
                     filter: and(filter, f),
+                    require,
                 }
             }
             Statement::Delete {
                 collection,
                 mut filter,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 self.inner(&mut filter)?;
                 Statement::Delete {
                     collection,
                     filter: and(filter, f),
+                    require,
                 }
             }
             Statement::ListCollections => Statement::ListCollections,

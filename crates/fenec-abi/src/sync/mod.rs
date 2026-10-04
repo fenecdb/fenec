@@ -358,6 +358,7 @@ fn put_docs(collection: &str, docs: Vec<Vec<(String, Value)>>) -> Statement {
             .collect(),
         insert: false,
         if_absent: false,
+        require: None,
     }
 }
 
@@ -370,6 +371,7 @@ fn del_ids(collection: &str, ids: &[DocId]) -> Statement {
                 .map(|&i| Expr::Lit(Value::Int(i as i64)))
                 .collect(),
         )),
+        require: None,
     }
 }
 
@@ -501,6 +503,12 @@ fn render_put(
     };
     (format!("{verb} {collection} {body}"), params)
 }
+
+/// A write with `require` that reaches a row whose insert the server has not
+/// answered: refused before anything is applied, as the browser's sync
+/// refuses it (`integrations/sync-scenarios.json`).
+const REQUIRE_UNANSWERED: &str =
+    "a write with `require` cannot reach a row whose insert the server has not answered yet";
 
 /// What [`Sync::write`] made of one statement.
 struct Applied {
@@ -1793,6 +1801,7 @@ impl Sync {
                 docs,
                 insert,
                 if_absent,
+                require,
                 ..
             } => {
                 let mut docs: Vec<Vec<(String, Value)>> = docs
@@ -1810,6 +1819,9 @@ impl Sync {
                 let (mut line, line_params) = render_put(&c, *insert, &docs);
                 if *if_absent {
                     line.push_str(" if absent");
+                }
+                if let Some(n) = require {
+                    line.push_str(&format!(" require {n}"));
                 }
                 let count = docs.len();
                 let has_id =
@@ -1883,11 +1895,13 @@ impl Sync {
                 if let Statement::Put {
                     insert: ins,
                     if_absent: absent,
+                    require: req,
                     ..
                 } = &mut st
                 {
                     *ins = *insert;
                     *absent = *if_absent;
+                    *req = *require;
                 }
                 db.execute_with(&st, &[])?;
                 undo.push_str(",\"del\":[");
@@ -1924,6 +1938,29 @@ impl Sync {
                     Response::Rows(rs) => rs,
                     _ => ResultSet::default(),
                 };
+                // `require` counts the rows the server's copy of the write
+                // finds, and a row of an insert it has not answered is
+                // reached there by a second line, its key: the count would
+                // be split between two statements, and the first, naming a
+                // temporary id the server never saw, would find none.
+                let required = matches!(
+                    s,
+                    Statement::Update {
+                        require: Some(_),
+                        ..
+                    } | Statement::Delete {
+                        require: Some(_),
+                        ..
+                    }
+                );
+                if required
+                    && key.is_some()
+                    && self.temps.iter().any(|t| {
+                        t.collection == c && before.rows.iter().any(|r| r.id as i64 == t.temp)
+                    })
+                {
+                    return Err(Error::Query(REQUIRE_UNANSWERED.into()));
+                }
                 let response = db.execute_with(s, params)?;
                 undo.push_str(",\"del\":[],\"put\":");
                 json::escape_into(&mut undo, &rows_json(&before));

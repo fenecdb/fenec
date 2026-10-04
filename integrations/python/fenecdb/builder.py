@@ -807,11 +807,17 @@ class _Builder:
         return sql, bind.params
 
     def to_insert(
-        self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        if_absent: bool = False,
+        require: int | None = None,
     ) -> tuple[str, list]:
         """The `put` of a document or a list of them, not sent. With
         `if_absent=True`, `put ... if absent`: a document whose id or
-        `@unique` value is held is passed over, and not counted."""
+        `@unique` value is held is passed over, and not counted. With
+        `require=n` on any write, `... require n`: unless it wrote exactly
+        `n` rows it is refused (412) and its batch put back."""
         self._assert_plain("insert")
         items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
         if not items:
@@ -819,20 +825,26 @@ class _Builder:
         bind = _Binder()
         body = ", ".join(_render_doc(d, bind, "insert") for d in items)
         absent = " if absent" if if_absent is True else ""
-        return f"put {self.collection} {body if len(items) == 1 else f'[{body}]'}{absent}", bind.params
+        required = _require_clause(require)
+        many = body if len(items) == 1 else f"[{body}]"
+        return f"put {self.collection} {many}{absent}{required}", bind.params
 
-    def to_update(self, patch: Mapping, *, all: bool = False) -> tuple[str, list]:
+    def to_update(
+        self, patch: Mapping, *, all: bool = False, require: int | None = None
+    ) -> tuple[str, list]:
         """The `set` of the rows the filter names, not sent."""
         self._assert_plain("update")
         bind = _Binder()
         body = _render_doc(patch, bind, "update")
-        return f"set {self.collection} {body}{self._require_filter('update', all, bind)}", bind.params
+        where = self._require_filter("update", all, bind)
+        return f"set {self.collection} {body}{where}{_require_clause(require)}", bind.params
 
-    def to_delete(self, *, all: bool = False) -> tuple[str, list]:
+    def to_delete(self, *, all: bool = False, require: int | None = None) -> tuple[str, list]:
         """The `del` of the rows the filter names, not sent."""
         self._assert_plain("delete")
         bind = _Binder()
-        return f"del {self.collection}{self._require_filter('delete', all, bind)}", bind.params
+        where = self._require_filter("delete", all, bind)
+        return f"del {self.collection}{where}{_require_clause(require)}", bind.params
 
     # `near`, `order`, `limit` mean something only to a read; dropped from a
     # write, `.limit(1).delete()` would delete every row.
@@ -969,23 +981,32 @@ class Query(_Builder):
         sql, params = self.to_fenecql()
         return [r.get("plan") for r in _rows(self._client().query(f"explain {sql}", params))]
 
-    def insert(self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False) -> int:
+    def insert(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        if_absent: bool = False,
+        require: int | None = None,
+    ) -> int:
         """`put` of a document or a list of them: how many were written --
         with `if_absent=True` those whose id or `@unique` value was held
-        left out, so a lock taken answers 1 and one held 0."""
+        left out, so a lock taken answers 1 and one held 0. With
+        `require=n` (on `update` and `delete` too) a write that did not
+        write exactly `n` rows is refused, 412, and its batch put back."""
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        return _affected(self._client().query(*self.to_insert(docs, if_absent=if_absent)))
+        text = self.to_insert(docs, if_absent=if_absent, require=require)
+        return _affected(self._client().query(*text))
 
-    def update(self, patch: Mapping, *, all: bool = False) -> int:
+    def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
         """`set` over the rows the filter names: how many it changed. With
         no filter it is refused unless `all=True`."""
-        return _affected(self._client().query(*self.to_update(patch, all=all)))
+        return _affected(self._client().query(*self.to_update(patch, all=all, require=require)))
 
-    def delete(self, *, all: bool = False) -> int:
+    def delete(self, *, all: bool = False, require: int | None = None) -> int:
         """`del` of the rows the filter names: how many it deleted. With no
         filter it is refused unless `all=True`."""
-        return _affected(self._client().query(*self.to_delete(all=all)))
+        return _affected(self._client().query(*self.to_delete(all=all, require=require)))
 
 
 class AsyncQuery(_Builder):
@@ -1008,16 +1029,35 @@ class AsyncQuery(_Builder):
         sql, params = self.to_fenecql()
         return [r.get("plan") for r in _rows(await self._client().query(f"explain {sql}", params))]
 
-    async def insert(self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False) -> int:
+    async def insert(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        *,
+        if_absent: bool = False,
+        require: int | None = None,
+    ) -> int:
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        return _affected(await self._client().query(*self.to_insert(docs, if_absent=if_absent)))
+        text = self.to_insert(docs, if_absent=if_absent, require=require)
+        return _affected(await self._client().query(*text))
 
-    async def update(self, patch: Mapping, *, all: bool = False) -> int:
-        return _affected(await self._client().query(*self.to_update(patch, all=all)))
+    async def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
+        return _affected(await self._client().query(*self.to_update(patch, all=all, require=require)))
 
-    async def delete(self, *, all: bool = False) -> int:
-        return _affected(await self._client().query(*self.to_delete(all=all)))
+    async def delete(self, *, all: bool = False, require: int | None = None) -> int:
+        return _affected(await self._client().query(*self.to_delete(all=all, require=require)))
+
+
+# ` require n` for a write's `require=n`: the rows it must write, a whole
+# number from 0 -- not a parameter, as `limit` is not, so a statement keeps
+# its shape. A bool is an int to Python and is refused, as JavaScript's
+# builder refuses `true`.
+def _require_clause(n: Any) -> str:
+    if n is None:
+        return ""
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        raise _err(f"require takes a count of rows, a whole number from 0 (got {n})")
+    return f" require {n}"
 
 
 def collection(name: str) -> Query:

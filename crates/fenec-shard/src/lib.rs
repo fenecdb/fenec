@@ -1620,7 +1620,8 @@ fn message(e: &Error) -> String {
         | Error::Io(m)
         | Error::Plugin(m)
         | Error::ReadOnly(m)
-        | Error::Denied(m) => m.clone(),
+        | Error::Denied(m)
+        | Error::Unmet(m) => m.clone(),
     }
 }
 

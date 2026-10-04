@@ -147,6 +147,13 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   inc('1');
   // @ts-expect-error -- ifAbsent is a boolean
   db.from('articles').toInsert({ title: 'x' }, { ifAbsent: 1 });
+  // A write that must write one row, or its batch goes back.
+  expect<number>(await db.from('articles').where('id', 1).update({ year: inc(-1) }, { require: 1 }));
+  expect<number>(await db.from('articles').where('id', 1).delete({ require: 1 }));
+  db.from('articles').toInsert({ title: 'x' }, { ifAbsent: true, require: 1 });
+  db.from('articles').toUpdate({ year: 1 }, { all: true, require: 3 });
+  // @ts-expect-error -- require is a count
+  db.from('articles').where('id', 1).toDelete({ require: '1' });
 
   const [sql, params] = db.from('articles').where('year', 2024).toFenecQL();
   expect<string>(sql);

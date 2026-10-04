@@ -148,6 +148,17 @@ void main() {
     await db.close();
   });
 
+  test('a require not met is refused, and writes nothing', () async {
+    final db = await Fenec.memory();
+    await db.execute('create collection accounts (balance int)');
+    await db.execute('put accounts {id: 1, balance: 5}');
+    final accounts = db.from('accounts');
+    expect(await codeOf(accounts.where('id', 2).update({'balance': 0}, require: 1)), FenecCode.unmet);
+    expect((await accounts.rows()).map((r) => r['balance']), [5]);
+    expect(await accounts.where('id', 1).update({'balance': 3}, require: 1), 1);
+    await db.close();
+  });
+
   test('a file is there again, and open once', () async {
     final path = scratch();
     var db = await Fenec.open(path);

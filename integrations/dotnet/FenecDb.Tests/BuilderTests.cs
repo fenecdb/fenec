@@ -166,9 +166,9 @@ public sealed class BuilderTests(Servers servers)
                 (string, IReadOnlyList<object?>)? text = op switch
                 {
                     "toFenecQL" => q.ToFenecQL(),
-                    "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false),
-                    "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false),
-                    "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false),
+                    "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
                     _ => null,
                 };
                 if (text is var (t, ps))
@@ -184,9 +184,9 @@ public sealed class BuilderTests(Servers servers)
                     "first" => q.FirstAsync(),
                     "count" => q.CountAsync(),
                     "explain" => q.ExplainAsync(),
-                    "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false),
-                    "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false),
-                    "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false),
+                    "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false, Long(Opt(a, 1, "require"))),
+                    "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false, Long(Opt(a, 0, "require"))),
                     _ => null,
                 };
                 if (sent is not null)

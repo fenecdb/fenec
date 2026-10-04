@@ -30,6 +30,7 @@ fn sessions(index: &str) -> Database {
         docs,
         insert: false,
         if_absent: false,
+        require: None,
     })
     .unwrap();
     db

@@ -89,6 +89,10 @@ pub const FENEC_MISUSE: i32 = 12;
 /// The file is open already, in this process or another: two databases
 /// over one file corrupt it.
 pub const FENEC_LOCKED: i32 = 13;
+/// A write's `require <n>` not met: it and its block were put back. An
+/// engine error's kind, numbered after the boundary's own, which were there
+/// first.
+pub const FENEC_UNMET: i32 = 14;
 
 /// `fenec_open`'s flags. Without any, every write is fsynced before the call
 /// returns and the file is mapped.
@@ -190,6 +194,7 @@ pub fn code(e: &Error) -> i32 {
         Error::Plugin(_) => FENEC_PLUGIN,
         Error::ReadOnly(_) => FENEC_READ_ONLY,
         Error::Denied(_) => FENEC_DENIED,
+        Error::Unmet(_) => FENEC_UNMET,
     }
 }
 
@@ -929,6 +934,7 @@ mod tests {
         ];
         let codes: Vec<i32> = all.iter().map(code).collect();
         assert_eq!(codes, (1..=10).collect::<Vec<_>>());
+        assert_eq!(code(&Error::Unmet(String::new())), FENEC_UNMET);
     }
 
     /// A panic comes back as a code and its message, never across the

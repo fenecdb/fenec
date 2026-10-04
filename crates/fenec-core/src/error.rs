@@ -24,6 +24,9 @@ pub enum Error {
     ReadOnly(String),
     /// Outside what the caller's token may read or write.
     Denied(String),
+    /// A write's `require <n>` not met: it wrote another number of rows, and
+    /// it and its block are put back. 412 over HTTP.
+    Unmet(String),
 }
 
 impl fmt::Display for Error {
@@ -39,6 +42,7 @@ impl fmt::Display for Error {
             Error::Plugin(m) => write!(f, "plugin error: {m}"),
             Error::ReadOnly(m) => write!(f, "read only: {m}"),
             Error::Denied(m) => write!(f, "denied: {m}"),
+            Error::Unmet(m) => write!(f, "unmet: {m}"),
         }
     }
 }

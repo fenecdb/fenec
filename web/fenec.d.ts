@@ -399,7 +399,12 @@ export declare class FenecError extends Error {
   collation?: string[];
   /** How many statements of the same text ran before this one. */
   ran?: number;
-  /** A write the server refused (`FenecSync`): the HTTP status it answered. */
+  /**
+   * The HTTP status a server refused with (`connect`, and a write
+   * `FenecSync` was refused): 412 a write's `require` not met, its batch
+   * put back; 409 an id or a `@unique` value taken; 403 outside the
+   * token's rules.
+   */
   status?: number;
   /** A write the server refused: the text of its first statement. */
   query?: string;
@@ -647,9 +652,9 @@ export declare class Query<
   toFenecQL(): [sql: string, params: unknown[]];
 
   /** The text of the write statements, without running them. The write side of `toFenecQL`. */
-  toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: { ifAbsent?: boolean }): [sql: string, params: unknown[]];
-  toUpdate(patch: Insert<F>, opts?: { all?: boolean }): [sql: string, params: unknown[]];
-  toDelete(opts?: { all?: boolean }): [sql: string, params: unknown[]];
+  toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): [sql: string, params: unknown[]];
+  toUpdate(patch: Insert<F>, opts?: WriteOptions): [sql: string, params: unknown[]];
+  toDelete(opts?: WriteOptions): [sql: string, params: unknown[]];
 
   /** The query's collection. */
   readonly collection: string;
@@ -684,9 +689,28 @@ export declare class Query<
    * is held (`put ... if absent`), and the count says what was written: a
    * lock taken (1) or not (0).
    */
-  insert(docs: InsertRow<F> | InsertRow<F>[], opts?: { ifAbsent?: boolean }): Promise<number>;
-  update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;
-  delete(opts?: { all?: boolean }): Promise<number>;
+  insert(docs: InsertRow<F> | InsertRow<F>[], opts?: InsertOptions): Promise<number>;
+  update(patch: Insert<F>, opts?: WriteOptions): Promise<number>;
+  delete(opts?: WriteOptions): Promise<number>;
+}
+
+/**
+ * `require`: the write must write exactly this many rows, a whole number
+ * from 0 (`... require n`), or it is refused -- 412 over HTTP, an error in
+ * the page -- and the batch it is in put back whole.
+ */
+export interface RequireOptions {
+  require?: number;
+}
+
+/** An update's or a delete's options: `all` covers every row, on purpose. */
+export interface WriteOptions extends RequireOptions {
+  all?: boolean;
+}
+
+/** An insert's options: `ifAbsent` passes over a document whose id or `@unique` value is held. */
+export interface InsertOptions extends RequireOptions {
+  ifAbsent?: boolean;
 }
 
 /** A patch (`update`): every field optional, a value written or worked out (`inc`, `expr`). */

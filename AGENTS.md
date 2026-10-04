@@ -985,6 +985,33 @@ render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
 absent` and the expired row's place. `site/content/docs/redis.html` is the
 recipes, each FenecQL block run by `tests/redis_docs.rs`.
 
+**`require <n>` makes a write's count a condition.** A write that matched
+no row answered `affected 0` and its `/batch` went on: a transfer's debit
+that found too little money was passed over and the credit made money,
+2 400 transfers taking the sum from 200 000 to 411 409. `put`, `insert`,
+`set` and `del` carry `require: Option<u64>` (the parser's `require` after
+the statement, an integer and never a parameter, so a statement keeps its
+shape), and `execute_inner` hands the answer to `required`, which refuses
+any other count as `Error::Unmet` -- after the writes, which the block they
+are in puts back as it puts back any statement that failed: a lone one's
+block of one, a `/batch` whole, the browser module's `run` of several. A
+clause of the write rather than an `assert (get ...)` statement: the count
+is the write's own, taken under the lock that wrote it, with no second
+read to race or to scope, and a scoped token's count is of the rows its
+filter let it write. 412 over HTTP (`api::status_of`), apart from 409 so a
+client tells a lost race from a value taken, and a `/batch` that stops says
+which statement did (`"at"`, from 0, `render_batch_stop`); `FENEC_UNMET` 14
+over the native library, after the boundary's own 11-13; `unmet` in each
+SDK's errors, and `{ require: n }` in every builder, held to the golden
+file. A replica's sync sends it with the write and holds it locally too,
+and refuses one that would reach a row of an unanswered insert
+(`REQUIRE_UNANSWERED`): that row is reached on the server by a second line,
+its key, which would split the count. `tests/require.rs` (both crates)
+moves money between few accounts from eight threads in process and eight
+HTTP clients as `/batch`es, a credit in eight to an account that is not
+there: the sum stays and no balance goes below zero. The browser module
+grew 1 479 bytes, 310 brotli.
+
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
 before refuses the file rather than open it as a plain hash and take the
@@ -2103,7 +2130,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 56 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 58 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

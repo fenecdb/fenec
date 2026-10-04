@@ -110,6 +110,24 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// `require 1` over a row that is not there is refused as `unmet`, and
+    /// the write is put back: nothing of it lands.
+    @Test func aRequireNotMetWritesNothing() async throws {
+        let db = try Fenec.memory()
+        try await db.execute("create collection accounts (balance int)")
+        try await db.execute("put accounts {id: 1, balance: 5}")
+        do {
+            _ = try await db.from("accounts").where("id", 2).update(["balance": 0] as Value, require: 1)
+            Issue.record("a require not met was taken")
+        } catch let e as FenecError {
+            #expect(e.code == .unmet, "\(e)")
+        }
+        let rows = try await db.query("get accounts select balance")
+        #expect(rows.map { $0["balance"] } == [.int(5)])
+        #expect(try await db.from("accounts").where("id", 1).update(["balance": 3] as Value, require: 1) == 1)
+        try await db.close()
+    }
+
     @Test func aFileIsThereAgainAndOpenOnce() async throws {
         let path = try scratch("reopen")
         var db = try await Fenec.open(path: path)

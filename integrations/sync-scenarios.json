@@ -437,6 +437,39 @@
       ]
     },
     {
+      "name": "a write whose require the server finds unmet is a refusal put back",
+      "covers": "fenecql.html#require: 412, the row put back as the 403's is; one the replica finds unmet is refused there, and nothing is sent",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "X"}, "where": {"key": "a"}, "require": 1}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [
+            {"query": "set tasks {title: $1} where key = $2 require 1", "params": ["X", "a"]}]}],
+          "rows": {"tasks": [{"id": 1, "title": "X"}, {"id": 2, "title": "two"}]}, "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "`set tasks` wrote 0 rows, and requires 1"}, "expect": {
+          "refused": [412], "pending": 0, "waits": [], "requests": [], "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}},
+        {"do": "write", "write": {"delete": "tasks", "where": {"key": "zzz"}, "require": 1}, "expect": {
+          "error": "`del tasks` wrote 0 rows, and requires 1", "requests": [], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "title": "one"}, {"id": 2, "title": "two"}]}}}
+      ]
+    },
+    {
+      "name": "an insert's require goes with it, and a require cannot reach a row the server has not answered",
+      "covers": "fenecql.html#require: a row under a temporary id is reached on the server by its key in a second line, which would split the count",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"insert": "tasks", "docs": [{"status": "open", "title": "new"}], "require": 1}, "expect": {
+          "requests": [{"path": "/query", "key": "<w1>", "body": [
+            {"query": "put tasks {status: $1, title: $2, key: $3} require 1", "params": ["open", "new", "<k1>"]}]}],
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "key": "<k1>", "title": "new"}]}, "pending": 1}},
+        {"do": "write", "write": {"update": "tasks", "set": {"title": "Y"}, "where": {"title": "new"}, "require": 1}, "expect": {
+          "error": "a write with `require` cannot reach a row whose insert the server has not answered yet", "requests": [], "pending": 1,
+          "rows": {"tasks": [{"id": 1}, {"id": 2}, {"id": 4503599627370496, "title": "new"}]}}},
+        {"do": "answer", "status": 200, "seq": 4, "body": {"affected": 1}, "expect": {"pending": 0}}
+      ]
+    },
+    {
       "name": "every other 4xx refuses, and the writes behind it go on",
       "covers": "mobile.html#sync: only 401, 408 and 429 of the 4xx are not refusals",
       "steps": [

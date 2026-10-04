@@ -829,6 +829,14 @@ public struct Query: Sendable {
             "an unfiltered \(verb) covers the whole collection; if you mean it, \(verb)({ all: true })")
     }
 
+    // `require n`: the write is refused, and put back whole, unless it
+    // wrote exactly n rows -- a check and its write in one statement.
+    private static func requireClause(_ n: Int?) throws -> String {
+        guard let n else { return "" }
+        if n < 0 { throw FenecError.builder("require takes a count of rows, a whole number from 0 (got \(n))") }
+        return " require \(n)"
+    }
+
     private static func docs(_ v: Value) -> [Value] {
         if case .array(let list) = v { return list }
         return [v]
@@ -838,32 +846,38 @@ public struct Query: Sendable {
     /// `FenecValue` -- or a list of them, not run.
     /// `ifAbsent`: `put ... if absent`, which passes over a document whose
     /// id or `@unique` value a row holds and counts only what it wrote -- a
-    /// lock taken, or not, in one statement.
-    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false) throws -> (text: String, params: [Value]) {
+    /// lock taken, or not, in one statement. `require`: refused, and nothing
+    /// written, unless it wrote exactly that many rows.
+    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("insert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
         let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
         let absent = ifAbsent ? " if absent" : ""
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)", bind.params)
+        let required = try Query.requireClause(require)
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)\(required)", bind.params)
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
-    /// refused unless `all`.
-    public func toUpdate(_ patch: any FenecValue, all: Bool = false) throws -> (text: String, params: [Value]) {
+    /// refused unless `all`; with `require`, refused unless it set exactly
+    /// that many rows.
+    public func toUpdate(_ patch: any FenecValue, all: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("update")
         let bind = Binder()
         let body = try Builder.renderDoc(try patch.fenecValue(), bind)
-        return ("set \(collection) \(body)\(try requireFilter("update", all, bind))", bind.params)
+        let filter = try requireFilter("update", all, bind)
+        return ("set \(collection) \(body)\(filter)\(try Query.requireClause(require))", bind.params)
     }
 
     /// The `del` of the rows the filter names, not run; with no filter it is
-    /// refused unless `all`.
-    public func toDelete(all: Bool = false) throws -> (text: String, params: [Value]) {
+    /// refused unless `all`; with `require`, refused unless it deleted
+    /// exactly that many rows.
+    public func toDelete(all: Bool = false, require: Int? = nil) throws -> (text: String, params: [Value]) {
         try assertPlain("delete")
         let bind = Binder()
-        return ("del \(collection)\(try requireFilter("delete", all, bind))", bind.params)
+        let filter = try requireFilter("delete", all, bind)
+        return ("del \(collection)\(filter)\(try Query.requireClause(require))", bind.params)
     }
 
     // -------------------------------------------------------------- running
@@ -906,22 +920,27 @@ public struct Query: Sendable {
 
     /// Puts a document, or a list of them: how many it wrote, which with
     /// `ifAbsent` leaves out those already held. None is no statement.
+    /// `require`: refused (`.unmet`) unless it wrote exactly that many.
     @discardableResult
-    public func insert(_ docs: any FenecValue, ifAbsent: Bool = false) async throws -> Int {
+    public func insert(_ docs: any FenecValue, ifAbsent: Bool = false, require: Int? = nil) async throws -> Int {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
-        return try await run(toInsert(v, ifAbsent: ifAbsent)).affected
+        return try await run(toInsert(v, ifAbsent: ifAbsent, require: require)).affected
     }
 
     /// Sets the patch's fields on the rows the filter names; with no filter
-    /// it is refused unless `all`.
+    /// it is refused unless `all`; with `require`, refused (`.unmet`) unless
+    /// it set exactly that many rows.
     @discardableResult
-    public func update(_ patch: any FenecValue, all: Bool = false) async throws -> Int {
-        try await run(toUpdate(patch, all: all)).affected
+    public func update(_ patch: any FenecValue, all: Bool = false, require: Int? = nil) async throws -> Int {
+        try await run(toUpdate(patch, all: all, require: require)).affected
     }
 
     /// Deletes the rows the filter names; with no filter it is refused
-    /// unless `all`.
+    /// unless `all`; with `require`, refused (`.unmet`) unless it deleted
+    /// exactly that many rows.
     @discardableResult
-    public func delete(all: Bool = false) async throws -> Int { try await run(toDelete(all: all)).affected }
+    public func delete(all: Bool = false, require: Int? = nil) async throws -> Int {
+        try await run(toDelete(all: all, require: require)).affected
+    }
 }

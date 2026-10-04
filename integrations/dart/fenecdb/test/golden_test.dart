@@ -124,11 +124,12 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
       final a = (s['args'] as List?) ?? const [];
       bool all(int at) => opt(a, at, 'all') as bool? ?? false;
       bool absent() => opt(a, 1, 'ifAbsent') as bool? ?? false;
+      int? require(int at) => opt(a, at, 'require') as int?;
       final made = switch (op) {
         'toFenecQL' => q.toFenecQL(),
-        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent()),
-        'toUpdate' => q.toUpdate(value(a[0])!, all: all(1)),
-        'toDelete' => q.toDelete(all: all(0)),
+        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1)),
+        'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1)),
+        'toDelete' => q.toDelete(all: all(0), require: require(0)),
         _ => null,
       };
       if (made != null) return (made.text, made.params, null);
@@ -137,9 +138,9 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'first' => q.first(),
         'count' => q.count(),
         'explain' => q.explain(),
-        'insert' => q.insert(value(a[0])!, ifAbsent: absent()),
-        'update' => q.update(value(a[0])!, all: all(1)),
-        'delete' => q.delete(all: all(0)),
+        'insert' => q.insert(value(a[0])!, ifAbsent: absent(), require: require(1)),
+        'update' => q.update(value(a[0])!, all: all(1), require: require(1)),
+        'delete' => q.delete(all: all(0), require: require(0)),
         _ => null,
       };
       if (ran != null) {

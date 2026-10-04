@@ -130,11 +130,17 @@ put docs {id: 7, body: "draft", version: 1}
 get docs select body, version where id = 7                                   -- → "draft"
 set docs {body: "final", version: version + 1} where id = 7 and version = 1   -- → 1: written
 set docs {body: "other", version: version + 1} where id = 7 and version = 1   -- → 0: read again
+set docs {body: "other", version: version + 1} where id = 7 and version = 1 require 1   -- → refused: 412, and its batch put back
 </pre>
 
 <ul>
   <li><b>0 means someone wrote first:</b> read the row again and retry, or
     tell the user.</li>
+  <li><b>In a <code>/batch</code>, add <code>require 1</code>:</b> a 0
+    would let the statements after it go on, where a lost race should stop
+    them. With it the write that found another version is refused (412) and
+    the batch is put back whole (<a href="/docs/fenecql#require">Writes that
+    must find their rows</a>).</li>
   <li><b>Costs:</b> a write that wins 1.13 us, one that loses
     0.66.</li>
 </ul>

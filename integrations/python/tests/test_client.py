@@ -36,6 +36,28 @@ def test_a_refusal_says_why_and_how(client):
     assert e.value.status == 400
 
 
+def test_a_write_that_does_not_write_its_count_is_refused_and_put_back(client):
+    name = fresh("require")
+    client.query(f"create collection {name} (name text, balance int)")
+    try:
+        client.collection(name).insert({"name": "a", "balance": 10})
+        accounts = client.collection(name)
+        with pytest.raises(FenecError) as e:
+            accounts.where("name", "nobody").update({"balance": 0}, require=1)
+        assert e.value.status == 412
+        assert "requires 1" in str(e.value)
+        assert accounts.where("name", "a").update({"balance": 5}, require=1) == 1
+        # A batch whose second write is unmet keeps nothing of the first.
+        met = accounts.where("name", "a").to_update({"balance": 0}, require=1)
+        unmet = accounts.where("name", "nobody").to_delete(require=1)
+        with pytest.raises(FenecError) as e:
+            client.batch([met, unmet])
+        assert e.value.status == 412
+        assert client.query(f"get {name} select balance") == [{"balance": 5}]
+    finally:
+        client.query(f"drop collection if exists {name}")
+
+
 def test_a_write_names_its_change_and_a_read_can_wait_for_it(client):
     name = fresh("seq")
     client.query(f"create collection {name} (t text)")

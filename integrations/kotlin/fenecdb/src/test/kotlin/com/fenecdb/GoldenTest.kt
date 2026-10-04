@@ -112,18 +112,19 @@ class GoldenTest {
                     val op = s.string("op")!!
                     val a = s.list("args") ?: emptyList()
                     val all = { at: Int -> opt(a, at, "all") as Boolean? ?: false }
+                    val require = { at: Int -> (opt(a, at, "require") as Number?)?.toLong() }
                     val made: Statement? = when (op) {
                         "toFenecQL" -> q.toFenecQL()
-                        "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false)
-                        "toUpdate" -> q.toUpdate(value(a[0]), all(1))
-                        "toDelete" -> q.toDelete(all(0))
+                        "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1))
+                        "toUpdate" -> q.toUpdate(value(a[0]), all(1), require(1))
+                        "toDelete" -> q.toDelete(all(0), require(0))
                         "rows" -> null.also { q.rows() }
                         "first" -> null.also { q.first() }
                         "count" -> null.also { q.count() }
                         "explain" -> null.also { q.explain() }
-                        "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false) }
-                        "update" -> null.also { q.update(value(a[0]), all(1)) }
-                        "delete" -> null.also { q.delete(all(0)) }
+                        "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false, require(1)) }
+                        "update" -> null.also { q.update(value(a[0]), all(1), require(1)) }
+                        "delete" -> null.also { q.delete(all(0), require(0)) }
                         else -> {
                             q = step(q, op, a)
                             continue
