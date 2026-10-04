@@ -3,6 +3,7 @@
 //! The server runs in-process over a scratch directory; the client is raw
 //! TCP, as in the other suites.
 
+use fenec_http::access::Access;
 use fenec_http::tenants::Tenants;
 use fenec_http::{Config, Server};
 use std::io::{Read, Write};
@@ -475,4 +476,236 @@ fn tenant_files_are_read_into_memory_with_mapping_off() {
     let read = held(Tenants::new(&dir).unwrap().with_mmap(false));
     assert!(read > mapped + 500 * 150, "read {read}, mapped {mapped}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A node taking JSON Web Tokens, its policy the usual `owner = $jwt.sub`,
+/// and the tenants `acme` and `globex` each holding a note of alice's.
+fn scoped_node(tag: &str, demands: fenec_http::access::Demands) -> (Node, Arc<Access>) {
+    let access = Arc::new(
+        Access::new(JWT_SECRET, "notes  read,write  where owner = $jwt.sub\n")
+            .unwrap()
+            .demanding(demands),
+    );
+    let cfg = Config {
+        token: Some("root".into()),
+        access: Some(Arc::clone(&access)),
+        ..admin_cfg()
+    };
+    let n = start(tag, cfg);
+    for t in ["acme", "globex"] {
+        create(n.port, t);
+        for q in [
+            "create collection notes (owner text @hash, title text, v vector<2> @hnsw)".to_string(),
+            format!("put notes {{owner: \"alice\", title: \"{t} secret\", v: [1, 0]}}"),
+        ] {
+            let mut body = String::from("{\"query\":");
+            fenec_core::json::escape_into(&mut body, &q);
+            body.push('}');
+            let r = call(
+                n.port,
+                "POST",
+                &format!("/t/{t}/query"),
+                body.as_bytes(),
+                Some("Bearer root"),
+            );
+            assert_eq!(r.status, 200, "{}", r.text());
+        }
+    }
+    (n, access)
+}
+
+const JWT_SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
+
+/// Every route under a tenant's prefix, as `(method, path, body)`.
+const ROUTES: &[(&str, &str, &str)] = &[
+    ("POST", "query", r#"{"query":"get notes"}"#),
+    ("POST", "batch", r#"{"statements":["get notes"]}"#),
+    ("GET", "notes", ""),
+    ("GET", "notes?select=title", ""),
+    ("POST", "notes", r#"{"title":"planted"}"#),
+    ("PATCH", "notes?title=eq.x", r#"{"title":"y"}"#),
+    ("DELETE", "notes?title=eq.x", ""),
+    (
+        "POST",
+        "notes/near",
+        r#"{"field":"v","vector":[1,0],"limit":1}"#,
+    ),
+    ("GET", "collections", ""),
+    ("GET", "notes/changes", ""),
+    ("GET", "_changes", ""),
+    ("GET", "_schema", ""),
+    (
+        "POST",
+        "_schema/plan?mode=follow",
+        r#"{"format":1,"fenecql":""}"#,
+    ),
+    ("GET", "_stats/statements", ""),
+];
+
+/// A token is held to the tenant it names: a JWT minted for one tenant read
+/// and subscribed to every other on the node, its policy's `owner =
+/// $jwt.sub` matching alice's rows in each tenant's file alike.
+#[test]
+fn a_token_reaches_only_the_tenant_it_names() {
+    let (n, access) = scoped_node("bound", Default::default());
+    let acme = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let both = access
+        .mint(r#"{"sub":"alice","tenant":["acme","globex"]}"#)
+        .unwrap();
+    let unbound = access.mint(r#"{"sub":"alice"}"#).unwrap();
+    let odd = access.mint(r#"{"sub":"alice","tenant":7}"#).unwrap();
+    let bearer = |t: &str| format!("Bearer {t}");
+
+    // Its own tenant: read and written as before.
+    let r = call(
+        n.port,
+        "GET",
+        "/t/acme/notes?select=title",
+        b"",
+        Some(&bearer(&acme)),
+    );
+    assert_eq!(
+        (r.status, r.text().as_str()),
+        (200, r#"[{"title":"acme secret"}]"#)
+    );
+
+    for (method, path, body) in ROUTES {
+        let target = format!("/t/globex/{path}");
+        for (who, token) in [
+            ("acme's", &acme),
+            ("an unbound", &unbound),
+            ("a number's", &odd),
+        ] {
+            let r = call(
+                n.port,
+                method,
+                &target,
+                body.as_bytes(),
+                Some(&bearer(token)),
+            );
+            assert_eq!(
+                r.status,
+                403,
+                "{who} token, {method} {target}: {}",
+                r.text()
+            );
+            assert!(
+                !r.text().contains("secret"),
+                "{method} {target}: {}",
+                r.text()
+            );
+        }
+    }
+    // A tenant that does not exist answers the same: the token is judged
+    // before the tenant is looked up, so a 404 tells nothing of who exists.
+    let r = call(n.port, "GET", "/t/nobody/notes", b"", Some(&bearer(&acme)));
+    assert_eq!(r.status, 403, "{}", r.text());
+
+    // A list names each tenant it holds.
+    let r = call(
+        n.port,
+        "GET",
+        "/t/globex/notes?select=title",
+        b"",
+        Some(&bearer(&both)),
+    );
+    assert_eq!(
+        (r.status, r.text().as_str()),
+        (200, r#"[{"title":"globex secret"}]"#)
+    );
+    // The node's own token is unaffected.
+    let r = call(
+        n.port,
+        "GET",
+        "/t/globex/notes?select=title",
+        b"",
+        Some("Bearer root"),
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+
+    // And nothing was written to globex by the refused writes.
+    let r = call(
+        n.port,
+        "GET",
+        "/t/globex/notes?select=title",
+        b"",
+        Some("Bearer root"),
+    );
+    assert_eq!(r.text(), r#"[{"title":"globex secret"}]"#);
+}
+
+/// `--jwt-unbound-tenants` takes a token naming no tenant for every tenant,
+/// the way a node took every token before; a named tenant still binds, and
+/// another claim name is read where the node is told so.
+#[test]
+fn unbound_tokens_are_taken_only_when_the_node_is_told() {
+    let demands = fenec_http::access::Demands {
+        unbound_tenants: true,
+        tenant_claim: "org".into(),
+        ..Default::default()
+    };
+    let (n, access) = scoped_node("unbound", demands);
+    let unbound = access.mint(r#"{"sub":"alice"}"#).unwrap();
+    let r = call(
+        n.port,
+        "GET",
+        "/t/globex/notes?select=title",
+        b"",
+        Some(&format!("Bearer {unbound}")),
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+    let acme = access.mint(r#"{"sub":"alice","org":"acme"}"#).unwrap();
+    let r = call(
+        n.port,
+        "GET",
+        "/t/globex/notes",
+        b"",
+        Some(&format!("Bearer {acme}")),
+    );
+    assert_eq!(r.status, 403, "{}", r.text());
+    let r = call(
+        n.port,
+        "GET",
+        "/t/acme/notes",
+        b"",
+        Some(&format!("Bearer {acme}")),
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+}
+
+/// A scoped write to a tenant is checked as one to a single database: the
+/// `WITH CHECK` hook was installed on a single database alone, and a
+/// tenant took alice writing a row of bob's.
+#[test]
+fn a_scoped_write_to_a_tenant_is_checked() {
+    let (n, access) = scoped_node("check", Default::default());
+    let alice = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let auth = format!("Bearer {alice}");
+    let r = call(
+        n.port,
+        "POST",
+        "/t/acme/notes",
+        br#"{"owner":"bob","title":"planted"}"#,
+        Some(&auth),
+    );
+    assert_eq!(r.status, 403, "{}", r.text());
+    let r = call(
+        n.port,
+        "POST",
+        "/t/acme/notes",
+        br#"{"title":"mine"}"#,
+        Some(&auth),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = call(
+        n.port,
+        "GET",
+        "/t/acme/notes?select=owner,title&order=title",
+        b"",
+        Some("Bearer root"),
+    );
+    assert_eq!(
+        r.text(),
+        r#"[{"owner":"alice","title":"acme secret"},{"owner":"alice","title":"mine"}]"#
+    );
 }

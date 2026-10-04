@@ -151,6 +151,9 @@ pub struct Tenants {
     mapped: bool,
     /// The router's lease, on a node that takes one (`--lease`).
     lease: Option<Arc<Lease>>,
+    /// Whether every tenant's database checks what a scoped token writes
+    /// ([`Tenants::check_scoped_writes`]).
+    checked: AtomicBool,
 }
 
 /// One tenant's open/closed state. Opening and closing a tenant both happen
@@ -183,6 +186,7 @@ impl Tenants {
             checkpoint: true,
             mapped: true,
             lease: None,
+            checked: AtomicBool::new(false),
         })
     }
 
@@ -356,6 +360,22 @@ impl Tenants {
     }
 
     /// A snapshot of the slots, taken without holding the registry after.
+    /// Has every tenant's database test what a scoped token writes against
+    /// its rules (`access::Check`), as [`crate::Server::new`] has a single
+    /// database: those open now and each opened after. A node serving JSON
+    /// Web Tokens without it took a scoped write outside the token's
+    /// filter, `WITH CHECK` being a hook no tenant had installed.
+    pub fn check_scoped_writes(&self) {
+        self.checked.store(true, Ordering::SeqCst);
+        for slot in self.all_slots() {
+            let held = slot.held.lock().unwrap_or_else(|e| e.into_inner());
+            if let Held::Open(t) = &*held {
+                // A second install finds it there and is refused: harmless.
+                let _ = crate::held::write(&t.db).install_plugin(&crate::access::CheckPlugin);
+            }
+        }
+    }
+
     fn all_slots(&self) -> Vec<Arc<Slot>> {
         self.registry().values().cloned().collect()
     }
@@ -573,6 +593,9 @@ impl Tenants {
         };
         if let Some(setup) = &self.setup {
             setup(&mut db).map_err(|e| Refused(500, e.to_string()))?;
+        }
+        if self.checked.load(Ordering::SeqCst) {
+            let _ = db.install_plugin(&crate::access::CheckPlugin);
         }
         // Every write the database lands asks the lease first, whichever
         // way it came in: HTTP, a maintenance, a follower.

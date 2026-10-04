@@ -82,6 +82,14 @@ usage: fenec-server [options]
                             (--mint-token gives one an hour)
       --jwt-max-age <s>     refuse a token whose `exp` lies further ahead
                             than this (0 = no bound, the default)
+      --jwt-tenant-claim <name>  with --dir, the claim naming the tenant a
+                            token is for: it reaches /t/<t>/ only when the
+                            claim names <t> (a text, or a list holding it)
+                            default: tenant
+      --jwt-unbound-tenants with --dir, take a token naming no tenant for
+                            every tenant. Without it such a token is refused
+                            (403): a policy's `owner = $jwt.sub` matches the
+                            same user in every tenant's file
       --policy <path>       the rules a token is held to, one per line:
                             <collection|*> <read|write|read,write>
                             [where <filter>] [for <role>]
@@ -314,6 +322,8 @@ fn main() {
                     v => fail(&format!("--jwt-require-exp expects on or off, got `{v}`")),
                 }
             }
+            "--jwt-tenant-claim" => demands.tenant_claim = next(&mut i, "--jwt-tenant-claim"),
+            "--jwt-unbound-tenants" => demands.unbound_tenants = true,
             "--jwt-max-age" => {
                 let v = next(&mut i, "--jwt-max-age");
                 let secs: u64 = v

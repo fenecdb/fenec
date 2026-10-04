@@ -110,6 +110,9 @@ curl -X POST 127.0.0.1:8081/t/acme/query -d '{"query": "get notes limit 5"}'
   <li><b>Unknown tenants are 404.</b> A request never creates one.</li>
   <li><b><code>/_admin/</code></b> is how the router drives the node; it needs
     <code>--admin-token</code>.</li>
+  <li><b>A user's token is bound to its tenant.</b> A JSON Web Token reaches
+    <code>/t/acme/</code> only when its <code>tenant</code> claim names
+    <code>acme</code> (<a href="#tokens">Tokens</a>).</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -555,10 +558,16 @@ took 38 ms under the router's write lock. An image adopted, or more changes
 than the ring holds, and the maps are read again whole.</p>
 </details>
 
-<h2>Tokens</h2>
+<h2 id="tokens">Tokens</h2>
 
 <p>There are three tokens: one for data, one per node for the router, and one
-for managing the router.</p>
+for managing the router. A user's JSON Web Token is bound to the tenant its
+<code>tenant</code> claim names:</p>
+
+<pre data-lang="bash">fenec-server --dir /data/n1 --http 127.0.0.1:8081 --admin-token a1 \
+         --jwt-secret-file jwt.secret --policy policy.txt
+fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","tenant":"acme"}'
+</pre>
 
 <details class="deep"><summary>Details</summary>
 <p>Three, each for a different job. Data requests carry whatever the nodes'
@@ -568,4 +577,24 @@ for managing the router.</p>
 <code>--token</code> guards <code>/_shard/</code>; like the nodes, it refuses to
 listen on a non-loopback address without one unless given
 <code>--insecure</code>.</p>
+
+<p>With <code>--jwt-secret</code> or <code>--jwt-keys</code> a node also takes
+JSON Web Tokens held to its <code>--policy</code>, and the policy is the
+node's, not a tenant's: <code>notes read,write where owner = $jwt.sub</code>
+matches alice's rows in every tenant's file alike. So on a
+<code>--dir</code> node a token reaches <code>/t/&lt;t&gt;/</code> only when its
+tenant claim names <code>&lt;t&gt;</code>, a text or a list holding it, and
+is refused with 403 elsewhere: on every route under the prefix, the
+statements, REST, <code>/batch</code>, a subscription, <code>/_changes</code>,
+<code>/_schema</code> and the statement counts. The check comes before the
+tenant is looked up, so a refused token learns nothing of which tenants
+exist. A token naming no tenant is refused on a <code>--dir</code> node
+unless it is started with <code>--jwt-unbound-tenants</code>, which takes
+such a token for every tenant it serves; <code>--jwt-tenant-claim
+&lt;name&gt;</code> reads another claim than <code>tenant</code>. The node's
+own <code>--http-token</code> and <code>--admin-token</code> are not bound.
+The router forwards <code>Authorization</code> as it came and holds no keys,
+so the node is what enforces it, behind the router or reached directly.
+What a scoped token writes to a tenant is checked against its rules as on a
+single file (<a href="/docs/http#scoped-access">Scoped access</a>).</p>
 </details>

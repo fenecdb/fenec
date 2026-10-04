@@ -493,6 +493,24 @@ key; an RSA modulus taken for an HS256 secret would sign anything. The file
 is read again as it changes, looked at once a second, which is the rotation.
 A verified token is kept by its text (`verified`, 16 shards of 256, emptied
 when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+A token naming no `exp` is refused (`Demands::require_exp`,
+`--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
+one may lie; `mint` stamps an hour on claims naming none.
+
+**A token is bound to the tenant it names** (`Scope::reaches`,
+`route_tenant`). The policy is the node's, not a tenant's, so `owner =
+$jwt.sub` matched alice's rows in every tenant's file: a token minted for
+one tenant read and subscribed to every other, on its node and through the
+router. On a `--dir` node a JWT reaches `/t/<t>/` only when its tenant
+claim (`--jwt-tenant-claim`, `tenant`) names `<t>`, a text or a list
+holding it; one naming none is 403 unless `--jwt-unbound-tenants`. It is
+asked once in `route_tenant`, before the tenant is looked up -- so a
+refusal says nothing of which tenants exist -- and every route below the
+prefix passes there: a new one cannot skip it. The router forwards
+`Authorization` and holds no keys, so the node enforces it. A tenant's
+database installs the `Check` hook as a single one does
+(`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
+and a scoped write to a tenant went unchecked.
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied

@@ -63,6 +63,9 @@ These are deliberate, and README explains each one:
 - **`--jwt-require-exp off` takes a token with no `exp` for ever.** By
   default such a token is refused (401); turning that off is the operator's
   call, as is how far ahead `--jwt-max-age` lets an `exp` lie.
+- **`--jwt-unbound-tenants` takes a token naming no tenant for every tenant**
+  of a `--dir` node. By default such a token is refused there (403), and a
+  token naming a tenant reaches that tenant alone.
 - **Two processes opening the same file corrupts it.** There is a single writer
   and no lock file; this is why everything that writes a file runs as a thread
   of one `fenec-server`.

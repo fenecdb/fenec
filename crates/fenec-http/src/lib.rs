@@ -224,6 +224,9 @@ impl Server {
     /// One database per tenant under `/t/<tenant>/`, plus `/_admin/`. Each
     /// tenant gets its own watcher as it is opened.
     pub fn with_tenants(tenants: Arc<Tenants>, cfg: Config) -> Server {
+        if cfg.access.is_some() {
+            tenants.check_scoped_writes();
+        }
         Server {
             backend: Backend::Tenants(tenants),
             cfg: Arc::new(cfg),
@@ -766,8 +769,15 @@ fn route_tenant(
             return Err(Response::error(401, "invalid or missing replication token")
                 .header("WWW-Authenticate", "Bearer"));
         }
-    } else {
-        authenticate(cfg, req)?;
+    } else if let Who::Scoped(scope) = authenticate(cfg, req)? {
+        // A token is held to the tenant it names here, before the tenant
+        // is looked up and once for every route below the prefix: the
+        // statements, REST, `/batch`, subscriptions, `/_changes`,
+        // `/_schema`, the statements' counts. The node's token and an
+        // unscoped server are unaffected.
+        scope
+            .reaches(&name)
+            .map_err(|why| Response::error(403, why))?;
     }
     let t = tenants
         .get(&name)

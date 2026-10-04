@@ -632,6 +632,12 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     to tokens whose <code>role</code> claim names that role; rules on one
     collection widen each other; a rule whose filter names a claim the token
     lacks does not apply. A subscription is checked when it opens.</li>
+  <li><b>Tenants.</b> On a <code>--dir</code> node a token reaches
+    <code>/t/&lt;t&gt;/</code> only when its <code>tenant</code> claim names
+    <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused
+    with 403 under every other tenant's prefix; one naming no tenant is
+    refused there unless the node runs with
+    <code>--jwt-unbound-tenants</code> (<a href="/docs/sharding#tokens">Tokens</a>).</li>
 </ul>
 
 <p>The server's own <code>--http-token</code> keeps full access alongside.</p>

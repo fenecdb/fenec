@@ -100,6 +100,15 @@ pub struct Demands {
     /// A token whose `exp` lies further ahead than this many seconds is
     /// refused (`--jwt-max-age`): an `exp` ten years out is no `exp`.
     pub max_age: Option<u64>,
+    /// The claim naming the tenant a token is for (`--jwt-tenant-claim`,
+    /// `tenant` unless told): on a `--dir` node a token reaches `/t/<t>/`
+    /// only when the claim names `<t>` -- a text, or a list holding it.
+    pub tenant_claim: String,
+    /// On a `--dir` node, take a token whose claims name no tenant for
+    /// every tenant (`--jwt-unbound-tenants`). Off, such a token is refused
+    /// there: a policy's `owner = $jwt.sub` matches the same user in every
+    /// tenant's file, so a token for one tenant read every other.
+    pub unbound_tenants: bool,
 }
 
 impl Default for Demands {
@@ -107,6 +116,8 @@ impl Default for Demands {
         Demands {
             require_exp: true,
             max_age: None,
+            tenant_claim: "tenant".into(),
+            unbound_tenants: false,
         }
     }
 }
@@ -237,6 +248,11 @@ struct Rule {
 pub struct Scope {
     subject: Option<String>,
     rules: Vec<Bound>,
+    /// The tenants the token names in its tenant claim; `None` where it
+    /// names none.
+    tenants: Option<Vec<String>>,
+    /// A token naming no tenant reaches every one (`--jwt-unbound-tenants`).
+    unbound: bool,
 }
 
 struct Bound {
@@ -399,12 +415,28 @@ impl Access {
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
             });
         }
+        // Anything but a text or a list of texts names no tenant: a number
+        // or an object compared as text could be made to match.
+        let tenants = match claim(&self.demands.tenant_claim) {
+            Some(Value::Text(t)) => Some(vec![t.clone()]),
+            Some(Value::List(l)) => Some(
+                l.iter()
+                    .filter_map(|v| match v {
+                        Value::Text(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
         Ok(Scope {
             subject: match claim("sub") {
                 Some(Value::Text(s)) => Some(s.clone()),
                 _ => None,
             },
             rules,
+            tenants,
+            unbound: self.demands.unbound_tenants,
         })
     }
 
@@ -634,6 +666,20 @@ impl Scope {
     /// The `sub` claim, when the token has one.
     pub fn subject(&self) -> Option<&str> {
         self.subject.as_deref()
+    }
+
+    /// Whether the token may reach tenant `name` on a `--dir` node: its
+    /// tenant claim names it, or it names none and the node takes unbound
+    /// tokens. The tenant comes from the path and each tenant is a file of
+    /// its own, but the policy is the node's: without this a token minted
+    /// for one tenant read every other whose rows its filter matched.
+    pub fn reaches(&self, name: &str) -> std::result::Result<(), &'static str> {
+        match &self.tenants {
+            Some(names) if names.iter().any(|n| n == name) => Ok(()),
+            Some(_) => Err("this token is for another tenant"),
+            None if self.unbound => Ok(()),
+            None => Err("this token names no tenant, and this node serves tenants"),
+        }
     }
 
     /// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows

@@ -22,7 +22,8 @@ impl Drop for Node {
     }
 }
 
-fn node(tag: &str) -> Node {
+/// A node taking `access`'s JSON Web Tokens beside its data token `data`.
+fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node {
     let dir = std::env::temp_dir().join(format!(
         "fenec-shard-{tag}-{}-{:?}",
         std::process::id(),
@@ -33,6 +34,8 @@ fn node(tag: &str) -> Node {
         addr: "127.0.0.1:0".into(),
         admin_token: Some(format!("adm-{tag}")),
         stream_keepalive: Duration::from_millis(80),
+        token: access.is_some().then(|| "data".to_string()),
+        access,
         ..fenec_http::Config::default()
     };
     let server = fenec_http::Server::with_tenants(Arc::clone(&tenants), cfg);
@@ -51,7 +54,18 @@ struct Cluster {
 
 /// A router with `n` nodes registered as `n1`, `n2`, ...
 fn cluster(tag: &str, n: usize, token: Option<&str>) -> Cluster {
-    let nodes: Vec<Node> = (1..=n).map(|i| node(&format!("{tag}{i}"))).collect();
+    cluster_with(tag, n, token, None)
+}
+
+fn cluster_with(
+    tag: &str,
+    n: usize,
+    token: Option<&str>,
+    access: Option<Arc<fenec_http::access::Access>>,
+) -> Cluster {
+    let nodes: Vec<Node> = (1..=n)
+        .map(|i| node_with(&format!("{tag}{i}"), access.clone()))
+        .collect();
     let cfg = Config {
         addr: "127.0.0.1:0".into(),
         token: token.map(String::from),
@@ -441,4 +455,65 @@ fn an_unreachable_node_is_a_502_not_a_hang() {
     assert!(started.elapsed() < Duration::from_secs(2));
     // And a new tenant has nowhere to go.
     assert_eq!(call(port, "PUT", "/_shard/tenants/beta", "", None).0, 503);
+}
+
+/// A token minted for one tenant reaches no other through the router, on
+/// its own node or another: the router forwards `Authorization` as it came
+/// and the node holds the token to the tenant its claim names -- query,
+/// REST, `/batch` and a subscription alike.
+#[test]
+fn a_token_for_one_tenant_reaches_no_other_through_the_router() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_with("bound", 2, None, Some(Arc::clone(&access)));
+    c.create("acme", Some("n1"));
+    c.create("globex", Some("n1"));
+    c.create("initech", Some("n2"));
+    for t in ["acme", "globex", "initech"] {
+        let q = r#"{"query":"create collection notes (owner text @hash, title text)"}"#;
+        let r = c.call("POST", &format!("/t/{t}/query"), q, Some("data"));
+        assert_eq!(r.0, 200, "{}", r.1);
+        let doc = format!(r#"{{"owner":"alice","title":"{t} secret"}}"#);
+        let r = c.call("POST", &format!("/t/{t}/notes"), &doc, Some("data"));
+        assert_eq!(r.0, 201, "{}", r.1);
+    }
+    let acme = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let r = c.call("GET", "/t/acme/notes?select=title", "", Some(&acme));
+    assert_eq!(body(&r), r#"[{"title":"acme secret"}]"#);
+
+    // globex is on acme's node, initech on the other.
+    for t in ["globex", "initech"] {
+        for (method, path, b) in [
+            ("GET", "notes", ""),
+            ("POST", "query", r#"{"query":"get notes"}"#),
+            ("POST", "batch", r#"{"statements":["get notes"]}"#),
+            ("POST", "notes", r#"{"title":"planted"}"#),
+            ("GET", "_changes", ""),
+        ] {
+            let r = c.call(method, &format!("/t/{t}/{path}"), b, Some(&acme));
+            assert_eq!(r.0, 403, "{method} /t/{t}/{path}: {}", r.1);
+            assert!(!r.1.contains("secret"), "{}", r.1);
+        }
+        // A subscription is refused before it streams anything.
+        let mut sock = TcpStream::connect(("127.0.0.1", c.port)).unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            sock,
+            "GET /t/{t}/notes/changes HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {acme}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = sock.read_to_string(&mut out);
+        assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+        assert!(
+            !out.contains("secret") && !out.contains("event: seed"),
+            "{out}"
+        );
+    }
 }
