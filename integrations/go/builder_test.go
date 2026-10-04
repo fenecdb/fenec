@@ -157,6 +157,17 @@ func value(x any) any {
 			}
 			return out
 		}
+		if n, ok := v.get("$inc"); ok {
+			return fenecdb.Inc(value(n))
+		}
+		if e, ok := v.get("$expr"); ok {
+			list := e.([]any)
+			params := make([]any, len(list)-1)
+			for i, p := range list[1:] {
+				params[i] = value(p)
+			}
+			return fenecdb.Expr(list[0].(string), params...)
+		}
 		if len(v.keys) == 1 && strings.HasPrefix(v.keys[0], "$") {
 			panic("a condition where a value goes: " + v.keys[0])
 		}
@@ -240,6 +251,17 @@ func spec(x any) any {
 		}
 	}
 	return fenecdb.Ops(pairs...)
+}
+
+// insertOpts is an insert's options, among its documents as Insert takes them.
+func insertOpts(o object) []any {
+	var out []any
+	for i, k := range o.keys {
+		if k == "ifAbsent" && o.vals[i].(bool) {
+			out = append(out, fenecdb.IfAbsent())
+		}
+	}
+	return out
 }
 
 func optsOf(x []any, at int) object {
@@ -467,7 +489,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 			case "toFenecQL":
 				text, params, err = q.ToFenecQL()
 			case "toInsert":
-				text, params, err = q.ToInsert(docs(a[0])...)
+				text, params, err = q.ToInsert(append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
 			case "toUpdate":
 				text, params, err = q.ToUpdate(doc(a[0]), options(optsOf(a, 1))...)
 			case "toDelete":
@@ -485,7 +507,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 				_, err = q.Explain(ctx)
 				return sent(err)
 			case "insert":
-				_, err = q.Insert(ctx, docs(a[0])...)
+				_, err = q.Insert(ctx, append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
 				return sent(err)
 			case "update":
 				_, err = q.Update(ctx, doc(a[0]), options(optsOf(a, 1))...)

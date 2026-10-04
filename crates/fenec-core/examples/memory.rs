@@ -79,6 +79,7 @@ fn main() {
             collection: "s".into(),
             docs,
             insert: false,
+            if_absent: false,
         })
         .unwrap();
     }

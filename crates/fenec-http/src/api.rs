@@ -613,6 +613,7 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
         collection: schema.name.clone(),
         docs: out,
         insert: true,
+        if_absent: false,
     })
 }
 

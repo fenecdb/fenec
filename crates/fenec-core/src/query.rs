@@ -19,6 +19,26 @@ pub enum CmpOp {
     Ge,
 }
 
+/// `+`, `-`, `*`, `/` between two values ([`arith`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl ArithOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// Field reference. `id` specifically yields the document id.
@@ -43,6 +63,9 @@ pub enum Expr {
     IsNull(Box<Expr>),
     /// Plugin or builtin function call: `cosine(embed, $1)`
     Call(String, Vec<Expr>),
+    /// `n + 1`, `price * $1`: arithmetic over numbers, and a timestamp
+    /// moved by milliseconds ([`arith`]).
+    Arith(ArithOp, Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -60,7 +83,7 @@ impl Expr {
                 b.referenced_fields(out);
             }
             Expr::Not(a) | Expr::IsNull(a) => a.referenced_fields(out),
-            Expr::Cmp(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) => {
+            Expr::Cmp(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) | Expr::Arith(_, a, b) => {
                 a.referenced_fields(out);
                 b.referenced_fields(out);
             }
@@ -89,7 +112,8 @@ impl Expr {
             | Expr::Or(a, b)
             | Expr::Cmp(_, a, b)
             | Expr::Like(a, b)
-            | Expr::Has(a, b) => a.has_subquery() || b.has_subquery(),
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => a.has_subquery() || b.has_subquery(),
             Expr::Not(a) | Expr::IsNull(a) => a.has_subquery(),
             Expr::In(a, items) => a.has_subquery() || items.iter().any(Expr::has_subquery),
             Expr::Call(_, args) => args.iter().any(Expr::has_subquery),
@@ -106,7 +130,8 @@ impl Expr {
             | Expr::Or(a, b)
             | Expr::Cmp(_, a, b)
             | Expr::Like(a, b)
-            | Expr::Has(a, b) => {
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => {
                 a.each_subquery_mut(f)?;
                 b.each_subquery_mut(f)
             }
@@ -138,7 +163,7 @@ impl Expr {
             Expr::Field(_) | Expr::Lit(_) => 0,
             Expr::And(a, b) | Expr::Or(a, b) => a.max_param().max(b.max_param()),
             Expr::Not(a) | Expr::IsNull(a) => a.max_param(),
-            Expr::Cmp(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) => {
+            Expr::Cmp(_, a, b) | Expr::Like(a, b) | Expr::Has(a, b) | Expr::Arith(_, a, b) => {
                 a.max_param().max(b.max_param())
             }
             Expr::In(a, items) => items
@@ -372,6 +397,69 @@ pub trait RowAccess {
 pub struct EvalCtx<'a> {
     pub params: &'a [Value],
     pub registry: &'a crate::plugin::Registry,
+    /// What `now()` answers when set: the database's clock
+    /// (`Database::set_clock`), which the browser module sets from
+    /// `Date.now()` before each statement -- it has no clock of its own --
+    /// and a test pins. The system's clock, through the registry, when
+    /// `None`.
+    pub clock: Option<i64>,
+}
+
+/// `l op r` for `+ - * /`: what an expression in a `set` (`{n: n + 1}`)
+/// or a filter works out. A null on either side is null, as SQL's is
+/// (`coalesce(n, 0) + 1` counts from nothing). Two ints make an int, and
+/// one past 64 bits is refused rather than wrapped, as a division by zero
+/// is; `/` between ints divides whole, toward zero, as PostgreSQL's does.
+/// An int and a float make a float, and a float that is no longer finite
+/// is refused. A timestamp moves by milliseconds (`now() + 30000`), and
+/// two timestamps apart are the milliseconds between them. Anything else
+/// is a type error: the field's type check is what a result meets next.
+pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
+    use Value::{Float, Int, Timestamp};
+    if l.is_null() || r.is_null() {
+        return Ok(Value::Null);
+    }
+    let over = || Error::Query("the int overflows 64 bits".into());
+    let whole = |a: i64, b: i64| -> Result<i64> {
+        match op {
+            ArithOp::Add => a.checked_add(b),
+            ArithOp::Sub => a.checked_sub(b),
+            ArithOp::Mul => a.checked_mul(b),
+            ArithOp::Div if b == 0 => return Err(Error::Query("division by zero".into())),
+            ArithOp::Div => a.checked_div(b),
+        }
+        .ok_or_else(over)
+    };
+    Ok(match (l, r) {
+        (Int(a), Int(b)) => Int(whole(*a, *b)?),
+        (Timestamp(t), Int(d)) if matches!(op, ArithOp::Add | ArithOp::Sub) => {
+            Timestamp(whole(*t, *d)?)
+        }
+        (Int(d), Timestamp(t)) if op == ArithOp::Add => Timestamp(whole(*d, *t)?),
+        (Timestamp(a), Timestamp(b)) if op == ArithOp::Sub => Int(whole(*a, *b)?),
+        (Int(_) | Float(_), Int(_) | Float(_)) => {
+            let (a, b) = (l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0));
+            let x = match op {
+                ArithOp::Add => a + b,
+                ArithOp::Sub => a - b,
+                ArithOp::Mul => a * b,
+                ArithOp::Div if b == 0.0 => return Err(Error::Query("division by zero".into())),
+                ArithOp::Div => a / b,
+            };
+            if !x.is_finite() {
+                return Err(Error::Query("the float overflows".into()));
+            }
+            Float(x)
+        }
+        _ => {
+            return Err(Error::Type(format!(
+                "`{}` takes numbers, or a timestamp and milliseconds; found {} and {}",
+                op.symbol(),
+                l.type_name(),
+                r.type_name()
+            )))
+        }
+    })
 }
 
 /// Case-insensitive substring test, the `~` operator.
@@ -495,12 +583,19 @@ pub fn eval(expr: &Expr, row: &mut dyn RowAccess, ctx: &EvalCtx) -> Result<Value
             ))
         }
         Expr::Call(name, args) => {
+            if let (Some(t), true) = (
+                ctx.clock,
+                args.is_empty() && name.eq_ignore_ascii_case("now"),
+            ) {
+                return Ok(Value::Timestamp(t));
+            }
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval(a, row, ctx)?);
             }
             ctx.registry.call(name, &vals)?
         }
+        Expr::Arith(op, a, b) => arith(*op, &eval(a, row, ctx)?, &eval(b, row, ctx)?)?,
     })
 }
 
@@ -1312,6 +1407,11 @@ pub enum Statement {
         /// `insert`: a document naming an id that is taken is refused
         /// (`Error::Duplicate`), where `put` writes over it.
         insert: bool,
+        /// `put ... if absent`: a document whose id, or a `@unique` value
+        /// of, a live row holds already is passed over rather than
+        /// refused, and not counted -- `SET NX`, whose answer (0 or 1) says
+        /// whether the write was made. The parser sets `insert` with it.
+        if_absent: bool,
     },
     Select(Select),
     /// `explain get ...`: the query runs, and what comes back is the path it
@@ -1373,7 +1473,8 @@ impl Expr {
             | Expr::Or(a, b)
             | Expr::Cmp(_, a, b)
             | Expr::Like(a, b)
-            | Expr::Has(a, b) => a.reads_vectors() || b.reads_vectors(),
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => a.reads_vectors() || b.reads_vectors(),
             Expr::Not(a) | Expr::IsNull(a) => a.reads_vectors(),
             Expr::In(a, items) => a.reads_vectors() || items.iter().any(Expr::reads_vectors),
             Expr::InSelect(a, sel) => a.reads_vectors() || sel.reads_vectors(),

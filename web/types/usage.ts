@@ -9,7 +9,9 @@ import {
   FenecError,
   and,
   connect,
+  expr,
   from,
+  inc,
   not,
   openFile,
   or,
@@ -138,6 +140,13 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   await db.from('articles').where('year', '<', 2000).delete();
   // @ts-expect-error -- a year is a number
   db.from('articles').insert({ year: 'soon' });
+  // A value worked out over the row; a lock taken, or not, in one statement.
+  expect<number>(await db.from('articles').where('id', 1).update({ year: inc(1), published: expr('now()') }));
+  expect<number>(await db.from('articles').insert({ title: 'lock' }, { ifAbsent: true }));
+  // @ts-expect-error -- inc takes a number
+  inc('1');
+  // @ts-expect-error -- ifAbsent is a boolean
+  db.from('articles').toInsert({ title: 'x' }, { ifAbsent: 1 });
 
   const [sql, params] = db.from('articles').where('year', 2024).toFenecQL();
   expect<string>(sql);

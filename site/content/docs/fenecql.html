@@ -23,6 +23,7 @@ alter collection &lt;name&gt; alter field &lt;field&gt; @ttl(&lt;duration&gt;) |
 
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
+put &lt;name&gt; { field: value, ... } if absent     -- a held id or @unique value passed over, and not counted
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
@@ -38,7 +39,7 @@ get &lt;name&gt; select [&lt;key&gt;,] count(*), sum(f), ... [where &lt;expr&gt;
            [group &lt;key&gt; [order &lt;column&gt; [desc]] [limit N] [offset N]]
 explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
-set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]
+set &lt;name&gt; { field: value, path: value } [where &lt;expr&gt;]  -- a value may read the row: {n: n + 1}
 del &lt;name&gt; [where &lt;expr&gt;]
 
 collections | describe &lt;name&gt; | compact [&lt;name&gt;]
@@ -50,7 +51,12 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
   <li><b>Every document gets an <code>id</code></b> on its own. Give one in a
     <code>put</code> and it writes over the document with that id.</li>
   <li><b><code>insert</code> never writes over.</b> If an id is taken, the
-    whole statement is refused.</li>
+    whole statement is refused; <code>put … if absent</code> passes over it
+    instead, and the answer counts what was written.</li>
+  <li><b>A <code>set</code> can read the row it writes.</b>
+    <code>set hits {n: n + 1} where key = "ip1"</code> is an increment, made
+    under the write lock — see <a href="#writes">Writes that read the
+    row</a>.</li>
   <li><b><code>alter collection</code> rewrites no document.</b> A field
     added reads <code>null</code> in the documents already there; a field's
     type does not change — see <a href="#changing-a-collection">Changing a
@@ -80,6 +86,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
+<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, and a <code>timestamp</code> moved by milliseconds — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>now</code> <code>timestamp</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, plus plugins</td></tr>
@@ -1046,9 +1053,12 @@ neither does a tenant that follows another node. The server's
 
 <p>The ttl is a kind of index in the file (kind 9, the milliseconds behind
 it), so a binary from before it refuses the file rather than hand out the
-rows past their time. A <code>@unique</code> field's value held by a row
-past its time stays taken until the sweep deletes the row; BM25's
-statistics count the row until then too.</p>
+rows past their time. A write takes the place of a row past its time:
+an <code>insert</code> naming its id writes over it, and a
+<code>@unique</code> value it holds is let go of with it, the row deleted
+in the same statement — so a lock taken by <code>insert</code> and left to
+expire can be taken again at once (<a href="/docs/redis#lock">Instead of
+Redis</a>). BM25's statistics count the row until the sweep.</p>
 
 <div class="note">
   <p><b>What it costs, measured</b> (<code>make ttl-bench</code>, a million
@@ -1403,6 +1413,101 @@ resolves to the lines. The steps are for reading, not parsing — their wording
 may change between versions.</p>
 </details>
 
+<h2 id="writes">Writes that read the row</h2>
+
+<p>A value in a <code>set</code> can be an expression over the row it
+writes: its fields, parameters and functions, with <code>+</code>
+<code>-</code> <code>*</code> <code>/</code>. Every write answers how many
+rows it changed, so a write that names what it expects to find says
+whether it found it.</p>
+
+<pre data-lang="fenecql">set hits {n: n + 1, seen: now()} where key = "ip1"      -- an increment
+set hits {n: coalesce(n, 0) + $1} where key = $2         -- from nothing, by a parameter
+set docs {body: $1, version: version + 1}
+  where id = $2 and version = $3                          -- compare-and-set: 1 or 0
+put locks {name: "nightly", owner: $1, at: now()} if absent   -- 1 if taken, 0 if held
+</pre>
+
+<ul>
+  <li><b>An increment is atomic.</b> The row is read and written under the
+    write lock, and there is one writer, so increments from any number of
+    clients all land.</li>
+  <li><b>A field read is the row as it was.</b> In <code>{n: n + 1, m:
+    n}</code> both read the old <code>n</code>; a name on the value side is
+    a field, a quoted string a string.</li>
+  <li><b><code>null</code> stays <code>null</code>.</b> <code>n + 1</code>
+    over a row with no <code>n</code> is <code>null</code>, as in SQL; write
+    <code>coalesce(n, 0) + 1</code> to count from nothing.</li>
+  <li><b>Every write answers its count</b> — <code>{"affected": n}</code>
+    over HTTP, the <code>count</code> of the browser module's answer, and
+    the write result of every SDK.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p><b>Types.</b> The result goes through the field's type check as a
+literal would. Two <code>int</code>s make an <code>int</code>, and a result
+past 64 bits is refused, never wrapped; <code>/</code> between
+<code>int</code>s divides whole, toward zero, as PostgreSQL's does
+(<code>7 / 2</code> is <code>3</code>), and a division by zero is refused.
+An <code>int</code> and a <code>float</code> make a <code>float</code>,
+which an <code>int</code> field takes when it is whole and refuses when it
+is not — <code>n * 2.0</code> fits, <code>n + 0.5</code> does not, as the
+literal <code>2.5</code> does not. A float that is no longer finite is
+refused. A <code>timestamp</code> plus or minus an <code>int</code> is a
+timestamp that many milliseconds on (<code>now() + 30000</code>), and two
+timestamps apart are the milliseconds between them. Anything else — text
+and a number — is a type error. An error refuses the statement whole, a
+block of one, so nothing of it is written; over no rows there is no error,
+as there is no row to work it out over.</p>
+
+<p><b>Precedence.</b> <code>*</code> and <code>/</code> bind tighter than
+<code>+</code> and <code>-</code>, and all four tighter than a comparison:
+<code>where n + 1 &gt; 2 * m</code>. <code>-1</code> where a value starts is
+a number; after a value, <code>n-1</code> and <code>n - 1</code> are a
+subtraction.</p>
+
+<p><b>Time.</b> <code>now()</code> is worked out once a statement, so every
+row a <code>set</code> writes holds the same time. In the browser it is the
+time the page hands the module with every statement, which has no clock of
+its own.</p>
+
+<p><b>What travels.</b> The record holds the document as written, the value
+worked out, never the expression: a replica, <code>/_changes</code>, an
+archive and a subscriber see the result, and a restore replays it as it
+was. A scoped token's rules test the document a <code>set</code> writes, as
+they test a literal's (<a href="/docs/http#scoped-access">Scoped
+access</a>). A replica of <a href="/docs/sync">Sync</a> works the
+expression out over its own row at once and sends the statement, which the
+server works out again over its own: two replicas' offline increments both
+land, and both replicas come to the server's sum.</p>
+
+<p><b>How it runs.</b> The pairs are bound to the collection once a
+statement, as a filter is: each field written and read by its position, and
+a value that reads no field — a literal, a parameter, <code>now()</code> —
+worked out once rather than a row. Each row is read once: a
+<code>set</code> read it twice before, once for the values and once for the
+indexes it takes out.</p>
+
+<p><b><code>if absent</code></b> passes over a document whose
+<code>id</code>, or whose <code>@unique</code> value, a live row holds,
+where <code>insert</code> refuses the statement: the others are written,
+and the answer counts those alone. That is Redis's <code>SET NX</code> in
+one statement, and it neither aborts a <code>/batch</code> nor makes an
+error a client has to catch. A row past its <code>@ttl</code> holds
+nothing — it is out of every read — so a write takes its place.</p>
+
+<div class="note">
+  <p><b>What it costs, measured</b> (<code>make counters-bench</code>, in
+  process over 100 000 rows of a text, an int and a note). A
+  <code>set</code> of a constant over every row took 65.0 ms against 85.5
+  before expressions — the row read once instead of twice — and
+  <code>{n: n + 1}</code> 66.6 ms; one row by id 1.07 us against 1.26, and
+  1.18 for <code>n + 1</code>. Sixteen threads incrementing one key 10 000
+  times each ended at 160 000, 320 000 increments a second, and sixteen HTTP
+  clients the same against <code>fenec-server</code>, 102 000 a second.</p>
+</div>
+</details>
+
 <h2>Time</h2>
 
 <p>A <code>timestamp</code> field takes an ISO-8601 date or epoch
@@ -1465,6 +1570,7 @@ create index on docs (embed) @hnsw(cosine)
 <h3>Update and delete</h3>
 
 <pre data-lang="fenecql">set articles {year: 2025} where id = 42
+set articles {views: coalesce(views, 0) + 1} where id = 42   -- an increment
 del articles where year &lt; 2000
 </pre>
 

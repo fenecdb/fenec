@@ -55,6 +55,7 @@ pub fn run_with_progress(
     let ctx = EvalCtx {
         params: &[],
         registry: &registry,
+        clock: None,
     };
 
     let mut rows: u64 = 0;
@@ -289,6 +290,7 @@ fn flush(
         collection: collection.to_string(),
         docs,
         insert: false,
+        if_absent: false,
     })
     .map_err(|e| locate(e, rows_done - n + 1, rows_done))
     .map(|_| ())

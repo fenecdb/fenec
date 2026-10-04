@@ -86,6 +86,7 @@ fn collection_with(options: &str) -> (Database, Vec<Value>) {
         collection: "c".into(),
         docs,
         insert: false,
+        if_absent: false,
     })
     .unwrap();
     // Queries near every cluster but the one `side` marks, so that filter

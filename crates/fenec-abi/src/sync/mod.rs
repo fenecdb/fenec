@@ -357,6 +357,7 @@ fn put_docs(collection: &str, docs: Vec<Vec<(String, Value)>>) -> Statement {
             .map(|d| d.into_iter().map(|(k, v)| (k, Expr::Lit(v))).collect())
             .collect(),
         insert: false,
+        if_absent: false,
     }
 }
 
@@ -1758,6 +1759,7 @@ impl Sync {
         let ctx = EvalCtx {
             params,
             registry: db.registry(),
+            clock: None,
         };
         pairs
             .iter()
@@ -1787,7 +1789,12 @@ impl Sync {
         let mut undo = String::from("{\"c\":");
         json::escape_into(&mut undo, &c);
         match s {
-            Statement::Put { docs, insert, .. } => {
+            Statement::Put {
+                docs,
+                insert,
+                if_absent,
+                ..
+            } => {
                 let mut docs: Vec<Vec<(String, Value)>> = docs
                     .iter()
                     .map(|d| self.values(db, d, params))
@@ -1800,7 +1807,10 @@ impl Sync {
                         }
                     }
                 }
-                let (line, line_params) = render_put(&c, *insert, &docs);
+                let (mut line, line_params) = render_put(&c, *insert, &docs);
+                if *if_absent {
+                    line.push_str(" if absent");
+                }
                 let count = docs.len();
                 let has_id =
                     |d: &Vec<(String, Value)>| d.iter().any(|(f, v)| f == "id" && !v.is_null());
@@ -1870,8 +1880,14 @@ impl Sync {
                     })
                     .collect();
                 let mut st = put_docs(&c, local);
-                if let Statement::Put { insert: ins, .. } = &mut st {
+                if let Statement::Put {
+                    insert: ins,
+                    if_absent: absent,
+                    ..
+                } = &mut st
+                {
                     *ins = *insert;
+                    *absent = *if_absent;
                 }
                 db.execute_with(&st, &[])?;
                 undo.push_str(",\"del\":[");

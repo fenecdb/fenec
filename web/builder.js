@@ -261,6 +261,55 @@ export function raw(sql, ...params) {
   return marked({ t: 'raw', sql, params });
 }
 
+// ------------------------------------------------------- values that compute
+
+// What `inc` and `expr` make: a value worked out over the row a `set`
+// writes, rendered as FenecQL with its values as parameters. Marked as a
+// condition node is, so a json field's object value is never taken for one.
+const EXPR = Symbol('fenec.expr');
+
+/**
+ * `{ n: inc(1) }` in an update: the field plus `by`, counting from 0 where
+ * it is null -- `n: coalesce(n, 0) + $1` -- worked out under the server's
+ * write lock, so increments from many clients all land.
+ */
+export function inc(by = 1) {
+  if (typeof by !== 'number' || !Number.isFinite(by)) {
+    throw new FenecError(`inc() takes a number: ${JSON.stringify(by)}`);
+  }
+  return { [EXPR]: 'inc', by };
+}
+
+/**
+ * A value as a FenecQL expression over the row it is written into, `?`s
+ * bound to the parameters in order: `{ at: expr('now()') }`,
+ * `{ total: expr('price * ?', 1.2) }`.
+ */
+export function expr(sql, ...params) {
+  if (typeof sql !== 'string') throw new FenecError('expr() expects text');
+  return { [EXPR]: 'expr', sql, params };
+}
+
+/** A document's value: `inc`'s and `expr`'s text, or a parameter. */
+function value(k, v, bind, write) {
+  if (!(v !== null && typeof v === 'object' && v[EXPR])) return bind(v, k);
+  if (v[EXPR] === 'inc') {
+    if (write === 'insert') {
+      throw new FenecError(`inc() reads the row it changes: use it in update (field: ${k})`);
+    }
+    return `coalesce(${k}, 0) + ${bind(v.by, k)}`;
+  }
+  let i = 0;
+  const out = v.sql.replace(/\?/g, () => {
+    if (i >= v.params.length) {
+      throw new FenecError('expr(): more `?` placeholders than parameters');
+    }
+    return bind(v.params[i++], k);
+  });
+  if (i !== v.params.length) throw new FenecError('expr(): too many parameters given');
+  return out;
+}
+
 function toCond(x) {
   if (isSpec(x) && x[NODE]) return x;
   if (isSpec(x)) return objectCond(x);
@@ -908,23 +957,28 @@ export class Query {
   // the server, or the "visible immediately" promise would be a lie, even
   // if only by a microtask.
 
-  /** The `put` text. */
-  toInsert(docs) {
+  /**
+   * The `put` text. `{ ifAbsent: true }`: `put ... if absent`, which passes
+   * over a document whose id or `@unique` value a row holds, and counts
+   * only what it wrote -- a lock taken, or not, in one statement.
+   */
+  toInsert(docs, opts = {}) {
     this.#assertPlain('insert');
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) throw new FenecError('cannot write an empty document list');
     const params = [];
     const bind = binder(params);
-    const body = list.map((d) => renderDoc(d, bind)).join(', ');
-    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}`, params];
+    const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
+    const absent = opts?.ifAbsent === true ? ' if absent' : '';
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}`, params];
   }
 
-  /** The `set` text. */
+  /** The `set` text. A value may be `inc(n)` or `expr(text, ...params)`. */
   toUpdate(patch, opts = {}) {
     this.#assertPlain('update');
     const params = [];
     const bind = binder(params);
-    const body = renderDoc(patch, bind);
+    const body = renderDoc(patch, bind, 'update');
     const where = this.#requireFilter('update', opts, bind);
     return [`set ${this.#s.collection} ${body}${where}`, params];
   }
@@ -938,11 +992,14 @@ export class Query {
     return [`del ${this.#s.collection}${where}`, params];
   }
 
-  /** `put` -- a single document or an array. Returns: documents written. */
-  async insert(docs) {
+  /**
+   * `put` -- a single document or an array. Returns: documents written,
+   * which with `{ ifAbsent: true }` leaves out those already held.
+   */
+  async insert(docs, opts = {}) {
     const list = Array.isArray(docs) ? docs : [docs];
     if (list.length === 0) return 0;
-    return (await this.#exec(...this.toInsert(list))).count ?? 0;
+    return (await this.#exec(...this.toInsert(list, opts))).count ?? 0;
   }
 
   /** `set` -- updates the rows matching the filter. Returns: rows affected. */
@@ -1054,11 +1111,11 @@ function binder(params) {
   };
 }
 
-function renderDoc(doc, bind) {
+function renderDoc(doc, bind, write) {
   if (!isSpec(doc)) throw new FenecError('expected a document object');
   const pairs = Object.entries(doc)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${path(k)}: ${bind(v, k)}`);
+    .map(([k, v]) => `${path(k)}: ${value(k, v, bind, write)}`);
   if (pairs.length === 0) throw new FenecError('cannot write an empty document');
   return `{${pairs.join(', ')}}`;
 }

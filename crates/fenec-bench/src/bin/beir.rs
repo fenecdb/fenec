@@ -213,6 +213,7 @@ fn main() {
             collection: "d".into(),
             docs,
             insert: false,
+            if_absent: false,
         })
         .unwrap();
     }

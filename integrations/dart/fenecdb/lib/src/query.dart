@@ -16,6 +16,7 @@
 // injection boundary. A step the builder refuses throws as it is called
 // (FenecCode.builder), its message the JS builder's.
 
+import 'dart:convert' show jsonEncode;
 import 'dart:typed_data';
 
 import 'fenec.dart';
@@ -49,6 +50,28 @@ class Cond {
 
   /// One comparison, `where`'s three arguments as a condition.
   static Cond cmp(String field, String op, Object? value) => Cond._(_condOf(field, op, value));
+}
+
+/// A value a write works out over the row it writes, rendered as FenecQL
+/// with its values as parameters: [Computed.inc] and [Computed.expr], as the
+/// JS builder's `inc` and `expr`.
+class Computed {
+  final Object? _by;
+  final String? _sql;
+  final List<Object?> _params;
+  Computed._(this._by, this._sql, this._params);
+
+  /// `{'n': Computed.inc(1)}` in an update: the field plus [by], counting
+  /// from 0 where it is null -- `n: coalesce(n, 0) + $1` -- worked out under
+  /// the write lock, so increments from many clients all land.
+  static Computed inc([Object? by = 1]) {
+    if (!(by is num && by.isFinite)) throw _refuse('inc() takes a number: ${jsonEncode(by)}');
+    return Computed._(by, null, const []);
+  }
+
+  /// A value as a FenecQL expression over the row, each `?` bound to the
+  /// next parameter: `Computed.expr('now()')`, `Computed.expr('price * ?', [1.2])`.
+  static Computed expr(String sql, [List<Object?> params = const []]) => Computed._(null, sql, params);
 }
 
 /// One key of a lookup's order: a field, `asc` or `desc`, and a collation
@@ -763,21 +786,48 @@ class Query {
     throw _refuse('an unfiltered $verb covers the whole collection; if you mean it, $verb({ all: true })');
   }
 
-  static String _renderDoc(Object? doc, String Function(Object?) bind) {
+  static String _renderDoc(Object? doc, String Function(Object?) bind, {bool insert = false}) {
     if (doc is! Map) throw _refuse('expected a document object');
     if (doc.isEmpty) throw _refuse('cannot write an empty document');
-    return '{${doc.entries.map((e) => '${_pathOf(e.key.toString())}: ${bind(e.value)}').join(', ')}}';
+    return '{${doc.entries.map((e) {
+      final key = _pathOf(e.key.toString());
+      return '$key: ${_value(key, e.value, bind, insert)}';
+    }).join(', ')}}';
   }
 
-  /// The `put` of a document -- a map of fields, in its order -- or a list of them, not run.
-  Statement toInsert(Object docs) {
+  /// A document's value: [Computed]'s text, or a parameter.
+  static String _value(String key, Object? v, String Function(Object?) bind, bool insert) {
+    if (v is! Computed) return bind(v);
+    final sql = v._sql;
+    if (sql == null) {
+      if (insert) throw _refuse('inc() reads the row it changes: use it in update (field: $key)');
+      return 'coalesce($key, 0) + ${bind(v._by)}';
+    }
+    final pieces = sql.split('?');
+    final out = StringBuffer();
+    for (var i = 0; i < pieces.length - 1; i++) {
+      if (i >= v._params.length) throw _refuse('expr(): more `?` placeholders than parameters');
+      out
+        ..write(pieces[i])
+        ..write(bind(v._params[i]));
+    }
+    if (pieces.length - 1 != v._params.length) throw _refuse('expr(): too many parameters given');
+    return (out..write(pieces.last)).toString();
+  }
+
+  /// The `put` of a document -- a map of fields, in its order -- or a list of
+  /// them, not run. [ifAbsent]: `put ... if absent`, which passes over a
+  /// document whose id or `@unique` value a row holds and counts only what
+  /// it wrote -- a lock taken, or not, in one statement.
+  Statement toInsert(Object docs, {bool ifAbsent = false}) {
     _assertPlain('insert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
     final params = <Object?>[];
     final bind = _binder(params);
-    final body = list.map((d) => _renderDoc(d, bind)).join(', ');
-    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}', params: params);
+    final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
+    final absent = ifAbsent ? ' if absent' : '';
+    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent', params: params);
   }
 
   /// The `set` of the rows the filter names, not run; with no filter it is refused unless [all].
@@ -834,10 +884,11 @@ class Query {
   }
 
   /// Puts a document -- a map of fields -- or a list of them: how many it
-  /// wrote. None is no statement.
-  Future<int> insert(Object docs) async {
+  /// wrote, which with [ifAbsent] leaves out those already held. None is no
+  /// statement.
+  Future<int> insert(Object docs, {bool ifAbsent = false}) async {
     if (docs is List && docs.isEmpty) return 0;
-    return (await _run(toInsert(docs))).affected;
+    return (await _run(toInsert(docs, ifAbsent: ifAbsent))).affected;
   }
 
   /// Sets the patch's fields on the rows the filter names; with no filter it is refused unless [all].

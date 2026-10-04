@@ -160,6 +160,11 @@ await p;                                               // the server has it
     included.</li>
   <li><b>Writes go one at a time, in order,</b> each under an
     <code>Idempotency-Key</code> it keeps until it is answered.</li>
+  <li><b>An increment lands from every replica.</b>
+    <code>update({ n: inc(1) })</code> is worked out over the replica's row
+    at once and sent as the statement, which the server works out again
+    over its own: two replicas that each increment offline leave the
+    server 2 up, and both replicas come to its sum.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>

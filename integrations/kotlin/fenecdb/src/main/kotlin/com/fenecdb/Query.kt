@@ -53,6 +53,37 @@ class Cond internal constructor(internal val node: Node) {
     }
 }
 
+/**
+ * A value a write works out over the row it writes, rendered as FenecQL with
+ * its values as parameters: [inc] and [expr], as the JS builder's.
+ */
+class Computed private constructor(internal val by: Any?, internal val sql: String?, internal val params: List<Any?>) {
+    companion object {
+        /**
+         * `mapOf("n" to Computed.inc(1))` in an update: the field plus [by],
+         * counting from 0 where it is null -- `n: coalesce(n, 0) + $1` --
+         * worked out under the write lock, so increments from many clients
+         * all land.
+         */
+        @JvmStatic @JvmOverloads fun inc(by: Any? = 1): Computed {
+            val finite = when (by) {
+                is Double -> by.isFinite()
+                is Float -> by.isFinite()
+                is Number -> true
+                else -> false
+            }
+            if (!finite) throw refuse("inc() takes a number: ${Json.write(by)}")
+            return Computed(by, null, emptyList())
+        }
+
+        /**
+         * A value as a FenecQL expression over the row, each `?` bound to
+         * the next parameter: `Computed.expr("now()")`, `Computed.expr("price * ?", 1.2)`.
+         */
+        @JvmStatic fun expr(sql: String, vararg params: Any?): Computed = Computed(null, sql, params.toList())
+    }
+}
+
 /** One key of a lookup's order: a field, `asc` or `desc`, and a collation (`tr` or `und`). */
 data class SortKey @JvmOverloads constructor(val field: String, val direction: String = "asc", val collate: String? = null)
 
@@ -249,10 +280,31 @@ internal object Builder {
         }
     }
 
-    fun renderDoc(doc: Any?, bind: Binder): String {
+    fun renderDoc(doc: Any?, bind: Binder, insert: Boolean = false): String {
         if (doc !is Map<*, *>) throw refuse("expected a document object")
         if (doc.isEmpty()) throw refuse("cannot write an empty document")
-        return "{" + doc.entries.joinToString(", ") { (k, v) -> "${path(k.toString())}: ${bind.bind(v)}" } + "}"
+        return "{" + doc.entries.joinToString(", ") { (k, v) ->
+            val key = path(k.toString())
+            "$key: ${value(key, v, bind, insert)}"
+        } + "}"
+    }
+
+    /** A document's value: [Computed]'s text, or a parameter. */
+    private fun value(key: String, v: Any?, bind: Binder, insert: Boolean): String {
+        if (v !is Computed) return bind.bind(v)
+        val sql = v.sql
+        if (sql == null) {
+            if (insert) throw refuse("inc() reads the row it changes: use it in update (field: $key)")
+            return "coalesce($key, 0) + ${bind.bind(v.by)}"
+        }
+        val pieces = sql.split('?')
+        val out = StringBuilder()
+        for (i in 0 until pieces.size - 1) {
+            if (i >= v.params.size) throw refuse("expr(): more `?` placeholders than parameters")
+            out.append(pieces[i]).append(bind.bind(v.params[i]))
+        }
+        if (pieces.size - 1 != v.params.size) throw refuse("expr(): too many parameters given")
+        return out.append(pieces.last()).toString()
     }
 
     /** Whether a `raw` fragment may read a collection of its own. */
@@ -660,14 +712,21 @@ class Query private constructor(private val s: State) {
         else -> listOf(docs)
     }
 
-    /** The `put` of a document -- a map of fields, in its order -- or a list of them, not run. */
-    fun toInsert(docs: Any?): Statement {
+    /**
+     * The `put` of a document -- a map of fields, in its order -- or a list of
+     * them, not run. [ifAbsent]: `put ... if absent`, which passes over a
+     * document whose id or `@unique` value a row holds and counts only what
+     * it wrote -- a lock taken, or not, in one statement.
+     */
+    @JvmOverloads
+    fun toInsert(docs: Any?, ifAbsent: Boolean = false): Statement {
         assertPlain("insert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
-        val body = list.joinToString(", ") { Builder.renderDoc(it, bind) }
-        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}", bind.params)
+        val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
+        val absent = if (ifAbsent) " if absent" else ""
+        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent", bind.params)
     }
 
     /** The `set` of the rows the filter names, not run; with no filter it is refused unless [all]. */
@@ -715,10 +774,14 @@ class Query private constructor(private val s: State) {
         return run(Statement("explain ${st.text}", st.params)).rows.map { it.string("plan") ?: "" }
     }
 
-    /** Puts a document -- a map of fields -- or a list of them: how many it wrote. None is no statement. */
-    suspend fun insert(docs: Any?): Long {
+    /**
+     * Puts a document -- a map of fields -- or a list of them: how many it
+     * wrote, which with [ifAbsent] leaves out those already held. None is no
+     * statement.
+     */
+    suspend fun insert(docs: Any?, ifAbsent: Boolean = false): Long {
         if (docsOf(docs).isEmpty()) return 0
-        return run(toInsert(docs)).affected
+        return run(toInsert(docs, ifAbsent)).affected
     }
 
     /** Sets the patch's fields on the rows the filter names; with no filter it is refused unless [all]. */
@@ -737,7 +800,8 @@ class Query private constructor(private val s: State) {
     fun countBlocking(): Long = kotlinx.coroutines.runBlocking { count() }
 
     /** [insert] on the calling thread, for Java. */
-    fun insertBlocking(docs: Any?): Long = kotlinx.coroutines.runBlocking { insert(docs) }
+    @JvmOverloads
+    fun insertBlocking(docs: Any?, ifAbsent: Boolean = false): Long = kotlinx.coroutines.runBlocking { insert(docs, ifAbsent) }
 
     /** [update] on the calling thread, for Java. */
     @JvmOverloads

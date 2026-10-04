@@ -15,5 +15,5 @@
 //
 // `web/fenec.client.test.js` fails if anything here reaches the engine.
 
-export { FenecError, Query, from, or, and, not, raw } from './builder.js';
+export { FenecError, Query, from, or, and, not, raw, inc, expr } from './builder.js';
 export { FenecHttp, connect } from './http.js';

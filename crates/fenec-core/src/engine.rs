@@ -1504,15 +1504,10 @@ impl Collection {
         Ok(())
     }
 
-    /// The refusal of `doc` where an `@unique` field of it holds a value
-    /// another document holds: asked by `put`, `insert` and `set` before
-    /// anything is written, against the bucket the value would be filed
-    /// under -- the block's own earlier writes are in it, as a write keeps
-    /// a built index up, and the first ask after an open builds it from
-    /// the documents, so the answer is exact. `null` is no value, and a
-    /// document keeping its own value is not a second one. A field without
-    /// `@unique` costs the look at its index kind.
-    fn unique_clash(&self, doc: &Document) -> Result<()> {
+    /// The other documents holding one of `doc`'s `@unique` values, each
+    /// with the field it holds it in.
+    fn unique_holders(&self, doc: &Document) -> Result<Vec<(&crate::schema::Field, DocId)>> {
+        let mut out = Vec::new();
         for f in self.schema.fields.iter().chain(&self.schema.paths) {
             if !f.index.is_unique() {
                 continue;
@@ -1523,17 +1518,31 @@ impl Collection {
             let Some(ix) = self.hash(&f.name)? else {
                 continue;
             };
-            let bucket = ix.get(&hash_key(v));
-            if let Some(other) = bucket.and_then(|b| b.iter().find(|&&d| d != doc.id)) {
-                return Err(Error::Duplicate(format!(
-                    "`{}.{}` is unique, and document {other} holds {} already",
-                    self.schema.name,
-                    f.name,
-                    crate::json::to_string(v)
-                )));
+            if let Some(b) = ix.get(&hash_key(v)) {
+                out.extend(b.iter().filter(|&&d| d != doc.id).map(|&d| (f, d)));
             }
         }
-        Ok(())
+        Ok(out)
+    }
+
+    /// The refusal of `doc` where an `@unique` field of it holds a value
+    /// another document holds: asked by `put`, `insert` and `set` before
+    /// anything is written, against the bucket the value would be filed
+    /// under -- the block's own earlier writes are in it, as a write keeps
+    /// a built index up, and the first ask after an open builds it from
+    /// the documents, so the answer is exact. `null` is no value, and a
+    /// document keeping its own value is not a second one. A field without
+    /// `@unique` costs the look at its index kind.
+    fn unique_clash(&self, doc: &Document) -> Result<()> {
+        match self.unique_holders(doc)?.first() {
+            Some((f, other)) => Err(Error::Duplicate(format!(
+                "`{}.{}` is unique, and document {other} holds {} already",
+                self.schema.name,
+                f.name,
+                crate::json::to_string(doc.at(&f.name).unwrap_or(&Value::Null))
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// The full-text index on `field`, built as [`Self::hash`] is.
@@ -2689,6 +2698,7 @@ impl Database {
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
+            clock: self.clock,
         };
         // A row past its time is gone for the subscriber as for any read:
         // one that changed and expired is a deletion, and the sweep's
@@ -4874,7 +4884,8 @@ impl Database {
                 collection,
                 docs,
                 insert,
-            } => self.put(collection, docs, *insert, params),
+                if_absent,
+            } => self.put(collection, docs, *insert, *if_absent, params),
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::Update {
@@ -5378,6 +5389,7 @@ impl Database {
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
+            clock: self.clock,
         };
         let mut doc = Document::default();
         let mut explicit_id: Option<DocId> = None;
@@ -5409,6 +5421,7 @@ impl Database {
         collection: &str,
         docs: &[Vec<(String, Expr)>],
         insert: bool,
+        if_absent: bool,
         params: &[Value],
     ) -> Result<Response> {
         let schema = self.collection(collection)?.schema.clone();
@@ -5426,19 +5439,57 @@ impl Database {
                     .fold(0, |m, d| m | collation_missing(&schema, d)),
             )?;
         }
+        // A row past its time (`@ttl`) is out of every read, and so out of
+        // a write's way: an id it holds is taken as free, a `@unique` value
+        // it holds is let go of with it. Otherwise a lock taken by
+        // `insert` and left to expire stayed held until the sweeper came
+        // by, up to a minute later.
+        let unique = schema
+            .fields
+            .iter()
+            .chain(&schema.paths)
+            .any(|f| f.index.is_unique());
+        // Without a clock -- the browser module handed none -- no row is
+        // past its time for a write, as before.
+        let expiry = match self.ttl_of(collection).filter(|_| insert || unique) {
+            Some((f, ttl)) => self.now().ok().map(|now| {
+                let cut = now.saturating_sub(ttl.min(i64::MAX as u64) as i64);
+                (schema.field_pos(f).unwrap_or(0), cut)
+            }),
+            None => None,
+        };
 
         let mut n = 0usize;
         let mut written: Vec<Document> = Vec::with_capacity(built.len());
         for mut doc in built {
+            if let (Some(cut), true) = (expiry, unique) {
+                let c = &self.collections[collection];
+                let mut gone = Vec::new();
+                for (_, other) in c.unique_holders(&doc)? {
+                    if expired(c, other, cut)? {
+                        gone.push(other);
+                    }
+                }
+                for other in gone {
+                    self.erase(collection, &schema, other, &hooks)?;
+                }
+            }
             let c = self.collections.get_mut(collection).unwrap();
             let mark = c.store.mark();
             let op = if doc.id == 0 {
                 doc.id = c.store.allocate_id();
                 WriteOp::Insert
             } else if c.store.contains(doc.id) {
-                // The statement is a block: what it wrote before this one
-                // is put back with it.
-                if insert {
+                let gone = match expiry {
+                    Some(cut) => expired(c, doc.id, cut)?,
+                    None => false,
+                };
+                if insert && !gone {
+                    if if_absent {
+                        continue;
+                    }
+                    // The statement is a block: what it wrote before this
+                    // one is put back with it.
                     return Err(Error::Duplicate(format!(
                         "`{collection}` holds a document {} already: insert makes new \
                          ones, put writes over",
@@ -5456,10 +5507,21 @@ impl Database {
             let checked = hooks
                 .iter()
                 .try_for_each(|h| h.before_write(&schema, op, &mut doc))
-                .and_then(|_| c.unique_clash(&doc));
-            if let Err(e) = checked {
-                c.store.rewind(mark);
-                return Err(e);
+                .and_then(|_| match c.unique_clash(&doc) {
+                    // `if absent` passes over a value held as an id held.
+                    Err(Error::Duplicate(_)) if if_absent => Ok(false),
+                    r => r.map(|_| true),
+                });
+            match checked {
+                Ok(true) => {}
+                Ok(false) => {
+                    c.store.rewind(mark);
+                    continue;
+                }
+                Err(e) => {
+                    c.store.rewind(mark);
+                    return Err(e);
+                }
             }
             // Drop the old index entries when overwriting.
             let old = match op {
@@ -5522,6 +5584,7 @@ impl Database {
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
+            clock: self.clock,
         };
         let want = cap.unwrap_or(usize::MAX);
 
@@ -7105,6 +7168,7 @@ impl Database {
         let ctx = EvalCtx {
             params,
             registry: &self.registry,
+            clock: self.clock,
         };
         sel.check()?;
         if !sel.aggregate.is_empty() {
@@ -7771,9 +7835,39 @@ impl Database {
         params: &[Value],
     ) -> Result<Response> {
         let ids = self.matching_ids(collection, filter, params)?;
+        // Taken out for the statement, so that the expressions can call its
+        // functions while each row is written through `&mut self`, and put
+        // back whatever the rows came to.
+        let registry = std::mem::take(&mut self.registry);
+        let out = self.update_rows(collection, set, ids, &registry, params);
+        self.registry = registry;
+        out
+    }
+
+    fn update_rows(
+        &mut self,
+        collection: &str,
+        set: &[(String, Expr)],
+        ids: Vec<DocId>,
+        registry: &Registry,
+        params: &[Value],
+    ) -> Result<Response> {
         let schema = self.collection(collection)?.schema.clone();
         let cid = self.collection(collection)?.id;
-        let hooks: Vec<_> = self.registry.hooks().to_vec();
+        let hooks: Vec<_> = registry.hooks().to_vec();
+        let ctx = EvalCtx {
+            params,
+            registry,
+            clock: self.clock,
+        };
+        let assigns: Vec<Assign> = set
+            .iter()
+            .map(|(key, e)| Assign {
+                key,
+                at: schema.field_pos(key),
+                calc: Calc::bind(&schema, e, &ctx),
+            })
+            .collect();
         let mut n = 0;
         // What the filter compared without, and what the new values would:
         // worked out in a pass of their own, since a write that stopped
@@ -7784,7 +7878,7 @@ impl Database {
                 let c = self.collection(collection)?;
                 for &id in &ids {
                     if let Some(doc) = c.store.read(&schema, id)? {
-                        let doc = self.updated(&schema, doc, set, params)?;
+                        let doc = updated(&schema, &doc, &assigns, &ctx)?;
                         missing |= collation_missing(&schema, &doc) | collate::take_missing();
                     }
                 }
@@ -7794,25 +7888,24 @@ impl Database {
 
         for id in ids {
             let c = self.collections.get_mut(collection).unwrap();
-            let Some(doc) = c.store.read(&schema, id)? else {
+            // Read once: the row the expressions read is the one the
+            // indexes take out. Read twice, as it was, a `set` of a
+            // constant over 100 000 rows decoded each of them again.
+            let Some(old) = c.store.read(&schema, id)? else {
                 continue;
             };
-            let mut doc = self.updated(&schema, doc, set, params)?;
-            let c = self.collections.get_mut(collection).unwrap();
+            let mut doc = updated(&schema, &old, &assigns, &ctx)?;
             for h in &hooks {
                 h.before_write(&schema, WriteOp::Update, &mut doc)?;
             }
             // An update makes a duplicate as a put does: `set email = "a"`
             // over two documents is refused at the second.
             c.unique_clash(&doc)?;
-            let old = c.store.read(&schema, id)?;
-            if let Some(old) = &old {
-                c.unindex_doc(old, Some(&doc));
-            }
+            c.unindex_doc(&old, Some(&doc));
             let payload = Store::encode_doc(&schema, &doc);
             let (mark, was) = (c.store.mark(), c.store.loc(id));
             let frame = c.store.append(OP_PUT, id, &payload);
-            c.index_doc(&doc, old.as_ref());
+            c.index_doc(&doc, Some(&old));
             self.remember(cid, id, was, mark);
             self.wal(REC_DATA, cid, &frame)?;
             self.note(cid, id);
@@ -7822,32 +7915,6 @@ impl Database {
             n += 1;
         }
         Ok(Response::Affected(n))
-    }
-
-    /// `doc` with `set` applied, every expression over the document as it
-    /// was.
-    fn updated(
-        &self,
-        schema: &Schema,
-        mut doc: Document,
-        set: &[(String, Expr)],
-        params: &[Value],
-    ) -> Result<Document> {
-        let snapshot = doc.clone();
-        let ctx = EvalCtx {
-            params,
-            registry: &self.registry,
-        };
-        for (k, e) in set {
-            // Checked before the value is worked out, over the document as
-            // it was, as every other is.
-            if schema.field(k).is_none() && schema.path_of(k)?.is_none() {
-                return Err(Error::NotFound(format!("field `{k}`")));
-            }
-            let v = eval(e, &mut DocRow(&snapshot, schema), &ctx)?;
-            set_field(schema, &mut doc, k, v)?;
-        }
-        Ok(doc)
     }
 
     fn delete(
@@ -7861,25 +7928,39 @@ impl Database {
             collate::refuse(collate::take_missing())?;
         }
         let schema = self.collection(collection)?.schema.clone();
-        let cid = self.collection(collection)?.id;
         let hooks: Vec<_> = self.registry.hooks().to_vec();
         let mut n = 0;
         for id in ids {
-            let c = self.collections.get_mut(collection).unwrap();
-            if let Some(doc) = c.store.read(&schema, id)? {
-                for h in &hooks {
-                    h.after_write(collection, WriteOp::Delete, &doc)?;
-                }
-                c.unindex_doc(&doc, None);
-            }
-            let (mark, was) = (c.store.mark(), c.store.loc(id));
-            let frame = c.store.append(OP_DEL, id, &[]);
-            self.remember(cid, id, was, mark);
-            self.wal(REC_DATA, cid, &frame)?;
-            self.note(cid, id);
+            self.erase(collection, &schema, id, &hooks)?;
             n += 1;
         }
         Ok(Response::Affected(n))
+    }
+
+    /// Deletes the document `id` of `collection`: what a `del` does to each
+    /// row it matches, and a write to a row past its `@ttl` that holds the
+    /// id or the `@unique` value the write is about to take.
+    fn erase(
+        &mut self,
+        collection: &str,
+        schema: &Schema,
+        id: DocId,
+        hooks: &[Arc<dyn crate::plugin::Hook>],
+    ) -> Result<()> {
+        let c = self.collections.get_mut(collection).unwrap();
+        let cid = c.id;
+        if let Some(doc) = c.store.read(schema, id)? {
+            for h in hooks {
+                h.after_write(collection, WriteOp::Delete, &doc)?;
+            }
+            c.unindex_doc(&doc, None);
+        }
+        let (mark, was) = (c.store.mark(), c.store.loc(id));
+        let frame = c.store.append(OP_DEL, id, &[]);
+        self.remember(cid, id, was, mark);
+        self.wal(REC_DATA, cid, &frame)?;
+        self.note(cid, id);
+        Ok(())
     }
 
     /// Drops the dead records of `which` (every collection when `None`) and
@@ -8348,6 +8429,96 @@ fn set_field(schema: &Schema, doc: &mut Document, k: &str, v: Value) -> Result<(
         .ok_or_else(|| Error::NotFound(format!("field `{k}` in collection `{}`", schema.name)))?;
     doc.set(k, v.coerce(&f.ty)?);
     Ok(())
+}
+
+/// Whether the row `id` of `c` is past its time: its `@ttl` field, at
+/// `cut.0`, at or before `cut.1`. A row whose field is null lives, as a
+/// read takes it.
+fn expired(c: &Collection, id: DocId, cut: (usize, i64)) -> Result<bool> {
+    Ok(matches!(c.store.read_field(id, cut.0)?, Some(Value::Timestamp(t)) if t <= cut.1))
+}
+
+/// One pair of a `set`, bound to its collection once a statement, as a
+/// [`Filter`] is: the field it writes by its position, and its value as a
+/// [`Calc`] -- a constant worked out once rather than a row, a field the
+/// expression reads by its position in the document. What it cannot bind,
+/// or a constant whose working out failed, it works out as `eval` does, so
+/// every error comes where and as it came before: at the first row, and
+/// never over no rows.
+struct Assign<'q> {
+    key: &'q str,
+    /// The field's position, for a field rather than a path into one.
+    at: Option<usize>,
+    calc: Calc<'q>,
+}
+
+/// A `set` value's expression over the row as it was ([`Assign`]).
+enum Calc<'q> {
+    Value(Value),
+    Field(usize),
+    Arith(ArithOp, Box<Calc<'q>>, Box<Calc<'q>>),
+    Eval(&'q Expr),
+}
+
+impl<'q> Calc<'q> {
+    fn bind(schema: &Schema, e: &'q Expr, ctx: &EvalCtx) -> Calc<'q> {
+        match e {
+            Expr::Field(name) => match schema.field_pos(name) {
+                Some(p) if name != "id" => Calc::Field(p),
+                _ => Calc::Eval(e),
+            },
+            Expr::Arith(op, a, b) => Calc::Arith(
+                *op,
+                Box::new(Calc::bind(schema, a, ctx)),
+                Box::new(Calc::bind(schema, b, ctx)),
+            ),
+            // Reading no field, the same on every row: `now()` is the one
+            // time for the whole statement.
+            _ => {
+                let mut fields = Vec::new();
+                e.referenced_fields(&mut fields);
+                match fields.is_empty() {
+                    true => match eval(e, &mut NoRow, ctx) {
+                        Ok(v) => Calc::Value(v),
+                        Err(_) => Calc::Eval(e),
+                    },
+                    false => Calc::Eval(e),
+                }
+            }
+        }
+    }
+
+    fn value(&self, schema: &Schema, row: &Document, ctx: &EvalCtx) -> Result<Value> {
+        Ok(match self {
+            Calc::Value(v) => v.clone(),
+            Calc::Field(p) => row.fields.get(*p).map_or(Value::Null, |(_, v)| v.clone()),
+            Calc::Arith(op, a, b) => arith(
+                *op,
+                &a.value(schema, row, ctx)?,
+                &b.value(schema, row, ctx)?,
+            )?,
+            Calc::Eval(e) => eval(e, &mut DocRow(row, schema), ctx)?,
+        })
+    }
+}
+
+/// `old` with a `set`'s pairs applied, every expression over the document
+/// as it was.
+fn updated(schema: &Schema, old: &Document, set: &[Assign], ctx: &EvalCtx) -> Result<Document> {
+    let mut doc = old.clone();
+    for a in set {
+        // Checked before the value is worked out, over the document as it
+        // was, as every other is.
+        if a.at.is_none() && schema.path_of(a.key)?.is_none() {
+            return Err(Error::NotFound(format!("field `{}`", a.key)));
+        }
+        let v = a.calc.value(schema, old, ctx)?;
+        match a.at {
+            Some(p) => doc.fields[p].1 = v.coerce(&schema.fields[p].ty)?,
+            None => set_field(schema, &mut doc, a.key, v)?,
+        }
+    }
+    Ok(doc)
 }
 
 /// One aggregate's running value over a group's rows. Nulls are skipped

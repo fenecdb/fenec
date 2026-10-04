@@ -29,6 +29,7 @@ fn sessions(index: &str) -> Database {
         collection: "s".into(),
         docs,
         insert: false,
+        if_absent: false,
     })
     .unwrap();
     db

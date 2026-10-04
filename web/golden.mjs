@@ -16,6 +16,8 @@
 //
 //   {"$or": [c, ...]}, {"$and": [c, ...]}, {"$not": c}   or(), and(), not()
 //   {"$raw": [text, param, ...]}                          raw()
+//   {"$inc": n}                                           inc(n), a value
+//   {"$expr": [text, param, ...]}                         expr(), a value
 //   {"$date": "2026-09-19T12:34:56.000Z"}                 a date
 //   {"$f32": [0.5, 0.25]}                                 a Float32Array
 //
@@ -29,7 +31,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { from, or, and, not, raw, FenecError } from './fenec.js';
+import { from, or, and, not, raw, inc, expr, FenecError } from './fenec.js';
 
 export const GOLDEN = fileURLToPath(new URL('../integrations/builder-golden.json', import.meta.url));
 
@@ -43,6 +45,8 @@ function arg(x) {
   if ('$and' in x) return and(...x.$and.map(arg));
   if ('$not' in x) return not(arg(x.$not));
   if ('$raw' in x) return raw(x.$raw[0], ...x.$raw.slice(1).map(arg));
+  if ('$inc' in x) return inc(x.$inc);
+  if ('$expr' in x) return expr(x.$expr[0], ...x.$expr.slice(1).map(arg));
   if ('$date' in x) return new Date(x.$date);
   if ('$f32' in x) return Float32Array.from(x.$f32);
   return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, arg(v)]));
@@ -357,6 +361,24 @@ c('delete takes no offset', docs, ['where', 'a', 1], ['offset', 2], ['toDelete']
 c('delete takes no match', docs, ['match', 'body', 'x'], ['toDelete', { all: true }]);
 c('delete takes no lookup', docs, ['where', 'a', 1], ['lookup', 'notes', { on: 'doc_id', required: true }], ['delete']);
 c('a write keeps the parameters of its where', docs, ['where', { $raw: ['n + ? > ?', 1, 2] }], ['where', 'tags', 'in', ['a', 'b']], ['update', { n: 0 }]);
+
+// Values worked out over the row: inc() and expr().
+c('update with inc counts from nothing', ['from', 'hits'], ['where', 'key', 'ip1'], ['update', { n: { $inc: 1 } }]);
+c('inc takes any number', ['from', 'hits'], ['where', 'id', 1], ['toUpdate', { n: { $inc: -2.5 } }]);
+c('inc into a path', docs, ['where', 'id', 1], ['toUpdate', { 'meta.views': { $inc: 1 } }]);
+c('inc takes only a number', ['from', 'hits'], ['where', 'id', 1], ['toUpdate', { n: { $inc: '1' } }]);
+c('inc in an insert is refused', ['from', 'hits'], ['toInsert', { n: { $inc: 1 } }]);
+c('expr binds its placeholders in order', docs, ['where', 'id', 7], ['update', { total: { $expr: ['price * ? + ?', 1.2, 3] }, at: { $expr: ['now()'] }, title: 'x' }]);
+c('expr beside inc and plain values', ['from', 'hits'], ['where', { $raw: ['n < ?', 100] }], ['toUpdate', { n: { $inc: 1 }, seen: { $expr: ['now() + ?', 30000] }, key: 'k' }]);
+c('expr in an insert', ['from', 'locks'], ['toInsert', { name: 'job', at: { $expr: ['now()'] } }]);
+c('expr with more placeholders than parameters', docs, ['where', 'id', 1], ['toUpdate', { n: { $expr: ['n + ? + ?', 1] } }]);
+c('expr with more parameters than placeholders', docs, ['where', 'id', 1], ['toUpdate', { n: { $expr: ['n + ?', 1, 2] } }]);
+c('a compare-and-set names the version it read', docs, ['where', 'id', 4], ['where', 'version', 3], ['update', { v: 'new', version: { $inc: 1 } }]);
+
+// put ... if absent: a lock taken, or not, in one statement.
+c('insert if absent', ['from', 'locks'], ['insert', { name: 'job', owner: 'a', at: { $expr: ['now()'] } }, { ifAbsent: true }]);
+c('insert of several if absent', ['from', 'locks'], ['toInsert', [{ id: 1, owner: 'a' }, { id: 2, owner: 'a' }], { ifAbsent: true }]);
+c('insert with ifAbsent false is a put', ['from', 'locks'], ['toInsert', { id: 1 }, { ifAbsent: false }]);
 
 // ------------------------------------------------------------------ writing
 

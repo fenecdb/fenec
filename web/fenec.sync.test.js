@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import { readFile, access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fenec, sync, connect, FenecError } from './fenec.js';
+import { Fenec, sync, connect, inc, FenecError } from './fenec.js';
 import { fenecTable, text, integer, index, rename } from './schema.js';
 import { installIndexedDB } from './idb.fake.js';
 import * as client from './client.js';
@@ -737,6 +737,38 @@ test('writes made offline survive a reload of the page, and go once it is back',
     second.close();
     s.close();
     delete globalThis.indexedDB;
+  }
+});
+
+test('two replicas increment offline, and both land: the server holds +2, and both see it', opts, async () => {
+  const s = await server();
+  const [a, b] = [await open(s.url), await open(s.url)];
+  try {
+    await a.ready();
+    await b.ready();
+    a.setOnline(false);
+    b.setOnline(false);
+    // Each applies its own at once, from the 1 it holds.
+    for (const r of [a, b]) {
+      r.from('tasks').where('key', 'a').update({ priority: inc(1) }).catch(() => {});
+      assert.equal((await r.from('tasks').where('key', 'a').first()).priority, 2);
+    }
+    a.setOnline(true);
+    b.setOnline(true);
+    await a.pushed();
+    await b.pushed();
+    // The server worked each out again over what it held: 1 + 1 + 1.
+    assert.deepEqual(await s.run('get tasks select priority where key = "a"'), [{ priority: 3 }]);
+    for (const r of [a, b]) {
+      await until(
+        async () => (await r.from('tasks').where('key', 'a').first()).priority === 3,
+        "the server's sum on the replica",
+      );
+    }
+  } finally {
+    a.close();
+    b.close();
+    s.close();
   }
 });
 

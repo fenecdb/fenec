@@ -137,6 +137,7 @@ fn main() {
             collection: "usertable".into(),
             docs,
             insert: true,
+            if_absent: false,
         })
         .unwrap();
         key = end;

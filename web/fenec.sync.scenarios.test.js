@@ -17,7 +17,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { Fenec, sync } from './fenec.js';
+import { Fenec, sync, inc } from './fenec.js';
 import { fakeIndexedDB, KeyRange } from './idb.fake.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
@@ -222,7 +222,11 @@ class Run {
     for (const [k, v] of Object.entries(w.where ?? {})) q = q.where(k, v);
     if (w.update) {
       sorted(w.set, 'set');
-      return q.update(w.set);
+      // `{"$inc": n}` is inc(n), as the builders' golden file writes it.
+      const set = Object.fromEntries(
+        Object.entries(w.set).map(([k, v]) => [k, v !== null && typeof v === 'object' && '$inc' in v ? inc(v.$inc) : v]),
+      );
+      return q.update(set);
     }
     return q.delete();
   }

@@ -25,6 +25,11 @@ Object? value(Object? v) {
     if (v.containsKey(r'$f32')) {
       return Float32List.fromList((v[r'$f32'] as List).map((x) => (x as num).toDouble()).toList());
     }
+    if (v.containsKey(r'$inc')) return Computed.inc(v[r'$inc']);
+    if (v.containsKey(r'$expr')) {
+      final e = v[r'$expr'] as List;
+      return Computed.expr(e[0] as String, [for (final x in e.skip(1)) value(x)]);
+    }
     return {for (final e in v.entries) e.key as String: value(e.value)};
   }
   if (v is List) return [for (final x in v) value(x)];
@@ -118,9 +123,10 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
       final op = s['op'] as String;
       final a = (s['args'] as List?) ?? const [];
       bool all(int at) => opt(a, at, 'all') as bool? ?? false;
+      bool absent() => opt(a, 1, 'ifAbsent') as bool? ?? false;
       final made = switch (op) {
         'toFenecQL' => q.toFenecQL(),
-        'toInsert' => q.toInsert(value(a[0])!),
+        'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent()),
         'toUpdate' => q.toUpdate(value(a[0])!, all: all(1)),
         'toDelete' => q.toDelete(all: all(0)),
         _ => null,
@@ -131,7 +137,7 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'first' => q.first(),
         'count' => q.count(),
         'explain' => q.explain(),
-        'insert' => q.insert(value(a[0])!),
+        'insert' => q.insert(value(a[0])!, ifAbsent: absent()),
         'update' => q.update(value(a[0])!, all: all(1)),
         'delete' => q.delete(all: all(0)),
         _ => null,

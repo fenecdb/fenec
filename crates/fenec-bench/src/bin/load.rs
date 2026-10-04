@@ -122,6 +122,7 @@ fn in_process(rows: &[Row], indexed: bool) -> String {
             collection: "docs".into(),
             docs,
             insert: false,
+            if_absent: false,
         })
         .unwrap();
     }

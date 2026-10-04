@@ -127,6 +127,7 @@ fn main() {
                 .map(|s| vec![("name".into(), Expr::Lit(Value::Text(s.clone())))])
                 .collect(),
             insert: false,
+            if_absent: false,
         })
         .unwrap();
     }

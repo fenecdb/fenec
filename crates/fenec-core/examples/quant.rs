@@ -358,6 +358,7 @@ fn main() {
                 collection: "docs".into(),
                 docs,
                 insert: false,
+                if_absent: false,
             })
             .unwrap();
             i += batch;

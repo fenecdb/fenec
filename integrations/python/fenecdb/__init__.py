@@ -60,6 +60,7 @@ __all__ = [
     "AsyncQuery",
     "Changes",
     "Client",
+    "Computed",
     "Cond",
     "FacetCount",
     "FenecError",
@@ -68,6 +69,8 @@ __all__ = [
     "SchemaError",
     "and_",
     "collection",
+    "expr",
+    "inc",
     "not_",
     "or_",
     "placeholders",
@@ -408,6 +411,7 @@ def placeholders(start: int, n: int) -> str:
 # Below FenecError, which the builder raises.
 from .builder import (  # noqa: E402
     AsyncQuery,
+    Computed,
     Cond,
     FacetCount,
     Query,
@@ -415,6 +419,8 @@ from .builder import (  # noqa: E402
     _rows,
     and_,
     collection,
+    expr,
+    inc,
     not_,
     or_,
     raw,

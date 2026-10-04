@@ -275,6 +275,26 @@
       ]
     },
     {
+      "name": "an increment made offline is sent as the expression, and the server's sum is the one kept",
+      "covers": "sync.html#optimistic: inc() runs on the replica at once and on the server again, so two replicas' offline increments both land; this is either of the two, the other's landing first",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "online", "online": false, "expect": {"requests": [], "streams": []}},
+        {"do": "write", "write": {"update": "tasks", "set": {"priority": {"$inc": 1}}, "where": {"key": "a"}}, "expect": {
+          "requests": [], "pending": 1, "rows": {"tasks": [{"id": 1, "priority": 2}, {"id": 2, "priority": 5}]}}},
+        {"do": "online", "online": true, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>",
+            "body": [{"query": "set tasks {priority: coalesce(priority, 0) + $1} where key = $2", "params": [1, "a"]}]}],
+          "streams": []}},
+        {"do": "answer", "status": 200, "seq": 5, "expect": {"pending": 0, "streams": [{"path": "/tasks/changes?status=eq.open&since=3"}]}},
+        {"do": "change", "seq": 4, "puts": [{"id": 1, "key": "a", "priority": 2, "status": "open", "title": "one"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "priority": 2}, {"id": 2, "priority": 5}]}}},
+        {"do": "change", "seq": 5, "puts": [{"id": 1, "key": "a", "priority": 3, "status": "open", "title": "one"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "priority": 3}, {"id": 2, "priority": 5}]}}}
+      ]
+    },
+    {
       "name": "writes go one at a time, in order, each under a key of its own",
       "covers": "mobile.html#sync: a write that lands after one written after it would leave the server holding the earlier",
       "steps": [

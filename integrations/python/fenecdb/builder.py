@@ -25,11 +25,26 @@ from __future__ import annotations
 
 import array
 import json
+import math
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence, TypeVar
 
-__all__ = ["AsyncQuery", "Cond", "FacetCount", "Query", "Rows", "and_", "collection", "not_", "or_", "raw"]
+__all__ = [
+    "AsyncQuery",
+    "Computed",
+    "Cond",
+    "FacetCount",
+    "Query",
+    "Rows",
+    "and_",
+    "collection",
+    "expr",
+    "inc",
+    "not_",
+    "or_",
+    "raw",
+]
 
 # Operator names, the symbols and the words for them.
 _OPS = {
@@ -254,6 +269,59 @@ def raw(sql: str, *params: Any) -> Cond:
     if not isinstance(sql, str):
         raise _err("raw() expects text")
     return Cond("raw", sql=sql, params=params)
+
+
+class Computed:
+    """A value worked out over the row a write writes: what `inc` and
+    `expr` make, rendered as FenecQL with its values as parameters."""
+
+    __slots__ = ("kind", "by", "sql", "params")
+
+    def __init__(self, kind: str, by: Any = None, sql: str = "", params: tuple = ()):
+        self.kind, self.by, self.sql, self.params = kind, by, sql, params
+
+    def __repr__(self) -> str:
+        return f"Computed({self.kind})"
+
+
+def inc(by: Any = 1) -> Computed:
+    """`{"n": inc(1)}` in an update: the field plus `by`, counting from 0
+    where it is null -- `n: coalesce(n, 0) + $1` -- worked out under the
+    server's write lock, so increments from many clients all land."""
+    if isinstance(by, bool) or not isinstance(by, (int, float)) or not math.isfinite(by):
+        text = json.dumps(by, ensure_ascii=False, separators=(",", ":"), default=str)
+        raise _err(f"inc() takes a number: {text}")
+    return Computed("inc", by=by)
+
+
+def expr(sql: str, *params: Any) -> Computed:
+    """A value as a FenecQL expression over the row it is written into,
+    each `?` bound to the next parameter: `{"at": expr("now()")}`,
+    `{"total": expr("price * ?", 1.2)}`."""
+    if not isinstance(sql, str):
+        raise _err("expr() expects text")
+    return Computed("expr", sql=sql, params=params)
+
+
+def _value(k: str, v: Any, bind: "_Binder", write: str) -> str:
+    """A document's value: `inc`'s and `expr`'s text, or a parameter."""
+    if not isinstance(v, Computed):
+        return bind(v, k)
+    if v.kind == "inc":
+        if write == "insert":
+            raise _err(f"inc() reads the row it changes: use it in update (field: {k})")
+        return f"coalesce({k}, 0) + {bind(v.by, k)}"
+    out, i = [], 0
+    parts = v.sql.split("?")
+    for part in parts[:-1]:
+        if i >= len(v.params):
+            raise _err("expr(): more `?` placeholders than parameters")
+        out.append(part + bind(v.params[i], k))
+        i += 1
+    if i != len(v.params):
+        raise _err("expr(): too many parameters given")
+    out.append(parts[-1])
+    return "".join(out)
 
 
 def _to_cond(x: Any) -> Cond:
@@ -738,21 +806,26 @@ class _Builder:
                 sql += f" offset {level['offset']}"
         return sql, bind.params
 
-    def to_insert(self, docs: Mapping | Sequence[Mapping]) -> tuple[str, list]:
-        """The `put` of a document or a list of them, not sent."""
+    def to_insert(
+        self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False
+    ) -> tuple[str, list]:
+        """The `put` of a document or a list of them, not sent. With
+        `if_absent=True`, `put ... if absent`: a document whose id or
+        `@unique` value is held is passed over, and not counted."""
         self._assert_plain("insert")
         items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
         if not items:
             raise _err("cannot write an empty document list")
         bind = _Binder()
-        body = ", ".join(_render_doc(d, bind) for d in items)
-        return f"put {self.collection} {body if len(items) == 1 else f'[{body}]'}", bind.params
+        body = ", ".join(_render_doc(d, bind, "insert") for d in items)
+        absent = " if absent" if if_absent is True else ""
+        return f"put {self.collection} {body if len(items) == 1 else f'[{body}]'}{absent}", bind.params
 
     def to_update(self, patch: Mapping, *, all: bool = False) -> tuple[str, list]:
         """The `set` of the rows the filter names, not sent."""
         self._assert_plain("update")
         bind = _Binder()
-        body = _render_doc(patch, bind)
+        body = _render_doc(patch, bind, "update")
         return f"set {self.collection} {body}{self._require_filter('update', all, bind)}", bind.params
 
     def to_delete(self, *, all: bool = False) -> tuple[str, list]:
@@ -817,10 +890,10 @@ class _Builder:
         return self._with(count=True)
 
 
-def _render_doc(doc: Any, bind: _Binder) -> str:
+def _render_doc(doc: Any, bind: _Binder, write: str) -> str:
     if not isinstance(doc, Mapping):
         raise _err("expected a document object")
-    pairs = [f"{_path(k)}: {bind(v, k)}" for k, v in doc.items()]
+    pairs = [f"{_path(k)}: {_value(k, v, bind, write)}" for k, v in doc.items()]
     if not pairs:
         raise _err("cannot write an empty document")
     return "{" + ", ".join(pairs) + "}"
@@ -896,11 +969,13 @@ class Query(_Builder):
         sql, params = self.to_fenecql()
         return [r.get("plan") for r in _rows(self._client().query(f"explain {sql}", params))]
 
-    def insert(self, docs: Mapping | Sequence[Mapping]) -> int:
-        """`put` of a document or a list of them: how many were written."""
+    def insert(self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False) -> int:
+        """`put` of a document or a list of them: how many were written --
+        with `if_absent=True` those whose id or `@unique` value was held
+        left out, so a lock taken answers 1 and one held 0."""
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        return _affected(self._client().query(*self.to_insert(docs)))
+        return _affected(self._client().query(*self.to_insert(docs, if_absent=if_absent)))
 
     def update(self, patch: Mapping, *, all: bool = False) -> int:
         """`set` over the rows the filter names: how many it changed. With
@@ -933,10 +1008,10 @@ class AsyncQuery(_Builder):
         sql, params = self.to_fenecql()
         return [r.get("plan") for r in _rows(await self._client().query(f"explain {sql}", params))]
 
-    async def insert(self, docs: Mapping | Sequence[Mapping]) -> int:
+    async def insert(self, docs: Mapping | Sequence[Mapping], *, if_absent: bool = False) -> int:
         if isinstance(docs, (list, tuple)) and not docs:
             return 0
-        return _affected(await self._client().query(*self.to_insert(docs)))
+        return _affected(await self._client().query(*self.to_insert(docs, if_absent=if_absent)))
 
     async def update(self, patch: Mapping, *, all: bool = False) -> int:
         return _affected(await self._client().query(*self.to_update(patch, all=all)))

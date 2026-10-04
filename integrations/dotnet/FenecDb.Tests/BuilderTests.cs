@@ -38,6 +38,9 @@ public sealed class BuilderTests(Servers servers)
         JsonValueKind.Array => e.EnumerateArray().Select(Value).ToList(),
         _ when e.TryGetProperty("$date", out var d) => DateTimeOffset.Parse(d.GetString()!, CultureInfo.InvariantCulture),
         _ when e.TryGetProperty("$f32", out var f) => f.EnumerateArray().Select(x => x.GetSingle()).ToArray(),
+        _ when e.TryGetProperty("$inc", out var n) => Computed.Inc(Value(n)),
+        _ when e.TryGetProperty("$expr", out var x) =>
+            Computed.Expr(x[0].GetString()!, x.EnumerateArray().Skip(1).Select(Value).ToArray()),
         _ => e.EnumerateObject().ToDictionary(p => p.Name, p => Value(p.Value)),
     };
 
@@ -163,7 +166,7 @@ public sealed class BuilderTests(Servers servers)
                 (string, IReadOnlyList<object?>)? text = op switch
                 {
                     "toFenecQL" => q.ToFenecQL(),
-                    "toInsert" => q.ToInsert(Docs(a[0])),
+                    "toInsert" => q.ToInsert(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false),
                     "toUpdate" => q.ToUpdate(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false),
                     "toDelete" => q.ToDelete(Opt(a, 0, "all")?.GetBoolean() ?? false),
                     _ => null,
@@ -181,7 +184,7 @@ public sealed class BuilderTests(Servers servers)
                     "first" => q.FirstAsync(),
                     "count" => q.CountAsync(),
                     "explain" => q.ExplainAsync(),
-                    "insert" => q.InsertAsync(Docs(a[0])),
+                    "insert" => q.InsertAsync(Docs(a[0]), Opt(a, 1, "ifAbsent")?.GetBoolean() ?? false),
                     "update" => q.UpdateAsync(Value(a[0])!, Opt(a, 1, "all")?.GetBoolean() ?? false),
                     "delete" => q.DeleteAsync(Opt(a, 0, "all")?.GetBoolean() ?? false),
                     _ => null,

@@ -26,4 +26,4 @@ export 'src/fenec.dart'
         FenecSchema;
 export 'src/remote.dart' show FenecRemote;
 export 'src/live.dart' show LiveQueries;
-export 'src/query.dart' show Query, Cond, SortKey, Statement;
+export 'src/query.dart' show Query, Cond, Computed, SortKey, Statement;

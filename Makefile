@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -225,6 +225,13 @@ replica-bench:
 ## beside writers and beside blocks of 1 000 writes (a /batch's).
 concurrency-bench:
 	$(CARGO) run --release -p fenec-bench --bin concurrency
+
+## A `set` of a constant against one of `n + 1`, over 100 000 rows and
+## one row by id; 16 threads and 16 HTTP clients each incrementing one key
+## 10 000 times, which must end at 160 000 (`set c {n: n + 1}`).
+counters-bench:
+	$(CARGO) build --release -p fenec-server
+	$(CARGO) run --release -p fenec-bench --bin counters
 
 ## What one request costs over the wire: a row by id, a filter, a near and a
 ## put, over fenec-server's HTTP (POST /query, kept alive) and PostgreSQL's

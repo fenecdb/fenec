@@ -76,6 +76,61 @@ public sealed class Cond
     }
 }
 
+/// <summary>
+/// A value worked out over the row a write writes: what <see cref="Inc"/> and <see cref="Expr"/> make, rendered as
+/// FenecQL with its values as parameters.
+/// </summary>
+public sealed class Computed
+{
+    internal readonly string Kind;
+    internal readonly object? By;
+    internal readonly string Sql = "";
+    internal readonly List<object?> Values = [];
+
+    Computed(string kind, object? by, string sql, List<object?> values) =>
+        (Kind, By, Sql, Values) = (kind, by, sql, values);
+
+    /// <summary>A field plus <paramref name="by"/> in an update, counting from 0 where it is null --
+    /// <c>["n"] = Computed.Inc(1)</c> is <c>n: coalesce(n, 0) + $1</c> -- worked out under the server's write
+    /// lock, so increments from many clients all land.</summary>
+    public static Computed Inc(object? by = null)
+    {
+        by ??= 1L;
+        if (!FiniteNumber(by)) throw Builder.Refuse($"inc() takes a number: {Builder.JsJson(by)}");
+        return new("inc", by, "", []);
+    }
+
+    /// <summary>A value as a FenecQL expression over the row it is written into, each <c>?</c> bound to the next
+    /// parameter: <c>Computed.Expr("now()")</c>, <c>Computed.Expr("price * ?", 1.2)</c>.</summary>
+    public static Computed Expr(string sql, params object?[] parameters) => new("expr", null, sql, parameters.ToList());
+
+    static bool FiniteNumber(object v) => v switch
+    {
+        sbyte or byte or short or ushort or int or uint or long or ulong or decimal => true,
+        float f => float.IsFinite(f),
+        double d => double.IsFinite(d),
+        _ => false,
+    };
+
+    internal string Render(string name, Binder bind, string write)
+    {
+        if (Kind == "inc")
+        {
+            if (write == "insert") throw Builder.Refuse($"inc() reads the row it changes: use it in update (field: {name})");
+            return $"coalesce({name}, 0) + {bind.Bind(By)}";
+        }
+        var pieces = Sql.Split('?');
+        var out_ = new StringBuilder();
+        for (var i = 0; i < pieces.Length - 1; i++)
+        {
+            if (i >= Values.Count) throw Builder.Refuse("expr(): more `?` placeholders than parameters");
+            out_.Append(pieces[i]).Append(bind.Bind(Values[i]));
+        }
+        if (pieces.Length - 1 != Values.Count) throw Builder.Refuse("expr(): too many parameters given");
+        return out_.Append(pieces[^1]).ToString();
+    }
+}
+
 internal sealed class Node(string t)
 {
     public string T { get; } = t; // and, or, not, null, in, cmp, raw
@@ -354,11 +409,25 @@ internal static class Builder
             .ToList();
     }
 
-    public static string RenderDoc(object? doc, Binder bind)
+    public static string RenderDoc(object? doc, Binder bind, string write)
     {
         var fields = DocOf(doc);
         if (fields.Count == 0) throw Refuse("cannot write an empty document");
-        return "{" + string.Join(", ", fields.Select(kv => $"{FieldPath(kv.Key)}: {bind.Bind(kv.Value)}")) + "}";
+        return "{" + string.Join(", ", fields.Select(kv =>
+        {
+            var name = FieldPath(kv.Key);
+            return $"{name}: {(kv.Value is Computed c ? c.Render(name, bind, write) : bind.Bind(kv.Value))}";
+        })) + "}";
+    }
+
+    static readonly JsonSerializerOptions Relaxed =
+        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    /// <summary>A value as JSON.stringify writes it, for a message to quote.</summary>
+    public static string JsJson(object? v)
+    {
+        try { return JsonSerializer.Serialize(v, Relaxed); }
+        catch (NotSupportedException) { return Convert.ToString(v, CultureInfo.InvariantCulture) ?? "null"; }
     }
 }
 
@@ -751,15 +820,17 @@ public sealed class Query
         docs is IEnumerable list and not IDictionary and not string ? list.Cast<object?>().ToList() : [docs];
 
     /// <summary>The <c>put</c> of a document -- a dictionary, or an object's public properties -- or a list of
-    /// them, not sent.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs)
+    /// them, not sent. With <paramref name="ifAbsent"/>, <c>put ... if absent</c>: a document whose id or
+    /// <c>@unique</c> value a row holds is passed over, and not counted.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false)
     {
         AssertPlain("insert");
         var list = DocsOf(docs);
         if (list.Count == 0) throw Builder.Refuse("cannot write an empty document list");
         var bind = new Binder();
-        var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind)));
-        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}", bind.Params);
+        var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
+        var absent = ifAbsent ? " if absent" : "";
+        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}", bind.Params);
     }
 
     /// <summary>The <c>set</c> of the rows the filter names, not sent; with no filter it is refused unless
@@ -768,7 +839,7 @@ public sealed class Query
     {
         AssertPlain("update");
         var bind = new Binder();
-        var body = Builder.RenderDoc(patch, bind);
+        var body = Builder.RenderDoc(patch, bind, "update");
         return ($"set {_s.Collection} {body}{RequireFilter("update", all, bind)}", bind.Params);
     }
 
@@ -839,12 +910,13 @@ public sealed class Query
     async Task<ExecResult> ExecAsync((string Text, IReadOnlyList<object?> Parameters) statement, CancellationToken ct) =>
         await Client.ExecAsync(statement.Text, statement.Parameters, ct).ConfigureAwait(false);
 
-    /// <summary>Puts a document -- a dictionary, or an object's public properties -- or a list of them. None is
-    /// no request.</summary>
-    public Task<ExecResult> InsertAsync(object docs, CancellationToken cancellationToken = default) =>
+    /// <summary>Puts a document -- a dictionary, or an object's public properties -- or a list of them; the
+    /// result's <c>Affected</c> is how many were written, which with <paramref name="ifAbsent"/> leaves out those
+    /// whose id or <c>@unique</c> value was held: a lock taken answers 1, one held 0. None is no request.</summary>
+    public Task<ExecResult> InsertAsync(object docs, bool ifAbsent = false, CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false))
-            : ExecAsync(ToInsert(docs), cancellationToken);
+            : ExecAsync(ToInsert(docs, ifAbsent), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
     /// <paramref name="all"/>.</summary>

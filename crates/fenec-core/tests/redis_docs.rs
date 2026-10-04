@@ -1,0 +1,68 @@
+//! Every FenecQL block of site/content/docs/redis.html, run statement by
+//! statement in order against one database, and each `-- → x` the answer
+//! it checks: a write's count, or the first value of a read's first row. A
+//! recipe on the page that stops working fails here, not in a reader's app.
+
+use fenec_core::prelude::*;
+
+const PAGE: &str = include_str!("../../../site/content/docs/redis.html");
+
+/// The page's `<pre data-lang="fenecql">` blocks, unescaped.
+fn blocks() -> Vec<String> {
+    let open = "<pre data-lang=\"fenecql\">";
+    let mut out = Vec::new();
+    let mut rest = PAGE;
+    while let Some(at) = rest.find(open) {
+        rest = &rest[at + open.len()..];
+        let end = rest.find("</pre>").expect("a block ends");
+        out.push(
+            rest[..end]
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&amp;", "&"),
+        );
+        rest = &rest[end..];
+    }
+    out
+}
+
+#[test]
+fn every_recipe_runs_and_answers_what_the_page_says() {
+    let mut db = Database::new();
+    db.set_clock(Some(1_777_800_000_000));
+    let (mut statements, mut checked) = (0, 0);
+    for block in blocks() {
+        for line in block.lines().filter(|l| !l.trim().is_empty()) {
+            let (code, expect) = match line.split_once("-- →") {
+                Some((code, rest)) => (code, Some(rest.trim())),
+                None => (line, None),
+            };
+            let st = fenec_ql::parse_one(code)
+                .unwrap_or_else(|e| panic!("`{code}` does not parse: {e}"));
+            let answer = db
+                .execute(&st)
+                .unwrap_or_else(|e| panic!("`{code}` failed: {e}"));
+            statements += 1;
+            let Some(expect) = expect else { continue };
+            // The answer is what comes before a `:` and its explanation.
+            let want = expect.split(':').next().unwrap().trim();
+            let got = match &answer {
+                Response::Affected(n) => n.to_string(),
+                Response::Rows(rs) => match rs.rows.first().and_then(|r| r.values.first()) {
+                    Some(Value::Text(t)) => format!("\"{t}\""),
+                    Some(v) => fenec_core::json::to_string(v),
+                    None => "no row".into(),
+                },
+                other => format!("{other:?}"),
+            };
+            assert_eq!(got, want, "`{}` answered {got}", code.trim());
+            checked += 1;
+        }
+    }
+    // The page has its recipes, and says what most of them answer.
+    assert!(
+        statements >= 30 && checked >= 20,
+        "{statements} run, {checked} checked"
+    );
+}
