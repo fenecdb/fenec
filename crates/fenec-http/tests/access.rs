@@ -438,3 +438,56 @@ fn an_inner_get_reads_only_what_the_token_may() {
     };
     assert!(e.contains("in (get ...)"), "{e}");
 }
+
+/// A `@unique` clash told a scoped token that another user's row holds the
+/// value, naming the row's id and echoing the value: alice, who may not read
+/// bob's profile, learned that it exists and where by trying his email.
+/// A scoped token is told the field alone, by every route; the server's own
+/// token is told the row and the value as before.
+#[test]
+fn a_unique_clash_tells_a_scoped_token_nothing_of_the_other_row() {
+    let n = start_with(
+        "profiles  read,write  where owner = $jwt.sub\n",
+        &[
+            "create collection profiles (owner text @hash, email text @unique)",
+            r#"put profiles {owner: "bob", email: "bob@x.io"}"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let tries = [
+        n.query(&alice, r#"insert profiles {email: "bob@x.io"}"#),
+        n.query(&alice, r#"put profiles {email: "bob@x.io"}"#),
+        n.call(Some(&alice), "POST", "/profiles", r#"{"email":"bob@x.io"}"#),
+        n.call(
+            Some(&alice),
+            "POST",
+            "/batch",
+            r#"{"query":"put profiles {email: \"bob@x.io\"}"}"#,
+        ),
+    ];
+    for (status, body) in tries {
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("`profiles.email` is unique"), "{body}");
+        assert!(!body.contains("bob"), "the value was told: {body}");
+        assert!(!body.contains("document"), "the row was told: {body}");
+    }
+    // Her own row, then a `set` of it onto bob's value: the same.
+    assert_eq!(
+        n.query(&alice, r#"put profiles {email: "alice@x.io"}"#).0,
+        200
+    );
+    let (status, body) = n.query(&alice, r#"set profiles {email: "bob@x.io"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        !body.contains("bob") && !body.contains("document"),
+        "{body}"
+    );
+
+    // The server's own token is told which row and what value.
+    let (status, body) = n.query(ROOT, r#"insert profiles {email: "bob@x.io"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.contains("document 1") && body.contains("bob@x.io"),
+        "{body}"
+    );
+}

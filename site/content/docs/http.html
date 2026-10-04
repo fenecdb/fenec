@@ -632,6 +632,9 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     to tokens whose <code>role</code> claim names that role; rules on one
     collection widen each other; a rule whose filter names a claim the token
     lacks does not apply. A subscription is checked when it opens.</li>
+  <li><b>Refusals</b> tell a scoped token only what it may read: a
+    <code>@unique</code> clash (409) names the field, not the document
+    holding the value nor the value, since that row is another user's.</li>
   <li><b>Tenants.</b> On a <code>--dir</code> node a token reaches
     <code>/t/&lt;t&gt;/</code> only when its <code>tenant</code> claim names
     <code>&lt;t&gt;</code> (a text, or a list holding it), and is refused

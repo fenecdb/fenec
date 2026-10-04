@@ -883,11 +883,33 @@ thread_local! {
 }
 
 /// Runs `f` -- a statement executing under the write lock -- as `who`: the
-/// documents it writes are checked against the token's rules.
-pub fn within<T>(who: &Who, f: impl FnOnce() -> T) -> T {
+/// documents it writes are checked against the token's rules, and what a
+/// refusal tells is what the token may know ([`told`]).
+pub fn within<T>(who: &Who, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let Who::Scoped(scope) = who else {
         return f();
     };
+    with_scope(scope, f).map_err(told)
+}
+
+/// A refusal as a scoped token is told it. A `@unique` clash names the
+/// document holding the value and echoes the value: told to a token whose
+/// rows are its own, it said that another user's row exists, its id and
+/// what it holds (`insert profiles {email: 'bob@x.io'}` answered "document
+/// 1 holds \"bob@x.io\" already"). The token is told the field alone; that
+/// the value is taken is what uniqueness itself says. A scoped token names
+/// no `id` ([`Scope::rewrite`]), so every duplicate it meets is a clash.
+fn told(e: Error) -> Error {
+    match e {
+        Error::Duplicate(m) => Error::Duplicate(match m.split_once(" is unique, and document ") {
+            Some((field, _)) => format!("{field} is unique, and the value is taken"),
+            None => "a unique value is taken".into(),
+        }),
+        e => e,
+    }
+}
+
+fn with_scope<T>(scope: &Arc<Scope>, f: impl FnOnce() -> T) -> T {
     let before = CURRENT.with(|c| c.replace(Some(Arc::clone(scope))));
     struct Restore(Option<Arc<Scope>>);
     impl Drop for Restore {

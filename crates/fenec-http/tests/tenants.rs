@@ -519,7 +519,7 @@ const JWT_SECRET: &[u8] = b"thirty-two bytes and a few more, for HS256";
 /// Every route under a tenant's prefix, as `(method, path, body)`.
 const ROUTES: &[(&str, &str, &str)] = &[
     ("POST", "query", r#"{"query":"get notes"}"#),
-    ("POST", "batch", r#"{"statements":["get notes"]}"#),
+    ("POST", "batch", r#"{"query":"get notes"}"#),
     ("GET", "notes", ""),
     ("GET", "notes?select=title", ""),
     ("POST", "notes", r#"{"title":"planted"}"#),

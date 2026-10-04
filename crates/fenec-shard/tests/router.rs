@@ -491,7 +491,7 @@ fn a_token_for_one_tenant_reaches_no_other_through_the_router() {
         for (method, path, b) in [
             ("GET", "notes", ""),
             ("POST", "query", r#"{"query":"get notes"}"#),
-            ("POST", "batch", r#"{"statements":["get notes"]}"#),
+            ("POST", "batch", r#"{"query":"get notes"}"#),
             ("POST", "notes", r#"{"title":"planted"}"#),
             ("GET", "_changes", ""),
         ] {

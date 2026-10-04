@@ -600,7 +600,11 @@ Values are one where <code>=</code> finds them one, so <code>-0.0</code>
 and <code>0.0</code> collide. <code>create index ... @unique</code> over
 documents that hold a value twice is refused and names the value and two
 of its documents. A replica takes what its primary took and does not ask
-again; <code>describe</code> shows the index as <code>@unique</code>.</p>
+again; <code>describe</code> shows the index as <code>@unique</code>. The
+refusal names the document holding the value and the value, but to a
+<a href="/docs/http#scoped-access">scoped token</a> it names the field
+alone (<code>`users.email` is unique, and the value is taken</code>): the
+row is another user's, which the token may not read.</p>
 
 <p>The check asks the bucket the value would go in, so the index has to
 hold every document: the first write after an open builds it, where a

@@ -1004,7 +1004,10 @@ collection with no unique field writes as before (848 against 852). `create
 index ... @unique` over a value held twice is refused naming it and two of
 its documents, under the lock or beside the database, where it is asked of
 the index once the writes made meanwhile are in. `Database::apply` builds
-it and asks nothing: the primary did.
+it and asks nothing: the primary did. A scoped token is told the field
+alone (`access::told`, in `within`): the clash names the other row's id
+and echoes its value, which told alice that bob's profile existed, where,
+and what it held.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
