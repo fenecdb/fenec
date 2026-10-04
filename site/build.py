@@ -873,8 +873,9 @@ MARK_LIGHT = re.search(r'<g class="mark-light".*?</g>', open(os.path.join(ROOT, 
 # (the viewBox starts where the farthest ridge does). The nearest ridge ends
 # in #150F26, the colour the band's floor (`.scarp::after`) starts from and
 # fades out of, as the home hero's floor does and the footer fades in --
-# two navy ridges ending on a hard edge read as another site. Static: the
-# home hero's rise and parallax are its own.
+# two navy ridges ending on a hard edge read as another site. Each ridge is
+# the home hero's two groups (`.ridge` > `.ridge-in`), so the band rises in
+# and moves on scroll by the hero's own keyframes and `site.js`'s parallax.
 SCARP = (
     '<div class="scarp" aria-hidden="true">'
     '<svg viewBox="0 60 1440 360" preserveAspectRatio="none" focusable="false">'
@@ -885,12 +886,16 @@ SCARP = (
     '<linearGradient id="sc1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B1742"/><stop offset="1" stop-color="#150F26"/></linearGradient>'
     '<radialGradient id="sckiss" cx=".64" cy="0" r=".55"><stop offset="0" stop-color="#FFCE73" stop-opacity=".75"/><stop offset="1" stop-color="#FFCE73" stop-opacity="0"/></radialGradient>'
     '</defs>'
-    '<path d="M0 170 C 160 120 320 195 480 150 C 640 105 800 180 980 140 C 1140 105 1300 165 1440 130 L1440 420 L0 420 Z" fill="url(#sc4)"/>'
-    '<path d="M0 235 C 180 195 300 265 470 225 C 660 180 790 255 960 215 C 1150 170 1290 240 1440 205 L1440 420 L0 420 Z" fill="url(#sc3)"/>'
+    '<g class="ridge r4"><g class="ridge-in"><path d="M0 170 C 160 120 320 195 480 150 C 640 105 800 180 980 140 C 1140 105 1300 165 1440 130 L1440 420 L0 420 Z" fill="url(#sc4)"/></g></g>'
+    '<g class="ridge r3"><g class="ridge-in"><path d="M0 235 C 180 195 300 265 470 225 C 660 180 790 255 960 215 C 1150 170 1290 240 1440 205 L1440 420 L0 420 Z" fill="url(#sc3)"/></g></g>'
+    '<g class="ridge r2"><g class="ridge-in">'
     '<path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275 L1440 420 L0 420 Z" fill="url(#sc2)"/>'
     '<path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275" fill="none" stroke="url(#sckiss)" stroke-width="3" vector-effect="non-scaling-stroke"/>'
+    '</g></g>'
+    '<g class="ridge r1"><g class="ridge-in">'
     '<path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350 L1440 420 L0 420 Z" fill="url(#sc1)"/>'
     '<path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350" fill="none" stroke="url(#sckiss)" stroke-width="2" vector-effect="non-scaling-stroke"/>'
+    '</g></g>'
     '</svg></div>')
 
 # Put back where the reader left the sidebar on the page before, before the
