@@ -57,12 +57,22 @@ func until(_ what: String, _ done: () -> Bool) async {
         await until("the first rows") { live.loaded }
         var runs = 0
         let watch = live.$rows.dropFirst().sink { _ in runs += 1 }
+        // Several at once are calls that overlap, and a call held under way
+        // across the burst makes them so. Started as tasks of a group alone
+        // they overlapped only as the pool ran them: on a loaded runner one
+        // insert could end, and its look run a frame later, before the rest
+        // began, as the Kotlin test's did.
+        db.begin()
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<10 {
                 group.addTask { try await all.insert(["title": "t\(i)", "done": false] as Value) }
             }
             try await group.waitForAll()
         }
+        // Nothing runs while a write is under way.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        #expect(runs == 0)
+        db.end()
         await until("the rows after the burst") { live.rows.count == 12 }
         try await Task.sleep(nanoseconds: 100_000_000)
         #expect(runs == 1)

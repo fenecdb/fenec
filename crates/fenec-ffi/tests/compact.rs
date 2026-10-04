@@ -110,3 +110,66 @@ fn a_file_the_app_keeps_updating_stays_near_what_it_holds() {
     assert!(sizes[0] < 300_000, "{sizes:?}");
     assert!(sizes[1] > 3_000_000, "{sizes:?}");
 }
+
+/// The library's thread ends with its file: `fenec_close` stops it and
+/// joins it before the close takes the lock, so nothing it does outlives
+/// the call -- a binding's test that closes, opens the file again at once
+/// and removes its directory races no compact. Looked at every 5 ms, a
+/// compact due every few rounds, a close lands during one or between two.
+#[test]
+fn nothing_compacts_a_file_after_its_close() {
+    set_auto_compact(
+        CompactPolicy {
+            ratio: 0.5,
+            floor: 64 << 10,
+        },
+        Duration::from_millis(5),
+    );
+    let body = "x".repeat(500);
+    let dir = std::env::temp_dir().join(format!("fenec-ffi-compact-close-{}", std::process::id()));
+    let listing = || {
+        let mut files: Vec<(String, u64)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().unwrap().len(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    for cycle in 0..30 {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.fenec");
+        let p = path.to_str().unwrap();
+        let h = open(p, FENEC_OPEN_NO_SYNC);
+        query(h, "create collection t (n int, body text)");
+        for id in 1..=100 {
+            query(h, &format!("put t {{id: {id}, n: 0, body: \"{body}\"}}"));
+        }
+        let last = 10 + cycle % 7;
+        for round in 1..=last {
+            for id in 1..=100 {
+                query(h, &format!("set t {{n: {round}}} where id = {id}"));
+            }
+        }
+        close(h);
+        let closed = listing();
+        assert!(
+            !closed.iter().any(|(name, _)| name.contains("beside")),
+            "a compact's side file outlived the close: {closed:?}"
+        );
+        // Several looks' time: a thread still running would have begun a
+        // side file or renamed a new file into place.
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(listing(), closed, "the directory changed after the close");
+        let h = open(p, FENEC_OPEN_NO_AUTO_COMPACT);
+        assert!(query(h, &format!("get t where n = {last} count")).contains(r#"{"count":100}"#));
+        close(h);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

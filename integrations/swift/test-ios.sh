@@ -24,4 +24,10 @@ import json, sys
 schemes = json.load(sys.stdin)["workspace"]["schemes"]
 print("FenecDB-Package" if "FenecDB-Package" in schemes else "FenecDB")
 ')
-xcodebuild test -quiet -scheme "$scheme" -destination "id=$device" -skipMacroValidation
+# The result bundle where CI looks for it when a run fails (each test's
+# output, the crash logs); xcodebuild refuses a path that exists.
+RESULT="$ROOT/integrations/swift/build/ios-tests.xcresult"
+rm -rf "$RESULT"
+mkdir -p "$(dirname "$RESULT")"
+xcodebuild test -quiet -scheme "$scheme" -destination "id=$device" -skipMacroValidation \
+  -resultBundlePath "$RESULT"

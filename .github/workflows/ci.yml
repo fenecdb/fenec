@@ -401,6 +401,21 @@ jobs:
           path: dist-mobile/*.aar
           if-no-files-found: error
 
+      # The log names each failing test with its assertion and stack (the
+      # Kotlin build's testLogging, dart test's GitHub reporter); the JUnit
+      # reports add each test's output. Gradle's HTML report was all a run
+      # left of "1 failed" when it was not uploaded.
+      - name: Test reports of a failing run
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-android
+          path: |
+            integrations/kotlin/fenecdb/build/reports/tests/
+            integrations/kotlin/fenecdb/build/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # The same on Apple's platforms: every slice of the XCFramework, the Swift
   # package's tests on macOS and on an iOS simulator, the library's size
   # linked for each target, and the Flutter plugin's example built for the
@@ -497,3 +512,15 @@ jobs:
             integrations/swift/build/FenecFFI.xcframework.zip.checksum
             integrations/swift/build/FenecFFIDynamic.xcframework.zip
           if-no-files-found: error
+
+      # `swift test` names a failing test and its issue in the log; the
+      # simulator's run keeps its result bundle (test-ios.sh), which holds
+      # each test's output and the crash logs.
+      - name: Test results of a failing run
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-apple
+          path: integrations/swift/build/ios-tests.xcresult
+          retention-days: 7
+          if-no-files-found: ignore

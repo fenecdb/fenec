@@ -76,7 +76,22 @@ class LiveTest {
         val runs = Collections.synchronizedList(ArrayList<Int>())
         val job = launch(Dispatchers.IO) { db.live(all).collect { runs.add(it.size) } }
         until("the first rows") { runs.size == 1 }
-        (0 until 10).map { i -> async(Dispatchers.IO) { all.insert(mapOf("title" to "t$i", "done" to false)) } }.awaitAll()
+        // Several at once are calls that overlap, and a call held under way
+        // across the burst makes them so. Launched on the IO pool alone they
+        // overlapped only as the scheduler had them: on a loaded runner one
+        // insert ended, and its look ran a frame later, before the rest
+        // began -- the query ran three times ([2, 10, 12]).
+        db.inflight.incrementAndGet()
+        try {
+            (0 until 10).map { i -> async(Dispatchers.IO) { all.insert(mapOf("title" to "t$i", "done" to false)) } }.awaitAll()
+            // Nothing runs while a write is under way.
+            delay(100)
+            assertEquals(listOf(2), runs.toList())
+        } finally {
+            // The held call ending, as `answerBlocking` ends one.
+            db.inflight.decrementAndGet()
+            db.lives.touch()
+        }
         until("the rows after the burst") { runs.lastOrNull() == 12 }
         delay(100)
         assertEquals(listOf(2, 12), runs.toList())

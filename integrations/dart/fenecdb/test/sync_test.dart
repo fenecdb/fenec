@@ -129,9 +129,13 @@ void main() {
     final s = await server('optimistic');
     final db = await Fenec.openSynced(url: s.url, shapes: [open], path: await scratch('optimistic'));
     await db.replica!.ready();
+    // Offline, nothing is sent: the server's answer cannot replace the row
+    // before it is read (see 'a refused write is put back').
+    db.replica!.setOnline(false);
     await db.from('tasks').insert({'title': 'new', 'status': 'open', 'priority': 2});
     // At once, under a temporary id.
     expect((await db.from('tasks').where('title', 'new').first())!['id'] as int, greaterThanOrEqualTo(1 << 52));
+    db.replica!.setOnline(true);
     await db.replica!.pushed();
     await eventually("the server's copy in place of the temporary row", () async {
       final rows = await db.from('tasks').where('title', 'new').rows();
@@ -153,9 +157,14 @@ void main() {
     await db.replica!.ready();
     final refused = <Refusal>[];
     final sub = db.replica!.refusals.listen(refused.add);
+    // Offline, nothing is sent, so the row is read before the server can
+    // refuse it: online, the 409 could come back and the row be put back
+    // before the read, as it was in the Kotlin test on a loaded runner.
+    db.replica!.setOnline(false);
     // The server's key is @unique; the replica's a plain hash.
     await db.from('tasks').insert({'key': 'a', 'title': 'dup', 'status': 'open'});
     expect(await titles(db), ['dup', 'one', 'two']);
+    db.replica!.setOnline(true);
     await eventually('the refusal', () => refused.isNotEmpty);
     expect(refused.first.status, 409);
     await eventually('the write put back', () async => (await titles(db)).join(',') == 'one,two');
