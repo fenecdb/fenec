@@ -60,6 +60,9 @@ These are deliberate, and README explains each one:
 - **A token on the command line shows up in `ps`.** `FENEC_HTTP_TOKEN`,
   `FENEC_JWT_SECRET`, `--jwt-secret-file` and `FENEC_REPLICATION_TOKEN` exist
   for that reason.
+- **`--jwt-require-exp off` takes a token with no `exp` for ever.** By
+  default such a token is refused (401); turning that off is the operator's
+  call, as is how far ahead `--jwt-max-age` lets an `exp` lie.
 - **Two processes opening the same file corrupts it.** There is a single writer
   and no lock file; this is why everything that writes a file runs as a thread
   of one `fenec-server`.

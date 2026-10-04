@@ -622,7 +622,13 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     so the ids other users write never reach it.</li>
   <li><b>Tokens</b> are HS256, or RS256 with <code>--jwt-keys</code> (below).
     The algorithm is the key's, not the token's, so <code>alg: none</code> is
-    refused. Every token is checked against <code>exp</code> and <code>nbf</code>. A rule with <code>for</code> applies
+    refused. Every token is checked against <code>exp</code> and <code>nbf</code>,
+    and one with no <code>exp</code> is refused (401): it would be good for
+    ever, and a token that leaked could only be outlived by rotating every
+    key. <code>--jwt-require-exp off</code> takes such tokens again, and
+    <code>--jwt-max-age &lt;s&gt;</code> also refuses one whose
+    <code>exp</code> lies further ahead than that. <code>--mint-token</code>
+    gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
     to tokens whose <code>role</code> claim names that role; rules on one
     collection widen each other; a rule whose filter names a claim the token
     lacks does not apply. A subscription is checked when it opens.</li>

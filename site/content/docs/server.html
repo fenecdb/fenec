@@ -66,7 +66,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--dir &lt;path&gt;</code></td><td>One file per tenant in this directory (<a href="/docs/sharding">Tenants and sharding</a>).</td></tr>
 <tr><td><code>--http &lt;address&gt;</code></td><td>Where to listen. Default <code>127.0.0.1:8080</code>.</td></tr>
 <tr><td><code>--http-token &lt;value&gt;</code></td><td>Requires <code>Authorization: Bearer &lt;value&gt;</code>. Also read from <code>FENEC_HTTP_TOKEN</code>, since <code>argv</code> shows up in <code>ps</code>.</td></tr>
-<tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
+<tr><td><code>--jwt-secret</code>, <code>--jwt-secret-file</code>, <code>--jwt-keys</code>, <code>--jwt-require-exp</code>, <code>--jwt-max-age</code>, <code>--policy</code></td><td>Tokens held to rules: which collections, which rows (<a href="#security">Security</a>).</td></tr>
 <tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
 <tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it.</td></tr>
@@ -114,7 +114,11 @@ reporting login a dashboard needs. The rules are ANDed into every statement
 a token runs, and every document it writes is checked against them as well
 (<a href="/docs/http#scoped-access">Scoped access</a>).
 <code>--mint-token '{"sub": "ada"}'</code> prints a token signed with the
-secret, for testing. Pass the secret with <code>--jwt-secret-file</code> or
+secret, for testing, which expires in an hour unless the claims name an
+<code>exp</code>. A token with no <code>exp</code> is refused, since it
+would be good for ever (<code>--jwt-require-exp off</code> takes it), and
+<code>--jwt-max-age &lt;s&gt;</code> refuses one whose <code>exp</code> lies
+further ahead than that. Pass the secret with <code>--jwt-secret-file</code> or
 <code>FENEC_JWT_SECRET</code> — <code>argv</code> shows up in <code>ps</code>
 output.</p>
 

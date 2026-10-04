@@ -103,6 +103,16 @@ fn listen(s: &mut TcpStream, heard: &mut String, until: &dyn Fn(&str) -> bool, b
     }
 }
 
+/// An HS256 token for `claims` exactly as given -- `mint` stamps an `exp`
+/// on claims that name none.
+fn signed(secret: &[u8], claims: &str) -> String {
+    use fenec_http::crypto::{b64url_encode, hmac_sha256};
+    let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let body = b64url_encode(claims.as_bytes());
+    let sig = hmac_sha256(secret, format!("{head}.{body}").as_bytes());
+    format!("{head}.{body}.{}", b64url_encode(&sig))
+}
+
 /// How many times `needle` appears in `hay`.
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -254,6 +264,12 @@ fn tokens_that_do_not_verify_are_refused() {
     let other = Access::new(&[9u8; 40], POLICY).unwrap();
     let forged = other.mint(r#"{"sub":"alice"}"#).unwrap();
     assert_eq!(n.call(Some(&forged), "GET", "/notes", "").0, 401);
+    // Signed with the server's own secret but naming no `exp`: good for
+    // ever, so refused (`--jwt-require-exp`).
+    let forever = signed(SECRET, r#"{"sub":"alice"}"#);
+    let (status, body) = n.call(Some(&forever), "GET", "/notes", "");
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("no exp"), "{body}");
     assert_eq!(n.call(None, "GET", "/notes", "").0, 401);
     assert_eq!(n.call(Some("guess"), "GET", "/notes", "").0, 401);
     // The server's own token is everything.
