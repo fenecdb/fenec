@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"sort"
@@ -537,7 +538,7 @@ type Opt func(*opts)
 
 type opts struct {
 	ef, k, candidates, limit, offset *int
-	exact, required, all             bool
+	exact, required, all, ifAbsent   bool
 	on, parentKey, collate           *string
 	sel                              []string
 	selSet                           bool
@@ -1471,7 +1472,86 @@ func structDoc(v any) (Doc, error) {
 	return d, nil
 }
 
-func renderDoc(doc any, bind *binder) (string, error) {
+// Computed is a value worked out over the row a write writes: what Inc and
+// Expr make, rendered as FenecQL with its values as parameters.
+type Computed struct {
+	kind   string
+	by     any
+	sql    string
+	params []any
+	err    error
+}
+
+// Inc is a field plus by in an update, counting from 0 where it is null --
+// D("n", fenecdb.Inc(1)) is n: coalesce(n, 0) + $1 -- worked out under the
+// server's write lock, so increments from many clients all land.
+func Inc(by any) Computed {
+	if !finiteNumber(by) {
+		return Computed{err: refuse("inc() takes a number: %s", jsJSON(by))}
+	}
+	return Computed{kind: "inc", by: by}
+}
+
+// Expr is a value as a FenecQL expression over the row it is written into,
+// each ? bound to the next parameter: Expr("now()"), Expr("price * ?", 1.2).
+func Expr(sql string, params ...any) Computed {
+	return Computed{kind: "expr", sql: sql, params: params}
+}
+
+func finiteNumber(v any) bool {
+	switch n := v.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float32:
+		return !math.IsNaN(float64(n)) && !math.IsInf(float64(n), 0)
+	case float64:
+		return !math.IsNaN(n) && !math.IsInf(n, 0)
+	case json.Number:
+		f, err := n.Float64()
+		return err == nil && !math.IsInf(f, 0)
+	}
+	return false
+}
+
+// jsJSON writes a value as JSON.stringify does, for a message to quote.
+func jsJSON(v any) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Sprint(v)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// render is a document's value: Inc's and Expr's text.
+func (c Computed) render(name string, bind *binder, write string) (string, error) {
+	if c.err != nil {
+		return "", c.err
+	}
+	if c.kind == "inc" {
+		if write == "insert" {
+			return "", refuse("inc() reads the row it changes: use it in update (field: %s)", name)
+		}
+		return "coalesce(" + name + ", 0) + " + bind.bind(c.by), nil
+	}
+	pieces := strings.Split(c.sql, "?")
+	var out strings.Builder
+	for i, p := range pieces[:len(pieces)-1] {
+		if i >= len(c.params) {
+			return "", refuse("expr(): more `?` placeholders than parameters")
+		}
+		out.WriteString(p)
+		out.WriteString(bind.bind(c.params[i]))
+	}
+	if len(pieces)-1 != len(c.params) {
+		return "", refuse("expr(): too many parameters given")
+	}
+	out.WriteString(pieces[len(pieces)-1])
+	return out.String(), nil
+}
+
+func renderDoc(doc any, bind *binder, write string) (string, error) {
 	d, err := docOf(doc)
 	if err != nil {
 		return "", err
@@ -1485,31 +1565,61 @@ func renderDoc(doc any, bind *binder) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		parts[i] = p + ": " + bind.bind(f.Value)
+		v := ""
+		switch c := f.Value.(type) {
+		case Computed:
+			v, err = c.render(p, bind, write)
+		case *Computed:
+			v, err = c.render(p, bind, write)
+		default:
+			v = bind.bind(f.Value)
+		}
+		if err != nil {
+			return "", err
+		}
+		parts[i] = p + ": " + v
 	}
 	return "{" + strings.Join(parts, ", ") + "}", nil
 }
 
-// ToInsert is the put of the documents, not sent.
+// IfAbsent, among an insert's documents, is put ... if absent: a document
+// whose id or @unique value a row holds is passed over and not counted,
+// so a lock taken answers 1 and one held 0.
+func IfAbsent() Opt { return func(o *opts) { o.ifAbsent = true } }
+
+// ToInsert is the put of the documents, not sent. An Opt among them --
+// IfAbsent -- is an option, not a document.
 func (b *Builder) ToInsert(docs ...any) (string, []any, error) {
 	if err := b.assertPlain("insert"); err != nil {
 		return "", nil, err
 	}
-	if len(docs) == 0 {
+	var options []Opt
+	list := make([]any, 0, len(docs))
+	for _, d := range docs {
+		if o, ok := d.(Opt); ok {
+			options = append(options, o)
+		} else {
+			list = append(list, d)
+		}
+	}
+	if len(list) == 0 {
 		return "", nil, refuse("cannot write an empty document list")
 	}
 	bind := &binder{params: []any{}}
-	parts := make([]string, len(docs))
-	for i, d := range docs {
-		s, err := renderDoc(d, bind)
+	parts := make([]string, len(list))
+	for i, d := range list {
+		s, err := renderDoc(d, bind, "insert")
 		if err != nil {
 			return "", nil, err
 		}
 		parts[i] = s
 	}
 	body := strings.Join(parts, ", ")
-	if len(docs) > 1 {
+	if len(list) > 1 {
 		body = "[" + body + "]"
+	}
+	if gather(options).ifAbsent {
+		body += " if absent"
 	}
 	return "put " + b.collection + " " + body, bind.params, nil
 }
@@ -1521,7 +1631,7 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 		return "", nil, err
 	}
 	bind := &binder{params: []any{}}
-	body, err := renderDoc(patch, bind)
+	body, err := renderDoc(patch, bind, "update")
 	if err != nil {
 		return "", nil, err
 	}
@@ -1647,9 +1757,16 @@ func (b *Builder) exec(ctx context.Context, text string, params []any) (Result, 
 }
 
 // Insert puts the documents -- Docs, maps or structs -- and hands back how
-// many were written. None is no request.
+// many were written (Result.Affected); with IfAbsent among them, those
+// whose id or @unique value was held are left out. None is no request.
 func (b *Builder) Insert(ctx context.Context, docs ...any) (Result, error) {
-	if len(docs) == 0 {
+	n := 0
+	for _, d := range docs {
+		if _, ok := d.(Opt); !ok {
+			n++
+		}
+	}
+	if n == 0 {
 		return Result{}, b.err
 	}
 	text, params, err := b.ToInsert(docs...)

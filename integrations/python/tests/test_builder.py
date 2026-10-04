@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import TOKEN, URL, fresh
-from fenecdb import AsyncClient, FacetCount, FenecError, Query, and_, collection, not_, or_, raw
+from fenecdb import AsyncClient, FacetCount, FenecError, Query, and_, collection, expr, inc, not_, or_, raw
 
 # run-tests.sh mounts the file beside the package in its container.
 GOLDEN = Path(os.environ.get("FENEC_GOLDEN") or Path(__file__).parents[2] / "builder-golden.json")
@@ -34,6 +34,10 @@ def arg(x):
         return not_(arg(x["$not"]))
     if "$raw" in x:
         return raw(x["$raw"][0], *[arg(p) for p in x["$raw"][1:]])
+    if "$inc" in x:
+        return inc(x["$inc"])
+    if "$expr" in x:
+        return expr(x["$expr"][0], *[arg(p) for p in x["$expr"][1:]])
     if "$date" in x:
         return datetime.fromisoformat(x["$date"].replace("Z", "+00:00"))
     if "$f32" in x:
@@ -41,7 +45,7 @@ def arg(x):
     return {k: arg(v) for k, v in x.items()}
 
 
-SNAKE = {"parentKey": "parent_key"}
+SNAKE = {"parentKey": "parent_key", "ifAbsent": "if_absent"}
 
 
 def kwargs(opts):
@@ -77,7 +81,7 @@ def run(steps):
                 text, params = q.to_fenecql()
             elif op in ("toInsert", "insert"):
                 fn = q.to_insert if op == "toInsert" else q.insert
-                out = fn(arg(args[0]))
+                out = fn(arg(args[0]), **kwargs(args[1] if len(args) > 1 else None))
                 text, params = out if op == "toInsert" else rec.sent[-1]
             elif op in ("toUpdate", "update"):
                 fn = q.to_update if op == "toUpdate" else q.update
