@@ -61,6 +61,29 @@ public struct Cond: Sendable, ExpressibleByDictionaryLiteral {
     }
 }
 
+// A value a write works out over the row it writes, as the JS builder's
+// `inc` and `expr`: an object under a key no field can be named (a NUL
+// opens it), so that it rides in a document's `Value` as any value does and
+// the builder renders it as FenecQL, its values as parameters.
+extension Value {
+    static let computedKey = "\u{0}fenec.computed"
+
+    /// `["n": .inc(1)]` in an update: the field plus `by`, counting from 0
+    /// where it is null -- `n: coalesce(n, 0) + $1` -- worked out under the
+    /// write lock, so increments from many clients all land.
+    public static func inc(_ by: Value = 1) -> Value {
+        .object(Row([(computedKey, "inc"), ("by", by)]))
+    }
+
+    /// A value as a FenecQL expression over the row, each `?` bound to the
+    /// next parameter: `["at": .expr("now()")]`, `.expr("price * ?", 1.2)`.
+    public static func expr(_ sql: String, _ params: Value...) -> Value { expr(sql, params) }
+
+    static func expr(_ sql: String, _ params: [Value]) -> Value {
+        .object(Row([(computedKey, "expr"), ("sql", .string(sql)), ("params", .array(params))]))
+    }
+}
+
 /// One key of a lookup's order: a field, `asc` or `desc`, and a collation
 /// (`tr` or `und`). A string literal is an ascending key.
 public struct SortKey: Sendable, ExpressibleByStringLiteral {
@@ -310,11 +333,44 @@ enum Builder {
         }
     }
 
-    /// A document's fields, in order.
-    static func renderDoc(_ doc: Value, _ bind: Binder) throws -> String {
+    /// A document's fields, in order; `insert` refuses an `inc`, which reads
+    /// the row it changes.
+    static func renderDoc(_ doc: Value, _ bind: Binder, insert: Bool = false) throws -> String {
         guard case .object(let row) = doc else { throw FenecError.builder("expected a document object") }
         guard !row.isEmpty else { throw FenecError.builder("cannot write an empty document") }
-        return "{" + (try row.map { "\(try path($0.key)): \(bind.bind($0.value))" }).joined(separator: ", ") + "}"
+        return "{" + (try row.map {
+            let key = try path($0.key)
+            return "\(key): \(try value(key, $0.value, bind, insert))"
+        }).joined(separator: ", ") + "}"
+    }
+
+    /// A document's value: `inc`'s and `expr`'s text, or a parameter.
+    static func value(_ key: String, _ v: Value, _ bind: Binder, _ insert: Bool) throws -> String {
+        guard case .object(let r) = v, let kind = r[Value.computedKey]?.string else { return bind.bind(v) }
+        if kind == "inc" {
+            let by = r["by"] ?? .null
+            let finite: Bool
+            switch by {
+            case .int: finite = true
+            case .double(let d): finite = d.isFinite
+            default: finite = false
+            }
+            guard finite else { throw FenecError.builder("inc() takes a number: \(by.json)") }
+            if insert {
+                throw FenecError.builder("inc() reads the row it changes: use it in update (field: \(key))")
+            }
+            return "coalesce(\(key), 0) + \(bind.bind(by))"
+        }
+        let sql = r["sql"]?.string ?? ""
+        let params = r["params"]?.array ?? []
+        let pieces = sql.split(separator: "?", omittingEmptySubsequences: false)
+        var out = ""
+        for i in 0..<pieces.count - 1 {
+            guard i < params.count else { throw FenecError.builder("expr(): more `?` placeholders than parameters") }
+            out += pieces[i] + bind.bind(params[i])
+        }
+        guard pieces.count - 1 == params.count else { throw FenecError.builder("expr(): too many parameters given") }
+        return out + pieces[pieces.count - 1]
     }
 
     /// Whether a `raw` fragment may read a collection of its own.
@@ -780,13 +836,17 @@ public struct Query: Sendable {
 
     /// The `put` of a document -- a `Value` or `Row` of fields, a `Codable`
     /// `FenecValue` -- or a list of them, not run.
-    public func toInsert(_ docs: any FenecValue) throws -> (text: String, params: [Value]) {
+    /// `ifAbsent`: `put ... if absent`, which passes over a document whose
+    /// id or `@unique` value a row holds and counts only what it wrote -- a
+    /// lock taken, or not, in one statement.
+    public func toInsert(_ docs: any FenecValue, ifAbsent: Bool = false) throws -> (text: String, params: [Value]) {
         try assertPlain("insert")
         let list = Query.docs(try docs.fenecValue())
         guard !list.isEmpty else { throw FenecError.builder("cannot write an empty document list") }
         let bind = Binder()
-        let body = try list.map { try Builder.renderDoc($0, bind) }.joined(separator: ", ")
-        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")", bind.params)
+        let body = try list.map { try Builder.renderDoc($0, bind, insert: true) }.joined(separator: ", ")
+        let absent = ifAbsent ? " if absent" : ""
+        return ("put \(collection) \(list.count == 1 ? body : "[\(body)]")\(absent)", bind.params)
     }
 
     /// The `set` of the rows the filter names, not run; with no filter it is
@@ -844,13 +904,13 @@ public struct Query: Sendable {
         return try await run(("explain \(text)", params)).rows.map { $0["plan"]?.string ?? "" }
     }
 
-    /// Puts a document, or a list of them: how many it wrote. None is no
-    /// statement.
+    /// Puts a document, or a list of them: how many it wrote, which with
+    /// `ifAbsent` leaves out those already held. None is no statement.
     @discardableResult
-    public func insert(_ docs: any FenecValue) async throws -> Int {
+    public func insert(_ docs: any FenecValue, ifAbsent: Bool = false) async throws -> Int {
         let v = try docs.fenecValue()
         if case .array(let list) = v, list.isEmpty { return 0 }
-        return try await run(toInsert(v)).affected
+        return try await run(toInsert(v, ifAbsent: ifAbsent)).affected
     }
 
     /// Sets the patch's fields on the rows the filter names; with no filter

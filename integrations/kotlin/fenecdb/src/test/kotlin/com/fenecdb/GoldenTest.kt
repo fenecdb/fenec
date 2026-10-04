@@ -30,6 +30,8 @@ class GoldenTest {
             is Row -> when {
                 v.containsKey("\$date") -> java.util.Date(java.time.Instant.parse(v.string("\$date")).toEpochMilli())
                 v.containsKey("\$f32") -> v.list("\$f32")!!.let { l -> FloatArray(l.size) { (l[it] as Number).toFloat() } }
+                v.containsKey("\$inc") -> Computed.inc(v["\$inc"])
+                v.containsKey("\$expr") -> v.list("\$expr")!!.let { Computed.expr(it[0] as String, *it.drop(1).map(::value).toTypedArray()) }
                 else -> LinkedHashMap<String, Any?>().also { m -> v.forEach { (k, x) -> m[k] = value(x) } }
             }
             is List<*> -> v.map(::value)
@@ -112,14 +114,14 @@ class GoldenTest {
                     val all = { at: Int -> opt(a, at, "all") as Boolean? ?: false }
                     val made: Statement? = when (op) {
                         "toFenecQL" -> q.toFenecQL()
-                        "toInsert" -> q.toInsert(value(a[0]))
+                        "toInsert" -> q.toInsert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false)
                         "toUpdate" -> q.toUpdate(value(a[0]), all(1))
                         "toDelete" -> q.toDelete(all(0))
                         "rows" -> null.also { q.rows() }
                         "first" -> null.also { q.first() }
                         "count" -> null.also { q.count() }
                         "explain" -> null.also { q.explain() }
-                        "insert" -> null.also { q.insert(value(a[0])) }
+                        "insert" -> null.also { q.insert(value(a[0]), opt(a, 1, "ifAbsent") as Boolean? ?: false) }
                         "update" -> null.also { q.update(value(a[0]), all(1)) }
                         "delete" -> null.also { q.delete(all(0)) }
                         else -> {

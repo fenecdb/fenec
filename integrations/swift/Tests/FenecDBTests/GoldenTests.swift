@@ -40,6 +40,8 @@ import Testing
         case .object(let r):
             if let d = r["$date"]?.string { return date(d) }
             if let f = r["$f32"]?.array { return .floats(f.map { Float($0.double!) }) }
+            if let n = r["$inc"] { return .inc(n) }
+            if let e = r["$expr"]?.array { return .expr(e[0].string!, e.dropFirst().map(value)) }
             return .object(Row(zip(r.keys, r.values.map(value)).map { ($0, $1) }))
         case .array(let a): return .array(a.map(value))
         default: return v
@@ -130,17 +132,18 @@ import Testing
                 let a = s["args"]?.array ?? []
                 let docs = { value(a[0]) }
                 let all = { (at: Int) in opt(a, at, "all")?.bool ?? false }
+                let absent = { opt(a, 1, "ifAbsent")?.bool ?? false }
                 var made: (text: String, params: [Value])?
                 switch op {
                 case "toFenecQL": made = try q.toFenecQL()
-                case "toInsert": made = try q.toInsert(docs())
+                case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent())
                 case "toUpdate": made = try q.toUpdate(docs(), all: all(1))
                 case "toDelete": made = try q.toDelete(all: all(0))
                 case "rows": _ = try await q.rows()
                 case "first": _ = try await q.first()
                 case "count": _ = try await q.count()
                 case "explain": _ = try await q.explain()
-                case "insert": _ = try await q.insert(docs())
+                case "insert": _ = try await q.insert(docs(), ifAbsent: absent())
                 case "update": _ = try await q.update(docs(), all: all(1))
                 case "delete": _ = try await q.delete(all: all(0))
                 default:
