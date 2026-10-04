@@ -277,8 +277,10 @@ a:hover { color: var(--sun-hot); }
    The home hero's dunes, the 404's and the band under the header on every
    other page (`.scarp`) are all these groups, so they rise and move alike.
    Hidden only where the script that adds `.loaded` can run: without it the
-   ridges stood invisible for good. */
-.ridge { transform: translateY(var(--py, 0px)); will-change: transform; }
+   ridges stood invisible for good. `site.js` writes the outer one's
+   transform itself: through an inherited custom property each write
+   restyled the ridge's whole subtree, three times the style work a frame. */
+.ridge { will-change: transform; }
 .js .ridge-in { opacity: 0; transform: translateY(52px); }
 .loaded .ridge-in { animation: rise 1.3s var(--ease) forwards; }
 .loaded .r4 .ridge-in { animation-delay: .06s; }

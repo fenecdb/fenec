@@ -177,7 +177,13 @@ contents scrolls on its own the same way.
 Every page but the home page opens on `SCARP` (`build.py`): the home
 hero's four ridges in its colours, then a floor that fades from the
 nearest ridge into the page, as the home hero's does and the footer fades
-out of it, so nothing ends on an edge.
+out of it, so nothing ends on an edge. Its ridges are the hero's own groups
+(`.ridge` > `.ridge-in`), so they rise in by the hero's keyframes at load
+and move by the hero's parallax on scroll -- one loop in `site.js` for
+every dune field, a transform each frame, no layout read, and nothing
+written while a field is off screen. Its nearest ridge only rises: it is
+the ground the floor fades out of, and faded in the floor's top showed as
+an edge. Under reduced motion the band stands still.
 
 ## Moving pictures
 

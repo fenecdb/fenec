@@ -250,7 +250,7 @@ if (fields.length) {
     queued = false;
     const y = scrollY;
     for (const f of fields) {
-      if (f.on) for (const [r, rate] of f.ridges) r.style.setProperty('--py', `${y * rate}px`);
+      if (f.on) for (const [r, rate] of f.ridges) r.style.transform = `translateY(${y * rate}px)`;
     }
   };
   const schedule = () => {
