@@ -8,14 +8,64 @@ const root = document.documentElement;
 
 requestAnimationFrame(() => root.classList.add('loaded'));
 
-/* ------------------------------------------------------------ docs sidebar */
+/* ---------------------------------------------------------------- the menu */
 
-const toggle = document.querySelector('.side-toggle');
+/* Under 860 px the header is the mark and one button, which opens every
+   header link and, on a docs page, the docs' nav, moved into the panel: one
+   menu, where "Contents" beside a row of links overflowed a phone and the
+   row was cut down by hiding links. While it is open the page behind is
+   inert and does not scroll; Escape, a link followed, or the window
+   widening past the breakpoint shuts it. */
+const header = document.querySelector('.top');
+const menuBtn = document.querySelector('.menu-toggle');
+const menu = document.getElementById('menu');
 const side = document.getElementById('side');
-if (toggle && side) {
-  toggle.addEventListener('click', () => {
-    const open = side.classList.toggle('open');
-    toggle.setAttribute('aria-expanded', String(open));
+const sideInner = side?.querySelector('.side-inner');
+const narrowNav = matchMedia('(max-width: 860px)');
+if (header && menuBtn && menu) {
+  const isOpen = () => header.classList.contains('open');
+  const setOpen = (open, focusBack) => {
+    header.classList.toggle('open', open);
+    root.classList.toggle('menu-open', open);
+    menuBtn.setAttribute('aria-expanded', String(open));
+    for (const el of document.body.children) if (el !== header) el.inert = open;
+    if (open) {
+      // The page being read, in the middle of the panel and focused there.
+      const here = menu.querySelector('.side-list a.here') || menu.querySelector('a[aria-current]');
+      menu.scrollTop = here && here.closest('.side-inner')
+        ? here.offsetTop - (menu.clientHeight - here.offsetHeight) / 2 : 0;
+      (here || menu.querySelector('a'))?.focus({ preventScroll: true });
+    } else if (focusBack) {
+      menuBtn.focus();
+    }
+  };
+  menuBtn.addEventListener('click', () => setOpen(!isOpen(), false));
+  addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && isOpen()) { e.preventDefault(); setOpen(false, true); }
+  });
+  // A link followed shuts it: an anchor on this page would leave it over
+  // what it scrolled to, and a page kept in the back/forward cache would
+  // come back with it open.
+  menu.addEventListener('click', (e) => { if (e.target.closest('a')) setOpen(false, false); });
+  addEventListener('pageshow', (e) => { if (e.persisted && isOpen()) setOpen(false, false); });
+
+  // The docs' nav is in the sidebar on a wide screen and in the menu on a
+  // narrow one: the same links, never both.
+  const place = () => {
+    if (sideInner) (narrowNav.matches ? menu : side).append(sideInner);
+    if (!narrowNav.matches && isOpen()) setOpen(false, false);
+  };
+  narrowNav.addEventListener('change', place);
+  place();
+}
+
+/* Where the sidebar was scrolled to, for the next page to put back before it
+   paints (SIDE_RESTORE in build.py): a link in it loads a page, and the
+   sidebar began at its top again, the link just followed out of sight. */
+if (side) {
+  addEventListener('pagehide', () => {
+    if (narrowNav.matches) return;
+    try { sessionStorage.setItem('fenec-side', String(side.scrollTop)); } catch {}
   });
 }
 
@@ -36,6 +86,16 @@ if (tocLinks.length) {
     }
     if (innerHeight + scrollY >= document.body.scrollHeight - 4) active = marks[marks.length - 1];
     for (const m of marks) m.link.classList.toggle('here', m === active);
+    // A long table scrolls on its own: its entry is kept in view by the
+    // table's scrollTop, never scrollIntoView, which would move the page.
+    const toc = active.link.closest('.toc');
+    const a = active.link;
+    if (toc && toc.scrollHeight > toc.clientHeight) {
+      const y = a.offsetTop; // the table is sticky, so it is the link's offsetParent
+      if (y < toc.scrollTop + 40 || y + a.offsetHeight > toc.scrollTop + toc.clientHeight - 40) {
+        toc.scrollTop = y - (toc.clientHeight - a.offsetHeight) / 2;
+      }
+    }
   };
   const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(mark); } };
   addEventListener('scroll', schedule, { passive: true });

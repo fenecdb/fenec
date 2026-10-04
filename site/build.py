@@ -827,6 +827,47 @@ MARK_DETAIL = _mark("mark-detail.svg", "mark mark-detail")
 # hero to run again every cycle as the header runs it once.
 MARK_LIGHT = re.search(r'<g class="mark-light".*?</g>', open(os.path.join(ROOT, "mark-detail.svg"), encoding="utf-8").read(), re.S).group(0)
 
+# The band under the header on every page but the home page: the home hero's
+# four ridges, in its colours and its ridge light, cut to the dunes alone
+# (the viewBox starts where the farthest ridge does). The nearest ridge ends
+# in #150F26, the colour the band's floor (`.scarp::after`) starts from and
+# fades out of, as the home hero's floor does and the footer fades in --
+# two navy ridges ending on a hard edge read as another site. Static: the
+# home hero's rise and parallax are its own.
+SCARP = (
+    '<div class="scarp" aria-hidden="true">'
+    '<svg viewBox="0 60 1440 360" preserveAspectRatio="none" focusable="false">'
+    '<defs>'
+    '<linearGradient id="sc4" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5E2F57"/><stop offset="1" stop-color="#37192F"/></linearGradient>'
+    '<linearGradient id="sc3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8B3C48"/><stop offset="1" stop-color="#4E2130"/></linearGradient>'
+    '<linearGradient id="sc2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#B0522C"/><stop offset=".55" stop-color="#7C3626"/><stop offset="1" stop-color="#48201F"/></linearGradient>'
+    '<linearGradient id="sc1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B1742"/><stop offset="1" stop-color="#150F26"/></linearGradient>'
+    '<radialGradient id="sckiss" cx=".64" cy="0" r=".55"><stop offset="0" stop-color="#FFCE73" stop-opacity=".75"/><stop offset="1" stop-color="#FFCE73" stop-opacity="0"/></radialGradient>'
+    '</defs>'
+    '<path d="M0 170 C 160 120 320 195 480 150 C 640 105 800 180 980 140 C 1140 105 1300 165 1440 130 L1440 420 L0 420 Z" fill="url(#sc4)"/>'
+    '<path d="M0 235 C 180 195 300 265 470 225 C 660 180 790 255 960 215 C 1150 170 1290 240 1440 205 L1440 420 L0 420 Z" fill="url(#sc3)"/>'
+    '<path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275 L1440 420 L0 420 Z" fill="url(#sc2)"/>'
+    '<path d="M0 300 C 150 265 340 330 520 292 C 700 254 830 320 1010 285 C 1190 250 1310 305 1440 275" fill="none" stroke="url(#sckiss)" stroke-width="3" vector-effect="non-scaling-stroke"/>'
+    '<path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350 L1440 420 L0 420 Z" fill="url(#sc1)"/>'
+    '<path d="M0 368 C 200 340 330 392 540 362 C 760 330 880 386 1080 356 C 1260 330 1350 372 1440 350" fill="none" stroke="url(#sckiss)" stroke-width="2" vector-effect="non-scaling-stroke"/>'
+    '</svg></div>')
+
+# Put back where the reader left the sidebar on the page before, before the
+# first paint: a sidebar link loads a page, and a sidebar starting at its top
+# again had the link just followed out of sight in a long nav. Where nothing
+# was kept, or what was kept leaves the current page out of view (a link from
+# the page body, a narrower window), the current page is centred in it --
+# by the sidebar's own scrollTop, so the page itself never moves.
+SIDE_RESTORE = (
+    "<script>(function(){var s=document.getElementById('side'),h=s.querySelector('a.here'),k=null;"
+    "try{k=sessionStorage.getItem('fenec-side')}catch(e){}"
+    "if(k!==null)s.scrollTop=+k;"
+    # What of the sidebar shows: at the top of a page it starts below the
+    # dunes, so its foot is under the fold until the page is scrolled.
+    "var v=Math.min(s.clientHeight,innerHeight-s.getBoundingClientRect().top);"
+    "if(h&&v>0&&(h.offsetTop<s.scrollTop||h.offsetTop+h.offsetHeight>s.scrollTop+v))"
+    "s.scrollTop=h.offsetTop-(v-h.offsetHeight)/2})()</script>")
+
 
 def build():
     if os.path.isdir(OUT):
@@ -960,21 +1001,16 @@ def build():
         if is_docs:
             # The dune field carries over the top of every docs page, so the
             # reference does not read as a different site from the front door.
-            scarp = ('<div class="hero-scarp" aria-hidden="true">'
-                     '<svg viewBox="0 0 1440 120" preserveAspectRatio="none">'
-                     '<path d="M0 78 C 220 44 340 96 520 70 C 720 40 840 92 1030 64 '
-                     'C 1200 40 1320 80 1440 58 L1440 120 L0 120 Z" fill="#1B1233"/>'
-                     '<path d="M0 96 C 240 70 360 112 560 92 C 760 72 880 110 1060 88 '
-                     'C 1230 68 1330 100 1440 84 L1440 120 L0 120 Z" fill="#150F26"/>'
-                     '</svg></div>')
-            shell = (f'{scarp}<div class="shell"><aside class="side" id="side">'
-                     f'<div class="side-inner">{nav_html(key, base)}</div></aside>'
+            shell = (f'{SCARP}<div class="shell">'
+                     f'<aside class="side" id="side" aria-label="Documentation">'
+                     f'<div class="side-inner">{nav_html(key, base)}</div></aside>{SIDE_RESTORE}'
                      f'<main class="doc" id="content"><article>{body}'
                      f'{prev_next(key, base)}</article></main>'
                      f'{toc_html(toc)}</div>')
         else:
             shell = f'<main id="content">{body}</main>'
         page = page.replace("{{content}}", shell)
+        page = page.replace("{{scarp}}", SCARP)
         page = page.replace("{{mark}}", MARK).replace("{{mark_detail}}", MARK_DETAIL)
         page = page.replace("{{mark_lines}}", MARK_LINES).replace("{{mark_light}}", MARK_LIGHT)
 
