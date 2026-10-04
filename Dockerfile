@@ -29,9 +29,11 @@ RUN rm -f rust-toolchain.toml
 # gives a static binary, and since we name no target, arm64/amd64 both come
 # out of the same Dockerfile. fenec-server is deliberately on the `release` profile
 # (unwind): a panicking connection thread takes down only its own session.
+# FEATURES: fenec-server's features, e.g. `timing` for `make roundtrip-bench`.
+ARG FEATURES=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --release -p fenec-server && \
+    cargo build --release -p fenec-server ${FEATURES:+--features $FEATURES} && \
     cp target/release/fenec-server /fenec-server
 
 # The empty image has no shell to run `mkdir`: the data directory is prepared

@@ -25,6 +25,10 @@ fenec-wire.workspace = true
 name = "fenec-server"
 path = "src/main.rs"
 
+[features]
+# The HTTP endpoint's phase timings (`fenec-http`'s `timing`, `GET /_timing`).
+timing = ["fenec-http/timing"]
+
 [[test]]
 name = "all"
 path = "tests/all.rs"

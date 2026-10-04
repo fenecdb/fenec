@@ -81,6 +81,33 @@ impl Http {
         out
     }
 
+    /// `query` with its time split, in ns: the request's write, the wait
+    /// for the answer's first bytes, and the rest of it read.
+    pub fn query_timed(&mut self, text: &str, params: &str) -> [u64; 3] {
+        let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
+        self.head.clear();
+        write!(
+            self.head,
+            "POST /query HTTP/1.1\r\nHost: bench\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        self.head.extend_from_slice(body.as_bytes());
+        let t0 = Instant::now();
+        self.w.write_all(&self.head).unwrap();
+        let t1 = Instant::now();
+        self.r.fill_buf().unwrap();
+        let t2 = Instant::now();
+        let status = self.read_answer();
+        let t3 = Instant::now();
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&self.body));
+        [
+            (t1 - t0).as_nanos() as u64,
+            (t2 - t1).as_nanos() as u64,
+            (t3 - t2).as_nanos() as u64,
+        ]
+    }
+
     /// `POST /query` of `text` with `params`, a JSON array's insides.
     pub fn query(&mut self, text: &str, params: &str) -> &[u8] {
         let body = format!("{{\"query\":{},\"params\":[{params}]}}", json_string(text));
@@ -219,6 +246,12 @@ pub fn free_port() -> u16 {
 /// fenec-server, killed when dropped.
 pub struct Server(Child);
 impl Server {
+    /// A server started elsewhere, killed when dropped as one this module
+    /// started.
+    pub fn from_child(child: Child) -> Server {
+        Server(child)
+    }
+
     /// Its process id, to read its resident set by.
     pub fn pid(&self) -> u32 {
         self.0.id()
