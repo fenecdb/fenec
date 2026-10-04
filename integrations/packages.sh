@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The packages as the registries would take them, installed where a user
 # would install them, and used: PyPI's `fenecdb`, npm's `@fenecdb/web`,
-# `@fenecdb/react`, `@fenecdb/cloudflare` and `@fenecdb/langchain`. Needs `make wasm wasm-lite`
-# first, since the web package carries both modules. Run by `make packages`, by CI, and by
+# `@fenecdb/react`, `@fenecdb/cloudflare` and `@fenecdb/langchain`. Needs `make wasm`
+# first, since the web package carries the module. Run by `make packages`, by CI, and by
 # packages.yml before anything is published.
 set -euo pipefail
 
@@ -14,9 +14,7 @@ mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 mkdir -p "$out/dist" "$out/npm"
 
-for f in fenec.wasm fenec-lite.wasm; do
-  [ -f "$root/web/$f" ] || { echo "web/$f is missing: make wasm wasm-lite" >&2; exit 1; }
-done
+[ -f "$root/web/fenec.wasm" ] || { echo "web/fenec.wasm is missing: make wasm" >&2; exit 1; }
 [ -d "$root/web/collate" ] || { echo "web/collate is missing: make wasm" >&2; exit 1; }
 
 # Every package says the workspace's version, or a release would publish
@@ -53,14 +51,20 @@ npm install -q --no-audit --no-fund \
   "$out/dist/fenecdb-cloudflare-$version.tgz" \
   "$out/dist/fenecdb-langchain-$version.tgz" \
   @langchain/core@1 react@19 >/dev/null
+# The module built without the indexes (`make wasm-lite`) is a test of the
+# files the two builds hand each other, not something a user is offered.
+if [ -e node_modules/@fenecdb/web/fenec-lite.wasm ]; then
+  echo "@fenecdb/web carries fenec-lite.wasm, a test build" >&2
+  exit 1
+fi
 cat > smoke.mjs <<'EOF'
 import { readFile } from 'node:fs/promises';
 import { Fenec } from '@fenecdb/web';
 import { useLiveQuery, FenecProvider } from '@fenecdb/react';
 
 const file = (path) => readFile(new URL(import.meta.resolve(`@fenecdb/web/${path}`)));
-for (const module of ['fenec.wasm', 'fenec-lite.wasm']) {
-  const db = await Fenec.open(await file(module), {
+{
+  const db = await Fenec.open(await file('fenec.wasm'), {
     collation: (name) => file(`collate/${name}.bin`),
   });
   db.run('create collection people (name text)');
@@ -68,8 +72,8 @@ for (const module of ['fenec.wasm', 'fenec-lite.wasm']) {
   // Greek and Cyrillic are not in the module: ordering them fetches their chunks.
   const rows = (await db.query('get people order name collate und')).rows.map((r) => r.name);
   const want = ['Ali', 'Çağla', 'Ömer', 'Zeynep', 'Ωμέγα', 'Жанна'];
-  if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(`${module}: ${rows}`);
-  console.log(`@fenecdb/web ${module}: ${db.version}, ${rows.length} rows in order`);
+  if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(`fenec.wasm: ${rows}`);
+  console.log(`@fenecdb/web fenec.wasm: ${db.version}, ${rows.length} rows in order`);
 }
 // A schema declared in code, from its own entry point: an open makes it,
 // and a second open with a field more adds the field.

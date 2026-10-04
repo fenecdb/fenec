@@ -11,12 +11,11 @@ npm, and the `fenec-web` bundle of each release.
 | `fenec.d.ts`, `client.d.ts` | their types |
 | `schema.js`, `schema.d.ts` | a schema declared in code, Drizzle's way: `@fenecdb/web/schema` |
 | `fenec.wasm` | the engine with every index and the schema check: 181 KB brotli |
-| `fenec-lite.wasm` | the engine without its four indexes or the schema check: 134 KB brotli |
 | `collate/` | the collation data the module fetches beside it, a chunk a group of scripts |
 
 ```js
 import { Fenec } from './fenec.js';
-const db = await Fenec.open('./fenec.wasm');      // or './fenec-lite.wasm'
+const db = await Fenec.open('./fenec.wasm');
 ```
 
 A page whose queries run on a server never fetches the module -- only
@@ -51,22 +50,15 @@ const db = await Fenec.open(await file('fenec.wasm'), {
 });
 ```
 
-**Which module.** `fenec-lite.wasm` has documents, filters, `order`,
-aggregates, `lookup`, collations, the change feed, persistence and the sync
-layer, and none of the four indexes: no graph behind `near` and `fuse` --
-they measure every vector, as `exact` does, the same rows and scores -- no
-text index behind `match` and `rerank`, no sparse index behind a
-`sparse<N>` field's `near` -- it scores every document -- no ordered index
-(the scan answers a `@sorted` field's comparisons and orders, with the same
-rows), and no check of a schema declared in code (`Fenec.open`'s `schema`
-is refused). A page that uses none of them saves 43 KB brotli with it,
-though a `near` without the graph takes 0.38 ms over 1 000 x 128 against
-0.20, 6.2 ms over 10 000 x 384 against 0.51 and 29 over 50 000 x 384
-against 0.75. A `match` or a `create index` that needs a missing index throws
-a `FenecError` naming it, and the file is the same either way: a store one
-module wrote opens in the other. A page that needs some of the
-indexes builds its module with them alone: `make wasm FEATURES="text sorted"`,
-and `SCHEMA=0` leaves the schema check out of it (7.5 KB brotli).
+**Which package.** A page whose queries run on a server imports
+`@fenecdb/web/client` and loads no module; a database in the page, or a
+synced replica, loads `fenec.wasm`, with every index and the schema check.
+A page that needs fewer indexes can build its own module with them alone --
+`make wasm FEATURES="text sorted"`, `FEATURES=none` for none, and `SCHEMA=0`
+leaves the schema check out (7.5 KB brotli) -- and the file is the same
+either way: a store one build wrote opens in the other. Without the graph a
+`near` measures every vector, as `exact` does; without the text index a
+`match` throws a `FenecError` naming it.
 
 Serve `.wasm` as `application/wasm`, compressed once at build time.
 Full reference: https://fenecdb.com/docs/javascript

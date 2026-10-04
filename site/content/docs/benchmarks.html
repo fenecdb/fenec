@@ -1185,7 +1185,7 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td>wasm32, browser</td><td class="n"><b>543 KB</b></td><td class="n"><b>181 KB</b></td><td class="n">217 KB</td></tr>
-<tr><td>wasm32, <code>fenec-lite.wasm</code>, no index</td><td class="n">392 KB</td><td class="n">134 KB</td><td class="n">159 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">392 KB</td><td class="n">134 KB</td><td class="n">159 KB</td></tr>
 <tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">141 KB</td><td class="n">38 KB</td><td class="n">42 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
@@ -1275,8 +1275,8 @@ WHY=&lt;pattern&gt;</code> names what pulls a part in.</p>
 <p>A page that does not search text, or needs no graph behind its vector
 search, can load a smaller module built without that index. Leaving all four
 indexes out saves 35.5 KB brotli, 20% of the module; without the graph a
-<code>near</code> still answers, every vector measured, which is what
-<code>fenec-lite.wasm</code>, built without any, does.</p>
+<code>near</code> still answers, every vector measured. The release ships
+the module with every index; any other set is a build option.</p>
 
 <div class="tbl">
 <table>
@@ -1314,8 +1314,8 @@ compiler drops the index whole, and the engine's paths through it with it.</p>
 the text index 7.7 and the sparse index 1.3, since the sort and the map it
 ranks through are the other indexes' too; built alone it adds 2.5. All four
 save 38.6 KB, 21% of the module. Each row is built with the schema check,
-as <code>make wasm</code> builds it; <code>fenec-lite.wasm</code> leaves
-that out too. Making the indexes optional cost the module with every index
+as <code>make wasm</code> builds it; <code>SCHEMA=0</code> leaves that
+out too. Making the indexes optional cost the module with every index
 nothing: it came out the size it had been before any could be left out, to
 the byte.</p>
 
@@ -1327,7 +1327,7 @@ scores: the scan cost the modules without it 2.2 KB brotli. Measured with
 
 <div class="tbl">
 <table>
-<thead><tr><th>Rows × dimensions</th><th class="n">Through the graph</th><th class="n">Exact, full module</th><th class="n">No graph, <code>fenec-lite.wasm</code></th></tr></thead>
+<thead><tr><th>Rows × dimensions</th><th class="n">Through the graph</th><th class="n">Exact, full module</th><th class="n">Built without <code>vector</code></th></tr></thead>
 <tbody>
 <tr><td>1 000 × 128</td><td class="n">0.20 ms</td><td class="n">0.17 ms</td><td class="n">0.38 ms</td></tr>
 <tr><td>10 000 × 128</td><td class="n">0.22 ms</td><td class="n">0.49 ms</td><td class="n">2.4 ms</td></tr>

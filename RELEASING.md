@@ -55,7 +55,7 @@ the .NET SDK is installed.
 | Package | From | What it holds |
 | --- | --- | --- |
 | `fenecdb` on PyPI | `integrations/python` | the HTTP client and the LangChain and LlamaIndex stores; the standard library alone |
-| `@fenecdb/web` on npm | `web/` | `fenec.js` and its types, `fenec.wasm`, `fenec-lite.wasm` and `collate/` |
+| `@fenecdb/web` on npm | `web/` | `fenec.js` and its types, `fenec.wasm` and `collate/` |
 | `@fenecdb/react` on npm | `integrations/react` | `FenecProvider`, `useFenec`, `useLiveQuery` |
 | `@fenecdb/cloudflare` on npm | `integrations/cloudflare` | `persist`, `restore`, `checkpoint`: a database kept in a Durable Object's storage |
 | `@fenecdb/langchain` on npm | `integrations/langchain` | `FenecVectorStore` for LangChain.js, over a `Fenec` or a `FenecHttp` |

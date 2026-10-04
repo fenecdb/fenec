@@ -123,8 +123,11 @@ wasm:
 	@mkdir -p web/collate && rm -f web/collate/*.bin && cp crates/fenec-core/src/collate/*.bin web/collate/
 	@echo "web/fenec.wasm  $$(wc -c < web/fenec.wasm) bytes"
 
-## The module made without an index (FEATURES=none), for web/fenec.test.js
-## to hand files between it and the full one.
+## The module made without an index or the schema check (as `make wasm
+## FEATURES=none SCHEMA=0`), for web/fenec.test.js to hand files between it
+## and the full one, both ways. A test build: no package or release ships
+## it, since a page either runs its queries on a server (@fenecdb/web/client)
+## or takes the full module.
 wasm-lite:
 	@$(CARGO) build -p fenec-wasm --target wasm32-unknown-unknown --profile wasm --no-default-features 2>&1 | tail -2
 	@cp $(WASM_OUT) web/fenec-lite.wasm
@@ -146,7 +149,7 @@ wasm-sizes:
 wasm-speed: wasm
 	@node crates/fenec-wasm/speed.mjs
 
-## `near` in the lite module, which has no graph and measures every
+## `near` in the build without the indexes, which has no graph and measures every
 ## vector: 1 000, 10 000 and 50 000 rows of 128 and 384 dimensions, against
 ## the full module's walk and its own exact scan (ROWS=10000 for one size)
 wasm-exact-speed: wasm wasm-lite
@@ -166,7 +169,7 @@ size-report:
 ## publishes them, installed into a project and a venv of their own and
 ## used (PYTHON=... picks the interpreter; it wants 3.10 or newer), and
 ## NuGet's FenecDb where the .NET SDK is installed.
-packages: wasm wasm-lite
+packages: wasm
 	@integrations/packages.sh
 	@if command -v dotnet >/dev/null 2>&1; then integrations/dotnet/package.sh; \
 	else echo "dotnet not found: FenecDb (NuGet) not checked"; fi

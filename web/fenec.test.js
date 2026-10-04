@@ -547,9 +547,9 @@ test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)
 });
 
 // A module made without the indexes (`make wasm-lite`, which is
-// `make wasm FEATURES=none`) opens what the full one wrote, and the full
-// one what it wrote: a page can load the smaller module over a store the
-// other filled, and hand it back.
+// `make wasm FEATURES=none SCHEMA=0`, a test build no package ships) opens
+// what the full one wrote, and the full one what it wrote: a build without
+// an index opens a file that declares one, and hands it back.
 const lite = await readFile(new URL('./fenec-lite.wasm', import.meta.url)).catch(() => null);
 
 test('the module made without indexes and the full one open each other\'s files', {

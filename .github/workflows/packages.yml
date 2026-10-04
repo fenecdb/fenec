@@ -49,7 +49,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         run: |
-          make wasm wasm-lite
+          make wasm
           integrations/packages.sh dist-packages
 
       - uses: actions/upload-artifact@v7

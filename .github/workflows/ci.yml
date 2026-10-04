@@ -133,9 +133,11 @@ jobs:
   # What a pull request does to the browser module against the branch it goes
   # into, on the run's summary page: raw, gzip and brotli, the code by crate,
   # module and part of the standard library, the ten functions that moved
-  # most -- and the lite module's sizes beside it. A pull request is checked
-  # out as its merge, so the base is the merge's first parent. It fails nothing -- a size the docs quote is held
-  # by site/build.py in the test job.
+  # most -- and beside it the sizes of the build without the indexes, the
+  # test build `make wasm-lite` makes, which no package ships. A pull
+  # request is checked out as its merge, so the base is the merge's first
+  # parent. It fails nothing -- a size the docs quote is held by
+  # site/build.py in the test job.
   size:
     name: size (browser module)
     if: github.event_name == 'pull_request'
@@ -236,7 +238,6 @@ jobs:
       # (packages.yml).
       - name: Packages
         run: |
-          make wasm-lite
           integrations/packages.sh
           integrations/dotnet/package.sh
 
