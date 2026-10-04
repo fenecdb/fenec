@@ -7,16 +7,29 @@
    keystroke is a `match` over it, answered here, and nothing leaves the
    tab -- the only requests are the site's own files.
 
+   A question of three words or more is also asked of its meaning, once
+   the reader pauses: the site's endpoint (`worker.js`) turns it into a
+   vector, the image with the sections' vectors is loaded beside it the
+   first time, and the same query runs again as `match ... near ... fuse`.
+   The words' answer is on screen meanwhile and stays there whenever the
+   meaning does not come -- no endpoint, a refusal, 800 ms gone by -- and
+   the vectors are never downloaded until an endpoint has answered with one.
+
    Nothing from the index becomes markup: a heading and a snippet are put in
    as text, and only the spans `highlight()` and `snippet()` name are
    wrapped, each in a <mark> made here. */
 
 import { Fenec } from './fenec.js';
 import { search, grouped } from './search-query.js';
+import { asker, wordsIn, MIN_WORDS } from './search-meaning.js';
+import { MAX_QUERY } from './search-vectors.js';
 
 const at = (p) => new URL(p, import.meta.url);
 const WASM = './fenec.wasm';
 const INDEX = './search.fenec';
+const INDEX_VECTORS = './search-vectors.fenec';
+// How long the reader stops typing before the meaning is asked.
+const PAUSE_MS = 250;
 const CSS = './search.css';
 // Where the index's URLs start: the site's root, beside this module.
 const ROOT = at('./');
@@ -38,6 +51,12 @@ let active = -1;
 let returnTo = null;
 let openedAt = 0;
 let firstShown = false;
+// The search by meaning: the endpoint's asker, the vectors' image once
+// loaded (the database then holds it in place of the words' image), and
+// the pause being waited out.
+const meaningOf = asker();
+let vectors = null;
+let pause = 0;
 
 /** Opens the dialog; `since` is when the reader asked, for the timing. */
 export async function open(from, since = performance.now()) {
@@ -68,6 +87,21 @@ async function load() {
   engine.load(image);
   db = engine;
   ui.dialog.dataset.loadMs = (performance.now() - t).toFixed(1);
+}
+
+/* The sections' vectors, the first time a query's vector comes back: the
+   image that holds them replaces the words' one, the same sections with
+   their embeddings, in the same database. */
+function loadVectors() {
+  vectors ??= fetch(at(INDEX_VECTORS)).then(unpacked).then((image) => {
+    db.run('drop collection docs');
+    db.load(image);
+    return true;
+  }).catch(() => {
+    vectors = null; // the next question tries again
+    return false;
+  });
+  return vectors;
 }
 
 /* The image is shipped gzipped (`build.py`), since the edge serves a file
@@ -105,6 +139,7 @@ function build() {
     'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': 'search-list',
     'aria-labelledby': 'search-title', placeholder: 'Search the docs',
     autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: 'go',
+    maxlength: String(MAX_QUERY),
   });
   const close = el('button', { type: 'button', class: 'search-close', 'aria-label': 'Close search' },
     el('kbd', { text: 'esc', 'aria-hidden': 'true' }), el('span', { class: 'search-x', text: 'Close', 'aria-hidden': 'true' }));
@@ -112,11 +147,12 @@ function build() {
   const note = el('p', { class: 'search-status', role: 'status', 'aria-live': 'polite' });
   const list = el('div', { id: 'search-list', class: 'search-list', role: 'listbox', 'aria-label': 'Results' });
   const timing = el('span', { class: 'search-time' });
+  const by = el('span', { class: 'search-how', text: 'by words' });
   const foot = el('footer', { class: 'search-foot' },
     el('span', { class: 'search-keys', 'aria-hidden': 'true' },
       el('kbd', { text: '↑' }), el('kbd', { text: '↓' }), ' to move ',
       el('kbd', { text: '↵' }), ' to open ', el('kbd', { text: 'esc' }), ' to close'),
-    el('span', { class: 'search-by' }, 'Searched in this tab by fenecdb', timing));
+    el('span', { class: 'search-by' }, 'Searched in this tab by fenecdb, ', by, timing));
   const dialog = el('dialog', { class: 'search', 'aria-labelledby': 'search-title' },
     el('div', { class: 'search-box' },
       el('h2', { id: 'search-title', class: 'search-title', text: 'Search the docs' }),
@@ -150,7 +186,7 @@ function build() {
     section = b.dataset.section === section || b.dataset.section === '' ? null : b.dataset.section;
     run();
   });
-  return { dialog, input, chips, note, list, timing };
+  return { dialog, input, chips, note, list, timing, by };
 }
 
 function icon() {
@@ -221,12 +257,37 @@ function status(text) {
 function run() {
   if (!db) return;
   const q = ui.input.value;
+  show(q, null);
+  clearTimeout(pause);
+  if (wordsIn(q) >= MIN_WORDS) pause = setTimeout(() => byMeaning(q), PAUSE_MS);
+}
+
+/* The query again with its vector, if one comes while it is still the
+   query in the field. */
+async function byMeaning(q) {
   const t = performance.now();
-  const { hits, facets } = search(db, q, section);
+  const vector = await meaningOf(q);
+  if (!vector || ui.input.value !== q || !(await loadVectors()) || ui.input.value !== q) return;
+  ui.dialog.dataset.meaningMs = (performance.now() - t).toFixed(1);
+  show(q, vector);
+}
+
+function show(q, vector) {
+  const t = performance.now();
+  const { hits, facets } = search(db, q, section, 10, vector);
   const ms = performance.now() - t;
+  const keep = vector && options[active] ? options[active].id : null;
   render(q, hits, facets);
+  // The meaning re-ranks the list under the reader's eyes; the one chosen
+  // stays chosen where it is still on it.
+  if (keep !== null) {
+    const i = options.findIndex((h) => h.id === keep);
+    if (i >= 0) select(i, false);
+  }
+  ui.by.textContent = vector ? 'by words and meaning' : 'by words';
   ui.timing.textContent = q.trim() ? ` · ${ms < 1 ? ms.toFixed(2) : ms.toFixed(1)} ms` : '';
   ui.dialog.dataset.queryMs = ms.toFixed(3);
+  ui.dialog.dataset.ranked = vector ? 'meaning' : 'words';
   if (hits.length && !firstShown) {
     firstShown = true;
     ui.dialog.dataset.firstResultMs = (performance.now() - openedAt).toFixed(1);
@@ -262,7 +323,8 @@ function render(q, hits, facets) {
         role: 'option', id: `search-opt-${options.indexOf(h)}`, class: 'search-hit',
         'aria-selected': 'false', 'data-i': String(options.indexOf(h)),
       },
-      el('span', { class: 'search-hit-head' }, marked(h.heading, h.heading === h.title ? h.titleMarks : h.headingMarks)),
+      el('span', { class: 'search-hit-head' }, marked(h.heading, h.heading === h.title ? h.titleMarks : h.headingMarks),
+        ...(h.byMeaning ? [el('span', { class: 'search-meaning', text: 'by meaning' })] : [])),
       el('span', { class: 'search-hit-text' }, marked(s.text, s.marks))));
     }
     out.push(group);

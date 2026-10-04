@@ -971,31 +971,49 @@ def search_documents(rendered):
     return docs
 
 
-def search_index(docs, wasm, dest):
+def search_index(docs, wasm, dest, dest_vectors):
     """Writes the documents into a database through the module the site
-    ships, and its image to `dest`; returns the number of documents. Fails
-    the build on an index missing or empty, and on a known query that does
-    not find its page first (`search.test.mjs`)."""
+    ships, twice: its image with their words to `dest`, and with their
+    vectors as well to `dest_vectors`; returns the number of documents.
+    Fails the build on an index missing or empty, and on a known query that
+    does not find its page first (`search.test.mjs`)."""
     if not os.path.exists(wasm):
         raise SystemExit("  the search index needs web/fenec.wasm: run `make wasm`")
     node = shutil.which("node")
     if node is None:
         raise SystemExit("  the search index is written by node, which is not on PATH")
-    run = subprocess.run([node, os.path.join(ROOT, "search-index.mjs"), wasm, dest],
+    # The sections' vectors, for the search by meaning: from the committed
+    # cache, and the sections it lacks from Workers AI where the build has
+    # the credentials. A section without one is found by its words alone,
+    # and the build goes on (search-embed.mjs).
+    vectors = dest + ".vectors.json"
+    embed = subprocess.run([node, os.path.join(ROOT, "search-embed.mjs"), vectors],
+                           input=json.dumps(docs), capture_output=True, text=True)
+    if embed.returncode != 0:
+        raise SystemExit(f"  embedding the sections failed:\n{embed.stderr}")
+    said = json.loads(embed.stderr.strip().splitlines()[-1])
+    print(f"  search: {said['cached']} vectors from the cache, {said['embedded']} embedded, "
+          f"{said['stale']} kept from a section's text before, {said['lacking']} sections without one"
+          + (f" ({said['why']})" if said["lacking"] or said["stale"] else ""))
+    run = subprocess.run([node, os.path.join(ROOT, "search-index.mjs"), wasm, dest, dest_vectors, vectors],
                          input=json.dumps(docs), capture_output=True, text=True)
+    os.remove(vectors)
     if run.returncode != 0:
         raise SystemExit(f"  writing the search index failed:\n{run.stderr}")
-    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
-        raise SystemExit(f"  the search index {dest} is missing or empty")
-    held = int(run.stdout.strip() or 0)
-    if held != len(docs) or held == 0:
+    for path in (dest, dest_vectors):
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            raise SystemExit(f"  the search index {path} is missing or empty")
+    held = [int(n) for n in run.stdout.split()] or [0]
+    if any(n != len(docs) for n in held) or not docs:
         raise SystemExit(f"  the search index holds {held} documents of {len(docs)}")
-    test = subprocess.run([node, "--test", os.path.join(ROOT, "search.test.mjs")],
+    test = subprocess.run([node, "--test", "--test-reporter=spec",
+                           os.path.join(ROOT, "search.test.mjs"), os.path.join(ROOT, "worker.test.mjs")],
                           capture_output=True, text=True,
-                          env={**os.environ, "FENEC_SEARCH_INDEX": dest, "FENEC_WASM": wasm})
+                          env={**os.environ, "FENEC_SEARCH_INDEX": dest,
+                               "FENEC_SEARCH_VECTORS": dest_vectors, "FENEC_WASM": wasm})
     if test.returncode != 0:
         raise SystemExit(f"  the search does not find what it should:\n{test.stdout}{test.stderr}")
-    return held
+    return held[0]
 
 
 # The fennec, written out of `fennec.js` by `node site/fennec.js`. Inlined,
@@ -1168,29 +1186,42 @@ def build():
         rendered.append((key, meta, headings(render_code_blocks(body))[0]))
     docs = search_documents(rendered)
     index_path = os.path.join(OUT, "search.fenec")
-    held = search_index(docs, os.path.join(REPO, "web", "fenec.wasm"), index_path)
-    image = open(index_path, "rb").read()
-    os.remove(index_path)
+    vectors_path = os.path.join(OUT, "search-vectors.fenec")
+    held = search_index(docs, os.path.join(REPO, "web", "fenec.wasm"), index_path, vectors_path)
     # Shipped gzipped, and opened in the page with DecompressionStream: a
     # file of no type the edge knows is served as it lies, and as it lies the
     # image is three times what it is gzipped.
-    packed = gziplib.compress(image, 9, mtime=0)
-    index_name = f"search.{hashlib.sha256(image).hexdigest()[:10]}.fenec.gz"
-    open(os.path.join(OUT, index_name), "wb").write(packed)
-    engine["search.fenec"] = index_name
-    _, br = compressed_bytes(image)
-    print(f"  search: {held} sections, an image of {len(image) / 1024:.1f} KB, "
-          f"{len(packed) / 1024:.1f} KB gzipped as served"
-          + (f" ({br / 1024:.1f} KB brotli)" if br else ""))
+    for key, path in (("search.fenec", index_path), ("search-vectors.fenec", vectors_path)):
+        image = open(path, "rb").read()
+        os.remove(path)
+        packed = gziplib.compress(image, 9, mtime=0)
+        stem = key[: -len(".fenec")]
+        name = f"{stem}.{hashlib.sha256(image).hexdigest()[:10]}.fenec.gz"
+        open(os.path.join(OUT, name), "wb").write(packed)
+        engine[key] = name
+        _, br = compressed_bytes(image)
+        print(f"  {stem}: {held} sections, an image of {len(image) / 1024:.1f} KB, "
+              f"{len(packed) / 1024:.1f} KB gzipped as served"
+              + (f" ({br / 1024:.1f} KB brotli)" if br else ""))
+    # The search's modules, each named by its hash and each importing the
+    # others by theirs, inside out.
+    def module(name, imports):
+        body = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        for plain, hashed in imports.items():
+            body = body.replace(f"'{plain}'", f"'./{hashed}'")
+        return emit(name, body)
+    search_vectors = module("search-vectors.js", {})
+    search_query = module("search-query.js", {"./search-vectors.js": search_vectors})
+    search_meaning = module("search-meaning.js", {"./search-vectors.js": search_vectors})
     search_css = emit("search.css", open(os.path.join(ROOT, "search.css"), encoding="utf-8").read())
-    search_query = emit("search-query.js", open(os.path.join(ROOT, "search-query.js"), encoding="utf-8").read())
-    search = open(os.path.join(ROOT, "search.js"), encoding="utf-8").read()
-    for plain, hashed in (("./search-query.js", search_query), ("./search.css", search_css),
-                          ("./search.fenec", index_name),
-                          ("./fenec.js", engine.get("fenec.js", "fenec.js")),
-                          ("./fenec.wasm", engine.get("fenec.wasm", "fenec.wasm"))):
-        search = search.replace(f"'{plain}'", f"'./{hashed}'")
-    search_js = emit("search.js", search)
+    search_js = module("search.js", {
+        "./search-query.js": search_query, "./search-meaning.js": search_meaning,
+        "./search-vectors.js": search_vectors,
+        "./search.css": search_css, "./search.fenec": engine["search.fenec"],
+        "./search-vectors.fenec": engine["search-vectors.fenec"],
+        "./fenec.js": engine.get("fenec.js", "fenec.js"),
+        "./fenec.wasm": engine.get("fenec.wasm", "fenec.wasm"),
+    })
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("./engine-worker.js", "./" + worker_name)
@@ -1269,6 +1300,17 @@ def build():
     for stable in CLIENT_MODULES + ("fenec.wasm", "collate/*"):
         rules += [f"/{stable}", "  Cache-Control: public, max-age=3600, must-revalidate", ""]
     open(os.path.join(OUT, "_headers"), "w", encoding="utf-8").write("\n".join(rules))
+
+    # Every module a script imports by name is a file of the build: a name
+    # left unhashed is a 404 that only the page that loads it would show --
+    # the search's dialog, once, failed to open over one.
+    for name in os.listdir(OUT):
+        if not name.endswith(".js"):
+            continue
+        body = open(os.path.join(OUT, name), encoding="utf-8").read()
+        for dep in re.findall(r"""(?:from\s*|import\s*\(\s*)["'](\./[^"']+)["']""", body):
+            if not os.path.exists(os.path.join(OUT, dep[2:])):
+                raise SystemExit(f"  {name} imports {dep}, which the build did not write")
 
     brief, full = llms_texts()
     open(os.path.join(OUT, "llms.txt"), "w", encoding="utf-8").write(brief)

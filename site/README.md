@@ -35,9 +35,11 @@ find its pattern: update the entry, do not delete it.
 
 ## Deployment
 
-Cloudflare Workers, assets-only — there is no `main` in `wrangler.jsonc`, so
-every request is answered from `site/dist` by the static-asset router. Same
-shape as `apps/site` in the backlex repo, including its two hard-won rules:
+Cloudflare Workers: every request but `/api/*` is answered from `site/dist`
+by the static-asset router without running any code (`run_worker_first`
+names `/api/*` alone), and `/api/embed` is `site/worker.js`, the search's
+embedding endpoint ("Search by meaning", below). Same shape as `apps/site`
+in the backlex repo, including its two hard-won rules:
 
 - **Routes are not declared in `wrangler.jsonc`.** A deploy token with Workers
   Scripts permissions but without *Zone › Workers Routes* uploads the worker and
@@ -90,6 +92,14 @@ site/
   search.css      the dialog's styles, loaded with it
   search-index.mjs  writes the search index through the module (build.py runs it)
   search.test.mjs   known queries and the page each must find first
+  search-vectors.js the embedding model and what of a section it reads
+  search-meaning.js asks the endpoint for a query's vector, never waiting on it
+  search-embed.mjs  the sections' vectors: the cache, and Workers AI for the rest
+  search-embeddings.json  the cache, committed: a vector per section, by hash
+  search-fixture.json     the tests' queries' vectors, so CI needs no network
+  search-mock.mjs   dist and a stand-in endpoint, to try it with no account
+  worker.js       /api/embed, the only code that runs on the edge
+  worker.test.mjs its limits and refusals, its bindings faked
   content/
     index.html    the home page
     404.html      served by not_found_handling
@@ -126,6 +136,85 @@ documents than it was handed, and runs `search.test.mjs` over the image:
 "compact" must find `docs/server#compaction` first, "facet" the facets
 section, and so on. Change a heading those queries rely on and the test
 says so.
+
+## Search by meaning
+
+A question of three words or more is also asked of its meaning. Once the
+reader pauses (250 ms), the page sends the query to `POST /api/embed` on
+the site's own origin, `worker.js` turns it into bge-m3's vector through
+Workers AI, and the page runs the same query again as
+`match body $1 near embed $2 fuse` over a second image: the same sections
+with their vectors (`search-vectors.<hash>.fenec.gz`), which it downloads
+only the first time a vector comes back. The words' list is on screen
+meanwhile and stays whenever the meaning does not come: no endpoint, a
+refusal, 800 ms gone by, no network. One or two words are looked up by the
+words alone, which find a section named for them first.
+
+The sections' vectors are kept in `search-embeddings.json`, committed, by a
+hash of the model and the text embedded: a build embeds only the sections
+new or changed since, through Workers AI when it has the credentials
+(`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_AI_TOKEN` or `CLOUDFLARE_API_TOKEN`),
+and a section it cannot embed goes without a vector, found by its words,
+with the build going on. Committed rather than kept as a CI cache, so a
+pull request's CI, which has no secrets, and a laptop build the same image
+as the deploy, and a change to a section shows as a change to one line.
+The tests' queries' vectors are in `search-fixture.json`, so CI asks no
+model. Both were first made with bge-m3 run locally (the ONNX export,
+q8); `rm site/search-embeddings.json && python3 site/build.py` and
+`node site/search-embed.mjs --fixture`, with the credentials, make them
+again through Workers AI.
+
+`node site/search-mock.mjs` serves `dist` with a stand-in endpoint that
+answers the fixture's queries (`--off` as the Worker answers before it is
+turned on, `--slow 2000` past the page's timeout).
+
+The endpoint, `worker.js`, takes `{"q"}` alone and gives a vector alone:
+only bge-m3 can be called, the query is at most 200 characters, cased and
+spaced one way before it is cached, and only this site's pages are answered
+(Origin, Referer and Sec-Fetch-Site; no CORS). A query is answered from the
+Worker's cache, then a per-address limit (30 a minute), then the day's
+budget (`DAILY_NEURONS`, counted on a Durable Object, 429 past it until
+midnight UTC), then the AI Gateway's cache and rate limit, and only then
+the model. Turnstile is left out: the most a day can cost is the budget,
+5 000 neurons, about 5 cents, and a challenge would be a third party's
+script on every page that searches.
+
+It is off (`SEMANTIC` in `wrangler.jsonc`) until the owner has made what
+it needs, all once:
+
+1. **Workers AI.** Dashboard, *AI* > *Workers AI*: open it once and accept
+   the terms if asked. Nothing to create; the Worker's `ai` binding uses it.
+2. **The AI Gateway.** Dashboard, *AI* > *AI Gateway* > *Create Gateway*,
+   named `fenecdb-site` (the `AI_GATEWAY` var). In its settings: *Cache
+   responses* on, TTL 30 days (the most it takes is a month); *Rate
+   limiting* on, 120 requests per 60 seconds, *sliding* window; logs as
+   wanted. Or through the API: `POST
+   /accounts/<account>/ai-gateway/gateways` with `{"id": "fenecdb-site",
+   "cache_ttl": 2592000, "collect_logs": true, "rate_limiting_interval":
+   60, "rate_limiting_limit": 120, "rate_limiting_technique": "sliding"}`.
+3. **No new route.** The Worker is the site's own: `fenecdb.com/*` already
+   reaches it, and `run_worker_first` sends it `/api/*` alone. Check under
+   *Workers & Pages* > `fenecdb-site` > *Domains & Routes* that the route
+   is `fenecdb.com/*` and not a narrower one.
+4. **Tokens.** The deploy needs nothing new for the bindings it adds (a
+   Durable Object, a rate limit, Workers AI); if a deploy fails on the
+   `ai` binding, give `CLOUDFLARE_API_TOKEN` *Account* > *Workers AI* >
+   *Read*. For the deploy to embed sections changed since the cache was
+   committed, either give the deploy token that permission or make a
+   token with it alone and store it as the repository secret
+   `CLOUDFLARE_AI_TOKEN`.
+5. **Spend.** The Worker holds the day to `DAILY_NEURONS` (5 000, half
+   the free allocation of 10 000 a day). Workers AI has no spend cap of
+   its own; a usage notification for it under *Notifications*, where the
+   account's plan offers one, says if anything else spends.
+6. **Turn it on.** `"SEMANTIC": "on"` in `wrangler.jsonc`, merged and
+   deployed. Then `curl -s -X POST https://fenecdb.com/api/embed -H
+   'origin: https://fenecdb.com' -H 'content-type: application/json'
+   -d '{"q":"keep data on a phone"}' | head -c 80` answers
+   `{"vector":[...`, and once more is a cache hit.
+7. **Once, optionally**: make the cache and the fixture again through
+   Workers AI (above), so the sections' vectors and a query's come from
+   the very same model run.
 
 ## Adding a docs page
 
