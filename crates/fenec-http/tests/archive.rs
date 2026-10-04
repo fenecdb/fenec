@@ -122,6 +122,18 @@ fn archived(arch: &Path, seq: u64) {
     }
 }
 
+/// Waits for the image an archiver is sent as it first connects. A test
+/// counting the images `consolidate` takes writes after it: an archiver
+/// that connected late, under load, was sent an image holding the writes
+/// already made, and `consolidate` rightly found nothing after it to take.
+fn first_image(arch: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while files(arch, "image-") == 0 {
+        assert!(Instant::now() < deadline, "the archiver was sent no image");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn restored(arch: &Path, out: &Path, to: Target) -> (Database, archive::Restored) {
     let r = Archive::new(arch).unwrap().restore(out, to).unwrap();
     (fenec_core::fs::open(out).unwrap(), r)
@@ -429,6 +441,7 @@ fn an_archive_takes_its_own_images_and_lets_go_of_what_no_restore_needs() {
             ));
         }
     };
+    first_image(&arch);
     batch(0);
     let seq_a = p.seq();
     archived(&arch, seq_a);
@@ -527,13 +540,14 @@ fn verify_says_what_an_archive_can_restore() {
             a.follow(&upstream, &flag, &|_| {})
         })
     };
+    first_image(&arch);
     for round in 0..3 {
         for i in 0..5 {
             p.exec(&format!("put notes {{n: {}}}", round * 10 + i));
         }
         archived(&arch, p.seq());
         if round < 2 {
-            shared.consolidate().unwrap();
+            assert!(shared.consolidate().unwrap().is_some());
         }
     }
     stop.store(true, Ordering::SeqCst);
