@@ -61,6 +61,25 @@ block. FenecQL has no <code>BEGIN</code> or <code>COMMIT</code>: over HTTP a
 <code>/batch</code> is one block (<a href="http.html">HTTP endpoint</a>).</p>
 </details>
 
+<h2>Compaction is the caller's too</h2>
+
+<p>An update leaves the version it replaced dead in the file until a
+<code>compact</code>. The server and the native library compact on their own;
+a program embedding the crate starts the same thread over its database, or
+asks from one of its own:</p>
+
+<pre data-lang="rust">use fenec_core::engine::{compact_when_due, CompactPolicy, Compactor};
+
+let db = Arc::new(RwLock::new(fenec_core::fs::open("app.fenec")?));
+// Looks every 5 s; compacts beside the queries once half the file is dead
+// and at least 64 MB. Stops when dropped.
+let _compactor = Compactor::start(&amp;db, CompactPolicy::default())?;
+// Or, from a thread you already have:
+compact_when_due(&amp;db, &amp;CompactPolicy::default());</pre>
+
+<p><code>Database::garbage</code> says what the file holds against what is
+live, without reading a document.</p>
+
 <h2>Durability is the caller's job</h2>
 
 <p>Call <code>sync</code> yourself: until you do, recent writes can be lost in

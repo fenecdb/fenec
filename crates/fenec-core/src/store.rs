@@ -821,6 +821,21 @@ impl Store {
         }
     }
 
+    /// The mapped file and where in it the payloads of `ids` are, those of
+    /// them read from it: what a reader may touch with no lock held, so
+    /// that the pages are in memory before it reads them under one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn places(&self, ids: &[DocId]) -> Option<(Base, Vec<usize>)> {
+        let (base, _) = self.base.as_ref()?;
+        let at = ids
+            .iter()
+            .filter_map(|&id| self.index.get(id))
+            .filter(|l| l.seg & MAPPED != 0)
+            .map(|l| (((l.seg & !MAPPED) as u64) << 32 | l.off as u64) as usize)
+            .collect();
+        Some((base.clone(), at))
+    }
+
     /// Decodes the whole document: a dropped place passed over, and a
     /// field the payload ends before -- added after it was written -- read
     /// as `null` ([`Schema::read_doc`]).

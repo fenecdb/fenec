@@ -6,6 +6,7 @@
 
 mod aggregate;
 mod alter;
+mod autocompact;
 mod blocks;
 mod changes;
 mod collate;

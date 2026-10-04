@@ -575,3 +575,85 @@ fn a_sweep_on_the_primary_reaches_its_replica() {
         assert_eq!(alive(n), want);
     }
 }
+
+/// A primary and its replica each compact their file on their own, again
+/// and again, while the primary takes updates: the replica follows across
+/// every one -- the writes made during a compact reach it numbered on --
+/// holds what the primary holds, and opened again over its compacted file
+/// it asks for what it missed rather than for an image.
+#[test]
+fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
+    use fenec_core::engine::{CompactPolicy, Compactor};
+    let d = dir("autocompact");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    assert_eq!(query(&p, SCHEMA).0, 200);
+    write_some(&p, 0, 40);
+    let rfile = d.join("r.fenec");
+    let r = replica(&rfile, p.port);
+    caught_up(&r, &p);
+
+    let small = CompactPolicy {
+        ratio: 0.5,
+        floor: 16 << 10,
+    };
+    let every = Duration::from_millis(3);
+    let compactors = [
+        Compactor::start_every(&p.db, small, every).unwrap(),
+        Compactor::start_every(&r.db, small, every).unwrap(),
+    ];
+    let pad = "y".repeat(300);
+    for round in 0..40 {
+        let (status, body) = query(
+            &p,
+            &format!("set items {{name: \"round {round} {pad}\", e: [{round}.0, 2.0, 1.0]}} where n < 30"),
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            query(&p, &format!("del items where n = {}", 30 + round % 10)).0,
+            200
+        );
+        write_some(&p, 100 + round * 2, 2);
+    }
+    drop(compactors);
+    caught_up(&r, &p);
+    let compacted = |n: &Node| n.db.read().unwrap().compactions();
+    assert!(
+        compacted(&p) >= 2,
+        "the primary compacted {} times",
+        compacted(&p)
+    );
+    assert!(
+        compacted(&r) >= 2,
+        "the replica compacted {} times",
+        compacted(&r)
+    );
+    for sql in [
+        "get items",
+        "get items select id, n match name \"round\" limit 1000",
+    ] {
+        assert_eq!(rows(&r, sql), rows(&p, sql), "{sql}");
+    }
+    let near = |n: &Node| {
+        let mut v = rows(
+            n,
+            "get items select id near e [3.0, 2.0, 1.0] exact limit 10000",
+        );
+        v.sort_by_key(|r| r.0);
+        v
+    };
+    assert_eq!(near(&r), near(&p));
+
+    // Opened again over the file it compacted, it goes on from where it was.
+    let images = r.follower.as_ref().unwrap().images();
+    r.follower.as_ref().unwrap().halt();
+    let at = seq(&r);
+    drop(r);
+    write_some(&p, 500, 5);
+    let (db, _) = replication::open(rfile.to_str().unwrap(), replication::DEFAULT_BUFFER).unwrap();
+    assert_eq!(db.change_seq(), at);
+    drop(db);
+    let r = replica(&rfile, p.port);
+    caught_up(&r, &p);
+    assert_eq!(r.follower.as_ref().unwrap().images(), 0, "{images} before");
+    assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
+}

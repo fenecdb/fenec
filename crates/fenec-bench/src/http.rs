@@ -87,6 +87,11 @@ impl Http {
         self.post("/query", "application/json", body.as_bytes())
     }
 
+    /// The last answer's body, kept until the next request.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
     /// GETs `path`; anything but a 2xx is the bench's end.
     pub fn get(&mut self, path: &str) -> &[u8] {
         let (status, out) = self.request("GET", path, "text/plain", b"");
@@ -217,6 +222,16 @@ impl Server {
     /// Its process id, to read its resident set by.
     pub fn pid(&self) -> u32 {
         self.0.id()
+    }
+
+    /// Stops it as a supervisor does, with SIGTERM, and waits for it: its
+    /// last writes are synced on the way down, where a kill under `--sync
+    /// <ms>` loses those of the last interval.
+    pub fn terminate(mut self) {
+        let _ = Command::new("kill")
+            .args(["-TERM", &self.0.id().to_string()])
+            .status();
+        let _ = self.0.wait();
     }
 }
 impl Drop for Server {

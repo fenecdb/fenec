@@ -56,6 +56,7 @@
 //! answer never holds one.
 
 use fenec_abi::Refused;
+use fenec_core::engine::{CompactPolicy, Compactor};
 use fenec_core::json;
 use fenec_core::prelude::*;
 use std::ffi::{c_char, CString};
@@ -101,10 +102,36 @@ pub const FENEC_OPEN_NO_SYNC: u32 = 1;
 /// class, as the device locks, where a mapped page read is the process's
 /// end (`SIGBUS`) rather than an error.
 pub const FENEC_OPEN_IN_MEMORY: u32 = 2;
+/// No compact on its own. Without it a thread looks at the file every 5 s
+/// and compacts it beside the calls once half of it is dead records -- the
+/// versions updates and deletes leave behind -- and at least 64 MB, as a
+/// server does: an app that updates its rows grew its file without bound.
+pub const FENEC_OPEN_NO_AUTO_COMPACT: u32 = 4;
+
+/// When a file opened without `FENEC_OPEN_NO_AUTO_COMPACT` is compacted, and
+/// how often it is looked at: a test's few megabytes want a lower floor and
+/// a shorter look than an app's.
+static AUTO_COMPACT: Mutex<(CompactPolicy, std::time::Duration)> = Mutex::new((
+    CompactPolicy {
+        ratio: fenec_core::engine::AUTO_COMPACT_RATIO,
+        floor: fenec_core::engine::AUTO_COMPACT_FLOOR,
+    },
+    fenec_core::engine::AUTO_COMPACT_EVERY,
+));
+
+/// Sets the policy the files opened from now on are compacted by, and how
+/// often each is looked at.
+#[doc(hidden)]
+pub fn set_auto_compact(policy: CompactPolicy, every: std::time::Duration) {
+    *AUTO_COMPACT.lock().unwrap_or_else(|e| e.into_inner()) = (policy, every);
+}
 
 /// An open database.
 struct Native {
-    db: RwLock<Database>,
+    /// An `Arc` of its own for the compactor, which holds it weakly.
+    db: Arc<RwLock<Database>>,
+    /// The thread compacting the file on its own, stopped at the close.
+    compactor: Mutex<Option<Compactor>>,
     /// Whether a write waits for its fsync (no `FENEC_OPEN_NO_SYNC`).
     durable: bool,
     /// Whether it holds a file: a memory database has nothing to sync or
@@ -298,7 +325,8 @@ pub extern "C" fn fenec_version() -> *const c_char {
 }
 
 /// Opens the file at `path` (made when missing) and writes its handle.
-/// `flags`: `FENEC_OPEN_NO_SYNC`, `FENEC_OPEN_IN_MEMORY`. A file open
+/// `flags`: `FENEC_OPEN_NO_SYNC`, `FENEC_OPEN_IN_MEMORY`,
+/// `FENEC_OPEN_NO_AUTO_COMPACT`. A file open
 /// already -- under another handle, or by another process, an app extension
 /// sharing the app's container -- is refused (`FENEC_LOCKED`).
 ///
@@ -322,7 +350,14 @@ pub unsafe extern "C" fn fenec_open(
         let lock = lock_file(path)?;
         let mapped = flags & FENEC_OPEN_IN_MEMORY == 0;
         let db = fenec_core::fs::open_with(path, mapped, Box::new(Ok)).map_err(|e| failed(&e))?;
-        *handle = keep(db, flags & FENEC_OPEN_NO_SYNC == 0, Some(lock));
+        let h = keep(db, flags & FENEC_OPEN_NO_SYNC == 0, Some(lock));
+        if flags & FENEC_OPEN_NO_AUTO_COMPACT == 0 {
+            let n = native(h)?;
+            let (policy, every) = *AUTO_COMPACT.lock().unwrap_or_else(|e| e.into_inner());
+            let started = Compactor::start_every(&n.db, policy, every);
+            *n.compactor.lock().unwrap_or_else(|e| e.into_inner()) = started.ok();
+        }
+        *handle = h;
         Ok(None)
     })
 }
@@ -349,7 +384,8 @@ pub unsafe extern "C" fn fenec_open_memory(
 fn keep(db: Database, durable: bool, lock: Option<File>) -> u64 {
     let file = lock.is_some();
     let n = Arc::new(Native {
-        db: RwLock::new(db),
+        db: Arc::new(RwLock::new(db)),
+        compactor: Mutex::new(None),
         durable: durable && file,
         file,
         closed: AtomicBool::new(false),
@@ -423,6 +459,9 @@ pub unsafe extern "C" fn fenec_close(
             hs.swap_remove(at).1
         };
         drop(n.sync_lock().take());
+        // Stopped before the lock is taken: a compact under way finishes
+        // first, its file in place, rather than be cut off.
+        drop(n.compactor.lock().unwrap_or_else(|e| e.into_inner()).take());
         let mut db = n.db.write().unwrap_or_else(|e| e.into_inner());
         n.closed.store(true, Ordering::Release);
         let mut result = Ok(());

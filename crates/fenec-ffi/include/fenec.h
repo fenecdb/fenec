@@ -43,6 +43,7 @@ extern "C" {
 /* fenec_open's flags. */
 #define FENEC_OPEN_NO_SYNC 1   /* writes wait for fenec_sync, not an fsync each */
 #define FENEC_OPEN_IN_MEMORY 2 /* read the file into memory rather than map it */
+#define FENEC_OPEN_NO_AUTO_COMPACT 4 /* no compact on its own once half the file is dead */
 
 /* The library's version; static, not to be freed. */
 const char *fenec_version(void);

@@ -499,6 +499,31 @@ impl Mapping {
     }
 }
 
+/// Reads a byte of every page of `m`, so that its pages are in memory
+/// before anything waits on one.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub fn touch(m: &crate::store::Base) {
+    let bytes: &[u8] = (**m).as_ref();
+    let mut sum = 0u8;
+    for at in (0..bytes.len()).step_by(4096) {
+        // Volatile, or the compiler drops reads whose result is unused.
+        sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) };
+    }
+    std::hint::black_box(sum);
+}
+
+/// Reads the byte at each of `at` in `m`: the pages those places are on,
+/// brought into memory.
+#[cfg(all(unix, target_pointer_width = "64"))]
+pub fn touch_at(m: &crate::store::Base, at: &[usize]) {
+    let bytes: &[u8] = (**m).as_ref();
+    let mut sum = 0u8;
+    for &a in at.iter().filter(|&&a| a < bytes.len()) {
+        sum ^= unsafe { std::ptr::read_volatile(bytes.as_ptr().add(a)) };
+    }
+    std::hint::black_box(sum);
+}
+
 #[cfg(all(unix, target_pointer_width = "64"))]
 impl AsRef<[u8]> for Mapping {
     fn as_ref(&self) -> &[u8] {
@@ -673,7 +698,9 @@ fn open_in_memory_into(
     wrap: Box<Wrap<'_>>,
 ) -> Result<Database> {
     let (mut sink, existing) = FileSink::open(path)?;
-    if existing.len() > MAGIC.len() {
+    // A new file is loaded too, as a mapped one is: it holds the magic by
+    // now, which the bytes the database counts as its file's must include.
+    if existing.len() >= MAGIC.len() {
         let whole = db.load(&existing)?;
         if whole < existing.len() {
             sink.cut(whole)?;

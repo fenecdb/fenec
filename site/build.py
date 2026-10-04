@@ -444,7 +444,67 @@ CLAIMS = [
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
+    # YCSB, in thousands of operations a second (`ycsb_facts`).
+    ("README.md", r"fenecdb does B with 16 threads at ([\d.]+) k operations", "ycsb:fenec:buffered:B:16", 0),
+    ("README.md", r"second against SQLite's ([\d.]+) k, and C on one thread", "ycsb:sqlite:buffered:B:16", 0),
+    ("README.md", r"and C on one thread at ([\d.]+) k against", "ycsb:fenec:buffered:C:1", 0),
+    ("README.md", r"k against\s+([\d.]+) k, its file compacted", "ycsb:sqlite:buffered:C:1", 0),
+    ("site/content/index.html", r"YCSB B over HTTP, 16 clients, durable</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:durable:B:16", 0),
+    ("site/content/index.html", r"<span>PostgreSQL ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
+    ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
+    ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:B:16", 0),
+    ("site/content/docs/vs-sqlite.html", r"A, 50% updates, 16 threads, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:durable:A:16", 0),
+    ("site/content/docs/vs-sqlite.html", r"A, 50% updates, 16 threads, durable</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:durable:A:16", 0),
+    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:C:1", 0),
+    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:C:1", 0),
+    ("site/content/docs/vs-postgres.html", r"B, 95% reads, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:16", 0),
+    ("site/content/docs/vs-postgres.html", r"B, 95% reads, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:16", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td class=\"n\">([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td[^>]*>[\d.]+ k</td><td class=\"n\"><b>([\d.]+) k", "ycsb:pg:durable:A:1", 0),
 ]
+
+
+# A YCSB figure the site quotes is the median of the runs of its cell in the
+# bench's results, which are committed with the pages that quote them: a
+# number copied by hand from a terminal is how the sizes above drifted.
+# Its fact is `ycsb:<system>:<mode>:<workload>:<threads>`, written in
+# thousands of operations a second, held to the last digit it shows.
+YCSB_RESULTS = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "results.tsv")
+# The runs a later one replaced, by run and system: their lines stay in the
+# results, which are only appended to, and count in no median.
+YCSB_SUPERSEDED = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "superseded.tsv")
+
+
+def ycsb_facts():
+    """Each YCSB cell's median ops/s, as `ycsb report` takes it: the upper
+    of the two middle runs when there are an even number."""
+    if not os.path.exists(YCSB_RESULTS):
+        return {}
+    lines = open(YCSB_RESULTS, encoding="utf-8").read().splitlines()
+    head = lines[0].split("\t")
+    col = {name: i for i, name in enumerate(head)}
+    # A run's cell measured again (a run cut short, completed later under
+    # its own id) counts once, as its last line, as `ycsb report` takes it.
+    superseded = set()
+    if os.path.exists(YCSB_SUPERSEDED):
+        for line in open(YCSB_SUPERSEDED, encoding="utf-8").read().splitlines()[1:]:
+            run, system = line.split("\t")[:2]
+            superseded.add((run, system))
+    latest = {}
+    for line in lines[1:]:
+        f = line.split("\t")
+        if f[col["workload"]] not in ("A", "B", "C", "D", "E", "F"):
+            continue
+        if (f[col["run"]], f[col["system"]]) in superseded:
+            continue
+        key = "ycsb:" + ":".join(f[col[c]] for c in ("system", "mode", "workload", "threads"))
+        latest[(key, f[col["run"]])] = float(f[col["ops_s"]])
+    runs = {}
+    for (key, _), ops in latest.items():
+        runs.setdefault(key, []).append(ops)
+    return {k: sorted(v)[len(v) // 2] for k, v in runs.items()}
 
 
 def glue_lines():
@@ -508,7 +568,10 @@ def check_claims():
     web = lambda name: os.path.join(REPO, "web", name)
     wasm = web("fenec.wasm")
     if not os.path.exists(wasm):
-        return []  # the copy step above already said so
+        # The copy step above already said so. The bench's figures need no
+        # module, so they are still held to their results.
+        ycsb = ycsb_facts()
+        return claims_against(ycsb, {k: " k ops/s" for k in ycsb}, lambda f: f.startswith("ycsb:"))
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
     # The client is fenec.js and the two modules it imports, as a page loads
@@ -548,13 +611,39 @@ def check_claims():
         # has shipped.
         "version": workspace_version(),
     }
+    ycsb = ycsb_facts()
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
     # Every size fact is in KB; without a default the report of a drifted
     # size died on a KeyError instead of saying which file drifted.
-    unit = {**{k: " KB" for k in truth}, **unit}
+    unit = {**{k: " KB" for k in truth}, **{k: " k ops/s" for k in ycsb}, **unit}
+    return claims_against({**truth, **ycsb}, unit, lambda f: True)
 
+
+# The names benchmarks.html#ycsb's full grid gives each system.
+YCSB_NAMES = {"fenec": "fenecdb", "sqlite": "SQLite", "server": "fenec-server",
+              "server-docker": "fenec-server in Docker", "pg": "PostgreSQL", "mongo": "MongoDB"}
+
+
+def ycsb_grid_claims(truth):
+    """A claim for each cell of benchmarks.html#ycsb's full grid: its row
+    names the cell, so every one is held to the results, not a few."""
+    out = []
+    for fact in truth:
+        if not fact.startswith("ycsb:"):
+            continue
+        _, system, mode, wl, threads = fact.split(":")
+        out.append(("site/content/docs/benchmarks.html",
+                    rf'<tr><td>{re.escape(YCSB_NAMES[system])}</td><td>{mode}</td><td>{wl}</td>'
+                    rf'<td class="n">{threads}</td><td class="n">([\d.]+) k</td>', fact, 0))
+    return out
+
+
+def claims_against(truth, unit, wanted):
+    """The CLAIMS whose fact `wanted` takes, each held to `truth`."""
     problems = []
-    for rel, pattern, fact, tol in CLAIMS:
+    for rel, pattern, fact, tol in CLAIMS + ycsb_grid_claims(truth):
+        if not wanted(fact):
+            continue
         path = os.path.join(REPO, rel)
         if not os.path.exists(path):
             continue  # AGENTS.md is optional
@@ -569,12 +658,19 @@ def check_claims():
                 else "a module `make wasm-lite` did not build" if fact not in truth
                 else "a brotli size and `brotli` is not installed"
             )
+            why = "a YCSB cell crates/fenec-bench/ycsb/results.tsv does not hold" if fact.startswith("ycsb:") else why
             problems.append(f"{rel}: /{pattern}/ claims {why}, so it went unchecked")
             continue
         for m in found:
             said, want = m.group(1), truth[fact]
             if fact == "version":
                 drifted = said != want
+            elif fact.startswith("ycsb:"):
+                # Thousands a second, to the last digit written.
+                places = len(said.partition(".")[2])
+                room = 0.5 * 10 ** -places + tol + 1e-9
+                said, drifted = float(said), abs(float(said) - want / 1000) > room
+                want = f"{want / 1000:.{places}f}"
             elif fact.startswith("kb"):
                 room = 0.5 + tol + (NOISE_KB if fact in COMPRESSED else 0)
                 said, drifted = int(said), abs(int(said) - want) > room

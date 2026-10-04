@@ -57,10 +57,12 @@ make concurrency-bench   # writers and readers at once against SQLite: durable a
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
+make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
+make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL and MongoDB in Docker, durable and buffered (YCSB_ARGS)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan
@@ -474,6 +476,56 @@ the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
 created, dropped or altered meanwhile fails it. Only a lone statement takes
 this path; a batch, the shell and `execute` hold the lock.
 
+**A file compacts itself once half of it is dead** (`engine/garbage.rs`).
+An update appends the whole record and leaves the version it replaced dead
+until a `compact`, which nothing ran on its own: under YCSB's updates a
+million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
+a live record a few to a page among dead ones, and one read in five waited
+for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
+loaded). `Database::garbage` is the file's bytes as written (`appended`)
+against the live records' (`Store::total_bytes - dead_bytes`, which the
+stores counted as writes landed already and an image's index carries) and
+what the last compact kept besides the documents (`kept`: schemas,
+counters, graphs) -- a sum over the collections, nothing added to the write
+path: a lone put, put over and del measured 570/700/532 ns in memory either
+way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
+build's own spread. `CompactPolicy` is the one rule (half the file dead and
+64 MB, `compact_due`), `compact_when_due` a look under `try_read` and a
+compact beside the database, `Compactor` a thread that looks every 5 s.
+`fenec_http::link` runs one thread over every database the process serves
+(`--auto-compact <ratio>|off`, default 0.5), apart from the graph keeper so
+its graphs do not wait out a compact of a gigabyte; the native library
+starts a `Compactor` a file (`FENEC_OPEN_NO_AUTO_COMPACT`); a replica and a
+following tenant compact too, since `may_write` lets a compact run there and
+their files grow with every update sent, and an image adopted during a
+maintenance marks every tail changed (`Tails::all_changed`), or a replica's
+compact put back what it copied before the image. The browser has no thread:
+`snapshot` writes the live records alone, so a page's persisted image drops
+them, and its memory keeps them until it reloads. The swap was the cost:
+the writes made during a 4-6 s compact of a 1 GB file, 200 000 records, were
+copied under the write lock (409-811 ms); they are copied in rounds before
+it, the ids drained from the tails at once and their documents 4 096 under
+the read lock at a time (one round of 408 708 held the readers 592 ms behind
+the waiting writer -- the lock is fair to writers), the pages a chunk reads
+touched first with no lock (`Store::places`, `fs::touch_at`: waiting on the
+disk under the lock, 291 ms), until a round finds fewer than 1 000. The
+rounds' frames are handed over to the side file before the swap
+(`Beside::hand_over`; left to the first write after it, 400 MB under the
+write lock, 158 ms), every page of the new file is touched before it
+(`fs::touch`, 1.3 GB in 2.8 s; left to the readers, the read p50 went 2 ->
+100 us for two seconds), and the stores it replaces are dropped after the
+lock (their unmapping was 10-15 ms of it). Under the lock: the last few ids,
+the side file's fsync and the rename, 6.4-12.5 ms over a 1 GB file and
+13.7-14.8 durable (`make compact-bench`: 5M updates of a field over a
+million 1 KB records from one writer at about 150k/s, buffered, the file
+1.03 -> 2.4-3.2 -> 1.2-1.4 GB three times where it reached 6.2 GB without,
+the reads during a compact p99 4.4 ms and 34 at the most against 0.9 and 57
+beside the updates, and after them 435k reads/s from the first second where
+the 6.2 GB file started at 19k and took 25 s to 400k). A database read into
+memory compacts beside itself too, the live records copied into fresh
+segments with no lock held; it used to copy them under the read lock and
+build every index again, though the indexes are keyed by id.
+
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
 body and the reader **must** consume it, or the stray byte is read as the next
@@ -628,6 +680,62 @@ measured on is a fanless M1 Air, which slows to a third under minutes of
 load on every core: a comparison runs its sides in turns (`--only fenec`,
 then `--only pg`), each after idle minutes, and a figure from a hot run is
 not one.
+
+**`make ycsb` is fenecdb as a general database.** YCSB's core workloads
+A-F written in the bench crate (`fenec-bench/src/bin/ycsb.rs`) rather than
+run through the Java YCSB, to its definitions: ten fields of 100 random
+characters, a read the whole record, an update one field, its scrambled
+zipfian (0.99, FNV-hashed over ten billion items), its skewed-latest for
+D, scans of 1 to 100 records for E. The key is an integer from 1
+(`insertorder=ordered`, no `user` prefix), so each system keys by what it
+keys best by: `id`, `INTEGER PRIMARY KEY`, a `bigint` primary key,
+`_id`; E's scan is `where id >= $1 limit n`, the id index walked from
+the key, no `@sorted`. A key not yet acknowledged is never drawn: an
+insert publishes a bound below its key before it takes one (`Keys`).
+fenecdb in process against SQLite (a connection a thread, WAL, mapped),
+fenec-server over HTTP against PostgreSQL 17 and MongoDB 8, each started
+in a container for its turn and removed with its volume, so the VM holds
+one at a time; `server-docker` is the same server in a container, which
+shows Docker's share -- its network, and an fsync in the VM that is not
+macOS's `F_FULLFSYNC`. Durable is an fsync a write in each engine's own
+terms (a flush and its durability, `synchronous=FULL` with `fullfsync`,
+`synchronous_commit=on`, `j: true`), buffered its default
+(`--sync 250`, `NORMAL`, `off`, `j: false`); C writes nothing and runs
+once. A server switching modes is stopped with SIGTERM, which syncs: a
+kill lost the last 250 ms of the load, and the next update found no row.
+Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
+runs within 4% of its idle time (`cool`), the probe's ratio written with
+the cell; the systems take turns with three idle minutes between them.
+Latencies go into a log-linear histogram, 64 steps an octave.
+`--verify` holds every answer to what was written (`check`): each
+thread logs its operations and answers into its own `Vec`, and after the
+cell a read must hold, field by field, a value a write that could have
+been the last one left (one ended before it and not followed by another
+that did, or one overlapping it), a scan consecutive keys as far as it
+could see, a write one record -- every write logged, since a read under
+concurrent writes is judged by every write's span, and nothing compared
+in an operation's time. A pass over all six systems found no mismatch
+(`ycsb/verify.tsv`). `ycsb/results.tsv` is the three runs the site
+quotes, appended to and never rewritten -- a run's cell measured again
+counts as its last line, and a run a later one replaced is named in
+`ycsb/superseded.tsv` and counts in no median (`ycsb report`, `site/build.py`)
+-- and `site/build.py` holds every YCSB figure on the site to its median
+there, the full grid row by row. Docker's VM syncs a
+write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9
+(`ycsb/fsync.txt`), so the durable server comparison is `server-docker`
+against PostgreSQL and MongoDB, all in the VM, the native server beside
+them. fenecdb's buffered reads lost to SQLite's after the updates for the
+engine's reason, not the harness's: an update writes the record again at
+the file's end, the file outgrew the page cache, and a profile put 86% of
+a one-thread read on its page coming in (`ycsb/profile-c1.txt`). Runs
+`c1`-`c3` measured fenecdb and fenec-server again with the file compacting
+itself (below; the harness starts the engine's `Compactor` as an app's
+library does, `--no-auto-compact` for neither): C at one thread 30.1k ->
+438k against SQLite's 279k, B 30.8k -> 410k, D 62.6k -> 432k, and fenecdb
+ahead of SQLite in every in-process cell; the buffered file stood at 3.7-4.0
+GB after D, between compacts of a file A grows by 100 MB a second. Official
+YCSB 0.17.0 against the same containers came within -14% to +2% of the
+harness (`ycsb/calibration/`).
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's

@@ -492,6 +492,13 @@ keeps <code>&lt;name&gt;.lock</code> while it is open.</p>
     of a mapped file read then is the app's end, not an error. Keep the
     default class (complete until first user authentication), or open the
     file with <code>.inMemory</code>.</li>
+  <li><b>The file compacts itself.</b> An update writes the row again at the
+    file's end; a thread of the library's looks every 5 s and compacts the
+    file beside your calls once half of it is versions updates and deletes
+    left behind, and at least 64 MB, so a file you keep updating stays under
+    about twice what it holds. Open with <code>.noAutoCompact</code>
+    (<code>NO_AUTO_COMPACT</code>, <code>noAutoCompact</code>) to compact
+    only when you run <code>compact</code>.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>

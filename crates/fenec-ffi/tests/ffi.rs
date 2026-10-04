@@ -486,6 +486,10 @@ fn the_header_declares_what_the_library_exports() {
         ("FENEC_LOCKED", FENEC_LOCKED),
         ("FENEC_OPEN_NO_SYNC", FENEC_OPEN_NO_SYNC as i32),
         ("FENEC_OPEN_IN_MEMORY", FENEC_OPEN_IN_MEMORY as i32),
+        (
+            "FENEC_OPEN_NO_AUTO_COMPACT",
+            FENEC_OPEN_NO_AUTO_COMPACT as i32,
+        ),
         ("FENEC_SYNC_POLL", FENEC_SYNC_POLL as i32),
         ("FENEC_SYNC_RESPONSE", FENEC_SYNC_RESPONSE as i32),
         ("FENEC_SYNC_OPENED", FENEC_SYNC_OPENED as i32),

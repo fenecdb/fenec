@@ -9,9 +9,13 @@
 //!
 //! And it keeps its graphs in the file ([`keep`]), since it checkpoints only
 //! on its way down: without them a crash after a long run left every vector
-//! written since the start to link again.
+//! written since the start to link again. The same databases are looked at
+//! for dead records past the policy ([`auto_compact`]), and compacted
+//! beside the queries, since nothing else ever gives them back.
 
+use fenec_core::engine::{compact_when_due, CompactPolicy, AUTO_COMPACT_FLOOR, AUTO_COMPACT_RATIO};
 use fenec_core::prelude::Database;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -88,6 +92,25 @@ pub fn keep(what: &str, db: &Arc<RwLock<Database>>) {
     KEPT.lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((what.to_string(), Arc::downgrade(db)));
+    COMPACTER.call_once(|| {
+        let started = std::thread::Builder::new()
+            .name("fenec-compact".into())
+            .spawn(|| loop {
+                std::thread::sleep(fenec_core::engine::AUTO_COMPACT_EVERY);
+                let Some(policy) = *POLICY.lock().unwrap_or_else(|e| e.into_inner()) else {
+                    continue;
+                };
+                let kept = KEPT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                for (what, db) in kept {
+                    if let Some(db) = db.upgrade() {
+                        compact(&what, &db, &policy);
+                    }
+                }
+            });
+        if let Err(e) = started {
+            crate::log!("could not start compacting the files: {e}");
+        }
+    });
     KEEPER.call_once(|| {
         let started = std::thread::Builder::new()
             .name("fenec-graphs".into())
@@ -144,5 +167,53 @@ fn save(what: &str, db: &RwLock<Database>) {
             crate::log!("{what}: could not write the graphs into the file: {e}");
             db.write().unwrap_or_else(|e| e.into_inner()).fail(&e);
         }
+    }
+}
+
+/// When a file the process serves is compacted on its own: `--auto-compact`,
+/// half of it dead and 64 MB unless told, `None` for never.
+static POLICY: Mutex<Option<CompactPolicy>> = Mutex::new(Some(CompactPolicy {
+    ratio: AUTO_COMPACT_RATIO,
+    floor: AUTO_COMPACT_FLOOR,
+}));
+static COMPACTER: Once = Once::new();
+
+/// The compacts the process ran on its own, for `/_metrics`.
+pub static AUTO_COMPACTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Sets when the files the process serves are compacted on their own, or
+/// that they never are.
+pub fn auto_compact(policy: Option<CompactPolicy>) {
+    *POLICY.lock().unwrap_or_else(|e| e.into_inner()) = policy;
+}
+
+/// Compacts `db` beside the queries if its dead records are past the
+/// policy: one database at a time, on a thread of its own rather than the
+/// graph keeper's, since a compact of a gigabyte takes seconds and the
+/// graphs of every other database would wait them out. A replica and a
+/// following tenant compact too -- a compact changes no document, and
+/// their files grow with every update their primary sends -- and an image
+/// a replica adopts meanwhile fails the compact rather than be written
+/// over.
+fn compact(what: &str, db: &RwLock<Database>, policy: &CompactPolicy) {
+    let before = db.read().unwrap_or_else(|e| e.into_inner()).garbage();
+    let t = Instant::now();
+    let Some(r) = compact_when_due(db, policy) else {
+        return;
+    };
+    let took = t.elapsed();
+    let g = db.read().unwrap_or_else(|e| e.into_inner());
+    match r {
+        Ok(_) => {
+            AUTO_COMPACTIONS.fetch_add(1, Ordering::Relaxed);
+            crate::log!(
+                "{what}: compacted, {:.1} MB -> {:.1} MB in {took:.1?}, {:.1?} under the write lock",
+                before.file as f64 / 1e6,
+                g.garbage().file as f64 / 1e6,
+                g.last_compact_held()
+            );
+        }
+        // Put back as it was: the next look tries again.
+        Err(e) => crate::log!("{what}: could not compact: {e}"),
     }
 }

@@ -38,6 +38,13 @@ usage: fenec-server [options]
       --sync <policy>       off | always | <ms>      default: 250
                             writes are buffered; this policy decides when
                             they reach the disk
+      --auto-compact <ratio|off>  compact a file on its own once this share
+                            of it is dead -- versions updates and deletes
+                            left behind -- and at least 64 MB, beside the
+                            queries: the write lock is taken only to put the
+                            new file in place. Every file served is looked
+                            at every 5 s, tenants and replicas too
+                            default: 0.5 (the file stays under twice its data)
       --no-checkpoint       do not write a checkpoint on shutdown. The
                             default is to write one: the HNSW graph lands in
                             the file and the next open does not rebuild it
@@ -359,6 +366,23 @@ fn main() {
             }
             "--ping" => ping = true,
             "--no-mmap" => mmap = false,
+            "--auto-compact" => {
+                let v = next(&mut i, "--auto-compact");
+                let policy = match v.as_str() {
+                    "off" => None,
+                    r => Some(
+                        r.parse::<f64>()
+                            .map_err(|_| Error::Query(String::new()))
+                            .and_then(fenec_core::engine::CompactPolicy::at)
+                            .unwrap_or_else(|_| {
+                                fail(&format!(
+                                    "--auto-compact expects a share of the file between 0 and 1, or off; got `{v}`"
+                                ))
+                            }),
+                    ),
+                };
+                fenec_http::link::auto_compact(policy);
+            }
             "--lease" => lease = true,
             "--insecure" => http_cfg.insecure = true,
             "--follow" => follow_url = Some(next(&mut i, "--follow")),

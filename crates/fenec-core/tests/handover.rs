@@ -346,8 +346,10 @@ fn small_documents_are_handed_over_by_their_count() {
 }
 
 /// The writes made while a compact wrote its file beside the database are
-/// in that file, inside the image, and the stores hold them in memory as
-/// they would the records of a write: they are handed over the same way.
+/// in that file, inside the image, and the compact hands them over to it
+/// before it takes the file's place, as the database hands over the records
+/// of a write -- left to the first write after the swap, the 400 MB a
+/// compact had copied were handed over under the write lock.
 #[test]
 fn a_compact_beside_hands_over_what_was_written_meanwhile() {
     let (a_path, a, b_path, mut b) = twins("beside");
@@ -373,10 +375,9 @@ fn a_compact_beside_hands_over_what_was_written_meanwhile() {
     meanwhile(&mut b);
     run(&mut b, "compact");
     same(&a, &b);
-    assert!(held(&a) > 0);
-    a.set_handover(0);
-    assert!(a.hand_over().unwrap() > 0);
     assert_eq!(held(&a), 0);
+    a.set_handover(0);
+    assert_eq!(a.hand_over().unwrap(), 0);
     same(&a, &b);
     workload(&mut a, 50_000);
     workload(&mut b, 50_000);

@@ -70,6 +70,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
 <tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it.</td></tr>
+<tr><td><code>--auto-compact &lt;ratio&gt;|off</code></td><td>Compacts a file on its own once this share of it is dead, beside the queries. Default <code>0.5</code> (<a href="#compaction">Compaction</a>).</td></tr>
 <tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
 <tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options (<a href="/docs/http">HTTP endpoint</a>).</td></tr>
 <tr><td><code>--replication-token</code>, <code>--replica-of</code>, <code>--promote</code>, <code>--replication-buffer</code>, <code>--cdc</code></td><td><a href="/docs/replication">Replication</a> and <a href="/docs/microservices">change data capture</a>.</td></tr>
@@ -180,6 +181,68 @@ The order is deliberate. The sync comes first, so even if the process is
 killed while the checkpoint is being written, the data is already on disk and
 only the graph is lost. The rewrite goes to a side file and is renamed, so a
 half-written checkpoint cannot corrupt anything.</p>
+</details>
+
+<h2 id="compaction">Compaction</h2>
+
+<p>An update writes the whole record again at the end of the file, and a
+delete writes a tombstone; the version left behind is dead until a
+<code>compact</code> writes the live records into a new file. The server
+runs one on its own: every 5 s it looks at each file it serves, the
+database, each open tenant and a replica alike, and compacts one once half
+of it is dead and the dead part is at least 64 MB. The compact runs beside
+the queries, and takes the write lock only to put the new file in
+place.</p>
+
+<div class="tbl">
+<table>
+<thead><tr><th>Flag</th><th class="n">Default</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>--auto-compact &lt;ratio&gt;</code></td><td class="n">0.5</td><td>The share of the file that may be dead before a compact runs.</td></tr>
+<tr><td><code>--auto-compact off</code></td><td class="n">&nbsp;</td><td>Compacts only on <code>compact</code>.</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="deep"><summary>Details</summary>
+<p>Left alone, a file of updated rows grows by a record a write, and its live
+records end up a few to a page among dead ones: under YCSB's updates, a
+million records of 1 KB took the file to 4.7 to 6.5 GB on an 8 GB machine,
+and one read in five then waited for the disk. With the default ratio the
+file stays under about twice what the last compact left it at, and each
+compact writes the live records once for as many bytes of updates.</p>
+
+<p>What it costs, measured with <code>make compact-bench</code>: a million
+1 KB records, five million updates of a field at keys drawn at random from
+one thread, buffered, while another reads whole records. With
+auto-compaction the file went from 1.03 GB to between 2.4 and 3.2 GB and
+back to 1.2 to 1.4 GB three times; each compact took 6 to 11 s with no lock
+held and held the write lock 6.4 to 12.5 ms to put its file in place. The
+reads while a compact ran had a p99 of 4.4 ms and took 34 ms at the most,
+against 0.9 and 57 ms beside the updates when none ran; the updates slowed
+from about 150 000 a second to 30 000-60 000 while it wrote. Once the updates
+were done the reads ran at 435 000 a second, p99 2.2 µs, from the first
+second. Without it the file ended at 6.2 GB, and the reads after the updates
+started at 19 000 a second and took 25 s to reach 400 000, their p99 0.11 ms
+over those 30 s. Durable, an fsync a write from 16 writers, 100 000 records
+updated 400 000 times at about 900 a second: the file went from 103 to
+211 MB and back three times, each compact held the write lock 13.7 to
+14.8 ms -- two <code>F_FULLFSYNC</code>s of this Mac's among it -- and ended
+at 190 MB against 515 without it; that file fits the page cache either way,
+and the reads ran alike, p99 2.2 µs.</p>
+
+<p>The compact copies what it reads under the read lock, writes the live
+records into a side file with no lock held, and copies the writes made
+meanwhile in rounds, a few thousand documents under the read lock at a
+time, until a round finds fewer than a thousand; it touches every page of
+the new file before the swap, so no reader waits for one after it. The write
+lock is then held for the last of those writes, the side file's fsync and
+the rename. A replica compacts its own file the same way: a compact changes
+no document, and an image its primary sends meanwhile fails the compact
+rather than be written over. <code>/_metrics</code> has the file's size,
+what a compact would give back of it and the compacts run
+(<a href="/docs/monitoring">Monitoring</a>), and each is logged with the
+file before and after and how long it held the lock.</p>
 </details>
 
 <h2 id="limits">Limits and health checks</h2>

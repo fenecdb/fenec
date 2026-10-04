@@ -350,6 +350,16 @@ fn render(source: Source) -> String {
     );
     let slow: u64 = SHARDS.iter().map(|s| load(&s.slow)).sum();
     out.sample("fenec_slow_statements_total", &[], slow);
+    out.family(
+        "fenec_auto_compactions_total",
+        "counter",
+        "Compacts the server ran on its own (--auto-compact), every database it serves together.",
+    );
+    out.sample(
+        "fenec_auto_compactions_total",
+        &[],
+        crate::link::AUTO_COMPACTIONS.load(Ordering::Relaxed),
+    );
     out.family("fenec_connections", "gauge", "Connections open now.");
     out.sample(
         "fenec_connections",
@@ -387,6 +397,19 @@ fn render(source: Source) -> String {
                 "The data footprint --max-memory holds to: records, indexes and graphs. Not RSS.",
             );
             out.sample("fenec_memory_bytes", &[], g.memory_bytes());
+            let garbage = g.garbage();
+            out.family(
+                "fenec_file_bytes",
+                "gauge",
+                "The database's file as written: live records, dead ones and the graphs.",
+            );
+            out.sample("fenec_file_bytes", &[], garbage.file);
+            out.family(
+                "fenec_reclaimable_bytes",
+                "gauge",
+                "What a compact would give back of the file now; --auto-compact runs one past its share.",
+            );
+            out.sample("fenec_reclaimable_bytes", &[], garbage.dead());
             out.family(
                 "fenec_change_sequence",
                 "gauge",

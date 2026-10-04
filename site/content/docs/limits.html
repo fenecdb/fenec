@@ -273,6 +273,17 @@ time at the next open, never data.</p>
     fails it with a request to run it again, since what was built no longer
     fits, and so does a second compact while one writes its file. It cannot
     be cancelled once begun.</li>
+  <li><b>A file compacts itself once half of it is dead.</b> The server
+    (<code>--auto-compact</code>, <a href="/docs/server#compaction">Compaction</a>)
+    and the native library (<code>FENEC_OPEN_NO_AUTO_COMPACT</code> turns it
+    off) look every 5 s and compact beside the queries once the dead records
+    are half the file and 64 MB, so a file under updates stays under about
+    twice its data, and its peak while the compact writes is the old file and
+    the new one together. Over a million 1 KB records updated at 150 000 a
+    second, each compact held the write lock 6 to 13 ms. An embedding
+    program calls <code>compact_when_due</code> from a thread of its own or
+    starts a <code>Compactor</code>; the browser module has no thread to run
+    one, and drops the dead records from each image it persists.</li>
   <li>A delete is a tombstone and the graph node stays in memory until
     <code>compact</code>. Changing a document's vector also marks the old
     node deleted and adds a new one, so in collections whose vectors change,

@@ -1,0 +1,49 @@
+fenecdb in process, YCSB C (100% reads), 1 thread, buffered, after A's and B's
+updates at 1, 4 and 16 threads over 1 000 000 records (the file 5 288 MB on an
+8 GB machine): macOS's sample(1) of the bench for 15 s of the cell, a build
+with line tables. The cell ran at 45 978 ops/s with the sampler attached.
+
+codec.rs:254 is the first read of a record's bytes, the tag of its first
+field, in the mapped file: 8 655 of the 10 100 samples of the reading
+thread in a read are there, waiting for the page to come in; 140 339 page-ins in
+the 15 s, about 9 400 a second against 46 000 reads -- one read in five
+goes to the disk. The statement is parsed once and bound (`Database::query`
+with a prepared `Statement` and its parameters), and neither the parser
+nor any rendering of the rows shows: the cost is the engine's, an update
+writing the whole record again at the file's end until a `compact`.
+
+Over a file just loaded (978 MB, no update yet), the same cell read
+443 k ops/s at one thread and 1.32 M at four, p99 3 and 7 us
+(`ycsb --systems fenec --modes buffered --workloads C --threads 1,4`):
+run	system	mode	workload	threads	records	seconds	ops	ops_s	probe	READ_p99
+d	fenec	buffered	C	1	1000000	30	13283118	442771	1.001	2.8
+d	fenec	buffered	C	4	1000000	30	39591098	1319703	1.002	6.6
+
+vm_stat Pageins over the 15 s: 26619719. -> 26760058.
+
+    10234 Thread_190280
+      10225 thread_start  (in libsystem_pthread.dylib) + 8  [0x199a14ba8]
+      ! 10225 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x199a19c08]
+      !   10225 _RNvNvMs0_NtNtNtCs1SSuMAdGM58_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in ycsb) + 380  [0x1028a2184]  unix.rs:123
+      !     10225 _RNSNvYNCINvNtNtCs1SSuMAdGM58_3std6thread9lifecycle15spawn_uncheckedNCNCNCNvCs1rbD9VDWaUI_4ycsb8run_cells0_000TyINtNtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3map8BTreeMapNtB1b_2OpNtB1b_4HistEINtNtB1U_3vec3VecNtB1b_5EntryEEEs_0INtNtNtCsjIpoRzUjyHQ_4core3ops8function6FnOnceuE9call_once6vtableB1b_  (in ycsb) + 236  [0x1025225f8]  function.rs:250
+      !       10206 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNCNCNvCs1rbD9VDWaUI_4ycsb8run_cells0_000TyINtNtNtNtCs6zY7rJBZy9D_5alloc11collections5btree3map8BTreeMapNtB1f_2OpNtB1f_4HistEINtNtB1Y_3vec3VecNtB1f_5EntryEEEB1f_  (in ycsb) + 540  [0x10249cb20]  backtrace.rs:166
+      !       : 10100 _RNvXsa_Cs1rbD9VDWaUI_4ycsbNtB5_16FenecLocalClientNtB5_6Client4read  (in ycsb) + 492  [0x10255a4e8]  ycsb.rs:693
+      !       : | 10055 _RNvMsj_NtCsd6u5fXOhsFp_10fenec_core6engineNtB5_8Database5query  (in ycsb) + 540  [0x102644088]  engine.rs:4756
+      !       : | + 9656 _RNvMsj_NtCsd6u5fXOhsFp_10fenec_core6engineNtB5_8Database6select  (in ycsb) + 4948  [0x1025ee4d4]  engine.rs:7245
+      !       : | + ! 9620 _RNvNtCsd6u5fXOhsFp_10fenec_core6engine11read_source  (in ycsb) + 148  [0x1026060c8]  engine.rs:1983
+      !       : | + ! : 9444 _RNvMs4_NtCsd6u5fXOhsFp_10fenec_core5storeNtB5_5Store10read_field  (in ycsb) + 508  [0x1025d3ad0]  store.rs:848
+      !       : | + ! : | 8655 _RNvNtCsd6u5fXOhsFp_10fenec_core5codec12decode_value  (in ycsb) + 56  [0x1025e6778]  codec.rs:254
+
+Sort by top of stack, same collapsed (when >= 5):
+        __semwait_signal  (in libsystem_kernel.dylib)        21654
+        _RNvNtCsd6u5fXOhsFp_10fenec_core5codec12decode_value  (in ycsb)        8674
+        _RNvNtNtCsjIpoRzUjyHQ_4core3str8converts9from_utf8  (in ycsb)        687
+        _RNvCs1rbD9VDWaUI_4ycsb10run_system  (in ycsb)        150
+        _xzm_free  (in libsystem_malloc.dylib)        81
+        _RNvMs4_NtCsd6u5fXOhsFp_10fenec_core5storeNtB5_5Store10read_field  (in ycsb)        67
+        _RNvNtCsd6u5fXOhsFp_10fenec_core5codec10skip_field  (in ycsb)        67
+        _platform_memcmp  (in libsystem_platform.dylib)        66
+        _RINvNtCsjIpoRzUjyHQ_4core3ptr9drop_glueNtNtCsd6u5fXOhsFp_10fenec_core5value5ValueEBF_  (in ycsb)        56
+        _RNvMsj_NtCsd6u5fXOhsFp_10fenec_core6engineNtB5_8Database6select  (in ycsb)        40
+        _RNvNtCsd6u5fXOhsFp_10fenec_core5codec11get_uvarint  (in ycsb)        38
+        _malloc_zone_malloc  (in libsystem_malloc.dylib)        36

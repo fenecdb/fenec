@@ -186,6 +186,11 @@ class Fenec {
   /// be the process's end.
   static const inMemory = 2;
 
+  /// No compact on its own. Without it the library compacts the file beside
+  /// the calls once half of it is dead records -- versions updates and
+  /// deletes left behind -- and at least 64 MB.
+  static const noAutoCompact = 4;
+
   final int _handle;
   final Worker _worker;
   var _closed = false;
@@ -201,7 +206,7 @@ class Fenec {
   Fenec._(this._handle, this._worker);
 
   /// Opens the file at [path], made when missing. [flags]: [noSync],
-  /// [inMemory].
+  /// [inMemory], [noAutoCompact].
   static Future<Fenec> open(String path, {int flags = 0}) async {
     final worker = await Worker.start(library);
     try {
