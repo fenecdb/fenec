@@ -461,8 +461,8 @@ CLAIMS = [
     ("site/content/docs/vs-postgres.html", r"B, 95% reads, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:16", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
-    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td class=\"n\">([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
-    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td[^>]*>[\d.]+ k</td><td class=\"n\"><b>([\d.]+) k", "ycsb:pg:durable:A:1", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:1", 0),
 ]
 
 

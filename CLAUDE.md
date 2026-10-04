@@ -776,7 +776,17 @@ library does, `--no-auto-compact` for neither): C at one thread 30.1k ->
 ahead of SQLite in every in-process cell; the buffered file stood at 3.7-4.0
 GB after D, between compacts of a file A grows by 100 MB a second. Official
 YCSB 0.17.0 against the same containers came within -14% to +2% of the
-harness (`ycsb/calibration/`).
+harness (`ycsb/calibration/`). Docker's network moves from day to day --
+PostgreSQL's C at one client was 3.34 k, 3.00 k and 3.53 k on three -- so
+the one-client server cells were measured again on 2026-10-04 with
+PostgreSQL beside them in turns, under the same run ids (`c1`-`c3`,
+`r1`-`r3`), each cell counting as its run's last line. `make
+roundtrip-bench` took the round trip apart: of a 0.29 ms read in Docker
+about 0.25 is Docker's port forwarding, the server's part 0.023 ms and
+PostgreSQL's bind and execute 0.016, so the published guess that a binary
+protocol answers sooner was not the cause; the durable gap was the fsync
+of a growing file (the sync log, above): durable A 2.24 k -> 3.27 k at one
+client against PostgreSQL's 2.60 k, even at 16.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's
