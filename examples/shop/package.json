@@ -1,0 +1,36 @@
+{
+  "name": "fenecdb-shop",
+  "private": true,
+  "type": "module",
+  "description": "Sandgrouse, a desert-gear shop: Next.js App Router over fenec-server -- a catalog of 10 000 products, search with facets and highlights, carts under scoped tokens, checkout that cannot oversell",
+  "scripts": {
+    "db": "sh scripts/db.sh",
+    "seed": "tsx scripts/seed.ts",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
+    "lint": "tsc --noEmit && eslint . --max-warnings 0",
+    "test": "node --import tsx --test --test-reporter=spec --test-concurrency=1 test/*.test.ts",
+    "load": "tsx scripts/load.ts",
+    "timing": "tsx scripts/timing.ts",
+    "lighthouse": "sh scripts/lighthouse.sh",
+    "ci": "sh scripts/ci.sh"
+  },
+  "dependencies": {
+    "@fenecdb/web": "0.1.10",
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "@lhci/cli": "0.15.1",
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.8",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  }
+}

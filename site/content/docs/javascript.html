@@ -31,7 +31,13 @@ queries on a server from Node through the client entry
 a database in the page kept in IndexedDB
 (<a href="https://github.com/fenecdb/fenec/tree/main/examples/web-local">web-local</a>),
 and a React app over either that or a synced replica
-(<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>).</p>
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/react">react</a>).
+A larger one is a shop in Next.js
+(<a href="https://github.com/fenecdb/fenec/tree/main/examples/shop">shop</a>):
+10 000 products whose pages the server renders through the client entry,
+search with highlights and facets, carts under each shopper's token, and a
+checkout that cannot oversell, with its Lighthouse scores, timings and
+load test measured.</p>
 
 <p>Beside a module the page loads <code>fenec.js</code> and the two modules it
 imports, 38 KB brotli as they are served with no build step; a bundler keeps
