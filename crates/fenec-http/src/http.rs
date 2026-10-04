@@ -283,6 +283,9 @@ pub struct Response {
     /// own rather than an `extra`, which cost every write two allocations
     /// and 2-3% of a put's rate over HTTP.
     pub seq: Option<u64>,
+    /// `X-Fenecdb-Version`, which every statement's answer carries: a field
+    /// as `seq` is, where an `extra` was two allocations an answer.
+    pub version: Option<&'static str>,
 }
 
 impl Response {
@@ -293,6 +296,7 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
             seq: None,
+            version: None,
         }
     }
 
@@ -310,7 +314,14 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             extra: Vec::new(),
             seq: None,
+            version: None,
         }
+    }
+
+    /// With `X-Fenecdb-Version: <version>`.
+    pub fn versioned(mut self, version: &'static str) -> Response {
+        self.version = Some(version);
+        self
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Response {
@@ -343,6 +354,11 @@ impl Response {
         for (k, v) in &self.extra {
             head.push_str(k);
             head.push_str(": ");
+            head.push_str(v);
+            head.push_str("\r\n");
+        }
+        if let Some(v) = self.version {
+            head.push_str("X-Fenecdb-Version: ");
             head.push_str(v);
             head.push_str("\r\n");
         }

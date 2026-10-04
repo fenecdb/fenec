@@ -11,27 +11,65 @@ use crate::value::Value;
 // ---------------------------------------------------------------- writing
 
 pub fn escape_into(out: &mut String, s: &str) {
+    // The runs between the bytes to escape go out whole: a character at a
+    // time, a row of ten 100-character fields took 3.4 us to render of the
+    // 11 a read by id spent in fenec-server. Every byte to escape is ASCII,
+    // so a run ends on a character's boundary; `get` rather than an index,
+    // whose panic would bring a `char`'s formatting into the browser module.
+    out.reserve(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
+    let mut from = 0;
+    for (i, &c) in s.as_bytes().iter().enumerate() {
+        let escaped = match c {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            0..=0x1f => "",
+            _ => continue,
+        };
+        out.push_str(s.get(from..i).unwrap_or_default());
+        if escaped.is_empty() {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            out.push_str("\\u00");
+            out.push(HEX[(c >> 4) as usize] as char);
+            out.push(HEX[(c & 15) as usize] as char);
+        } else {
+            out.push_str(escaped);
+        }
+        from = i + 1;
+    }
+    out.push_str(s.get(from..).unwrap_or_default());
+    out.push('"');
+}
+
+/// `n` in decimal: `to_string` allocated a `String` for every int a row
+/// held, and copied it.
+pub fn int_into(out: &mut String, n: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut m = n.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 {
+            break;
         }
     }
-    out.push('"');
+    if n < 0 {
+        out.push('-');
+    }
+    for &d in &digits[at..] {
+        out.push(d as char);
+    }
 }
 
 fn num_into(out: &mut String, f: f64) {
     if f.is_finite() {
         if f.fract() == 0.0 && f.abs() < 1e15 {
-            out.push_str(&format!("{}", f as i64));
+            int_into(out, f as i64);
         } else {
             crate::num::f64_into(out, f);
         }
@@ -66,7 +104,7 @@ pub fn value_into(out: &mut String, v: &Value) {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Int(i) => out.push_str(&i.to_string()),
+        Value::Int(i) => int_into(out, *i),
         // ISO-8601 for the browser side: `new Date(x)` works directly.
         Value::Timestamp(ms) => escape_into(out, &crate::time::format_iso(*ms)),
         Value::Float(f) => num_into(out, *f),
@@ -78,7 +116,7 @@ pub fn value_into(out: &mut String, v: &Value) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&x.to_string());
+                int_into(out, *x as i64);
             }
             out.push(']');
         }
