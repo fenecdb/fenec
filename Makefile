@@ -39,7 +39,9 @@ test:
 	@$(MAKE) --no-print-directory test-js
 	@if [ -f web/fenec.wasm ] && command -v node >/dev/null 2>&1; then $(MAKE) --no-print-directory sync-scenarios-check; fi
 
-## JS tests. node's own runner; no dependencies.
+## JS tests. node's own runner; no dependencies. The spec reporter ends a
+## failing run with each failing test's name and assertion: Node 22's
+## default away from a terminal is TAP, a failure among a thousand lines.
 ##   fenec.test.js       query builder (end-to-end too when wasm is present)
 ##   fenec.sync.test.js  sync layer -- against a real `fenec-server --http` server;
 ##                     skipped when `web/fenec.wasm` or the binary is missing
@@ -54,7 +56,7 @@ test:
 ##                     engine, and its live queries over a scripted server
 test-js:
 	@if command -v node >/dev/null 2>&1; then \
-		node --test web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js; \
+		node --test --test-reporter=spec web/fenec.test.js web/fenec.sync.test.js web/fenec.sync.scenarios.test.js web/fenec.persist.test.js web/fenec.file.test.js web/fenec.schema.test.js web/fenec.client.test.js; \
 	else \
 		echo "node not found -- JS tests skipped"; \
 	fi

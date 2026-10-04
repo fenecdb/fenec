@@ -41,9 +41,21 @@ tasks.test {
     System.getenv("FENEC_LIBRARY")?.let { systemProperty("fenec.library", it) }
     System.getenv("FENEC_GOLDEN")?.let { systemProperty("fenec.golden", it) }
     System.getenv("FENEC_SERVER")?.let { systemProperty("fenec.server", it) }
+    // A failure named in the log, with its assertion and stack: the report
+    // is an HTML file on the runner. run-tests.sh runs Gradle with `-q`,
+    // which logs at the quiet level, and that level's settings are its
+    // own -- set for the lifecycle level alone, a CI log said "1 failed"
+    // and nothing of which.
     testLogging {
-        events("failed")
-        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        val failures: org.gradle.api.tasks.testing.logging.TestLogging.() -> Unit = {
+            events("failed")
+            exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            showExceptions = true
+            showCauses = true
+            showStackTraces = true
+        }
+        failures()
+        quiet(failures)
     }
 }
 
