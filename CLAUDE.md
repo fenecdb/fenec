@@ -15,11 +15,11 @@ front door and links into them, and this file is the working summary.
 make test          # cargo test (no fenec-bench, no examples), fenec-core without its indexes, then the JS tests
 make wasm          # builds fenec-wasm for wasm32, copies to web/fenec.wasm
 make wasm FEATURES="text sorted"   # without the other indexes (FEATURES=none: none of them)
-make wasm-lite     # the module without any, to web/fenec-lite.wasm (web/fenec.test.js)
+make wasm-lite     # the test build without any, to web/fenec-lite.wasm (web/fenec.test.js; shipped by nothing)
 make wasm-sizes    # the module's size with each of the 16 sets of indexes
 make size-report   # where the module's bytes go, by crate, module and std (BASE=main: against main; BIN=fenec-server: a native binary's)
 make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (speed.mjs a.wasm b.wasm compares builds)
-make wasm-exact-speed   # near without the graph (the lite module), 1k-50k rows x 128/384, against the graph and exact
+make wasm-exact-speed   # near without the graph (the wasm-lite build), 1k-50k rows x 128/384, against the graph and exact
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
 make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
@@ -1186,11 +1186,17 @@ every browser module.
 `make wasm-lite` makes, both ways, and CI runs clippy over none and each
 alone.
 
-**Two modules and a client entry, by where the queries run.**
-`@fenecdb/web` ships `fenec.wasm` (every index and the schema check,
-180.6 KB brotli) and `fenec-lite.wasm` (no index, no schema check, 134.3
-KB), and `@fenecdb/web/client`, which
-is `web/client.js`: the builder (`builder.js`) and the HTTP client
+**One module and a client entry, by where the queries run, and a test
+build.** `@fenecdb/web` ships `fenec.wasm` (every index and the schema
+check, 180.6 KB brotli) and `@fenecdb/web/client`, so a user has two
+clear choices: queries on a server through the client entry and no
+module, or a database in the page or a synced replica through the full
+module. `fenec-lite.wasm` (no index, no schema check, 134.3 KB; `make
+wasm-lite`, as `make wasm FEATURES=none SCHEMA=0`) was shipped beside it
+and is a test build now -- built in CI, packed and released by nothing --
+because it holds the invariant above: a build without an index opens a
+file that declares one, and `web/fenec.test.js` hands files between it
+and the full module both ways. The client entry is `web/client.js`: the builder (`builder.js`) and the HTTP client
 (`http.js`) re-exported, the two modules `fenec.js` imports beside its
 glue, persistence and sync. The entry's worth is that it cannot pull in
 the engine, sync or storage, not the bytes: a `connect`-only app never
@@ -1225,10 +1231,10 @@ search over codes is, a bit index taken to hold its vectors whole while
 fewer than `BIT_TRAIN` distinct ones are stored (`stored_hash`); its
 tombstones, which count there, are not known here. Without `sparse`, a
 sparse `near` takes the `exact` scan. `match` without `text` is refused:
-BM25 needs the index's statistics. `web/fenec.test.js` holds the lite
-module's `near` to the full one's `near ... exact` over 9
+BM25 needs the index's statistics. `web/fenec.test.js` holds the test
+build's `near` to the full one's `near ... exact` over 9
 declarations, filters and pages, row for row and score for score. The scan
-costs the modules without the graph 2.2 KB brotli; in the lite module at
+costs the modules without the graph 2.2 KB brotli; in the test build at
 10 000 x 128 it takes 2.4 ms against 0.22 through a graph and 0.49 for the
 full module's exact scan, at 50 000 x 384 29, 0.75 and 3.9 (`make
 wasm-exact-speed`): each

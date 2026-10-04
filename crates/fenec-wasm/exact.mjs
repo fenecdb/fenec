@@ -1,6 +1,6 @@
 // `near` in a module without the graph, in Node: `make wasm-exact-speed`.
 //
-// A module made without `vector` -- the lite one, `make wasm-lite` --
+// A module made without `vector` -- the test build `make wasm-lite` --
 // answers `near` by measuring every vector, as `near ... exact` does in the
 // full one. This is what that costs as a collection grows: 1 000, 10 000 and
 // 50 000 clustered vectors of 128 and 384 dimensions, a `limit 10` each,

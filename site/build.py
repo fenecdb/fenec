@@ -412,7 +412,7 @@ CLAIMS = [
     ("site/content/docs/javascript.html",
      r"<code>sync\(\)</code> loads it too</td><td class=\"n\">(\d+) KB</td>", "kb_br", 0),
     ("site/content/docs/javascript.html",
-     r"<code>Fenec.open\('./fenec-lite.wasm'\)</code></td><td class=\"n\">(\d+) KB</td>", "kb_lite_br", 0),
+     r"make wasm FEATURES=none SCHEMA=0   # nor the schema check: (\d+) KB", "kb_lite_br", 0),
     ("site/content/docs/javascript.html", r"modules it\s+imports, (\d+) KB brotli", "kb_client_br", 0),
     ("site/content/docs/javascript.html", r"bundles to\s+(\d+) KB brotli through it", "kb_app_client_br", 0),
     ("site/content/docs/javascript.html", r"and to (\d+) KB through <code>@fenecdb/web</code>", "kb_app_br", 0),
@@ -430,16 +430,15 @@ CLAIMS = [
     ("site/content/docs/benchmarks.html",
      r"in an app's bundle, <code>@fenecdb/web/client</code></td><td class=\"n\">(\d+) KB</td>", "kb_app_client_br", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">(\d+) KB</td>', "kb_lite", 0),
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">(\d+) KB</td>', "kb_lite", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_br", 0),
     ("site/content/docs/benchmarks.html",
-     r'<code>fenec-lite.wasm</code>, no index</td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
+     r'<code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">\d+ KB</td><td class="n">\d+ KB</td><td class="n">(\d+) KB</td>',
      "kb_lite_gz", 0),
     ("README.md", r"`@fenecdb/web/client`, (\d+) KB brotli\s+in its bundle", "kb_app_client_br", 0),
     ("web/README.md", r"`fenec.wasm` \|[^\n]*: (\d+) KB brotli", "kb_br", 0),
-    ("web/README.md", r"`fenec-lite.wasm` \|[^\n]*: (\d+) KB brotli", "kb_lite_br", 0),
     ("web/README.md", r"`@fenecdb/web/client`, (\d+) KB brotli in an app's bundle", "kb_app_client_br", 0),
     ("CLAUDE.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
     ("AGENTS.md", r"WASM glue \(~(\d+) lines\)", "glue", 8),
@@ -579,8 +578,10 @@ def check_claims():
     client = b"".join(open(web(n), "rb").read() for n in CLIENT_MODULES if n != "client.js")
     client_gz, client_br = compressed_bytes(client)
     kb = lambda n: None if n is None else n / 1024
-    # The module built without the indexes, where it was built: a claim on
-    # it when it is missing says so.
+    # The module built without the indexes or the schema check (`make
+    # wasm-lite`, a test build no package ships, whose size the docs quote
+    # as a build option), where it was built: a claim on it when it is
+    # missing says so.
     other = {}
     for key, name in (("lite", "fenec-lite.wasm"),):
         if os.path.exists(web(name)):
