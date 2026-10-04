@@ -273,15 +273,23 @@ a:hover { color: var(--sun-hot); }
 }
 
 /* Two nested groups so the arrival and the parallax never fight over the
-   same transform: the outer one is scrolled, the inner one animates in. */
+   same transform: the outer one is scrolled, the inner one animates in.
+   The home hero's dunes, the 404's and the band under the header on every
+   other page (`.scarp`) are all these groups, so they rise and move alike.
+   Hidden only where the script that adds `.loaded` can run: without it the
+   ridges stood invisible for good. */
 .ridge { transform: translateY(var(--py, 0px)); will-change: transform; }
-.ridge-in { opacity: 0; transform: translateY(52px); }
+.js .ridge-in { opacity: 0; transform: translateY(52px); }
 .loaded .ridge-in { animation: rise 1.3s var(--ease) forwards; }
 .loaded .r4 .ridge-in { animation-delay: .06s; }
 .loaded .r3 .ridge-in { animation-delay: .19s; }
 .loaded .r2 .ridge-in { animation-delay: .32s; }
 .loaded .r1 .ridge-in { animation-delay: .45s; }
 @keyframes rise { to { opacity: 1; transform: translateY(0); } }
+/* The band's nearest ridge is the ground its floor fades out of: faded in
+   with the rest, the floor's top stood as a hard edge under the band until
+   it arrived. It only rises, its foot below the band's edge throughout. */
+.js .scarp .r1 .ridge-in { opacity: 1; }
 
 /* Heat still coming off the sand after sundown. */
 .shimmer {

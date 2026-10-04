@@ -233,17 +233,41 @@ if (sandCanvas && !still) {
   addEventListener('resize', () => { build(); wake(); }, { passive: true });
 }
 
-/* Dune parallax: the near ridge travels fastest, as it would from a car. */
-const ridges = [...document.querySelectorAll('.dunes .ridge')];
-if (ridges.length && !still) {
-  const rates = [0.16, 0.1, 0.055, 0.02];
+/* Dune parallax: the near ridge travels fastest, as it would from a car.
+   One loop for every dune field -- the home hero's, the 404's and the band
+   under the header on every other page -- each ridge by its own rate, so the
+   band moves as the hero does. It writes a transform on a frame and reads no
+   layout; a field off screen is left alone, an observer saying which are on. */
+const RATES = { r4: 0.16, r3: 0.1, r2: 0.055, r1: 0.02 };
+const fields = still ? [] : [...document.querySelectorAll('.dunes, .scarp')].map((el) => ({
+  el, on: true,
+  ridges: [...el.querySelectorAll('.ridge')].map((r) =>
+    [r, RATES[[...r.classList].find((c) => c in RATES)] ?? 0.05]),
+}));
+if (fields.length) {
   let queued = false;
   const move = () => {
     queued = false;
     const y = scrollY;
-    ridges.forEach((r, i) => { r.style.setProperty('--py', `${y * (rates[i] ?? 0.05)}px`); });
+    for (const f of fields) {
+      if (f.on) for (const [r, rate] of f.ridges) r.style.setProperty('--py', `${y * rate}px`);
+    }
   };
-  addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(move); } }, { passive: true });
+  const schedule = () => {
+    if (!queued && fields.some((f) => f.on)) { queued = true; requestAnimationFrame(move); }
+  };
+  // A margin, so a field coming back into view has been moved before it shows.
+  if (typeof IntersectionObserver === 'function') {
+    const io = new IntersectionObserver((es) => {
+      for (const e of es) {
+        const f = fields.find((x) => x.el === e.target);
+        if (f) f.on = e.isIntersecting;
+      }
+      schedule();
+    }, { rootMargin: '120px 0px' });
+    for (const f of fields) io.observe(f.el);
+  }
+  addEventListener('scroll', schedule, { passive: true });
   move();
 }
 
