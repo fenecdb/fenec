@@ -85,12 +85,47 @@ site/
   engine-worker.js  the engine off the main thread, for the playground
   highlight.js    the playground editor's colours; build.py writes its rules in
   test_highlight.py holds highlight.js to build.py's highlighter (needs node)
+  search.js       the search dialog, loaded when it is opened
+  search-query.js what the search asks the database, shared with its test
+  search.css      the dialog's styles, loaded with it
+  search-index.mjs  writes the search index through the module (build.py runs it)
+  search.test.mjs   known queries and the page each must find first
   content/
     index.html    the home page
     404.html      served by not_found_handling
     docs/*.html   one fragment per docs page
   dist/           generated output, gitignored
 ```
+
+## Search
+
+The search is fenecdb, in the reader's tab. `build.py` cuts every docs page,
+the home page and the playground into sections at their `<h2>` and `<h3>`,
+each a document -- `title`, `heading`, `url` with the heading's anchor,
+`body` as plain text with its code, `section` (the sidebar's group) and
+`kind` (doc, compare or benchmark) -- and hands them to
+`search-index.mjs`, which writes them into a database through
+`web/fenec.wasm` and its image into `dist` as `search.<hash>.fenec.gz`.
+Both texts are `@text(prefix=12)`, so a word half typed finds the words it
+begins.
+
+The page loads nothing of it until the search is opened -- the button,
+`/`, or Cmd/Ctrl+K. Then `search.js` fetches the module, the engine and the
+image, decompresses the image with `DecompressionStream` and hands it to
+`load`; every keystroke is a `match` over the text and another over the
+heading, whose score counts three times (FenecQL has no weight for a field),
+`snippet()` and `highlight()` for what is shown, and `facet section` for the
+chips. A snippet and a heading go into the page as text, and only the spans
+the engine names are wrapped in `<mark>`.
+
+The image is gzipped by the build because a `.fenec` is a type the edge does
+not know, and serves as it lies: 524 KB, against 178 KB gzipped.
+
+The build fails if the index cannot be written, is empty, or holds fewer
+documents than it was handed, and runs `search.test.mjs` over the image:
+"compact" must find `docs/server#compaction` first, "facet" the facets
+section, and so on. Change a heading those queries rely on and the test
+says so.
 
 ## Adding a docs page
 

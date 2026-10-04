@@ -13,6 +13,7 @@ across a dozen files and drift.
 import gzip as gziplib
 import hashlib
 import html
+import html.parser
 import json
 import os
 import re
@@ -852,6 +853,151 @@ def llms_texts():
     return "".join(index), "".join(full)
 
 
+# ------------------------------------------------------------------ search
+#
+# The site's search is fenecdb itself, in the visitor's browser: every page cut
+# into its sections, written into a database by the module the site ships,
+# and its image served beside the pages. Nothing is asked of a server and
+# nothing is loaded until the search is opened. The documents are built here
+# from the pages as rendered, so a section's anchor is the id its heading got.
+
+# The pages that are not docs, and the group each is found under. 404 is not
+# content.
+SEARCH_PAGES = {"index": "Home", "playground": "Playground"}
+# What a section's text does not hold: drawings, scripts, and what the page
+# hides from a screen reader too.
+SEARCH_SKIP = {"svg", "script", "style", "canvas", "template", "noscript", "button"}
+SEARCH_VOID = {"br", "img", "input", "meta", "link", "hr", "wbr", "source", "col", "area"}
+SEARCH_BLOCK = {"p", "li", "div", "pre", "tr", "td", "th", "table", "ul", "ol", "dl",
+                "dt", "dd", "details", "summary", "figure", "figcaption", "section",
+                "blockquote", "h1", "h2", "h3", "h4", "aside", "nav", "header", "footer",
+                "main", "article", "br"}
+
+
+class Sections(html.parser.HTMLParser):
+    """A rendered page's text, a section for each h2 and h3: `(id, heading,
+    text)`, the first under the page's h1 and no id."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.sections = [[None, "", []]]
+        self.skip = None  # (tag, depth) of the element being passed over
+        self.heading = None  # the text of the heading being read
+
+    def handle_starttag(self, tag, attrs):
+        if self.skip:
+            if tag == self.skip[0]:
+                self.skip[1] += 1
+            return
+        attrs = dict(attrs)
+        if tag in SEARCH_SKIP or attrs.get("aria-hidden") == "true":
+            if tag not in SEARCH_VOID:
+                self.skip = [tag, 1]
+            return
+        if tag in ("h2", "h3"):
+            self.sections.append([attrs.get("id"), "", []])
+        if tag in ("h1", "h2", "h3"):
+            self.heading = []
+        elif tag in SEARCH_BLOCK:
+            self.sections[-1][2].append(" ")
+
+    def handle_startendtag(self, tag, attrs):
+        if not self.skip and tag in SEARCH_BLOCK:
+            self.sections[-1][2].append(" ")
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            if tag == self.skip[0]:
+                self.skip[1] -= 1
+                if self.skip[1] == 0:
+                    self.skip = None
+            return
+        if tag in ("h1", "h2", "h3") and self.heading is not None:
+            text = squash("".join(self.heading))
+            if tag == "h1" and len(self.sections) == 1:
+                self.sections[0][1] = text
+            elif tag != "h1":
+                self.sections[-1][1] = text
+            self.heading = None
+        elif tag in SEARCH_BLOCK:
+            self.sections[-1][2].append(" ")
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if self.heading is not None:
+            self.heading.append(data)
+        else:
+            self.sections[-1][2].append(data)
+
+
+def squash(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def search_documents(rendered):
+    """`rendered` is `[(key, meta, body)]`, each body as the page shows it;
+    the documents of the search index, a section each."""
+    groups = {key: group for group, items in NAV for key, _ in items}
+    docs = []
+    for key, meta, body in rendered:
+        group = groups.get(key) or SEARCH_PAGES.get(key)
+        if group is None:
+            continue
+        kind = ("benchmark" if key == "docs/benchmarks"
+                else "compare" if group == "Compare" else "doc")
+        title = re.sub(r"\s+—\s+fenecdb$", "", meta.get("title", "")).strip()
+        if key == "index":
+            title = "fenecdb"
+        # The URL as the pages link it (`clean_links`): no `.html`, and an
+        # index is its directory.
+        url = key[: -len("index")] if key.endswith("index") else key
+        parser = Sections()
+        parser.feed(body)
+        parser.close()
+        for anchor, heading, text in parser.sections:
+            text = squash("".join(text))
+            heading = heading or title
+            if not text and anchor is None:
+                continue
+            docs.append({
+                "title": title,
+                "heading": heading,
+                "url": url + (f"#{anchor}" if anchor else ""),
+                "body": text,
+                "section": group,
+                "kind": kind,
+            })
+    return docs
+
+
+def search_index(docs, wasm, dest):
+    """Writes the documents into a database through the module the site
+    ships, and its image to `dest`; returns the number of documents. Fails
+    the build on an index missing or empty, and on a known query that does
+    not find its page first (`search.test.mjs`)."""
+    if not os.path.exists(wasm):
+        raise SystemExit("  the search index needs web/fenec.wasm: run `make wasm`")
+    node = shutil.which("node")
+    if node is None:
+        raise SystemExit("  the search index is written by node, which is not on PATH")
+    run = subprocess.run([node, os.path.join(ROOT, "search-index.mjs"), wasm, dest],
+                         input=json.dumps(docs), capture_output=True, text=True)
+    if run.returncode != 0:
+        raise SystemExit(f"  writing the search index failed:\n{run.stderr}")
+    if not os.path.exists(dest) or os.path.getsize(dest) == 0:
+        raise SystemExit(f"  the search index {dest} is missing or empty")
+    held = int(run.stdout.strip() or 0)
+    if held != len(docs) or held == 0:
+        raise SystemExit(f"  the search index holds {held} documents of {len(docs)}")
+    test = subprocess.run([node, "--test", os.path.join(ROOT, "search.test.mjs")],
+                          capture_output=True, text=True,
+                          env={**os.environ, "FENEC_SEARCH_INDEX": dest, "FENEC_WASM": wasm})
+    if test.returncode != 0:
+        raise SystemExit(f"  the search does not find what it should:\n{test.stdout}{test.stderr}")
+    return held
+
+
 # The fennec, written out of `fennec.js` by `node site/fennec.js`. Inlined,
 # so the header draws it with the first paint rather than after a request.
 def _mark(name, cls):
@@ -1006,21 +1152,56 @@ def build():
     # The editor's highlighter, imported by the playground alone.
     highlight_name = emit("highlight.js", highlight_js())
 
+    pages = []
+    for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
+        for name in sorted(files):
+            if name.endswith(".html"):
+                pages.append(os.path.join(dirpath, name))
+
+    # The search: its index first, since the script that opens it names the
+    # image by its hash. The pages are rendered for it as they are below, so
+    # each section's anchor is the id its heading is given there.
+    rendered = []
+    for path in sorted(pages):
+        key = os.path.relpath(path, os.path.join(ROOT, "content"))[:-5].replace(os.sep, "/")
+        meta, body = read_page(path)
+        rendered.append((key, meta, headings(render_code_blocks(body))[0]))
+    docs = search_documents(rendered)
+    index_path = os.path.join(OUT, "search.fenec")
+    held = search_index(docs, os.path.join(REPO, "web", "fenec.wasm"), index_path)
+    image = open(index_path, "rb").read()
+    os.remove(index_path)
+    # Shipped gzipped, and opened in the page with DecompressionStream: a
+    # file of no type the edge knows is served as it lies, and as it lies the
+    # image is three times what it is gzipped.
+    packed = gziplib.compress(image, 9, mtime=0)
+    index_name = f"search.{hashlib.sha256(image).hexdigest()[:10]}.fenec.gz"
+    open(os.path.join(OUT, index_name), "wb").write(packed)
+    engine["search.fenec"] = index_name
+    _, br = compressed_bytes(image)
+    print(f"  search: {held} sections, an image of {len(image) / 1024:.1f} KB, "
+          f"{len(packed) / 1024:.1f} KB gzipped as served"
+          + (f" ({br / 1024:.1f} KB brotli)" if br else ""))
+    search_css = emit("search.css", open(os.path.join(ROOT, "search.css"), encoding="utf-8").read())
+    search_query = emit("search-query.js", open(os.path.join(ROOT, "search-query.js"), encoding="utf-8").read())
+    search = open(os.path.join(ROOT, "search.js"), encoding="utf-8").read()
+    for plain, hashed in (("./search-query.js", search_query), ("./search.css", search_css),
+                          ("./search.fenec", index_name),
+                          ("./fenec.js", engine.get("fenec.js", "fenec.js")),
+                          ("./fenec.wasm", engine.get("fenec.wasm", "fenec.wasm"))):
+        search = search.replace(f"'{plain}'", f"'./{hashed}'")
+    search_js = emit("search.js", search)
+
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("./engine-worker.js", "./" + worker_name)
     script = script.replace("'./motion.js'", f"'./{motion_js}'")
+    script = script.replace("'./search.js'", f"'./{search_js}'")
     script = script.replace("'./highlight.js'", f"'./{highlight_name}'")
     emit("site.js", script)
 
     shutil.copy(os.path.join(ROOT, "mark.svg"), os.path.join(OUT, "favicon.svg"))
 
     emit("styles.css", open(os.path.join(ROOT, "styles.css"), encoding="utf-8").read())
-
-    pages = []
-    for dirpath, _, files in os.walk(os.path.join(ROOT, "content")):
-        for name in sorted(files):
-            if name.endswith(".html"):
-                pages.append(os.path.join(dirpath, name))
 
     for path in sorted(pages):
         rel = os.path.relpath(path, os.path.join(ROOT, "content"))

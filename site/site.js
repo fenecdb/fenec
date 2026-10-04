@@ -69,6 +69,39 @@ if (side) {
   });
 }
 
+/* The search: the dialog, the engine and the index load when it is first
+   opened (`search.js`), never with the page. */
+const searchBtn = document.querySelector('.search-open-btn');
+if (searchBtn) {
+  let searching = null;
+  const openSearch = (from) => {
+    const since = performance.now();
+    // The menu shuts first: its panel would stand over the page the
+    // dialog's results lead to, and a link in it is no place to come back to.
+    if (header?.classList.contains('open')) {
+      menuBtn.click();
+      if (menu.contains(from)) from = searchBtn;
+    }
+    (searching ??= import('./search.js')).then((m) => m.open(from, since), (e) => {
+      searching = null;
+      console.error(e);
+    });
+  };
+  searchBtn.addEventListener('click', () => openSearch(searchBtn));
+  const typing = (t) => t instanceof Element && (t.isContentEditable || t.closest('input, textarea, select, [contenteditable]'));
+  addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if ((e.metaKey || e.ctrlKey) && k === 'k' && !e.shiftKey) {
+      e.preventDefault();
+      openSearch(document.activeElement);
+    } else if (k === '/' && !e.metaKey && !e.ctrlKey && !typing(e.target)) {
+      e.preventDefault();
+      openSearch(document.activeElement);
+    }
+  });
+}
+
 /* Table of contents: the active entry is the last heading that has passed
    under the sticky header. */
 const tocLinks = [...document.querySelectorAll('.toc a')];

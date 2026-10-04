@@ -115,8 +115,10 @@ jobs:
       # runner is enough: the module is the one the site workflow builds, to
       # the byte, and brotli comes from apt.
       # esbuild bundles the app the docs weigh the client entry by, pinned as
-      # the site's deploy pins it.
-      - name: Check the sizes the docs quote
+      # the site's deploy pins it. The same build writes the site's search
+      # index through the module and fails when a known query does not find
+      # its page first (site/search.test.mjs).
+      - name: Check the sizes the docs quote, and the site's search
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get install -y --no-install-recommends brotli

@@ -210,6 +210,37 @@ a:hover { color: var(--sun-hot); }
   html:not(.js) .top-nav { flex-wrap: wrap; gap: 4px 18px; }
 }
 
+/* The search: the button alone. The dialog's styles come with it, when it
+   is opened (search.css). */
+.search-open-btn {
+  display: inline-flex; align-items: center; gap: 8px; flex: none; cursor: pointer;
+  font: 500 14px/1 var(--sans); color: var(--sand-2);
+  background: rgba(244,169,60,.06); border: 1px solid var(--rule-hot);
+  border-radius: 6px; padding: 7px 8px 7px 10px;
+}
+.search-open-btn:hover { color: var(--sand); border-color: var(--sand-dim); }
+.search-open-btn svg { width: 16px; height: 16px; fill: none; stroke: var(--sun); stroke-width: 1.8; stroke-linecap: round; }
+.search-open-btn kbd {
+  font: 500 11.5px/1 var(--mono); color: var(--sand-dim);
+  border: 1px solid var(--rule-hot); border-radius: 4px; padding: 2px 6px;
+}
+/* It needs script, as the dialog it opens does. */
+html:not(.js) .search-open-btn { display: none; }
+/* Under 860 px the header is the mark and two buttons: Search before Menu,
+   so a phone's search is one tap and not inside the panel. Square, the
+   word kept for a screen reader. */
+@media (max-width: 860px) {
+  .js .search-open-btn {
+    order: 1; margin-left: auto; width: 40px; height: 40px; padding: 0; justify-content: center;
+  }
+  .js .menu-toggle { order: 2; margin-left: 0; }
+  .search-open-btn kbd { display: none; }
+  .search-open-btn svg { width: 18px; height: 18px; }
+  .search-open-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+}
+
 /* ========================================================== the hero scene */
 
 /* The ridge line is pinned to the bottom of the first screen, so the dune

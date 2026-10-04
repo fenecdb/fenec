@@ -57,6 +57,9 @@ jobs:
       - name: Install brotli
         run: sudo apt-get install -y --no-install-recommends brotli
 
+      # build.py also writes the search index through the module, and fails
+      # when it is missing or empty or a known query does not find its page
+      # first (site/search.test.mjs).
       - name: Build the wasm module and the site
         run: make site
 
