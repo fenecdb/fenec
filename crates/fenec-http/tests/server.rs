@@ -10,7 +10,7 @@ use fenec_http::{Config, Server};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 struct Harness {
@@ -179,24 +179,65 @@ fn sync_failure_is_reported_and_stops_writes() {
     assert!(h.db.read().unwrap().failure().is_some());
 }
 
-/// A disk that takes `delay` for an fsync, and fails it when `fail` is set
-/// -- the half of a sync that runs outside the lock. It keeps `FileSink`'s
-/// protocol: an fsync covers every byte appended before it starts, and one
-/// that finds its bytes covered does not run. It counts the fsyncs it ran.
+/// A disk whose fsync fails when `fail` is set -- the half of a sync that
+/// runs outside the lock -- and waits at a [`Gate`] the test holds. It
+/// keeps `FileSink`'s protocol: an fsync covers every byte appended before
+/// it starts, and one that finds its bytes covered does not run. It counts
+/// the fsyncs it ran.
 #[derive(Clone)]
 struct SlowDisk {
-    delay: Duration,
     fail: bool,
     fsyncs: Arc<AtomicUsize>,
     appended: Arc<AtomicU64>,
     /// Bytes on disk; held through an fsync, as the file is.
     synced: Arc<Mutex<u64>>,
+    gate: Arc<(Mutex<Gate>, Condvar)>,
+}
+
+/// What an fsync waits for: the test letting it go, or the appends it
+/// is told to wait for -- writes that could land only if the fsync held no
+/// lock. Ordered by events, not by the clock: timed with a 200 ms fsync
+/// and a 50 ms head start, the test failed on a loaded machine with no
+/// lock held anywhere. An fsync that waits out `GATE_LIMIT` goes on and
+/// says so in `timed_out`, which is the failure: what it waited for could
+/// not happen beside it.
+#[derive(Default)]
+struct Gate {
+    /// Appends so far: a write's record each.
+    appends: u64,
+    /// While set, an fsync waits until `appends` reaches it.
+    hold_until: Option<u64>,
+    /// Fsyncs that reached the gate.
+    reached: usize,
+    timed_out: bool,
+}
+
+const GATE_LIMIT: Duration = Duration::from_secs(20);
+
+impl SlowDisk {
+    fn wait_at_gate(&self) {
+        let (lock, cv) = &*self.gate;
+        let mut g = lock.lock().unwrap();
+        g.reached += 1;
+        cv.notify_all();
+        let (mut g, waited) = cv
+            .wait_timeout_while(g, GATE_LIMIT, |g| {
+                g.hold_until.is_some_and(|n| g.appends < n)
+            })
+            .unwrap();
+        if waited.timed_out() {
+            g.timed_out = true;
+        }
+    }
 }
 
 impl fenec_core::engine::Sink for SlowDisk {
     fn append(&mut self, bytes: &[u8]) -> fenec_core::error::Result<()> {
         self.appended
             .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        let (lock, cv) = &*self.gate;
+        lock.lock().unwrap().appends += 1;
+        cv.notify_all();
         Ok(())
     }
     fn rewrite(&mut self, _bytes: &[u8]) -> fenec_core::error::Result<()> {
@@ -211,7 +252,7 @@ impl fenec_core::engine::Sink for SlowDisk {
                 return Ok(());
             }
             let covers = disk.appended.load(Ordering::SeqCst);
-            std::thread::sleep(disk.delay);
+            disk.wait_at_gate();
             disk.fsyncs.fetch_add(1, Ordering::SeqCst);
             if disk.fail {
                 return Err(fenec_core::error::Error::Io("input/output error".into()));
@@ -222,14 +263,52 @@ impl fenec_core::engine::Sink for SlowDisk {
     }
 }
 
-fn slow_disk_server(delay: Duration, fail: bool) -> (Harness, Arc<AtomicUsize>) {
+struct SlowDiskServer {
+    h: Harness,
+    fsyncs: Arc<AtomicUsize>,
+    gate: Arc<(Mutex<Gate>, Condvar)>,
+}
+
+impl SlowDiskServer {
+    /// Holds every fsync from now on until `appends` more writes landed;
+    /// `u64::MAX` until [`Self::open`].
+    fn hold_for(&self, appends: u64) {
+        let mut g = self.gate.0.lock().unwrap();
+        g.hold_until = Some(g.appends.saturating_add(appends));
+    }
+
+    fn open(&self) {
+        self.gate.0.lock().unwrap().hold_until = None;
+        self.gate.1.notify_all();
+    }
+
+    /// Waits until `n` fsyncs in all reached the gate.
+    fn reached(&self, n: usize) {
+        let (lock, cv) = &*self.gate;
+        let (g, waited) = cv
+            .wait_timeout_while(lock.lock().unwrap(), GATE_LIMIT, |g| g.reached < n)
+            .unwrap();
+        assert!(
+            !waited.timed_out(),
+            "{} fsyncs reached the disk, not {n}",
+            g.reached
+        );
+    }
+
+    fn timed_out(&self) -> bool {
+        self.gate.0.lock().unwrap().timed_out
+    }
+}
+
+fn slow_disk_server(fail: bool) -> SlowDiskServer {
     let fsyncs = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new((Mutex::new(Gate::default()), Condvar::new()));
     let mut db = Database::with_sink(Box::new(SlowDisk {
-        delay,
         fail,
         fsyncs: Arc::clone(&fsyncs),
         appended: Arc::new(AtomicU64::new(0)),
         synced: Arc::new(Mutex::new(0)),
+        gate: Arc::clone(&gate),
     }));
     db.execute(&fenec_ql::parse_one("create collection t (n int)").unwrap())
         .unwrap();
@@ -240,34 +319,37 @@ fn slow_disk_server(delay: Duration, fail: bool) -> (Harness, Arc<AtomicUsize>) 
         },
         db,
     );
-    (h, fsyncs)
+    SlowDiskServer { h, fsyncs, gate }
 }
 
 /// The fsync of a durable write runs outside the write lock: a read
 /// arriving meanwhile is answered at once, and writers arriving together
 /// share one fsync -- the group commit -- rather than take one each in
 /// turn under the lock.
+///
+/// Held by order, not by the clock: the fsync is held until the read is
+/// answered, or until the other writers' records have landed, which under
+/// the lock neither could be -- the fsync then waits out `GATE_LIMIT` and
+/// the test fails on it. Timed (a 200 ms fsync, the read under 100 ms, the
+/// eight writes under a second) it failed once on a loaded machine.
 #[test]
 fn a_durable_write_does_not_hold_the_readers_or_the_other_writers() {
-    let (h, fsyncs) = slow_disk_server(Duration::from_millis(200), false);
-    let port = h.port;
+    let s = slow_disk_server(false);
+    let port = s.h.port;
+    s.hold_for(u64::MAX);
     let writer = std::thread::spawn(move || ok(Conn::open(port).query("put t {n: 1}")));
-    std::thread::sleep(Duration::from_millis(50));
-    let mut reader = Conn::open(h.port);
-    let t = Instant::now();
-    ok(reader.query("get t count"));
-    let read = t.elapsed();
+    s.reached(1);
+    // The write's fsync is under way, and stays so until the read is in.
+    ok(Conn::open(port).query("get t count"));
+    s.open();
     writer.join().unwrap();
-    // The write under way was still inside its 200 ms fsync.
-    assert!(
-        read < Duration::from_millis(100),
-        "the read waited {read:?}"
-    );
+    assert!(!s.timed_out(), "the read waited for the fsync");
 
-    // Eight writers at once: with an fsync each under the lock they took
-    // 8 x 200 ms. Sharing, they take two or three fsyncs.
-    let before = fsyncs.load(Ordering::SeqCst);
-    let t = Instant::now();
+    // Eight writers at once, the first fsync held until all eight records
+    // are in: with an fsync each under the lock, the second writer could
+    // not append. Sharing, the one fsync after it covers the other seven.
+    let before = s.fsyncs.load(Ordering::SeqCst);
+    s.hold_for(8);
     let writers: Vec<_> = (0..8)
         .map(|i| {
             std::thread::spawn(move || ok(Conn::open(port).query(&format!("put t {{n: {i}}}"))))
@@ -276,13 +358,9 @@ fn a_durable_write_does_not_hold_the_readers_or_the_other_writers() {
     for w in writers {
         w.join().unwrap();
     }
-    let took = t.elapsed();
-    let ran = fsyncs.load(Ordering::SeqCst) - before;
-    assert!(ran <= 4, "{ran} fsyncs for 8 writes");
-    assert!(
-        took < Duration::from_millis(1000),
-        "8 durable writes took {took:?}"
-    );
+    assert!(!s.timed_out(), "the writers waited for each other's fsync");
+    let ran = s.fsyncs.load(Ordering::SeqCst) - before;
+    assert!(ran <= 2, "{ran} fsyncs for 8 writes");
 }
 
 /// An fsync that fails after the lock was let go takes the answer back:
@@ -290,7 +368,7 @@ fn a_durable_write_does_not_hold_the_readers_or_the_other_writers() {
 /// it, as after a failure of its own.
 #[test]
 fn a_failed_fsync_outside_the_lock_is_reported_and_stops_writes() {
-    let (h, _) = slow_disk_server(Duration::from_millis(1), true);
+    let SlowDiskServer { h, .. } = slow_disk_server(true);
     let mut c = Conn::open(h.port);
     let (status, body) = c.query("put t {n: 1}");
     assert_eq!(
