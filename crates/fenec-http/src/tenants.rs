@@ -845,6 +845,10 @@ impl Tenants {
             std::fs::remove_file(&path)
                 .map_err(|e| Refused(500, format!("could not remove tenant `{name}`: {e}")))?;
             let _ = std::fs::remove_file(path.with_extension("fenec.compacting"));
+            // The sync log beside it (`fenec_core::fs`): a log names the
+            // file it was written for, and is kept from a tenant made
+            // again under the name that way too.
+            let _ = std::fs::remove_file(path.with_extension("fenec.sync"));
             let _ = std::fs::remove_file(self.follows_path(name));
             Ok(())
         })

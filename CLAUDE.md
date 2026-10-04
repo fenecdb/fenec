@@ -55,6 +55,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
 make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
@@ -332,6 +333,31 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 <ms>` flushes the same way, a database's and each of a node's tenants'
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
+
+**A durable write syncs a log beside the file, not the file**
+(`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
+fsync of a file whose length changed commits the journal too: in Docker's
+VM a 300-byte append and its `fdatasync` took 356 us, the same bytes
+written into room the file already had and synced 65 -- why PostgreSQL
+fills its WAL segments first. So `FileSink`'s sync writes what the file
+took since the last one into `<file>.fenec.sync`, 4 KB of header and 256
+KB of entries written once at its full size and never grown, and syncs
+that alone (`Tail`); the file is fsynced when an entry would not fit, a
+sync holds more than 64 KB, or the sink is new to the file -- whose bytes
+an earlier process may have left unsynced -- and the log then begins a
+generation from where the file stands. An entry is the file's bytes at a
+place, with its generation and a hash, so a cut one ends the log; the
+header names the generation, where the file stood synced, and a hash of
+the 4 KB before that, so a log is applied only to its own file. `create`
+applies it before the file is read or mapped (`synclog::recover`, the
+bytes written again only where the file lost them), a new file removes
+one left beside it, a rename over the file (`swap_in`) removes it, and a
+tenant's delete too; `open_read_only` passes it over. On macOS
+`F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
+there is no log (`ENABLED`; `fs::keep_sync_log` has a test thread keep
+one). In Docker a durable update went 624 -> 325 us p50 (`make
+roundtrip-bench`), against PostgreSQL's 378; the Linux test suite runs
+with it.
 
 **Replication ships only what is on disk, numbered by the change counter.**
 A primary (`--replication-token`) writes through a `Tee`

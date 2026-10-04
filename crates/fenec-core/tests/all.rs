@@ -35,6 +35,7 @@ mod sparse;
 mod spill;
 mod storage;
 mod subquery;
+mod synclog;
 mod ttl;
 mod unique;
 mod writes;

@@ -58,6 +58,126 @@ struct Disk {
     /// A failed write or fsync. The kernel may have dropped the pages it
     /// could not write, so nothing is reported durable after one.
     failed: Option<crate::error::Error>,
+    /// What a sync writes into the sync log rather than fsync the file.
+    #[cfg(unix)]
+    tail: Tail,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static KEEP_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Has the files this thread opens keep a sync log ([`crate::synclog`])
+/// where the platform would not -- macOS, whose `F_FULLFSYNC` costs the
+/// same either way -- so that a test there goes through it.
+#[doc(hidden)]
+#[cfg(unix)]
+pub fn keep_sync_log(on: bool) {
+    KEEP_LOG.with(|k| k.set(on));
+}
+
+/// The bytes written since the last sync, which the next one puts into the
+/// sync log ([`crate::synclog`]) and syncs there, rather than fsync the
+/// file: on ext4 an fsync of a file that grew commits the journal, 356 us
+/// in Docker's VM where the log's takes 65.
+#[cfg(unix)]
+struct Tail {
+    /// Whether this sink keeps a log (`synclog::ENABLED`, or a test's).
+    keeps: bool,
+    log_path: PathBuf,
+    /// Opened at the first sync that begins a generation; `None` where it
+    /// could not be made, and every sync then fsyncs the file.
+    log: Option<crate::synclog::SyncLog>,
+    /// The file's length: where the next byte written goes.
+    end: u64,
+    /// The bytes written since the last sync and where they start, while
+    /// they fit an entry.
+    since: Vec<u8>,
+    since_at: u64,
+    /// The next sync fsyncs the file itself and begins a generation: what
+    /// was written since outgrew an entry, or the file is new to the sink
+    /// -- whose bytes an earlier process may have left unsynced.
+    direct: bool,
+}
+
+#[cfg(unix)]
+impl Tail {
+    fn new(path: &Path, end: u64) -> Tail {
+        Tail {
+            keeps: crate::synclog::ENABLED || KEEP_LOG.with(|k| k.get()),
+            log_path: crate::synclog::path_for(path),
+            log: None,
+            end,
+            since: Vec::new(),
+            since_at: end,
+            direct: true,
+        }
+    }
+
+    /// `bytes` reached the file.
+    fn wrote(&mut self, bytes: &[u8]) {
+        self.end += bytes.len() as u64;
+        if !self.keeps || self.direct {
+            return;
+        }
+        if self.since.len() + bytes.len() > crate::synclog::ENTRY_MAX {
+            self.direct = true;
+            self.since = Vec::new();
+        } else {
+            self.since.extend_from_slice(bytes);
+        }
+    }
+
+    /// The file starts again at `end`, synced: a cut, a rewrite.
+    fn reset(&mut self, end: u64) {
+        self.end = end;
+        self.since.clear();
+        self.since_at = end;
+        self.direct = true;
+    }
+
+    /// Makes what was written since the last sync durable: through the log
+    /// while it fits there, else by an fsync of the file, after which the
+    /// log begins a generation from where the file now stands.
+    fn sync(&mut self, file: &File) -> std::io::Result<()> {
+        if self.keeps && !self.direct {
+            if self.since.is_empty() {
+                return Ok(());
+            }
+            if let Some(log) = self
+                .log
+                .as_mut()
+                .filter(|l| l.takes(self.since_at, self.since.len()))
+            {
+                log.append(self.since_at, &self.since)?;
+                self.since.clear();
+                self.since_at = self.end;
+                return Ok(());
+            }
+        }
+        file.sync_data()?;
+        self.since.clear();
+        self.since_at = self.end;
+        if self.keeps {
+            if self.log.is_none() {
+                self.log = crate::synclog::SyncLog::open(&self.log_path).ok();
+            }
+            if let Some(log) = &mut self.log {
+                log.begin(file, self.end)?;
+                self.direct = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// The file was put in place by a rename: the log, written beside the
+    /// one it replaced, is let go of, and the next sync begins one anew.
+    fn replaced(&mut self, end: u64) {
+        self.log = None;
+        let _ = std::fs::remove_file(&self.log_path);
+        self.reset(end);
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -76,6 +196,8 @@ impl Disk {
             return Err(self.failed.clone().unwrap());
         }
         self.written += bytes.len() as u64;
+        #[cfg(unix)]
+        self.tail.wrote(&bytes);
         Ok(())
     }
 
@@ -88,6 +210,8 @@ impl Disk {
             return Err(self.failed.clone().unwrap());
         }
         self.written += bytes.len() as u64;
+        #[cfg(unix)]
+        self.tail.wrote(bytes);
         Ok(())
     }
 
@@ -100,7 +224,11 @@ impl Disk {
             return Ok(());
         }
         self.write_pending(pending)?;
-        if let Err(e) = self.file.sync_data() {
+        #[cfg(unix)]
+        let synced = self.tail.sync(&self.file);
+        #[cfg(not(unix))]
+        let synced = self.file.sync_data();
+        if let Err(e) = synced {
             self.failed = Some(e.into());
             return Err(self.failed.clone().unwrap());
         }
@@ -131,6 +259,11 @@ impl FileSink {
             Ok(f) => {
                 // Everything appended so far is in the image, and the image
                 // is on disk.
+                #[cfg(unix)]
+                {
+                    let end = f.metadata().map_or(0, |m| m.len());
+                    disk.tail.replaced(end);
+                }
                 disk.file = f;
                 disk.written = self.appended;
                 disk.synced = self.appended;
@@ -163,15 +296,25 @@ impl FileSink {
             .truncate(false)
             .open(&path)?;
         if file.metadata()?.len() == 0 {
+            // A log left beside a file of that name is not this one's.
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(crate::synclog::path_for(&path));
             file.write_all(&MAGIC[..])?;
             file.flush()?;
             file.seek(SeekFrom::Start(0))?;
+        } else {
+            // What the last process made durable through the sync log and
+            // the machine lost from the file goes back before it is read.
+            #[cfg(unix)]
+            crate::synclog::recover(&file, &crate::synclog::path_for(&path))?;
         }
         Ok((file, path))
     }
 
     /// A sink appending to `file`, which is positioned at its end.
     fn over(file: File, path: PathBuf) -> FileSink {
+        #[cfg(unix)]
+        let end = file.metadata().map_or(0, |m| m.len());
         FileSink {
             pending: Arc::new(Mutex::new(Vec::new())),
             appended: 0,
@@ -182,6 +325,8 @@ impl FileSink {
                 #[cfg(test)]
                 fsyncs: 0,
                 failed: None,
+                #[cfg(unix)]
+                tail: Tail::new(&path, end),
             })),
             path,
             #[cfg(all(unix, target_pointer_width = "64"))]
@@ -202,6 +347,8 @@ impl FileSink {
         disk.file.set_len(len as u64)?;
         disk.file.sync_data()?;
         disk.file.seek(SeekFrom::End(0))?;
+        #[cfg(unix)]
+        disk.tail.reset(len as u64);
         Ok(())
     }
 }
@@ -793,6 +940,7 @@ impl Sink for ReadOnly {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     /// A durability finds its bytes on disk when a later one got there
     /// first, and runs no fsync of its own; what it wrote is the file's
