@@ -77,3 +77,87 @@ def test_a_schema_is_compared_and_applied_only_when_asked(client):
     finally:
         client.query(f"drop collection if exists {name}")
         client.query("drop collection if exists _migrations")
+
+
+def _server(plan):
+    """A server on loopback that takes one connection after another and
+    does, for each request it reads, what `plan` says next: "answer" with
+    keep-alive, "close" (answer, then close the connection) or "drop"
+    (close it with no answer). Its port, the requests it read, and an event
+    set each time it closed a connection."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    seen = []
+    closed = threading.Event()
+    plan = list(plan)
+
+    def read_request(conn):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return None
+            data += chunk
+        head, _, rest = data.partition(b"\r\n\r\n")
+        length = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":")[1])
+        while len(rest) < length:
+            rest += conn.recv(65536)
+        return head + rest
+
+    def serve():
+        while plan:
+            conn, _ = srv.accept()
+            while plan:
+                req = read_request(conn)
+                if req is None:
+                    break
+                seen.append(req)
+                what = plan.pop(0)
+                if what == "drop":
+                    break
+                body = b'{"affected":1}'
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: %d\r\nConnection: keep-alive\r\n\r\n%s" % (len(body), body)
+                )
+                if what == "close":
+                    break
+            conn.close()
+            closed.set()
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1], seen, closed
+
+
+def test_a_connection_the_server_closed_is_opened_again_before_a_request():
+    from fenecdb import Client
+
+    port, seen, closed = _server(["close", "answer"])
+    c = Client(f"http://127.0.0.1:{port}")
+    assert c.query("put t {n: 1}") == {"affected": 1}
+    assert closed.wait(10)
+    assert c.query("put t {n: 2}") == {"affected": 1}
+    assert len(seen) == 2
+
+
+def test_a_request_sent_is_never_sent_again():
+    from fenecdb import Client
+
+    port, seen, _ = _server(["answer", "drop", "answer"])
+    c = Client(f"http://127.0.0.1:{port}")
+    assert c.query("put t {n: 1}") == {"affected": 1}
+    with pytest.raises(Exception):
+        c.query("put t {n: 2}")
+    # The server read the second write once: it was not sent again over a
+    # new connection after the first broke under it.
+    assert len(seen) == 2
+    assert c.query("put t {n: 3}") == {"affected": 1}
+    assert len(seen) == 3

@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import http.client
 import json
+import select
 import ssl
 import threading
 import urllib.error
@@ -261,34 +262,31 @@ class Client:
 
     def _send(self, method: str, path: str, body: bytes, headers: dict) -> tuple:
         """A request over this thread's connection: its status, `Fenec-Seq`
-        and body. A connection the server closed while it was idle is found
-        closed by the request sent over it, which never reached a statement;
-        that one request goes again, over a new connection."""
+        and body. A kept connection the server closed while it was idle is
+        found so before the request goes -- its socket reads as ready, the
+        end of the stream -- and a new one is opened in its place. Nothing
+        is sent again once sent: a write the server read and answered on a
+        connection that then broke would run twice."""
         conn = getattr(self._local, "conn", None)
-        for fresh in (conn is None, True):
-            if fresh:
-                conn = self._connect()
-            try:
-                conn.request(method, path, body, headers)
-                resp = conn.getresponse()
-                raw = resp.read()
-            except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError):
-                conn.close()
-                self._local.conn = None
-                if fresh:
-                    raise
-                continue
-            except BaseException:
-                conn.close()
-                self._local.conn = None
-                raise
-            if resp.will_close:
-                conn.close()
-                self._local.conn = None
-            else:
-                self._local.conn = conn
-            return resp.status, resp.getheader("Fenec-Seq"), raw
-        raise AssertionError("unreachable")
+        if conn is not None and _closed(conn):
+            conn.close()
+            conn = None
+        if conn is None:
+            conn = self._connect()
+        try:
+            conn.request(method, path, body, headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+        except BaseException:
+            conn.close()
+            self._local.conn = None
+            raise
+        if resp.will_close:
+            conn.close()
+            self._local.conn = None
+        else:
+            self._local.conn = conn
+        return resp.status, resp.getheader("Fenec-Seq"), raw
 
     def _connect(self) -> http.client.HTTPConnection:
         if self._tls:
@@ -318,6 +316,20 @@ def _faceted(answer: Any) -> Any:
     if isinstance(answer, dict) and "facets" in answer and isinstance(answer.get("rows"), list):
         return _rows(answer)
     return answer
+
+
+def _closed(conn: http.client.HTTPConnection) -> bool:
+    """Whether a kept connection can no longer take a request: the server
+    closed it (its socket reads as ready, at the end of the stream) or sent
+    what no request asked for. Between requests nothing is due on it."""
+    sock = conn.sock
+    if sock is None:
+        return True
+    try:
+        ready, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(ready)
 
 
 def _answer(status: int, raw: bytes) -> Any:
