@@ -110,6 +110,12 @@ html.search-open { overflow: hidden; }
 }
 .search-keys kbd { margin-right: 2px; }
 .search-time { font-family: var(--mono); }
+/* A section the meaning found and no word of the query is in. */
+.search-meaning {
+  margin-left: 8px; padding: 1px 6px; vertical-align: 2px;
+  font: 500 11px/1.4 var(--mono); color: var(--oasis);
+  border: 1px solid rgba(79, 224, 196, .35); border-radius: 4px;
+}
 
 /* A phone: the dialog from the top of the screen, the keys it has none of
    left out. */
