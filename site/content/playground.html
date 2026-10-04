@@ -28,10 +28,11 @@ description: Run FenecQL against a real fenecdb instance in your own browser. No
 
       <div class="pg-main">
         <div class="pg-editor">
-          <textarea id="pg-sql" spellcheck="false" aria-label="FenecQL"
+          <div class="hl"><pre class="hl-mirror" aria-hidden="true" data-bare></pre><textarea
+                    id="pg-sql" spellcheck="false" aria-label="FenecQL"
                     rows="7">get notes select body, topic, year
   where year >= 2023 and topic = "vectors"
-  limit 10</textarea>
+  limit 10</textarea></div>
           <div class="pg-bar">
             <button class="btn btn-fill pg-run" id="pg-run" type="button" disabled>Run</button>
             <span class="pg-hint">⌘↵ / Ctrl↵</span>

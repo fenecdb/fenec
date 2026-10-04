@@ -380,12 +380,12 @@ rows, err := db.Query(ctx, "get docs select title near embed $1 limit 5", []floa
 </pre>
 </li>
 <li data-name=".NET" data-mark="C#" data-file="Program.cs">
-<pre class="given" data-bare>
+<pre class="given" data-lang="csharp" data-bare>
 using FenecDb;
 
 using var db = new FenecClient("http://127.0.0.1:8080", new() { Token = "secret" });
 </pre>
-<pre class="typed" data-bare>
+<pre class="typed" data-lang="csharp" data-bare>
 await db.ExecAsync("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))");
 await db.ExecAsync("put docs {title: $1, embed: $2}", ["Night at the oasis", new[] { 0.1f, 0.2f, 0.3f }]);
 await db.ExecAsync("put docs {title: $1, embed: $2}", ["Dunes", new[] { 0.9f, 0.1f, 0.0f }]);
@@ -411,7 +411,7 @@ let rows = query("get docs select title near embed $1 limit 5", json!([[0.1, 0.2
 </pre>
 </li>
 <li data-name="Java" data-mark="jv" data-file="Search.java">
-<pre class="given" data-bare>
+<pre class="given" data-lang="java" data-bare>
 static HttpResponse&lt;String&gt; query(String json) throws Exception {
     var req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8080/query"))
         .header("Content-Type", "application/json")
@@ -421,7 +421,7 @@ static HttpResponse&lt;String&gt; query(String json) throws Exception {
     return HTTP.send(req, HttpResponse.BodyHandlers.ofString());
 }
 </pre>
-<pre class="typed" data-bare>
+<pre class="typed" data-lang="java" data-bare>
 query("""
     {"query": "create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))"}""");
 query("""
@@ -433,7 +433,7 @@ String rows = query("""
 </pre>
 </li>
 <li data-name="PHP" data-mark="php" data-file="search.php">
-<pre class="given" data-bare>
+<pre class="given" data-lang="php" data-bare>
 function query(string $q, array $params = []) {
     $ch = curl_init('http://127.0.0.1:8080/query');
     curl_setopt_array($ch, [
@@ -450,7 +450,7 @@ function query(string $q, array $params = []) {
     return $body;
 }
 </pre>
-<pre class="typed" data-bare>
+<pre class="typed" data-lang="php" data-bare>
 query('create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))');
 query('put docs {title: $1, embed: $2}', ['Night at the oasis', [0.1, 0.2, 0.3]]);
 query('put docs {title: $1, embed: $2}', ['Dunes', [0.9, 0.1, 0.0]]);
@@ -458,7 +458,7 @@ $rows = query('get docs select title near embed $1 limit 5', [[0.1, 0.2, 0.3]]);
 </pre>
 </li>
 <li data-name="Ruby" data-mark="rb" data-file="search.rb">
-<pre class="given" data-bare>
+<pre class="given" data-lang="ruby" data-bare>
 def query(q, params = [])
   req = Net::HTTP::Post.new(URI.join(URL, "/query"), "Content-Type" =&gt; "application/json")
   req["Authorization"] = "Bearer secret"
@@ -469,7 +469,7 @@ def query(q, params = [])
   body
 end
 </pre>
-<pre class="typed" data-bare>
+<pre class="typed" data-lang="ruby" data-bare>
 query("create collection if not exists docs (title text, embed vector&lt;3&gt; @hnsw(cosine))")
 query("put docs {title: $1, embed: $2}", ["Night at the oasis", [0.1, 0.2, 0.3]])
 query("put docs {title: $1, embed: $2}", ["Dunes", [0.9, 0.1, 0.0]])

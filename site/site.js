@@ -398,10 +398,16 @@ function playground(el) {
   ];
   el.querySelector('#pg-egs').innerHTML = EXAMPLES
     .map(([name], i) => `<li><button type="button" data-eg="${i}">${name}</button></li>`).join('');
+  // The editor's colours come with their own module, after the page: until
+  // then the textarea is plain text, laid out as it will be coloured.
+  let hl = null, redraw = () => {};
+  import('./highlight.js').then((m) => { hl = m; redraw = m.overlay(sqlBox); }, () => {});
+
   el.querySelector('#pg-egs').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-eg]');
     if (!b) return;
     sqlBox.value = EXAMPLES[+b.dataset.eg][1];
+    redraw();
     sqlBox.focus();
     run();
   });
@@ -482,7 +488,8 @@ function playground(el) {
       draw(r);
       say(`${r.ms.toFixed(3)} ms`, 'ok');
     } catch (err) {
-      out.innerHTML = `<p class="pg-err">${escapeHtml(String(err.message || err))}</p>`;
+      const msg = String(err.message || err);
+      out.innerHTML = `<p class="pg-err">${hl ? hl.quoted(msg) : escapeHtml(msg)}</p>`;
       say('query error', 'err');
     } finally {
       runBtn.disabled = false;

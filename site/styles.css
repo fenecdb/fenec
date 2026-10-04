@@ -784,6 +784,34 @@ tbody tr:last-child td { border-bottom: 0; }
   font: 400 14px/1.7 var(--mono); tab-size: 2; min-height: 130px;
 }
 .pg-editor textarea::placeholder { color: var(--sand-dim); }
+
+/* The editor coloured as it is typed (highlight.js): the textarea's text
+   drawn transparent over a mirror of it in the docs' token colours. The two
+   share every metric that places a character -- font, padding, tab size,
+   wrapping and the scrollbar's gutter -- or the caret drifts off its glyph.
+   The textarea stays the control and is painted on top; until the module
+   comes, and in forced colours, it is plain text and the mirror is not drawn. */
+.hl { position: relative; }
+.hl > textarea, .hl-mirror {
+  font: 400 14px/1.7 var(--mono); tab-size: 2; letter-spacing: 0;
+  white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
+  scrollbar-gutter: stable;
+}
+.hl > textarea { position: relative; }
+.hl-mirror {
+  position: absolute; inset: 0; margin: 0; padding: 16px 18px;
+  overflow: hidden; pointer-events: none; color: var(--sand);
+  visibility: hidden;
+}
+.hl.on .hl-mirror { visibility: visible; }
+.hl.on > textarea { color: transparent; caret-color: var(--sand); }
+.hl.on > textarea::selection { color: transparent; background: rgba(79,224,196,.28); }
+@media (forced-colors: active) {
+  .hl.on .hl-mirror { display: none; }
+  .hl.on > textarea { color: CanvasText; caret-color: auto; }
+  .hl.on > textarea::selection { color: HighlightText; background: Highlight; }
+}
+.pg-err .hl-q { white-space: pre-wrap; }
 .pg-bar {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 11px 14px; border-top: 1px solid var(--rule); background: rgba(0,0,0,.3);

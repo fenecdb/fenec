@@ -83,6 +83,8 @@ site/
   mark.svg        the mark, written by `node site/fennec.js`: the favicon
   mark-detail.svg the same with its running light: header and footer
   engine-worker.js  the engine off the main thread, for the playground
+  highlight.js    the playground editor's colours; build.py writes its rules in
+  test_highlight.py holds highlight.js to build.py's highlighter (needs node)
   content/
     index.html    the home page
     404.html      served by not_found_handling
