@@ -127,8 +127,7 @@ impl Header {
     fn decode(b: &[u8]) -> Option<Header> {
         let b = b.get(..HEADER)?;
         let word = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
-        if &b[..8] != LOG_MAGIC || b[8..12] != 2u32.to_le_bytes() || word(56) != hash(0, &b[..56])
-        {
+        if &b[..8] != LOG_MAGIC || b[8..12] != 2u32.to_le_bytes() || word(56) != hash(0, &b[..56]) {
             return None;
         }
         Some(Header {
@@ -433,7 +432,10 @@ mod tests {
         assert!(!log.takes(24, 1), "no generation is begun");
         main.set_len(23).unwrap();
         recover(&main, &path_for(&main_path)).unwrap();
-        assert_eq!(std::fs::read(&main_path).unwrap(), b"base-one-long-entry-two!");
+        assert_eq!(
+            std::fs::read(&main_path).unwrap(),
+            b"base-one-long-entry-two!"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -458,7 +458,11 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         #[cfg(feature = "timing")]
         if req.segments() == ["_timing"] {
             timing::end();
-            if timing::handle(&req).write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
+            if timing::handle(&req)
+                .write(&mut out, keep_alive, head_only)
+                .is_err()
+                || !keep_alive
+            {
                 return;
             }
             continue;

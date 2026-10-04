@@ -143,7 +143,10 @@ fn a_full_log_begins_again_from_the_file() {
         durable(&mut db);
     }
     let later = base(&path).unwrap();
-    assert!(later > first, "the log filled and began again: {first} -> {later}");
+    assert!(
+        later > first,
+        "the log filled and began again: {first} -> {later}"
+    );
     let whole = std::fs::read(&path).unwrap();
     power_loss(db, &path, 100);
     let mut db = fs::open(&path).unwrap();
@@ -164,14 +167,19 @@ fn a_sync_past_an_entry_fsyncs_the_file() {
     durable(&mut db);
     let first = base(&path).unwrap();
     let text = "y".repeat(1000);
-    let rows: Vec<String> = (0..100).map(|i| format!("{{n: {i}, s: \"{text}\"}}")).collect();
+    let rows: Vec<String> = (0..100)
+        .map(|i| format!("{{n: {i}, s: \"{text}\"}}"))
+        .collect();
     run(&mut db, &format!("put t [{}]", rows.join(", ")));
     durable(&mut db);
     run(&mut db, "put t {n: 100}");
     durable(&mut db);
     // The generation the next entry wrote begins past the 100 KB.
     let after = base(&path).unwrap();
-    assert!(after >= first + 100_000, "the file was synced: {first} -> {after}");
+    assert!(
+        after >= first + 100_000,
+        "the file was synced: {first} -> {after}"
+    );
     power_loss(db, &path, 0);
     let mut db = fs::open(&path).unwrap();
     assert_eq!(count(&mut db), 102);

@@ -1109,7 +1109,12 @@ pub fn render_batch_error(e: &Error, completed: usize, version: &'static str) ->
 
 /// A batch stopped at statement `completed` with `status` and `why`: an
 /// error, or a write the data ceiling refused.
-pub fn render_batch_stop(status: u16, why: &str, completed: usize, version: &'static str) -> Response {
+pub fn render_batch_stop(
+    status: u16,
+    why: &str,
+    completed: usize,
+    version: &'static str,
+) -> Response {
     let mut out = String::from("{\"error\":");
     json::escape_into(&mut out, why);
     out.push_str(&format!(",\"completed\":{completed}}}"));

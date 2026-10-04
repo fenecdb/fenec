@@ -1010,7 +1010,6 @@ impl Sink for ReadOnly {
 mod tests {
     use super::*;
 
-
     /// A durability finds its bytes on disk when a later one got there
     /// first, and runs no fsync of its own; what it wrote is the file's
     /// tail, in the order it was appended, rewrite or not.

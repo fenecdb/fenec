@@ -138,7 +138,10 @@ impl Fenec {
         let Some(image) = &self.docker else {
             let bin = std::env::var("FENEC_SERVER").unwrap_or_default();
             let child = std::process::Command::new(if bin.is_empty() {
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/timing/release/fenec-server")
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../target/timing/release/fenec-server"
+                )
             } else {
                 &bin
             })
@@ -347,9 +350,7 @@ fn strace(target: &str, pid: &str, ops: usize, run: impl FnOnce()) -> String {
         "fenec-strace",
         "sh",
         "-c",
-        &format!(
-            "exec strace -c -f $(for t in /proc/{pid}/task/*; do echo -p ${{t##*/}}; done)"
-        ),
+        &format!("exec strace -c -f $(for t in /proc/{pid}/task/*; do echo -p ${{t##*/}}; done)"),
     ]));
     std::thread::sleep(Duration::from_secs(2));
     run();
@@ -368,7 +369,9 @@ fn strace(target: &str, pid: &str, ops: usize, run: impl FnOnce()) -> String {
         if cols.len() < 5 || cols[0].parse::<f64>().is_err() {
             continue;
         }
-        let Ok(n) = cols[3].parse::<usize>() else { continue };
+        let Ok(n) = cols[3].parse::<usize>() else {
+            continue;
+        };
         let name = cols[cols.len() - 1];
         if name != "total" && n * 10 >= ops {
             calls.push(format!("{name} {:.2}", n as f64 / ops as f64));
@@ -554,17 +557,27 @@ fn run_pg(cfg: &Config, sync: &str) {
             server.push(("executor".to_string(), ms * 1e3));
         }
         // Each message's time as the server logs it, in a pass of its own.
-        c.batch_execute("SET log_min_duration_statement = 0").unwrap();
+        c.batch_execute("SET log_min_duration_statement = 0")
+            .unwrap();
         let since = chrono_now();
         let logged = cfg.ops.min(5000);
         for i in 0..logged {
             one(&mut c, i, &mut rng);
         }
-        c.batch_execute("SET log_min_duration_statement = -1").unwrap();
+        c.batch_execute("SET log_min_duration_statement = -1")
+            .unwrap();
         let (bind, exec) = pg_logged(&since);
         server.push(("bind".to_string(), bind));
         server.push(("execute".to_string(), exec));
-        report("pg", sync, op, &mut total, None, per_op(&before, &after, cfg.ops), &server);
+        report(
+            "pg",
+            sync,
+            op,
+            &mut total,
+            None,
+            per_op(&before, &after, cfg.ops),
+            &server,
+        );
         if cfg.strace {
             let pid: i32 = c.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
             let n = 2000;
@@ -593,8 +606,8 @@ fn pg_logged(since: &str) -> (f64, f64) {
         .args(["logs", "--since", since, DOCKER_PG])
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&out.stderr).into_owned()
-        + &String::from_utf8_lossy(&out.stdout);
+    let text =
+        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
     let (mut b, mut nb, mut e, mut ne) = (0.0, 0, 0.0, 0);
     for line in text.lines() {
         let Some(at) = line.find("duration: ") else {
@@ -616,10 +629,7 @@ fn pg_logged(since: &str) -> (f64, f64) {
             ne += 1;
         }
     }
-    (
-        b * 1e3 / nb.max(1) as f64,
-        e * 1e3 / ne.max(1) as f64,
-    )
+    (b * 1e3 / nb.max(1) as f64, e * 1e3 / ne.max(1) as f64)
 }
 
 struct Config {
@@ -662,7 +672,8 @@ fn main() {
             "server" | "server-docker" => {
                 let mut f = Fenec {
                     port: http::free_port(),
-                    file: std::env::temp_dir().join(format!("roundtrip-{}.fenec", std::process::id())),
+                    file: std::env::temp_dir()
+                        .join(format!("roundtrip-{}.fenec", std::process::id())),
                     docker: (sys == "server-docker").then(|| image.clone()),
                     proc: None,
                 };
