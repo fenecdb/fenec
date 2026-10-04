@@ -9,7 +9,7 @@
     "smoke": "tsx test/smoke.ts"
   },
   "dependencies": {
-    "@fenecdb/web": "^0.1.9"
+    "@fenecdb/web": "^0.1.10"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

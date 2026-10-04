@@ -182,7 +182,7 @@ into `scratch`, so the runtime image holds the binary and nothing else — no
 shell, no package manager, no libc.
 
 ```bash
-docker pull ghcr.io/fenecdb/fenec-server:0.1.9     # published, multi-arch
+docker pull ghcr.io/fenecdb/fenec-server:0.1.10     # published, multi-arch
 make docker && make docker-run TOKEN=secret   # or build it yourself
 ```
 

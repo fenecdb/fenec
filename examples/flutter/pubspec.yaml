@@ -1,7 +1,7 @@
 name: fenecdb_notes
 description: Notes kept in a fenecdb file on the device -- full-text and toy vector search, filters, a live list.
 publish_to: none
-version: 0.1.9
+version: 0.1.10
 
 environment:
   sdk: ^3.4.0
@@ -9,8 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  fenecdb: ^0.1.9
-  fenecdb_flutter: ^0.1.9
+  fenecdb: ^0.1.10
+  fenecdb_flutter: ^0.1.10
   path_provider: ^2.1.0
 
 dev_dependencies:

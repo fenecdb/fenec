@@ -9,8 +9,8 @@
     "smoke": "tsx test/smoke.ts"
   },
   "dependencies": {
-    "@fenecdb/react": "^0.1.9",
-    "@fenecdb/web": "^0.1.9",
+    "@fenecdb/react": "^0.1.10",
+    "@fenecdb/web": "^0.1.10",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
