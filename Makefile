@@ -14,7 +14,7 @@ FEATURES ?=
 SCHEMA ?= 1
 WASM_FEATURES = $(if $(FEATURES)$(filter 0,$(SCHEMA)),--no-default-features --features "$(if $(filter none,$(FEATURES)),,$(if $(FEATURES),$(FEATURES),indexes)) $(if $(filter 0,$(SCHEMA)),,schema)",)
 
-.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
+.PHONY: all test test-js sync-scenarios-check builder-golden schema-golden types types-check docs-types ffi ffi-bench sync-bench swift-test kotlin-test dart-test wasm wasm-lite wasm-sizes wasm-speed wasm-exact-speed size-report packages version agents-md statements-bench file-bench web serve server node shard shard-bench replica-bench concurrency-bench requests-bench roundtrip-bench load-bench maintenance-bench compact-bench open-bench reopen-bench quant-bench scale-bench ycsb mirror-bench counters-bench small bench sweep collate-bench subquery-bench ttl-bench search-bench \
 	python-test go-test dotnet-test languages-test examples-test react-test langchain-test ai-sdk-test cloudflare-test cloudflare-bench \
 	compare beir import-test follow-bench \
 	pgvector-up pgvector-down docker docker-run docker-compact docker-down memory clean \
@@ -73,6 +73,11 @@ sync-scenarios-check:
 ## held to (web/golden.mjs holds the chains; fenec.test.js checks the file)
 builder-golden:
 	node web/golden.mjs
+
+## AGENTS.md written again from CLAUDE.md: the same text under its own
+## title (tools/agents_md.py; CI runs it with --check)
+agents-md:
+	python3 tools/agents_md.py
 
 ## integrations/schema-golden.json written again: each declaration's
 ## description, from web/schema.js, and each plan, from the engine (the

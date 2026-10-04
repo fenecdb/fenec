@@ -1,13 +1,16 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Codex and other coding agents when working with code in this repository. It is written from CLAUDE.md by `make agents-md`: edit that one.
 
 fenecdb — a minimal, vector-native embedded database in Rust. Compiles to WASM for
 the browser, has its own query language (FenecQL), and its server (`fenec-server`)
-speaks HTTP; every language reaches it that way until the official SDKs
-(Phase 53). The docs under `site/content/docs/` are the long-form reference (design
+speaks HTTP; every language reaches it that way, Python, JavaScript, Go and
+.NET through official clients. The docs under `site/content/docs/` are the long-form reference (design
 rationale, benchmarks, full FenecQL and HTTP surface); `README.md` is the
 front door and links into them, and this file is the working summary.
+`AGENTS.md` is this file for other agents, the same text under its own title
+and first line: `make agents-md` writes it from `CLAUDE.md`
+(`tools/agents_md.py`), and CI fails when the two differ, so edit `CLAUDE.md`.
 
 ## Commands
 
@@ -22,11 +25,14 @@ make wasm-speed    # the module in Node: HNSW build, near, filter, match, JSON (
 make wasm-exact-speed   # near without the graph (the wasm-lite build), 1k-50k rows x 128/384, against the graph and exact
 make ffi           # the native library for apps (crates/fenec-ffi) for this machine, TARGET=... another, JNI=1 with the Kotlin functions
 make ffi-bench     # a call through the native library against fenec-server's handler in process: open, put, near
-make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test
+make sync-bench    # the sync core (fenec_abi::sync) a change applied, against the same put alone
+make sync-scenarios-check   # both runners of integrations/sync-scenarios.json passed every scenario (after make test)
+make swift-test    # the Swift package (Package.swift) on macOS: the XCFramework's macOS slice, swift test (sync tests start a fenec-server), then again on one cooperative thread
 make kotlin-test   # the Kotlin library's JVM tests, the library built for Linux (Docker unless Linux with Gradle)
 make dart-test     # the Dart package against the library for this machine, and the Flutter plugin where Flutter is installed
-make packages      # fenecdb (PyPI), @fenecdb/web and @fenecdb/react (npm) as a release publishes them, installed and used
+make packages      # fenecdb (PyPI), the @fenecdb npm packages and FenecDb (NuGet) as a release publishes them, installed and used
 make version V=X.Y.Z   # one version wherever a release reads it (RELEASING.md)
+make agents-md     # AGENTS.md written again from this file (CI fails when they differ)
 make serve         # wasm + python3 http.server -> http://localhost:8787
 make bench         # scale measurement (fenec-core/examples/bench.rs)
 make memory        # memory footprint, for calibrating --max-memory
@@ -34,6 +40,12 @@ make sweep         # ef / recall trade-off
 make compare       # vs SQLite + pgvector (needs `make pgvector-up` first)
 make python-test   # LangChain + LlamaIndex stores vs their frameworks' tests (Docker)
 make languages-test   # the docs' example in Python, JS, Go, C#, Java, PHP, Ruby and Rust over HTTP (Docker for some)
+make examples-test    # examples/: the Notes app in every language, each its smoke on this checkout's build (E="python go" for some)
+make go-test       # the Go SDK (integrations/go) against a primary, a replica and a tenant node its tests start
+make dotnet-test   # the .NET SDK (integrations/dotnet) the same way, xunit; the dotnet/sdk:8.0 image on Linux without .NET
+make builder-golden   # integrations/builder-golden.json written again from the JS builder (web/golden.mjs)
+make schema-golden    # integrations/schema-golden.json: declarations, FenecQL texts and plans, through the module (web/schema-golden.mjs)
+make docs-types   # every data-lang="ts" example on the site under tsc --strict (web/types/docs.mjs; part of make types-check)
 make react-test    # useLiveQuery vs a real fenec-server replica (needs `make wasm`)
 make beir BEIR=dir # nDCG@10 per ranking path (vectors: crates/fenec-bench/beir, embed.mjs + splade.mjs; BM25 alone without; FENECBENCH_TEXT=chars sets @text's options)
 make import-test   # the PostgreSQL arm of import and --follow (needs Docker)
@@ -47,15 +59,20 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
+make compact-bench       # a file under updates, compacted on its own or not: its size, reads during and after each compact, its swap's lock (COMPACT_ARGS)
 make open-bench          # opening a 1 GB file, read into memory or mapped
 make reopen-bench        # a crashed 100k x 768 file: linked at the open, beside the queries, or with its graphs kept
 make quant-bench         # quant=int8|bit against full vectors: memory, recall, latency
 make scale-bench         # fenec-server over HTTP against pgvector at scale: load, memory, recall, latency, filters (pgvector-up first)
+make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server vs PostgreSQL and MongoDB in Docker, durable and buffered (YCSB_ARGS)
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
+make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
+make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
 
 Single tests:
@@ -85,7 +102,7 @@ Dependency direction (nothing points back up):
 ```
 fenec-core  (std only, zero deps)
      |
-fenec-ql    (lexer + parser)          fenec-abi   (the answers both C ABIs give)
+fenec-ql    (lexer + parser)          fenec-abi   (the answers both C ABIs give, and a replica's sync)
      |                                fenec-wasm  (browser C ABI)   fenec-ffi (native C ABI, apps)
      |
 fenec-http  (REST/JSON + SSE, tenant registry, replication, /_metrics)
@@ -321,6 +338,45 @@ an earlier fsync already covered runs none, which is the group commit: 268 ->
 (`Tenants::sync_dirty`): the tenants' held their lock through the fsync, and
 every read and write of one waited up to 27 ms a pass on macOS.
 
+**A durable write syncs a log beside the file, not the file**
+(`synclog.rs`, Linux and Android). The file only grows, and on ext4 an
+fsync of a file whose length changed commits the journal too: in Docker's
+VM a 300-byte append and its `fdatasync` took 356 us, the same bytes
+written into room the file already had and synced 65 -- why PostgreSQL
+fills its WAL segments first. So `FileSink`'s sync writes what the file
+took since the last one into `<file>.sync` (the whole name and `.sync`:
+with the extension replaced, `x.db` and `x.fenec` shared one, as they
+shared `.compacting` and `.beside` -- `fs::beside` names all three), 4 KB
+of header and 256 KB of entries written once at full size and never
+grown, and syncs that alone (`Tail`). The file is fsynced when an entry
+would not fit, a sync holds more than 64 KB, or the sink is new to the
+file -- whose bytes an earlier process may have left unsynced -- and the
+log then begins a generation from where the file stands. An entry is the
+file's bytes at a place, with its generation and a hash, so a cut one
+ends the log; the header names the generation, where the file stood
+synced, the file's device and inode, and a hash of the 4 KB before that
+point, so a log is applied to its own file alone -- not to one renamed
+into the place, even one holding the same bytes. `create` applies it
+before the file is read or mapped (`synclog::recover`), fsyncs the file
+and wipes the header, so a file cut below the log's end after that open
+is not written over at the next. Everything that renames a file into a
+database's place removes the log first and makes the removal durable --
+`swap_in` after syncing the file it replaces, a restore, a backup
+unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
+the file and removes it, so a node keeps none beside a closed tenant, and
+`Tenants::stats` counts it; a log that cannot be made is not tried again
+until the next open, each try being 260 KB of writes. `open_read_only`
+applies none: after a power loss, `fenec types` or a raw copy taken
+before the next open may lack the last durable writes. On macOS
+`F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
+there is no log (`ENABLED`; `fs::keep_sync_log` has a test thread keep
+one). In Docker a durable update went 624 -> 325 us p50 (`make
+roundtrip-bench`), against PostgreSQL's 378; `tests/synclog.rs` crashes
+the machine (the process forgotten, the file cut back to the log's
+start) through a full log, a sync past an entry, a torn header, a file
+renamed in, a second open and two files of one stem, and fenec-core's
+and fenec-http's tests pass on Linux, where every file keeps one.
+
 **Replication ships only what is on disk, numbered by the change counter.**
 A primary (`--replication-token`) writes through a `Tee`
 (`fenec-http/src/replication.rs`): a write's record enters a bounded feed in
@@ -464,6 +520,56 @@ s, for a peak of +67 MB; cloning the segments rather than sharing them held
 the read lock 508 ms and took +1.16 GB. One side file at a time; a collection
 created, dropped or altered meanwhile fails it. Only a lone statement takes
 this path; a batch, the shell and `execute` hold the lock.
+
+**A file compacts itself once half of it is dead** (`engine/garbage.rs`).
+An update appends the whole record and leaves the version it replaced dead
+until a `compact`, which nothing ran on its own: under YCSB's updates a
+million 1 KB records grew a buffered file to 4.7-6.5 GB on an 8 GB machine,
+a live record a few to a page among dead ones, and one read in five waited
+for the disk (C at one thread 30.1k ops/s, 443k over the file freshly
+loaded). `Database::garbage` is the file's bytes as written (`appended`)
+against the live records' (`Store::total_bytes - dead_bytes`, which the
+stores counted as writes landed already and an image's index carries) and
+what the last compact kept besides the documents (`kept`: schemas,
+counters, graphs) -- a sum over the collections, nothing added to the write
+path: a lone put, put over and del measured 570/700/532 ns in memory either
+way, and 666/797/595 against 660/785/593 over a mapped file, inside the base
+build's own spread. `CompactPolicy` is the one rule (half the file dead and
+64 MB, `compact_due`), `compact_when_due` a look under `try_read` and a
+compact beside the database, `Compactor` a thread that looks every 5 s.
+`fenec_http::link` runs one thread over every database the process serves
+(`--auto-compact <ratio>|off`, default 0.5), apart from the graph keeper so
+its graphs do not wait out a compact of a gigabyte; the native library
+starts a `Compactor` a file (`FENEC_OPEN_NO_AUTO_COMPACT`); a replica and a
+following tenant compact too, since `may_write` lets a compact run there and
+their files grow with every update sent, and an image adopted during a
+maintenance marks every tail changed (`Tails::all_changed`), or a replica's
+compact put back what it copied before the image. The browser has no thread:
+`snapshot` writes the live records alone, so a page's persisted image drops
+them, and its memory keeps them until it reloads. The swap was the cost:
+the writes made during a 4-6 s compact of a 1 GB file, 200 000 records, were
+copied under the write lock (409-811 ms); they are copied in rounds before
+it, the ids drained from the tails at once and their documents 4 096 under
+the read lock at a time (one round of 408 708 held the readers 592 ms behind
+the waiting writer -- the lock is fair to writers), the pages a chunk reads
+touched first with no lock (`Store::places`, `fs::touch_at`: waiting on the
+disk under the lock, 291 ms), until a round finds fewer than 1 000. The
+rounds' frames are handed over to the side file before the swap
+(`Beside::hand_over`; left to the first write after it, 400 MB under the
+write lock, 158 ms), every page of the new file is touched before it
+(`fs::touch`, 1.3 GB in 2.8 s; left to the readers, the read p50 went 2 ->
+100 us for two seconds), and the stores it replaces are dropped after the
+lock (their unmapping was 10-15 ms of it). Under the lock: the last few ids,
+the side file's fsync and the rename, 6.4-12.5 ms over a 1 GB file and
+13.7-14.8 durable (`make compact-bench`: 5M updates of a field over a
+million 1 KB records from one writer at about 150k/s, buffered, the file
+1.03 -> 2.4-3.2 -> 1.2-1.4 GB three times where it reached 6.2 GB without,
+the reads during a compact p99 4.4 ms and 34 at the most against 0.9 and 57
+beside the updates, and after them 435k reads/s from the first second where
+the 6.2 GB file started at 19k and took 25 s to 400k). A database read into
+memory compacts beside itself too, the live records copied into fresh
+segments with no lock held; it used to copy them under the read lock and
+build every index again, though the indexes are keyed by id.
 
 **File format** (see README *File format*): every record is
 `[kind][collection-id][length][body]`. The length is written even for an empty
@@ -620,6 +726,72 @@ load on every core: a comparison runs its sides in turns (`--only fenec`,
 then `--only pg`), each after idle minutes, and a figure from a hot run is
 not one.
 
+**`make ycsb` is fenecdb as a general database.** YCSB's core workloads
+A-F written in the bench crate (`fenec-bench/src/bin/ycsb.rs`) rather than
+run through the Java YCSB, to its definitions: ten fields of 100 random
+characters, a read the whole record, an update one field, its scrambled
+zipfian (0.99, FNV-hashed over ten billion items), its skewed-latest for
+D, scans of 1 to 100 records for E. The key is an integer from 1
+(`insertorder=ordered`, no `user` prefix), so each system keys by what it
+keys best by: `id`, `INTEGER PRIMARY KEY`, a `bigint` primary key,
+`_id`; E's scan is `where id >= $1 limit n`, the id index walked from
+the key, no `@sorted`. A key not yet acknowledged is never drawn: an
+insert publishes a bound below its key before it takes one (`Keys`).
+fenecdb in process against SQLite (a connection a thread, WAL, mapped),
+fenec-server over HTTP against PostgreSQL 17 and MongoDB 8, each started
+in a container for its turn and removed with its volume, so the VM holds
+one at a time; `server-docker` is the same server in a container, which
+shows Docker's share -- its network, and an fsync in the VM that is not
+macOS's `F_FULLFSYNC`. Durable is an fsync a write in each engine's own
+terms (a flush and its durability, `synchronous=FULL` with `fullfsync`,
+`synchronous_commit=on`, `j: true`), buffered its default
+(`--sync 250`, `NORMAL`, `off`, `j: false`); C writes nothing and runs
+once. A server switching modes is stopped with SIGTERM, which syncs: a
+kill lost the last 250 ms of the load, and the next update found no row.
+Each cell is 30 s after a 5 s warm-up, and starts once a one-core probe
+runs within 4% of its idle time (`cool`), the probe's ratio written with
+the cell; the systems take turns with three idle minutes between them.
+Latencies go into a log-linear histogram, 64 steps an octave.
+`--verify` holds every answer to what was written (`check`): each
+thread logs its operations and answers into its own `Vec`, and after the
+cell a read must hold, field by field, a value a write that could have
+been the last one left (one ended before it and not followed by another
+that did, or one overlapping it), a scan consecutive keys as far as it
+could see, a write one record -- every write logged, since a read under
+concurrent writes is judged by every write's span, and nothing compared
+in an operation's time. A pass over all six systems found no mismatch
+(`ycsb/verify.tsv`). `ycsb/results.tsv` is the three runs the site
+quotes, appended to and never rewritten -- a run's cell measured again
+counts as its last line, and a run a later one replaced is named in
+`ycsb/superseded.tsv` and counts in no median (`ycsb report`, `site/build.py`)
+-- and `site/build.py` holds every YCSB figure on the site to its median
+there, the full grid row by row. Docker's VM syncs a
+write in 0.08-0.10 ms where the Mac's `F_FULLFSYNC` takes 3.9
+(`ycsb/fsync.txt`), so the durable server comparison is `server-docker`
+against PostgreSQL and MongoDB, all in the VM, the native server beside
+them. fenecdb's buffered reads lost to SQLite's after the updates for the
+engine's reason, not the harness's: an update writes the record again at
+the file's end, the file outgrew the page cache, and a profile put 86% of
+a one-thread read on its page coming in (`ycsb/profile-c1.txt`). Runs
+`c1`-`c3` measured fenecdb and fenec-server again with the file compacting
+itself (below; the harness starts the engine's `Compactor` as an app's
+library does, `--no-auto-compact` for neither): C at one thread 30.1k ->
+438k against SQLite's 279k, B 30.8k -> 410k, D 62.6k -> 432k, and fenecdb
+ahead of SQLite in every in-process cell; the buffered file stood at 3.7-4.0
+GB after D, between compacts of a file A grows by 100 MB a second. Official
+YCSB 0.17.0 against the same containers came within -14% to +2% of the
+harness (`ycsb/calibration/`). Docker's network moves from day to day --
+PostgreSQL's C at one client was 3.34 k, 3.00 k and 3.53 k on three -- so
+the one-client server cells were measured again on 2026-10-04 with
+PostgreSQL beside them in turns, under the same run ids (`c1`-`c3`,
+`r1`-`r3`), each cell counting as its run's last line. `make
+roundtrip-bench` took the round trip apart: of a 0.29 ms read in Docker
+about 0.25 is Docker's port forwarding, the server's part 0.023 ms and
+PostgreSQL's bind and execute 0.016, so the published guess that a binary
+protocol answers sooner was not the cause; the durable gap was the fsync
+of a growing file (the sync log, above): durable A 2.24 k -> 3.27 k at one
+client against PostgreSQL's 2.60 k, even at 16.
+
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's
 `run` of several -- is its statements' batch: a `put` in it leaves its vectors waiting
@@ -750,6 +922,50 @@ one, is put back whole. JWT scoping keeps
 the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
+
+**A `set` reads the row it writes, and every write says what it did.**
+`Expr::Arith` is `+ - * /` (`query::arith`): ints stay ints and one past
+64 bits is refused, never wrapped; `/` between ints divides whole toward
+zero; an int and a float make a float, refused once not finite; a
+timestamp moves by milliseconds; a null is null (`coalesce(n, 0) + 1`
+counts from nothing); anything else is a type error, and the result meets
+the field's type check as a literal does. The lexer reads `-` after what
+ends a value (`n-1`, `n - 1`) as a subtraction and before a value as a
+number's sign (`subtracts`), and the parser folds a `-` over a number back
+into it, so every text that parsed before parses to the same tree;
+`arith_level` is two frames a level of parentheses, `operand` out of line
+so `primary` is in one place (inlined three times it was 2.9 KB of the
+browser module). A `set`'s pairs are bound once a statement
+(`Assign`, `Calc`, as `Filter` binds a filter): a field by its position, a
+value reading no field -- a literal, a parameter, `now()` -- worked out
+once, the rest `eval` over the row, so an error comes at the first row and
+never over none. The row is read once (it was read twice, for the values
+and for the indexes it took out), and the registry is taken out of the
+database for the statement so a row's expression can call it while the
+row is written. Under the single writer the read and the write are one, so
+an increment is atomic: 16 threads x 10 000 on one key end at 160 000,
+320 000 a second, 16 HTTP clients the same at 102 000
+(`make counters-bench`); over 100 000 rows `{n: 7}` took 85.5 ms
+and takes 65.0, `{n: n + 1}` 66.6. `now()` is the database's
+clock where one is set (`EvalCtx::clock`, the browser module's every
+statement) and the system's otherwise, worked out once a statement. The
+record holds the document written, never the expression: replicas,
+`/_changes`, archives and a sync replica's server see the result, and a
+replica's optimistic apply works the same text out over its own row while
+the server works it out again -- two replicas' offline increments both land
+(the scenario file holds it). `put ... if absent` (`Statement::Put`'s
+`if_absent`, which sets `insert`) passes over a document whose id or
+`@unique` value a live row holds and counts what it wrote -- `SET NX`
+without a 409 that aborts a `/batch` or an exception to catch. A row past
+its `@ttl` is out of a write's way as of every read: an insert naming its
+id writes over it, and a `@unique` value it holds is let go of with it, the
+row deleted in the same statement (`expired`, `erase`); left to the
+sweeper, a lock that expired stayed held up to a minute. The builders
+render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
+`?`s bound, every SDK to the golden file. The browser module grew
+7.9 KB, 2.7 KB brotli: the parser's arithmetic, the binding, `if
+absent` and the expired row's place. `site/content/docs/redis.html` is the
+recipes, each FenecQL block run by `tests/redis_docs.rs`.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
@@ -1802,8 +2018,8 @@ isolate a database), sends a vector as its `f32` bytes and a json field's
 has live queries as `Lives` has them, the looks of a burst gathered a frame
 (16 ms) and taken once no write is under way. The libraries are built alone
 (`cargo rustc --crate-type cdylib`): beside the staticlib and rlib, LTO left
-the shared one 4% larger. 1.51 MB stripped on aarch64-apple-darwin, 1.68 on
-x86_64 Linux with JNI; a buffered put of a 128-dim vector 4.6 us against
+the shared one 4% larger. 1.68 MB stripped on aarch64-apple-darwin, 1.88 on
+x86_64 Linux with JNI, the sync (below) 165 and 198 KB of them; a buffered put of a 128-dim vector 4.6 us against
 the server handler's 23.2, a fsynced one 4.0 ms on an M1, `near` 97.8 us
 against 151.4 (`make ffi-bench`). The XCFramework is assembled by hand
 (`build-xcframework.sh`), so the Command Line Tools build every slice; a
@@ -1815,6 +2031,97 @@ and Dart opens `FenecFFI.framework/FenecFFI`: a static one kept whole with
 `-force_load` had the Runner link a file CocoaPods' "Copy XCFrameworks"
 phase makes with no order declared against it, and `flutter build ios`
 failed on it.
+
+**A replica's sync is a state machine; the network is the binding's.**
+iOS (ATS) and Android refuse cleartext HTTP by default and a server sits
+behind TLS, which fenecdb's own client does not speak and should not: the
+platform's client has the trust store, proxies, pinning and power
+management. So `fenec_abi::sync` does no I/O -- a binding feeds it events
+(`Sync::response`, `opened`, `bytes`, `closed`, `timer`, `signal`; FFI
+`fenec_sync_feed`) and performs the JSON actions it hands back (`request`,
+`stream`, `cancel`, `wait`, `token`, `changed`, `refused`, `status`) with
+`URLSession`, `HttpURLConnection` (Android's and the JVM's, one loop for
+both) or `dart:io`'s `HttpClient`, every event handed to the core in turn on
+one serial queue so a stream's bytes stay in order and no action outruns
+its cancel. Porting `FenecSync` would have been three more copies of the
+optimistic writes, the key reconciliation and the cursors, tested apiece;
+here the logic is once, held to the scenario file (below), and each
+binding's loop is a page. A write
+through `fenec_query` to a shape's collection is the sync's
+(`Sync::claims`, `write`): applied to the replica with what puts it back,
+and queued with an `Idempotency-Key`, in one block; DDL over a synced
+collection is refused, a collection with no shape is the app's own. What
+`FenecSync` holds in memory is in the file, written in the blocks it
+describes: `_sync_shapes` (cursors), `_sync_queue` (unanswered writes, their
+keys and undo), `_sync_temps` (rows under temporary ids). Writes go one at
+a time in order; 0/408/429/5xx retry with backoff (250 ms doubling to 15 s,
+30% jitter), 401 asks for a token, any other 4xx is a refusal put back. A
+replica reopened sends its queue before opening its streams. An update of
+an unanswered insert reaches the server's copy by its key as well
+(`fenec_ql::spans` keeps each statement's own text for the `/batch` lines,
+an insert rendered as the builders render it, every value a parameter); an
+insert the shape does not hold loses its temporary row once a stream passes
+the write's `Fenec-Seq`; a seed writes over and deletes the rest, keeping
+unanswered writes' rows, rather than clearing first (a row that stayed
+keeps its vector's node). A change with `"schema": true`, or rows naming a
+field the replica has not got, has the collection made again from `GET
+/collections`, its rows kept in the fields left (`remake`), and the shape
+seeded whole (`Shape::fresh`): applied as they came, the rows of an alter
+failed the put and the stream retried the same change for good. A one-row change
+costs 18.4 us against 7.1 for the same put alone, rows in changes of 100
+3.8 us either way, a 128-dim row under HNSW 482 against 465, a seed of 10
+000 rows 72 ms against 44 (`make sync-bench`). It adds about 165 KB to the
+native library -- 1.51 -> 1.68 MB on aarch64-apple-darwin, 1.68 -> 1.88 on
+x86_64 Linux, about 77 KB of it the sync's own code -- and the browser module is built without it:
+`fenec-abi`'s `sync` feature, which only `fenec-ffi` turns on. Compiled
+in as dead code, it still moved LLVM's inlining and left the module 155
+bytes larger; off, the module is the size it was, 512 400 bytes. Dart's is
+`Fenec.openSynced`, since a static `sync` cannot sit beside the instance's
+fsync `sync()`.
+
+**The browser's sync and the native core are held to one scenario file.**
+Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
+the browser module, so the two are written apart, and
+`integrations/sync-scenarios.json` says what both do: 56 scenarios, each a
+script of shapes, app writes and server events -- a seed, a change, a
+stream dropped, the status each write's request is answered with, a seed
+past the horizon, the network's signal, a token -- with what the replica,
+the queue, the requests sent (method, path, body, the idempotency key
+reused or new), the timers and the refusals are after every step.
+`crates/fenec-abi/tests/scenarios.rs` drives the sans-IO core through it,
+and `web/fenec.sync.scenarios.test.js` drives `FenecSync` through a fetch
+and a clock the script plays, its replica persisted over an in-memory
+IndexedDB so a restart is a page opened again; each writes the names that
+passed to `target/sync-scenarios/`, and `make sync-scenarios-check` (in
+`make test` where the module is built, and its own CI step) fails unless
+both ran every one -- under `CI` the JS runner fails rather than skip
+without `web/fenec.wasm`. A behaviour of either changes in the file first.
+A step's values are the builders' texts, so a write's fields are written
+in alphabetical order (the native runner's JSON sorts them, JavaScript
+keeps them as given); `<name>` binds a value made at run time -- a key, an
+`Idempotency-Key` -- and `@name` is a fixture. Where the platforms differ
+on purpose a scenario says why in `differs` and a step holds
+`expect_js`/`expect_native`; none does now. What is left between them is
+the platforms': a JS write's promise settles with the server's answer
+where a native write returns once kept, JS has `batch()` where a native
+text of several statements is one write, tabs elect a leader, and the
+browser fetches collation chunks. Bringing the browser to the core fixed
+what it got wrong: a network failure or a 5xx put a write back, an update
+or a delete of an unanswered insert went by the temporary id the server
+never saw, an insert the shape did not hold kept its row until the next
+seed, a seed cleared the collection and every pending row with it, a
+write made offline was gone with the page, and each tab sent its own
+writes. Its state is now the core's, in the replica: `_sync_shapes`,
+`_sync_queue` and `_sync_temps`, stored the moment a write is made
+(`persist`'s journal, or the file of an `openFile`d `local`); a follower
+tab applies its write and hands it to the leader, which keeps it in its
+own queue and tells every tab the answer, and a tab taking the lead reads
+the queue its predecessor stored (`#lead`, through a `sibling` database).
+`fenec-http`'s CORS allows `Idempotency-Key` and exposes `Fenec-Seq`,
+without which a page on another origin could not send the one or read the
+other. `fenec.js` grew 113.3 -> 132.5 KB, 31.1 -> 35.8 KB brotli -- 3.1 KB
+of it code, the rest the comments -- and the browser module did not change
+by a byte.
 
 **A schema declared in code is checked at every open, in the engine.**
 Two front ends compile to one description (`fenec_core::declared`,
@@ -1877,14 +2184,49 @@ standard suite and the tests LlamaIndex's integrations run from a
 languages-test` the eight examples (Python, Java, PHP and Ruby from their
 images, the others with the toolchain on the machine), `make react-test`
 runs the hook against a real replica, and CI runs all three
-(`integrations`). CI also builds the three packages as a release
+(`integrations`). The Go and .NET SDKs (`integrations/go`, module
+`github.com/fenecdb/fenec/integrations/go`, package `fenecdb`;
+`integrations/dotnet`, NuGet's `FenecDb`, `net8.0`) are the standard
+library alone, the Python client's surface -- a statement and its rows,
+typed rows, writes with their `Fenec-Seq`, `/batch`, an idempotency key,
+`After` for a replica, a subscription, `/_changes`, a tenant, `/_health`,
+a typed error -- and write a `float32` as the shortest text that reads back
+as it through an `f64`, which is how the server reads a number, but for
+`json::TIE`, which goes as its `f64`'s text: `encoding/json` wrote its
+shortest `f32` text and the server stored the float above. A request is
+bounded through its context or token, never the HTTP client's timeout,
+which would cut a subscription short. `make go-test` and `make
+dotnet-test` start the servers they need (`FENEC_SERVER`, else
+`target/debug/fenec-server`), CI runs both, and `make languages-test`
+runs the docs' Go and C# examples through each SDK too (`go-sdk`,
+`dotnet-sdk`). Python, Go and .NET have the JS builder too
+(`fenecdb/builder.py`'s `db.collection(...)`, Go's `db.From(...)` and
+.NET's `db.From(...)`), and all four make the same text of the same chain,
+to the byte, refusals by the same message: `integrations/builder-golden.json`
+holds the chains (`{op, args}`, the JS builder's names, what JSON has no
+word for an object of one `$` key) and what the JS builder made of each --
+`web/golden.mjs` holds the chains and writes the file (`make
+builder-golden`), `web/fenec.test.js` runs every case through the JS
+builder again so the file cannot drift, and `make python-test`, `go-test`
+and `dotnet-test` run every case through their own builder, the
+endpoints' statements read off a recording transport. A builder change
+starts in `web/fenec.js` and a case in `golden.mjs`, then the three
+follow. Go's object conditions are `Fields`/`Ops` and a document a
+`D(...)`, names and values in turn, since a map has no order and the order
+is the text's; its options are functional, since a struct cannot tell
+`limit 0` from none. CI also builds the three packages as a release
 publishes them and installs and uses them (`integrations/packages.sh`):
 PyPI's `fenecdb`, npm's `@fenecdb/web` -- the client, both modules and
 `collate/`, `web/package.json` -- and `@fenecdb/react`. They go out when a
 release's draft is published (`packages.yml`), only after that same check,
 with a token where the registry's secret holds one (`NPM_TOKEN`,
 `PYPI_API_TOKEN`), with the workflow's OIDC identity (trusted publishing)
-where it does not (RELEASING.md). With
+where it does not (RELEASING.md). NuGet's `FenecDb` is packed, installed
+into a fresh console app and used against a server
+(`integrations/dotnet/package.sh`) and only then pushed with
+`NUGET_API_KEY`, its job skipped with a notice without the secret; the Go
+module has no registry, and `release.yml` pushes the tag
+`integrations/go/vX.Y.Z` it is fetched by beside `vX.Y.Z`. With
 `full_text=True` a store indexes its text for BM25 as well and searches by
 the words (`match`) or by the words and the vector fused (`fuse`):
 LlamaIndex's `TEXT_SEARCH` and `HYBRID`, LangChain's `mode="text"` and
@@ -1929,6 +2271,19 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
   beside the others it would count theirs. Measurement programs are
   `crates/fenec-core/examples/` and are wired to `make` targets, not to CI.
+- A test that fails and passes on a rerun is a bug, the test's or the code's:
+  it is reproduced -- in a loop, under load (`docker run --cpus=3` beside
+  busy loops is GitHub's three-core runner) -- and fixed, never retried
+  away or given a longer sleep. A test waits for an event, not for a time:
+  it holds what it races (`Replica.setOnline(false)` before a write it
+  reads back, a call held under way across a burst, a disk's fsync held at
+  a gate) and bounds only the wait for something that must happen. A CI
+  log names every failing test with its assertion: cargo's and `swift
+  test`'s own output, Gradle's `testLogging` (set for `-q`'s quiet level
+  too), `dart test`'s GitHub reporter, `node --test --test-reporter=spec`.
+  A failing mobile job also uploads `test-reports-android` (the JUnit
+  reports) or `test-results-apple` (the simulator's `.xcresult`) for a
+  week.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.
