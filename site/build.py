@@ -13,6 +13,7 @@ across a dozen files and drift.
 import gzip as gziplib
 import hashlib
 import html
+import json
 import os
 import re
 import shutil
@@ -127,6 +128,15 @@ KEYWORDS = {
     "dart": """import final const var return if else for in while try on catch
         async await class extends super this null true false void required
         late static""".split(),
+    # The home page's sessions in the languages the docs show as text.
+    "csharp": """using var new await async return if else for foreach in while try
+        catch throw class static public private void null true false""".split(),
+    "java": """static final var new return if else for while try catch throw throws
+        class public private void null true false""".split(),
+    "php": """function return if else foreach as new throw array null true
+        false""".split(),
+    "ruby": """def end return if else elsif unless do require nil true false
+        raise""".split(),
 }
 
 TYPES = """bool int float text bytes timestamp vector f16 cosine l2 dot
@@ -147,7 +157,28 @@ COMMENT = {
     "swift": r"//[^\n]*|/\*[\s\S]*?\*/",
     "kotlin": r"//[^\n]*|/\*[\s\S]*?\*/",
     "dart": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "csharp": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "java": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "php": r"//[^\n]*|/\*[\s\S]*?\*/",
+    "ruby": r"#[^\n]*",
 }
+
+
+def token_pattern(lang):
+    """The one alternation a language is tokenised by, in the syntax Python
+    and JavaScript share and ASCII-only (`re.ASCII` here, a JS regex without
+    the `u` flag there), so the playground's highlighter (`highlight_js`)
+    compiles this same text and splits a statement where the docs do."""
+    parts = []
+    comment = COMMENT.get(lang)
+    if comment:
+        parts.append(f"(?P<comment>{comment})")
+    parts.append(r"(?P<string>\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')")
+    parts.append(r"(?P<param>\$\d+)")
+    parts.append(r"(?P<anno>@[A-Za-z_][\w]*)")
+    parts.append(r"(?P<word>[A-Za-z_][\w]*)")
+    parts.append(r"(?P<num>\b\d[\d_]*(?:\.\d+)?\b)")
+    return "|".join(parts)
 
 
 def highlight(code, lang):
@@ -160,16 +191,7 @@ def highlight(code, lang):
         return html.escape(code)
 
     kw = set(KEYWORDS.get(lang, []))
-    parts = []
-    comment = COMMENT.get(lang)
-    if comment:
-        parts.append(f"(?P<comment>{comment})")
-    parts.append(r"(?P<string>\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*')")
-    parts.append(r"(?P<param>\$\d+)")
-    parts.append(r"(?P<anno>@[A-Za-z_][\w]*)")
-    parts.append(r"(?P<word>[A-Za-z_][\w]*)")
-    parts.append(r"(?P<num>\b\d[\d_]*(?:\.\d+)?\b)")
-    pattern = re.compile("|".join(parts))
+    pattern = re.compile(token_pattern(lang), re.ASCII)
 
     out, pos = [], 0
     for m in pattern.finditer(code):
@@ -191,7 +213,26 @@ def highlight(code, lang):
     return "".join(out)
 
 
-PRE_RE = re.compile(r'<pre(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</pre>')
+# The languages a page highlights as they are typed: the playground's. Every
+# other code on the site is highlighted above, as it is built.
+JS_LANGS = ("fenecql",)
+
+
+def highlight_js(langs=JS_LANGS):
+    """`highlight.js` with the rules above written into it, so the editor and
+    the docs cannot colour a statement two ways; `site/test_highlight.py`
+    holds the two to the same HTML over sample statements."""
+    rules = {"types": TYPES, "langs": {
+        lang: {"pattern": token_pattern(lang).replace("(?P<", "(?<"),
+               "kw": KEYWORDS.get(lang, [])} for lang in langs}}
+    src = open(os.path.join(ROOT, "highlight.js"), encoding="utf-8").read()
+    marker = "/* rules: build.py */ null"
+    if marker not in src:
+        raise SystemExit("site/highlight.js lost its rules marker")
+    return src.replace(marker, json.dumps(rules, separators=(",", ":")))
+
+
+PRE_RE =re.compile(r'<pre(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</pre>')
 
 
 def render_code_blocks(body):
@@ -957,10 +998,13 @@ def build():
     mark_js = emit("fennec.js", open(os.path.join(ROOT, "fennec.js"), encoding="utf-8").read())
     motion = open(os.path.join(ROOT, "motion.js"), encoding="utf-8").read()
     motion_js = emit("motion.js", motion.replace("'./fennec.js'", f"'./{mark_js}'"))
+    # The editor's highlighter, imported by the playground alone.
+    highlight_name = emit("highlight.js", highlight_js())
 
     script = open(os.path.join(ROOT, "site.js"), encoding="utf-8").read()
     script = script.replace("./engine-worker.js", "./" + worker_name)
     script = script.replace("'./motion.js'", f"'./{motion_js}'")
+    script = script.replace("'./highlight.js'", f"'./{highlight_name}'")
     emit("site.js", script)
 
     shutil.copy(os.path.join(ROOT, "mark.svg"), os.path.join(OUT, "favicon.svg"))
