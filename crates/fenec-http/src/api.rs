@@ -1131,7 +1131,7 @@ pub fn render_batch_stop(
 /// The JSON form of a raw query response: the shape follows the statement.
 pub fn render_any(resp: &Response2, version: &'static str) -> Response {
     match resp {
-        Response2::Rows(rs) => Response::json(200, rows_json(rs)),
+        Response2::Rows(rs) => Response::json(200, rows_body(rs)),
         Response2::Affected(n) => Response::json(200, format!("{{\"affected\":{n}}}")),
         Response2::Ok(msg) => {
             let mut out = String::from("{\"message\":");
@@ -1148,7 +1148,7 @@ pub fn render_any(resp: &Response2, version: &'static str) -> Response {
 
 pub fn render(resp: &Response2, shape: &Shape, version: &'static str) -> Response {
     match (shape, resp) {
-        (Shape::Rows, Response2::Rows(rs)) => Response::json(200, rows_json(rs)),
+        (Shape::Rows, Response2::Rows(rs)) => Response::json(200, rows_body(rs)),
         (Shape::Count, Response2::Rows(rs)) => {
             let n = rs
                 .rows
@@ -1191,6 +1191,18 @@ pub use fenec_core::query::Response as Response2;
 /// set, so they go beside the rows rather than into one, and a query that
 /// asks none keeps the bare array every client reads.
 pub fn rows_json(rs: &ResultSet) -> String {
+    rows_json_into(String::new(), rs)
+}
+
+/// [`rows_json`] as an answer's body, written into the connection's spare
+/// buffer (`http::spare_body`), which goes back to it once the answer is
+/// sent.
+fn rows_body(rs: &ResultSet) -> Vec<u8> {
+    let spare = String::from_utf8(crate::http::spare_body()).unwrap_or_default();
+    rows_json_into(spare, rs).into_bytes()
+}
+
+fn rows_json_into(mut out: String, rs: &ResultSet) -> String {
     // Room for the rows as the first one goes: grown from nothing, the
     // answer to a read by id of a 1 KB record was copied eight times.
     let first: usize = rs.rows.first().map_or(0, |r| {
@@ -1206,7 +1218,8 @@ pub fn rows_json(rs: &ResultSet) -> String {
             })
             .sum()
     });
-    let mut out = String::with_capacity((first * rs.rows.len()).min(1 << 20) + 16);
+    out.clear();
+    out.reserve((first * rs.rows.len()).min(1 << 20) + 16);
     if rs.facets.is_empty() {
         json::rows_array_into(&mut out, rs);
         return out;

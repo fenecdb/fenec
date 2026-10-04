@@ -19,7 +19,20 @@ pub fn escape_into(out: &mut String, s: &str) {
     out.reserve(s.len() + 2);
     out.push('"');
     let mut from = 0;
-    for (i, &c) in s.as_bytes().iter().enumerate() {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        // Eight bytes at a time while none needs escaping: a byte at a
+        // time, the test was 1.2 us of a 1 KB row's render natively, most
+        // of a scan's answer, and 0.38 this way.
+        if let Some(w) = bytes.get(i..i + 8) {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(w);
+            if !needs_escape(u64::from_le_bytes(word)) {
+                i += 8;
+                continue;
+            }
+        }
         let escaped = match c {
             b'"' => "\\\"",
             b'\\' => "\\\\",
@@ -27,7 +40,10 @@ pub fn escape_into(out: &mut String, s: &str) {
             b'\r' => "\\r",
             b'\t' => "\\t",
             0..=0x1f => "",
-            _ => continue,
+            _ => {
+                i += 1;
+                continue;
+            }
         };
         out.push_str(s.get(from..i).unwrap_or_default());
         if escaped.is_empty() {
@@ -38,10 +54,26 @@ pub fn escape_into(out: &mut String, s: &str) {
         } else {
             out.push_str(escaped);
         }
-        from = i + 1;
+        i += 1;
+        from = i;
     }
     out.push_str(s.get(from..).unwrap_or_default());
     out.push('"');
+}
+
+/// Whether any of the eight bytes of `w` is `"`, `\` or a control
+/// character -- what [`escape_into`] escapes -- by the bit tests for a
+/// zero byte and a byte under 0x20, no byte compared on its own. A byte of
+/// 0x80 and up never matches, so a run of UTF-8 passes as ASCII does.
+#[inline]
+fn needs_escape(w: u64) -> bool {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let zero = |x: u64| x.wrapping_sub(ONES) & !x & HIGH;
+    let quote = zero(w ^ (ONES * b'"' as u64));
+    let slash = zero(w ^ (ONES * b'\\' as u64));
+    let control = w.wrapping_sub(ONES * 0x20) & !w & HIGH;
+    quote | slash | control != 0
 }
 
 /// `n` in decimal: `to_string` allocated a `String` for every int a row
@@ -896,6 +928,48 @@ fn params(src: &str, exact: bool) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The words skipped eight bytes at a time escape as a byte at a
+    /// time would: every byte to escape, at every place in a word, among
+    /// ASCII, UTF-8 and the bytes next to the ones tested for.
+    #[test]
+    fn escaping_a_word_at_a_time_escapes_every_byte() {
+        fn one_at_a_time(s: &str) -> String {
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        let pieces = [
+            "a", "\"", "\\", "\n", "\u{1}", "\u{1f}", " ", "!", "#", "[", "]", "ş", "€", "😀",
+            "\u{7f}", "\t", "\r", "0",
+        ];
+        let mut seed = 1u64;
+        for _ in 0..20_000 {
+            let mut s = String::new();
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let len = (seed >> 58) as usize;
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                // Mostly plain letters, so whole words pass untested.
+                let k = (seed >> 33) as usize % (pieces.len() * 4);
+                s.push_str(pieces.get(k).unwrap_or(&"x"));
+            }
+            let mut out = String::new();
+            escape_into(&mut out, &s);
+            assert_eq!(out, one_at_a_time(&s), "{s:?}");
+        }
+    }
 
     /// An array as the general path reads it, a value at a time: a vector
     /// when every item is a number, as `parse_value` read every array

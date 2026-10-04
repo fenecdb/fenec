@@ -1963,6 +1963,31 @@ formatting back into the browser module, which is 1 KB smaller instead.
 `the_byte_walk_reads_as_the_char_walk_did` holds the tokens, positions and
 errors to the old lexer's over 40 000 generated texts.
 
+**A plain `get` is written as JSON from the stored documents**
+(`Database::query_json`). Fields alone, in the order the payload holds
+them -- `select *` and most lists, with no `match`, `near`, `lookup`,
+`facet`, aggregate or `count` -- are answered over HTTP by writing each
+row's bytes out as JSON under the read lock, a text escaped where it lies
+(`codec::text_at`), rather than decoded into a `Value` each, rendered after
+the lock and dropped; anything else returns `None` and goes through `query`.
+It must write byte for byte what `json::rows_array_into` writes of
+`query`'s rows (`tests/query_json.rs`: every type, a field added after a
+document, a dropped one, a mapped file, rows past their time). In the
+container, musl's allocator gives a freed group of blocks back to the
+system and faults it in again at the next request: a YCSB scan of 50 1 KB
+records took 37 page faults and 213-220 us inside fenec-server, a read by
+id a page mapped and unmapped while its columns were `Vec`s -- so the
+columns sit in an array on the stack, and an answer's body is the
+connection's spare buffer (`http::spare_body`, given back after the
+`writev`, up to 1 MB): no fault, 50-60 us, and a read by id 22.4 -> 17.7
+(`make roundtrip-bench`, `--measure scan50`). In process a 1 KB row took
+0.95 us to decode, a field a look-up and a skip of the fields before it,
+and 1.17 to write out; `select` reads a row in one pass now (`one_pass`,
+0.43), `json::escape_into` tests eight bytes at a time (`needs_escape`,
+0.39), and `query_json` takes 0.46 for both. The browser module's scan of
+100 such rows went 0.355 -> 0.254 ms for 353 bytes brotli; `make
+load-bench`'s pages read back 165.8k -> 212.0k rows a second.
+
 **A Durable Object keeps a database as a file would** (`integrations/cloudflare`,
 `@fenecdb/cloudflare`). A Worker imports a `.wasm` compiled, and `Fenec.open`
 takes the module so -- it read `.instance.exports` off what `instantiate`

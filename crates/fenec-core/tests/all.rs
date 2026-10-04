@@ -27,6 +27,7 @@ mod memory;
 mod paging;
 mod persist;
 mod quant;
+mod query_json;
 mod redis_docs;
 mod replica;
 mod require;

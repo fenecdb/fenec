@@ -296,6 +296,34 @@ fn hex(c: u8) -> Option<u8> {
 
 // ----------------------------------------------------------------- response
 
+/// The most of an answer's body a connection keeps for its next one.
+const SPARE_MAX: usize = 1 << 20;
+
+thread_local! {
+    /// The last answer's body, emptied, for the next answer on the same
+    /// connection (a connection is a thread). musl's allocator, the
+    /// container's, gives a block of tens of KB back to the system when it
+    /// is freed: a scan's 56 KB answer was its pages faulted in afresh
+    /// each time, 34 page faults a scan of YCSB E in Docker.
+    static SPARE: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// An empty buffer for an answer's body: the connection's spare, its room
+/// kept.
+pub fn spare_body() -> Vec<u8> {
+    let mut v = SPARE.take();
+    v.clear();
+    v
+}
+
+/// An answer's body back to the connection once it is sent, unless it is
+/// larger than a connection keeps.
+pub fn give_back(body: Vec<u8>) {
+    if body.capacity() <= SPARE_MAX {
+        SPARE.set(body);
+    }
+}
+
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
