@@ -58,9 +58,15 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
         let Value::Object(m) = d else {
             panic!("a document is an object")
         };
+        // `{"$inc": n}` is inc(n), as the builders write it.
         let parts: Vec<String> = m
             .iter()
-            .map(|(k, v)| format!("{k}: {}", bind(v, params)))
+            .map(|(k, v)| match v {
+                Value::Object(o) if o.len() == 1 && o[0].0 == "$inc" => {
+                    format!("{k}: coalesce({k}, 0) + {}", bind(&o[0].1, params))
+                }
+                v => format!("{k}: {}", bind(v, params)),
+            })
             .collect();
         format!("{{{}}}", parts.join(", "))
     };
