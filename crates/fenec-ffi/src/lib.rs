@@ -56,8 +56,8 @@
 //! answer never holds one.
 
 use fenec_abi::Refused;
-use fenec_core::json;
 use fenec_core::engine::{CompactPolicy, Compactor};
+use fenec_core::json;
 use fenec_core::prelude::*;
 use std::ffi::{c_char, CString};
 use std::fs::File;

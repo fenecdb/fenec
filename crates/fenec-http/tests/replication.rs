@@ -608,19 +608,36 @@ fn a_primary_and_its_replica_compact_on_their_own_while_writes_go_on() {
             &format!("set items {{name: \"round {round} {pad}\", e: [{round}.0, 2.0, 1.0]}} where n < 30"),
         );
         assert_eq!(status, 200, "{body}");
-        assert_eq!(query(&p, &format!("del items where n = {}", 30 + round % 10)).0, 200);
+        assert_eq!(
+            query(&p, &format!("del items where n = {}", 30 + round % 10)).0,
+            200
+        );
         write_some(&p, 100 + round * 2, 2);
     }
     drop(compactors);
     caught_up(&r, &p);
     let compacted = |n: &Node| n.db.read().unwrap().compactions();
-    assert!(compacted(&p) >= 2, "the primary compacted {} times", compacted(&p));
-    assert!(compacted(&r) >= 2, "the replica compacted {} times", compacted(&r));
-    for sql in ["get items", "get items select id, n match name \"round\" limit 1000"] {
+    assert!(
+        compacted(&p) >= 2,
+        "the primary compacted {} times",
+        compacted(&p)
+    );
+    assert!(
+        compacted(&r) >= 2,
+        "the replica compacted {} times",
+        compacted(&r)
+    );
+    for sql in [
+        "get items",
+        "get items select id, n match name \"round\" limit 1000",
+    ] {
         assert_eq!(rows(&r, sql), rows(&p, sql), "{sql}");
     }
     let near = |n: &Node| {
-        let mut v = rows(n, "get items select id near e [3.0, 2.0, 1.0] exact limit 10000");
+        let mut v = rows(
+            n,
+            "get items select id near e [3.0, 2.0, 1.0] exact limit 10000",
+        );
         v.sort_by_key(|r| r.0);
         v
     };

@@ -759,7 +759,14 @@ impl Database {
             let mut ids = t.unwrap().ids;
             ids.sort_unstable();
             ids.dedup();
-            copy_writes(live, p, &ids, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
+            copy_writes(
+                live,
+                p,
+                &ids,
+                &mut b.side,
+                &mut b.landed,
+                &mut b.landed_bytes,
+            )?;
             // An id handed out and deleted meanwhile left no record; it must
             // not come back.
             let next = live.store.next_id();
@@ -814,10 +821,7 @@ impl Database {
         self.dirty = false;
         self.compacted_to(len);
         self.swap_held = began.elapsed();
-        let done = Response::Ok(format!(
-            "compaction done, {} bytes reclaimed",
-            b.reclaimed
-        ));
+        let done = Response::Ok(format!("compaction done, {} bytes reclaimed", b.reclaimed));
         Ok((done, retired))
     }
 }
@@ -863,7 +867,14 @@ fn catch_up(db: &RwLock<Database>, b: &mut Beside) -> Result<usize> {
             let Some(live) = g.collections.get(&p.name).filter(|c| c.id == p.cid) else {
                 return Ok(0);
             };
-            copy_writes(live, p, chunk, &mut b.side, &mut b.landed, &mut b.landed_bytes)?;
+            copy_writes(
+                live,
+                p,
+                chunk,
+                &mut b.side,
+                &mut b.landed,
+                &mut b.landed_bytes,
+            )?;
         }
     }
     Ok(copied)

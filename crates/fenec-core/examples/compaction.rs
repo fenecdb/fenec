@@ -111,8 +111,14 @@ fn main() {
     let _ = std::fs::remove_file(&path);
     let mut db = fenec_core::fs::open(&path).unwrap();
     let fields: Vec<String> = (0..FIELDS).map(|i| format!("field{i} text")).collect();
-    db.execute(&fenec_ql::parse_one(&format!("create collection usertable ({})", fields.join(", "))).unwrap())
-        .unwrap();
+    db.execute(
+        &fenec_ql::parse_one(&format!(
+            "create collection usertable ({})",
+            fields.join(", ")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let t = Instant::now();
     let mut rng = Rng(0x5943_5342);
     let mut key = 1;
@@ -213,13 +219,20 @@ fn main() {
     // The writers: a field of a record at a time.
     let sets: Arc<Vec<Statement>> = Arc::new(
         (0..FIELDS)
-            .map(|i| fenec_ql::parse_one(&format!("set usertable {{field{i}: $2}} where id = $1")).unwrap())
+            .map(|i| {
+                fenec_ql::parse_one(&format!("set usertable {{field{i}: $2}} where id = $1"))
+                    .unwrap()
+            })
             .collect(),
     );
     let mut writers = Vec::new();
     for w in 0..o.writers {
-        let (db, sets, updates, updating) =
-            (Arc::clone(&db), Arc::clone(&sets), Arc::clone(&updates), Arc::clone(&updating));
+        let (db, sets, updates, updating) = (
+            Arc::clone(&db),
+            Arc::clone(&sets),
+            Arc::clone(&updates),
+            Arc::clone(&updating),
+        );
         let (records, total, durable) = (o.records, o.updates, o.durable);
         writers.push(std::thread::spawn(move || {
             let mut rng = Rng(0x1234_5678 + w as u64 * 7919);
@@ -305,9 +318,15 @@ fn main() {
         );
         last_updates = done;
         second += 1;
-        if updated_at.is_none() && !updating.load(Ordering::Relaxed) && writers.iter().all(|w| w.is_finished()) {
+        if updated_at.is_none()
+            && !updating.load(Ordering::Relaxed)
+            && writers.iter().all(|w| w.is_finished())
+        {
             updated_at = Some(Instant::now());
-            println!("# the updates are done after {:.1} s", start.elapsed().as_secs_f64());
+            println!(
+                "# the updates are done after {:.1} s",
+                start.elapsed().as_secs_f64()
+            );
         }
         if updated_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(o.after)) {
             break;

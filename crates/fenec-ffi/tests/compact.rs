@@ -75,8 +75,12 @@ fn a_file_the_app_keeps_updating_stays_near_what_it_holds() {
     );
     let body = "x".repeat(500);
     let mut sizes = Vec::new();
-    for flags in [FENEC_OPEN_NO_SYNC, FENEC_OPEN_NO_SYNC | FENEC_OPEN_NO_AUTO_COMPACT] {
-        let dir = std::env::temp_dir().join(format!("fenec-ffi-compact-{}-{flags}", std::process::id()));
+    for flags in [
+        FENEC_OPEN_NO_SYNC,
+        FENEC_OPEN_NO_SYNC | FENEC_OPEN_NO_AUTO_COMPACT,
+    ] {
+        let dir =
+            std::env::temp_dir().join(format!("fenec-ffi-compact-{}-{flags}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("app.fenec");

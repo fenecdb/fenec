@@ -502,9 +502,9 @@ fn digest(b: &[u8]) -> u64 {
 
 /// A record's fields in one: what a scan's row is held to.
 fn combine(fields: &[u64; FIELDS]) -> u64 {
-    fields
-        .iter()
-        .fold(0x9E37_79B9_7F4A_7C15, |h, d| (h ^ d).wrapping_mul(0x100_0000_01B3).rotate_left(29))
+    fields.iter().fold(0x9E37_79B9_7F4A_7C15, |h, d| {
+        (h ^ d).wrapping_mul(0x100_0000_01B3).rotate_left(29)
+    })
 }
 
 fn base_digests(key: u64) -> [u64; FIELDS] {
@@ -577,7 +577,9 @@ impl System for FenecLocal {
         "fenec"
     }
     fn size(&self) -> Option<u64> {
-        std::fs::metadata(self.dir.join("ycsb.fenec")).ok().map(|m| m.len())
+        std::fs::metadata(self.dir.join("ycsb.fenec"))
+            .ok()
+            .map(|m| m.len())
     }
     fn load(&mut self, records: u64) {
         // A load starts afresh: the syncer holds the database it replaces.
@@ -616,9 +618,8 @@ impl System for FenecLocal {
         db.sync().unwrap();
         let db = Arc::new(RwLock::new(db));
         if self.auto_compact {
-            self.compactor = Some(
-                fenec_core::engine::Compactor::start(&db, Default::default()).unwrap(),
-            );
+            self.compactor =
+                Some(fenec_core::engine::Compactor::start(&db, Default::default()).unwrap());
         }
         self.db = Some(db);
     }
@@ -1127,7 +1128,9 @@ impl Client for ServerClient {
         true
     }
     fn read(&mut self, key: u64) {
-        let out = self.c.query("get usertable where id = $1", &key.to_string());
+        let out = self
+            .c
+            .query("get usertable where id = $1", &key.to_string());
         expect(out, b"\"field9\"");
     }
     fn update(&mut self, key: u64, field: usize, value: &str) {
@@ -1190,8 +1193,12 @@ fn json_rows(body: &[u8]) -> Vec<(u64, [u64; FIELDS])> {
                         .unwrap_or(u64::MAX)
                 }
                 Some(n) if n.starts_with(b"field") => {
-                    let f: Option<usize> = std::str::from_utf8(&n[5..]).ok().and_then(|f| f.parse().ok());
-                    let v = value.strip_prefix(b"\"").and_then(|v| v.strip_suffix(b"\""));
+                    let f: Option<usize> = std::str::from_utf8(&n[5..])
+                        .ok()
+                        .and_then(|f| f.parse().ok());
+                    let v = value
+                        .strip_prefix(b"\"")
+                        .and_then(|v| v.strip_suffix(b"\""));
                     if let (Some(f), Some(v)) = (f, v) {
                         if f < FIELDS {
                             d[f] = digest(v);
@@ -1219,18 +1226,32 @@ struct Pg {
 /// cache it counts on, and checkpoints spaced so the load is not one. Its
 /// data in a volume, the VM's own file system, not the image's layers.
 const PG_RUN: &[&str] = &[
-    "-e", "POSTGRES_PASSWORD=fenec", "-e", "POSTGRES_DB=ycsb",
-    "-p", "127.0.0.1:55433:5432", "--shm-size=1g",
-    "-v", "fenecycsb-pg:/var/lib/postgresql/data",
+    "-e",
+    "POSTGRES_PASSWORD=fenec",
+    "-e",
+    "POSTGRES_DB=ycsb",
+    "-p",
+    "127.0.0.1:55433:5432",
+    "--shm-size=1g",
+    "-v",
+    "fenecycsb-pg:/var/lib/postgresql/data",
     "postgres:17",
-    "-c", "shared_buffers=1GB", "-c", "effective_cache_size=2GB",
-    "-c", "max_wal_size=4GB", "-c", "max_connections=200",
+    "-c",
+    "shared_buffers=1GB",
+    "-c",
+    "effective_cache_size=2GB",
+    "-c",
+    "max_wal_size=4GB",
+    "-c",
+    "max_connections=200",
 ];
 
 /// MongoDB 8 as it comes: WiredTiger's cache is half the memory less 1 GB.
 const MONGO_RUN: &[&str] = &[
-    "-p", "127.0.0.1:27018:27017",
-    "-v", "fenecycsb-mongo:/data/db",
+    "-p",
+    "127.0.0.1:27018:27017",
+    "-v",
+    "fenecycsb-mongo:/data/db",
     "mongo:8",
 ];
 
@@ -1311,8 +1332,7 @@ impl System for Pg {
             key = end;
         }
         c.batch_execute("VACUUM ANALYZE usertable").unwrap();
-        c.batch_execute("CHECKPOINT")
-            .unwrap();
+        c.batch_execute("CHECKPOINT").unwrap();
     }
     fn set_mode(&mut self, mode: Mode) {
         self.durable = mode == Mode::Durable;
@@ -1398,7 +1418,9 @@ impl Client for PgClient {
         self.c
             .execute(
                 &self.insert,
-                &[&k, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]],
+                &[
+                    &k, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9],
+                ],
             )
             .unwrap();
     }
@@ -1474,7 +1496,9 @@ impl System for Mongo {
         let mut key = 1;
         while key <= records {
             let end = (key + LOAD_BATCH as u64).min(records + 1);
-            let docs: Vec<Document> = (key..end).map(|k| mongo_doc(k, &record_values(k))).collect();
+            let docs: Vec<Document> = (key..end)
+                .map(|k| mongo_doc(k, &record_values(k)))
+                .collect();
             coll.insert_many(docs).run().unwrap();
             key = end;
         }
@@ -1597,7 +1621,13 @@ struct Cell {
     logs: Vec<Vec<Entry>>,
 }
 
-fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cfg: &Config) -> (Cell, u64) {
+fn run_cell(
+    sys: &dyn System,
+    w: &Workload,
+    threads: usize,
+    records_now: u64,
+    cfg: &Config,
+) -> (Cell, u64) {
     let keys = Keys::new(records_now, threads);
     let expect_new = if w.mix.iter().any(|(o, _)| *o == Op::Insert) {
         (records_now / 10).max(10_000)
@@ -1630,7 +1660,8 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
                     space,
                 };
                 // The same seed for every system: the cell and the thread.
-                let mut rng = Rng::new(SEED ^ ((w.name as u64) << 32) ^ ((threads as u64) << 16) ^ t as u64);
+                let mut rng =
+                    Rng::new(SEED ^ ((w.name as u64) << 32) ^ ((threads as u64) << 16) ^ t as u64);
                 let mix = w.mix;
                 s.spawn(move || {
                     let mut hist: BTreeMap<Op, Hist> = BTreeMap::new();
@@ -1709,22 +1740,30 @@ fn run_cell(sys: &dyn System, w: &Workload, threads: usize, records_now: u64, cf
                         // timed span; the warm-up's writes are logged too,
                         // since the reads after them see them.
                         let (s, e) = (at(start), at(end));
-                        let write = |client: &mut Box<dyn Client>, s, field: usize, d| Entry::Write {
-                            key,
-                            field: field as u8,
-                            value: d,
-                            s,
-                            e,
-                            affected: client.affected(),
-                        };
+                        let write =
+                            |client: &mut Box<dyn Client>, s, field: usize, d| Entry::Write {
+                                key,
+                                field: field as u8,
+                                value: d,
+                                s,
+                                e,
+                                affected: client.affected(),
+                            };
                         match op {
                             Op::Read => log.push(Entry::read(key, s, e, client.got())),
                             Op::Rmw => {
                                 let (mid, rows) = rmw_read.take().unwrap();
                                 log.push(Entry::read(key, s, at(mid), rows));
-                                log.push(write(&mut client, at(mid), field, digest(value.as_bytes())));
+                                log.push(write(
+                                    &mut client,
+                                    at(mid),
+                                    field,
+                                    digest(value.as_bytes()),
+                                ));
                             }
-                            Op::Update => log.push(write(&mut client, s, field, digest(value.as_bytes()))),
+                            Op::Update => {
+                                log.push(write(&mut client, s, field, digest(value.as_bytes())))
+                            }
                             Op::Insert => log.push(write(&mut client, s, FIELDS, 0)),
                             Op::Scan => log.push(Entry::Scan {
                                 key,
@@ -1884,14 +1923,25 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
     // Every write, into its field's register.
     let mut regs: std::collections::HashMap<(u64, u8), Reg> = std::collections::HashMap::new();
     for e in logs.iter().flatten() {
-        if let Entry::Write { key, field, value, s, e, affected } = *e {
+        if let Entry::Write {
+            key,
+            field,
+            value,
+            s,
+            e,
+            affected,
+        } = *e
+        {
             v.writes += 1;
             if affected != 1 {
                 v.wrong(format!("write of {key} answered {affected} records"));
             }
             let mut put = |f: u8, d: u64| {
                 regs.entry((key, f))
-                    .or_insert_with(|| Reg { ws: Vec::new(), smax: Vec::new() })
+                    .or_insert_with(|| Reg {
+                        ws: Vec::new(),
+                        smax: Vec::new(),
+                    })
                     .ws
                     .push(W { s, e, d })
             };
@@ -1904,11 +1954,19 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
             }
         }
     }
-    let mut by_value: std::collections::HashMap<u64, ((u64, u8), usize)> = std::collections::HashMap::new();
+    let mut by_value: std::collections::HashMap<u64, ((u64, u8), usize)> =
+        std::collections::HashMap::new();
     for (r, reg) in regs.iter_mut() {
         reg.ws.sort_by_key(|w| (w.e, w.s));
         let mut m = 0;
-        reg.smax = reg.ws.iter().map(|w| { m = m.max(w.s); m }).collect();
+        reg.smax = reg
+            .ws
+            .iter()
+            .map(|w| {
+                m = m.max(w.s);
+                m
+            })
+            .collect();
         for (i, w) in reg.ws.iter().enumerate() {
             by_value.insert(w.d, (*r, i));
         }
@@ -1935,25 +1993,45 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
     };
     for e in logs.iter().flatten() {
         match e {
-            Entry::Read { key, s, e, rows, got } => {
+            Entry::Read {
+                key,
+                s,
+                e,
+                rows,
+                got,
+            } => {
                 v.reads += 1;
                 if *rows != 1 || got.0 != *key {
-                    v.wrong(format!("read of {key} answered {rows} rows, the first {}", got.0));
+                    v.wrong(format!(
+                        "read of {key} answered {rows} rows, the first {}",
+                        got.0
+                    ));
                     continue;
                 }
                 for f in 0..FIELDS {
                     if !may_hold(model, (*key, f as u8), *s, *e, got.1[f]) {
-                        v.wrong(format!("read of {key} [{s}, {e}] ns: field{f} holds no value written to it"));
+                        v.wrong(format!(
+                            "read of {key} [{s}, {e}] ns: field{f} holds no value written to it"
+                        ));
                         break;
                     }
                 }
             }
-            Entry::Scan { key, len, seen, next, rows } => {
+            Entry::Scan {
+                key,
+                len,
+                seen,
+                next,
+                rows,
+            } => {
                 v.scans += 1;
                 v.rows += rows.len() as u64;
                 let visible = (seen + 1).saturating_sub(*key).min(*len);
                 if (rows.len() as u64) < visible || rows.len() as u64 > *len {
-                    v.wrong(format!("scan of {len} from {key} answered {} rows, {visible} visible", rows.len()));
+                    v.wrong(format!(
+                        "scan of {len} from {key} answered {} rows, {visible} visible",
+                        rows.len()
+                    ));
                     continue;
                 }
                 for (i, (k, c)) in rows.iter().enumerate() {
@@ -2004,7 +2082,9 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
                         }
                     };
                     if !found {
-                        v.wrong(format!("scan from {key}: the record of {k} is not as written"));
+                        v.wrong(format!(
+                            "scan from {key}: the record of {k} is not as written"
+                        ));
                         break;
                     }
                 }
@@ -2015,7 +2095,10 @@ fn check(logs: &[Vec<Entry>], model: &mut Model) -> Verdict {
     // What each field written holds now: the writes no other began after.
     for (r, reg) in regs {
         let last = *reg.smax.last().unwrap();
-        model.fields.insert(r, reg.ws.iter().filter(|w| w.e >= last).map(|w| w.d).collect());
+        model.fields.insert(
+            r,
+            reg.ws.iter().filter(|w| w.e >= last).map(|w| w.d).collect(),
+        );
     }
     v
 }
@@ -2122,12 +2205,19 @@ fn make_system(name: &str, dir: &Path, cfg: &Config) -> Box<dyn System> {
         "mongo" => {
             let (url, container) = match std::env::var("FENECBENCH_YCSB_MONGO") {
                 Ok(url) => (url, None),
-                Err(_) => (MONGO_URL.to_string(), Some(Container::start("mongo", MONGO_RUN))),
+                Err(_) => (
+                    MONGO_URL.to_string(),
+                    Some(Container::start("mongo", MONGO_RUN)),
+                ),
             };
             let client = mongodb::sync::Client::with_uri_str(url).unwrap();
             let until = Instant::now() + Duration::from_secs(120);
             let info = loop {
-                match client.database("admin").run_command(doc! {"buildInfo": 1}).run() {
+                match client
+                    .database("admin")
+                    .run_command(doc! {"buildInfo": 1})
+                    .run()
+                {
                     Ok(d) => break d,
                     Err(e) => {
                         assert!(Instant::now() < until, "MongoDB did not start: {e}");
@@ -2220,7 +2310,11 @@ fn run_system(name: &str, cfg: &Config, base: f64, run: usize) {
                             eprintln!("  {e}");
                         }
                         let new = !path.exists();
-                        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .unwrap();
                         if new {
                             writeln!(f, "run\tsystem\tmode\tworkload\tthreads\treads\tscans\tscan_rows\twrites\tmismatches\tundecided").unwrap();
                         }
@@ -2358,25 +2452,27 @@ fn report(path: &Path) {
     // The runs a later one replaced, by run and system (`superseded.tsv`
     // beside the results): they stay in the file, which is only appended
     // to, and count in no median.
-    let superseded: Vec<(String, String)> = std::fs::read_to_string(path.with_file_name("superseded.tsv"))
-        .unwrap_or_default()
-        .lines()
-        .skip(1)
-        .filter_map(|l| {
-            let mut f = l.split('\t');
-            Some((f.next()?.to_string(), f.next()?.to_string()))
-        })
-        .collect();
+    let superseded: Vec<(String, String)> =
+        std::fs::read_to_string(path.with_file_name("superseded.tsv"))
+            .unwrap_or_default()
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                Some((f.next()?.to_string(), f.next()?.to_string()))
+            })
+            .collect();
     let lines = lines.filter(|l| {
         let f: Vec<&str> = l.split('\t').collect();
-        !superseded
-            .iter()
-            .any(|(run, sys)| f.get(col("run")) == Some(&run.as_str()) && f.get(col("system")) == Some(&sys.as_str()))
+        !superseded.iter().any(|(run, sys)| {
+            f.get(col("run")) == Some(&run.as_str()) && f.get(col("system")) == Some(&sys.as_str())
+        })
     });
     // A run's cell measured again -- a run cut short and completed by a
     // later invocation with its `--run-id` loads and pings again -- counts
     // once, as its last line: the file is only ever appended to.
-    let mut latest: BTreeMap<(String, String, String, String, usize), Vec<String>> = BTreeMap::new();
+    let mut latest: BTreeMap<(String, String, String, String, usize), Vec<String>> =
+        BTreeMap::new();
     for l in lines {
         let f: Vec<String> = l.split('\t').map(str::to_string).collect();
         let key = (
@@ -2531,7 +2627,14 @@ mod tests {
     }
 
     fn update(key: u64, field: u8, value: u64, s: u64, e: u64) -> Entry {
-        Entry::Write { key, field, value, s, e, affected: 1 }
+        Entry::Write {
+            key,
+            field,
+            value,
+            s,
+            e,
+            affected: 1,
+        }
     }
 
     #[test]
@@ -2547,7 +2650,10 @@ mod tests {
         assert_eq!(stale.mismatches, 1);
         // Overlapping it, either.
         for got in [base, new] {
-            let v = check(&[vec![w()], vec![read(7, 15, 25, got)]], &mut Model::default());
+            let v = check(
+                &[vec![w()], vec![read(7, 15, 25, got)]],
+                &mut Model::default(),
+            );
             assert_eq!(v.mismatches, 0);
         }
         // A write followed by another that ended before the read is gone.
@@ -2561,7 +2667,10 @@ mod tests {
         moved[4] = 42;
         let v = check(&[vec![w(), read(7, 30, 40, moved)]], &mut Model::default());
         assert_eq!(v.mismatches, 1);
-        let v = check(&[vec![Entry::read(7, 1, 2, vec![(8, base_digests(8))])]], &mut Model::default());
+        let v = check(
+            &[vec![Entry::read(7, 1, 2, vec![(8, base_digests(8))])]],
+            &mut Model::default(),
+        );
         assert_eq!(v.mismatches, 1);
     }
 
@@ -2572,18 +2681,39 @@ mod tests {
         let mut new = base_digests(7);
         new[3] = 42;
         assert_eq!(check(&[vec![read(7, 1, 2, new)]], &mut model).mismatches, 0);
-        assert_eq!(check(&[vec![read(7, 1, 2, base_digests(7))]], &mut model).mismatches, 1);
+        assert_eq!(
+            check(&[vec![read(7, 1, 2, base_digests(7))]], &mut model).mismatches,
+            1
+        );
     }
 
     #[test]
     fn a_scan_answers_every_key_it_could_see_in_order() {
         let row = |k: u64| (k, combine(&base_digests(k)));
-        let scan = |rows: Vec<(u64, u64)>| Entry::Scan { key: 5, len: 3, seen: 100, next: 101, rows };
+        let scan = |rows: Vec<(u64, u64)>| Entry::Scan {
+            key: 5,
+            len: 3,
+            seen: 100,
+            next: 101,
+            rows,
+        };
         let mut m = Model::default();
-        assert_eq!(check(&[vec![scan(vec![row(5), row(6), row(7)])]], &mut m).mismatches, 0);
-        assert_eq!(check(&[vec![scan(vec![row(5), row(7), row(8)])]], &mut m).mismatches, 1);
-        assert_eq!(check(&[vec![scan(vec![row(5), row(6)])]], &mut m).mismatches, 1);
-        assert_eq!(check(&[vec![scan(vec![row(5), row(6), (7, 1)])]], &mut m).mismatches, 1);
+        assert_eq!(
+            check(&[vec![scan(vec![row(5), row(6), row(7)])]], &mut m).mismatches,
+            0
+        );
+        assert_eq!(
+            check(&[vec![scan(vec![row(5), row(7), row(8)])]], &mut m).mismatches,
+            1
+        );
+        assert_eq!(
+            check(&[vec![scan(vec![row(5), row(6)])]], &mut m).mismatches,
+            1
+        );
+        assert_eq!(
+            check(&[vec![scan(vec![row(5), row(6), (7, 1)])]], &mut m).mismatches,
+            1
+        );
     }
 
     #[test]

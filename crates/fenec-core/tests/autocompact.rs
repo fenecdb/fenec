@@ -148,7 +148,11 @@ fn the_dead_bytes_are_counted_as_writes_land_and_found_again_on_open() {
         // The open counts the same from the records it walks.
         let mut db = fenec_core::fs::open_with(&path, mapped, Box::new(Ok)).unwrap();
         let again = db.garbage();
-        assert_eq!((again.file, again.live), (g.file, g.live), "mapped: {mapped}");
+        assert_eq!(
+            (again.file, again.live),
+            (g.file, g.live),
+            "mapped: {mapped}"
+        );
 
         // A compact leaves nothing dead, and what it kept besides the
         // documents is not counted as dead after it.
@@ -215,7 +219,10 @@ fn a_file_compacted_on_its_own_under_writes_holds_what_its_twin_does() {
         }
         drop(compactor);
         let compactions = db.read().unwrap().compactions();
-        assert!(compactions >= 3, "mapped {mapped}: {compactions} compactions");
+        assert!(
+            compactions >= 3,
+            "mapped {mapped}: {compactions} compactions"
+        );
         // Looked at every 2 ms, a compact due at half the file: the file is
         // never long past twice what it holds.
         assert!(most < 4.0, "mapped {mapped}: the file reached {most:.2}x");

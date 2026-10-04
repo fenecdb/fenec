@@ -161,7 +161,12 @@ impl Database {
     pub fn compact_due(&self, policy: &CompactPolicy) -> bool {
         self.failed.is_none()
             && !self.maintaining()
-            && self.sink.lock().unwrap_or_else(|e| e.into_inner()).side().is_some()
+            && self
+                .sink
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .side()
+                .is_some()
             && policy.due(self.garbage())
     }
 }
