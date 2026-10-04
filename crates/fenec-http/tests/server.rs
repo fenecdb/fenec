@@ -510,10 +510,12 @@ fn connection_limit_refuses_extra_connections() {
     }
 }
 
-/// A keep-alive connection silent past `--idle-timeout` is closed: its
-/// thread is let go of.
+/// A keep-alive connection silent past `--idle-timeout` is closed, and
+/// closed with nothing said: a `400 read error` written as it went was read
+/// by Python's `http.client` as the answer to the next request it sent on
+/// the connection, a `put` that never ran.
 #[test]
-fn idle_timeout_closes_the_connection() {
+fn idle_timeout_closes_the_connection_without_a_word() {
     let h = start(
         Config {
             idle_timeout: Some(Duration::from_millis(200)),
@@ -523,15 +525,33 @@ fn idle_timeout_closes_the_connection() {
     );
     let mut c = Conn::open(h.port);
     ok(c.query("collections"));
-    std::thread::sleep(Duration::from_millis(600));
-    // The close is said with the timed-out read's 400 before it, which
-    // the next request finds waiting; then the connection is gone.
-    let mut asked = 0;
-    while let Some((status, body)) = c.ask("GET", "/collections", "") {
-        assert_eq!(status, 400, "the silent connection was kept: {body}");
-        asked += 1;
-        assert!(asked < 2, "the silent connection was kept");
-    }
+    // The server's close is the event waited for: the read ends at it, and
+    // the client's own read timeout (10 s) bounds only a server that never
+    // closes.
+    let mut sent = Vec::new();
+    let read = c.r.read_to_end(&mut sent);
+    assert!(read.is_ok(), "the connection was kept: {read:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&sent),
+        "",
+        "bytes no request asked for"
+    );
+
+    // A connection opened and never written to is closed the same way.
+    let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut sent = Vec::new();
+    assert!(s.read_to_end(&mut sent).is_ok());
+    assert!(sent.is_empty(), "{}", String::from_utf8_lossy(&sent));
+
+    // A request cut off part way is answered, since one was asked: 408.
+    let mut s = TcpStream::connect(("127.0.0.1", h.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(b"GET /collections HTTP/1.1\r\nHost: t\r\n")
+        .unwrap();
+    let mut sent = String::new();
+    let _ = s.read_to_string(&mut sent);
+    assert!(sent.starts_with("HTTP/1.1 408"), "{sent}");
 }
 
 /// `GET /_health` answers with no token and takes no lock: a probe that

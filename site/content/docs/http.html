@@ -554,7 +554,9 @@ without a filter is refused, and covering a whole collection needs a separate
 collide with a field named <code>all</code>.</p>
 
 <p>Limits are shared with <code>fenec-server</code> (<code>--max-connections</code>,
-<code>--idle-timeout</code>); the body ceiling is 64 MiB and the header block
+<code>--idle-timeout</code>: a connection silent that long between requests is
+closed with nothing written, and one that went silent part way through a
+request is answered 408); the body ceiling is 64 MiB and the header block
 64 KiB. <code>Transfer-Encoding: chunked</code> is unsupported and refused with
 411, which beats reading half a body. A field whose name matches a clause name
 (<code>select</code>, <code>order</code>, <code>limit</code>,
