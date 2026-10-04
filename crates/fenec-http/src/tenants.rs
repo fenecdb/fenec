@@ -1047,7 +1047,13 @@ mod tests {
     #[test]
     fn closing_and_reopening_under_load_loses_nothing() {
         // Writers and a closer racing: a second instance of the file would
-        // show up as lost or duplicated documents.
+        // show up as lost or duplicated documents. A tenant some writer
+        // holds is not idle, and four writers back to back left the closer
+        // no moment with none of them holding it -- under load it closed
+        // nothing at all -- so the writers also stop together now and then,
+        // and the tenant is closed there before all four open it again at
+        // once. The closer races them beside that, whenever it gets a turn.
+        const ROUNDS: usize = 4;
         let dir = scratch("race");
         let reg = Arc::new(Tenants::new(&dir).unwrap());
         run(
@@ -1059,20 +1065,31 @@ mod tests {
         let closer = {
             let (reg, stop) = (Arc::clone(&reg), Arc::clone(&stop));
             std::thread::spawn(move || {
-                let mut closed = 0;
                 while !stop.load(Ordering::SeqCst) {
-                    closed += reg.close_idle(Duration::ZERO);
+                    reg.close_idle(Duration::ZERO);
                 }
-                closed
             })
         };
+        let parked = Arc::new(std::sync::Barrier::new(4));
         let writers: Vec<_> = (0..4)
             .map(|w| {
-                let reg = Arc::clone(&reg);
+                let (reg, parked) = (Arc::clone(&reg), Arc::clone(&parked));
                 std::thread::spawn(move || {
-                    for i in 0..200 {
-                        let t = reg.get("t").unwrap();
-                        run(&t, &format!("put n {{w: {w}, i: {i}}}"));
+                    for round in 0..ROUNDS {
+                        for i in 0..50 {
+                            let t = reg.get("t").unwrap();
+                            run(&t, &format!("put n {{w: {w}, i: {}}}", round * 50 + i));
+                        }
+                        // None of the four holds the tenant now: it closes,
+                        // here or in the closer, whose look may hold it a
+                        // moment longer.
+                        if parked.wait().is_leader() {
+                            while !reg.with_slot("t", |held| {
+                                reg.close(held);
+                                matches!(held, Held::Closed)
+                            }) {}
+                        }
+                        parked.wait();
                     }
                 })
             })
@@ -1081,8 +1098,7 @@ mod tests {
             w.join().unwrap();
         }
         stop.store(true, Ordering::SeqCst);
-        let closed = closer.join().unwrap();
-        assert!(closed > 0, "the closer never got a turn");
+        closer.join().unwrap();
 
         reg.close_idle(Duration::ZERO);
         let db = fenec_core::fs::open(dir.join("t.fenec")).unwrap();
