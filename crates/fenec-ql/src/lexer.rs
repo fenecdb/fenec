@@ -547,6 +547,37 @@ mod tests {
         assert!(tokenize("a.5").is_err());
     }
 
+    /// A `-` after what ends a value takes away; anywhere else it is a
+    /// number's sign, as it always was.
+    #[test]
+    fn a_minus_after_a_value_subtracts() {
+        let toks =
+            |s: &str| -> Vec<Tok> { tokenize(s).unwrap().into_iter().map(|t| t.tok).collect() };
+        let n = || Tok::Ident("n".into());
+        assert_eq!(toks("n-1"), [n(), Tok::Minus, Tok::Int(1), Tok::Eof]);
+        assert_eq!(toks("n - 1"), [n(), Tok::Minus, Tok::Int(1), Tok::Eof]);
+        assert_eq!(
+            toks("$1-2"),
+            [Tok::Param(0), Tok::Minus, Tok::Int(2), Tok::Eof]
+        );
+        assert_eq!(
+            toks("(n)-2.5")[3..],
+            [Tok::Minus, Tok::Float(2.5), Tok::Eof]
+        );
+        assert_eq!(toks("n = -1"), [n(), Tok::Eq, Tok::Int(-1), Tok::Eof]);
+        assert_eq!(
+            toks("[1, -2]")[3..],
+            [Tok::Int(-2), Tok::RBracket, Tok::Eof]
+        );
+        assert_eq!(toks("-n"), [Tok::Minus, n(), Tok::Eof]);
+        assert_eq!(
+            toks("n+1*2/3")[1..6],
+            [Tok::Plus, Tok::Int(1), Tok::Star, Tok::Int(2), Tok::Slash]
+        );
+        // A comment is still a comment.
+        assert_eq!(toks("n -- 1"), [n(), Tok::Eof]);
+    }
+
     #[test]
     fn numbers_and_params() {
         let t = tokenize("[-0.5, 1e-3, 42] $2").unwrap();
@@ -849,6 +880,10 @@ mod tests {
             "7e",
             "1.",
             "-",
+            "+",
+            "/",
+            "n-1",
+            "-x",
             "--c\n",
             "-- c",
             "#c\n",

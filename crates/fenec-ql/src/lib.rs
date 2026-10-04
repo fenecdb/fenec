@@ -292,6 +292,31 @@ mod tests {
             .to_string();
         assert!(e.contains("too deep"), "{e}");
 
+        // Arithmetic is depth too: a chain of `+`, a run of `-`, and
+        // parentheses around sums, which take two levels each.
+        let sum = vec!["1"; MAX_EXPR_DEPTH * 2].join(" + ");
+        let e = parse_one(&format!("get t where n = {sum}"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("too deep"), "{e}");
+        let minus = "- ".repeat(MAX_EXPR_DEPTH * 2);
+        let e = parse_one(&format!("get t where n = {minus}1"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("too deep"), "{e}");
+        let half = MAX_EXPR_DEPTH / 2 - 2;
+        let nested = format!("set t {{n: {}n{}}}", "(1 + ".repeat(half), ")".repeat(half));
+        let st = parse_one(&nested).unwrap();
+        let mut db = fenec_core::engine::Database::new();
+        db.execute(&parse_one("create collection t (n int)").unwrap())
+            .unwrap();
+        db.execute(&parse_one("put t {n: 0}").unwrap()).unwrap();
+        db.execute(&st).unwrap();
+        let Ok(Response::Rows(rs)) = db.query(&parse_one("get t select n").unwrap(), &[]) else {
+            panic!("rows")
+        };
+        assert_eq!(rs.rows[0].values[0], Value::Int(half as i64));
+
         // An expression below the limit parses normally.
         let ok = format!(
             "get t where {}n = 1{}",
