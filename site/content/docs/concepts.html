@@ -17,7 +17,8 @@ copy in, evict or warm up.</p>
   <li><b>Writes only append.</b> Old data is never changed in place.</li>
   <li><b>Reads decode in place.</b> A read takes just the field it needs.</li>
   <li><b><code>compact</code> reclaims space</b> from deleted and overwritten
-    rows.</li>
+    rows. A server and an app run it on their own, beside the queries, once
+    half the file is dead.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -40,7 +41,10 @@ of the locking cost all follow from that one structure.</p>
 </ul>
 
 <p>No eviction policy, no dirty pages, no warm-up. Dead bytes are reclaimed by
-<code>compact</code>.</p>
+<code>compact</code>, which <code>fenec-server</code> and the native library
+run on their own (<a href="/docs/server#compaction">Compaction</a>): left to
+grow, a file of updated rows spreads its live records thin over pages of
+dead ones, and reads wait for the disk.</p>
 </details>
 
 <h2 id="the-file-is-mapped">The file is mapped</h2>

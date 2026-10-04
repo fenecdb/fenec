@@ -181,17 +181,18 @@ median of three runs (<a href="benchmarks.html#ycsb">every cell</a>):</p>
 <table>
 <thead><tr><th>YCSB, 1 000 000 records</th><th class="n">fenecdb</th><th class="n">SQLite</th></tr></thead>
 <tbody>
-<tr><td>B, 95% reads, 16 threads, buffered</td><td class="n"><b>78.6 k</b></td><td class="n">47.9 k</td></tr>
-<tr><td>A, 50% updates, 16 threads, durable</td><td class="n"><b>3.43 k</b></td><td class="n">0.45 k</td></tr>
-<tr><td>C, reads, one thread, after the updates</td><td class="n">30.1 k</td><td class="n"><b>279 k</b></td></tr>
+<tr><td>B, 95% reads, 16 threads, buffered</td><td class="n"><b>545 k</b></td><td class="n">47.9 k</td></tr>
+<tr><td>A, 50% updates, 16 threads, durable</td><td class="n"><b>3.22 k</b></td><td class="n">0.45 k</td></tr>
+<tr><td>C, reads, one thread, after the updates</td><td class="n"><b>438 k</b></td><td class="n">279 k</td></tr>
 </tbody>
 </table>
 </div>
 
 <ul>
-  <li><b>SQLite reads faster once updates have grown fenecdb's file,</b>
-    which writes a record again at its end on every update until a
-    <code>compact</code>.</li>
+  <li><b>fenecdb writes a record again at its file's end on every
+    update</b>, where SQLite updates its page in place; the file compacts
+    itself once half of it is dead, beside the reads. Before it did, C at
+    one thread read 30.1 k after the updates, where SQLite read 279 k.</li>
   <li><b>SQLite opens faster</b> and its readers never wait for a block of
     writes; fenecdb's do, while the block runs.</li>
   <li><b>Not measured yet:</b> sqlite-vec, by brute force or with its

@@ -181,9 +181,12 @@ where a second process over a server's file would corrupt it.</p>
 file (<code>notes.fenec~</code>) and flushed before the file is touched, so a
 crash at any point leaves one of the two whole, and the next
 <code>openFile</code> takes whichever holds every write <code>run</code>
-answered. A write a crash cut short is cut off. What updates and deletes
-leave behind stays in the image until a <code>compact</code>, as it does in
-a server's checkpoint. Once the file refuses a write, every later write is
+answered. A write a crash cut short is cut off. A new image holds the live
+records alone, so what updates and deletes left behind goes with it, from
+the file and from <code>persist</code>'s images alike; the page's memory
+keeps those versions until it opens the file again or runs
+<code>compact</code>, since a page has no thread to compact beside its
+queries the way a server and an app do. Once the file refuses a write, every later write is
 refused too; the database has to be opened from the file again.</p>
 
 <p><code>persist</code> and <code>restore</code> keep the same bytes in
