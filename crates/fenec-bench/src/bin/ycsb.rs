@@ -2355,6 +2355,24 @@ fn report(path: &Path) {
     let mut lines = text.lines();
     let head: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |name: &str| head.iter().position(|h| *h == name).unwrap();
+    // The runs a later one replaced, by run and system (`superseded.tsv`
+    // beside the results): they stay in the file, which is only appended
+    // to, and count in no median.
+    let superseded: Vec<(String, String)> = std::fs::read_to_string(path.with_file_name("superseded.tsv"))
+        .unwrap_or_default()
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?.to_string(), f.next()?.to_string()))
+        })
+        .collect();
+    let lines = lines.filter(|l| {
+        let f: Vec<&str> = l.split('\t').collect();
+        !superseded
+            .iter()
+            .any(|(run, sys)| f.get(col("run")) == Some(&run.as_str()) && f.get(col("system")) == Some(&sys.as_str()))
+    });
     // A run's cell measured again -- a run cut short and completed by a
     // later invocation with its `--run-id` loads and pings again -- counts
     // once, as its last line: the file is only ever appended to.

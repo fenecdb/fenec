@@ -446,21 +446,21 @@ CLAIMS = [
     ("site/content/docs/concepts.html", r"glue is about (\d+) lines", "glue", 8),
     # YCSB, in thousands of operations a second (`ycsb_facts`).
     ("README.md", r"fenecdb does B with 16 threads at ([\d.]+) k operations", "ycsb:fenec:buffered:B:16", 0),
-    ("README.md", r"second against SQLite's ([\d.]+) k, and loses C", "ycsb:sqlite:buffered:B:16", 0),
-    ("README.md", r"loses C on one thread, ([\d.]+) k against", "ycsb:fenec:buffered:C:1", 0),
-    ("README.md", r"against\s+([\d.]+) k, once updates have grown", "ycsb:sqlite:buffered:C:1", 0),
+    ("README.md", r"second against SQLite's ([\d.]+) k, and C on one thread", "ycsb:sqlite:buffered:B:16", 0),
+    ("README.md", r"and C on one thread at ([\d.]+) k against", "ycsb:fenec:buffered:C:1", 0),
+    ("README.md", r"k against\s+([\d.]+) k, its file compacted", "ycsb:sqlite:buffered:C:1", 0),
     ("site/content/index.html", r"YCSB B over HTTP, 16 clients, durable</dt><dd><b>([\d.]+) k ops/s", "ycsb:server-docker:durable:B:16", 0),
     ("site/content/index.html", r"<span>PostgreSQL ([\d.]+) k, both in Docker", "ycsb:pg:durable:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"B, 95% reads, 16 threads, buffered</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:B:16", 0),
     ("site/content/docs/vs-sqlite.html", r"A, 50% updates, 16 threads, durable</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:durable:A:16", 0),
     ("site/content/docs/vs-sqlite.html", r"A, 50% updates, 16 threads, durable</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:durable:A:16", 0),
-    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td class=\"n\">([\d.]+) k", "ycsb:fenec:buffered:C:1", 0),
-    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td[^>]*>[\d.]+ k</td><td class=\"n\"><b>([\d.]+) k", "ycsb:sqlite:buffered:C:1", 0),
+    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td class=\"n\"><b>([\d.]+) k", "ycsb:fenec:buffered:C:1", 0),
+    ("site/content/docs/vs-sqlite.html", r"C, reads, one thread, after the updates</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:sqlite:buffered:C:1", 0),
     ("site/content/docs/vs-postgres.html", r"B, 95% reads, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:16", 0),
     ("site/content/docs/vs-postgres.html", r"B, 95% reads, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:16", 0),
-    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td class=\"n\">([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
-    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td[^>]*>[\d.]+ k</td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:16", 0),
+    ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td class=\"n\">([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td[^>]*>[\d.]+ k</td><td class=\"n\"><b>([\d.]+) k", "ycsb:pg:durable:A:1", 0),
 ]
@@ -472,6 +472,9 @@ CLAIMS = [
 # Its fact is `ycsb:<system>:<mode>:<workload>:<threads>`, written in
 # thousands of operations a second, held to the last digit it shows.
 YCSB_RESULTS = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "results.tsv")
+# The runs a later one replaced, by run and system: their lines stay in the
+# results, which are only appended to, and count in no median.
+YCSB_SUPERSEDED = os.path.join(REPO, "crates", "fenec-bench", "ycsb", "superseded.tsv")
 
 
 def ycsb_facts():
@@ -484,10 +487,17 @@ def ycsb_facts():
     col = {name: i for i, name in enumerate(head)}
     # A run's cell measured again (a run cut short, completed later under
     # its own id) counts once, as its last line, as `ycsb report` takes it.
+    superseded = set()
+    if os.path.exists(YCSB_SUPERSEDED):
+        for line in open(YCSB_SUPERSEDED, encoding="utf-8").read().splitlines()[1:]:
+            run, system = line.split("\t")[:2]
+            superseded.add((run, system))
     latest = {}
     for line in lines[1:]:
         f = line.split("\t")
         if f[col["workload"]] not in ("A", "B", "C", "D", "E", "F"):
+            continue
+        if (f[col["run"]], f[col["system"]]) in superseded:
             continue
         key = "ycsb:" + ":".join(f[col[c]] for c in ("system", "mode", "workload", "threads"))
         latest[(key, f[col["run"]])] = float(f[col["ops_s"]])

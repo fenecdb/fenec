@@ -1,0 +1,13 @@
+run	system	why
+r1	fenec	before the file compacted on its own: runs c1-c3 replace it
+r2	fenec	before the file compacted on its own: runs c1-c3 replace it
+r3	fenec	before the file compacted on its own: runs c1-c3 replace it
+r1	server	before the file compacted on its own: runs c1-c3 replace it
+r2	server	before the file compacted on its own: runs c1-c3 replace it
+r3	server	before the file compacted on its own: runs c1-c3 replace it
+r1	server-docker	before the file compacted on its own: runs c1-c3 replace it
+r2	server-docker	before the file compacted on its own: runs c1-c3 replace it
+r3	server-docker	before the file compacted on its own: runs c1-c3 replace it
+s1	server-docker	before the file compacted on its own: runs c1-c3 replace it
+s2	server-docker	before the file compacted on its own: runs c1-c3 replace it
+s3	server-docker	before the file compacted on its own: runs c1-c3 replace it
