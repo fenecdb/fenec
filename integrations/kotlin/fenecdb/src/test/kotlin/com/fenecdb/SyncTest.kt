@@ -1,5 +1,6 @@
 package com.fenecdb
 
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -129,9 +130,13 @@ class SyncTest {
         val s = server("optimistic")
         val db = Fenec.sync(url = s.url, shapes = listOf(open), path = path("optimistic"))
         db.replica!!.ready()
+        // Offline, nothing is sent: the server's answer cannot replace the
+        // row before it is read (see aRefusedWriteIsPutBack).
+        db.replica!!.setOnline(false)
         db.from("tasks").insert(mapOf("title" to "new", "status" to "open", "priority" to 2))
         // At once, under a temporary id.
         assertTrue((db.from("tasks").where("title", "new").first()!!.long("id") ?: 0) >= 1L shl 52)
+        db.replica!!.setOnline(true)
         db.replica!!.pushed()
         eventually("the server's copy in place of the temporary row") {
             val rows = db.from("tasks").where("title", "new").rows()
@@ -153,11 +158,18 @@ class SyncTest {
         val db = Fenec.sync(url = s.url, shapes = listOf(open), path = path("refused"))
         db.replica!!.ready()
         val refused = Collections.synchronizedList(ArrayList<Refusal>())
-        val job = launch(Dispatchers.IO) { db.replica!!.refusals.collect { refused.add(it) } }
-        delay(50)
+        // Subscribed before `launch` returns: started on a pool thread after
+        // a 50 ms head start, the collector could miss the refusal, which a
+        // SharedFlow keeps for no one.
+        val job = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) { db.replica!!.refusals.collect { refused.add(it) } }
+        // Offline, nothing is sent, so the row is read before the server
+        // can refuse it: online, the 409 came back and the row was put back
+        // before the test read it, on a loaded runner ([one, two]).
+        db.replica!!.setOnline(false)
         // The server's key is @unique; the replica's a plain hash.
         db.from("tasks").insert(mapOf("key" to "a", "title" to "dup", "status" to "open"))
         assertEquals(listOf("dup", "one", "two"), titles(db))
+        db.replica!!.setOnline(true)
         eventually("the refusal") { refused.isNotEmpty() }
         assertEquals(409, refused[0].status)
         eventually("the write put back") { titles(db) == listOf("one", "two") }

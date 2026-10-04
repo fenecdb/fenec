@@ -253,13 +253,15 @@ public final class Fenec: @unchecked Sendable {
         }
     }
 
-    private func begin() {
+    /// A call under way, until `end`: internal for the tests, which hold one
+    /// across a burst of writes.
+    func begin() {
         state.lock()
         inflight += 1
         state.unlock()
     }
 
-    private func end() {
+    func end() {
         state.lock()
         inflight -= 1
         state.unlock()

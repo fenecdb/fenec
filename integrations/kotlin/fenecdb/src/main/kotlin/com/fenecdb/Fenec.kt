@@ -120,8 +120,11 @@ data class Changes(val seq: Long, val horizon: Long, val collections: List<Strin
 class Fenec private constructor(internal val handle: Long) : AutoCloseable {
     private val closed = AtomicBoolean(false)
 
-    /** Writes under way, which a live query's look waits out. */
-    private val inflight = AtomicInteger()
+    /**
+     * Writes under way, which a live query's look waits out. Internal for
+     * the tests, which hold a call under way across a burst.
+     */
+    internal val inflight = AtomicInteger()
     internal val lives = Lives(this)
 
     /** The replica's sync, set once by [Fenec.Companion.sync]. */
