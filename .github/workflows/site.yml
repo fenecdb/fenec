@@ -59,8 +59,17 @@ jobs:
 
       # build.py also writes the search index through the module, and fails
       # when it is missing or empty or a known query does not find its page
-      # first (site/search.test.mjs).
+      # first (site/search.test.mjs). The sections' vectors come from the
+      # committed cache (site/search-embeddings.json); a section new or
+      # changed since is embedded through Workers AI with these, when the
+      # token may run it (CLOUDFLARE_AI_TOKEN, or the deploy token given
+      # Workers AI Read), and goes without a vector otherwise -- found by its
+      # words alone until someone commits the cache again. Never a failure.
       - name: Build the wasm module and the site
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_AI_TOKEN: ${{ secrets.CLOUDFLARE_AI_TOKEN }}
         run: make site
 
       # Every internal link and anchor in the built pages has to resolve: a
