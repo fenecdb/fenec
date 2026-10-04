@@ -200,6 +200,52 @@ fn a_record_a_crash_cut_short_is_cut_off_before_the_next_write() {
     assert_eq!(r.rows().unwrap().rows[0].values[0], Value::Int(2));
 }
 
+/// A primary's writes made durable through the sync log (`fenec_core::fs`,
+/// Linux's, kept here by the test thread) -- through its `Tee`, which sends
+/// a write once its durability ran -- are its file's again after the
+/// machine lost the file's tail, and a replica started after is sent every
+/// one of them.
+#[cfg(unix)]
+#[test]
+fn a_primary_back_from_a_power_loss_holds_what_its_log_made_durable() {
+    let d = dir("power");
+    let file = d.join("p.fenec");
+    let path = file.to_str().unwrap();
+    fenec_core::fs::keep_sync_log(true);
+    let (mut db, feed) = replication::open(path, replication::DEFAULT_BUFFER).unwrap();
+    fenec_core::fs::keep_sync_log(false);
+    db.fork(fresh_id()).unwrap();
+    let durable = |db: &mut Database, sql: &str| {
+        db.execute(&fenec_ql::parse_one(sql).unwrap()).unwrap();
+        if let Some(d) = db.flush().unwrap() {
+            d().unwrap();
+        }
+    };
+    durable(&mut db, SCHEMA);
+    for i in 0..30 {
+        durable(
+            &mut db,
+            &format!("put items {{name: \"item {i}\", n: {i}, e: [{i}.0, 1.0, 0.5]}}"),
+        );
+    }
+    let at_crash = db.change_seq();
+    let log = std::fs::read(fenec_core::fs::beside(&file, "sync")).unwrap();
+    assert_eq!(&log[..8], b"FENECSYN");
+    let synced = u64::from_le_bytes(log[24..32].try_into().unwrap());
+    std::mem::forget(db);
+    std::mem::forget(feed);
+    let f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+    f.set_len(synced).unwrap();
+    drop(f);
+
+    let p = primary(&file, replication::DEFAULT_BUFFER);
+    assert_eq!(seq(&p), at_crash);
+    assert_eq!(rows(&p, "get items").len(), 30);
+    let r = replica(&d.join("r.fenec"), p.port);
+    caught_up(&r, &p);
+    assert_eq!(rows(&r, "get items"), rows(&p, "get items"));
+}
+
 #[test]
 fn a_replica_follows_and_a_restarted_one_goes_on_from_where_it_was() {
     let d = dir("follow");

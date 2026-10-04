@@ -9,7 +9,7 @@
 //! which is why PostgreSQL writes its WAL into segments it filled with
 //! zeros first. So a sync writes what the file took since the last one into
 //! this log too -- a file of fixed size beside the database
-//! (`<file>.fenec.sync`), written in place and never grown -- and syncs the
+//! (`<file>.sync`), written in place and never grown -- and syncs the
 //! log alone. The file itself is synced only when the log is full, or a
 //! sync holds more than an entry takes: once every 256 KB of writes.
 //!
@@ -18,9 +18,12 @@
 //! if the file lost them. An entry carries a hash, so one cut short by a
 //! crash ends the log; a generation, so the entries of an earlier pass of
 //! the log are not taken for this one's; and the log's header names where
-//! the file stood synced when the generation began and a hash of the bytes
-//! before that, so a log is applied only to the file it was written beside
-//! -- a file put in its place by a `compact` is not.
+//! the file stood synced when the generation began, the file's device and
+//! inode, and a hash of the bytes before that point, so a log is applied
+//! only to the file it was written beside -- not to one renamed into its
+//! place. Applied once, its header is wiped; whatever renames a file into
+//! a database's place removes the log first (`fs::forget_sync_log`), and a
+//! clean close removes it once the file is synced.
 //!
 //! On macOS `F_FULLFSYNC` flushes the drive whatever was written, 3.9 ms
 //! either way, so the log is used only where it pays (`ENABLED`).
@@ -48,9 +51,22 @@ const LOG_MAGIC: &[u8; 8] = b"FENECSYN";
 const ENTRY_MAGIC: u32 = 0x4E59_5346;
 const ENTRY_HEAD: usize = 32;
 
-/// The log beside `main`.
+/// The log beside `main`: its whole name and `.sync`. Its extension
+/// replaced, `x.db` and `x.fenec` shared one log, each writing over the
+/// other's entries.
 pub(crate) fn path_for(main: &Path) -> PathBuf {
-    main.with_extension("fenec.sync")
+    crate::fs::beside(main, "sync")
+}
+
+/// What names the file a log was written for beside the hash of its bytes:
+/// its device and inode. A file renamed into the place -- a restore, a
+/// tenant's import, a `compact` -- is another inode, and its log is not
+/// applied to it even where the bytes before the generation's start are
+/// the same.
+fn identity(main: &File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = main.metadata()?;
+    Ok((m.dev(), m.ino()))
 }
 
 /// A 64-bit hash, eight bytes a step: what tells an entry written whole
@@ -87,25 +103,31 @@ struct Header {
     generation: u64,
     base: u64,
     print: u64,
+    /// The file's device and inode.
+    file: (u64, u64),
 }
 
+const HEADER: usize = 64;
+
 impl Header {
-    fn encode(&self) -> [u8; 48] {
-        let mut b = [0u8; 48];
+    fn encode(&self) -> [u8; HEADER] {
+        let mut b = [0u8; HEADER];
         b[..8].copy_from_slice(LOG_MAGIC);
-        b[8..12].copy_from_slice(&1u32.to_le_bytes());
+        b[8..12].copy_from_slice(&2u32.to_le_bytes());
         b[16..24].copy_from_slice(&self.generation.to_le_bytes());
         b[24..32].copy_from_slice(&self.base.to_le_bytes());
         b[32..40].copy_from_slice(&self.print.to_le_bytes());
-        let h = hash(0, &b[..40]);
-        b[40..48].copy_from_slice(&h.to_le_bytes());
+        b[40..48].copy_from_slice(&self.file.0.to_le_bytes());
+        b[48..56].copy_from_slice(&self.file.1.to_le_bytes());
+        let h = hash(0, &b[..56]);
+        b[56..64].copy_from_slice(&h.to_le_bytes());
         b
     }
 
     fn decode(b: &[u8]) -> Option<Header> {
-        let b = b.get(..48)?;
+        let b = b.get(..HEADER)?;
         let word = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
-        if &b[..8] != LOG_MAGIC || b[8..12] != 1u32.to_le_bytes() || word(40) != hash(0, &b[..40])
+        if &b[..8] != LOG_MAGIC || b[8..12] != 2u32.to_le_bytes() || word(56) != hash(0, &b[..56])
         {
             return None;
         }
@@ -113,6 +135,7 @@ impl Header {
             generation: word(16),
             base: word(24),
             print: word(32),
+            file: (word(40), word(48)),
         })
     }
 }
@@ -136,22 +159,30 @@ fn entry(log: &[u8], generation: u64, at: u64) -> Option<&[u8]> {
 }
 
 /// Puts back into `main` what the log beside it holds and the file lost:
-/// run before the file is read. A log that does not name this file, or
-/// none, changes nothing. The file is synced when anything was written.
+/// run before the file is read. A log that does not name this file -- its
+/// inode and the bytes before the generation's start -- or none, changes
+/// nothing. A log that does is spent once the file is synced: its header
+/// is wiped, so that a file cut below the log's end after this open (an
+/// older binary's, or this one's cut of a torn record past the entries)
+/// is not written over again at the next.
 pub(crate) fn recover(main: &File, log_path: &Path) -> io::Result<()> {
-    let log = match std::fs::read(log_path) {
-        Ok(b) => b,
+    // Something else at the log's name is no log: the sink then finds it
+    // cannot make one, and fsyncs the file.
+    match std::fs::metadata(log_path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
-    };
+    }
+    let log = std::fs::read(log_path)?;
     let Some(h) = Header::decode(&log) else {
         return Ok(());
     };
     let len = main.metadata()?.len();
-    if len < h.base || fingerprint(main, h.base)? != h.print {
+    if h.file != identity(main)? || len < h.base || fingerprint(main, h.base)? != h.print {
         return Ok(());
     }
-    let (mut at, mut pos, mut wrote) = (h.base, HEAD as usize, false);
+    let (mut at, mut pos) = (h.base, HEAD as usize);
     let mut held = Vec::new();
     while let Some(bytes) = log.get(pos..).and_then(|l| entry(l, h.generation, at)) {
         let end = at + bytes.len() as u64;
@@ -162,15 +193,16 @@ pub(crate) fn recover(main: &File, log_path: &Path) -> io::Result<()> {
         };
         if !same {
             main.write_all_at(bytes, at)?;
-            wrote = true;
         }
         at = end;
         pos += ENTRY_HEAD + bytes.len();
     }
-    if wrote {
-        main.sync_data()?;
-    }
-    Ok(())
+    // The entries the file held may be in the cache alone, a process's
+    // crash having left them there: synced either way before the log goes.
+    main.sync_data()?;
+    let log = OpenOptions::new().write(true).open(log_path)?;
+    log.write_all_at(&[0u8; HEADER], 0)?;
+    log.sync_data()
 }
 
 /// The log as a sink writes it.
@@ -183,7 +215,7 @@ pub(crate) struct SyncLog {
     at: u64,
     /// A generation begun and not yet written: it goes out with the first
     /// entry, under the same fsync.
-    begun: Option<[u8; 48]>,
+    begun: Option<[u8; HEADER]>,
 }
 
 impl SyncLog {
@@ -198,7 +230,7 @@ impl SyncLog {
             .truncate(false)
             .open(path)?;
         let size = HEAD + ROOM;
-        let mut head = [0u8; 48];
+        let mut head = [0u8; HEADER];
         let had = file.metadata()?.len();
         if had < size {
             file.write_all_at(&vec![0u8; (size - had) as usize], had)?;
@@ -240,6 +272,7 @@ impl SyncLog {
                 generation: self.generation,
                 base,
                 print,
+                file: identity(main)?,
             }
             .encode(),
         );
@@ -275,6 +308,29 @@ impl SyncLog {
         self.pos += e.len() as u64;
         self.at = at + bytes.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl SyncLog {
+    /// The entries the generation in force holds.
+    pub(crate) fn entries(path: &Path) -> usize {
+        let log = std::fs::read(path).unwrap();
+        let Some(h) = Header::decode(&log) else {
+            return 0;
+        };
+        let (mut at, mut pos, mut n) = (h.base, HEAD as usize, 0);
+        while let Some(b) = log.get(pos..).and_then(|l| entry(l, h.generation, at)) {
+            at += b.len() as u64;
+            pos += ENTRY_HEAD + b.len();
+            n += 1;
+        }
+        n
+    }
+
+    /// Writes to the log fail from here on, as a disk's would.
+    pub(crate) fn break_writes(&mut self, path: &Path) {
+        self.file = File::open(path).unwrap();
     }
 }
 

@@ -340,24 +340,38 @@ fsync of a file whose length changed commits the journal too: in Docker's
 VM a 300-byte append and its `fdatasync` took 356 us, the same bytes
 written into room the file already had and synced 65 -- why PostgreSQL
 fills its WAL segments first. So `FileSink`'s sync writes what the file
-took since the last one into `<file>.fenec.sync`, 4 KB of header and 256
-KB of entries written once at its full size and never grown, and syncs
-that alone (`Tail`); the file is fsynced when an entry would not fit, a
-sync holds more than 64 KB, or the sink is new to the file -- whose bytes
-an earlier process may have left unsynced -- and the log then begins a
-generation from where the file stands. An entry is the file's bytes at a
-place, with its generation and a hash, so a cut one ends the log; the
-header names the generation, where the file stood synced, and a hash of
-the 4 KB before that, so a log is applied only to its own file. `create`
-applies it before the file is read or mapped (`synclog::recover`, the
-bytes written again only where the file lost them), a new file removes
-one left beside it, a rename over the file (`swap_in`) removes it, and a
-tenant's delete too; `open_read_only` passes it over. On macOS
+took since the last one into `<file>.sync` (the whole name and `.sync`:
+with the extension replaced, `x.db` and `x.fenec` shared one, as they
+shared `.compacting` and `.beside` -- `fs::beside` names all three), 4 KB
+of header and 256 KB of entries written once at full size and never
+grown, and syncs that alone (`Tail`). The file is fsynced when an entry
+would not fit, a sync holds more than 64 KB, or the sink is new to the
+file -- whose bytes an earlier process may have left unsynced -- and the
+log then begins a generation from where the file stands. An entry is the
+file's bytes at a place, with its generation and a hash, so a cut one
+ends the log; the header names the generation, where the file stood
+synced, the file's device and inode, and a hash of the 4 KB before that
+point, so a log is applied to its own file alone -- not to one renamed
+into the place, even one holding the same bytes. `create` applies it
+before the file is read or mapped (`synclog::recover`), fsyncs the file
+and wipes the header, so a file cut below the log's end after that open
+is not written over at the next. Everything that renames a file into a
+database's place removes the log first and makes the removal durable --
+`swap_in` after syncing the file it replaces, a restore, a backup
+unsealed, a tenant's import (`fs::forget_sync_log`); a clean close syncs
+the file and removes it, so a node keeps none beside a closed tenant, and
+`Tenants::stats` counts it; a log that cannot be made is not tried again
+until the next open, each try being 260 KB of writes. `open_read_only`
+applies none: after a power loss, `fenec types` or a raw copy taken
+before the next open may lack the last durable writes. On macOS
 `F_FULLFSYNC` flushes the drive either way, 3.9 ms appended or not, so
 there is no log (`ENABLED`; `fs::keep_sync_log` has a test thread keep
 one). In Docker a durable update went 624 -> 325 us p50 (`make
-roundtrip-bench`), against PostgreSQL's 378; the Linux test suite runs
-with it.
+roundtrip-bench`), against PostgreSQL's 378; `tests/synclog.rs` crashes
+the machine (the process forgotten, the file cut back to the log's
+start) through a full log, a sync past an entry, a torn header, a file
+renamed in, a second open and two files of one stem, and fenec-core's
+and fenec-http's tests pass on Linux, where every file keeps one.
 
 **Replication ships only what is on disk, numbered by the change counter.**
 A primary (`--replication-token`) writes through a `Tee`
