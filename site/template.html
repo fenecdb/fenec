@@ -14,20 +14,23 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400..700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{base}}styles.css">
+<script>document.documentElement.classList.add('js')</script>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
 
 <header class="top">
   <a class="brand" href="{{base}}" aria-label="fenecdb, home">{{mark}}</a>
-  <button class="side-toggle" aria-expanded="false" aria-controls="side">Contents</button>
-  <nav class="top-nav">
-    <a href="{{base}}docs/"{{nav_docs}}>Docs</a>
-    <a href="{{base}}playground.html"{{nav_playground}}>Playground</a>
-    <a href="{{base}}docs/benchmarks.html"{{nav_bench}}>Benchmarks</a>
-    <a href="{{base}}docs/compare.html"{{nav_compare}}>Compare</a>
-    <a href="{{repo}}">Source</a>
-  </nav>
+  <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="menu"><span class="menu-bars" aria-hidden="true"></span>Menu</button>
+  <div class="menu" id="menu">
+    <nav class="top-nav" aria-label="Site">
+      <a href="{{base}}docs/"{{nav_docs}}>Docs</a>
+      <a href="{{base}}playground.html"{{nav_playground}}>Playground</a>
+      <a href="{{base}}docs/benchmarks.html"{{nav_bench}}>Benchmarks</a>
+      <a href="{{base}}docs/compare.html"{{nav_compare}}>Compare</a>
+      <a href="{{repo}}">Source</a>
+    </nav>
+  </div>
 </header>
 
 {{content}}

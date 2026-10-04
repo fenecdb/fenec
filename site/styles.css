@@ -54,6 +54,9 @@
 
 html {
   scroll-behavior: smooth;
+  /* The menu stops the page scrolling while it is open; with a classic
+     scrollbar the page would widen under it, and every line move. */
+  scrollbar-gutter: stable;
   scroll-padding-top: 88px;
   -webkit-text-size-adjust: 100%;
   background: var(--night-0);
@@ -131,7 +134,8 @@ a:hover { color: var(--sun-hot); }
   0% { transform: none; } 35% { transform: translateY(-2px) scaleY(1.06); } 100% { transform: none; }
 }
 
-.top-nav { margin-left: auto; display: flex; gap: 24px; }
+.menu { margin-left: auto; }
+.top-nav { display: flex; gap: 24px; }
 .top-nav a {
   position: relative; font: 500 15px/1 var(--sans); color: var(--sand-2);
   text-decoration: none; padding: 8px 0;
@@ -145,11 +149,65 @@ a:hover { color: var(--sun-hot); }
 .top-nav a:hover::after, .top-nav a[aria-current]::after { right: 0; }
 .top-nav a[aria-current] { color: var(--sand); }
 
-.side-toggle {
-  display: none; margin-left: auto;
-  font: 500 14px/1 var(--sans); color: var(--sand);
+/* One menu under 860 px, on every page: the header's links, and on a docs
+   page the docs' own nav below them (site.js moves it in), in a panel under
+   the header. Two menus side by side -- "Contents" beside a row of links --
+   overflowed a phone, and the row was cut down to fit by hiding links. */
+.menu-toggle {
+  display: none; margin-left: auto; align-items: center; gap: 10px;
+  height: 40px; padding: 0 14px;
+  font: 500 15px/1 var(--sans); color: var(--sand);
   background: rgba(244,169,60,.09); border: 1px solid var(--rule-hot);
-  border-radius: 4px; padding: 8px 13px; cursor: pointer;
+  border-radius: 6px; cursor: pointer;
+}
+.menu-toggle:hover { border-color: var(--sun); }
+.menu-bars, .menu-bars::before, .menu-bars::after {
+  display: block; width: 16px; height: 1.5px; border-radius: 1px; background: currentColor;
+  transition: transform .25s var(--ease), background-color .15s;
+}
+.menu-bars { position: relative; }
+.menu-bars::before, .menu-bars::after { content: ""; position: absolute; left: 0; }
+.menu-bars::before { transform: translateY(-5px); }
+.menu-bars::after { transform: translateY(5px); }
+.top.open .menu-bars { background-color: transparent; }
+.top.open .menu-bars::before { transform: rotate(45deg); }
+.top.open .menu-bars::after { transform: rotate(-45deg); }
+
+@media (max-width: 860px) {
+  .js .menu-toggle { display: inline-flex; }
+  /* Under the header, to the bottom of the screen, scrolling on its own.
+     Absolute, not fixed: the header's backdrop-filter makes it the
+     containing block of a fixed child anyway. Hidden by visibility, so
+     nothing in it takes focus while it is shut. */
+  .js .menu {
+    position: absolute; top: 100%; left: 0; right: 0; margin: 0;
+    height: calc(100vh - 66px); height: calc(100dvh - 66px);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 6px var(--gutter) 48px;
+    background: linear-gradient(to bottom, var(--night-0), var(--night-1));
+    visibility: hidden; opacity: 0; transform: translateY(-8px);
+    transition: opacity .2s var(--ease), transform .2s var(--ease), visibility 0s linear .2s;
+  }
+  .js .top.open .menu {
+    visibility: visible; opacity: 1; transform: none;
+    transition: opacity .2s var(--ease), transform .2s var(--ease), visibility 0s;
+  }
+  .js .menu .top-nav { flex-direction: column; gap: 0; }
+  .js .menu .top-nav a {
+    font-size: 19px; padding: 15px 0 15px 14px; border-bottom: 1px solid var(--rule);
+    border-left: 2px solid transparent;
+  }
+  .js .menu .top-nav a::after { display: none; }
+  .js .menu .top-nav a[aria-current] { color: var(--star); border-left-color: var(--sun); }
+  .js .menu .side-inner { padding: 30px 0 0; }
+  /* On the body, which hands it to the viewport: on the root it left the
+     body's own overflow-x as a scroller of its own, and the sticky header
+     stuck to that, scrolled out of sight with the panel under it. */
+  html.menu-open body { overflow: hidden; }
+
+  /* Without script the links wrap under the mark rather than hide. */
+  html:not(.js) .top { height: auto; min-height: 66px; flex-wrap: wrap; padding-block: 10px; }
+  html:not(.js) .top-nav { flex-wrap: wrap; gap: 4px 18px; }
 }
 
 /* ========================================================== the hero scene */
@@ -486,14 +544,37 @@ tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 1160px) { .shell { grid-template-columns: 224px minmax(0,1fr); } .toc { display: none; } }
 @media (max-width: 860px) { .shell { grid-template-columns: 1fr; } }
 
-.docs .hero-scarp {
-  height: clamp(90px, 12vw, 170px); margin-bottom: -1px; position: relative;
-  background: radial-gradient(90% 100% at 72% 100%, rgba(255,140,60,.2), transparent 62%);
+/* The band under the header on every page but the home page: the home
+   hero's ridges and its afterglow, and below the nearest ridge a floor that
+   fades from its colour into the page, as the home hero's does and as the
+   footer fades out of the page. Nothing in it ends on an edge: the sky is
+   clear at the top, the floor clear at the bottom. The floor lies behind
+   what follows (z-index), which is why the shell and the playground's band
+   are lifted over it. */
+.scarp {
+  position: relative; z-index: 0; pointer-events: none;
+  height: clamp(100px, 14vw, 200px);
+  background:
+    radial-gradient(58% 110% at 62% 100%, rgba(255,140,60,.3) 0%, rgba(255,140,60,0) 70%),
+    linear-gradient(to bottom, rgba(51,26,58,0) 10%, rgba(51,26,58,.5));
 }
-.docs .hero-scarp svg { position: absolute; inset: auto 0 0 0; width: 100%; height: 100%; display: block; }
+.scarp svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.scarp::after {
+  content: ""; position: absolute; left: 0; right: 0; top: calc(100% - 1px);
+  height: clamp(140px, 20vw, 260px);
+  background: linear-gradient(to bottom, #150F26 0%, rgba(21,15,38,.84) 20%, rgba(21,15,38,.55) 45%,
+    rgba(21,15,38,.24) 72%, rgba(21,15,38,0) 100%);
+}
+.scarp ~ .shell, .scarp ~ .band { position: relative; z-index: 1; }
 
-.side { position: sticky; top: 66px; align-self: start; max-height: calc(100vh - 66px); overflow-y: auto; }
-.side-inner { padding: 34px 0 60px; }
+.side {
+  position: sticky; top: 66px; align-self: start; max-height: calc(100vh - 66px);
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+}
+/* Room at the foot as tall as the dunes: at the top of a page the sidebar
+   starts below them, its foot under the fold, and without it the last
+   pages of the nav could not be scrolled into view there. */
+.side-inner { padding: 34px 0 calc(60px + clamp(100px, 14vw, 200px)); }
 .side-group {
   margin: 28px 0 9px; font: 600 12.5px/1 var(--sans); color: var(--sun);
   letter-spacing: .06em; text-transform: none;
@@ -513,20 +594,12 @@ tbody tr:last-child td { border-bottom: 0; }
   text-shadow: 0 0 16px rgba(244,169,60,.45);
 }
 
+/* Under 860 px the docs' nav is in the header's menu; without script it
+   stands above the page. */
 @media (max-width: 860px) {
-  .docs .side-toggle { display: inline-block; }
-  .top-nav { margin-left: 0; gap: 16px; }
-  .top-nav a { font-size: 14px; }
-  .side { position: static; max-height: none; display: none; border-bottom: 1px solid var(--rule); }
-  .side.open { display: block; animation: reveal .4s var(--ease); }
+  .side { position: static; max-height: none; border-bottom: 1px solid var(--rule); }
   .side-inner { padding: 20px 0 28px; }
-}
-/* A phone keeps Docs and Playground in the header; Benchmarks and Source
-   are a tap away in the footer. Links are written without .html, so the
-   match is on the path, not the extension. */
-@media (max-width: 600px) {
-  .top { gap: 12px; }
-  .top-nav a[href*="benchmarks"], .top-nav a[href*="github.com"] { display: none; }
+  .js .side { display: none; }
 }
 
 .doc { padding: 40px 0 100px; min-width: 0; }
@@ -588,7 +661,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .cards a { font-weight: 600; font-size: 17px; text-decoration: none; color: var(--sun-hot); }
 .cards p { margin: 6px 0 0; color: var(--sand-dim); font-size: 15px; max-width: none; }
 
-.toc { position: sticky; top: 66px; padding: 44px 0 40px; font-size: 14px; }
+/* Scrolls on its own: FenecQL's 28 entries ran past the bottom of a laptop's
+   screen, out of reach until the page ended. */
+.toc {
+  position: sticky; top: 66px; padding: 44px 0 40px; font-size: 14px;
+  max-height: calc(100vh - 66px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+}
 .toc p { margin: 0 0 11px; font-weight: 600; font-size: 12.5px; color: var(--sun); letter-spacing: .05em; }
 .toc ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--rule); }
 .toc a {
@@ -647,7 +725,6 @@ tbody tr:last-child td { border-bottom: 0; }
 
 /* =============================================================== playground */
 
-.ridgeline.flip { transform: scaleY(-1); margin: 0 0 -1px; }
 .pg-band { padding-top: clamp(30px, 4vw, 54px); }
 .pg-title {
   margin: 0 0 12px; font: 700 clamp(34px, 4.6vw, 52px)/1.04 var(--sans);

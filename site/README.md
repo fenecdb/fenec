@@ -156,6 +156,27 @@ screen, and under reduced motion it is a still frame with the rings drawn.
 It replaced a WebGL cloud of documents gathering into an HNSW index, which
 said "vector database" before a word was read.
 
+## The header, and the dunes under it
+
+Under 860 px the header is the mark and one Menu button. It opens a panel
+under the header with every header link and, on a docs page, the docs' nav,
+which `site.js` moves in from the sidebar (the same links, never shown
+twice). While it is open the page behind is `inert` and does not scroll;
+Escape, a link followed or a wider window shuts it. Without script the
+links wrap under the mark instead.
+
+A link in the sidebar loads a page, so the sidebar's scroll is kept in
+`sessionStorage` as the page goes and put back by an inline script right
+after the sidebar, before the first paint (`SIDE_RESTORE` in `build.py`);
+when nothing was kept, or the current page would be out of sight, the
+sidebar centres it by its own scroll, never the page's. The table of
+contents scrolls on its own the same way.
+
+Every page but the home page opens on `SCARP` (`build.py`): the home
+hero's four ridges in its colours, then a floor that fades from the
+nearest ridge into the page, as the home hero's does and the footer fades
+out of it, so nothing ends on an edge.
+
 ## Moving pictures
 
 Each of the home page's six sections tells its story as a scene, not as
