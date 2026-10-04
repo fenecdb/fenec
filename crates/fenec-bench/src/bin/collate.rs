@@ -128,6 +128,7 @@ fn main() {
                 .collect(),
             insert: false,
             if_absent: false,
+            require: None,
         })
         .unwrap();
     }

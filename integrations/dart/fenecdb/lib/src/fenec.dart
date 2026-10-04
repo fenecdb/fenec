@@ -46,6 +46,9 @@ enum FenecCode {
   panic(11),
   misuse(12),
   locked(13),
+
+  /// A write's `require n` not met: it wrote another count, and was put back.
+  unmet(14),
   builder(100);
 
   final int value;

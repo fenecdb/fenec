@@ -77,6 +77,19 @@ usage: fenec-server [options]
                             token's `kid` names its key. Read again as the
                             file changes, which is how keys rotate. Also read
                             from FENEC_JWT_KEYS
+      --jwt-require-exp <on|off>  refuse a token with no `exp` claim, which
+                            would be good for ever  default: on
+                            (--mint-token gives one an hour)
+      --jwt-max-age <s>     refuse a token whose `exp` lies further ahead
+                            than this (0 = no bound, the default)
+      --jwt-tenant-claim <name>  with --dir, the claim naming the tenant a
+                            token is for: it reaches /t/<t>/ only when the
+                            claim names <t> (a text, or a list holding it)
+                            default: tenant
+      --jwt-unbound-tenants with --dir, take a token naming no tenant for
+                            every tenant. Without it such a token is refused
+                            (403): a policy's `owner = $jwt.sub` matches the
+                            same user in every tenant's file
       --policy <path>       the rules a token is held to, one per line:
                             <collection|*> <read|write|read,write>
                             [where <filter>] [for <role>]
@@ -214,6 +227,7 @@ fn main() {
     let mut jwt_keys: Option<String> = std::env::var("FENEC_JWT_KEYS").ok();
     let mut policy: Option<String> = None;
     let mut mint: Option<String> = None;
+    let mut demands = fenec_http::access::Demands::default();
     let mut follow_url: Option<String> = None;
     let mut follow_table: Option<String> = None;
     let mut follow_into: Option<String> = None;
@@ -301,6 +315,22 @@ fn main() {
             "--http-token" => http_cfg.token = Some(next(&mut i, "--http-token")),
             "--jwt-secret" => jwt_secret = Some(next(&mut i, "--jwt-secret")),
             "--jwt-keys" => jwt_keys = Some(next(&mut i, "--jwt-keys")),
+            "--jwt-require-exp" => {
+                demands.require_exp = match next(&mut i, "--jwt-require-exp").as_str() {
+                    "on" => true,
+                    "off" => false,
+                    v => fail(&format!("--jwt-require-exp expects on or off, got `{v}`")),
+                }
+            }
+            "--jwt-tenant-claim" => demands.tenant_claim = next(&mut i, "--jwt-tenant-claim"),
+            "--jwt-unbound-tenants" => demands.unbound_tenants = true,
+            "--jwt-max-age" => {
+                let v = next(&mut i, "--jwt-max-age");
+                let secs: u64 = v
+                    .parse()
+                    .unwrap_or_else(|_| fail(&format!("--jwt-max-age expects seconds, got `{v}`")));
+                demands.max_age = (secs > 0).then_some(secs);
+            }
             "--jwt-secret-file" => {
                 let path = next(&mut i, "--jwt-secret-file");
                 match std::fs::read_to_string(&path) {
@@ -410,15 +440,18 @@ fn main() {
         i += 1;
     }
 
-    let access = |policy: &str| match (&jwt_secret, &jwt_keys) {
-        (Some(_), Some(_)) => {
-            fail("--jwt-secret or --jwt-keys: the keys file holds the secret too")
+    let access = |policy: &str| {
+        match (&jwt_secret, &jwt_keys) {
+            (Some(_), Some(_)) => {
+                fail("--jwt-secret or --jwt-keys: the keys file holds the secret too")
+            }
+            (Some(secret), None) => fenec_http::access::Access::new(secret.as_bytes(), policy),
+            (None, Some(path)) => {
+                fenec_http::access::Access::from_jwks(std::path::Path::new(path), policy)
+            }
+            (None, None) => unreachable!(),
         }
-        (Some(secret), None) => fenec_http::access::Access::new(secret.as_bytes(), policy),
-        (None, Some(path)) => {
-            fenec_http::access::Access::from_jwks(std::path::Path::new(path), policy)
-        }
-        (None, None) => unreachable!(),
+        .map(|a| a.demanding(demands.clone()))
     };
     let keyed = jwt_secret.is_some() || jwt_keys.is_some();
     if let Some(claims) = mint {

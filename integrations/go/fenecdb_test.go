@@ -265,6 +265,39 @@ func TestABatchLandsWholeOrNotAtAll(t *testing.T) {
 	}
 }
 
+func TestAWriteThatMissesItsCountIsRefusedAndPutBack(t *testing.T) {
+	ctx := context.Background()
+	db := root()
+	name := fresh("require")
+	must(db.Exec(ctx, "create collection "+name+" (name text, balance int)")).of(t)
+	accounts := db.From(name)
+	must(accounts.Insert(ctx, fenecdb.D("name", "a", "balance", 10))).of(t)
+	_, err := accounts.Where("name", "=", "nobody").Update(ctx, fenecdb.D("balance", 0), fenecdb.Require(1))
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || !strings.Contains(e.Message, "requires 1") {
+		t.Fatalf("an unmet update: %+v", e)
+	}
+	if r := must(accounts.Where("name", "=", "a").Update(ctx, fenecdb.D("balance", 5), fenecdb.Require(1))).of(t); r.Affected != 1 {
+		t.Fatalf("a met update wrote %d", r.Affected)
+	}
+	// A batch whose second write is unmet keeps nothing of the first.
+	met, metParams, err := accounts.Where("name", "=", "a").ToUpdate(fenecdb.D("balance", 0), fenecdb.Require(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unmet, unmetParams, err := accounts.Where("name", "=", "nobody").ToDelete(fenecdb.Require(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Batch(ctx, fenecdb.Stmt(met, metParams...), fenecdb.Stmt(unmet, unmetParams...))
+	if e := statusOf(t, err); e.Status != 412 || e.Code != fenecdb.CodeUnmet || e.Completed != 0 {
+		t.Fatalf("an unmet batch: %+v", e)
+	}
+	rows := must(db.Query(ctx, "get "+name+" select balance")).of(t)
+	if len(rows) != 1 || rows[0]["balance"] != 5.0 {
+		t.Fatalf("an unmet batch left %v", rows)
+	}
+}
+
 func TestAnIdempotencyKeyIsReplayed(t *testing.T) {
 	ctx := context.Background()
 	db := root()

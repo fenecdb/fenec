@@ -96,7 +96,17 @@ pub fn read_request(
     let mut head = Vec::new();
     loop {
         let mut line = Vec::new();
-        let n = read_line(reader, &mut line, MAX_HEADER_BYTES - head.len())?;
+        let n = match read_line(reader, &mut line, MAX_HEADER_BYTES - head.len()) {
+            Ok(n) => n,
+            // Nothing of a request came before the silence (`--idle-timeout`)
+            // or the reset: the connection is closed with nothing written.
+            // A `400 read error` written here was read by a client that
+            // reuses its connections (Python's `http.client`) as the answer
+            // to the next request it sent, which never ran.
+            Err(Line::Io(_)) if head.is_empty() && line.is_empty() => return Ok(None),
+            Err(Line::Io(e)) => return Err(unread(&e)),
+            Err(Line::Long) => return Err(BadRequest(431, "header line too long".into())),
+        };
         if n == 0 {
             return if head.is_empty() {
                 Ok(None) // the connection closed
@@ -165,9 +175,7 @@ pub fn read_request(
     }
     let mut body = vec![0u8; len];
     if len > 0 {
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| BadRequest(400, format!("could not read the body: {e}")))?;
+        reader.read_exact(&mut body).map_err(|e| unread(&e))?;
     }
 
     // HTTP/1.1 defaults to a persistent connection; 1.0 is the other way round.
@@ -189,16 +197,30 @@ pub fn read_request(
     }))
 }
 
+/// Why a line could not be read.
+enum Line {
+    Io(std::io::Error),
+    Long,
+}
+
+/// The answer to a request cut off part way: 408 when the client went
+/// silent, 400 otherwise.
+fn unread(e: &std::io::Error) -> BadRequest {
+    use std::io::ErrorKind::{TimedOut, WouldBlock};
+    match e.kind() {
+        WouldBlock | TimedOut => BadRequest(408, "the request was not sent in time".into()),
+        _ => BadRequest(400, format!("read error: {e}")),
+    }
+}
+
 fn read_line(
     reader: &mut BufReader<TcpStream>,
     out: &mut Vec<u8>,
     budget: usize,
-) -> Result<usize, BadRequest> {
+) -> Result<usize, Line> {
     let mut taken = 0;
     loop {
-        let available = reader
-            .fill_buf()
-            .map_err(|e| BadRequest(400, format!("read error: {e}")))?;
+        let available = reader.fill_buf().map_err(Line::Io)?;
         if available.is_empty() {
             return Ok(taken);
         }
@@ -214,7 +236,7 @@ fn read_line(
                 reader.consume(n);
                 taken += n;
                 if taken > budget {
-                    return Err(BadRequest(431, "header line too long".into()));
+                    return Err(Line::Long);
                 }
             }
         }

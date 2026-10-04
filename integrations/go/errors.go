@@ -16,6 +16,7 @@ const (
 	CodeNotFound     = "not_found"    // 404: a collection, field or tenant that is not there
 	CodeConflict     = "conflict"     // 409: an id or a @unique value taken, a collection that exists
 	CodeGone         = "gone"         // 410: a /_changes cursor the server no longer reaches
+	CodeUnmet        = "unmet"        // 412: a write's Require not met, its batch put back
 	CodeKeyReused    = "key_reused"   // 422: an Idempotency-Key sent with another request
 	CodeUnavailable  = "unavailable"  // 503: too many connections or subscriptions
 	CodeTimeout      = "timeout"      // 504: After's change did not reach the replica in the wait
@@ -52,6 +53,8 @@ func codeOf(status int) string {
 		return CodeConflict
 	case 410:
 		return CodeGone
+	case 412:
+		return CodeUnmet
 	case 422:
 		return CodeKeyReused
 	case 503:

@@ -66,7 +66,11 @@ export class FenecHttp {
       throw new FenecError(`server did not return JSON (${res.status}): ${text.slice(0, 200)}`);
     }
     if (!res.ok && !also.includes(res.status)) {
-      throw new FenecError(body?.error ?? `HTTP ${res.status}`);
+      // The status is the refusal's kind: 412 a write's `require` not met,
+      // 409 a value taken, 403 outside the token's rules.
+      const e = new FenecError(body?.error ?? `HTTP ${res.status}`);
+      e.status = res.status;
+      throw e;
     }
     return body;
   }

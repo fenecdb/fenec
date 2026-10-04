@@ -493,6 +493,24 @@ key; an RSA modulus taken for an HS256 secret would sign anything. The file
 is read again as it changes, looked at once a second, which is the rotation.
 A verified token is kept by its text (`verified`, 16 shards of 256, emptied
 when the keys change, `exp` asked each time): 0.27 us against 2.9 for HS256.
+A token naming no `exp` is refused (`Demands::require_exp`,
+`--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
+one may lie; `mint` stamps an hour on claims naming none.
+
+**A token is bound to the tenant it names** (`Scope::reaches`,
+`route_tenant`). The policy is the node's, not a tenant's, so `owner =
+$jwt.sub` matched alice's rows in every tenant's file: a token minted for
+one tenant read and subscribed to every other, on its node and through the
+router. On a `--dir` node a JWT reaches `/t/<t>/` only when its tenant
+claim (`--jwt-tenant-claim`, `tenant`) names `<t>`, a text or a list
+holding it; one naming none is 403 unless `--jwt-unbound-tenants`. It is
+asked once in `route_tenant`, before the tenant is looked up -- so a
+refusal says nothing of which tenants exist -- and every route below the
+prefix passes there: a new one cannot skip it. The router forwards
+`Authorization` and holds no keys, so the node enforces it. A tenant's
+database installs the `Check` hook as a single one does
+(`Tenants::check_scoped_writes`, from `Server::with_tenants`): none did,
+and a scoped write to a tenant went unchecked.
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied
@@ -967,6 +985,33 @@ render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
 absent` and the expired row's place. `site/content/docs/redis.html` is the
 recipes, each FenecQL block run by `tests/redis_docs.rs`.
 
+**`require <n>` makes a write's count a condition.** A write that matched
+no row answered `affected 0` and its `/batch` went on: a transfer's debit
+that found too little money was passed over and the credit made money,
+2 400 transfers taking the sum from 200 000 to 411 409. `put`, `insert`,
+`set` and `del` carry `require: Option<u64>` (the parser's `require` after
+the statement, an integer and never a parameter, so a statement keeps its
+shape), and `execute_inner` hands the answer to `required`, which refuses
+any other count as `Error::Unmet` -- after the writes, which the block they
+are in puts back as it puts back any statement that failed: a lone one's
+block of one, a `/batch` whole, the browser module's `run` of several. A
+clause of the write rather than an `assert (get ...)` statement: the count
+is the write's own, taken under the lock that wrote it, with no second
+read to race or to scope, and a scoped token's count is of the rows its
+filter let it write. 412 over HTTP (`api::status_of`), apart from 409 so a
+client tells a lost race from a value taken, and a `/batch` that stops says
+which statement did (`"at"`, from 0, `render_batch_stop`); `FENEC_UNMET` 14
+over the native library, after the boundary's own 11-13; `unmet` in each
+SDK's errors, and `{ require: n }` in every builder, held to the golden
+file. A replica's sync sends it with the write and holds it locally too,
+and refuses one that would reach a row of an unanswered insert
+(`REQUIRE_UNANSWERED`): that row is reached on the server by a second line,
+its key, which would split the count. `tests/require.rs` (both crates)
+moves money between few accounts from eight threads in process and eight
+HTTP clients as `/batch`es, a credit in eight to an account that is not
+there: the sum stays and no balance goes below zero. The browser module
+grew 1 479 bytes, 310 brotli.
+
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
 before refuses the file rather than open it as a plain hash and take the
@@ -986,7 +1031,10 @@ collection with no unique field writes as before (848 against 852). `create
 index ... @unique` over a value held twice is refused naming it and two of
 its documents, under the lock or beside the database, where it is asked of
 the index once the writes made meanwhile are in. `Database::apply` builds
-it and asks nothing: the primary did.
+it and asks nothing: the primary did. A scoped token is told the field
+alone (`access::told`, in `within`): the clash names the other row's id
+and echoes its value, which told alice that bob's profile existed, where,
+and what it held.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
@@ -2082,7 +2130,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 56 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 58 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

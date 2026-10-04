@@ -123,6 +123,7 @@ fn in_process(rows: &[Row], indexed: bool) -> String {
             docs,
             insert: false,
             if_absent: false,
+            require: None,
         })
         .unwrap();
     }

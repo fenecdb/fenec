@@ -73,6 +73,7 @@ class FenecRemote internal constructor(url: String, @Volatile private var token:
             401, 403 -> FenecException.Code.DENIED
             404 -> FenecException.Code.NOT_FOUND
             409 -> FenecException.Code.DUPLICATE
+            412 -> FenecException.Code.UNMET
             else -> FenecException.Code.IO
         }
 

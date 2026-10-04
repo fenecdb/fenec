@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-/* The codes a call returns. 1 to 10 are the engine's errors by kind. */
+/* The codes a call returns. 1 to 10 and 14 are the engine's errors by kind. */
 #define FENEC_OK 0
 #define FENEC_TYPE 1        /* a value that does not fit its field */
 #define FENEC_NOT_FOUND 2   /* a collection, field or document not there */
@@ -39,6 +39,7 @@ extern "C" {
 #define FENEC_PANIC 11      /* a panic inside the library, caught */
 #define FENEC_MISUSE 12     /* a handle not open, a NULL, text not UTF-8 */
 #define FENEC_LOCKED 13     /* the file is open already, here or elsewhere */
+#define FENEC_UNMET 14      /* a write's `require <n>` not met; its block put back */
 
 /* fenec_open's flags. */
 #define FENEC_OPEN_NO_SYNC 1   /* writes wait for fenec_sync, not an fsync each */

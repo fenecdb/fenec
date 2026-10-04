@@ -1412,6 +1412,9 @@ pub enum Statement {
         /// refused, and not counted -- `SET NX`, whose answer (0 or 1) says
         /// whether the write was made. The parser sets `insert` with it.
         if_absent: bool,
+        /// `... require <n>`: the statement is refused (`Error::Unmet`), and
+        /// so its block put back whole, unless it wrote exactly `n` rows.
+        require: Option<u64>,
     },
     Select(Select),
     /// `explain get ...`: the query runs, and what comes back is the path it
@@ -1422,10 +1425,14 @@ pub enum Statement {
         collection: String,
         set: Vec<(String, Expr)>,
         filter: Option<Expr>,
+        /// As `Put`'s: the rows it changed must be exactly this many.
+        require: Option<u64>,
     },
     Delete {
         collection: String,
         filter: Option<Expr>,
+        /// As `Put`'s: the rows it deleted must be exactly this many.
+        require: Option<u64>,
     },
     ListCollections,
     Describe(String),

@@ -612,6 +612,7 @@ impl System for FenecLocal {
                 docs,
                 insert: true,
                 if_absent: false,
+                require: None,
             })
             .unwrap();
             key = end;

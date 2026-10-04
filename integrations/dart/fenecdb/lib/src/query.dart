@@ -786,6 +786,14 @@ class Query {
     throw _refuse('an unfiltered $verb covers the whole collection; if you mean it, $verb({ all: true })');
   }
 
+  // `require n`: the write is refused, and put back whole, unless it
+  // wrote exactly n rows -- a check and its write in one statement.
+  static String _requireClause(int? n) {
+    if (n == null) return '';
+    if (n < 0) throw _refuse('require takes a count of rows, a whole number from 0 (got $n)');
+    return ' require $n';
+  }
+
   static String _renderDoc(Object? doc, String Function(Object?) bind, {bool insert = false}) {
     if (doc is! Map) throw _refuse('expected a document object');
     if (doc.isEmpty) throw _refuse('cannot write an empty document');
@@ -818,8 +826,9 @@ class Query {
   /// The `put` of a document -- a map of fields, in its order -- or a list of
   /// them, not run. [ifAbsent]: `put ... if absent`, which passes over a
   /// document whose id or `@unique` value a row holds and counts only what
-  /// it wrote -- a lock taken, or not, in one statement.
-  Statement toInsert(Object docs, {bool ifAbsent = false}) {
+  /// it wrote -- a lock taken, or not, in one statement. [require]: refused,
+  /// and nothing written, unless it wrote exactly that many rows.
+  Statement toInsert(Object docs, {bool ifAbsent = false, int? require}) {
     _assertPlain('insert');
     final list = docs is List ? docs : [docs];
     if (list.isEmpty) throw _refuse('cannot write an empty document list');
@@ -827,23 +836,28 @@ class Query {
     final bind = _binder(params);
     final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
     final absent = ifAbsent ? ' if absent' : '';
-    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent', params: params);
+    final required = _requireClause(require);
+    return (text: 'put $collection ${list.length == 1 ? body : '[$body]'}$absent$required', params: params);
   }
 
-  /// The `set` of the rows the filter names, not run; with no filter it is refused unless [all].
-  Statement toUpdate(Object patch, {bool all = false}) {
+  /// The `set` of the rows the filter names, not run; with no filter it is
+  /// refused unless [all]; with [require], refused unless it set exactly that many rows.
+  Statement toUpdate(Object patch, {bool all = false, int? require}) {
     _assertPlain('update');
     final params = <Object?>[];
     final bind = _binder(params);
     final body = _renderDoc(patch, bind);
-    return (text: 'set $collection $body${_requireFilter('update', all, bind)}', params: params);
+    final filter = _requireFilter('update', all, bind);
+    return (text: 'set $collection $body$filter${_requireClause(require)}', params: params);
   }
 
-  /// The `del` of the rows the filter names, not run; with no filter it is refused unless [all].
-  Statement toDelete({bool all = false}) {
+  /// The `del` of the rows the filter names, not run; with no filter it is
+  /// refused unless [all]; with [require], refused unless it deleted exactly that many rows.
+  Statement toDelete({bool all = false, int? require}) {
     _assertPlain('delete');
     final params = <Object?>[];
-    return (text: 'del $collection${_requireFilter('delete', all, _binder(params))}', params: params);
+    final filter = _requireFilter('delete', all, _binder(params));
+    return (text: 'del $collection$filter${_requireClause(require)}', params: params);
   }
 
   // ------------------------------------------------------------- running
@@ -885,15 +899,22 @@ class Query {
 
   /// Puts a document -- a map of fields -- or a list of them: how many it
   /// wrote, which with [ifAbsent] leaves out those already held. None is no
-  /// statement.
-  Future<int> insert(Object docs, {bool ifAbsent = false}) async {
+  /// statement. [require]: refused ([FenecCode.unmet]) unless it wrote
+  /// exactly that many.
+  Future<int> insert(Object docs, {bool ifAbsent = false, int? require}) async {
     if (docs is List && docs.isEmpty) return 0;
-    return (await _run(toInsert(docs, ifAbsent: ifAbsent))).affected;
+    return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require))).affected;
   }
 
-  /// Sets the patch's fields on the rows the filter names; with no filter it is refused unless [all].
-  Future<int> update(Object patch, {bool all = false}) async => (await _run(toUpdate(patch, all: all))).affected;
+  /// Sets the patch's fields on the rows the filter names; with no filter it
+  /// is refused unless [all]; with [require], refused ([FenecCode.unmet])
+  /// unless it set exactly that many.
+  Future<int> update(Object patch, {bool all = false, int? require}) async =>
+      (await _run(toUpdate(patch, all: all, require: require))).affected;
 
-  /// Deletes the rows the filter names; with no filter it is refused unless [all].
-  Future<int> delete({bool all = false}) async => (await _run(toDelete(all: all))).affected;
+  /// Deletes the rows the filter names; with no filter it is refused unless
+  /// [all]; with [require], refused ([FenecCode.unmet]) unless it deleted
+  /// exactly that many.
+  Future<int> delete({bool all = false, int? require}) async =>
+      (await _run(toDelete(all: all, require: require))).affected;
 }

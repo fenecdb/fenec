@@ -167,6 +167,27 @@ const FIELD_RENAME: u8 = 3;
 /// schema after it, and nothing of the field's ordered index changes.
 const FIELD_TTL: u8 = 4;
 
+/// `out` held to the statement's `require <n>`: refused as `Error::Unmet`
+/// unless it wrote exactly `n` rows. Refused after the writes, which the
+/// block they are in puts back as it puts back any statement that failed --
+/// a lone one's block of one, a `/batch` whole. Without it a transfer's
+/// debit (`set ... where id = $from and balance >= $amt`) that matched no
+/// row answered `affected 0`, the `/batch` went on to the credit, and money
+/// was made.
+fn required(
+    verb: &str,
+    collection: &str,
+    require: Option<u64>,
+    out: Result<Response>,
+) -> Result<Response> {
+    match (require, &out) {
+        (Some(want), Ok(Response::Affected(n))) if *n as u64 != want => Err(Error::Unmet(format!(
+            "`{verb} {collection}` wrote {n} {}, and requires {want}",
+            if *n == 1 { "row" } else { "rows" }
+        ))),
+        _ => out,
+    }
+}
 /// The expiry a [`FIELD_TTL`] change leaves its field with.
 fn ttl_after(ch: &FieldChange) -> Option<u64> {
     ch.schema.field(&ch.field).and_then(|f| f.index.ttl())
@@ -4885,15 +4906,36 @@ impl Database {
                 docs,
                 insert,
                 if_absent,
-            } => self.put(collection, docs, *insert, *if_absent, params),
+                require,
+            } => required(
+                if *insert { "insert" } else { "put" },
+                collection,
+                *require,
+                self.put(collection, docs, *insert, *if_absent, params),
+            ),
             Statement::Select(sel) => Ok(Response::Rows(self.select(sel, params)?)),
             Statement::Explain(sel) => Ok(Response::Rows(self.explain(sel, params)?)),
             Statement::Update {
                 collection,
                 set,
                 filter,
-            } => self.update(collection, set, filter, params),
-            Statement::Delete { collection, filter } => self.delete(collection, filter, params),
+                require,
+            } => required(
+                "set",
+                collection,
+                *require,
+                self.update(collection, set, filter, params),
+            ),
+            Statement::Delete {
+                collection,
+                filter,
+                require,
+            } => required(
+                "del",
+                collection,
+                *require,
+                self.delete(collection, filter, params),
+            ),
             Statement::ListCollections => Ok(Response::Schemas(
                 self.order
                     .iter()
@@ -4931,7 +4973,9 @@ impl Database {
             Statement::Update {
                 collection, filter, ..
             }
-            | Statement::Delete { collection, filter } => (collection, filter),
+            | Statement::Delete {
+                collection, filter, ..
+            } => (collection, filter),
             _ => return Ok(Cow::Borrowed(stmt)),
         };
         if !filter.as_ref().is_some_and(Expr::has_subquery) && self.ttl_of(collection).is_none() {
@@ -4943,12 +4987,18 @@ impl Database {
         // Made anew rather than the statement cloned whole: `Statement`'s
         // clone was its every variant's, a schema's among them.
         Ok(Cow::Owned(match stmt {
-            Statement::Update { set, .. } => Statement::Update {
+            Statement::Update { set, require, .. } => Statement::Update {
                 collection,
                 set: set.clone(),
                 filter,
+                require: *require,
             },
-            _ => Statement::Delete { collection, filter },
+            Statement::Delete { require, .. } => Statement::Delete {
+                collection,
+                filter,
+                require: *require,
+            },
+            _ => unreachable!("only a set or a del has a filter to answer"),
         }))
     }
 

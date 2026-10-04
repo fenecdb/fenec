@@ -133,19 +133,20 @@ import Testing
                 let docs = { value(a[0]) }
                 let all = { (at: Int) in opt(a, at, "all")?.bool ?? false }
                 let absent = { opt(a, 1, "ifAbsent")?.bool ?? false }
+                let require = { (at: Int) in opt(a, at, "require")?.int }
                 var made: (text: String, params: [Value])?
                 switch op {
                 case "toFenecQL": made = try q.toFenecQL()
-                case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent())
-                case "toUpdate": made = try q.toUpdate(docs(), all: all(1))
-                case "toDelete": made = try q.toDelete(all: all(0))
+                case "toInsert": made = try q.toInsert(docs(), ifAbsent: absent(), require: require(1))
+                case "toUpdate": made = try q.toUpdate(docs(), all: all(1), require: require(1))
+                case "toDelete": made = try q.toDelete(all: all(0), require: require(0))
                 case "rows": _ = try await q.rows()
                 case "first": _ = try await q.first()
                 case "count": _ = try await q.count()
                 case "explain": _ = try await q.explain()
-                case "insert": _ = try await q.insert(docs(), ifAbsent: absent())
-                case "update": _ = try await q.update(docs(), all: all(1))
-                case "delete": _ = try await q.delete(all: all(0))
+                case "insert": _ = try await q.insert(docs(), ifAbsent: absent(), require: require(1))
+                case "update": _ = try await q.update(docs(), all: all(1), require: require(1))
+                case "delete": _ = try await q.delete(all: all(0), require: require(0))
                 default:
                     q = try step(q, op, a)
                     continue

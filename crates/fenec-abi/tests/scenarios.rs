@@ -84,14 +84,19 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             _ => String::new(),
         }
     };
+    // `"require": n`: the builders' `{ require: n }`, last in the text.
+    let required = match member(w, "require") {
+        Some(Value::Int(n)) => format!(" require {n}"),
+        _ => String::new(),
+    };
     if let Some(Value::Text(c)) = member(w, "insert") {
         let Some(Value::List(docs)) = member(w, "docs") else {
             panic!("an insert has docs")
         };
         let body: Vec<String> = docs.iter().map(|d| doc(d, params, &mut bind)).collect();
         return match body.as_slice() {
-            [one] => format!("put {c} {one}"),
-            _ => format!("put {c} [{}]", body.join(", ")),
+            [one] => format!("put {c} {one}{required}"),
+            _ => format!("put {c} [{}]{required}", body.join(", ")),
         };
     }
     if let Some(Value::Text(c)) = member(w, "update") {
@@ -101,11 +106,11 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             &mut bind,
         );
         let wh = filter(member(w, "where"), params, &mut bind);
-        return format!("set {c} {set}{wh}");
+        return format!("set {c} {set}{wh}{required}");
     }
     if let Some(Value::Text(c)) = member(w, "delete") {
         let wh = filter(member(w, "where"), params, &mut bind);
-        return format!("del {c}{wh}");
+        return format!("del {c}{wh}{required}");
     }
     if let Some(Value::List(ws)) = member(w, "batch") {
         return ws

@@ -103,6 +103,16 @@ fn listen(s: &mut TcpStream, heard: &mut String, until: &dyn Fn(&str) -> bool, b
     }
 }
 
+/// An HS256 token for `claims` exactly as given -- `mint` stamps an `exp`
+/// on claims that name none.
+fn signed(secret: &[u8], claims: &str) -> String {
+    use fenec_http::crypto::{b64url_encode, hmac_sha256};
+    let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let body = b64url_encode(claims.as_bytes());
+    let sig = hmac_sha256(secret, format!("{head}.{body}").as_bytes());
+    format!("{head}.{body}.{}", b64url_encode(&sig))
+}
+
 /// How many times `needle` appears in `hay`.
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -254,6 +264,12 @@ fn tokens_that_do_not_verify_are_refused() {
     let other = Access::new(&[9u8; 40], POLICY).unwrap();
     let forged = other.mint(r#"{"sub":"alice"}"#).unwrap();
     assert_eq!(n.call(Some(&forged), "GET", "/notes", "").0, 401);
+    // Signed with the server's own secret but naming no `exp`: good for
+    // ever, so refused (`--jwt-require-exp`).
+    let forever = signed(SECRET, r#"{"sub":"alice"}"#);
+    let (status, body) = n.call(Some(&forever), "GET", "/notes", "");
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("no exp"), "{body}");
     assert_eq!(n.call(None, "GET", "/notes", "").0, 401);
     assert_eq!(n.call(Some("guess"), "GET", "/notes", "").0, 401);
     // The server's own token is everything.
@@ -421,4 +437,57 @@ fn an_inner_get_reads_only_what_the_token_may() {
         panic!("a rule holding `in (get ...)` was taken");
     };
     assert!(e.contains("in (get ...)"), "{e}");
+}
+
+/// A `@unique` clash told a scoped token that another user's row holds the
+/// value, naming the row's id and echoing the value: alice, who may not read
+/// bob's profile, learned that it exists and where by trying his email.
+/// A scoped token is told the field alone, by every route; the server's own
+/// token is told the row and the value as before.
+#[test]
+fn a_unique_clash_tells_a_scoped_token_nothing_of_the_other_row() {
+    let n = start_with(
+        "profiles  read,write  where owner = $jwt.sub\n",
+        &[
+            "create collection profiles (owner text @hash, email text @unique)",
+            r#"put profiles {owner: "bob", email: "bob@x.io"}"#,
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let tries = [
+        n.query(&alice, r#"insert profiles {email: "bob@x.io"}"#),
+        n.query(&alice, r#"put profiles {email: "bob@x.io"}"#),
+        n.call(Some(&alice), "POST", "/profiles", r#"{"email":"bob@x.io"}"#),
+        n.call(
+            Some(&alice),
+            "POST",
+            "/batch",
+            r#"{"query":"put profiles {email: \"bob@x.io\"}"}"#,
+        ),
+    ];
+    for (status, body) in tries {
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("`profiles.email` is unique"), "{body}");
+        assert!(!body.contains("bob"), "the value was told: {body}");
+        assert!(!body.contains("document"), "the row was told: {body}");
+    }
+    // Her own row, then a `set` of it onto bob's value: the same.
+    assert_eq!(
+        n.query(&alice, r#"put profiles {email: "alice@x.io"}"#).0,
+        200
+    );
+    let (status, body) = n.query(&alice, r#"set profiles {email: "bob@x.io"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        !body.contains("bob") && !body.contains("document"),
+        "{body}"
+    );
+
+    // The server's own token is told which row and what value.
+    let (status, body) = n.query(ROOT, r#"insert profiles {email: "bob@x.io"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.contains("document 1") && body.contains("bob@x.io"),
+        "{body}"
+    );
 }

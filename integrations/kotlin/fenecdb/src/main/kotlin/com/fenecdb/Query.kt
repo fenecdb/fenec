@@ -706,6 +706,14 @@ class Query private constructor(private val s: State) {
         throw refuse("an unfiltered $verb covers the whole collection; if you mean it, $verb({ all: true })")
     }
 
+    // `require n`: the write is refused, and put back whole, unless it
+    // wrote exactly n rows -- a check and its write in one statement.
+    private fun requireClause(n: Long?): String {
+        if (n == null) return ""
+        if (n < 0) throw refuse("require takes a count of rows, a whole number from 0 (got $n)")
+        return " require $n"
+    }
+
     private fun docsOf(docs: Any?): List<Any?> = when (docs) {
         is List<*> -> docs
         is Array<*> -> docs.toList()
@@ -716,34 +724,44 @@ class Query private constructor(private val s: State) {
      * The `put` of a document -- a map of fields, in its order -- or a list of
      * them, not run. [ifAbsent]: `put ... if absent`, which passes over a
      * document whose id or `@unique` value a row holds and counts only what
-     * it wrote -- a lock taken, or not, in one statement.
+     * it wrote -- a lock taken, or not, in one statement. [require]: refused,
+     * and nothing written, unless it wrote exactly that many rows.
      */
     @JvmOverloads
-    fun toInsert(docs: Any?, ifAbsent: Boolean = false): Statement {
+    fun toInsert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Statement {
         assertPlain("insert")
         val list = docsOf(docs)
         if (list.isEmpty()) throw refuse("cannot write an empty document list")
         val bind = Binder()
         val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
         val absent = if (ifAbsent) " if absent" else ""
-        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent", bind.params)
+        val required = requireClause(require)
+        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"}$absent$required", bind.params)
     }
 
-    /** The `set` of the rows the filter names, not run; with no filter it is refused unless [all]. */
+    /**
+     * The `set` of the rows the filter names, not run; with no filter it is
+     * refused unless [all]; with [require], refused unless it set exactly that many rows.
+     */
     @JvmOverloads
-    fun toUpdate(patch: Any?, all: Boolean = false): Statement {
+    fun toUpdate(patch: Any?, all: Boolean = false, require: Long? = null): Statement {
         assertPlain("update")
         val bind = Binder()
         val body = Builder.renderDoc(patch, bind)
-        return Statement("set ${s.collection} $body${requireFilter("update", all, bind)}", bind.params)
+        val filter = requireFilter("update", all, bind)
+        return Statement("set ${s.collection} $body$filter${requireClause(require)}", bind.params)
     }
 
-    /** The `del` of the rows the filter names, not run; with no filter it is refused unless [all]. */
+    /**
+     * The `del` of the rows the filter names, not run; with no filter it is
+     * refused unless [all]; with [require], refused unless it deleted exactly that many rows.
+     */
     @JvmOverloads
-    fun toDelete(all: Boolean = false): Statement {
+    fun toDelete(all: Boolean = false, require: Long? = null): Statement {
         assertPlain("delete")
         val bind = Binder()
-        return Statement("del ${s.collection}${requireFilter("delete", all, bind)}", bind.params)
+        val filter = requireFilter("delete", all, bind)
+        return Statement("del ${s.collection}$filter${requireClause(require)}", bind.params)
     }
 
     // ---------------------------------------------------------------- running
@@ -777,18 +795,26 @@ class Query private constructor(private val s: State) {
     /**
      * Puts a document -- a map of fields -- or a list of them: how many it
      * wrote, which with [ifAbsent] leaves out those already held. None is no
-     * statement.
+     * statement. [require]: refused ([FenecException.Code.UNMET]) unless it
+     * wrote exactly that many.
      */
-    suspend fun insert(docs: Any?, ifAbsent: Boolean = false): Long {
+    suspend fun insert(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Long {
         if (docsOf(docs).isEmpty()) return 0
-        return run(toInsert(docs, ifAbsent)).affected
+        return run(toInsert(docs, ifAbsent, require)).affected
     }
 
-    /** Sets the patch's fields on the rows the filter names; with no filter it is refused unless [all]. */
-    suspend fun update(patch: Any?, all: Boolean = false): Long = run(toUpdate(patch, all)).affected
+    /**
+     * Sets the patch's fields on the rows the filter names; with no filter it
+     * is refused unless [all]; with [require], refused (UNMET) unless it set exactly that many.
+     */
+    suspend fun update(patch: Any?, all: Boolean = false, require: Long? = null): Long =
+        run(toUpdate(patch, all, require)).affected
 
-    /** Deletes the rows the filter names; with no filter it is refused unless [all]. */
-    suspend fun delete(all: Boolean = false): Long = run(toDelete(all)).affected
+    /**
+     * Deletes the rows the filter names; with no filter it is refused unless
+     * [all]; with [require], refused (UNMET) unless it deleted exactly that many.
+     */
+    suspend fun delete(all: Boolean = false, require: Long? = null): Long = run(toDelete(all, require)).affected
 
     /** [rows] on the calling thread, for Java. */
     fun rowsBlocking(): Rows = kotlinx.coroutines.runBlocking { rows() }
@@ -801,13 +827,16 @@ class Query private constructor(private val s: State) {
 
     /** [insert] on the calling thread, for Java. */
     @JvmOverloads
-    fun insertBlocking(docs: Any?, ifAbsent: Boolean = false): Long = kotlinx.coroutines.runBlocking { insert(docs, ifAbsent) }
+    fun insertBlocking(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Long =
+        kotlinx.coroutines.runBlocking { insert(docs, ifAbsent, require) }
 
     /** [update] on the calling thread, for Java. */
     @JvmOverloads
-    fun updateBlocking(patch: Any?, all: Boolean = false): Long = kotlinx.coroutines.runBlocking { update(patch, all) }
+    fun updateBlocking(patch: Any?, all: Boolean = false, require: Long? = null): Long =
+        kotlinx.coroutines.runBlocking { update(patch, all, require) }
 
     /** [delete] on the calling thread, for Java. */
     @JvmOverloads
-    fun deleteBlocking(all: Boolean = false): Long = kotlinx.coroutines.runBlocking { delete(all) }
+    fun deleteBlocking(all: Boolean = false, require: Long? = null): Long =
+        kotlinx.coroutines.runBlocking { delete(all, require) }
 }

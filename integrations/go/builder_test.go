@@ -260,6 +260,9 @@ func insertOpts(o object) []any {
 		if k == "ifAbsent" && o.vals[i].(bool) {
 			out = append(out, fenecdb.IfAbsent())
 		}
+		if k == "require" {
+			out = append(out, fenecdb.Require(o.vals[i].(int)))
+		}
 	}
 	return out
 }
@@ -292,6 +295,8 @@ func options(o object) []fenecdb.Opt {
 			if v.(bool) {
 				out = append(out, fenecdb.All())
 			}
+		case "require":
+			out = append(out, fenecdb.Require(v.(int)))
 		case "on":
 			out = append(out, fenecdb.On(v.(string)))
 		case "parentKey":

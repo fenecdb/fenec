@@ -1316,8 +1316,8 @@ const keyText = (k) => (typeof k === 'string' ? k : JSON.stringify(k));
  * local first, server second.
  */
 class SyncQuery extends Query {
-  insert(docs) {
-    return this.context.write('insert', this, docs, null);
+  insert(docs, opts = {}) {
+    return this.context.write('insert', this, docs, opts);
   }
   update(patch, opts = {}) {
     return this.context.write('update', this, patch, opts);
@@ -1654,7 +1654,9 @@ export class FenecSync {
         }
         return doc;
       });
-      const line = base.toInsert(docs);
+      // `require` goes to the server with the write, and is held here too.
+      const required = { require: opts?.require };
+      const line = base.toInsert(docs, required);
       const named = docs.filter((d) => d.id != null).map((d) => d.id);
       if (!key && named.length < docs.length) {
         return { lines: [line], undo: { c, del: [], put: '[]' }, temps: [], count: docs.length };
@@ -1675,22 +1677,27 @@ export class FenecSync {
         const { id: _, ...rest } = d;
         return { id: t, ...rest };
       });
-      this.#local.run(...from(c).toInsert(local));
+      this.#local.run(...from(c).toInsert(local, required));
       this.#nextTemp = next;
       return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
     }
     const stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
     // `select()` drops the projection: writing back needs every field.
     const before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
+    const ids = new Set(before.map((r) => r.id));
+    const keys = key ? this.#temps.filter((t) => t.collection === c && ids.has(t.temp)).map((t) => t.key) : [];
+    // `require` counts the rows the server's copy finds, and a row of an
+    // insert it has not answered is reached there by a second line, its
+    // key: the count would be split between two statements, the first
+    // naming a temporary id the server never saw.
+    if (keys.length && opts?.require != null) {
+      throw new FenecError('a write with `require` cannot reach a row whose insert the server has not answered yet');
+    }
     const count = this.#local.run(...stmt).count ?? 0;
     const lines = [stmt];
-    if (key && before.length) {
-      const ids = new Set(before.map((r) => r.id));
-      const keys = this.#temps.filter((t) => t.collection === c && ids.has(t.temp)).map((t) => t.key);
-      if (keys.length) {
-        const k = from(c).where(key, 'in', keys);
-        lines.push(verb === 'update' ? k.toUpdate(arg) : k.toDelete());
-      }
+    if (keys.length) {
+      const k = from(c).where(key, 'in', keys);
+      lines.push(verb === 'update' ? k.toUpdate(arg) : k.toDelete());
     }
     return { lines, undo: { c, del: [], put: JSON.stringify(before) }, temps: [], count };
   }

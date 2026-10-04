@@ -29,6 +29,7 @@ mod persist;
 mod quant;
 mod redis_docs;
 mod replica;
+mod require;
 mod rewrite;
 mod sorted;
 mod sparse;

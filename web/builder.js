@@ -961,6 +961,8 @@ export class Query {
    * The `put` text. `{ ifAbsent: true }`: `put ... if absent`, which passes
    * over a document whose id or `@unique` value a row holds, and counts
    * only what it wrote -- a lock taken, or not, in one statement.
+   * `{ require: n }` on any write: `... require n`, refused (412) and its
+   * batch put back unless it wrote exactly `n` rows.
    */
   toInsert(docs, opts = {}) {
     this.#assertPlain('insert');
@@ -970,7 +972,8 @@ export class Query {
     const bind = binder(params);
     const body = list.map((d) => renderDoc(d, bind, 'insert')).join(', ');
     const absent = opts?.ifAbsent === true ? ' if absent' : '';
-    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}`, params];
+    const required = requireClause(opts);
+    return [`put ${this.#s.collection} ${list.length === 1 ? body : `[${body}]`}${absent}${required}`, params];
   }
 
   /** The `set` text. A value may be `inc(n)` or `expr(text, ...params)`. */
@@ -980,7 +983,7 @@ export class Query {
     const bind = binder(params);
     const body = renderDoc(patch, bind, 'update');
     const where = this.#requireFilter('update', opts, bind);
-    return [`set ${this.#s.collection} ${body}${where}`, params];
+    return [`set ${this.#s.collection} ${body}${where}${requireClause(opts)}`, params];
   }
 
   /** The `del` text. */
@@ -989,7 +992,7 @@ export class Query {
     const params = [];
     const bind = binder(params);
     const where = this.#requireFilter('delete', opts, bind);
-    return [`del ${this.#s.collection}${where}`, params];
+    return [`del ${this.#s.collection}${where}${requireClause(opts)}`, params];
   }
 
   /**
@@ -1109,6 +1112,18 @@ function binder(params) {
     params.push(normalize(v, what));
     return `$${params.length}`;
   };
+}
+
+// ` require n` for a write's `{ require: n }`: the rows it must write, a
+// whole number from 0 -- not a parameter, as `limit` is not, so a statement
+// keeps its shape.
+function requireClause(opts) {
+  const n = opts?.require;
+  if (n === undefined || n === null) return '';
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
+    throw new FenecError(`require takes a count of rows, a whole number from 0 (got ${String(n)})`);
+  }
+  return ` require ${n}`;
 }
 
 function renderDoc(doc, bind, write) {

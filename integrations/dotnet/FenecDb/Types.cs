@@ -120,7 +120,8 @@ public class FenecException : Exception
     public int Status { get; }
 
     /// <summary>The status's name: <c>bad_request</c> (400), <c>unauthorized</c> (401), <c>forbidden</c> (403),
-    /// <c>not_found</c> (404), <c>conflict</c> (409), <c>gone</c> (410), <c>key_reused</c> (422),
+    /// <c>not_found</c> (404), <c>conflict</c> (409), <c>gone</c> (410), <c>unmet</c> (412: a write's require
+    /// not met, its batch put back), <c>key_reused</c> (422),
     /// <c>unavailable</c> (503), <c>timeout</c> (504), <c>storage_full</c> (507), or <c>http_&lt;status&gt;</c>.</summary>
     public string Code { get; }
 
@@ -144,6 +145,7 @@ public class FenecException : Exception
         404 => "not_found",
         409 => "conflict",
         410 => "gone",
+        412 => "unmet",
         422 => "key_reused",
         503 => "unavailable",
         504 => "timeout",

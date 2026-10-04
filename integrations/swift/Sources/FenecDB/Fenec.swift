@@ -9,6 +9,8 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
     public enum Code: Int32, Sendable {
         case type = 1, notFound, exists, duplicate, corrupt, query, io, plugin, readOnly, denied
         case panic, misuse, locked
+        /// A write's `require n` not met: it wrote another count, and was put back.
+        case unmet = 14
         case builder = 100
     }
 

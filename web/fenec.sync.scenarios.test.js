@@ -212,9 +212,11 @@ class Run {
       });
     }
     const t = on ?? this.db;
+    // `"require": n`: the builders' `{ require: n }`.
+    const opts = w.require === undefined ? {} : { require: w.require };
     if (w.insert) {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
-      return t.from(w.insert).insert(w.docs);
+      return t.from(w.insert).insert(w.docs, opts);
     }
     const c = w.update ?? w.delete;
     let q = t.from(c);
@@ -226,9 +228,9 @@ class Run {
       const set = Object.fromEntries(
         Object.entries(w.set).map(([k, v]) => [k, v !== null && typeof v === 'object' && '$inc' in v ? inc(v.$inc) : v]),
       );
-      return q.update(set);
+      return q.update(set, opts);
     }
-    return q.delete();
+    return q.delete(opts);
   }
 
   async step(st) {

@@ -102,6 +102,21 @@ class FenecTest {
         db.close()
     }
 
+    /** `require 1` over a row that is not there is refused as UNMET, and the write is put back. */
+    @Test
+    fun aRequireNotMetWritesNothing() = runBlocking {
+        val db = Fenec.memory()
+        db.execute("create collection accounts (balance int)")
+        db.execute("put accounts {id: 1, balance: 5}")
+        val e = assertFailsWith<FenecException> {
+            db.from("accounts").where("id", 2).update(mapOf("balance" to 0), require = 1)
+        }
+        assertEquals(FenecException.Code.UNMET, e.code, e.message)
+        assertEquals(listOf(5L), db.query("get accounts select balance").map { it.long("balance") })
+        assertEquals(1, db.from("accounts").where("id", 1).update(mapOf("balance" to 3), require = 1))
+        db.close()
+    }
+
     @Test
     fun aFileIsThereAgainAndOpenOnce() = runBlocking {
         val path = scratch()

@@ -509,6 +509,25 @@ test('an insert if absent says whether it wrote, in the module', { skip: wasm ? 
   assert.equal((await locks.first()).owner, 'a');
 });
 
+test('a write that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection accounts (name text @unique, balance int)');
+  db.run('put accounts [{name: "a", balance: 100}, {name: "b", balance: 0}]');
+  const [debit] = db.from('accounts').where('name', 'a').where('balance', { gte: 30 }).toUpdate({ balance: inc(-30) }, { require: 1 });
+  assert.match(debit, / require 1$/);
+  // A credit to an account that is not there: the debit before it goes back.
+  assert.throws(
+    () => db.run('set accounts {balance: balance - 30} where name = "a" require 1; set accounts {balance: balance + 30} where name = "ghost" require 1'),
+    /unmet: `set accounts` wrote 0 rows, and requires 1/,
+  );
+  assert.deepEqual((await db.from('accounts').order('name').rows()).map((r) => r.balance), [100, 0]);
+  // Through the builder, met and missed.
+  assert.equal(await db.from('accounts').where('name', 'b').update({ balance: inc(30) }, { require: 1 }), 1);
+  await assert.rejects(db.from('accounts').where('name', 'nobody').delete({ require: 1 }), /unmet/);
+  assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
+});
+
 test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

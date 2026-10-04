@@ -816,13 +816,24 @@ public sealed class Query
         throw Builder.Refuse($"an unfiltered {verb} covers the whole collection; if you mean it, {verb}({{ all: true }})");
     }
 
+    // " require n" for a write's require: the rows it must write, a whole number from 0 written into the text
+    // -- not a parameter, as limit is not, so a statement keeps its shape.
+    static string RequireClause(long? n) => n switch
+    {
+        null => "",
+        < 0 => throw Builder.Refuse($"require takes a count of rows, a whole number from 0 (got {n})"),
+        _ => $" require {n}",
+    };
+
     static List<object?> DocsOf(object? docs) =>
         docs is IEnumerable list and not IDictionary and not string ? list.Cast<object?>().ToList() : [docs];
 
     /// <summary>The <c>put</c> of a document -- a dictionary, or an object's public properties -- or a list of
     /// them, not sent. With <paramref name="ifAbsent"/>, <c>put ... if absent</c>: a document whose id or
-    /// <c>@unique</c> value a row holds is passed over, and not counted.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false)
+    /// <c>@unique</c> value a row holds is passed over, and not counted. With <paramref name="require"/>, on any
+    /// write, <c>... require n</c>: unless it wrote exactly n rows it is refused (412, <c>unmet</c>) and its
+    /// batch put back.</summary>
+    public (string Text, IReadOnlyList<object?> Parameters) ToInsert(object docs, bool ifAbsent = false, long? require = null)
     {
         AssertPlain("insert");
         var list = DocsOf(docs);
@@ -830,26 +841,28 @@ public sealed class Query
         var bind = new Binder();
         var body = string.Join(", ", list.Select(d => Builder.RenderDoc(d, bind, "insert")));
         var absent = ifAbsent ? " if absent" : "";
-        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}", bind.Params);
+        return ($"put {_s.Collection} {(list.Count == 1 ? body : $"[{body}]")}{absent}{RequireClause(require)}", bind.Params);
     }
 
     /// <summary>The <c>set</c> of the rows the filter names, not sent; with no filter it is refused unless
     /// <paramref name="all"/>.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToUpdate(object patch, bool all = false)
+    public (string Text, IReadOnlyList<object?> Parameters) ToUpdate(object patch, bool all = false, long? require = null)
     {
         AssertPlain("update");
         var bind = new Binder();
         var body = Builder.RenderDoc(patch, bind, "update");
-        return ($"set {_s.Collection} {body}{RequireFilter("update", all, bind)}", bind.Params);
+        var where = RequireFilter("update", all, bind);
+        return ($"set {_s.Collection} {body}{where}{RequireClause(require)}", bind.Params);
     }
 
     /// <summary>The <c>del</c> of the rows the filter names, not sent; with no filter it is refused unless
     /// <paramref name="all"/>.</summary>
-    public (string Text, IReadOnlyList<object?> Parameters) ToDelete(bool all = false)
+    public (string Text, IReadOnlyList<object?> Parameters) ToDelete(bool all = false, long? require = null)
     {
         AssertPlain("delete");
         var bind = new Binder();
-        return ($"del {_s.Collection}{RequireFilter("delete", all, bind)}", bind.Params);
+        var where = RequireFilter("delete", all, bind);
+        return ($"del {_s.Collection}{where}{RequireClause(require)}", bind.Params);
     }
 
     FenecClient Client => _s.Client ?? throw Builder.Refuse(
@@ -912,18 +925,23 @@ public sealed class Query
 
     /// <summary>Puts a document -- a dictionary, or an object's public properties -- or a list of them; the
     /// result's <c>Affected</c> is how many were written, which with <paramref name="ifAbsent"/> leaves out those
-    /// whose id or <c>@unique</c> value was held: a lock taken answers 1, one held 0. None is no request.</summary>
-    public Task<ExecResult> InsertAsync(object docs, bool ifAbsent = false, CancellationToken cancellationToken = default) =>
+    /// whose id or <c>@unique</c> value was held: a lock taken answers 1, one held 0. None is no request. With
+    /// <paramref name="require"/> (on an update and a delete too) a write that did not write exactly that many rows
+    /// is refused, 412 (<c>unmet</c>), and its batch put back.</summary>
+    public Task<ExecResult> InsertAsync(object docs, bool ifAbsent = false, long? require = null,
+        CancellationToken cancellationToken = default) =>
         DocsOf(docs).Count == 0
             ? Task.FromResult(new ExecResult(0, null, 0, false))
-            : ExecAsync(ToInsert(docs, ifAbsent), cancellationToken);
+            : ExecAsync(ToInsert(docs, ifAbsent, require), cancellationToken);
 
     /// <summary>Sets the patch's fields on the rows the filter names; with no filter it is refused unless
     /// <paramref name="all"/>.</summary>
-    public Task<ExecResult> UpdateAsync(object patch, bool all = false, CancellationToken cancellationToken = default) =>
-        ExecAsync(ToUpdate(patch, all), cancellationToken);
+    public Task<ExecResult> UpdateAsync(object patch, bool all = false, long? require = null,
+        CancellationToken cancellationToken = default) =>
+        ExecAsync(ToUpdate(patch, all, require), cancellationToken);
 
     /// <summary>Deletes the rows the filter names; with no filter it is refused unless <paramref name="all"/>.</summary>
-    public Task<ExecResult> DeleteAsync(bool all = false, CancellationToken cancellationToken = default) =>
-        ExecAsync(ToDelete(all), cancellationToken);
+    public Task<ExecResult> DeleteAsync(bool all = false, long? require = null,
+        CancellationToken cancellationToken = default) =>
+        ExecAsync(ToDelete(all, require), cancellationToken);
 }

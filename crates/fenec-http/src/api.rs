@@ -111,6 +111,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                     collection: name.to_string(),
                     set,
                     filter,
+                    require: None,
                 },
                 shape: Shape::Affected("updated", 200),
             })
@@ -123,6 +124,7 @@ pub fn route(db: &Database, req: &Request) -> Result<Routed> {
                 statement: Statement::Delete {
                     collection: name.to_string(),
                     filter,
+                    require: None,
                 },
                 shape: Shape::Affected("deleted", 200),
             })
@@ -614,6 +616,7 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
         docs: out,
         insert: true,
         if_absent: false,
+        require: None,
     })
 }
 
@@ -1104,20 +1107,24 @@ pub fn render_batch(results: &[Response2], version: &'static str) -> Response {
 /// permanently separate the client's optimistic local state from the
 /// server.
 pub fn render_batch_error(e: &Error, completed: usize, version: &'static str) -> Response {
-    render_batch_stop(status_of(e), &e.to_string(), completed, version)
+    render_batch_stop(status_of(e), &e.to_string(), completed, completed, version)
 }
 
-/// A batch stopped at statement `completed` with `status` and `why`: an
-/// error, or a write the data ceiling refused.
+/// A batch stopped at statement `at` (from 0) with `status` and `why`: an
+/// error, a write whose `require` was not met, or a write the data ceiling
+/// refused. `completed` statements of it stay applied: none of a block.
+/// `at` names the statement, since in a block the count is no longer where
+/// it stopped.
 pub fn render_batch_stop(
     status: u16,
     why: &str,
     completed: usize,
+    at: usize,
     version: &'static str,
 ) -> Response {
     let mut out = String::from("{\"error\":");
     json::escape_into(&mut out, why);
-    out.push_str(&format!(",\"completed\":{completed}}}"));
+    out.push_str(&format!(",\"completed\":{completed},\"at\":{at}}}"));
     Response::json(status, out).versioned(version)
 }
 
@@ -1273,6 +1280,10 @@ pub fn status_of(e: &Error) -> u16 {
     match e {
         Error::NotFound(_) => 404,
         Error::Exists(_) | Error::Duplicate(_) => 409,
+        // The write's `require` was not met: the state it was sent against
+        // is not the one it found. Apart from 409 so a client tells a lost
+        // race on a balance from a value taken.
+        Error::Unmet(_) => 412,
         Error::Type(_) | Error::Query(_) => 400,
         Error::Corrupt(_) | Error::Io(_) | Error::Plugin(_) => 500,
         // As `--http-read-only` answers: the write is not this server's to take.

@@ -87,7 +87,49 @@ pub struct Access {
     /// Emptied when the keys change, since a key taken out must take its
     /// tokens with it; `exp` and `nbf` are asked on every request.
     verified: [Mutex<HashMap<Box<str>, Claims>>; SHARDS],
+    demands: Demands,
 }
+
+/// What a token must carry beyond a good signature.
+#[derive(Clone, Debug)]
+pub struct Demands {
+    /// A token with no `exp` is refused (`--jwt-require-exp`, on unless
+    /// turned off): one minted without it was taken for ever, and a token
+    /// that leaked could not be outlived, only every key rotated.
+    pub require_exp: bool,
+    /// A token whose `exp` lies further ahead than this many seconds is
+    /// refused (`--jwt-max-age`): an `exp` ten years out is no `exp`.
+    pub max_age: Option<u64>,
+    /// The claim naming the tenant a token is for (`--jwt-tenant-claim`,
+    /// `tenant` unless told): on a `--dir` node a token reaches `/t/<t>/`
+    /// only when the claim names `<t>` -- a text, or a list holding it.
+    pub tenant_claim: String,
+    /// On a `--dir` node, take a token whose claims name no tenant for
+    /// every tenant (`--jwt-unbound-tenants`). Off, such a token is refused
+    /// there: a policy's `owner = $jwt.sub` matches the same user in every
+    /// tenant's file, so a token for one tenant read every other.
+    pub unbound_tenants: bool,
+}
+
+impl Default for Demands {
+    fn default() -> Demands {
+        Demands {
+            require_exp: true,
+            max_age: None,
+            tenant_claim: "tenant".into(),
+            unbound_tenants: false,
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// How long a token `mint` signs lives when its claims name no `exp`.
+pub const MINTED_FOR: u64 = 3600;
 
 type Claims = Arc<Vec<(String, Value)>>;
 const SHARDS: usize = 16;
@@ -206,6 +248,11 @@ struct Rule {
 pub struct Scope {
     subject: Option<String>,
     rules: Vec<Bound>,
+    /// The tenants the token names in its tenant claim; `None` where it
+    /// names none.
+    tenants: Option<Vec<String>>,
+    /// A token naming no tenant reaches every one (`--jwt-unbound-tenants`).
+    unbound: bool,
 }
 
 struct Bound {
@@ -263,7 +310,14 @@ impl Access {
             source,
             rules,
             verified: Default::default(),
+            demands: Demands::default(),
         })
+    }
+
+    /// The same keys and policy, holding tokens to `demands`.
+    pub fn demanding(mut self, demands: Demands) -> Access {
+        self.demands = demands;
+        self
     }
 
     /// The keys, the file's read again first where it changed -- looked at
@@ -297,9 +351,20 @@ impl Access {
 
     /// A token for `claims`, a JSON object -- what `fenec-server --mint-token`
     /// prints.
-    /// Signed with the first HS256 key, its `kid` named.
+    /// Signed with the first HS256 key, its `kid` named. Claims naming no
+    /// `exp` get one [`MINTED_FOR`] seconds from now: a server refuses a
+    /// token without one ([`Demands::require_exp`]).
     pub fn mint(&self, claims: &str) -> std::result::Result<String, String> {
-        fenec_core::json::parse_object(claims).map_err(|e| e.to_string())?;
+        let parsed = fenec_core::json::parse_object(claims).map_err(|e| e.to_string())?;
+        let stamped;
+        let claims = if parsed.iter().any(|(k, _)| k == "exp") {
+            claims
+        } else {
+            let open = claims.trim().strip_suffix('}').unwrap_or("{").trim_end();
+            let comma = if open.ends_with('{') { "" } else { "," };
+            stamped = format!(r#"{open}{comma}"exp":{}}}"#, unix_now() + MINTED_FOR);
+            &stamped
+        };
         let keys = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
         let (kid, secret) = keys
             .iter()
@@ -350,12 +415,28 @@ impl Access {
                 filter: r.filter.as_ref().map(|f| bind(f, &values)),
             });
         }
+        // Anything but a text or a list of texts names no tenant: a number
+        // or an object compared as text could be made to match.
+        let tenants = match claim(&self.demands.tenant_claim) {
+            Some(Value::Text(t)) => Some(vec![t.clone()]),
+            Some(Value::List(l)) => Some(
+                l.iter()
+                    .filter_map(|v| match v {
+                        Value::Text(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
         Ok(Scope {
             subject: match claim("sub") {
                 Some(Value::Text(s)) => Some(s.clone()),
                 _ => None,
             },
             rules,
+            tenants,
+            unbound: self.demands.unbound_tenants,
         })
     }
 
@@ -380,8 +461,15 @@ impl Access {
                     _ => None,
                 })
         };
-        if seconds("exp").is_some_and(|exp| now as f64 >= exp) {
-            return Err("the token has expired");
+        match seconds("exp") {
+            Some(exp) if now as f64 >= exp => return Err("the token has expired"),
+            Some(exp) if self.demands.max_age.is_some_and(|m| exp > (now + m) as f64) => {
+                return Err("the token's exp is further ahead than this server takes")
+            }
+            None if self.demands.require_exp => {
+                return Err("the token has no exp: one without would be good for ever")
+            }
+            _ => {}
         }
         if seconds("nbf").is_some_and(|nbf| (now as f64) < nbf) {
             return Err("the token is not valid yet");
@@ -580,6 +668,20 @@ impl Scope {
         self.subject.as_deref()
     }
 
+    /// Whether the token may reach tenant `name` on a `--dir` node: its
+    /// tenant claim names it, or it names none and the node takes unbound
+    /// tokens. The tenant comes from the path and each tenant is a file of
+    /// its own, but the policy is the node's: without this a token minted
+    /// for one tenant read every other whose rows its filter matched.
+    pub fn reaches(&self, name: &str) -> std::result::Result<(), &'static str> {
+        match &self.tenants {
+            Some(names) if names.iter().any(|n| n == name) => Ok(()),
+            Some(_) => Err("this token is for another tenant"),
+            None if self.unbound => Ok(()),
+            None => Err("this token names no tenant, and this node serves tenants"),
+        }
+    }
+
     /// `None`: no access. `Some(None)`: every row. `Some(Some(f))`: the rows
     /// `f` matches -- the rules' filters, any of them.
     fn filter(&self, collection: &str, write: bool) -> Option<Option<Expr>> {
@@ -668,6 +770,7 @@ impl Scope {
                 mut docs,
                 insert,
                 if_absent,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 let mut pins = Vec::new();
@@ -694,12 +797,15 @@ impl Scope {
                     docs,
                     insert,
                     if_absent,
+                    require,
                 }
             }
+            // `require` counts the rows the token's filter let it write.
             Statement::Update {
                 collection,
                 set,
                 mut filter,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 self.inner(&mut filter)?;
@@ -707,17 +813,20 @@ impl Scope {
                     collection,
                     set,
                     filter: and(filter, f),
+                    require,
                 }
             }
             Statement::Delete {
                 collection,
                 mut filter,
+                require,
             } => {
                 let f = self.writable(&collection)?;
                 self.inner(&mut filter)?;
                 Statement::Delete {
                     collection,
                     filter: and(filter, f),
+                    require,
                 }
             }
             Statement::ListCollections => Statement::ListCollections,
@@ -781,11 +890,33 @@ thread_local! {
 }
 
 /// Runs `f` -- a statement executing under the write lock -- as `who`: the
-/// documents it writes are checked against the token's rules.
-pub fn within<T>(who: &Who, f: impl FnOnce() -> T) -> T {
+/// documents it writes are checked against the token's rules, and what a
+/// refusal tells is what the token may know ([`told`]).
+pub fn within<T>(who: &Who, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let Who::Scoped(scope) = who else {
         return f();
     };
+    with_scope(scope, f).map_err(told)
+}
+
+/// A refusal as a scoped token is told it. A `@unique` clash names the
+/// document holding the value and echoes the value: told to a token whose
+/// rows are its own, it said that another user's row exists, its id and
+/// what it holds (`insert profiles {email: 'bob@x.io'}` answered "document
+/// 1 holds \"bob@x.io\" already"). The token is told the field alone; that
+/// the value is taken is what uniqueness itself says. A scoped token names
+/// no `id` ([`Scope::rewrite`]), so every duplicate it meets is a clash.
+fn told(e: Error) -> Error {
+    match e {
+        Error::Duplicate(m) => Error::Duplicate(match m.split_once(" is unique, and document ") {
+            Some((field, _)) => format!("{field} is unique, and the value is taken"),
+            None => "a unique value is taken".into(),
+        }),
+        e => e,
+    }
+}
+
+fn with_scope<T>(scope: &Arc<Scope>, f: impl FnOnce() -> T) -> T {
     let before = CURRENT.with(|c| c.replace(Some(Arc::clone(scope))));
     struct Restore(Option<Arc<Scope>>);
     impl Drop for Restore {
@@ -857,7 +988,13 @@ mod tests {
             kid: None,
             kind: KeyKind::Hmac(b"your-256-bit-secret".to_vec()),
         };
-        let a = Access::with(vec![key], None, "").unwrap();
+        // It names no `exp`, which a server takes only when told to.
+        let a = Access::with(vec![key], None, "")
+            .unwrap()
+            .demanding(Demands {
+                require_exp: false,
+                ..Demands::default()
+            });
         let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
                      eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.\
                      SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
@@ -896,6 +1033,48 @@ mod tests {
         assert!(Access::new(b"short", "").is_err());
     }
 
+    /// A token with no `exp` was taken for ever: one that leaked could be
+    /// outlived only by rotating every key.
+    #[test]
+    fn a_token_without_exp_is_refused_unless_told() {
+        let a = access("");
+        let signed = |claims: &[u8]| {
+            let head = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+            let body = b64url_encode(claims);
+            let sig = hmac_sha256(SECRET, format!("{head}.{body}").as_bytes());
+            format!("{head}.{body}.{}", b64url_encode(&sig))
+        };
+        let forever = signed(br#"{"sub":"alice"}"#);
+        assert_eq!(
+            a.verify(&forever, 1_000).unwrap_err(),
+            "the token has no exp: one without would be good for ever"
+        );
+        // Minted with none, it gets an hour.
+        let minted = a.mint(r#"{"sub":"alice"}"#).unwrap();
+        let now = unix_now();
+        assert!(a.verify(&minted, now).is_ok());
+        assert!(a.verify(&minted, now + MINTED_FOR + 1).is_err());
+        assert!(a.mint("{}").is_ok() && a.mint(" { } ").is_ok());
+
+        let lax = access("").demanding(Demands {
+            require_exp: false,
+            ..Demands::default()
+        });
+        assert!(lax.verify(&forever, 1_000).is_ok());
+
+        // An `exp` further ahead than --jwt-max-age is no `exp`.
+        let capped = access("").demanding(Demands {
+            max_age: Some(600),
+            ..Demands::default()
+        });
+        let far = signed(br#"{"sub":"alice","exp":100000}"#);
+        assert!(capped.verify(&far, 99_500).is_ok());
+        assert_eq!(
+            capped.verify(&far, 1_000).unwrap_err(),
+            "the token's exp is further ahead than this server takes"
+        );
+    }
+
     /// A JWKS as an identity provider publishes it -- an EC key this server
     /// passes over, an RSA key -- and tokens node:crypto signed with the
     /// RSA key's private half.
@@ -912,7 +1091,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("keys.json");
         std::fs::write(&path, jwks).unwrap();
-        let a = Access::from_jwks(&path, "notes read where owner = $jwt.sub").unwrap();
+        // node:crypto signed them with no `exp`.
+        let a = Access::from_jwks(&path, "notes read where owner = $jwt.sub")
+            .unwrap()
+            .demanding(Demands {
+                require_exp: false,
+                ..Demands::default()
+            });
         let sub = |t: &str, now| a.scope(t, now).map(|s| s.subject.unwrap_or_default());
         assert_eq!(sub(alice, 1).unwrap(), "alice", "named by its kid");
         assert_eq!(sub(bob, 1).unwrap(), "bob", "no kid: each RS256 key");
