@@ -3,7 +3,7 @@
 // from integrations/kotlin's NDK build. Nothing to compile: the Dart side
 // opens the library itself.
 group 'com.fenecdb.flutter'
-version '0.1.9'
+version '0.1.10'
 
 buildscript {
     repositories {

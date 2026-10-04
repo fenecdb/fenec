@@ -1,7 +1,7 @@
 name: fenecdb_flutter_example
 description: A todo list kept in a fenecdb file, its list a live query.
 publish_to: none
-version: 0.1.9
+version: 0.1.10
 
 environment:
   sdk: ^3.4.0

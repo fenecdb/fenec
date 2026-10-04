@@ -1,1 +1,1 @@
-fenecdb==0.1.9
+fenecdb==0.1.10

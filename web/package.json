@@ -1,6 +1,6 @@
 {
   "name": "@fenecdb/web",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "fenecdb in the browser: the engine as WebAssembly, and dependency-free ES modules with its query builder, HTTP client and sync layer -- or the client alone, with no engine (@fenecdb/web/client)",
   "license": "Apache-2.0",
   "type": "module",

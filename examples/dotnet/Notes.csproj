@@ -12,7 +12,7 @@
   <!-- The published package; `-p:FenecLocal=<repository root>` builds against
        this repository's SDK instead, as CI does. -->
   <ItemGroup Condition="'$(FenecLocal)' == ''">
-    <PackageReference Include="FenecDb" Version="0.1.9" />
+    <PackageReference Include="FenecDb" Version="0.1.10" />
   </ItemGroup>
   <ItemGroup Condition="'$(FenecLocal)' != ''">
     <ProjectReference Include="$(FenecLocal)/integrations/dotnet/FenecDb/FenecDb.csproj" />
