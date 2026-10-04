@@ -2166,6 +2166,19 @@ Both binaries hold 72 KB of the standard library's backtrace symbolizer
   counts, `/_metrics` or the statements', is a `[[test]]` of its own:
   beside the others it would count theirs. Measurement programs are
   `crates/fenec-core/examples/` and are wired to `make` targets, not to CI.
+- A test that fails and passes on a rerun is a bug, the test's or the code's:
+  it is reproduced -- in a loop, under load (`docker run --cpus=3` beside
+  busy loops is GitHub's three-core runner) -- and fixed, never retried
+  away or given a longer sleep. A test waits for an event, not for a time:
+  it holds what it races (`Replica.setOnline(false)` before a write it
+  reads back, a call held under way across a burst, a disk's fsync held at
+  a gate) and bounds only the wait for something that must happen. A CI
+  log names every failing test with its assertion: cargo's and `swift
+  test`'s own output, Gradle's `testLogging` (set for `-q`'s quiet level
+  too), `dart test`'s GitHub reporter, `node --test --test-reporter=spec`.
+  A failing mobile job also uploads `test-reports-android` (the JUnit
+  reports) or `test-results-apple` (the simulator's `.xcresult`) for a
+  week.
 - Comments explain *why* a thing is the way it is — a measured cost, a trap that
   was hit, an alternative that was rejected. Match that when adding code.
 - All prose in the repo (comments, docs, README) is English.
