@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { from, or, not, raw, Query, FenecError } from './fenec.js';
+import { from, or, not, raw, inc, expr, Query, FenecError } from './fenec.js';
 
 const q = () => from('articles');
 
@@ -474,6 +474,39 @@ test('open takes a compiled module', { skip: wasm ? false : 'no web/fenec.wasm (
     db.close();
   }
   assert.deepEqual(images[0], images[1]);
+});
+
+test('an update works out its values over the row, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection hits (key text @hash, n int, at timestamp)');
+  db.run('put hits [{key: "a"}, {key: "b", n: 5}]');
+  const hits = db.from('hits');
+  for (let i = 0; i < 3; i++) assert.equal(await hits.where('key', 'a').update({ n: inc(1) }), 1);
+  assert.equal(await hits.where('key', 'b').update({ n: expr('n * ? - 1', 2) }), 1);
+  assert.deepEqual(await hits.select('key', 'n').order('key').rows(), [{ key: 'a', n: 3 }, { key: 'b', n: 9 }]);
+  // now() is the time the module is handed, which it has no clock of its own for.
+  const before = Date.now();
+  await hits.where('key', 'a').update({ at: expr('now() + ?', 1000) });
+  const at = Date.parse((await hits.where('key', 'a').first()).at);
+  assert.ok(at >= before + 1000 && at <= Date.now() + 1000, `${at}`);
+  // Overflow is refused, and nothing written.
+  db.run('set hits {n: 9223372036854775807} where key = "b"');
+  await assert.rejects(hits.where('key', 'b').update({ n: inc(1) }), /overflows/);
+  // A compare-and-set answers 1 when it matched, 0 when the value moved.
+  assert.equal(db.run('set hits {n: 0} where key = $1 and n = $2', ['a', 3]).count, 1);
+  assert.equal(db.run('set hits {n: 0} where key = $1 and n = $2', ['a', 3]).count, 0);
+});
+
+test('an insert if absent says whether it wrote, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection locks (name text @unique, owner text, at timestamp @ttl(30s))');
+  const locks = db.from('locks');
+  const take = (owner) => locks.insert({ name: 'job', owner, at: expr('now()') }, { ifAbsent: true });
+  assert.equal(await take('a'), 1);
+  assert.equal(await take('b'), 0);
+  assert.equal((await locks.first()).owner, 'a');
 });
 
 test('end to end on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {

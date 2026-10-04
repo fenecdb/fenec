@@ -3,7 +3,7 @@
 // are `@fenecdb/web`'s own, re-exported: a query typed for one is typed for
 // the other.
 
-export { FenecError, FenecHttp, Query, and, connect, from, not, or, raw } from './fenec.js';
+export { FenecError, FenecHttp, Query, and, connect, expr, from, inc, not, or, raw } from './fenec.js';
 export type {
   Aggregate,
   Bytes,

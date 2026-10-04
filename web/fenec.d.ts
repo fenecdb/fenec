@@ -365,6 +365,29 @@ export function not<F extends Fields = Fields>(cond: Where<Hold<F>> | Cond<Hold<
  */
 export function raw<F extends Fields = Fields>(sql: string, ...params: unknown[]): Cond<F>;
 
+declare const computed: unique symbol;
+
+/**
+ * A value a write works out over the row it writes: what `inc()` and
+ * `expr()` make. Opaque, as a `Cond` is.
+ */
+export interface Computed {
+  readonly [computed]: true;
+}
+
+/**
+ * `{ n: inc(1) }` in an update: the field plus `by`, counting from 0 where
+ * it is null (`n: coalesce(n, 0) + $1`), worked out under the write lock --
+ * increments from many clients all land.
+ */
+export function inc(by?: number): Computed;
+
+/**
+ * A value as a FenecQL expression over the row, `?` placeholders bound to
+ * parameters in order: `{ at: expr('now()') }`, `{ total: expr('price * ?', 1.2) }`.
+ */
+export function expr(sql: string, ...params: unknown[]): Computed;
+
 /** Executor: `(sql, params)` -> response. A `Fenec` instance also works. */
 export type Exec = (sql: string, params: unknown[]) => unknown;
 
@@ -624,7 +647,7 @@ export declare class Query<
   toFenecQL(): [sql: string, params: unknown[]];
 
   /** The text of the write statements, without running them. The write side of `toFenecQL`. */
-  toInsert(docs: InsertRow<F> | InsertRow<F>[]): [sql: string, params: unknown[]];
+  toInsert(docs: InsertRow<F> | InsertRow<F>[], opts?: { ifAbsent?: boolean }): [sql: string, params: unknown[]];
   toUpdate(patch: Insert<F>, opts?: { all?: boolean }): [sql: string, params: unknown[]];
   toDelete(opts?: { all?: boolean }): [sql: string, params: unknown[]];
 
@@ -657,15 +680,18 @@ export declare class Query<
   /**
    * Writes the documents as FenecQL's `put`: new ones, and one naming an
    * `id` written over. FenecQL's `insert` refuses a taken id instead.
+   * `{ ifAbsent: true }` passes over a document whose id or `@unique` value
+   * is held (`put ... if absent`), and the count says what was written: a
+   * lock taken (1) or not (0).
    */
-  insert(docs: InsertRow<F> | InsertRow<F>[]): Promise<number>;
+  insert(docs: InsertRow<F> | InsertRow<F>[], opts?: { ifAbsent?: boolean }): Promise<number>;
   update(patch: Insert<F>, opts?: { all?: boolean }): Promise<number>;
   delete(opts?: { all?: boolean }): Promise<number>;
 }
 
-/** A patch (`update`): every field optional. */
+/** A patch (`update`): every field optional, a value written or worked out (`inc`, `expr`). */
 export type Insert<F extends Fields> = {
-  [K in keyof Row<F>]?: Writable<Row<F>[K]> | null;
+  [K in keyof Row<F>]?: Writable<Row<F>[K]> | null | Computed;
 };
 
 /** The fields a write must give: those that read back never null (`required`, `.notNull()`). */
@@ -676,9 +702,9 @@ type RequiredKeys<F> = { [K in keyof F]-?: null extends F[K] ? never : K }[keyof
  * optional or null, and `id` only to write over the document holding it.
  */
 export type InsertRow<F extends Fields> = { id?: number } & {
-  [K in RequiredKeys<F>]: Writable<F[K]>;
+  [K in RequiredKeys<F>]: Writable<F[K]> | Computed;
 } & {
-  [K in Exclude<keyof F, RequiredKeys<F>>]?: Writable<F[K]> | null;
+  [K in Exclude<keyof F, RequiredKeys<F>>]?: Writable<F[K]> | null | Computed;
 };
 
 /**
