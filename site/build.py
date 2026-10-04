@@ -65,6 +65,7 @@ NAV = [
         ("docs/mobile", "Mobile and native apps"),
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
+        ("docs/redis", "Instead of Redis"),
         ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [
@@ -96,7 +97,7 @@ KEYWORDS = {
     "fenecql": """create drop collection index if not exists get put set del select
         from where near order limit offset count ef exact asc desc and or in has is
         null true false collections describe compact begin commit on match fuse
-        lookup group insert set del rerank""".split(),
+        lookup group insert set del rerank absent""".split(),
     "js": """import export from const let var async await function return new class
         extends if else for of while try catch finally throw typeof null undefined
         true false this default""".split(),

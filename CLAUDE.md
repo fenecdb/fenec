@@ -67,6 +67,7 @@ make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
+make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
 
 Single tests:
@@ -867,6 +868,50 @@ one, is put back whole. JWT scoping keeps
 the flag as it rewrites the statement; made a `put` there, a scoped insert
 would write over. The JS builder's `.insert()` still sends `put`: the sync
 layer writes rows back through it when it undoes an optimistic write.
+
+**A `set` reads the row it writes, and every write says what it did.**
+`Expr::Arith` is `+ - * /` (`query::arith`): ints stay ints and one past
+64 bits is refused, never wrapped; `/` between ints divides whole toward
+zero; an int and a float make a float, refused once not finite; a
+timestamp moves by milliseconds; a null is null (`coalesce(n, 0) + 1`
+counts from nothing); anything else is a type error, and the result meets
+the field's type check as a literal does. The lexer reads `-` after what
+ends a value (`n-1`, `n - 1`) as a subtraction and before a value as a
+number's sign (`subtracts`), and the parser folds a `-` over a number back
+into it, so every text that parsed before parses to the same tree;
+`arith_level` is two frames a level of parentheses, `operand` out of line
+so `primary` is in one place (inlined three times it was 2.9 KB of the
+browser module). A `set`'s pairs are bound once a statement
+(`Assign`, `Calc`, as `Filter` binds a filter): a field by its position, a
+value reading no field -- a literal, a parameter, `now()` -- worked out
+once, the rest `eval` over the row, so an error comes at the first row and
+never over none. The row is read once (it was read twice, for the values
+and for the indexes it took out), and the registry is taken out of the
+database for the statement so a row's expression can call it while the
+row is written. Under the single writer the read and the write are one, so
+an increment is atomic: 16 threads x 10 000 on one key end at 160 000,
+320 000 a second, 16 HTTP clients the same at 102 000
+(`make counters-bench`); over 100 000 rows `{n: 7}` took 85.5 ms
+and takes 65.0, `{n: n + 1}` 66.6. `now()` is the database's
+clock where one is set (`EvalCtx::clock`, the browser module's every
+statement) and the system's otherwise, worked out once a statement. The
+record holds the document written, never the expression: replicas,
+`/_changes`, archives and a sync replica's server see the result, and a
+replica's optimistic apply works the same text out over its own row while
+the server works it out again -- two replicas' offline increments both land
+(the scenario file holds it). `put ... if absent` (`Statement::Put`'s
+`if_absent`, which sets `insert`) passes over a document whose id or
+`@unique` value a live row holds and counts what it wrote -- `SET NX`
+without a 409 that aborts a `/batch` or an exception to catch. A row past
+its `@ttl` is out of a write's way as of every read: an insert naming its
+id writes over it, and a `@unique` value it holds is let go of with it, the
+row deleted in the same statement (`expired`, `erase`); left to the
+sweeper, a lock that expired stayed held up to a minute. The builders
+render `inc(n)` as `f: coalesce(f, 0) + $k` and `expr(text, ...)` with its
+`?`s bound, every SDK to the golden file. The browser module grew
+7.9 KB, 2.7 KB brotli: the parser's arithmetic, the binding, `if
+absent` and the expired row's place. `site/content/docs/redis.html` is the
+recipes, each FenecQL block run by `tests/redis_docs.rs`.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
@@ -1983,7 +2028,7 @@ fsync `sync()`.
 **The browser's sync and the native core are held to one scenario file.**
 Moving `FenecSync` onto `fenec_abi::sync` was measured at +21 KB brotli of
 the browser module, so the two are written apart, and
-`integrations/sync-scenarios.json` says what both do: 55 scenarios, each a
+`integrations/sync-scenarios.json` says what both do: 56 scenarios, each a
 script of shapes, app writes and server events -- a seed, a change, a
 stream dropped, the status each write's request is answered with, a seed
 past the horizon, the network's signal, a token -- with what the replica,

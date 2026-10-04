@@ -459,6 +459,7 @@ message. Python's builder starts with <code>collection</code>, since
 <tr><td><code>.order("title", "desc", collate="tr")</code></td><td><code>.order('title', 'desc', { collate: 'tr' })</code></td><td><code>.Order("title", "desc", fenecdb.Collate("tr"))</code></td><td><code>.Order("title", "desc", collate: "tr")</code></td></tr>
 <tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td><td><code>.Rows(ctx)</code>, <code>.First(ctx)</code>, <code>.Count(ctx)</code>, <code>RowsAs[T]</code></td><td><code>.RowsAsync()</code>, <code>.FirstAsync()</code>, <code>.CountAsync()</code>, <code>.RowsAsync&lt;T&gt;()</code></td></tr>
 <tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.Insert(ctx, doc)</code>, <code>.Update(ctx, patch)</code>, <code>.Delete(ctx)</code></td><td><code>.InsertAsync(doc)</code>, <code>.UpdateAsync(patch)</code>, <code>.DeleteAsync()</code></td></tr>
+<tr><td><code>.update({"n": inc(1)})</code>, <code>.insert(doc, if_absent=True)</code></td><td><code>.update({ n: inc(1) })</code>, <code>.insert(doc, { ifAbsent: true })</code></td><td><code>.Update(ctx, fenecdb.D("n", fenecdb.Inc(1)))</code>, <code>.Insert(ctx, doc, fenecdb.IfAbsent())</code></td><td><code>.UpdateAsync(new { n = Computed.Inc(1) })</code>, <code>.InsertAsync(doc, ifAbsent: true)</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -475,6 +476,7 @@ message. Python's builder starts with <code>collection</code>, since
 <tr><td><code>.order("title", "desc", collate: "tr")</code></td><td><code>.order("title", "desc", collate = "tr")</code></td><td><code>.order('title', 'desc', 'tr')</code></td></tr>
 <tr><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rows(as: T.self)</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code>, <code>.rowsBlocking()</code></td><td><code>.rows()</code>, <code>.first()</code>, <code>.count()</code></td></tr>
 <tr><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td><td><code>.insert(doc)</code>, <code>.update(patch)</code>, <code>.delete()</code></td></tr>
+<tr><td><code>.update(["n": .inc(1)])</code>, <code>.insert(doc, ifAbsent: true)</code></td><td><code>.update(mapOf("n" to Computed.inc(1)))</code>, <code>.insert(doc, ifAbsent = true)</code></td><td><code>.update({'n': Computed.inc(1)})</code>, <code>.insert(doc, ifAbsent: true)</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -487,7 +489,10 @@ paths into a json field and <code>or</code>, <code>and</code>,
 <code>snippet</code> and <code>facet</code>, the facets beside the rows;
 <code>lookup</code> and its chains; <code>order</code> with a collation; <code>limit</code> and
 <code>offset</code>; and the writes, an <code>update</code> or
-<code>delete</code> with no filter refused unless it says <code>all</code>.
+<code>delete</code> with no filter refused unless it says <code>all</code>,
+a value worked out over the row with <code>inc</code> and <code>expr</code>
+(<a href="/docs/fenecql#writes">Writes that read the row</a>), and an
+insert <code>if absent</code>.
 A query is immutable, so a base query can be kept and branched from.</p>
 
 <details class="deep"><summary>Details: one golden file</summary>
