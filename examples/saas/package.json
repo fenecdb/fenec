@@ -1,0 +1,28 @@
+{
+  "name": "fenecdb-saas",
+  "private": true,
+  "type": "module",
+  "description": "Trellis, a team workspace on fenecdb: sign-up and sessions owned by the app, a tenant per organisation behind fenec-shard, roles and teams as scoped tokens, live boards, scoped search, and a tenant moved and failed over under load",
+  "scripts": {
+    "cluster": "tsx scripts/cluster.ts",
+    "seed": "tsx scripts/seed.ts",
+    "start": "tsx src/main.ts",
+    "dev": "tsx scripts/dev.ts",
+    "lint": "tsc --noEmit && eslint . --max-warnings 0",
+    "test": "node --import tsx --test --test-reporter=spec --test-concurrency=1 test/*.test.ts",
+    "bench": "tsx scripts/bench.ts",
+    "shots": "tsx scripts/shots.ts",
+    "ci": "sh scripts/ci.sh"
+  },
+  "dependencies": {
+    "@fenecdb/web": "0.1.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "26.6.4",
+    "eslint": "9.39.5",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

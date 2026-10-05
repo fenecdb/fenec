@@ -676,6 +676,13 @@ accounts       update(balance, held)                              for app
     access.</li>
 </ul>
 
+<p>A whole product built on these rules is
+<a href="https://github.com/fenecdb/fenec/tree/main/examples/saas">examples/saas</a>:
+sign-up and sessions owned by the app, a tenant per organisation behind
+<code>fenec-shard</code>, roles and teams as grants and list claims, live
+boards and search under each person's token, with its threat model and the
+attacks its tests try.</p>
+
 <details class="deep"><summary>Details</summary>
 <p><code>--http-token</code> is everything or nothing. With
 <code>--jwt-secret</code> the endpoint also takes HS256 JSON Web Tokens, each

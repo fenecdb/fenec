@@ -104,3 +104,11 @@ These are deliberate, and README explains each one:
 
 If you think one of these is worse than the README makes it sound, that is
 worth an issue — as a documentation or design argument, not as an advisory.
+
+## An application built on it
+
+[`examples/saas`](examples/saas) is a multi-tenant product on fenecdb with
+its threat model written out: what the app owns (passwords, sessions,
+rate limits, the signing key), what fenec-server enforces (scoped,
+tenant-bound tokens, per-operation and per-field grants, append-only
+logs), and the attacks its tests try against both.

@@ -1,0 +1,101 @@
+-- The accounts tenant: who can sign in, their sessions, and what happened
+-- to them. One tenant for the whole product; only the app's own scoped
+-- token reaches it (policy.txt, `for app`), and no user token names it.
+
+-- An account, known everywhere else by `uid` (a token's `sub`). `email`
+-- is normalised by the app before it gets here -- NFC, trimmed,
+-- lowercased -- because @unique compares bytes:
+-- "Alice@X.io" and "alice@x.io" would otherwise be two accounts.
+-- `password` is scrypt's output and its parameters, never the password;
+-- empty for an account that only signs in through the identity provider.
+create collection users (
+  uid      text @unique,
+  email    text @unique,
+  name     text,
+  password text,
+  verified bool,
+  created  timestamp
+)
+
+-- A sign-in through the identity provider: its issuer and subject, the
+-- account it belongs to.
+create collection identities (
+  subject  text @unique,
+  user     text @hash,
+  at       timestamp
+)
+
+-- Refresh tokens, stored as their SHA-256, never as they are. Each is used
+-- once: rotating one marks it used and inserts the next of its family in
+-- the same block. A used one coming back is a stolen copy, and the whole
+-- family is revoked. A token lapses 14 days after it was issued.
+create collection refresh (
+  hash     text @unique,
+  family   text @hash,
+  user     text @hash,
+  used     bool,
+  revoked  bool,
+  agent    text,
+  at       timestamp @ttl(14d)
+)
+
+-- Email verification and password reset links, as their SHA-256. Each is
+-- taken with `del ... require 1`: once, and not after it lapses, since a
+-- row past its @ttl is out of every filter, a delete's too.
+create collection verifications (
+  hash     text @unique,
+  user     text @hash,
+  at       timestamp @ttl(24h)
+)
+
+create collection resets (
+  hash     text @unique,
+  user     text @hash,
+  at       timestamp @ttl(30m)
+)
+
+-- Sign-in attempts per address and per account in a window: the counter
+-- recipe. A window's row is made by its first attempt and lapses ten
+-- minutes later, so the next attempt starts a new one.
+create collection limits (
+  key      text @unique,
+  n        int,
+  at       timestamp @ttl(10m)
+)
+
+-- Which organisations an account belongs to: the organisation switcher's
+-- list. Who may do what inside one is that organisation's own `members`.
+create collection memberships (
+  key      text @unique,
+  user     text @hash,
+  org      text @hash,
+  at       timestamp
+)
+
+-- Organisations, by slug. The slug names the tenant (`o-<slug>`); the
+-- unique index is what stops two sign-ups taking one name.
+create collection orgs (
+  slug     text @unique,
+  name     text,
+  owner    text,
+  created  timestamp
+)
+
+-- Security events: sign-ins, failures, refresh reuse, resets. Append-only
+-- for every token but the operator's (policy.txt).
+create collection security_log (
+  user     text @hash,
+  kind     text @hash,
+  ip       text,
+  detail   text,
+  at       timestamp @sorted
+)
+
+-- The development mailbox: what a real deployment would hand to a mail
+-- service. Each mail lapses after a day.
+create collection outbox (
+  to       text @hash,
+  subject  text,
+  body     text,
+  at       timestamp @ttl(1d)
+)
