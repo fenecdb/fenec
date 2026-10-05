@@ -4,7 +4,7 @@
 
 An embedded document database with full-text and vector search built in.
 Documents, indexes, aggregates, atomic batches, BM25 and HNSW in one engine,
-written in Rust with no dependencies. It runs inside a web page as 226 KB of
+written in Rust with no dependencies. It runs inside a web page as 234 KB of
 gzipped WebAssembly, in an iOS, Android or Flutter app as a file on the
 device, in a Rust process, or as a server any language reaches over HTTP,
 and it has its own query language (**FenecQL**).
@@ -138,7 +138,7 @@ import { Fenec } from './fenec.js';
 const db = await Fenec.open('./fenec.wasm');
 ```
 
-226 KB of gzipped WebAssembly and a 48 KB gzipped client — no wasm-bindgen, no
+234 KB of gzipped WebAssembly and a 48 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
 `@fenecdb/web/client`, 7 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
@@ -240,7 +240,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Runtime size** | 226 KB gzip wasm + 48 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
+| **Runtime size** | 234 KB gzip wasm + 48 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
 

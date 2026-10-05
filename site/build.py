@@ -68,6 +68,7 @@ NAV = [
         ("docs/http", "HTTP endpoint"),
         ("docs/sync", "Sync"),
         ("docs/redis", "Instead of Redis"),
+        ("docs/analytics", "Analytics and market data"),
         ("docs/integrations", "Integrations"),
     ]),
     ("Operate", [

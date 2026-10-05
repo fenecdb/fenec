@@ -72,6 +72,7 @@ make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
 make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
+make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
 
@@ -1944,6 +1945,48 @@ ms, and with `facet` out of line 4.8 -> 5.6 (`#[inline(always)]`). The
 two cost the browser module 2.9 KB brotli -- the split, the ranges'
 read and index paths, the parser -- kept in it, so a replica or a page
 answers a shop's sidebar as its server does.
+
+**An item of a select list is an expression, and an aggregate folds
+one** (`engine/aggregate.rs`). `Select::aggregate` and `computed` are
+`Column`s, an expression and the name it answers under (`as`, or for a
+field or an aggregate of one the text it was written as, `label_of`;
+anything else is refused without `as`, since a name would have to be the
+expression written back), and `group` is a list of expressions, a name of
+the list standing for its item (`group_keys`). Aggregates are calls, so no
+walk over an expression grew a variant: `count()` is `count(*)`,
+`count(distinct e)` a call of `distinct` inside `count`, `first(e by k)` a
+call of two, and `case when ... end` a call of its conditions and values,
+which `eval` works out lazily; `bucket`, `greatest` and `least` are
+registry functions, so `where` and `set` have them too. A key is matched to
+an item by being the same field or the very item its name gives
+(`is_key`), not by comparing expressions -- `PartialEq` over `Expr` was 1.5
+KB of the browser module. `Reader` binds a list once a query: every field
+and path read decoded in one pass into slots, `bucket` over a constant
+interval and any other expression (its fields made parameters past the
+query's own, `Expr::rewrite`) worked out into slots of their own once a
+row, so a fold reads a `&Value` by its place. An expression over
+aggregates (`sum(px * qty) / sum(qty)`) is the same rewrite over the
+group's keys and folds. `count(distinct)` keeps every group's values in one
+map of the hash index's type, refused past `MAX_DISTINCT_VALUES` (a
+million, about 70 MB), never counted short; `first`/`last` keep the row
+least/greatest by `(k, id)`, boxed so a fold stays the size it was, and
+both are folded out of line (`row_held`): in the loop the fixed
+aggregates took 15% longer. Natively `Fold::add` is inlined and the
+paths' and expressions' reading out of line: as they first stood, a
+million rows in 100 groups took 52.8 -> 54.5 ms and the whole set 32.1
+-> 33.9; now 51 and 31. A `count(*)` by `bucket` of an `@sorted` or
+`@ttl` timestamp or int whose filter is a range of it and nothing more
+reads the index's keys and no row (`counted_by_index`, native only): a
+day's per-minute counts over a million events 19.5 ms by a stored minute
+field, 4.0 now. One-minute bars of a symbol for an hour out of a million
+ticks, 1.7 ms where open and close were 120 queries, 195 ms (278 over
+HTTP); VWAP of 50 symbols 118 ms against reading every tick out, 173;
+distinct users an hour over a week 125 ms against 7.7 s (`make
+analytics-bench`). The browser module grew 19.5 KB, 6.8 KB brotli, the
+test build 6.6: the parser's calls and `case` (2.2 KB raw), binding and
+folding (8 KB), the checks and names (1.4 KB), `bucket`'s calendar.
+`site/content/docs/analytics.html` is the recipes, each FenecQL block run
+by `tests/analytics_docs.rs` through `redis_docs.rs`'s runner.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending
