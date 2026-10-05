@@ -87,8 +87,45 @@ the query again on the server. The first rows wait for every stream's seed,
 a burst of writes runs it once after the run under way, and a stream that
 ends is opened again, its seed running the query, since writes may have
 come between. <code>useLiveQuery</code> takes the endpoint as it takes a
-replica.</p>
+replica. Under a scoped token the server tells such a stream of the writes
+to rows the token may read, and of no other (<a href="/docs/http#subscriptions">HTTP</a>).
+A token refused, or lapsed under an open stream -- the server ends a stream
+at its token's <code>exp</code> -- is a <code>FenecError</code> of status
+401 to <code>onError</code>, and the live query stops there, for the app to
+open it again with a fresh token.</p>
 </details>
+
+<h3 id="subscribe">A shape's rows, as they change</h3>
+
+<p><code>db.subscribe</code> keeps a shape -- the rows of a collection a
+filter selects -- rather than a query's answer: a <code>seed</code> with the
+whole shape, then each <code>change</code>, the rows written into it and the
+ids that left it. The shape is the REST surface's: a field's filter,
+<code>where</code> and <code>select</code>.</p>
+
+<pre data-lang="ts">import { connect } from '@fenecdb/web/client';
+
+const db = connect('https://db.example.com/t/acme', { token: 'a token' });
+const tasks = new Map&lt;number, unknown&gt;();
+const stop = db.subscribe('tasks', { team: 'eq.design', select: ['title', 'status'] }, (ev) =&gt; {
+  if (ev.type === 'seed') {
+    tasks.clear();
+    for (const r of ev.rows) tasks.set(r.id, r);
+  } else {
+    for (const r of ev.puts) tasks.set(r.id, r);
+    for (const id of ev.dels) tasks.delete(id);
+  }
+}, {
+  onError: (e) =&gt; console.warn(e),          // status 401: a fresh token, then subscribe again
+  onState: (s) =&gt; console.log(s),           // 'open' at each seed, 'retry' while it waits
+});
+</pre>
+
+<p>A stream that ends -- a tenant moved, the network -- is opened again
+(250 ms, doubling to 15 s) and seeds again; one refused or ended for its
+token is not. <code>sseEvents(res)</code>, the reader under it, takes any
+<code>fetch</code> answer of server-sent events: <code>EventSource</code>
+cannot send <code>Authorization</code>.</p>
 
 <h3 id="batch">Batches, retries and polling</h3>
 

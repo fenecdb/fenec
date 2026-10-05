@@ -4,7 +4,7 @@
 // the other.
 
 export {
-  FenecError, FenecHttp, Query, and, bucket, connect, countDistinct, expr, first, from, inc, last, not, or, raw,
+  FenecError, FenecHttp, Query, and, bucket, connect, countDistinct, expr, first, from, inc, last, not, or, raw, sseEvents,
 } from './fenec.js';
 export type {
   Aggregate,
@@ -39,8 +39,14 @@ export type {
   SchemaOutcome,
   SchemaRefusal,
   SchemaText,
+  SseEvent,
+  ShapeFilter,
+  ShapeChange,
+  ShapeEvent,
+  ShapeSeed,
   Sparse,
   Spec,
+  SubscribeOptions,
   TableRef,
   Tables,
   TextKey,

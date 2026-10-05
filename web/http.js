@@ -304,6 +304,72 @@ export class FenecHttp {
   }
 
   /**
+   * A shape's rows, and every change to them (`GET /<collection>/changes`):
+   * `onEvent` is handed `{ type: 'seed', seq, rows }` -- the whole shape,
+   * which replaces what the caller held -- then `{ type: 'change', seq,
+   * puts, dels, schema }` as each write lands. `shape` is the REST
+   * surface's: a field's filter (`{ team: 'eq.design' }`), `where` (a
+   * FenecQL condition) and `select` (a list or a text); a scoped token's
+   * rules are ANDed in by the server. A stream that ends -- a tenant moved,
+   * the network -- is opened again (250 ms, doubling to 15 s) and seeds
+   * again; one refused or ended for its token (401, as the server ends one
+   * at its token's `exp`) is not, for the app to subscribe again with a
+   * fresh one. `onError` hears why a stream ended, `onState` `'open'` at
+   * each seed and `'retry'` as it waits to open again. Returns the
+   * function that stops it.
+   *
+   * @param {string} collection
+   * @param {Record<string, string | string[]>} [shape]
+   * @param {(ev: object) => void} onEvent
+   * @param {{onError?: Function, onState?: Function}} [opts]
+   */
+  subscribe(collection, shape, onEvent, opts = {}) {
+    if (typeof onEvent !== 'function') throw new FenecError('subscribe(collection, shape, onEvent): onEvent must be a function');
+    const c = ident(collection, 'collection');
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(shape ?? {})) {
+      if (k === 'since') throw new FenecError('subscribe: each stream seeds; `since` is not taken');
+      q.append(k, Array.isArray(v) ? v.join(',') : String(v));
+    }
+    const qs = q.toString();
+    const url = `${this.#url}/${encodeURIComponent(c)}/changes${qs ? `?${qs}` : ''}`;
+    const headers = { accept: 'text/event-stream' };
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const onError = opts.onError ?? this.onError;
+    const stop = new AbortController();
+    (async () => {
+      for (let attempt = 0; !stop.signal.aborted; attempt++) {
+        try {
+          const res = await this.#request(url, { headers, signal: stop.signal });
+          if (!res.ok || !res.body) throw await refusal(res, c);
+          for await (const ev of sseEvents(res)) {
+            if (stop.signal.aborted) return;
+            if (ev.name === 'error') throw streamError(ev.data);
+            const msg = JSON.parse(ev.data);
+            if (ev.name === 'seed') {
+              attempt = 0;
+              opts.onState?.('open');
+              onEvent({ type: 'seed', seq: msg.seq, rows: msg.rows ?? [] });
+            } else if (ev.name === 'change') {
+              onEvent({ type: 'change', seq: msg.seq, puts: msg.puts ?? [], dels: msg.dels ?? [], schema: !!msg.schema });
+            }
+          }
+        } catch (err) {
+          if (stop.signal.aborted) return;
+          if (onError) onError(err);
+          else Promise.reject(err);
+          // A token refused is refused again: stopped, for a fresh one.
+          if (err?.status === 401) return stop.abort();
+        }
+        if (stop.signal.aborted) return;
+        opts.onState?.('retry');
+        await new Promise((r) => setTimeout(r, Math.min(15000, 250 * 2 ** attempt)));
+      }
+    })();
+    return () => stop.abort();
+  }
+
+  /**
    * `live` with `{ poll: ms }`: no stream. The query is asked every `ms`
    * with the tag of the last answer (`If-None-Match`), and the server
    * answers 304 without running it while nothing it reads was written --

@@ -41,7 +41,7 @@ test('the client reaches the builder and the HTTP client, and nothing of the eng
 
 test('the client exports what fenec.js does of it, the same objects', () => {
   assert.deepEqual(Object.keys(client).sort(), [
-    'FenecError', 'FenecHttp', 'Query', 'and', 'bucket', 'connect', 'countDistinct', 'expr', 'first', 'from', 'inc', 'last', 'not', 'or', 'raw',
+    'FenecError', 'FenecHttp', 'Query', 'and', 'bucket', 'connect', 'countDistinct', 'expr', 'first', 'from', 'inc', 'last', 'not', 'or', 'raw', 'sseEvents',
   ]);
   for (const [name, value] of Object.entries(client)) assert.equal(value, fenec[name], name);
   assert.equal(client.from('docs').where('year', 2024).toFenecQL()[0], 'get docs where year = $1');
@@ -176,6 +176,64 @@ test("a stream ended at its token's exp is an auth error, and is not opened agai
   assert.match(errors[0].message, /expired/);
   await new Promise((r) => setTimeout(r, 400));
   assert.equal(server.streams.length, 1, 'opened again with the token refused');
+});
+
+// A shape's subscription through the client: Trellis and its tests each
+// carried a reader of their own, the client keeping its own to itself.
+test('subscribe hands a shape its seed and changes, opens it again, and stops at a 401', async () => {
+  const server = scripted(() => []);
+  const db = client.connect('http://db.test', { token: 't', fetch: server.fetch });
+  const events = [];
+  const errors = [];
+  const states = [];
+  const stop = db.subscribe('tasks', { team: 'eq.design', select: ['id', 'title'] }, (ev) => events.push(ev), {
+    onError: (e) => errors.push(e),
+    onState: (s) => states.push(s),
+  });
+  await until(() => server.streams.length === 1);
+  assert.equal(server.streams[0].path, '/tasks/changes');
+  assert.equal(server.streams[0].search, '?team=eq.design&select=id%2Ctitle');
+  assert.equal(server.streams[0].auth, 'Bearer t');
+  server.streams[0].emit('seed', { seq: 3, rows: [{ id: 1, title: 'a' }] });
+  server.streams[0].emit('change', { seq: 4, puts: [{ id: 2, title: 'b' }], dels: [1], schema: false });
+  await until(() => events.length === 2);
+  assert.deepEqual(events, [
+    { type: 'seed', seq: 3, rows: [{ id: 1, title: 'a' }] },
+    { type: 'change', seq: 4, puts: [{ id: 2, title: 'b' }], dels: [1], schema: false },
+  ]);
+  // The server says why a stream ends: told, and the stream opened again.
+  server.streams[0].emit('error', { error: 'the tenant was closed on this node' });
+  await until(() => server.streams.length === 2);
+  assert.match(errors[0].message, /tenant was closed/);
+  server.streams[1].emit('seed', { seq: 9, rows: [] });
+  await until(() => events.length === 3);
+  assert.deepEqual(states, ['open', 'retry', 'open']);
+  // Ended at its token's exp: an auth error, and not opened again.
+  server.streams[1].emit('error', { error: 'the token has expired', status: 401 });
+  await until(() => errors.length === 2);
+  assert.equal(errors[1].status, 401);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(server.streams.length, 2);
+  stop();
+  assert.throws(() => db.subscribe('tasks', { since: '3' }, () => {}), /since/);
+  assert.throws(() => db.subscribe('tasks', {}, null), /onEvent/);
+});
+
+test('sseEvents reads the events of a stream cut anywhere', async () => {
+  const text = 'event: seed\r\ndata: {"seq":1}\r\n\r\n: keepalive\n\nevent: change\ndata: {"seq":2}\n\n';
+  const bytes = new TextEncoder().encode(text);
+  const body = new ReadableStream({
+    start(c) {
+      for (let i = 0; i < bytes.length; i += 5) c.enqueue(bytes.slice(i, i + 5));
+      c.close();
+    },
+  });
+  const got = [];
+  for await (const ev of client.sseEvents(new Response(body))) got.push(ev);
+  assert.deepEqual(got, [
+    { name: 'seed', data: '{"seq":1}' },
+    { name: 'change', data: '{"seq":2}' },
+  ]);
 });
 
 test('a text says what it reads, or a live query over HTTP is refused', () => {
