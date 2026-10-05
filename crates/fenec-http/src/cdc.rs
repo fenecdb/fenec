@@ -23,7 +23,9 @@
 //! cursors are rows of [`CONSUMERS`], written as any write is: on disk
 //! before the answer where writes are, and on the replicas. Their own
 //! writes are not in the stream, or every acknowledgement would be a write
-//! to read.
+//! to read -- nor do they end a `wait`, and a commit past nothing but
+//! cursors writes nothing ([`unmoved`]), or a consumer committing every
+//! answer would read its own commit's empty answer and commit again.
 
 use crate::http::{Method, Request, Response};
 use crate::replication::{Feed, Tail};
@@ -79,12 +81,15 @@ type Response2 = fenec_core::query::Response;
 
 /// Where `name` stands, `None` for a consumer not seen yet.
 fn cursor(db: &Arc<RwLock<Database>>, name: &str) -> Result<Option<u64>> {
-    let g = crate::held::read(db);
+    cursor_in(&crate::held::read(db), name)
+}
+
+fn cursor_in(g: &Database, name: &str) -> Result<Option<u64>> {
     if g.collection(CONSUMERS).is_err() {
         return Ok(None);
     }
     let r = run(
-        &g,
+        g,
         "get _consumers select since where name = $1",
         &[Value::Text(name.into())],
     )?;
@@ -184,9 +189,14 @@ fn write(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, since: Option<i64
     let done = (|| -> Result<_> {
         let mut g = crate::held::write(db);
         let there = g.collection(CONSUMERS).is_ok();
+        let unmoved = match since {
+            Some(n) if there => unmoved(&g, name, n)?,
+            _ => false,
+        };
         let mut exec =
             |sql: &str, params: &[Value]| g.execute_with(&fenec_ql::parse_one(sql)?, params);
         let n = match since {
+            Some(n) if unmoved => n,
             Some(n) => {
                 exec(
                     "create collection if not exists _consumers (name text @hash, since int)",
@@ -226,6 +236,24 @@ fn write(db: &Arc<RwLock<Database>>, cfg: &Config, name: &str, since: Option<i64
     }
 }
 
+/// Whether moving `name` to `since` changes nothing it would read: where
+/// it stands, every write after it is a cursor's (`_consumers`), which
+/// the stream leaves out, and `since` is past where it stands. Written, a
+/// sink that commits each answer -- an empty one past its own last commit
+/// too -- made a write for every one it read, for ever.
+fn unmoved(db: &Database, name: &str, since: i64) -> Result<bool> {
+    let Some(at) = cursor_in(db, name)? else {
+        return Ok(false);
+    };
+    if at > since as u64 {
+        return Ok(false);
+    }
+    // `None`: past the ring, or a collection dropped since -- moved.
+    Ok(db
+        .changed_collections_since(at)
+        .is_some_and(|names| names.iter().all(|n| n == CONSUMERS)))
+}
+
 pub fn handle(
     db: &Arc<RwLock<Database>>,
     feed: &Feed,
@@ -252,7 +280,7 @@ pub fn handle(
     let wait = Duration::from_millis(wait.unwrap_or(0)).min(LONGEST);
     // No cursor: the consumer's, or the last write on disk -- what is
     // written from now on.
-    let since = since.or(from).unwrap_or_else(|| feed.durable());
+    let mut since = since.or(from).unwrap_or_else(|| feed.durable());
     let until = Instant::now() + wait;
     loop {
         let epoch = feed.epoch();
@@ -268,6 +296,16 @@ pub fn handle(
                     Ok(out) => out,
                     Err(e) => return Response::error(500, &e.to_string()),
                 };
+                drop(g);
+                // Only writes the stream leaves out -- a consumer's own
+                // commit among them -- and time left to wait: wait on past
+                // them. Answered at once, a sink that commits every answer
+                // committed in a loop, 30 000 fsynced writes in a few idle
+                // minutes, each waking its own next read.
+                if body.is_empty() && next > since && Instant::now() < until {
+                    since = next;
+                    continue;
+                }
                 return answer(body, next);
             }
             Tail::Nothing => {

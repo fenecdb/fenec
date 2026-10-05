@@ -942,7 +942,12 @@ where it is (`/_changes/consumers/<name>`, rows of `_consumers`, made by a
 `POST` at the last write on disk -- read from "now" each time, it missed
 what came between two reads -- and moved by a `POST` of `since`), each
 write at least once; the stream leaves `_consumers`' own writes out, the
-cursor going past them. A feed kept for it alone has no token (`Replication`'s
+cursor going past them, and a `wait` waits on past them rather than answer
+nothing at once, while a commit to where nothing but cursors were written
+since the consumer's place writes nothing (`unmoved`, the change ring's
+`changed_collections_since`): a sink that committed every answer
+committed its own commit's empty answer, 30 000 fsynced writes in a few
+idle minutes. A feed kept for it alone has no token (`Replication`'s
 token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
 cost nothing measurable, 16 400 single puts a second over HTTP either way,
 and 9 000 rows of 128 dimensions read back at 283 000 a second.

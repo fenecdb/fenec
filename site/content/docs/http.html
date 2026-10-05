@@ -587,7 +587,10 @@ crash between reading it and committing. The cursors are rows of a
 <code>_consumers</code> collection, written as any write is — on disk
 before the answer under <code>--sync always</code>, and on the replicas —
 and their own writes are left out of the stream, the cursor going past
-them. An unknown consumer is 404 rather than read from "now" each time,
+them. A read with <code>wait</code> waits on past them too, so a consumer's
+own commit does not wake its next read, and a commit past nothing but
+cursors writes nothing: a consumer that commits after every answer, an
+empty one too, sits idle while nothing else is written. An unknown consumer is 404 rather than read from "now" each time,
 which would miss what is written between two reads; a commit past the last
 write on disk is 409. <code>GET /_changes/consumers</code> lists each
 consumer's <code>since</code> and how many writes it is
