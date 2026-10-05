@@ -657,7 +657,7 @@ fn query(n: &Native, sql: &str, params: &str, vectors: &[u8]) -> (i32, String) {
         Err(Stop::Failed(f)) => f,
         Err(Stop::Refused(r)) => {
             let code = match &r {
-                Refused::Error(e, _) => code(e),
+                Refused::Error(e, ..) => code(e),
                 Refused::Exact(_) => FENEC_QUERY,
             };
             (code, fenec_abi::answer(&Err(r)))

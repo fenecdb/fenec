@@ -246,6 +246,9 @@ export class Fenec {
     if (res.kind === 'error' && res.exact && !asJson) return this.#run(sql, params, res.exact, quiet);
     if (res.kind === 'error') {
       const e = new FenecError(res.message);
+      // A text of several says which statement stopped it, from 0, as a
+      // `/batch` does.
+      if (typeof res.at === 'number') e.at = res.at;
       // Refused for collation data the module has not been handed: which,
       // and how many statements before this one ran (`query` runs it again
       // only when none did).

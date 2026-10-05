@@ -1037,7 +1037,12 @@ is the write's own, taken under the lock that wrote it, with no second
 read to race or to scope, and a scoped token's count is of the rows its
 filter let it write. 412 over HTTP (`api::status_of`), apart from 409 so a
 client tells a lost race from a value taken, and a `/batch` that stops says
-which statement did (`"at"`, from 0, `render_batch_stop`); `FENEC_UNMET` 14
+which statement did (`"at"`, from 0, `render_batch_stop`), and so does
+a text of several through `fenec-abi` (`Refused::Error`'s third field,
+`"at"` in the module's and the native library's error, `FenecError.at`
+from `Fenec.run`): a ledger's debit and credit are both `set accounts`,
+and a page ran a text's prefixes again to tell which had stopped it --
+202 bytes of the browser module, 8 brotli; `FENEC_UNMET` 14
 over the native library, after the boundary's own 11-13; `unmet` in each
 SDK's errors, and `{ require: n }` in every builder, held to the golden
 file. A replica's sync sends it with the write and holds it locally too,

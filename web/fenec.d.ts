@@ -459,7 +459,8 @@ export declare class FenecError extends Error {
   query?: string;
   /**
    * The statement a `/batch` stopped at, from 0 (`FenecHttp.batch`): with
-   * `status` 412, the write whose `require` was not met.
+   * `status` 412, the write whose `require` was not met. `Fenec.run` and
+   * `query` name it the same way for a text of several statements.
    */
   at?: number;
   /**
