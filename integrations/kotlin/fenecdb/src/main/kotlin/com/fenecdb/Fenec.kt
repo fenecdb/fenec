@@ -123,6 +123,9 @@ data class Changes(val seq: Long, val horizon: Long, val collections: List<Strin
 class Fenec private constructor(internal val handle: Long) : AutoCloseable {
     private val closed = AtomicBoolean(false)
 
+    /** Counted down once the close let the file go, which a second `close()` waits for. */
+    private val released = java.util.concurrent.CountDownLatch(1)
+
     /**
      * Writes under way, which a live query's look waits out. Internal for
      * the tests, which hold a call under way across a burst.
@@ -317,12 +320,23 @@ class Fenec private constructor(internal val handle: Long) : AutoCloseable {
         FenecNative.answer(FenecNative.checkpoint(handle))
     }
 
-    /** Saves the graphs, syncs and lets the file go; the live queries stop. Waits for the calls under way. */
+    /**
+     * Saves the graphs, syncs and lets the file go; the live queries stop. Waits for the calls under way,
+     * and a close called while another runs waits for it: returning at once, it let its caller open the
+     * file again before the first had let it go.
+     */
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        syncing?.stop()
-        lives.clear()
-        FenecNative.answer(FenecNative.close(handle))
+        if (!closed.compareAndSet(false, true)) {
+            released.await()
+            return
+        }
+        try {
+            syncing?.stop()
+            lives.clear()
+            FenecNative.answer(FenecNative.close(handle))
+        } finally {
+            released.countDown()
+        }
     }
 }
 

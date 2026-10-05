@@ -508,9 +508,12 @@ graph. The mapping takes address space past the file's end -- a gigabyte at
 least -- for the writes to grow into; where the system refuses that much, as
 an iOS app's address space may, the file alone is mapped and mapped again
 as it grows. A 32-bit Android device (armeabi-v7a) reads the file into
-memory. The lock is a file of its own, held with <code>flock</code>: a
-checkpoint renames a new file over the database, which a lock on the
-database itself would not survive.</p>
+memory. The lock is a file of its own, held with a record lock
+(<code>fcntl</code>), which belongs to the process: a checkpoint renames a
+new file over the database, which a lock on the database itself would not
+survive, and an <code>flock</code> belongs to the open file, which a child
+process started meanwhile shares until it runs its program -- a close and
+an open again at that moment were refused.</p>
 </details>
 
 <h2 id="durability">Durability</h2>

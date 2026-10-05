@@ -124,13 +124,21 @@ impl Database {
     /// Notes what a compact left besides the documents, once its file is in
     /// place: the next one is due only once as many dead bytes as the policy
     /// asks for have come on top.
+    ///
+    /// What the stores hold, dead or alive, is no part of it: the versions
+    /// a compact beside the writes copied and then saw written over, and a
+    /// collection it did not compact, are dead in the new file and counted
+    /// so. Taken as kept, they raised the bar for the next compact by as
+    /// much -- a compact that ran beside a burst of updates of 100 rows left
+    /// 101 KB of them, and the file at 307 KB, six times its 53 KB of rows,
+    /// was not due again.
     pub(super) fn compacted_to(&mut self, len: u64) {
-        let live: u64 = self
+        let held: u64 = self
             .collections
             .values()
-            .map(|c| c.store.total_bytes().saturating_sub(c.store.dead_bytes()) as u64)
+            .map(|c| c.store.total_bytes() as u64)
             .sum();
-        self.kept = len.saturating_sub(live);
+        self.kept = len.saturating_sub(held);
         self.compactions += 1;
     }
 

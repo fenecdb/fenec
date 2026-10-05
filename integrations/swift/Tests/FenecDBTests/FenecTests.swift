@@ -156,6 +156,23 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// Every close a caller sees finished has let the file go: a second
+    /// close called while the first runs waits for it, where it returned at
+    /// once and the open after it was refused.
+    @Test func aCloseSeenFinishedHasLetTheFileGo() async throws {
+        let path = try scratch("closes")
+        for _ in 0..<50 {
+            let db = try await Fenec.open(path: path, options: [.noSync])
+            try await db.execute("create collection if not exists t (n int)")
+            try await db.execute("put t {n: 1}")
+            async let first: Void = db.close()
+            try await db.close()
+            let again = try await Fenec.open(path: path, options: [.noSync])
+            try await first
+            try await again.close()
+        }
+    }
+
     @Test func manyTasksShareOneDatabase() async throws {
         let db = try await Fenec.open(path: try scratch("tasks"))
         try await db.execute("create collection t (w int, e vector<2> @hnsw(l2))")

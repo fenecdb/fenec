@@ -148,6 +148,8 @@ public final class Fenec: @unchecked Sendable {
     let handle: UInt64
     private let state = NSLock()
     private var closed = false
+    /// The close under way or done, which a second `close()` awaits.
+    private var closeTask: Task<Void, Error>?
     /// Writes under way, which a live query's run waits out.
     private var inflight = 0
     let lives: Lives
@@ -335,20 +337,25 @@ public final class Fenec: @unchecked Sendable {
 
     /// Saves the graphs, syncs and lets the file go; the live queries stop.
     /// Waits for the calls under way.
+    /// A close called while another runs waits for it: returning at once,
+    /// it let its caller open the file again before the first had let it go.
     public func close() async throws {
-        if markClosed() { return }
-        await syncing?.stop()
-        await lives.clear()
-        try await byHandle(.close)
+        try await closing().value
     }
 
-    /// Whether it was closed before.
-    private func markClosed() -> Bool {
+    /// The close, begun by the first call and awaited by every one.
+    private func closing() -> Task<Void, Error> {
         state.lock()
         defer { state.unlock() }
-        let was = closed
+        if let t = closeTask { return t }
         closed = true
-        return was
+        let t = Task {
+            await self.syncing?.stop()
+            await self.lives.clear()
+            try await self.byHandle(.close)
+        }
+        closeTask = t
+        return t
     }
 
     private enum Op { case sync, flush, checkpoint, close }
