@@ -1,0 +1,69 @@
+# Who may read and write what, with a JSON Web Token the app signs
+# (src/tokens.ts, RS256; the nodes hold only the public key, --jwt-keys).
+# Every token names its tenant, so on these nodes it reaches that tenant's
+# file alone; the rules below are then about rows and fields inside it.
+#
+# A person's token carries `role` as a list that includes the roles below
+# it -- an owner's is ["owner", "admin", "member", "guest"], a guest's
+# ["guest"] -- so a rule `for member` also holds an admin, and `teams`, the
+# keys of the teams they are in. The operator's token (--http-token) is not
+# a JWT and is held to none of this; the app uses it only to give a new
+# organisation its schema.
+#
+# collection    access                                  rows                                              role
+
+# ---- The accounts tenant: the app's token alone. No person's token names
+# that tenant, so none reaches these collections whatever they grant.
+users           read,insert,update(password, verified, name)                                              for app
+identities      read,insert                                                                               for app
+refresh         read,insert,update(used, revoked)                                                         for app
+verifications   read,insert,delete                                                                        for app
+resets          read,insert,delete                                                                        for app
+limits          read,insert,update(n),delete                                                              for app
+memberships     read,insert,delete                                                                        for app
+orgs            read,insert                                                                               for app
+security_log    read,insert                                                                               for app
+outbox          read,insert                                                                               for app
+
+# ---- An organisation's tenant.
+
+# Everyone reads the teams they are in, and what those teams hold.
+teams           read                                    where key in $jwt.teams
+projects        read                                    where team in $jwt.teams
+tasks           read                                    where team in $jwt.teams
+comments        read                                    where team in $jwt.teams
+members         read                                                                                      for guest
+
+# Everyone, guests too, comments in their teams, and edits only their own
+# comments; a comment is pinned to its author.
+comments        insert,update(body, edited)             where team in $jwt.teams and author = $jwt.sub
+
+# A member makes tasks in their teams and edits every field of one but
+# `team` and `author`: moving a task to another team is refused (403).
+tasks           insert                                  where team in $jwt.teams and author = $jwt.sub    for member
+tasks           update(title, body, status, assignee, priority, due, project, updated)  where team in $jwt.teams  for member
+
+# An admin sees and changes the whole organisation: every team, task and
+# comment, and its members -- but not an owner, nor anyone into one: the
+# filter holds the row before and after the write.
+teams           read,insert,update(name),delete                                                           for admin
+projects        read,insert,update(name),delete                                                           for admin
+tasks           read,write                                                                                for admin
+comments        read,delete                                                                               for admin
+members         update(role, teams),delete              where role != "owner"                             for admin
+invites         read,insert,delete                      where role != "owner"                             for admin
+audit           read                                                                                      for admin
+audit           insert                                  where actor = $jwt.sub                            for admin
+members         update(role, teams)                                                                       for owner
+
+# The app's token in an organisation: makes its first owner and team,
+# reads members to mint tokens, and takes up invitations.
+members         read,insert                                                                               for app
+teams           read,insert                                                                               for app
+invites         read                                                                                      for app
+redemptions     read,insert                                                                               for app
+audit           read,insert                                                                               for app
+
+# History is written once: no JWT updates or deletes these, by any route.
+audit           append-only
+security_log    append-only

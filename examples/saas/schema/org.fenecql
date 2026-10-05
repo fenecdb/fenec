@@ -1,0 +1,85 @@
+-- An organisation's tenant: a file of its own on one of the nodes, which
+-- the router moves between them. Nothing here names the organisation: the
+-- path does (/t/o-<slug>/), and a user's token reaches that path alone.
+
+-- Teams. A member's token lists the teams they are in (`teams`, a list
+-- claim); what a team holds is read only by those listed.
+create collection teams (
+  key      text @unique,
+  name     text,
+  created  timestamp
+)
+
+create collection projects (
+  key      text @unique,
+  team     text @hash,
+  name     text,
+  created  timestamp
+)
+
+-- A task. A member edits every field but `team` and `author` (policy.txt's
+-- update(...) grant); moving a task to another team is an admin's.
+create collection tasks (
+  team     text @hash,
+  project  text @hash,
+  title    text @text,
+  body     text @text,
+  status   text @hash,
+  assignee text @hash,
+  author   text,
+  priority int,
+  due      timestamp,
+  updated  timestamp @sorted
+)
+
+-- A comment carries its task's team, so the same list claim scopes it.
+create collection comments (
+  task     int @hash,
+  team     text @hash,
+  author   text @hash,
+  name     text,
+  body     text @text,
+  at       timestamp @sorted,
+  edited   timestamp
+)
+
+-- Who is in the organisation, with which role, in which teams. This is
+-- where a token's `role` and `teams` claims are read from at every refresh.
+create collection members (
+  user     text @unique,
+  name     text,
+  email    text,
+  role     text @hash,
+  teams    [text],
+  joined   timestamp
+)
+
+-- An invitation, by the SHA-256 of the code mailed. It lapses after three
+-- days (@ttl); a redemption makes it used.
+create collection invites (
+  hash     text @unique,
+  email    text,
+  role     text,
+  teams    [text],
+  by       text,
+  at       timestamp @ttl(72h)
+)
+
+-- One row an invitation used: `insert ... if absent require 1` on the
+-- invite's hash, so the second use writes nothing and its block is put back.
+create collection redemptions (
+  invite   text @unique,
+  user     text,
+  at       timestamp
+)
+
+-- What admins did: members, roles, teams, invitations. Append-only
+-- (policy.txt): an admin's token inserts rows naming itself, and no token
+-- but the operator's changes or deletes one.
+create collection audit (
+  actor    text @hash,
+  action   text @hash,
+  target   text,
+  detail   text,
+  at       timestamp @sorted
+)
