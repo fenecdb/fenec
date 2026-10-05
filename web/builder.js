@@ -323,7 +323,8 @@ export function inc(by = 1) {
 /**
  * A value as a FenecQL expression over the row it is written into, `?`s
  * bound to the parameters in order: `{ at: expr('now()') }`,
- * `{ total: expr('price * ?', 1.2) }`.
+ * `{ total: expr('price * ?', 1.2) }`, `{ entry: expr('? + ":dr"', ref) }`
+ * (`+` joins two texts, and only two texts).
  */
 export function expr(sql, ...params) {
   if (typeof sql !== 'string') throw new FenecError('expr() expects text');

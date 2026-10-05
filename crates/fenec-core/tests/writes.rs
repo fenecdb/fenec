@@ -158,6 +158,50 @@ fn types_follow_the_field_and_overflow_is_refused() {
     assert!(matches!(e, Error::NotFound(_)), "{e}");
 }
 
+/// `+` joins two texts, in a put's values, a `set` and a filter: a
+/// ledger's entry ids were made of their movement's (`$1 + ":dr"`) and
+/// travelled as parameters of their own. Text and a number stay a type
+/// error, either way round, and so does `-` between texts.
+#[test]
+fn plus_joins_two_texts_and_nothing_else() {
+    let mut db = counters();
+    run_with(
+        &mut db,
+        r#"put hits {id: 3, key: $1 + ":dr", s: "a" + "" + "b"}"#,
+        &[Value::Text("tx7".into())],
+    )
+    .unwrap();
+    assert_eq!(
+        one(&db, "get hits select key where id = 3"),
+        Value::Text("tx7:dr".into())
+    );
+    assert_eq!(
+        one(&db, "get hits select s where id = 3"),
+        Value::Text("ab".into())
+    );
+    run(&mut db, r#"set hits {s: s + "-" + key} where id = 1"#).unwrap();
+    assert_eq!(
+        one(&db, "get hits select s where id = 1"),
+        Value::Text("a-ip1".into())
+    );
+    assert_eq!(
+        one(&db, r#"get hits select id where key = "tx" + "7:dr""#),
+        Value::Int(3)
+    );
+    // A null is null, as in arithmetic.
+    run(&mut db, r#"set hits {s: s + "x"} where id = 2"#).unwrap();
+    assert_eq!(one(&db, "get hits select s where id = 2"), Value::Null);
+    for bad in [
+        r#"set hits {s: s + 1} where id = 1"#,
+        r#"set hits {s: 1 + s} where id = 1"#,
+        r#"set hits {s: s - "a"} where id = 1"#,
+        r#"set hits {s: s * "a"} where id = 1"#,
+    ] {
+        let e = run(&mut db, bad).unwrap_err();
+        assert!(matches!(e, Error::Type(_)), "{bad}: {e}");
+    }
+}
+
 #[test]
 fn now_is_the_clock_once_a_statement_and_a_timestamp_moves_by_milliseconds() {
     let mut db = counters();

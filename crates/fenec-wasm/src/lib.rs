@@ -366,7 +366,7 @@ pub unsafe extern "C" fn fenec_schema(
     let out = match out {
         None => json::error_to_string(&Error::NotFound(format!("handle {handle}"))),
         Some(Ok(o)) => o.json(),
-        Some(Err(e)) => fenec_abi::refused(&e, 0),
+        Some(Err(e)) => fenec_abi::refused(&e, 0, None),
     };
     boxed(out.as_bytes())
 }

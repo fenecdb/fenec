@@ -11,6 +11,13 @@
 //! sweeps -- its writes come from its primary, whose sweep it applies --
 //! and neither does a following tenant, nor the browser, which has no
 //! server to sweep for it.
+//!
+//! A row is swept once it has been past its time for a sweep's period
+//! ([`GRACE`]), not at the first pass after it: until then `expired()`
+//! reads it, so a reaper that comes by once a minute sees every row past
+//! its time before it goes -- a hold's money, a reservation's stock -- and
+//! gives it back. Swept at the first pass, a row that lapsed a moment
+//! before it was gone unseen whatever the reaper's period.
 
 use fenec_core::prelude::Database;
 use std::sync::{Mutex, Once, RwLock, Weak};
@@ -27,6 +34,10 @@ const SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// batches of 10 000, 13.9 ms at the median, and of 100, 0.16 ms but 6.0 s
 /// in all, each batch finding its rows again (`make ttl-bench`).
 pub const BATCH: usize = 1_000;
+
+/// How long past its time a row stays for a reaper before the sweep
+/// deletes it: a sweep's period, so a reaper as frequent finds every one.
+pub const GRACE: Duration = SWEEP_EVERY;
 
 /// The databases the sweeper looks at, each named for the log.
 static SWEPT: Mutex<Vec<(String, Weak<RwLock<Database>>)>> = Mutex::new(Vec::new());
@@ -52,7 +63,7 @@ pub fn watch(what: &str, db: &std::sync::Arc<RwLock<Database>>) {
                 };
                 for (what, db) in swept {
                     if let Some(db) = db.upgrade() {
-                        pass(&what, &db);
+                        pass_after(&what, &db, GRACE);
                     }
                 }
             });
@@ -71,6 +82,11 @@ fn now_ms() -> i64 {
 /// One sweep of `db`, now: every collection whose rows expire, a batch at
 /// a time until none past its time is left. How many rows it deleted.
 pub fn pass(what: &str, db: &RwLock<Database>) -> usize {
+    pass_after(what, db, Duration::ZERO)
+}
+
+/// [`pass`] of the rows past their time by `grace` at least.
+pub fn pass_after(what: &str, db: &RwLock<Database>, grace: Duration) -> usize {
     let collections = {
         let g = crate::held::read(db);
         // Its writes come from its primary, which sweeps.
@@ -82,7 +98,7 @@ pub fn pass(what: &str, db: &RwLock<Database>) -> usize {
     let mut total = 0;
     for c in collections {
         loop {
-            let now = now_ms();
+            let now = now_ms() - grace.as_millis() as i64;
             let ids = match crate::held::read(db).expired(&c, now, BATCH) {
                 Ok(ids) => ids,
                 Err(e) => {

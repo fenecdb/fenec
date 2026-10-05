@@ -73,6 +73,14 @@ These are deliberate, and README explains each one:
   holding its words, the token's or not, as an index walk does: users who
   must learn nothing of each other's rows, not even through timing, belong
   in tenants, a file each, or in collections of their own.
+- **A scoped update reaches every field unless its grant names them.**
+  `accounts update for app` lets the app's token `set accounts {kind:
+  ...}` as freely as `{balance: ...}`; `accounts update(balance, held,
+  status) for app` refuses a write changing any other field (403), by
+  every route. A field list holds a token to fields, not to amounts: one
+  that may move a balance may move it anywhere its rules' filters allow,
+  and a journal beside it, append-only, is what a reconciliation holds it
+  to.
 - **`append-only` binds scoped tokens, not the server's own.** A policy's
   `<collection> append-only` refuses every update and delete a JSON Web
   Token asks for there; the `--http-token` still changes and deletes rows,
@@ -85,6 +93,8 @@ These are deliberate, and README explains each one:
   of one `fenec-server`.
 - **A batch holds the database.** From its first write to its end every other
   writer waits on it, and readers on a batch that is still being written.
+  A batch of reads alone holds the read lock: writers wait for it as for
+  any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
 - **The whole database is resident**, with no page cache and no eviction. An
   authenticated client can ask for work that costs memory; `--max-memory` is

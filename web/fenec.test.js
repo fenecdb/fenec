@@ -528,6 +528,38 @@ test('a write that misses its require puts its run back, in the module', { skip:
   assert.throws(() => db.from('accounts').where('name', 'a').toDelete({ require: -1 }), /whole number from 0/);
 });
 
+test('a run of several says which statement stopped it, as a /batch does', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection accounts (name text @unique, balance int)');
+  db.run('put accounts [{name: "a", balance: 100}, {name: "b", balance: 0}]');
+  // The debit and the credit are both `set accounts`: only `at` tells them apart.
+  const move = (from, to, n) =>
+    db.run(
+      'set accounts {balance: balance - $3} where name = $1 and balance >= $3 require 1; ' +
+        'set accounts {balance: balance + $3} where name = $2 require 1',
+      [from, to, n],
+    );
+  const stop = (f) => {
+    try {
+      f();
+    } catch (e) {
+      return e;
+    }
+    assert.fail('no error');
+  };
+  const funds = stop(() => move('a', 'b', 500));
+  assert.equal(funds.at, 0);
+  assert.match(funds.message, /unmet/);
+  const ghost = stop(() => move('a', 'ghost', 5));
+  assert.equal(ghost.at, 1);
+  // A statement of its own names no place.
+  assert.equal(stop(() => db.run('set accounts {balance: 1} where name = "ghost" require 1')).at, undefined);
+  // A run holding a compact runs a statement at a time, and names it too.
+  assert.equal(stop(() => db.run('compact accounts; set accounts {nope: 1} where name = "a"')).at, 1);
+  assert.deepEqual((await db.from('accounts').order('name').rows()).map((r) => r.balance), [100, 0]);
+});
+
 test('a read that misses its require puts its run back, in the module', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

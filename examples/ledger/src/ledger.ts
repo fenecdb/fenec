@@ -82,7 +82,7 @@ export class Ledger {
     return this.#move(
       [
         ['put limits {account: $1, n: 0, at: now()} if absent', 'invalid'],
-        ['set limits {n: n + 1} where account = $1 and n < $10 require 1', 'rate_limited'],
+        ['set limits {n: n + 1} where account = $1 and n < $8 require 1', 'rate_limited'],
         [usable(2), 'recipient'],
         [usable(1), 'source'],
         ['set accounts {balance: balance - $3} where ext = $1 and balance - held >= $3 require 1', 'funds'],
@@ -137,7 +137,7 @@ export class Ledger {
     return this.#move(
       [
         [
-          'set transfers {refunded: refunded + $3} where ref = $10 and src = $2 and dst = $1 and kind in ["transfer", "capture"] and refunded + $3 <= amount require 1',
+          'set transfers {refunded: refunded + $3} where ref = $8 and src = $2 and dst = $1 and kind in ["transfer", "capture"] and refunded + $3 <= amount require 1',
           'refund_exceeds',
         ],
         ['set accounts {balance: balance - $3} where ext = $1 and balance - held >= $3 require 1', 'funds'],
@@ -192,11 +192,11 @@ export class Ledger {
     return this.#move(
       [
         [
-          'set holds {state: "captured", captured: $3} where ref = $10 and account = $1 and amount = $11 and state = "held" and until > now() require 1',
+          'set holds {state: "captured", captured: $3} where ref = $8 and account = $1 and amount = $9 and state = "held" and until > now() require 1',
           'hold',
         ],
         [usable(2), 'recipient'],
-        ['set accounts {held: held - $11, balance: balance - $3} where ext = $1 and held >= $11 require 1', 'funds'],
+        ['set accounts {held: held - $9, balance: balance - $3} where ext = $1 and held >= $9 require 1', 'funds'],
         ['set accounts {balance: balance + $3} where ext = $2 require 1', 'recipient'],
       ],
       [h.account, c.to, c.amount, h.currency, c.ref, 'capture', c.memo ?? ''],
@@ -281,20 +281,20 @@ export class Ledger {
   /**
    * A block that moves money: its guards and the two sides, then the two
    * entries and the movement's record. `base` is $1 to $7 in every one --
-   * from, to, amount, currency, ref, kind, memo -- $8 and $9 the entries'
-   * ids, and `extra` from $10. An entry's id is the movement's ref and its
-   * side, which is what the change stream's consumer deduplicates by.
+   * from, to, amount, currency, ref, kind, memo -- and `extra` from $8. An
+   * entry's id is the movement's ref and its side (`$5 + ":dr"`), which is
+   * what the change stream's consumer deduplicates by.
    */
   #move(steps: Step[], base: unknown[], extra: unknown[], key?: string): Promise<Result> {
     const ref = base[4] as string;
-    // A refund and a capture name what they come of ($10).
-    const of = base[5] === 'refund' || base[5] === 'reversal' || base[5] === 'capture' ? '$10' : 'null';
+    // A refund and a capture name what they come of ($8).
+    const of = base[5] === 'refund' || base[5] === 'reversal' || base[5] === 'capture' ? '$8' : 'null';
     return this.#run(
       [
         ...steps,
         [
-          'insert journal [{entry: $8, tx: $5, account: $1, currency: $4, amount: 0 - $3, kind: $6, at: now()}, ' +
-            '{entry: $9, tx: $5, account: $2, currency: $4, amount: $3, kind: $6, at: now()}]',
+          'insert journal [{entry: $5 + ":dr", tx: $5, account: $1, currency: $4, amount: 0 - $3, kind: $6, at: now()}, ' +
+            '{entry: $5 + ":cr", tx: $5, account: $2, currency: $4, amount: $3, kind: $6, at: now()}]',
           'duplicate',
         ],
         [
@@ -302,7 +302,7 @@ export class Ledger {
           'duplicate',
         ],
       ],
-      [...base, `${ref}:dr`, `${ref}:cr`, ...extra],
+      [...base, ...extra],
       ref,
       key,
     );
@@ -324,9 +324,9 @@ export class Ledger {
   }
 }
 
-/** The guard that `actor` ($11) holds account `$n`, when there is an actor. */
+/** The guard that `actor` ($9) holds account `$n`, when there is an actor. */
 function holds(actor: string | undefined, n: number): Step[] {
-  return actor ? [[`get accounts select ext where ext = $${n} and holders has $11 limit 1 require 1`, 'not_holder']] : [];
+  return actor ? [[`get accounts select ext where ext = $${n} and holders has $9 limit 1 require 1`, 'not_holder']] : [];
 }
 
 function refused(reason: Refusal, status: number, error: string): Result {

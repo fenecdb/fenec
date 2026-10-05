@@ -125,7 +125,9 @@ const stop = db.live(stock.select('available').where('sku', 'TENT-1'), (rows) =>
   <li><b>A refusal names its statement:</b> <code>FenecError</code>'s
     <code>at</code> (from 0), its <code>status</code> (412 a
     <code>require</code> not met, 409 a value taken, 422 a key sent with
-    another request) and <code>completed</code>.</li>
+    another request) and <code>completed</code>. A database in the page
+    names it the same way: <code>db.run</code> of several statements, one
+    block, throws with the <code>at</code> of the one that stopped it.</li>
   <li><b>A write answers where it left the database,</b>
     <code>seq</code>, and the client keeps the last as <code>db.seq</code>.</li>
   <li><b><code>{ poll }</code> is for a page many view:</b> a stream is a

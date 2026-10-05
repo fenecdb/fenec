@@ -228,6 +228,23 @@ describe('the journal cannot be rewritten', () => {
     assert.equal((await query(tenant, app, 'del accounts where ext = "ada-main"')).status, 403);
   });
 
+  test('the app token changes an account’s balance, held and status, and no other field', async () => {
+    const app = tokens.app();
+    const before_ = (await query(tenant, tokens.admin('ops'), 'get accounts order ext')).body;
+    for (const q of [
+      'set accounts {kind: "world"} where ext = "ada-main"',
+      'set accounts {currency: "USD"} where ext = "ada-main"',
+      'set accounts {holders: ["mallory"]} where ext = "ada-main"',
+      'set accounts {balance: balance + 1, ext: "x"} where ext = "ada-main"',
+    ]) {
+      const r = await query(tenant, app, q);
+      assert.equal(r.status, 403, q);
+    }
+    const patch = await raw(`/t/${tenant}/accounts?ext=eq.ada-main`, { method: 'PATCH', token: app, body: '{"kind":"world"}' });
+    assert.equal(patch.status, 403);
+    assert.deepEqual((await query(tenant, tokens.admin('ops'), 'get accounts order ext')).body, before_);
+  });
+
   test('an operator’s admin token reads everything and writes nothing', async () => {
     const admin = tokens.admin('ops');
     assert.ok(((await query(tenant, admin, 'get accounts')).body as unknown[]).length >= 7);

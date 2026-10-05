@@ -312,9 +312,11 @@ are closed now, and the shop uses what closed them:
    steps. A query whose type names no facet reads its counts as `Facets`,
    maybe absent, and `rows.facets` needs no cast.
 
-The inventory pattern, `@ttl` that cannot give stock back (hence the
-`holdUntil` field and the reaper), and the composite unique the cart works
-around with `line = owner|sku` are as `realworld-gaps.md` describes them.
+The inventory pattern and the composite unique the cart works around with
+`line = owner|sku` are as `realworld-gaps.md` describes them. `@ttl` can
+give stock back now -- `expired()` reads the rows past their time for a
+reaper -- but a reservation here is its order's row, which outlives it, so
+the order keeps `holdUntil` under `@sorted` and the reaper finds it so.
 
 ## Files
 

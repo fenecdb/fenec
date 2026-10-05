@@ -59,6 +59,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make recon-bench         # a ledger's reconciliation /batch beside transfers and reads: their longest waits
 make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
@@ -281,7 +282,18 @@ of 930 000 small documents. Durable writes gain from the fsync outside the
 lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two processes opening the same file corrupts
 it, which is why everything that writes one -- the HTTP endpoint, a
 replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
-of `fenec-server`, never a binary of its own.
+of `fenec-server`, never a binary of its own. A `/batch` whose every
+statement reads (`read_batch`) takes the read lock once for all of them,
+as the native library's `fenec_abi::query` does: a snapshot at the one
+change `Fenec-Seq` names, a `require` stopping it with 412 and `at`. It
+took the write lock as every batch did, and held out readers too; writers
+still wait for it, since a read lock is the only snapshot there is
+(`make recon-bench`, a ledger's reconciliation over a million journal
+entries, 150 to 220 ms: transfers' longest wait 199 -> 224 ms, the same;
+reads by id with no transfer waiting, 18 waits past 50 ms -> 2). Where
+a writer waits, the std lock holds new readers behind it on macOS and
+Linux alike, so a read beside a snapshot and a busy writer waits as
+before.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,
@@ -498,7 +510,17 @@ A token naming no `exp` is refused (`Demands::require_exp`,
 `--jwt-require-exp off` takes it), and `--jwt-max-age` bounds how far ahead
 one may lie; `mint` stamps an hour on claims naming none. Grants are
 `read`, `insert`, `update` and `delete` (`write` the three, bits in
-`Rule::ops`), and the `Check` hook takes the write's op: an insert held to
+`Rule::ops`), `update(a, b)` the update of those fields alone
+(`Rule::fields`): `update` on `accounts` let a ledger's app token `set
+accounts {balance: balance + 500000}` and change an account's kind too,
+and `WITH CHECK` saw only the row after. A write over a row is judged by
+the fields that differ, as encodings (`Scope::overwrites`, through the
+hook's `before_overwrite`, which the engine calls with the row as it was
+-- a `set`'s and a `put`'s over an id, the old row read before the hooks
+rather than after, so no read more): each must be one granting rule's,
+that rule admitting the row before and after; a policy naming no field
+list judges nothing there, and an unscoped write meets an empty hook
+list or a thread-local found empty. And the `Check` hook takes the write's op: an insert held to
 the rules granting it, an update found and checked by its own, a delete
 found by its own; an update and a delete need read beside them, an insert
 none, so a client appends to a stream it cannot see. `<c> append-only`, a
@@ -930,7 +952,12 @@ where it is (`/_changes/consumers/<name>`, rows of `_consumers`, made by a
 `POST` at the last write on disk -- read from "now" each time, it missed
 what came between two reads -- and moved by a `POST` of `since`), each
 write at least once; the stream leaves `_consumers`' own writes out, the
-cursor going past them. A feed kept for it alone has no token (`Replication`'s
+cursor going past them, and a `wait` waits on past them rather than answer
+nothing at once, while a commit to where nothing but cursors were written
+since the consumer's place writes nothing (`unmoved`, the change ring's
+`changed_collections_since`): a sink that committed every answer
+committed its own commit's empty answer, 30 000 fsynced writes in a few
+idle minutes. A feed kept for it alone has no token (`Replication`'s
 token is an `Option`: an empty one matched an empty `Bearer`). Keeping it
 cost nothing measurable, 16 400 single puts a second over HTTP either way,
 and 9 000 rows of 128 dimensions read back at 283 000 a second.
@@ -978,7 +1005,12 @@ layer writes rows back through it when it undoes an optimistic write.
 64 bits is refused, never wrapped; `/` between ints divides whole toward
 zero; an int and a float make a float, refused once not finite; a
 timestamp moves by milliseconds; a null is null (`coalesce(n, 0) + 1`
-counts from nothing); anything else is a type error, and the result meets
+counts from nothing); `+` joins two texts and only two (`$1 + ":dr"`, an
+entry id made of its movement's, which travelled as a parameter of its
+own) -- `+` rather than a `concat()`, since every client language joins
+text so and the builders' `expr` already passes it, and a text and a
+number stay a type error, never a number made text unasked; anything
+else is a type error, and the result meets
 the field's type check as a literal does. The lexer reads `-` after what
 ends a value (`n-1`, `n - 1`) as a subtraction and before a value as a
 number's sign (`subtracts`), and the parser folds a `-` over a number back
@@ -1032,7 +1064,12 @@ is the write's own, taken under the lock that wrote it, with no second
 read to race or to scope, and a scoped token's count is of the rows its
 filter let it write. 412 over HTTP (`api::status_of`), apart from 409 so a
 client tells a lost race from a value taken, and a `/batch` that stops says
-which statement did (`"at"`, from 0, `render_batch_stop`); `FENEC_UNMET` 14
+which statement did (`"at"`, from 0, `render_batch_stop`), and so does
+a text of several through `fenec-abi` (`Refused::Error`'s third field,
+`"at"` in the module's and the native library's error, `FenecError.at`
+from `Fenec.run`): a ledger's debit and credit are both `set accounts`,
+and a page ran a text's prefixes again to tell which had stopped it --
+202 bytes of the browser module, 8 brotli; `FENEC_UNMET` 14
 over the native library, after the boundary's own 11-13; `unmet` in each
 SDK's errors, and `{ require: n }` in every builder, held to the golden
 file. A replica's sync sends it with the write and holds it locally too,
@@ -1129,7 +1166,22 @@ read lock (`Database::expired`) and 1 000 rows deleted under the write
 lock as a block of ordinary deletes (`Database::sweep`, the filter
 written there, since a `del` leaves expired rows out): replicas,
 `/_changes`, archives and subscriptions see deletes. A replica, a
-following tenant and the browser never sweep. 100 000 rows past their
+following tenant and the browser never sweep. `expired()` in a filter
+reads the rows past their time (`Expr::asks_expired`, answered in
+`answer_filter` as `field <= now - ttl`, a range of the index, the alive
+test left out; `not expired()` is the default read), in every place a
+filter goes, `set` and `del` too: a reaper's, which gives back what a
+lapsed hold reserved -- `del holds where expired() and id = $1 require 1`
+beside the give-back, one block, the delete the once-only guard -- where
+a ledger kept holds `@sorted` and reaped by hand, since a row the sweep
+deleted unseen kept its money in `held` for good. The sweeper deletes a
+row a sweep's period past its time (`sweep::GRACE`, `pass_after`), so a
+reaper as frequent sees every one; at the first pass after its time a row
+that lapsed a moment before went unseen whatever the reaper's period. A
+scoped token reaches them only by the policy's `expired` grant
+(`Scope::reaping`), never through `write` or `*`; a rule's own filter
+takes none. A collection without `@ttl` refuses it by name (the registry
+has no `expired`, and says so). 100 000 rows past their
 time out of 200 000 went in 0.56 s, the lock held 1.06 ms a batch at the
 median and 2.3 at most; a read tests each row's time, so a `count` over
 a million rows half past their time is a scan, 68.8 ms against 1.1 with
@@ -1140,6 +1192,7 @@ off (field change 4, the index kept). `_idempotency`'s `at` is the first
 user: its purge on the write path went. The two features cost the browser
 module 16.4 KB, 5.7 KB brotli -- 18.7 KB more while a ttl printed back
 through a float, which brought the standard library's float formatting.
+`expired()` cost it 561 bytes, 98 brotli.
 
 **`alter collection` rewrites no document; positions are not places.** A
 document is its values in field order, so a field added goes last and a

@@ -95,10 +95,10 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
-<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, and a <code>timestamp</code> moved by milliseconds — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
+<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, a <code>timestamp</code> moved by milliseconds, and <code>+</code> joining two texts — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
-<tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>timestamp</code> <code>bucket(at, 15m)</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
+<tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>expired</code> (<a href="#reaper">rows past their <code>@ttl</code></a>) <code>timestamp</code> <code>bucket(at, 15m)</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
 <tr><td><b>Ordering</b></td><td><code>order year desc, title asc</code> — a tie on the first key is decided by the second; <code>id</code> can be ordered too; <code>order name collate und</code> puts text in Unicode's order for every language and <code>collate tr</code> in Turkish order, and a field declared <code>name text collate und</code> is in it wherever it compares — see <a href="#collation">Collation</a></td></tr>
 <tr><td><b>Explain</b></td><td><code>explain get ...</code> runs the query and returns the path it took, one row a step — see <a href="#explain">Explain</a></td></tr>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
@@ -1033,6 +1033,9 @@ while.</p>
   <li><b>The server deletes it.</b> A primary sweeps once a minute, as
     ordinary deletes that replicas, <code>/_changes</code>, archives and
     subscriptions see as any.</li>
+  <li><b><code>expired()</code> reads what the others leave out,</b> for
+    a reaper that gives back what a row held before the sweep deletes it
+    (<a href="#reaper">below</a>).</li>
   <li><b>Durations</b> are whole <code>ms</code>, <code>s</code>,
     <code>m</code>, <code>h</code> or <code>d</code>: <code>@ttl(45s)</code>,
     <code>@ttl(12h)</code>, <code>@ttl(7d)</code>.</li>
@@ -1077,6 +1080,37 @@ an <code>insert</code> naming its id writes over it, and a
 in the same statement — so a lock taken by <code>insert</code> and left to
 expire can be taken again at once (<a href="/docs/redis#lock">Instead of
 Redis</a>). BM25's statistics count the row until the sweep.</p>
+
+<h3 id="reaper">Reading what expired: the reaper</h3>
+
+<p>A row past its time is out of every read, so a hold that lapsed cannot be
+found to give its money back, nor a reservation its stock. <code>expired()</code>
+in a filter reads those rows — and only those, where the filter says so —
+wherever a filter goes: <code>get</code>, <code>count</code>, a
+<code>lookup</code> level, an inner <code>get</code>, <code>set</code> and
+<code>del</code>. It is <code>until &lt;= now - ttl</code>, a range of the
+field's ordered index; <code>not expired()</code> is what a read finds without
+it.</p>
+
+<pre data-lang="fenecql">create collection holds (account text @hash, amount int, until timestamp @ttl(1ms))
+
+get holds select id, account, amount where expired() limit 100   -- what lapsed
+
+-- each given back once, in one block (a /batch): the delete is the guard
+del holds where expired() and id = $1 require 1
+set accounts {held: held - $2} where ext = $3 and held &gt;= $2 require 1
+</pre>
+
+<p>A capture needs no guard of its own against the lapse:
+<code>get holds where id = $1 limit 1 require 1</code> finds no hold past
+its time. Two reapers, or a reaper and a capture, racing for one hold: the
+<code>del ... require 1</code> lets one through, and the other's block is put
+back whole. The sweeper leaves a row a minute past its time before it deletes
+it, so a reaper that comes by once a minute sees every one; a row it misses
+for longer is deleted unseen, and what it held is the reconciliation's to
+find. A scoped token reads them only by the policy's <code>expired</code>
+grant (<a href="/docs/http#scoped-access">Scoped access</a>). Without
+<code>@ttl</code> on the collection, <code>expired()</code> is an error.</p>
 
 <div class="note">
   <p><b>What it costs, measured</b> (<code>make ttl-bench</code>, a million
@@ -1607,6 +1641,7 @@ set hits {n: coalesce(n, 0) + $1} where key = $2         -- from nothing, by a p
 set docs {body: $1, version: version + 1}
   where id = $2 and version = $3                          -- compare-and-set: 1 or 0
 put locks {name: "nightly", owner: $1, at: now()} if absent   -- 1 if taken, 0 if held
+insert journal {entry: $1 + ":dr", amount: 0 - $2}           -- two texts joined
 </pre>
 
 <ul>
@@ -1636,8 +1671,11 @@ is not — <code>n * 2.0</code> fits, <code>n + 0.5</code> does not, as the
 literal <code>2.5</code> does not. A float that is no longer finite is
 refused. A <code>timestamp</code> plus or minus an <code>int</code> is a
 timestamp that many milliseconds on (<code>now() + 30000</code>), and two
-timestamps apart are the milliseconds between them. Anything else — text
-and a number — is a type error. An error refuses the statement whole, a
+timestamps apart are the milliseconds between them. <code>+</code> joins two
+texts (<code>$1 + ":dr"</code>), and only two texts. Anything else — text
+and a number, either way round, or <code>-</code> between texts — is a type
+error: a number turned into text without asking would hide the mistake a
+typed field is there to catch. An error refuses the statement whole, a
 block of one, so nothing of it is written; over no rows there is no error,
 as there is no row to work it out over.</p>
 

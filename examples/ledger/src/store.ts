@@ -69,8 +69,9 @@ export class HttpStore implements Store {
     }
   }
 
-  // A /batch of reads runs under the write lock like any batch: no write
-  // lands between them, so they read one state, and `Fenec-Seq` names it.
+  // A /batch of reads alone runs under one read lock: no write lands
+  // between them, so they read one state, and `Fenec-Seq` names it. Other
+  // reads go on beside it; a write waits for it, as for any read.
   async snapshot(queries: string[]) {
     const out = await this.batch(queries, []);
     if (!out.ok) throw new StoreError(out.error, out.status);
@@ -81,15 +82,10 @@ export class HttpStore implements Store {
 
 /**
  * The engine in this process. `run` of several statements is one block,
- * put back whole when one fails, as a `/batch` is. Two things a `/batch`
- * has the module's `run` has not (README, "Gaps"):
- *
- * - it does not say which statement stopped it, so on a failure the block
- *   is run again a prefix at a time, each ended by a statement that always
- *   fails, until the failure is another's: nothing lands, and it is
- *   synchronous, so no other client's block comes between;
- * - there is no `Idempotency-Key`; the ledger's `@unique` refs are what
- *   keep a retry from landing twice in process.
+ * put back whole when one fails, as a `/batch` is, and its error names the
+ * statement that stopped it (`at`), as a `/batch`'s does. There is no
+ * `Idempotency-Key`; the ledger's `@unique` refs are what keep a retry
+ * from landing twice in process.
  */
 export class LocalStore implements Store {
   constructor(readonly db: Fenec) {}
@@ -99,22 +95,11 @@ export class LocalStore implements Store {
       this.db.run(statements.join('\n'), params);
       return { ok: true, results: [], replayed: false, seq: this.db.changeSeq };
     } catch (e) {
-      const error = (e as Error).message;
-      return { ok: false, status: statusOf(error), error, at: this.#stoppedAt(statements, params, error) };
+      if (!(e instanceof FenecError)) throw e;
+      const error = e.message;
+      // A block of one statement names no place: it is the first.
+      return { ok: false, status: statusOf(error), error, at: e.at ?? 0 };
     }
-  }
-
-  #stoppedAt(statements: string[], params: unknown[], error: string): number | undefined {
-    const probe = 'get events where who = "\u0000probe" limit 1 require 1';
-    for (let k = 0; k < statements.length; k++) {
-      try {
-        this.db.run([...statements.slice(0, k + 1), probe].join('\n'), params);
-      } catch (e) {
-        if ((e as Error).message !== error) continue; // the probe's, or another
-        return k;
-      }
-    }
-    return undefined;
   }
 
   async rows<T = Record<string, unknown>>(query: string, params: unknown[] = []): Promise<T[]> {

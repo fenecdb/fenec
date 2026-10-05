@@ -780,3 +780,197 @@ fn a_scoped_match_scores_nothing_of_rows_the_token_cannot_read() {
         "{root_before} {root_after}"
     );
 }
+
+const REAPER: &str = "\
+holds  read,insert,delete,expired              for app
+holds  read                       where owner = $jwt.sub
+";
+
+/// `expired()` reads the rows past their `@ttl`, which every other read
+/// leaves out: granted by `expired` alone -- never by `read`, `write` or
+/// `*` -- so a reaper's token gives back a lapsed hold and a user's never
+/// sees one again. A rule's own filter takes none.
+#[test]
+fn the_rows_past_their_time_are_the_expired_grants() {
+    let n = start_with(
+        REAPER,
+        &[
+            "create collection holds (owner text @hash, amount int, until timestamp @ttl(1ms))",
+            "put holds [{owner: \"alice\", amount: 5, until: 1}, \
+             {owner: \"alice\", amount: 7, until: \"2999-01-01\"}]",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let app = n.token(r#"{"sub":"ledger","role":"app"}"#);
+    let (status, body) = n.query(&alice, "get holds where expired()");
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("`expired` grant"), "{body}");
+    assert_eq!(n.query(&alice, "del holds where expired()").0, 403);
+    let (status, body) = n.query(&alice, "get holds select amount");
+    assert_eq!((status, count(&body, "\"amount\"")), (200, 1), "{body}");
+    // Through an inner `get` too.
+    let (status, body) = n.query(
+        &alice,
+        "get holds where owner in (get holds select owner where expired())",
+    );
+    assert_eq!(status, 403, "{body}");
+
+    let (status, body) = n.query(&app, "get holds select amount where expired()");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("5") && !body.contains("7"), "{body}");
+    let reap = line("del holds where expired() and amount = 5 require 1");
+    let (status, body) = n.call(Some(&app), "POST", "/batch", &reap);
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = n.call(Some(&app), "POST", "/batch", &reap);
+    assert_eq!(status, 412, "given back once: {body}");
+
+    // `*` and `write` grant no `expired`; a rule's filter takes none.
+    let wide = start_with(
+        "*  read,write\n",
+        &["create collection holds (until timestamp @ttl(1ms))"],
+    );
+    let t = wide.token(r#"{"sub":"x"}"#);
+    assert_eq!(wide.query(&t, "get holds where expired()").0, 403);
+    assert!(Access::new(SECRET, "holds read where expired()").is_err());
+    assert!(Access::new(SECRET, "holds read,expired\n").is_ok());
+}
+
+const BALANCES: &str = "\
+accounts  read                                     for app
+accounts  insert   where balance = 0               for app
+accounts  update(balance, held, status)            for app
+notes     read,insert,update,delete  where owner = $jwt.sub
+notes     update(title)
+";
+
+fn balance(n: &Node) -> String {
+    n.query(ROOT, "get accounts select kind, balance, held, status")
+        .1
+}
+
+/// An `update(...)` grant names the fields a scoped write may change: the
+/// app's token moves balances and changes nothing else of an account, by
+/// any route -- `set`, REST `PATCH` and `PUT`, `/batch` -- where `update`
+/// on `accounts` reached every field and `set accounts {balance: ...}`
+/// could make money. A write is judged by the fields it changes: one
+/// naming another field with the value it holds changes nothing there.
+#[test]
+fn an_update_grant_names_the_fields_it_may_change() {
+    let n = start_with(
+        BALANCES,
+        &[
+            "create collection accounts (ext text @unique, kind text, balance int, held int, status text)",
+            "put accounts {ext: \"a\", kind: \"customer\", balance: 100, held: 0, status: \"open\"}",
+            "create collection notes (owner text @hash, title text, body text)",
+            "put notes [{owner: \"alice\", title: \"a\", body: \"x\"}, {owner: \"bob\", title: \"b\", body: \"y\"}]",
+        ],
+    );
+    let app = n.token(r#"{"sub":"ledger","role":"app"}"#);
+    let start = balance(&n);
+    for sql in [
+        "set accounts {kind: \"world\"} where ext = \"a\"",
+        "set accounts {balance: balance + 1, kind: \"world\"} where ext = \"a\"",
+        "set accounts {ext: \"b\"} where ext = \"a\"",
+        "set accounts {kind: \"world\"} where ext = \"a\" require 1",
+        "put accounts {id: 1, ext: \"a\", kind: \"world\", balance: 100, held: 0, status: \"open\"}",
+    ] {
+        let (status, body) = n.query(&app, sql);
+        assert_eq!(status, 403, "{sql}: {body}");
+    }
+    let (_, body) = n.query(&app, "set accounts {kind: \"world\"} where ext = \"a\"");
+    assert!(
+        body.contains("may not change `kind` in `accounts`"),
+        "{body}"
+    );
+    for (method, target, body) in [
+        ("PATCH", "/accounts?ext=eq.a", r#"{"kind":"world"}"#),
+        (
+            "PUT",
+            "/accounts?ext=eq.a",
+            r#"{"kind":"world","balance":5}"#,
+        ),
+        ("PATCH", "/accounts/all", r#"{"status":"x","kind":"world"}"#),
+    ] {
+        let (status, answer) = n.call(Some(&app), method, target, body);
+        assert_eq!(status, 403, "{method} {target}: {answer}");
+    }
+    // A batch holding one is refused whole: its balance move does not land.
+    let batch = [
+        line("set accounts {balance: balance + 500000} where ext = \"a\""),
+        line("set accounts {kind: \"world\"} where ext = \"a\""),
+    ];
+    let (status, body) = n.call(Some(&app), "POST", "/batch", &batch.join("\n"));
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(balance(&n), start);
+
+    // The fields it names it changes, by every route.
+    let (status, body) = n.query(
+        &app,
+        "set accounts {balance: balance - 10, held: held + 10} where ext = \"a\" require 1",
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = n.call(
+        Some(&app),
+        "PATCH",
+        "/accounts?ext=eq.a",
+        r#"{"status":"frozen"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    // Another field written with the value it holds changes nothing there.
+    let (status, body) = n.query(
+        &app,
+        "set accounts {kind: kind, status: \"open\"} where ext = \"a\"",
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = n.call(
+        Some(&app),
+        "POST",
+        "/batch",
+        &line("set accounts {held: 0} where ext = \"a\" require 1"),
+    );
+    assert_eq!(status, 200, "{body}");
+    let now = balance(&n);
+    assert!(now.contains("\"customer\"") && now.contains("90"), "{now}");
+    // The server's own token is not held to it.
+    assert_eq!(
+        n.query(ROOT, "set accounts {kind: \"world\"} where ext = \"a\"")
+            .0,
+        200
+    );
+
+    // Rules widen each other, each with its own fields and rows: alice
+    // changes every field of her notes and the title of anyone's, the
+    // owner of none but hers -- and gives none of hers away.
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let rows = |sql: &str| n.query(ROOT, sql).1;
+    assert_eq!(
+        n.query(&alice, "set notes {body: \"z\"} where owner = \"alice\"")
+            .0,
+        200
+    );
+    assert_eq!(n.query(&alice, "set notes {title: \"t\"}").0, 200);
+    assert_eq!(count(&rows("get notes where title = \"t\" count"), "2"), 1);
+    for sql in [
+        "set notes {body: \"z\"} where owner = \"bob\"",
+        "set notes {title: \"u\", body: \"z\"} where owner = \"bob\"",
+        "set notes {owner: \"bob\"} where owner = \"alice\"",
+    ] {
+        let (status, body) = n.query(&alice, sql);
+        assert_eq!(status, 403, "{sql}: {body}");
+    }
+    let all = rows("get notes select owner, body order id");
+    assert!(all.contains("\"y\"") && all.contains("\"alice\""), "{all}");
+
+    // The grammar: fields named, `id` never, a list closed.
+    assert!(Access::new(SECRET, "a update(x, y_2) where x = 1 for r").is_ok());
+    for bad in [
+        "a update(",
+        "a update(x y)",
+        "a update()",
+        "a update(id)",
+        "a update((x))",
+        "a update(x)\na append-only",
+    ] {
+        assert!(Access::new(SECRET, bad).is_err(), "{bad}");
+    }
+}

@@ -58,7 +58,7 @@ href="javascript.html#packages">Which package</a>).</p>
 <thead><tr><th>What the page loads</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
 <tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>195 KB</b></td><td class="n">234 KB</td></tr>
-<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">42 KB</td><td class="n">48 KB</td></tr>
+<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">42 KB</td><td class="n">49 KB</td></tr>
 <tr><td>The client alone in an app's bundle, <code>@fenecdb/web/client</code></td><td class="n">7 KB</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -1280,7 +1280,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>236 KB brotli</b>; for an app whose queries run on a
+the browser pays is <b>237 KB brotli</b>; for an app whose queries run on a
 server, the client alone in its bundle.</p>
 
 <div class="tbl">
@@ -1291,9 +1291,9 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1607 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>585 KB</b></td><td class="n"><b>195 KB</b></td><td class="n">234 KB</td></tr>
-<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">432 KB</td><td class="n">148 KB</td><td class="n">176 KB</td></tr>
-<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">157 KB</td><td class="n">42 KB</td><td class="n">42 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>586 KB</b></td><td class="n"><b>195 KB</b></td><td class="n">234 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">433 KB</td><td class="n">148 KB</td><td class="n">176 KB</td></tr>
+<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">158 KB</td><td class="n">42 KB</td><td class="n">42 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>

@@ -206,6 +206,52 @@ impl Expr {
         }
     }
 
+    /// Whether it asks `expired()` -- the rows past their `@ttl`, which
+    /// every read otherwise leaves out -- outside an inner `get`, whose
+    /// collection is its own to ask of.
+    pub fn asks_expired(&self) -> bool {
+        match self {
+            Expr::Call(name, args) => {
+                (args.is_empty() && name.eq_ignore_ascii_case(EXPIRED))
+                    || args.iter().any(Expr::asks_expired)
+            }
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => false,
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => a.asks_expired() || b.asks_expired(),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.asks_expired(),
+            Expr::In(a, items) => a.asks_expired() || items.iter().any(Expr::asks_expired),
+        }
+    }
+
+    /// Each `expired()` in it, outside an inner `get`, made `past`: the
+    /// test of a row past its time. Whether it held one.
+    pub fn answer_expired(&mut self, past: &Expr) -> bool {
+        match self {
+            Expr::Call(name, args) if args.is_empty() && name.eq_ignore_ascii_case(EXPIRED) => {
+                *self = past.clone();
+                true
+            }
+            Expr::Call(_, args) => args
+                .iter_mut()
+                .fold(false, |any, a| a.answer_expired(past) | any),
+            Expr::Field(_) | Expr::Lit(_) | Expr::Param(_) => false,
+            Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::Like(a, b)
+            | Expr::Has(a, b)
+            | Expr::Arith(_, a, b) => a.answer_expired(past) | b.answer_expired(past),
+            Expr::Not(a) | Expr::IsNull(a) | Expr::InSelect(a, _) => a.answer_expired(past),
+            Expr::In(a, items) => items.iter_mut().fold(a.answer_expired(past), |any, i| {
+                i.answer_expired(past) | any
+            }),
+        }
+    }
+
     /// Calls `f` on each `in (get ...)` in it, outermost first and not
     /// inside one another: the inner `get`s are `f`'s to walk.
     pub fn each_subquery_mut(&mut self, f: &mut dyn FnMut(&mut Expr) -> Result<()>) -> Result<()> {
@@ -498,8 +544,14 @@ pub struct EvalCtx<'a> {
 /// is; `/` between ints divides whole, toward zero, as PostgreSQL's does.
 /// An int and a float make a float, and a float that is no longer finite
 /// is refused. A timestamp moves by milliseconds (`now() + 30000`), and
-/// two timestamps apart are the milliseconds between them. Anything else
+/// two timestamps apart are the milliseconds between them. `+` joins two
+/// texts, and only two texts: a text and a number is no join. Anything else
 /// is a type error: the field's type check is what a result meets next.
+/// The function a filter calls to read the rows past their `@ttl`
+/// ([`Expr::asks_expired`]): answered before the query runs, as the test
+/// of a row past its time, never called.
+pub const EXPIRED: &str = "expired";
+
 pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
     use Value::{Float, Int, Timestamp};
     if l.is_null() || r.is_null() {
@@ -522,6 +574,16 @@ pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
             Timestamp(whole(*t, *d)?)
         }
         (Int(d), Timestamp(t)) if op == ArithOp::Add => Timestamp(whole(*d, *t)?),
+        // Two texts joined: an entry id made of its movement's
+        // (`$1 + ":dr"`) travelled as a parameter of its own. Only two
+        // texts: `"n" + 1` stays a type error, as a number made text
+        // silently would hide the mistake a typed field exists to catch.
+        (Value::Text(a), Value::Text(b)) if op == ArithOp::Add => {
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(a);
+            s.push_str(b);
+            Value::Text(s)
+        }
         (Timestamp(a), Timestamp(b)) if op == ArithOp::Sub => Int(whole(*a, *b)?),
         (Int(_) | Float(_), Int(_) | Float(_)) => {
             let (a, b) = (l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0));
@@ -539,7 +601,8 @@ pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
         }
         _ => {
             return Err(Error::Type(format!(
-                "`{}` takes numbers, or a timestamp and milliseconds; found {} and {}",
+                "`{}` takes numbers, a timestamp and milliseconds, or (`+`) two texts; found {} \
+                 and {}",
                 op.symbol(),
                 l.type_name(),
                 r.type_name()

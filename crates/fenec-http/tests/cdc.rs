@@ -381,6 +381,55 @@ fn a_consumer_reads_from_where_it_committed_and_again_what_it_did_not() {
     );
 }
 
+/// A sink that commits after every answer, an empty one too, stays idle
+/// while nothing else is written: its read waits past its own commits, and
+/// a commit past nothing but cursors writes nothing. Each commit was a
+/// write that woke the next read at once, which answered nothing past it
+/// and was committed again -- 30 000 fsynced writes in a few idle minutes.
+#[test]
+fn a_sink_that_commits_every_answer_stays_idle() {
+    let n = start("idle", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    let made = n.call(Some(ROOT), "POST", "/_changes/consumers/sink", "");
+    assert_eq!(made.status, 200, "{}", made.body);
+    n.run("put a {t: \"one\"}");
+    let seq = || n.db.read().unwrap().change_seq();
+    let commit = |next: u64| {
+        let c = n.call(
+            Some(ROOT),
+            "POST",
+            "/_changes/consumers/sink",
+            &format!("{{\"since\": {next}}}"),
+        );
+        assert_eq!(c.status, 200, "{}", c.body);
+    };
+    let first = n.changes("consumer=sink&wait=5000");
+    assert_eq!(events(&first.body).len(), 1, "{}", first.body);
+    commit(first.next.unwrap());
+    let settled = seq();
+    const WAIT: u64 = 300;
+    for round in 0..4 {
+        let t = Instant::now();
+        let a = n.changes(&format!("consumer=sink&wait={WAIT}"));
+        assert_eq!(a.status, 200, "{}", a.body);
+        assert_eq!(a.body, "", "round {round}");
+        assert!(
+            t.elapsed() >= Duration::from_millis(WAIT),
+            "round {round}: woken after {:?} by nothing but a commit",
+            t.elapsed()
+        );
+        commit(a.next.unwrap());
+        assert_eq!(seq(), settled, "round {round}: a commit past nothing wrote");
+    }
+    // A write wakes it, and the line comes once.
+    n.run("put a {t: \"two\"}");
+    let woken = n.changes("consumer=sink&wait=5000");
+    let seen: Vec<_> = events(&woken.body).into_iter().map(|e| e.4).collect();
+    assert_eq!(seen, [Some("two".into())]);
+    commit(woken.next.unwrap());
+    assert_eq!(n.changes("consumer=sink").body, "");
+}
+
 #[test]
 fn a_consumers_cursor_is_on_disk_before_it_is_answered() {
     let path = file("kept");
@@ -457,4 +506,42 @@ fn a_sweep_comes_as_deletes() {
             ("del".to_string(), "s".to_string(), Some(3)),
         ]
     );
+}
+
+/// The sweeper leaves a row a sweep's period past its time before it
+/// deletes it, so a reaper coming by as often reads it with `expired()`
+/// and gives back what it held; swept at the first pass after its time, a
+/// row that lapsed a moment before went unseen.
+#[test]
+fn a_row_past_its_time_waits_a_sweep_for_its_reaper() {
+    let n = start("grace", replication::DEFAULT_BUFFER);
+    n.run("create collection holds (amount int, until timestamp @ttl(1ms))");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    n.run(&format!(
+        "put holds [{{amount: 5, until: {}}}, {{amount: 7, until: 1}}]",
+        now - 1000
+    ));
+    let grace = fenec_http::sweep::GRACE;
+    assert_eq!(
+        fenec_http::sweep::pass_after("test", &n.db, grace),
+        1,
+        "only the one past its time by a sweep's period"
+    );
+    let expired = |n: &Node| {
+        let db = n.db.read().unwrap();
+        let stmt = fenec_ql::parse_one("get holds select amount where expired()").unwrap();
+        let r = db.query(&stmt, &[]).unwrap();
+        r.rows()
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.values[0].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(expired(&n), [fenec_core::value::Value::Int(5)]);
+    assert_eq!(fenec_http::sweep::pass("test", &n.db), 1);
+    assert!(expired(&n).is_empty());
 }

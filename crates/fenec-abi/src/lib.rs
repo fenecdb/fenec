@@ -28,8 +28,10 @@ pub struct Prepared {
 
 /// Why a statement was not answered.
 pub enum Refused {
-    /// The error, and how many of the text's statements ran before it.
-    Error(Error, usize),
+    /// The error, how many of the text's statements ran before it and
+    /// stayed, and -- for a text of several -- which one it stopped at,
+    /// from 0, as a `/batch` answers `at`.
+    Error(Error, usize, Option<usize>),
     /// A json field is handed a list of numbers that came over as `f32`s:
     /// the places of those parameters, written as the answer lists them,
     /// for the caller to send them again as JSON.
@@ -39,7 +41,7 @@ pub enum Refused {
 impl From<Error> for Refused {
     #[inline(always)]
     fn from(e: Error) -> Refused {
-        Refused::Error(e, 0)
+        Refused::Error(e, 0, None)
     }
 }
 
@@ -138,22 +140,28 @@ pub fn exact(
 /// -- land together or not at all, and one refused for collation data puts
 /// back the ones before it, so the page runs the whole text again. A text
 /// with a compact runs a statement at a time, each write on its own a
-/// block. The answer is the last statement's.
+/// block. The answer is the last statement's; a refusal of a text of
+/// several names the statement that stopped it, as a `/batch`'s does: a
+/// ledger's debit and credit are both `set accounts`, and the error alone
+/// could not tell them apart -- the page ran the text's prefixes again,
+/// each ended by a statement that always fails, to find which.
 #[inline(always)]
 pub fn execute(db: &mut Database, p: &Prepared) -> std::result::Result<Response, Refused> {
     let block = p.stmts.len() > 1 && p.stmts.iter().all(|s| s.fits_block());
     if block {
         db.begin()?;
     }
+    let several = p.stmts.len() > 1;
     let mut last = Response::Ok(String::from("empty"));
     for (ran, s) in p.stmts.iter().enumerate() {
+        let at = several.then_some(ran);
         match db.execute_with(s, &p.params) {
             Ok(r) => last = r,
             Err(e) if block => {
                 db.rollback();
-                return Err(Refused::Error(e, 0));
+                return Err(Refused::Error(e, 0, at));
             }
-            Err(e) => return Err(Refused::Error(e, ran)),
+            Err(e) => return Err(Refused::Error(e, ran, at)),
         }
     }
     if block {
@@ -171,11 +179,12 @@ pub fn read_only(p: &Prepared) -> bool {
 /// [`execute`] over statements that only read ([`read_only`]), through
 /// `&Database`: the same answers, under a lock shared with other readers.
 pub fn query(db: &Database, p: &Prepared) -> std::result::Result<Response, Refused> {
+    let several = p.stmts.len() > 1;
     let mut last = Response::Ok(String::from("empty"));
     for (ran, s) in p.stmts.iter().enumerate() {
         match db.query(s, &p.params) {
             Ok(r) => last = r,
-            Err(e) => return Err(Refused::Error(e, ran)),
+            Err(e) => return Err(Refused::Error(e, ran, several.then_some(ran))),
         }
     }
     Ok(last)
@@ -191,7 +200,7 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
             "{{\"kind\":\"error\",\"message\":\"a json field is handed a list of numbers \
              sent over as f32s\",\"exact\":[{places}]}}"
         ),
-        Err(Refused::Error(e, ran)) => refused(e, *ran),
+        Err(Refused::Error(e, ran, at)) => refused(e, *ran, *at),
     }
 }
 
@@ -199,10 +208,17 @@ pub fn answer(r: &std::result::Result<Response, Refused>) -> String {
 /// the module has not been handed, which (`"chunks"`) and how many of the
 /// statements before it ran (`"ran"`, left out when none did): the client
 /// runs one again by itself only when nothing before it had. A native
-/// build carries every chunk, and never names one.
+/// build carries every chunk, and never names one. `at` is the statement
+/// of a text of several that stopped it (`"at"`, from 0).
 #[inline(always)]
-pub fn refused(e: &Error, ran: usize) -> String {
+pub fn refused(e: &Error, ran: usize, at: Option<usize>) -> String {
     let mut out = json::error_to_string(e);
+    if let Some(at) = at {
+        out.pop();
+        out.push_str(",\"at\":");
+        out.push_str(&at.to_string());
+        out.push('}');
+    }
     let missing = collate::take_missing();
     if missing != 0 {
         out.pop();
