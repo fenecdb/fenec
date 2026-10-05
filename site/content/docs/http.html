@@ -64,7 +64,7 @@ POST   /_changes/consumers/C    body: {"since": N} -- make C, or move it
 GET    /_changes/consumers      each consumer, where it is and how far behind
 DELETE /_changes/consumers/C
 GET    /_whoami                 who the server takes the token for, and the rules that apply to it
-GET    /_schema                 the schema as a description (Schema in code)
+GET    /_schema                 the schema as a description (Schema in code); ?as=fenecql: as its statements
 POST   /_schema/plan            body: a description -- what an apply would do; ?mode=follow: what the server lacks
 POST   /_schema/apply           body: a description -- migrations, then what only adds; the server's token
 </pre>

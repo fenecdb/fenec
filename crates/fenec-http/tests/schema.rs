@@ -144,3 +144,28 @@ fn the_schema_is_described_compared_and_applied_by_its_owner() {
     let (status, e) = n.call(ROOT, "POST", "/_schema/apply", "{\"format\":7}");
     assert_eq!(status, 400, "{e}");
 }
+
+#[test]
+fn the_schema_is_described_as_the_statements_that_make_it() {
+    let n = start();
+    let user = n.access.mint(r#"{"sub":"u1"}"#).unwrap();
+    // What the studio shows a collection as: the engine's own text, in a
+    // description `/_schema/plan` takes back as it is.
+    let (status, all) = n.call(ROOT, "GET", "/_schema?as=fenecql", "");
+    assert_eq!(status, 200, "{all}");
+    assert!(all.starts_with(r#"{"format":1,"fenecql":""#), "{all}");
+    assert!(
+        all.contains(r#"create collection todos (title text required, done bool @hash)\n"#),
+        "{all}"
+    );
+    assert!(all.contains("create collection hidden (x int)"), "{all}");
+    let (status, plan) = n.call(ROOT, "POST", "/_schema/plan", &all);
+    assert_eq!(status, 200, "{plan}");
+    assert!(plan.contains(r#""statements":[],"refusals":[]"#), "{plan}");
+    // A scoped token is told of what it reads, and nothing else.
+    let (_, mine) = n.call(&user, "GET", "/_schema?as=fenecql", "");
+    assert_eq!(
+        mine,
+        r#"{"format":1,"fenecql":"create collection todos (title text required, done bool @hash)\n"}"#
+    );
+}

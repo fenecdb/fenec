@@ -597,7 +597,8 @@ impl Router {
     /// GET    /_shard/nodes                     [{name, addr}]
     /// PUT    /_shard/nodes/<n>   {addr, token} add or change a node
     /// DELETE /_shard/nodes/<n>                 refused while it holds tenants
-    /// GET    /_shard/tenants                   [{name, node, state}]
+    /// GET    /_shard/tenants                   [{name, node, state}]; with
+    ///                                       ?bytes, each one's bytes on its node
     /// PUT    /_shard/tenants/<t> [{node, schema}]  place and create; least disk
     ///                                       wins; `schema`, FenecQL text, applied
     ///                                       there before the tenant is answered
@@ -641,7 +642,7 @@ impl Router {
             (Method::Delete, ["nodes", n]) => self.remove_node(n),
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
-            (Method::Get, ["tenants"]) => Ok(self.list_tenants()),
+            (Method::Get, ["tenants"]) => Ok(self.list_tenants(req)),
             (Method::Put, ["tenants", t]) => {
                 self.create(t, field(&body, "node"), field(&body, "schema"))
             }
@@ -769,25 +770,70 @@ impl Router {
         Response::json(200, format!("[{}]", items.join(",")))
     }
 
-    fn list_tenants(&self) -> Response {
-        let dir = self.read_dir();
-        let items: Vec<String> = dir
-            .tenants()
+    /// The directory's tenants; with `?bytes`, each with the bytes it holds
+    /// on its node (`/_admin/sizes`, asked once a node with no lock held),
+    /// which the studio's list of tenants shows. A node that does not
+    /// answer leaves its tenants without a size rather than failing the list.
+    fn list_tenants(&self, req: &Request) -> Response {
+        let sized = req.query.iter().any(|(k, _)| k == "bytes");
+        let (tenants, nodes) = {
+            let dir = self.read_dir();
+            let tenants: Vec<(String, String, bool, Option<String>)> = dir
+                .tenants()
+                .iter()
+                .map(|(name, p)| {
+                    (
+                        name.clone(),
+                        p.node.clone(),
+                        p.state == State::Moving,
+                        dir.replica(name).map(str::to_string),
+                    )
+                })
+                .collect();
+            let nodes: Vec<(String, Node)> = match sized {
+                true => dir
+                    .nodes()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                false => Vec::new(),
+            };
+            (tenants, nodes)
+        };
+        let mut sizes: Vec<(String, String, i64)> = Vec::new();
+        for (node, n) in &nodes {
+            let Ok((200, body)) = self
+                .pool
+                .call(&n.addr, "GET", "/_admin/sizes", &n.token, b"")
+            else {
+                continue;
+            };
+            let Ok(fields) = fenec_core::json::parse_object(&String::from_utf8_lossy(&body)) else {
+                continue;
+            };
+            for (t, v) in fields {
+                if let Value::Int(b) = v {
+                    sizes.push((node.clone(), t, b));
+                }
+            }
+        }
+        let items: Vec<String> = tenants
             .iter()
-            .map(|(name, p)| {
-                let replica = match dir.replica(name) {
+            .map(|(name, node, moving, replica)| {
+                let replica = match replica {
                     Some(r) => format!(",\"replica\":{}", quote(r)),
                     None => String::new(),
                 };
+                let bytes = sizes
+                    .iter()
+                    .find(|(n, t, _)| n == node && t == name)
+                    .map(|(_, _, b)| format!(",\"bytes\":{b}"))
+                    .unwrap_or_default();
                 format!(
-                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}}}",
+                    "{{\"name\":{},\"node\":{},\"state\":\"{}\"{replica}{bytes}}}",
                     quote(name),
-                    quote(&p.node),
-                    if p.state == State::Moving {
-                        "moving"
-                    } else {
-                        "active"
-                    }
+                    quote(node),
+                    if *moving { "moving" } else { "active" }
                 )
             })
             .collect();

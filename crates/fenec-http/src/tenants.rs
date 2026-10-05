@@ -915,6 +915,17 @@ impl Tenants {
 
     /// `(name, footprint)` of the open tenants and the bytes on disk of all
     /// of them -- what a router places new tenants by.
+    /// The bytes a tenant holds on disk: its file and the sync log beside
+    /// it, where one is kept.
+    pub fn disk(&self, name: &str) -> u64 {
+        let p = self.path(name);
+        [fenec_core::fs::beside(&p, "sync"), p]
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
+    }
+
     pub fn stats(&self) -> Stats {
         let mut open: Vec<(String, usize, bool)> = self
             .open_tenants()
@@ -928,14 +939,7 @@ impl Tenants {
             .map(|t| t.read().unlinked())
             .sum();
         let names = self.names();
-        // Each file and the sync log beside it, where one is kept.
-        let disk = names
-            .iter()
-            .map(|n| self.path(n))
-            .flat_map(|p| [fenec_core::fs::beside(&p, "sync"), p])
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
+        let disk = names.iter().map(|n| self.disk(n)).sum();
         Stats {
             tenants: names.len(),
             disk,

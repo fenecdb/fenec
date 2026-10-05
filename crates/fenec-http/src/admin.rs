@@ -4,6 +4,7 @@
 //! GET    /_admin/stats                 {tenants, disk, memory, open}: flat
 //! GET    /_admin/open                  the open tenants: name, memory, frozen
 //! GET    /_admin/tenants               names on disk
+//! GET    /_admin/sizes                 {"<tenant>": bytes on disk, ...}
 //! PUT    /_admin/tenants/<t>           create an empty tenant       201 / 409
 //! POST   /_admin/tenants/<t>/schema    a description, applied as /_schema/apply
 //!                                      applies it: what a router's create with
@@ -48,6 +49,7 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         (Method::Get, ["stats"]) => Ok(stats(tenants)),
         (Method::Get, ["open"]) => Ok(open(tenants)),
         (Method::Get, ["tenants"]) => Ok(names(tenants)),
+        (Method::Get, ["sizes"]) => Ok(sizes(tenants)),
         (Method::Put, ["tenants", t]) => tenants
             .create(t)
             .map(|_| Response::json(201, format!("{{\"created\":\"{t}\"}}"))),
@@ -213,6 +215,23 @@ fn open(tenants: &Tenants) -> Response {
         ));
     }
     out.push(']');
+    Response::json(200, out)
+}
+
+/// `{"<tenant>": bytes, ...}`: each tenant's file and sync log, which a
+/// router joins into its list of tenants for the studio. Read from the file
+/// system's sizes, so no tenant is opened for it.
+fn sizes(tenants: &Tenants) -> Response {
+    let mut out = String::from("{");
+    for (i, n) in tenants.names().iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        fenec_core::json::escape_into(&mut out, n);
+        out.push(':');
+        out.push_str(&tenants.disk(n).to_string());
+    }
+    out.push('}');
     Response::json(200, out)
 }
 
