@@ -516,6 +516,7 @@ or a read model — start the server with <code>--cdc</code> and read
 curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
 # Content-Type: application/x-ndjson
 # Fenec-Next: 5
+# Fenec-Seq: 5
 #
 # {"seq":1,"at":1790784252138,"collection":"a","op":"create"}
 # {"seq":2,"at":1790784252158,"collection":"a","op":"put","id":1,"doc":{"id":1,"n":1,"t":"x"}}
@@ -528,6 +529,8 @@ curl -i 'http://127.0.0.1:8080/_changes?since=0&amp;limit=1000&amp;wait=10000'
   <li><b>Send <code>Fenec-Next</code> back as the next <code>since</code></b>
     and nothing is missed or seen twice.</li>
   <li><b>Only writes already on disk</b> are handed out.</li>
+  <li><b><code>Fenec-Seq</code> is the last write the database holds:</b>
+    when <code>Fenec-Next</code> has reached it, you have every write.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -542,6 +545,16 @@ all, one JSON object a line, from any write the server still keeps.</p>
   <code>Fenec-Next</code> the last one in the answer: sent back as the next
   <code>since</code>, nothing is missed or had twice. Keep it where your
   consumer keeps its own state, and commit the two together.</li>
+  <li><code>Fenec-Seq</code> on every answer is the last write the database
+  holds, on disk or not yet, the writes the stream leaves out (a consumer's
+  cursor, an idempotency key) among them. An answer whose
+  <code>Fenec-Next</code> is that has every write there is: a worker that
+  catches up before it serves knows it at once, where an empty page alone
+  could not tell it from one whose writes are not on disk yet under
+  <code>--sync 250</code>, and waited out pages to be sure. A
+  <code>Fenec-Next</code> behind it has writes to come: read again with
+  <code>wait</code>. A client that notes <code>Fenec-Seq</code> for
+  <code>Fenec-After</code> reads a replica from there on.</li>
   <li>A batch's writes are one record on disk and come together,
   numbered one by one; a cursor inside one goes on after the write it
   names.</li>

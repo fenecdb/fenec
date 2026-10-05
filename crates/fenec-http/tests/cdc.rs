@@ -68,6 +68,8 @@ fn start(name: &str, buffer: usize) -> Node {
 struct Answer {
     status: u16,
     next: Option<u64>,
+    /// `Fenec-Seq`: the last write the database holds.
+    seq: Option<u64>,
     body: String,
 }
 
@@ -86,13 +88,15 @@ impl Node {
         let mut out = String::new();
         s.read_to_string(&mut out).unwrap();
         let (head, body) = out.split_once("\r\n\r\n").unwrap();
-        let next = head
-            .lines()
-            .find_map(|l| l.strip_prefix("Fenec-Next: "))
-            .map(|v| v.trim().parse().unwrap());
+        let header = |name: &str| {
+            head.lines()
+                .find_map(|l| l.strip_prefix(name))
+                .map(|v| v.trim().parse().unwrap())
+        };
         Answer {
             status: head[9..12].parse().unwrap(),
-            next,
+            next: header("Fenec-Next: "),
+            seq: header("Fenec-Seq: "),
             body: body.to_string(),
         }
     }
@@ -244,6 +248,34 @@ fn a_cursor_the_feed_no_longer_holds_is_refused_with_where_to_start() {
     assert_eq!(got.last().map(|e| e.0), Some(201));
     // Past the last write: someone else's cursor, or this database restored.
     assert_eq!(n.changes("since=9999").status, 409);
+}
+
+/// `Fenec-Seq` is the last write the database holds, so a reader knows at
+/// once whether it has every write there is: an empty page whose
+/// `Fenec-Next` is behind it has writes still to come -- here one not on
+/// disk yet, which the stream hands over once an fsync covers it.
+#[test]
+fn an_answer_says_where_the_writes_end() {
+    let n = start("seq", replication::DEFAULT_BUFFER);
+    n.run("create collection a (t text)");
+    n.run("put a [{t: \"1\"}, {t: \"2\"}]");
+    let a = n.changes("since=0");
+    assert_eq!((a.next, a.seq), (Some(3), Some(3)), "{}", a.body);
+    // Caught up: an empty page at the end says so too.
+    let a = n.changes("since=3");
+    assert_eq!((a.body.as_str(), a.next, a.seq), ("", Some(3), Some(3)));
+    // A write in the database, not yet on disk: not in the stream, and
+    // not yet read.
+    n.db.write()
+        .unwrap()
+        .execute(&fenec_ql::parse_one("put a {t: \"3\"}").unwrap())
+        .unwrap();
+    let a = n.changes("since=3");
+    assert_eq!((a.body.as_str(), a.next, a.seq), ("", Some(3), Some(4)));
+    n.db.write().unwrap().sync().unwrap();
+    let a = n.changes("since=3");
+    assert_eq!(events(&a.body).len(), 1, "{}", a.body);
+    assert_eq!((a.next, a.seq), (Some(4), Some(4)));
 }
 
 #[test]

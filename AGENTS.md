@@ -1005,7 +1005,13 @@ an image) and has the engine read them out a write at a time
 them, each document by its collection's schema as the database knows it or
 as a create among the records made it. `since` is the last write a
 consumer has and `Fenec-Next` the last one an answer holds; a cursor inside
-a block's record goes on after the write it names. Only what an fsync
+a block's record goes on after the write it names. `Fenec-Seq` on every
+answer is the last write the database holds (`Feed::seq`, read after the
+page, so never short of it), on disk or not and of the collections the
+stream leaves out: a `Fenec-Next` that has reached it has every write
+there is, where an empty page alone could not tell a consumer that had
+caught up from one whose writes were not on disk yet, and Kestrel's
+worker waited out 600 ms of empty pages to be sure. Only what an fsync
 covered is handed over, a cursor the feed no longer reaches is answered 410
 with the first `since` it does -- never with writes missing -- one past the
 last write 409, and `wait` waits on the feed's `Condvar` for a write. A
