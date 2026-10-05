@@ -275,7 +275,9 @@ fn lex_with(src: &str, vectors: bool) -> Result<Vec<Token>> {
             // Not inside an object literal, two braces down: only a json
             // field holds one, and its numbers stay as they are written.
             '[' if vectors && braces < 2 => {
-                let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in"));
+                // `in [..]` and `facet f ranges [..]` keep their integers and
+                // `f64`s: a bound past 2^24 is not an `f32`.
+                let after_in = matches!(out.last(), Some(Token { tok: Tok::Ident(w), .. }) if w.eq_ignore_ascii_case("in") || w.eq_ignore_ascii_case("ranges"));
                 match !after_in {
                     true => match numbers_at(src, b, i) {
                         Some((v, end)) => {
