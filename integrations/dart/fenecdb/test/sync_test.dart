@@ -253,6 +253,53 @@ void main() {
     db.close();
   });
 
+  test('a batch lands whole, says where it stopped, and lands once under a key', () async {
+    final s = await server('batch');
+    final db = Fenec.connect(s.url);
+    final tasks = db.from('tasks');
+    final out = await db.batch([
+      tasks.toInsert({'key': 'd', 'title': 'four'}),
+      tasks.where('key', 'a').toUpdate({'priority': 9}, require: 1),
+      tasks.where('priority', '>=', 5).order('priority').select(['key']).toFenecQL(),
+    ]);
+    expect(out.results, hasLength(3));
+    expect(out.results[0].affected, 1);
+    expect([for (final r in out.results[2].rows) r['key']], ['b', 'a']);
+    expect(out.seq, isNotNull);
+    expect(out.seq, db.seq);
+    expect(out.replayed, isFalse);
+
+    await expectLater(
+      db.batch([
+        tasks.toInsert({'key': 'e', 'title': 'five'}),
+        tasks.where('key', 'nobody').toDelete(require: 1),
+      ]),
+      throwsA(isA<FenecException>()
+          .having((e) => e.code, 'code', FenecCode.unmet)
+          .having((e) => e.status, 'status', 412)
+          .having((e) => e.at, 'at', 1)
+          .having((e) => e.completed, 'completed', 0)),
+    );
+    expect(await tasks.count(), 4);
+
+    final stmts = [
+      tasks.toInsert({'key': 'f', 'title': 'six'})
+    ];
+    expect((await db.batch(stmts, idempotencyKey: 'batch-1')).replayed, isFalse);
+    expect((await db.batch(stmts, idempotencyKey: 'batch-1')).replayed, isTrue);
+    expect(await tasks.count(), 5);
+    // A copy keys every write it runs, the builder's too.
+    final keyed = db.withIdempotencyKey('put-1');
+    expect(await keyed.from('tasks').insert({'key': 'g'}), 1);
+    expect(await keyed.from('tasks').insert({'key': 'g'}), 1);
+    expect(await tasks.count(), 6);
+    await expectLater(
+      keyed.execute('put tasks {key: "i"}'),
+      throwsA(isA<FenecException>().having((e) => e.status, 'status', 422).having((e) => e.at, 'at', isNull)),
+    );
+    db.close();
+  });
+
   test('a server answers marks in the row and facets beside the rows', () async {
     final s = await server('search');
     await s.run('create collection docs (body text @text, kind text)');

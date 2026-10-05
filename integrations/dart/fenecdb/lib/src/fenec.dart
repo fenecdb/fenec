@@ -26,7 +26,25 @@ class FenecException implements Exception {
   /// The parameters the library asked for again as JSON (`exact`).
   final List<int>? exact;
 
-  FenecException(this.code, this.message, [this.exact]);
+  /// The HTTP status a server refused with ([FenecRemote]): 422 is an
+  /// idempotency key sent with another request. Null for the library's own.
+  final int? status;
+
+  /// The statement of a [FenecRemote.batch] that stopped it, from 0: the
+  /// write whose `require` was not met, the put whose id was taken.
+  final int? at;
+
+  /// How many statements of a failed batch stayed applied: 0, since a batch
+  /// lands whole, but for one holding a `compact`.
+  final int? completed;
+
+  FenecException(this.code, this.message, [this.exact])
+      : status = null,
+        at = null,
+        completed = null;
+
+  /// A server's refusal: its status and, for a batch, where it stopped.
+  FenecException.http(this.code, this.message, {required int this.status, this.at, this.completed}) : exact = null;
 
   @override
   String toString() => 'FenecException(${code.name}): $message';
@@ -378,6 +396,18 @@ class Fenec {
   /// The file written anew as an image of the database, graphs and all: the
   /// next open links nothing.
   Future<void> checkpoint() async => _answer(await _worker.call('checkpoint', [_handle]));
+
+  /// Builds the hash, text, ordered and sparse indexes an open leaves for
+  /// their first read, so the first search does not pay for its index (a
+  /// `@text` index of 100 000 products: 141 ms): those [only] names --
+  /// collections and `collection.field`s -- or every one. Each under the
+  /// read lock on its own, on the database's isolate, so reads go on beside
+  /// it. Answers how many it built; call it after the open, as the app
+  /// starts.
+  Future<int> warm([List<String> only = const []]) async {
+    final out = _answer(await _worker.call('warm', [_handle, only.join(',')]));
+    return (jsonDecode(out) as Map<String, Object?>)['built'] as int? ?? 0;
+  }
 
   /// Saves the graphs, syncs and lets the file go; the live queries stop.
   /// A close called while another runs waits for it: returning at once, it

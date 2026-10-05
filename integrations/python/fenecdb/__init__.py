@@ -28,6 +28,14 @@ read `facet` counts, which come back beside the rows as `rows.facets`:
               .match("title", "phone").facet("brand", top=10).limit(20).rows())
     rows.facets["brand"]   # [FacetCount(value="acme", count=12), ...]
 
+A retry after a timeout cannot tell whether the write ran; under an
+`Idempotency-Key` it runs once, and the second answer is the first one
+kept (`replayed`). One key per write -- the same key with another request
+is refused (422):
+
+    db.batch([debit, credit], idempotency_key=transfer_id)
+    db.with_idempotency_key(order_id).collection("orders").insert(order)
+
 `AsyncClient` is the same over asyncio, for an event loop a blocking
 request would stall:
 
@@ -83,11 +91,19 @@ __all__ = [
 
 class FenecError(Exception):
     """A statement the server refused: its message, and the HTTP status --
-    0 for one the query builder refused before sending anything."""
+    0 for one the query builder refused before sending anything. A batch
+    that stopped also says which statement stopped it, from 0 (`at`: the
+    write whose `require` was not met, 412, or whose id was taken, 409),
+    and how many statements stayed applied (`completed`: 0, since a batch
+    lands whole, but for one holding a `compact`); both None otherwise."""
 
-    def __init__(self, message: str, status: int):
+    def __init__(
+        self, message: str, status: int, *, at: int | None = None, completed: int | None = None
+    ):
         super().__init__(message)
         self.status = status
+        self.at = at
+        self.completed = completed
 
 
 class SchemaError(FenecError):
@@ -107,6 +123,18 @@ class Changes(NamedTuple):
 
     writes: list
     next: int
+
+
+class _Shared:
+    """What a client and the copies `with_idempotency_key` makes of it
+    share, as Go's and .NET's copies share theirs: the change the last
+    write left the database at, and whether its answer was replayed."""
+
+    __slots__ = ("seq", "replayed")
+
+    def __init__(self) -> None:
+        self.seq: int | None = None
+        self.replayed = False
 
 
 class Client:
@@ -129,14 +157,43 @@ class Client:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = timeout
-        # The change the last write left the database at (`Fenec-Seq`): a
-        # read on a replica passed it as `after` waits for that write.
-        self.seq: int | None = None
+        self.idempotency_key: str | None = None
+        self._shared = _Shared()
         self._host = parts.hostname or "127.0.0.1"
         self._port = parts.port or (443 if parts.scheme == "https" else 80)
         self._tls = parts.scheme == "https"
         self._base = parts.path.rstrip("/")
         self._local = threading.local()
+
+    @property
+    def seq(self) -> int | None:
+        """The change the last write through this client, or a copy of it,
+        left the database at (`Fenec-Seq`): a read on a replica passed it as
+        `after` waits for that write."""
+        return self._shared.seq
+
+    @seq.setter
+    def seq(self, value: int | None) -> None:
+        self._shared.seq = value
+
+    @property
+    def replayed(self) -> bool:
+        """Whether the last write's answer was the one kept for its
+        `Idempotency-Key`: the write had run before, and did not again."""
+        return self._shared.replayed
+
+    def with_idempotency_key(self, key: str) -> "Client":
+        """A copy of the client whose writes -- `query`, `batch` and the
+        builder's -- carry `key` as their `Idempotency-Key`: sent again
+        after a timeout, a write runs once. It shares this client's
+        connections and `seq`. One key per write; the same key with
+        another request is refused (422)."""
+        if not isinstance(key, str) or not key:
+            raise ValueError("an idempotency key is a text, not empty")
+        copy = object.__new__(Client)
+        copy.__dict__.update(self.__dict__)
+        copy.idempotency_key = key
+        return copy
 
     def collection(self, name: str) -> Query:
         """The query builder over collection `name`: chain `select`, `where`,
@@ -145,23 +202,46 @@ class Client:
         return Query(name, self)
 
     def query(
-        self, fenecql: str, params: Sequence[Any] | None = None, *, after: int | None = None
+        self,
+        fenecql: str,
+        params: Sequence[Any] | None = None,
+        *,
+        after: int | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
         """Runs one FenecQL statement. Values go in as `$1`, `$2`, ... and
         never into the text. With `after` -- a primary's `seq` -- a replica
-        answers once it holds that write. A read answers its rows, a list;
-        one with a `facet` clause a `Rows`, the counts as its `facets`."""
+        answers once it holds that write. With `idempotency_key` a write
+        runs once however often it is sent (`replayed`). A read answers its
+        rows, a list; one with a `facet` clause a `Rows`, the counts as its
+        `facets`."""
         body = {"query": fenecql, "params": list(params or [])}
-        return _faceted(self._post("/query", json.dumps(body).encode(), "application/json", after))
+        return _faceted(
+            self._post(
+                "/query", json.dumps(body).encode(), "application/json", after, key=idempotency_key
+            )
+        )
 
-    def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
+    def batch(
+        self,
+        statements: Iterable[tuple[str, Sequence[Any]]],
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
         """Runs statements in order under one write lock, as one block:
         their writes -- a create, a drop or a `create index` among them --
-        all land or, at the first error, none of them do. A batch holding a
+        all land or, at the first error, none of them do: a `FenecError`
+        whose `at` is the statement that stopped it. A batch holding a
         `compact` runs each statement on its own, and what ran before an
-        error stays."""
+        error stays (`completed`). Answers `{"ok": n, "results": [...]}`,
+        a statement's `{"affected": n}` or `{"rows": [...]}` each, and
+        leaves the change it wrote at in `seq`. With `idempotency_key` it
+        lands once however often it is sent (`replayed`); a batch of reads
+        alone takes no key."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
-        return self._post("/batch", "\n".join(lines).encode(), "application/x-ndjson")
+        return self._post(
+            "/batch", "\n".join(lines).encode(), "application/x-ndjson", key=idempotency_key
+        )
 
     def schema(
         self, fenecql: str, migrations: Sequence[Any] | None = None, *, migrate: bool = False
@@ -245,24 +325,37 @@ class Client:
             raise
 
     def _post(
-        self, path: str, body: bytes, content_type: str, after: int | None = None, accept: int = 0
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        after: int | None = None,
+        accept: int = 0,
+        key: str | None = None,
     ) -> Any:
         headers = {"Content-Type": content_type}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if after is not None:
             headers["Fenec-After"] = str(after)
-        status, seq, raw = self._send("POST", self._base + path, body, headers)
-        if seq is not None and 200 <= status < 300:
-            self.seq = int(seq)
+        key = key or self.idempotency_key
+        if key:
+            headers["Idempotency-Key"] = key
+        status, seq, replayed, raw = self._send("POST", self._base + path, body, headers)
+        if 200 <= status < 300:
+            # A replayed batch's answer carries no `Fenec-Seq`: `seq` stays
+            # where the last write that sent one left it.
+            if seq is not None:
+                self.seq = int(seq)
+            self._shared.replayed = replayed
         # An answer that is no error: a schema's refusals (409).
         if status == accept:
             return json.loads(raw)
         return _answer(status, raw)
 
     def _send(self, method: str, path: str, body: bytes, headers: dict) -> tuple:
-        """A request over this thread's connection: its status, `Fenec-Seq`
-        and body. A kept connection the server closed while it was idle is
+        """A request over this thread's connection: its status, `Fenec-Seq`,
+        whether it was replayed (`Idempotent-Replayed`) and body. A kept connection the server closed while it was idle is
         found so before the request goes -- its socket reads as ready, the
         end of the stream -- and a new one is opened in its place. Nothing
         is sent again once sent: a write the server read and answered on a
@@ -286,7 +379,8 @@ class Client:
             self._local.conn = None
         else:
             self._local.conn = conn
-        return resp.status, resp.getheader("Fenec-Seq"), raw
+        replayed = resp.getheader("Idempotent-Replayed") == "true"
+        return resp.status, resp.getheader("Fenec-Seq"), replayed, raw
 
     def _connect(self) -> http.client.HTTPConnection:
         if self._tls:
@@ -336,11 +430,14 @@ def _answer(status: int, raw: bytes) -> Any:
     """A response's JSON, or the error it says, as `Client` raises it."""
     if 200 <= status < 300:
         return json.loads(raw) if raw else None
+    at = completed = None
     try:
-        message = json.loads(raw).get("error", raw.decode(errors="replace"))
+        body = json.loads(raw)
+        message = body.get("error", raw.decode(errors="replace"))
+        at, completed = body.get("at"), body.get("completed")
     except (ValueError, AttributeError):
         message = raw.decode(errors="replace")
-    raise FenecError(message, status)
+    raise FenecError(message, status, at=at, completed=completed)
 
 
 class AsyncClient:
@@ -370,27 +467,66 @@ class AsyncClient:
         self._port = parts.port or (443 if parts.scheme == "https" else 80)
         self._tls = ssl.create_default_context() if parts.scheme == "https" else None
         self._base = parts.path.rstrip("/")
-        self._conn: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
-        self._lock = asyncio.Lock()
+        self.idempotency_key: str | None = None
+        # The connection, its lock, `seq` and `replayed`, shared with the
+        # copies `with_idempotency_key` makes: one connection still.
+        self._s = _AsyncShared()
+
+    @property
+    def seq(self) -> int | None:
+        """The change the last write left the database at, as `Client.seq`."""
+        return self._s.seq
+
+    @property
+    def replayed(self) -> bool:
+        """Whether the last write's answer was replayed, as `Client.replayed`."""
+        return self._s.replayed
+
+    def with_idempotency_key(self, key: str) -> "AsyncClient":
+        """A copy whose writes carry `key`, as `Client.with_idempotency_key`,
+        over this client's connection."""
+        if not isinstance(key, str) or not key:
+            raise ValueError("an idempotency key is a text, not empty")
+        copy = object.__new__(AsyncClient)
+        copy.__dict__.update(self.__dict__)
+        copy.idempotency_key = key
+        return copy
 
     def collection(self, name: str) -> AsyncQuery:
         """The query builder, as `Client.collection`, its endpoints awaited."""
         return AsyncQuery(name, self)
 
-    async def query(self, fenecql: str, params: Sequence[Any] | None = None) -> Any:
+    async def query(
+        self,
+        fenecql: str,
+        params: Sequence[Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
         """One FenecQL statement, as `Client.query`."""
         body = {"query": fenecql, "params": list(params or [])}
-        return _faceted(await self._post("/query", json.dumps(body).encode(), "application/json"))
+        return _faceted(
+            await self._post(
+                "/query", json.dumps(body).encode(), "application/json", idempotency_key
+            )
+        )
 
-    async def batch(self, statements: Iterable[tuple[str, Sequence[Any]]]) -> Any:
+    async def batch(
+        self,
+        statements: Iterable[tuple[str, Sequence[Any]]],
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
         """Statements under one write lock, as one block, as `Client.batch`."""
         lines = [json.dumps({"query": q, "params": list(p)}) for q, p in statements]
-        return await self._post("/batch", "\n".join(lines).encode(), "application/x-ndjson")
+        return await self._post(
+            "/batch", "\n".join(lines).encode(), "application/x-ndjson", idempotency_key
+        )
 
     async def close(self) -> None:
-        if self._conn:
-            _, writer = self._conn
-            self._conn = None
+        if self._s.conn:
+            _, writer = self._s.conn
+            self._s.conn = None
             writer.close()
             try:
                 await writer.wait_closed()
@@ -403,16 +539,23 @@ class AsyncClient:
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    async def _post(self, path: str, body: bytes, content_type: str) -> Any:
-        async with self._lock:
+    async def _post(
+        self, path: str, body: bytes, content_type: str, key: str | None = None
+    ) -> Any:
+        key = key or self.idempotency_key
+        async with self._s.lock:
             # A kept connection the server closed meanwhile fails on its first
             # use: the request goes once more over a fresh one. A request
             # that failed over a fresh one says why.
-            for fresh in (self._conn is None, True):
+            for fresh in (self._s.conn is None, True):
                 try:
-                    status, raw = await asyncio.wait_for(
-                        self._exchange(path, body, content_type), self.timeout
+                    status, headers, raw = await asyncio.wait_for(
+                        self._exchange(path, body, content_type, key), self.timeout
                     )
+                    if 200 <= status < 300:
+                        if "fenec-seq" in headers:
+                            self._s.seq = int(headers["fenec-seq"])
+                        self._s.replayed = headers.get("idempotent-replayed") == "true"
                     return _answer(status, raw)
                 except (ConnectionError, asyncio.IncompleteReadError, OSError):
                     await self.close()
@@ -423,12 +566,14 @@ class AsyncClient:
                     raise
             raise AssertionError("unreachable")
 
-    async def _exchange(self, path: str, body: bytes, content_type: str) -> tuple[int, bytes]:
-        if self._conn is None:
-            self._conn = await asyncio.open_connection(
+    async def _exchange(
+        self, path: str, body: bytes, content_type: str, key: str | None
+    ) -> tuple[int, dict, bytes]:
+        if self._s.conn is None:
+            self._s.conn = await asyncio.open_connection(
                 self._host, self._port, ssl=self._tls, server_hostname=self._host if self._tls else None
             )
-        reader, writer = self._conn
+        reader, writer = self._s.conn
         head = [
             f"POST {self._base}{path} HTTP/1.1",
             f"Host: {self._host}:{self._port}",
@@ -438,6 +583,8 @@ class AsyncClient:
         ]
         if self.token:
             head.append(f"Authorization: Bearer {self.token}")
+        if key:
+            head.append(f"Idempotency-Key: {key}")
         writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + body)
         await writer.drain()
 
@@ -457,10 +604,22 @@ class AsyncClient:
             await reader.readuntil(b"\r\n")
         else:
             raw = await reader.read()
-            self._conn = None
-        if headers.get("connection", "").lower() == "close" and self._conn:
+            self._s.conn = None
+        if headers.get("connection", "").lower() == "close" and self._s.conn:
             await self.close()
-        return status, raw
+        return status, headers, raw
+
+
+class _AsyncShared:
+    """An `AsyncClient`'s connection and what its copies share with it."""
+
+    __slots__ = ("conn", "lock", "seq", "replayed")
+
+    def __init__(self) -> None:
+        self.conn: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
+        self.lock = asyncio.Lock()
+        self.seq: int | None = None
+        self.replayed = False
 
 
 def placeholders(start: int, n: int) -> str:

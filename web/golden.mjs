@@ -279,6 +279,15 @@ c('a negative facet top is refused', docs, ['facet', 'brand', { top: -1 }], Q);
 c('a facet name is checked', docs, ['facet', 'brand; del docs'], Q);
 c('facet takes no aggregate', ['from', 'orders'], ['select', 'status', 'count(*)'], ['group', 'status'], ['facet', 'status'], Q);
 c('delete takes no facet', docs, ['where', 'a', 1], ['facet', 'b'], ['toDelete']);
+// A facet's own conditions left out, and ranges of a number.
+c('a disjunctive facet', docs, ['where', 'brand', 'in', ['acme', 'zeta']], ['where', 'year', 2024], ['facet', 'brand', { top: 10, disjunctive: true }], ['facet', 'color'], ['limit', 20], Q);
+c('a range facet', docs, ['where', 'year', 2024], ['facet', 'price', { ranges: [0, 25, 50.5, 100] }], ['limit', 0], Q);
+c('a disjunctive range facet', docs, ['where', 'price', '>=', 50], ['facet', 'price', { ranges: [-10, 0, 50, 1000], disjunctive: true }], ['count']);
+c('range bounds must rise', docs, ['facet', 'price', { ranges: [0, 50, 50] }], Q);
+c('range bounds are numbers', docs, ['facet', 'price', { ranges: [0, '50'] }], Q);
+c('a range facet takes two bounds', docs, ['facet', 'price', { ranges: [5] }], Q);
+c('a range facet takes no top', docs, ['facet', 'price', { top: 3, ranges: [0, 5] }], Q);
+c('disjunctive is a boolean', docs, ['facet', 'brand', { disjunctive: 'yes' }], Q);
 
 // Aggregates and group.
 c('aggregates grouped, ordered by one', ['from', 'orders'], ['select', 'status', 'count(*)', 'SUM(total)', 'avg(total)'], ['where', 'year', 2024], ['group', 'status'], ['order', 'sum(total)', 'desc'], ['limit', 3], Q);

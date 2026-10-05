@@ -6,10 +6,15 @@
 export { FenecError, FenecHttp, Query, and, connect, expr, from, inc, not, or, raw } from './fenec.js';
 export type {
   Aggregate,
+  BatchItem,
+  BatchResult,
+  BatchStatement,
   Bytes,
   Collation,
   Cond,
   Exec,
+  FacetCount,
+  Facets,
   Fields,
   HttpOptions,
   Insert,
@@ -23,6 +28,7 @@ export type {
   Relations,
   RelationRef,
   Row,
+  Rows,
   Schema,
   SchemaDescription,
   SchemaInfo,
@@ -42,4 +48,5 @@ export type {
   VectorKey,
   Where,
   Writable,
+  WriteOptions,
 } from './fenec.js';

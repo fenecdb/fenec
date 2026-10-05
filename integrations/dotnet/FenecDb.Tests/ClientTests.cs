@@ -133,7 +133,7 @@ public sealed class ClientTests(Servers servers)
         await accounts.InsertAsync(new Dictionary<string, object?> { ["name"] = "a", ["balance"] = 10 });
         var e = await Assert.ThrowsAsync<FenecException>(() =>
             accounts.Where("name", "=", "nobody").UpdateAsync(new { balance = 0 }, require: 1));
-        Assert.Equal((412, "unmet"), (e.Status, e.Code));
+        Assert.Equal((412, "unmet", null), (e.Status, e.Code, e.At));
         Assert.Contains("requires 1", e.Message);
         var met = await accounts.Where("name", "=", "a").UpdateAsync(new { balance = 5 }, require: 1);
         Assert.Equal(1, met.Affected);
@@ -142,7 +142,7 @@ public sealed class ClientTests(Servers servers)
         var (debit, debitParams) = accounts.Where("name", "=", "a").ToUpdate(new { balance = 0 }, require: 1);
         var (gone, goneParams) = accounts.Where("name", "=", "nobody").ToDelete(require: 1);
         e = await Assert.ThrowsAsync<FenecException>(() => db.BatchAsync([new(debit, debitParams), new(gone, goneParams)]));
-        Assert.Equal((412, "unmet", 0), (e.Status, e.Code, e.Completed));
+        Assert.Equal((412, "unmet", 0, 1), (e.Status, e.Code, e.Completed, e.At));
         var rows = await db.QueryAsync($"get {name} select balance");
         Assert.Equal([5L], rows.Select(r => r.GetProperty("balance").GetInt64()));
     }
@@ -168,7 +168,7 @@ public sealed class ClientTests(Servers servers)
             new($"del {name} where n = 1"),
             new($"put {name} {{nofield: 1}}"),
         ]));
-        Assert.Equal((404, 0), (e.Status, e.Completed));
+        Assert.Equal((404, 0, 2), (e.Status, e.Completed, e.At));
         var rows = await db.QueryAsync($"get {name} select t order n");
         Assert.Equal(["a", "b"], rows.Select(r => r.GetProperty("t").GetString()));
     }
@@ -231,6 +231,15 @@ public sealed class ClientTests(Servers servers)
         Assert.Equal(1, count[0].GetProperty("count").GetInt32());
         var e = await Assert.ThrowsAsync<FenecException>(() => keyed.ExecAsync($"put {name} {{t: $1}}", ["another"]));
         Assert.Equal((422, "key_reused"), (e.Status, e.Code));
+
+        // A batch under a key of its own lands once as well.
+        var batch = db.WithIdempotencyKey(name + "-2");
+        Statement[] stmts = [new($"put {name} {{t: $1}}", ["b1"]), new($"put {name} {{t: $1}}", ["b2"])];
+        var b1 = await batch.BatchAsync(stmts);
+        var b2 = await batch.BatchAsync(stmts);
+        Assert.Equal((false, true, 2), (b1.Replayed, b2.Replayed, b2.Ok));
+        count = await db.QueryAsync($"get {name} count");
+        Assert.Equal(3, count[0].GetProperty("count").GetInt32());
     }
 
     [Fact]

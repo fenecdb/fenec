@@ -1156,6 +1156,34 @@ test('collate und on wasm is Intl.Collator("und") in every script, handed the da
 // Highlights are UTF-16 offsets: what a JavaScript string's `slice` takes,
 // past an emoji and a Han character outside the first plane; the facets
 // count every matched row, whatever the page, and come back on the rows.
+// A shop's sidebar: the brands counted as though none were chosen, the
+// prices by band out of the ordered index -- in the page as on a server.
+test('disjunctive and range facets on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
+  const { Fenec } = await import('./fenec.js');
+  const db = await Fenec.open(wasm);
+  db.run('create collection p (brand text @hash, cat text @hash, price int @sorted)');
+  await db.from('p').insert([
+    { brand: 'acme', cat: 'tents', price: 900 },
+    { brand: 'acme', cat: 'tents', price: 3000 },
+    { brand: 'nova', cat: 'tents', price: 6000 },
+    { brand: 'zeta', cat: 'tents', price: 12000 },
+    { brand: 'zeta', cat: 'lamps', price: 100 },
+  ]);
+  const rows = await db
+    .from('p')
+    .where('cat', 'tents')
+    .where('brand', 'acme')
+    .facet('brand', { disjunctive: true })
+    .facet('price', { ranges: [0, 2500, 5000, 10000] })
+    .limit(10)
+    .rows();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.facets, {
+    brand: [{ value: 'acme', count: 2 }, { value: 'nova', count: 1 }, { value: 'zeta', count: 1 }],
+    price: [{ value: [0, 2500], count: 1 }, { value: [2500, 5000], count: 1 }, { value: [5000, 10000], count: 0 }],
+  });
+});
+
 test('highlight, snippet and facet on wasm', { skip: wasm ? false : 'no web/fenec.wasm (make wasm)' }, async () => {
   const { Fenec } = await import('./fenec.js');
   const db = await Fenec.open(wasm);

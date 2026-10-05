@@ -138,6 +138,21 @@ class FenecTest {
         db.close()
     }
 
+    /** An open leaves a `@text` index for its first read; [Fenec.warm] builds it beforehand, once. */
+    @Test
+    fun warmBuildsWhatAnOpenLeft() = runBlocking {
+        val path = scratch()
+        var db = Fenec.openAsync(path)
+        db.execute("create collection docs (body text @text)")
+        db.execute("""put docs [{body: "rust is fast"}, {body: "go is simple"}]""")
+        db.close()
+        db = Fenec.openAsync(path)
+        assertEquals(1, db.warm(listOf("docs")))
+        assertEquals(listOf("rust is fast"), db.from("docs").select("body").match("body", "rust").rows().map { it.string("body") })
+        assertEquals(0, db.warm())
+        db.close()
+    }
+
     @Test
     fun manyCoroutinesShareOneDatabase() = runBlocking {
         val db = Fenec.open(scratch())

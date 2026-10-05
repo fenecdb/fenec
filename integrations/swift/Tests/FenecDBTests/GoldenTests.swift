@@ -95,7 +95,11 @@ import Testing
             return try q.mark(
                 snippet: a[0].string!, words: a[1].int!, ellipsis: opt(a, 2, "ellipsis"), pre: opt(a, 2, "pre"),
                 post: opt(a, 2, "post"))
-        case ("facet", _): return try q.facet(a[0].string!, top: opt(a, 1, "top")?.int)
+        // The options as the file holds them, a bound that is no number too.
+        case ("facet", _):
+            return try q.facet(
+                a[0].string!, top: opt(a, 1, "top")?.int, rangeValues: opt(a, 1, "ranges"),
+                disjunctiveValue: opt(a, 1, "disjunctive"))
         case ("order", _):
             return try q.order(a[0].string!, a.count > 1 ? a[1].string! : "asc", collate: opt(a, 2, "collate")?.string)
         case ("limit", _): return try q.limit(a[0].int!)

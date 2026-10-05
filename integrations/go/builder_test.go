@@ -132,6 +132,13 @@ func loadGolden(t *testing.T) []golden {
 	return out
 }
 
+// untypable are the cases whose chain a Go caller cannot write: the
+// compiler refuses them before the builder could.
+var untypable = map[string]string{
+	"range bounds are numbers": "Ranges takes float64s",
+	"disjunctive is a boolean": "Disjunctive takes no value",
+}
+
 // value is an argument as a Go caller would hand it over.
 func value(x any) any {
 	switch v := x.(type) {
@@ -313,6 +320,21 @@ func options(o object) []fenecdb.Opt {
 			out = append(out, fenecdb.Where(cond(v)))
 		case "top":
 			out = append(out, fenecdb.Top(v.(int)))
+		case "ranges":
+			var bounds []float64
+			for _, b := range v.([]any) {
+				switch n := b.(type) {
+				case int:
+					bounds = append(bounds, float64(n))
+				default:
+					bounds = append(bounds, n.(float64))
+				}
+			}
+			out = append(out, fenecdb.Ranges(bounds...))
+		case "disjunctive":
+			if v.(bool) {
+				out = append(out, fenecdb.Disjunctive())
+			}
 		case "pre":
 			out = append(out, fenecdb.Pre(v))
 		case "post":
@@ -595,6 +617,9 @@ func TestBuilderMakesWhatTheGoldenFileSays(t *testing.T) {
 	db := fenecdb.New(srv.URL)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if why, ok := untypable[c.name]; ok {
+				t.Skip(why)
+			}
 			got := runChain(t, db, rec, c.steps)
 			if c.isErr {
 				if got.err != c.err {

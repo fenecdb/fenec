@@ -128,6 +128,22 @@ struct Note: Codable, Equatable, FenecValue {
         try await db.close()
     }
 
+    /// An open leaves a `@text` index for its first read; `warm` builds it
+    /// beforehand, once.
+    @Test func warmBuildsWhatAnOpenLeft() async throws {
+        let path = try scratch("warm")
+        var db = try await Fenec.open(path: path)
+        try await db.execute("create collection docs (body text @text)")
+        try await db.execute(#"put docs [{body: "rust is fast"}, {body: "go is simple"}]"#)
+        try await db.close()
+        db = try await Fenec.open(path: path)
+        #expect(try await db.warm(["docs"]) == 1)
+        let hits = try await db.from("docs").select("body").match("body", "rust").rows()
+        #expect(hits.compactMap { $0["body"]?.string } == ["rust is fast"])
+        #expect(try await db.warm() == 0)
+        try await db.close()
+    }
+
     @Test func aFileIsThereAgainAndOpenOnce() async throws {
         let path = try scratch("reopen")
         var db = try await Fenec.open(path: path)

@@ -35,6 +35,10 @@ type Error struct {
 	// since a batch lands whole or not at all, but for one holding a
 	// compact, which runs each statement on its own and keeps what ran.
 	Completed int
+	// At is the statement of a failed Batch that stopped it, from 0: the
+	// write whose Require was not met, the put whose id was taken. -1 for
+	// anything but a batch's stop, since 0 names its first statement.
+	At int
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("fenecdb: %d %s", e.Status, e.Message) }
@@ -68,13 +72,17 @@ func codeOf(status int) string {
 }
 
 func errorOf(status int, raw []byte) *Error {
-	e := &Error{Status: status, Code: codeOf(status)}
+	e := &Error{Status: status, Code: codeOf(status), At: -1}
 	var body struct {
 		Error     string `json:"error"`
 		Completed int    `json:"completed"`
+		At        *int   `json:"at"`
 	}
 	if json.Unmarshal(raw, &body) == nil && body.Error != "" {
 		e.Message, e.Completed = body.Error, body.Completed
+		if body.At != nil {
+			e.At = *body.At
+		}
 	} else {
 		e.Message = strings.TrimSpace(string(raw))
 	}

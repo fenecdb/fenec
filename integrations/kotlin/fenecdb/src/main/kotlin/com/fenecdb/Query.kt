@@ -189,6 +189,21 @@ internal object Builder {
     fun text(v: Any, what: String): String =
         v as? String ?: throw refuse("$what must be text: ${Json.write(Values.normalize(v))}")
 
+    /**
+     * A number as JavaScript's `String` writes it, the text every other
+     * builder makes: 2500 (the JVM writes `2500.0`), 50.5, -10, 1e+21, 1e-7.
+     * The JVM's shortest digits, laid out as JavaScript lays them out.
+     */
+    fun jsNumber(d: Double): String {
+        val a = Math.abs(d)
+        if (d == 0.0 || (a >= 1e-6 && a < 1e21)) {
+            return java.math.BigDecimal(d.toString()).stripTrailingZeros().toPlainString()
+        }
+        val (mant, exp) = d.toString().split('E')
+        val e = exp.toInt()
+        return java.math.BigDecimal(mant).stripTrailingZeros().toPlainString() + "e" + (if (e < 0) "-" else "+") + Math.abs(e)
+    }
+
     fun whole(n: Long, what: String): Long =
         if (n in 0..(1L shl 53) - 1) n else throw refuse("$what must be a non-negative integer: $n")
 
@@ -344,7 +359,7 @@ class Query private constructor(private val s: State) {
         val kind get() = if (words == null) "highlight" else "snippet"
     }
 
-    private class Facet(val field: String, val top: Long?)
+    private class Facet(val field: String, val top: Long?, val ranges: List<String>?, val disjunctive: Boolean)
 
     private class Level(
         val collection: String, val on: String, val parent: String?, val project: List<String>?, val cond: List<Node>,
@@ -532,13 +547,34 @@ class Query private constructor(private val s: State) {
      * field -- holds over every row the query matches, not the page alone,
      * and how many hold it, most first. The counts come back beside the
      * rows: [rows]'s [Rows.facets], and a live query's.
+     *
+     * [ranges] counts the rows in each range of numbers from one bound up to
+     * the next, every range in order, its value `[from, to]`; [disjunctive]
+     * counts as if the filter's own conditions on the field were not there,
+     * so the other values a shopper could add are counted too.
      */
     @JvmOverloads
-    fun facet(field: String, top: Long? = null): Query {
-        val f = Facet(Builder.path(field), top?.let { Builder.whole(it, "facet top") })
-        if (f.top == 0L) throw refuse("facet ${f.field} top 0 answers nothing")
-        if (s.facets.any { it.field == f.field }) throw refuse("facet ${f.field} is asked twice")
-        return Query(s.copy(facets = s.facets + f))
+    fun facet(field: String, top: Long? = null, ranges: List<Number>? = null, disjunctive: Boolean = false): Query =
+        facetOf(field, top, ranges, disjunctive)
+
+    /** [facet] over options of any type, as the golden file holds them, so a refusal of one is the JS builder's. */
+    internal fun facetOf(field: String, top: Long?, ranges: List<Any?>?, disjunctive: Any?): Query {
+        val name = Builder.path(field)
+        val t = top?.let { Builder.whole(it, "facet top") }
+        if (t == 0L) throw refuse("facet $name top 0 answers nothing")
+        if (s.facets.any { it.field == name }) throw refuse("facet $name is asked twice")
+        val bounds = ranges?.let { r ->
+            // The engine's rule, refused before anything is sent.
+            val numbers = r.map { (it as? Number)?.toDouble() }
+            val ok = t == null && r.size >= 2 && numbers.all { it != null && it.isFinite() } &&
+                numbers.zipWithNext().all { (a, b) -> b!! > a!! }
+            if (!ok) {
+                throw refuse("facet $name ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order")
+            }
+            numbers.map { Builder.jsNumber(it!!) }
+        }
+        if (disjunctive != null && disjunctive !is Boolean) throw refuse("facet $name disjunctive is true or false")
+        return Query(s.copy(facets = s.facets + Facet(name, t, bounds, disjunctive == true)))
     }
 
     /** `order field asc|desc`: each call adds a key. `collate = "tr"` puts text in Turkish order. */
@@ -667,7 +703,13 @@ class Query private constructor(private val s: State) {
         sql.append(s.require)
         if (s.count) sql.append(" count")
         if (s.facets.isNotEmpty()) {
-            sql.append(" facet ").append(s.facets.joinToString(", ") { f -> f.top?.let { "${f.field} top $it" } ?: f.field })
+            sql.append(" facet ").append(
+                s.facets.joinToString(", ") { f ->
+                    f.field + (f.top?.let { " top $it" } ?: "") +
+                        (f.ranges?.let { " ranges [${it.joinToString(", ")}]" } ?: "") +
+                        (if (f.disjunctive) " disjunctive" else "")
+                },
+            )
         }
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.

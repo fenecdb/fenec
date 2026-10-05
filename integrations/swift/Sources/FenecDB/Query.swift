@@ -221,6 +221,19 @@ enum Builder {
         return n
     }
 
+    /// A number as JavaScript's `String` writes it, the text every other
+    /// builder makes: 2500 (Swift writes `2500.0`), 50.5, -10, 1e-7.
+    static func jsNumber(_ d: Double) -> String {
+        if d == 0 { return "0" }
+        if d.rounded() == d, abs(d) < 1e21 { return String(format: "%.0f", d) }
+        let s = d.description
+        guard let e = s.firstIndex(of: "e") else { return s }
+        var exp = s[s.index(after: e)...]
+        let sign = exp.first == "-" ? "-" : "+"
+        if exp.first == "-" || exp.first == "+" { exp = exp.dropFirst() }
+        return s[..<e] + "e" + sign + String(exp.drop(while: { $0 == "0" }))
+    }
+
     /// A mark's tags: both or neither, each text.
     static func tags(_ pre: Value?, _ post: Value?, _ what: String) throws -> (pre: String, post: String)? {
         guard pre != nil || post != nil else { return nil }
@@ -446,7 +459,7 @@ public struct Query: Sendable {
     var count = false
     var lookups: [Level] = []
     var marks: [Mark] = []
-    var facets: [(field: String, top: Int?)] = []
+    var facets: [(field: String, top: Int?, ranges: [String]?, disjunctive: Bool)] = []
     var exec: Exec?
 
     init(collection: String) { self.collection = collection }
@@ -554,12 +567,50 @@ public struct Query: Sendable {
     /// the rows: `answer().facets`.
     ///
     ///     db.from("products").match("title", "phone").facet("brand", top: 10).facet("color").limit(20)
-    public func facet(_ field: String, top: Int? = nil) throws -> Query {
+    ///
+    /// `ranges: [0, 25, 50]` counts the rows in each range of numbers from
+    /// one bound up to the next, every range in order, its value `[from,
+    /// to]`; `disjunctive` counts as if the filter's own conditions on the
+    /// field were not there, so the other values a shopper could add are
+    /// counted too.
+    public func facet(_ field: String, top: Int? = nil, ranges: [Double]? = nil, disjunctive: Bool = false) throws -> Query {
+        try facet(field, top: top, rangeValues: ranges.map { .array($0.map { .double($0) }) }, disjunctiveValue: .bool(disjunctive))
+    }
+
+    /// `facet`, its options as the golden file holds them -- a bound that is
+    /// not a number, a disjunctive that is not a boolean -- so a refusal of
+    /// one is the JS builder's.
+    func facet(_ field: String, top: Int?, rangeValues: Value?, disjunctiveValue: Value?) throws -> Query {
         let f = try Builder.path(field)
         let t = try top.map { try Builder.whole($0, "facet top") }
         if t == 0 { throw FenecError.builder("facet \(f) top 0 answers nothing") }
         if facets.contains(where: { $0.field == f }) { throw FenecError.builder("facet \(f) is asked twice") }
-        return with { $0.facets.append((f, t)) }
+        var bounds: [String]?
+        if let rangeValues {
+            // The engine's rule, refused before anything is sent.
+            let list = rangeValues.array ?? []
+            let numbers = list.compactMap { v -> Double? in
+                switch v {
+                case .int(let n): return Double(n)
+                case .double(let d): return d
+                default: return nil
+                }
+            }
+            let rising = zip(numbers, numbers.dropFirst()).allSatisfy { $0 < $1 }
+            guard t == nil, rangeValues.array != nil, numbers.count == list.count, numbers.count >= 2,
+                numbers.allSatisfy({ $0.isFinite }), rising
+            else {
+                throw FenecError.builder(
+                    "facet \(f) ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order")
+            }
+            bounds = numbers.map(Builder.jsNumber)
+        }
+        var disjunctive = false
+        if let d = disjunctiveValue, !d.isNull {
+            guard let b = d.bool else { throw FenecError.builder("facet \(f) disjunctive is true or false") }
+            disjunctive = b
+        }
+        return with { $0.facets.append((f, t, bounds, disjunctive)) }
     }
 
     /// `field op value`, joined to the conditions before with `and`. The op
@@ -785,7 +836,14 @@ public struct Query: Sendable {
         sql += requirement
         if count { sql += " count" }
         if !facets.isEmpty {
-            sql += " facet " + facets.map { f in f.top.map { "\(f.field) top \($0)" } ?? f.field }.joined(separator: ", ")
+            let each = facets.map { f -> String in
+                var one = f.field
+                if let top = f.top { one += " top \(top)" }
+                if let ranges = f.ranges { one += " ranges [" + ranges.joined(separator: ", ") + "]" }
+                if f.disjunctive { one += " disjunctive" }
+                return one
+            }
+            sql += " facet " + each.joined(separator: ", ")
         }
         // Terminal, so every clause after it is the child's -- and last, so
         // its parameters come after the parent's.
