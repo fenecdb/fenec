@@ -101,6 +101,33 @@ fn an_open_leaves_each_index_to_the_first_read_of_it() {
     assert!(back.memory_bytes() > unbuilt);
 }
 
+/// `warm` builds what the first reads would have, those it names first, and
+/// answers as they would: a server's `--warm` and the native library's
+/// `fenec_warm`.
+#[test]
+fn warm_builds_each_index_the_first_read_would() {
+    let db = filled();
+    let back = reopened(&db);
+    assert_eq!(
+        back.unbuilt_indexes(&[]),
+        [
+            ("docs", "kind"),
+            ("docs", "body"),
+            ("docs", "n"),
+            ("docs", "s")
+        ]
+        .map(|(c, f)| (c.to_string(), f.to_string()))
+    );
+    assert_eq!(back.warm(&["docs.body".into(), "tags".into()]).unwrap(), 1);
+    assert_eq!(built(&back), [false, true, false, true, false]);
+    assert_eq!(back.warm(&["docs".into()]).unwrap(), 3);
+    assert_eq!(built(&back), [true; 5]);
+    assert_eq!(back.warm(&[]).unwrap(), 0);
+    for q in QUERIES {
+        assert_eq!(answer(&back, q), answer(&db, q), "{q}");
+    }
+}
+
 /// A write skips an unbuilt index, and the build reads the documents the
 /// write left. The filter of the last one reads the hash index, which is
 /// built there and kept up by the write.

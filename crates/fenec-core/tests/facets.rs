@@ -404,8 +404,259 @@ fn what_facets_cannot_answer_is_refused() {
         ("get v facet k top 0", "top 0"),
         ("get v facet k top 10001", "at most 10000"),
         ("get v facet nope", "nope"),
+        ("get v facet n top 3 ranges [0, 1]", "no `top`"),
+        ("get v facet n ranges [0]", "2 to 10 001 numbers"),
+        ("get v facet n ranges [5, 5]", "above the one"),
+        ("get v facet n ranges [5, 1]", "above the one"),
+        ("get v facet n ranges [0, \"a\"]", "numbers"),
+        ("get v facet n ranges $1", "brackets"),
+        ("get v facet k ranges [0, 1]", "counts numbers"),
+        (
+            "get v where k = \"a\" or n = 1 facet k disjunctive",
+            "reads another field",
+        ),
     ] {
         let e = error(&db, sql);
         assert!(e.contains(want), "{sql}: {e}");
     }
+}
+
+/// `disjunctive`: a facet counted over the query's rows with its own
+/// conditions on the field left out is the facet of the query written
+/// without them -- through the buckets and the scan, beside `match`, a
+/// count, a page and a facet that is not disjunctive.
+#[test]
+fn a_disjunctive_facet_counts_as_the_filter_without_its_own_conditions() {
+    let (db, _) = products(3_000);
+    // Each: the filter, and what it is without the brand's conditions.
+    let cases = [
+        (r#"brand = "acme""#, ""),
+        (
+            r#"brand in ["acme", "nova"] and year >= 2022"#,
+            "year >= 2022",
+        ),
+        (
+            r#"year >= 2021 and (brand = "zeta" or brand is null) and color = "red""#,
+            r#"year >= 2021 and color = "red""#,
+        ),
+        (
+            r#"not brand = "orbit" and tags has "sale""#,
+            r#"tags has "sale""#,
+        ),
+        ("year = 2023", "year = 2023"),
+        ("", ""),
+    ];
+    for coll in ["p", "q"] {
+        for (filter, rest) in cases {
+            let w = |f: &str| match f {
+                "" => String::new(),
+                f => format!(" where {f}"),
+            };
+            for tail in [
+                "limit 5 offset 2",
+                "count",
+                "match body \"phone lens\" limit 3",
+            ] {
+                let got = answer(
+                    &db,
+                    &format!(
+                        "get {coll}{} {tail} facet brand disjunctive, color, year disjunctive",
+                        w(filter)
+                    ),
+                    &[],
+                );
+                let want = answer(
+                    &db,
+                    &format!("get {coll}{} {tail} facet brand, color", w(rest)),
+                    &[],
+                );
+                let plain = answer(
+                    &db,
+                    &format!("get {coll}{} {tail} facet color, year", w(filter)),
+                    &[],
+                );
+                let at = format!("{coll} {filter} | {tail}");
+                assert_eq!(facet(&got, "brand"), facet(&want, "brand"), "{at}");
+                assert_eq!(facet(&got, "color"), facet(&plain, "color"), "{at}");
+                assert_eq!(got.rows, plain.rows, "{at}: the page is the query's");
+                // With no condition of its own the year's disjunctive count
+                // is the plain one: the brand's conditions stay in it.
+                if !filter.contains("year") {
+                    assert_eq!(facet(&got, "year"), facet(&plain, "year"), "{at}");
+                }
+            }
+        }
+    }
+}
+
+/// A row past its time is out of a disjunctive facet's count too, though
+/// the facet is of the field it expires by.
+#[test]
+fn a_disjunctive_facet_leaves_expired_rows_out() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection s (at timestamp @ttl(1s), k text)",
+        &[],
+    );
+    for (at, k) in [(0, "old"), (5_000, "new"), (6_000, "new")] {
+        exec(
+            &mut db,
+            "put s {at: $1, k: $2}",
+            &[Value::Timestamp(at), Value::Text(k.into())],
+        );
+    }
+    db.set_clock(Some(5_500));
+    let rs = answer(
+        &db,
+        "get s where at >= 5500 count facet at disjunctive, k",
+        &[],
+    );
+    assert_eq!(facet(&rs, "at").values.len(), 2, "{:?}", rs.facets);
+    assert_eq!(facet(&rs, "k").values, [(Value::Text("new".into()), 1)]);
+}
+
+/// `ranges`: how many rows hold a number in each range, held to a count by
+/// hand -- through an ordered index and by reading the field, over every
+/// row and over a filter's, a list once a row a range, nulls, a float
+/// field, bounds the index cannot key, and a path into a json field.
+#[test]
+fn range_facets_count_each_range_through_the_index_and_the_read() {
+    let mut db = Database::new();
+    for (name, idx) in [("r", "@sorted"), ("u", "")] {
+        exec(
+            &mut db,
+            &format!(
+                "create collection {name} (price int {idx}, w float {idx}, at timestamp {idx}, \
+                 sizes [int], meta json, kind text @hash)"
+            ),
+            &[],
+        );
+    }
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    let mut rows = Vec::new();
+    for _ in 0..4_000 {
+        let price = (rng.below(10) != 0).then(|| rng.below(12_000) as i64 - 500);
+        let w = rng.below(1000) as f64 / 7.0;
+        let sizes: Vec<i64> = (0..rng.below(4)).map(|_| rng.below(50) as i64).collect();
+        let kind = ["a", "b", "c"][rng.below(3) as usize];
+        rows.push((price, w, sizes.clone(), kind));
+        let params = [
+            price.map_or(Value::Null, Value::Int),
+            Value::Float(w),
+            price.map_or(Value::Null, |p| Value::Timestamp(p * 1000)),
+            Value::List(sizes.iter().map(|s| Value::Int(*s)).collect()),
+            match price {
+                Some(p) => Value::object(vec![("p".into(), Value::Int(p))]).unwrap(),
+                None => Value::Null,
+            },
+            Value::Text(kind.into()),
+        ];
+        for name in ["r", "u"] {
+            exec(
+                &mut db,
+                &format!("put {name} {{price: $1, w: $2, at: $3, sizes: $4, meta: $5, kind: $6}}"),
+                &params,
+            );
+        }
+    }
+    let count = |bounds: &[f64], vals: &mut dyn Iterator<Item = Vec<f64>>| {
+        let mut n = vec![0u64; bounds.len() - 1];
+        for row in vals {
+            let mut hit = vec![false; n.len()];
+            for v in row {
+                if let Some(i) = (0..n.len()).find(|&i| bounds[i] <= v && v < bounds[i + 1]) {
+                    hit[i] = true;
+                }
+            }
+            for (i, h) in hit.iter().enumerate() {
+                n[i] += *h as u64;
+            }
+        }
+        n
+    };
+    let as_values = |bounds: &[Value], n: Vec<u64>| -> Vec<(Value, u64)> {
+        n.into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    Value::List(vec![bounds[i].clone(), bounds[i + 1].clone()]),
+                    c,
+                )
+            })
+            .collect()
+    };
+    for (filter, keep) in [
+        ("", (|_: &str| true) as fn(&str) -> bool),
+        ("where kind = \"b\"", |k| k == "b"),
+        ("where kind in [\"a\", \"c\"]", |k| k != "b"),
+    ] {
+        for coll in ["r", "u"] {
+            for (field, text, bounds) in [
+                (
+                    "price",
+                    "[0, 2500, 5000, 10000]",
+                    vec![0.0, 2500.0, 5000.0, 10000.0],
+                ),
+                ("price", "[-1000, 0.5, 11000]", vec![-1000.0, 0.5, 11000.0]),
+                ("w", "[0, 10, 50.5, 200]", vec![0.0, 10.0, 50.5, 200.0]),
+                (
+                    "at",
+                    "[0, 2500000, 9000000]",
+                    vec![0.0, 2_500_000.0, 9_000_000.0],
+                ),
+                ("sizes", "[0, 10, 20, 49]", vec![0.0, 10.0, 20.0, 49.0]),
+                ("meta.p", "[0, 2500, 5000]", vec![0.0, 2500.0, 5000.0]),
+            ] {
+                let rs = answer(
+                    &db,
+                    &format!("get {coll} {filter} limit 1 facet {field} ranges {text}"),
+                    &[],
+                );
+                let mut vals = rows.iter().filter(|r| keep(r.3)).map(|r| match field {
+                    "price" | "meta.p" => r.0.iter().map(|p| *p as f64).collect(),
+                    "at" => r.0.iter().map(|p| (*p * 1000) as f64).collect(),
+                    "w" => vec![r.1],
+                    _ => r.2.iter().map(|s| *s as f64).collect(),
+                });
+                let bound_values: Vec<Value> =
+                    match fenec_ql::parse_one(&format!("get {coll} facet {field} ranges {text}"))
+                        .unwrap()
+                    {
+                        Statement::Select(s) => s.facets[0].ranges.clone().unwrap(),
+                        _ => unreachable!(),
+                    };
+                assert_eq!(
+                    facet(&rs, field).values,
+                    as_values(&bound_values, count(&bounds, &mut vals)),
+                    "{coll} {field} {text} {filter}"
+                );
+            }
+        }
+    }
+    // The index answers where it keys every bound, and the read where not.
+    let plan = |sql: &str| {
+        answer(&db, &format!("explain {sql}"), &[])
+            .rows
+            .iter()
+            .map(|r| format!("{:?}", r.values[0]))
+            .collect::<String>()
+    };
+    assert!(
+        plan("get r where kind = \"b\" facet price ranges [0, 5000]").contains("ordered index")
+    );
+    assert!(plan("get r facet price ranges [0, 0.5]").contains("read"));
+    assert!(plan("get u facet price ranges [0, 5000]").contains("read"));
+    // A disjunctive range facet leaves its own range condition out.
+    let rs = answer(
+        &db,
+        "get r where price >= 5000 and kind = \"a\" count facet price ranges [0, 5000, 20000] disjunctive",
+        &[],
+    );
+    let want = answer(
+        &db,
+        "get r where kind = \"a\" count facet price ranges [0, 5000, 20000]",
+        &[],
+    );
+    assert_eq!(rs.facets, want.facets);
 }

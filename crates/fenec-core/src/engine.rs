@@ -1584,6 +1584,42 @@ impl Collection {
         }
     }
 
+    /// The fields whose hash, text, ordered or sparse index nothing has
+    /// built yet, in that order of kinds.
+    pub fn unbuilt(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, d) in self.hashes.iter() {
+            if d.0.get().is_none() {
+                out.push(name.clone());
+            }
+        }
+        for (name, d) in self.texts.iter() {
+            if d.0.get().is_none() {
+                out.push(name.clone());
+            }
+        }
+        for (name, d) in &self.sorted {
+            if d.0.get().is_none() {
+                out.push(name.clone());
+            }
+        }
+        for (name, d) in &self.sparse {
+            if d.0.get().is_none() {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
+    /// Builds whichever derived index `field` has, as its first read would.
+    pub fn warm(&self, field: &str) -> Result<()> {
+        self.hash(field)?;
+        self.text(field)?;
+        self.sorted_index(field)?;
+        self.sparse_index(field)?;
+        Ok(())
+    }
+
     /// The full-text index on `field`, built as [`Self::hash`] is.
     pub fn text(&self, field: &str) -> Result<Option<&TextIndex>> {
         let (Some(d), Some(pos)) = (self.texts.get(field), self.schema.field_pos(field)) else {
@@ -2860,6 +2896,55 @@ impl Database {
 
     pub fn collection_names(&self) -> Vec<String> {
         self.order.clone()
+    }
+
+    /// The hash, text, ordered and sparse indexes nothing has built since
+    /// the open, as `(collection, field)` in collection order -- those
+    /// `only` names when it names any: a collection (`products`) or one of
+    /// its fields (`products.description`). What [`Self::warm_index`] builds
+    /// one at a time.
+    pub fn unbuilt_indexes(&self, only: &[String]) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for name in &self.order {
+            let Some(c) = self.collections.get(name) else {
+                continue;
+            };
+            for field in c.unbuilt() {
+                let named = only.is_empty()
+                    || only.iter().any(|o| match o.split_once('.') {
+                        Some((col, f)) => col == name && f == field,
+                        None => o == name,
+                    });
+                if named {
+                    out.push((name.clone(), field));
+                }
+            }
+        }
+        out
+    }
+
+    /// Builds the derived index on `collection.field`, as the first read of
+    /// it would: under the read lock a server holds, so reads go on beside
+    /// it and a reader that needs it waits for this build rather than
+    /// starting its own. A collection or field gone since it was listed is
+    /// passed over.
+    pub fn warm_index(&self, collection: &str, field: &str) -> Result<()> {
+        match self.collections.get(collection) {
+            Some(c) => c.warm(field),
+            None => Ok(()),
+        }
+    }
+
+    /// Every derived index `only` names ([`Self::unbuilt_indexes`]) built
+    /// now, in turn: what a process that holds the database itself calls
+    /// after the open, on a thread of its own, so the first `match` does
+    /// not pay for its index. Answers how many it built.
+    pub fn warm(&self, only: &[String]) -> Result<usize> {
+        let todo = self.unbuilt_indexes(only);
+        for (c, f) in &todo {
+            self.warm_index(c, f)?;
+        }
+        Ok(todo.len())
     }
 
     pub fn stats(&self) -> Vec<CollectionStats> {
@@ -5210,10 +5295,14 @@ impl Database {
                 .lookup
                 .as_ref()
                 .is_some_and(|l| l.chain().any(|s| self.ttl_of(&s.collection).is_some()));
-        if !expiring && !sel.has_subquery() {
+        // A select built in code, not parsed, has its disjunctive facets
+        // split here, before the expiry is ANDed in.
+        let unsplit = sel.facets.iter().any(|f| f.disjunctive && f.rest.is_none());
+        if !expiring && !sel.has_subquery() && !unsplit {
             return Ok(std::borrow::Cow::Borrowed(sel));
         }
         let mut sel = sel.clone();
+        sel.split_facets()?;
         sel.each_filter_mut(&mut |collection, f| self.answer_filter(collection, f, params, depth))?;
         Ok(std::borrow::Cow::Owned(sel))
     }
@@ -7506,7 +7595,7 @@ impl Database {
             }
             let n = ids.len();
             let all = sel.filter.is_none() && sel.lookup.is_none();
-            let facets = self.facets(c, sel, &ids, all)?;
+            let facets = self.facets(c, sel, &ids, all, &ctx)?;
             return Ok(ResultSet {
                 columns: vec![COUNT_COLUMN.to_string()],
                 rows: vec![Row {
@@ -7558,7 +7647,7 @@ impl Database {
             let want = ranked_rows(sel, "match", MAX_MATCH_ROWS)?;
             scored = with_scores(self.run_match(c, sel, m, want, params, &ctx)?);
             if wants_facets {
-                facet_ids = Some(self.matched_set(c, sel, m, &ctx)?);
+                facet_ids = Some(self.matched_set(c, &sel.filter, m, &ctx)?);
             }
         } else if let Some(near) = &sel.near {
             // `near` decides the ordering by similarity; a second ordering is
@@ -7629,8 +7718,8 @@ impl Database {
         }
         let facets = match (wants_facets, &facet_ids) {
             (false, _) => Vec::new(),
-            (true, Some(ids)) => self.facets(c, sel, ids, false)?,
-            (true, None) => self.facets(c, sel, &[], true)?,
+            (true, Some(ids)) => self.facets(c, sel, ids, false, &ctx)?,
+            (true, None) => self.facets(c, sel, &[], true, &ctx)?,
         };
 
         // Children are attached after the parent page is decided, so a
@@ -7822,7 +7911,7 @@ impl Database {
     fn matched_set(
         &self,
         c: &Collection,
-        sel: &Select,
+        filter: &Option<Expr>,
         m: &Match,
         ctx: &EvalCtx,
     ) -> Result<Vec<DocId>> {
@@ -7834,7 +7923,7 @@ impl Database {
             _ => return Ok(Vec::new()),
         };
         let mut ids = ix.matching(&query);
-        if let Some(f) = &sel.filter {
+        if let Some(f) = filter {
             let test = Filter::new(c, f, ctx);
             let mut kept = Vec::with_capacity(ids.len());
             for id in ids {
@@ -7858,21 +7947,77 @@ impl Database {
     /// field of every row, a list counting once a row for each value it
     /// holds. `null` is a value: a row whose field is null is counted
     /// under it, so a scalar field's counts add up to the rows.
+    ///
+    /// A `disjunctive` facet counts over the rows its own set selects --
+    /// the filter with its conditions on the field left out
+    /// ([`Facet::rest`]), `match` and a required `lookup` as they are --
+    /// found in the same statement, under the same lock, rather than a
+    /// query of its own a field.
     fn facets(
         &self,
         c: &Collection,
         sel: &Select,
         ids: &[DocId],
         all: bool,
+        ctx: &EvalCtx,
     ) -> Result<Vec<FacetValues>> {
         let mut out = Vec::with_capacity(sel.facets.len());
-        let rows = if all { c.store.len() } else { ids.len() } as u64;
         // Which rows the set holds, for the buckets: made once, for the
         // first field that reads them.
         let mut member: Option<Vec<u64>> = None;
         for f in &sel.facets {
+            out.push(match (&f.rest, f.disjunctive) {
+                (Some(rest), true) => {
+                    let (own, all) = self.facet_set(c, sel, rest, ctx)?;
+                    self.facet(c, f, &own, all, &mut None)?
+                }
+                _ => self.facet(c, f, ids, all, &mut member)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The rows a disjunctive facet counts over: those `filter` -- the
+    /// query's, its own conditions left out -- `match` and a required
+    /// `lookup` select, or every row (`true`) when none of them narrows.
+    fn facet_set(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        filter: &Option<Expr>,
+        ctx: &EvalCtx,
+    ) -> Result<(Vec<DocId>, bool)> {
+        if let Some(m) = &sel.matcher {
+            return Ok((self.matched_set(c, filter, m, ctx)?, false));
+        }
+        let required = sel.lookup.as_ref().filter(|l| l.required);
+        if filter.is_none() && required.is_none() {
+            return Ok((Vec::new(), true));
+        }
+        let mut ids = self.matching_ids(&sel.collection, filter, ctx.params)?;
+        if let Some(l) = required {
+            ids = self.retain_with_children(c, l, ids, ctx)?;
+        }
+        Ok((ids, false))
+    }
+
+    /// One facet's counts over `ids`, or every row when `all`.
+    #[inline(always)]
+    fn facet(
+        &self,
+        c: &Collection,
+        f: &Facet,
+        ids: &[DocId],
+        all: bool,
+        member: &mut Option<Vec<u64>>,
+    ) -> Result<FacetValues> {
+        let rows = if all { c.store.len() } else { ids.len() } as u64;
+        {
             let (pos, keys) = source_or_err(&c.schema, &f.field, "")?;
             let field = &c.schema.fields[pos];
+            if let Some(bounds) = &f.ranges {
+                return self.facet_ranges(c, f, (pos, keys), bounds, ids, all, member);
+            }
             let bucketed = keys.is_none()
                 && matches!(
                     field.ty,
@@ -7882,17 +8027,12 @@ impl Database {
             let ix = bucketed.then(|| c.hash(&f.field)).transpose()?.flatten();
             if let Some(ix) = ix {
                 if !all && member.is_none() {
-                    let top = ids.last().map_or(0, |&d| d as usize + 1);
-                    let mut bits = vec![0u64; top.div_ceil(64)];
-                    for &d in ids {
-                        bits[d as usize / 64] |= 1 << (d % 64);
-                    }
-                    member = Some(bits);
+                    *member = Some(member_bits(ids));
                 }
                 let mut held = 0u64;
                 for (key, docs) in ix.iter() {
                     let mut n = docs.len() as u64;
-                    if let (Some(bits), false) = (&member, all) {
+                    if let (Some(bits), false) = (&*member, all) {
                         n = 0;
                         for &d in docs {
                             let w = bits.get(d as usize / 64).copied().unwrap_or(0);
@@ -7909,51 +8049,59 @@ impl Database {
                     counted.push((Value::Null, rows - held));
                 }
             } else {
-                // Every row of the collection, when the set is all of it.
-                let every;
-                let ids = match all {
-                    true => {
-                        every = c.store.ids();
-                        &every
-                    }
-                    false => ids,
-                };
                 // A value's number under its encoding, and the row it was
                 // last counted for: a list holding a value twice counts its
                 // row once. The hash index's own map type.
                 let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
                 let mut last: Vec<usize> = Vec::new();
                 let mut key = Vec::new();
-                let mut slot = vec![Value::Null];
-                let place = [c.schema.place(pos)];
-                for (row, &id) in ids.iter().enumerate() {
-                    let found = match keys {
-                        None => c.store.read_fields(id, &place, &mut slot)?,
-                        Some(k) => c.store.read_paths(id, &[(pos, k)], &mut slot)?,
+                let mut count = |row: usize, v: &Value| {
+                    key.clear();
+                    crate::codec::encode_value(&mut key, v);
+                    let at = match index.get(&key) {
+                        Some(n) => n[0] as usize,
+                        None => {
+                            index
+                                .entry(key.clone())
+                                .or_default()
+                                .push(counted.len() as DocId);
+                            counted.push((v.clone(), 0));
+                            last.push(usize::MAX);
+                            counted.len() - 1
+                        }
                     };
-                    let values = match (&slot[0], found) {
-                        (_, false) => &[],
-                        (Value::List(items), true) => items.as_slice(),
-                        (_, true) => std::slice::from_ref(&slot[0]),
+                    if last[at] != row {
+                        last[at] = row;
+                        counted[at].1 += 1;
+                    }
+                };
+                // The browser module reads the rows through the range
+                // facet's loop, one copy of it; natively through a loop of
+                // its own, since through that one's `dyn` a facet by the
+                // scan of 100 000 rows went 4.8 -> 5.2 ms.
+                #[cfg(target_arch = "wasm32")]
+                each_value(c, (pos, keys), ids, all, &mut count)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let every;
+                    let ids = match all {
+                        true => {
+                            every = c.store.ids();
+                            &every
+                        }
+                        false => ids,
                     };
-                    for v in values {
-                        key.clear();
-                        crate::codec::encode_value(&mut key, v);
-                        let at = match index.get(&key) {
-                            Some(n) => n[0] as usize,
-                            None => {
-                                index
-                                    .entry(key.clone())
-                                    .or_default()
-                                    .push(counted.len() as DocId);
-                                counted.push((v.clone(), 0));
-                                last.push(usize::MAX);
-                                counted.len() - 1
-                            }
+                    let mut slot = vec![Value::Null];
+                    let place = [c.schema.place(pos)];
+                    for (row, &id) in ids.iter().enumerate() {
+                        let found = match keys {
+                            None => c.store.read_fields(id, &place, &mut slot)?,
+                            Some(k) => c.store.read_paths(id, &[(pos, k)], &mut slot)?,
                         };
-                        if last[at] != row {
-                            last[at] = row;
-                            counted[at].1 += 1;
+                        match (&slot[0], found) {
+                            (_, false) => {}
+                            (Value::List(items), true) => items.iter().for_each(|v| count(row, v)),
+                            (v, true) => count(row, v),
                         }
                     }
                 }
@@ -7993,12 +8141,102 @@ impl Database {
             for i in picked {
                 values.push(std::mem::replace(&mut counted[i], (Value::Null, 0)));
             }
-            out.push(FacetValues {
+            Ok(FacetValues {
                 field: f.field.clone(),
                 values,
-            });
+            })
         }
-        Ok(out)
+    }
+
+    /// `facet <field> ranges [...]`: how many rows hold a number in each
+    /// range, the ranges in order. Through the field's ordered index when
+    /// every bound is a key it holds exactly -- each range two searches and
+    /// the chunks between over every row, its entries walked against the
+    /// set otherwise -- and by reading the field of every row else, a list
+    /// counting once a row in each range a value of it falls in.
+    #[allow(clippy::too_many_arguments)]
+    fn facet_ranges(
+        &self,
+        c: &Collection,
+        f: &Facet,
+        (pos, keys): (usize, Option<&str>),
+        bounds: &[Value],
+        ids: &[DocId],
+        all: bool,
+        member: &mut Option<Vec<u64>>,
+    ) -> Result<FacetValues> {
+        let field = &c.schema.fields[pos];
+        let numeric = |t: &DataType| {
+            matches!(
+                t,
+                DataType::Int | DataType::Float | DataType::Timestamp | DataType::Json
+            )
+        };
+        let counts_numbers = match &field.ty {
+            DataType::List(t) => numeric(t),
+            t => numeric(t),
+        };
+        if keys.is_none() && !counts_numbers {
+            return Err(Error::Query(format!(
+                "`facet {} ranges` counts numbers, and `{}` is not one",
+                f.field, f.field
+            )));
+        }
+        let mut counts = None;
+        if let (None, Some(ix)) = (keys, c.sorted_index(&f.field)?) {
+            let mut at = Vec::with_capacity(bounds.len());
+            for b in bounds {
+                match SortedIndex::bound(&field.ty, b) {
+                    Some(k) => at.push(k),
+                    None => break,
+                }
+            }
+            if at.len() == bounds.len() {
+                if !all && member.is_none() {
+                    *member = Some(member_bits(ids));
+                }
+                counts = ix.range_counts(&at, if all { None } else { member.as_deref() });
+            }
+        }
+        let indexed = counts.is_some();
+        let counts = match counts {
+            Some(n) => n,
+            None => {
+                let mut n = vec![0u64; bounds.len() - 1];
+                // The row each range was last counted for: a list with two
+                // values in one range counts its row once.
+                let mut last = vec![usize::MAX; n.len()];
+                each_value(c, (pos, keys), ids, all, &mut |row: usize, v: &Value| {
+                    if !matches!(v, Value::Int(_) | Value::Float(_) | Value::Timestamp(_)) {
+                        return;
+                    }
+                    // The bounds at or below it; a `NaN`, equal to every
+                    // one, is past them all.
+                    let at =
+                        bounds.partition_point(|b| b.cmp_value(v) != std::cmp::Ordering::Greater);
+                    if at > 0 && at < bounds.len() && last[at - 1] != row {
+                        last[at - 1] = row;
+                        n[at - 1] += 1;
+                    }
+                })?;
+                n
+            }
+        };
+        plan(|| {
+            let how = if indexed { "its ordered index" } else { "read" };
+            format!("facet {}: {how}, {} ranges", f.field, counts.len())
+        });
+        let mut values = Vec::with_capacity(counts.len());
+        for (i, n) in counts.into_iter().enumerate() {
+            values.push((
+                Value::List(vec![bounds[i].clone(), bounds[i + 1].clone()]),
+                n,
+            ));
+        }
+        Ok(FacetValues {
+            field: f.field.clone(),
+            values,
+        })
     }
 
     /// An aggregating select: the rows the filter finds -- through the same
@@ -9048,6 +9286,54 @@ fn ranked_rows(sel: &Select, clause: &str, ceiling: usize) -> Result<usize> {
 
 /// A ranking as the rows carry it. One conversion for `match`, `near` and
 /// `fuse`: a closure each was a copy each in the browser module.
+/// Each value a range facet's field holds over `ids` -- every row when
+/// `all` -- handed with the row's place: a scalar's value, a list's one by
+/// one, none for a row without the field.
+fn each_value(
+    c: &Collection,
+    (pos, keys): (usize, Option<&str>),
+    ids: &[DocId],
+    all: bool,
+    f: &mut dyn FnMut(usize, &Value),
+) -> Result<()> {
+    let every;
+    let ids = match all {
+        true => {
+            every = c.store.ids();
+            &every
+        }
+        false => ids,
+    };
+    let mut slot = vec![Value::Null];
+    let place = [c.schema.place(pos)];
+    for (row, &id) in ids.iter().enumerate() {
+        let found = match keys {
+            None => c.store.read_fields(id, &place, &mut slot)?,
+            Some(k) => c.store.read_paths(id, &[(pos, k)], &mut slot)?,
+        };
+        let values = match (&slot[0], found) {
+            (_, false) => &[],
+            (Value::List(items), true) => items.as_slice(),
+            (_, true) => std::slice::from_ref(&slot[0]),
+        };
+        for v in values {
+            f(row, v);
+        }
+    }
+    Ok(())
+}
+
+/// Which rows `ids` holds, a bit an id: what a facet asks an index's
+/// entries against.
+fn member_bits(ids: &[DocId]) -> Vec<u64> {
+    let top = ids.iter().max().map_or(0, |&d| d as usize + 1);
+    let mut bits = vec![0u64; top.div_ceil(64)];
+    for &d in ids {
+        bits[d as usize / 64] |= 1 << (d % 64);
+    }
+    bits
+}
+
 fn with_scores(hits: Vec<(DocId, f32)>) -> Vec<(DocId, Option<f32>)> {
     hits.into_iter().map(|(id, s)| (id, Some(s))).collect()
 }
