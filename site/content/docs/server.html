@@ -70,6 +70,7 @@ front of it are on <a href="/docs/sharding">Tenants and sharding</a>.</p>
 <tr><td><code>--sync off|always|&lt;ms&gt;</code></td><td>When writes reach the disk. Default <code>250</code> (<a href="#durability">Durability</a>).</td></tr>
 <tr><td><code>--no-checkpoint</code></td><td>Writes no checkpoint on shutdown.</td></tr>
 <tr><td><code>--no-mmap</code></td><td>Reads the file into memory instead of mapping it.</td></tr>
+<tr><td><code>--warm all|off|&lt;list&gt;</code></td><td>Builds the hash, text, ordered and sparse indexes after the open, beside the first requests, rather than on the first read of each. Default <code>all</code> for a file, <code>off</code> for a node's tenants (<a href="#warm">Warm-up</a>).</td></tr>
 <tr><td><code>--auto-compact &lt;ratio&gt;|off</code></td><td>Compacts a file on its own once this share of it is dead, beside the queries. Default <code>0.5</code> (<a href="#compaction">Compaction</a>).</td></tr>
 <tr><td><code>--max-connections</code>, <code>--idle-timeout</code>, <code>--max-memory</code></td><td><a href="#limits">Limits</a>.</td></tr>
 <tr><td><code>--http-cors</code>, <code>--http-read-only</code>, <code>--http-max-streams</code>, <code>--http-keepalive</code>, <code>--changes</code>, <code>--idempotency-ttl</code></td><td>The HTTP endpoint's options (<a href="/docs/http">HTTP endpoint</a>).</td></tr>
@@ -190,6 +191,39 @@ The order is deliberate. The sync comes first, so even if the process is
 killed while the checkpoint is being written, the data is already on disk and
 only the graph is lost. The rewrite goes to a side file and is renamed, so a
 half-written checkpoint cannot corrupt anything.</p>
+</details>
+
+<h2 id="warm">Warm-up</h2>
+
+<p>An open builds no hash, text, ordered or sparse index: the first query
+that reads one builds it, and pays for it. <code>fenec-server</code> builds
+them after the open instead, beside the first requests, one at a time: the
+port opens as soon as before, and the first search finds its index built.
+<code>--warm products,orders.status</code> names the collections and fields
+to warm, <code>--warm off</code> none.</p>
+
+<details class="deep"><summary>Details</summary>
+<p>Each index is built under the read lock on its own, so reads go on beside
+it, a read that needs the index being built waits for that build rather than
+starting its own, and a write waits out one index at most (a
+<code>@text</code> index of 100 000 products: 141 ms). The thread starts once
+the HTTP endpoint is up, whose start takes the write lock. Over 100 000
+products with a text, two hash and an ordered index, on an M1: the first
+answer 16 ms after the start either way, the indexes built 208 ms after it,
+and the first <code>match</code> 1.4 ms warm against 166 ms cold; the process
+held 99 MB against 88 for a cold one that had only searched, and 25 before
+any read.</p>
+
+<p>It is on for a file because an index is declared to be read, and a
+first query that builds one is the slowest a server answers: a shop's
+first search page took 2.68 s to its largest paint against 1.40 s warm. The
+memory is what the reads would have taken anyway; only an index nothing
+ever reads is held for nothing, and <code>--warm</code> names the rest. A
+node's tenants open on their first request and close when idle, and
+warming each would build every index of every tenant a request touches, so
+there it is off unless asked. The native library has the same call,
+<code>fenec_warm</code>, and the Rust API <code>Database::warm</code> and
+<code>warm_index</code>.</p>
 </details>
 
 <h2 id="compaction">Compaction</h2>

@@ -140,7 +140,7 @@ const db = await Fenec.open('./fenec.wasm');
 
 223 KB of gzipped WebAssembly and a 45 KB gzipped client — no wasm-bindgen, no
 build step. An app whose queries run on a server can import
-`@fenecdb/web/client`, 6 KB brotli in its bundle, which cannot pull in the
+`@fenecdb/web/client`, 7 KB brotli in its bundle, which cannot pull in the
 engine, sync or storage ([which package](https://fenecdb.com/docs/javascript#packages)). With live
 queries (`db.live`, React's `useLiveQuery`) it can be an app's whole state,
 no server: [state in the page](https://fenecdb.com/docs/javascript#state). [JavaScript client](https://fenecdb.com/docs/javascript).

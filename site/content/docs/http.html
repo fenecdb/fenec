@@ -305,6 +305,12 @@ it wrote exactly <code>N</code> rows the batch stops with
 <pre data-lang="json">{"error":"unmet: `set accounts` wrote 0 rows, and requires 1","completed":0,"at":1}
 </pre>
 
+<p>Every client sends one: <code>db.batch([...], { idempotencyKey })</code> in
+JavaScript, <code>batch(...)</code> in Python, <code>Batch</code> in Go,
+<code>BatchAsync</code> in .NET, and the remote clients of Swift, Kotlin and
+Dart; a batch that stops throws the client's error with the statement's
+<code>at</code> and the status.</p>
+
 <details class="deep"><summary>Details</summary>
 <p><code>POST /batch</code> takes one query body per line as NDJSON. The
 statements run in order under a single write lock, as one block: their writes
@@ -353,7 +359,10 @@ that sends a write again after a timeout or a dropped connection — not
 knowing whether the first landed — may write it twice. Send an
 <code>Idempotency-Key</code> with it, one per write, and a request sent again
 with the key is answered as the first was, with
-<code>Idempotent-Replayed: true</code>, and not made again.</p>
+<code>Idempotent-Replayed: true</code>, and not made again. Its
+<code>Fenec-Seq</code> is where the database stands as it replays, which
+holds the write, so a read sent to a replica with <code>Fenec-After</code>
+waits for it as after the first answer.</p>
 
 <ul>
   <li>The key and the answer are kept in the same block as the write, under
@@ -427,6 +436,49 @@ separately from ordinary requests (<code>--http-max-streams</code>, default
 64). Sharing one ceiling would let 100 subscribers shut the server to plain
 requests. The client-side layer built on this stream is
 <a href="sync.html">Sync</a>.</p>
+
+<p>What a stream costs, measured on an M1 with streams of a shape that holds
+nothing (what <code>FenecHttp.live</code> opens): 45 to 57 KB of resident
+memory and a thread each, and every write wakes every stream, which reads
+what it changed: a write's p50 went from 0.26 ms with none to 0.94 with 60
+and 3.1 with 500. A page thousands view should not hold one a viewer; it
+polls (below).</p>
+</details>
+
+<h2 id="polling">Polling a read</h2>
+
+<p>Send <code>If-None-Match</code> with a <code>/query</code> read and the
+answer carries an <code>ETag</code>: the change the database stood at. Sent
+back, the tag is answered <code>304</code>, with no body and the query not
+run, while no write has touched a collection the read reads.</p>
+
+<pre data-lang="bash">curl -si http://127.0.0.1:8080/query -H 'If-None-Match: "0"' \
+  -d '{"query":"get inventory select available where sku = $1","params":["TENT-1"]}'
+# HTTP/1.1 200 OK
+# ETag: "48211"
+curl -si http://127.0.0.1:8080/query -H 'If-None-Match: "48211"' -d '...the same...'
+# HTTP/1.1 304 Not Modified
+</pre>
+
+<ul>
+  <li><b>Nothing is held between polls:</b> no stream, no thread, no wake-up
+    at a write. <code>FenecHttp.live(query, cb, { poll: 5000 })</code> polls
+    so.</li>
+  <li><b>Untagged</b>, and run each time: a read of a collection whose rows
+    expire (<code>@ttl</code>), one calling <code>now()</code>, one holding an
+    inner <code>get</code> — answers that move with no write.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>Whether a collection was written since a tag is the change ring's answer
+(<code>Database::changed_collections_since</code>): a tag older than the ring
+reaches, or a collection dropped since, counts as a change and the query runs.
+A read without the header is answered as before, no tag worked out. Over one
+keep-alive connection a 304 took 54 us at the median, against 55 for a read
+by key and 95 for a page of 24 run; the round trip is most of either. A
+browser keeps its connection between polls, so a public page polls through
+the site's own server or a proxy, which keeps few connections to
+fenec-server however many viewers it has.</p>
 </details>
 
 <h2 id="changes">Change data capture</h2>

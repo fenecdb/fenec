@@ -59,7 +59,14 @@ docs.insert({"title": "Night at the oasis", "embed": [0.1, 0.2, 0.3]})
 
 rows = docs.select("title").near("embed", [0.1, 0.2, 0.3]).limit(5).rows()
 n = docs.where("title", "~", "Dunes").count()</pre>
-<p><code>AsyncClient</code> does the same in an event loop, the endpoints of
+<p><code>batch([(text, params), ...])</code> runs statements as one block,
+all or none -- a <code>FenecError</code> that stops it says which
+(<code>e.at</code>, from 0); <code>idempotency_key=</code> on
+<code>query</code> and <code>batch</code>, or
+<code>with_idempotency_key(key)</code> for every write of a copy, makes a
+write once however often it is sent (<code>db.replayed</code>), and
+<code>db.seq</code> is the change the last write left the database at.
+<code>AsyncClient</code> does the same in an event loop, the endpoints of
 its <code>collection(...)</code> awaited; LangChain and LlamaIndex have
 stores of their own (<a href="integrations.html">Integrations</a>).</p>
 <p><a href="https://github.com/fenecdb/fenec/tree/main/examples/python">Full example</a>: Notes, a CLI over the server with the builder, <code>match</code>, <code>fuse</code> and the change stream.</p>
@@ -130,7 +137,9 @@ n, err := docs.Where("title", "~", "Dunes").Count(ctx)</pre>
 <code>Batch</code>, <code>IdempotencyKey</code>, <code>After</code> for a
 replica, <code>Subscribe</code>, <code>Changes</code> and
 <code>WithTenant</code> cover the rest of the <a href="http.html">HTTP
-endpoint</a> (<a href="https://github.com/fenecdb/fenec/tree/main/integrations/go">integrations/go</a>).
+endpoint</a> (<a href="https://github.com/fenecdb/fenec/tree/main/integrations/go">integrations/go</a>);
+a refusal is an <code>*fenecdb.Error</code>, and a batch's says which
+statement stopped it (<code>At</code>, from 0).
 A <code>[]float32</code> goes out as the decimals that read back as each
 <code>f32</code>, so a vector round-trips to the bit.</p>
 <p>Without the SDK, <code>net/http</code> and <code>encoding/json</code>:</p>
@@ -228,7 +237,9 @@ classes by property name, any case; <code>BatchAsync</code>,
 <code>SubscribeAsync</code> as an <code>IAsyncEnumerable</code>,
 <code>ChangesAsync</code> and a <code>Tenant</code> option cover the rest
 of the <a href="http.html">HTTP endpoint</a>
-(<a href="https://github.com/fenecdb/fenec/tree/main/integrations/dotnet">integrations/dotnet</a>).
+(<a href="https://github.com/fenecdb/fenec/tree/main/integrations/dotnet">integrations/dotnet</a>);
+a refusal is a <code>FenecException</code>, and a batch's says which
+statement stopped it (<code>At</code>, from 0).
 A <code>float[]</code> or <code>ReadOnlyMemory&lt;float&gt;</code> goes out
 as the decimals that read back as each float.</p>
 <p>Without the SDK, <code>HttpClient</code> and <code>System.Text.Json</code>:</p>
@@ -363,7 +374,10 @@ let hits = try await remote.from("docs").select("title").near("embed", [Float(0.
 any <code>Decodable</code>. A live query for SwiftUI, where the file goes
 and a replica a server keeps in step are on
 <a href="mobile.html">Mobile and native apps</a>. A device reaches a
-server through TLS: <code>URLSession</code> makes the requests.</p>
+server through TLS: <code>URLSession</code> makes the requests; over it,
+<code>remote.batch([...], idempotencyKey:)</code> lands statements whole
+and <code>withIdempotencyKey</code> makes a write once
+(<a href="mobile.html#connect">Without a file</a>).</p>
 <p><a href="https://github.com/fenecdb/fenec/tree/main/examples/swift">Full example</a>: Notes, a SwiftUI app over a file, its list a <code>LiveQuery</code>, and a CLI.</p>
 </div>
 
@@ -398,7 +412,10 @@ val hits = remote.from("docs").select("title").near("embed", floatArrayOf(0.1f, 
 <code>...Blocking</code> ones. Live queries are <code>Flow</code>s, and a
 replica a server keeps in step is <code>Fenec.sync</code>
 (<a href="mobile.html">Mobile and native apps</a>). A device reaches a
-server through TLS: <code>HttpURLConnection</code> makes the requests.</p>
+server through TLS: <code>HttpURLConnection</code> makes the requests; over
+it, <code>remote.batch(listOf(...), idempotencyKey = id)</code> lands
+statements whole and <code>withIdempotencyKey</code> makes a write once
+(<a href="mobile.html#connect">Without a file</a>).</p>
 <p><a href="https://github.com/fenecdb/fenec/tree/main/examples/kotlin-android">Full example</a>: Notes, a Compose app over a file, its list a live <code>Flow</code>, and a JVM CLI.</p>
 </div>
 
@@ -433,7 +450,10 @@ final hits = await remote.from('docs').select(['title']).near('embed', Float32Li
 Live queries are <code>Stream</code>s, and a replica a server keeps in step
 is <code>Fenec.openSynced</code> (<a href="mobile.html">Mobile and native
 apps</a>). A device reaches a server through TLS: <code>dart:io</code>'s
-<code>HttpClient</code> makes the requests.</p>
+<code>HttpClient</code> makes the requests; over it,
+<code>remote.batch([...], idempotencyKey: id)</code> lands statements whole
+and <code>withIdempotencyKey</code> makes a write once
+(<a href="mobile.html#connect">Without a file</a>).</p>
 <p><a href="https://github.com/fenecdb/fenec/tree/main/examples/flutter">Full example</a>: Notes, a Flutter app over a file, its list a <code>StreamBuilder</code> over a live query.</p>
 </div>
 

@@ -4,6 +4,7 @@
 // for `"; del products; --` is a search for those characters.
 import 'server-only';
 import { cache } from 'react';
+import { and, or } from '@fenecdb/web/client';
 import { db } from './db';
 import { products, categories, inventory } from './schema';
 import { PRICE_BANDS } from './generate';
@@ -47,51 +48,80 @@ export const category = cache(async (slug: string) => {
 });
 
 /**
+ * The bounds of the price facet's ranges, in cents: each band from its
+ * floor to the next, the last up to the largest whole number a bound
+ * takes exactly.
+ */
+const BOUNDS = [0, ...PRICE_BANDS.map((b) => Math.min(b.max, Number.MAX_SAFE_INTEGER))];
+
+/** The rows of the price bands a query string names: `price >= floor and price < next`, a band each. */
+function bandsWhere(slugs: string[]) {
+  const conds = PRICE_BANDS.flatMap((b, i) =>
+    slugs.includes(b.slug) ? [and({ price: { gte: BOUNDS[i] } }, { price: { lt: BOUNDS[i + 1] } })] : [],
+  );
+  return conds.length === 1 ? conds[0] : or(...conds);
+}
+
+/**
  * A page of a category or a search, with each facet counted over every
- * row it matches. A facet a filter is set on is counted again without its
- * own filter -- so "Brand" still lists the other brands to add -- each
- * such count a query of its own beside the page, run at once.
+ * row it matches, in one statement. A facet a filter is set on is
+ * `disjunctive`: counted without its own filter, so "Brand" still lists
+ * the other brands to add -- where it was a query of its own beside the
+ * page. The price is counted by ranges of the `@sorted` field: the bands
+ * are no field of their own.
  */
 export async function listing(opts: { category?: string; q?: string; filters: Filters; sort: Sort; page: number }) {
   const shop = await db();
-  const base = (skip?: FilterKey) => {
-    let q = shop.from(products);
-    if (opts.category) q = q.where('category', opts.category);
-    for (const [k, values] of Object.entries(opts.filters) as [FilterKey, string[]][]) {
-      if (k === skip || !values.length) continue;
-      const field = FILTERS[k].field;
-      q = values.length === 1 ? q.where(field, values[0]) : q.where(field, 'in', values);
+  const on = (k: FilterKey) => (opts.filters[k]?.length ?? 0) > 0;
+  // The rows the page and its facets are of.
+  let base = shop.from(products);
+  if (opts.category) base = base.where('category', opts.category);
+  for (const [k, values] of Object.entries(opts.filters) as [FilterKey, string[]][]) {
+    if (!values.length) continue;
+    if (k === 'price') {
+      if (PRICE_BANDS.some((b) => values.includes(b.slug))) base = base.where(bandsWhere(values));
+      continue;
     }
-    return q;
-  };
-  let page = base().select(...CARD);
+    const field = FILTERS[k].field;
+    base = values.length === 1 ? base.where(field, values[0]) : base.where(field, 'in', values);
+  }
+  if (opts.q) base = base.match('description', opts.q);
+
+  let page = base.select(...CARD);
   if (opts.q) {
-    page = page.highlight('name').snippet('description', 26, { ellipsis: '…' }).match('description', opts.q);
+    page = page.highlight('name').snippet('description', 26, { ellipsis: '…' });
   } else {
     const s = SORTS[opts.sort];
     page = page.order(s.field, s.dir).order('id');
   }
+  // `category` is asked on a category page too, where nothing chooses it:
+  // one value, from its index, whose count is the matches.
   page = page
-    .facet('brand', { top: 40 })
-    .facet('priceBand')
-    .facet('colour')
-    .facet('material', { top: 20 });
-  if (opts.q && !opts.category) page = page.facet('category');
-  page = page.offset((opts.page - 1) * PAGE_SIZE).limit(PAGE_SIZE);
+    .facet('brand', { top: 40, disjunctive: on('brand') })
+    .facet('price', { ranges: BOUNDS, disjunctive: on('price') })
+    .facet('colour', { disjunctive: on('colour') })
+    .facet('material', { top: 20, disjunctive: on('material') })
+    .facet('category', { disjunctive: on('category') })
+    .offset((opts.page - 1) * PAGE_SIZE)
+    .limit(PAGE_SIZE);
 
-  const again = (Object.keys(opts.filters) as FilterKey[]).map(async (k) => {
-    let q = base(k);
-    if (opts.q) q = q.match('description', opts.q);
-    const rows = await q.facet(FILTERS[k].field, { top: 40 }).limit(0).rows();
-    return [FILTERS[k].field, (rows.facets?.[FILTERS[k].field] ?? []) as Facet[]] as const;
-  });
-  const [got, ...recounted] = await Promise.all([page.rows(), ...again]);
-  // `page` was built in steps, so its type no longer knows it asked for facets.
-  const rows = got as typeof got & { facets?: Record<string, Facet[]> };
-  const facets: Record<string, Facet[]> = { ...((rows.facets ?? {}) as Record<string, Facet[]>) };
-  for (const [field, counts] of recounted) facets[field] = counts;
-  // Every row has a brand, so the brands' counts add up to the matches.
-  const total = ((rows.facets?.brand ?? []) as Facet[]).reduce((n, f) => n + f.count, 0);
+  const rows = await page.rows();
+  const facets: Record<string, Facet[]> = {};
+  for (const [field, counts] of Object.entries(rows.facets ?? {})) {
+    facets[field] =
+      field === 'price'
+        ? counts.flatMap((f, i) => (f.count > 0 ? [{ value: PRICE_BANDS[i].slug, count: f.count }] : []))
+        : (counts as Facet[]);
+  }
+  // The matches: the counts of a facet no filter of its own leaves out add
+  // up to them -- every product has a category and a colour or none -- and
+  // with each of those chosen, a count of their own.
+  const sum = (counts: { count: number }[] | undefined) => (counts ?? []).reduce((n, f) => n + f.count, 0);
+  const total = !on('category')
+    ? sum(rows.facets?.category)
+    : !on('colour')
+      ? sum(rows.facets?.colour)
+      : sum((await base.facet('colour').limit(0).rows()).facets.colour);
   const cards: Card[] = rows.map((r) => {
     const row = r as unknown as Card & { 'highlight(name)'?: [number, number][]; 'snippet(description)'?: Card['snippet'] };
     return { ...row, marks: row['highlight(name)'] ?? undefined, snippet: row['snippet(description)'] ?? null };
