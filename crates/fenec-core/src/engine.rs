@@ -1939,6 +1939,25 @@ enum Source<'a> {
     Mark(usize),
 }
 
+/// The places in the payload of a select's fields, when its columns are
+/// the id at most once and fields alone, in the order the payload holds
+/// them -- `select *` and most lists -- so a row is read in one pass over
+/// its document: a field at a time looked the document up again and
+/// skipped every field before it, ten look-ups and 45 skips a row of ten
+/// fields, 0.95 us a 1 KB row against 0.43.
+fn one_pass(schema: &Schema, sources: &[Source]) -> Option<Vec<usize>> {
+    let mut places = Vec::with_capacity(sources.len());
+    let mut ids = 0;
+    for s in sources {
+        match s {
+            Source::Id => ids += 1,
+            Source::At((pos, None)) => places.push(schema.place(*pos)),
+            _ => return None,
+        }
+    }
+    (!places.is_empty() && ids <= 1 && places.windows(2).all(|w| w[0] < w[1])).then_some(places)
+}
+
 /// A `highlight()` or `snippet()` worked out for a query.
 struct MarkPlan {
     /// The text field it marks.
@@ -4841,6 +4860,150 @@ impl Database {
         }
     }
 
+    /// [`Self::query`]'s answer to a plain `get` -- fields alone, in their
+    /// order, with no `match`, `near`, `lookup`, `facet`, aggregate or
+    /// `count` -- written straight onto `out` as the JSON array
+    /// [`crate::json::rows_array_into`] writes of its rows, read off the stored
+    /// documents: no row's values decoded into a `Value` each and dropped
+    /// after. The number of rows, or `None` for any other statement, which
+    /// `query` answers, `out` as it was. A YCSB scan of 50 1 KB records in
+    /// fenec-server took 66 us to decode and 44 to write out in Docker,
+    /// where musl gave the blocks back to the system after each and
+    /// faulted them in again the next time.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn query_json(
+        &self,
+        stmt: &Statement,
+        params: &[Value],
+        out: &mut String,
+    ) -> Result<Option<usize>> {
+        let Statement::Select(sel) = stmt else {
+            return Ok(None);
+        };
+        if !sel.aggregate.is_empty()
+            || sel.count
+            || sel.matcher.is_some()
+            || sel.near.is_some()
+            || sel.fuse.is_some()
+            || sel.lookup.is_some()
+            || !sel.facets.is_empty()
+            || !sel.marks.is_empty()
+        {
+            return Ok(None);
+        }
+        self.refuse_inexact(stmt, params)?;
+        let stmt = self.answered(stmt, params)?;
+        let Statement::Select(sel) = &*stmt else {
+            return Ok(None);
+        };
+        let c = self.collection(&sel.collection)?;
+        sel.check()?;
+        // Each column's name and its field's place in the payload, `ID` for
+        // the id, on the stack: what a request allocates and frees, musl
+        // maps and unmaps whenever the last block of its size goes, and a
+        // read by id had a page mapped, faulted in and unmapped each time
+        // when these were `Vec`s.
+        const ID: usize = usize::MAX;
+        const MOST: usize = 64;
+        let mut cols: [(&str, usize); MOST] = [("", ID); MOST];
+        fn put<'a>(
+            cols: &mut [(&'a str, usize)],
+            width: &mut usize,
+            col: (&'a str, usize),
+        ) -> bool {
+            let Some(slot) = cols.get_mut(*width) else {
+                return false;
+            };
+            *slot = col;
+            *width += 1;
+            true
+        }
+        let mut width = 0;
+        let mut ids_named = 0;
+        let mut fits = true;
+        match &sel.project {
+            None => {
+                fits &= put(&mut cols, &mut width, ("id", ID));
+                for (p, f) in c.schema.fields.iter().enumerate() {
+                    fits &= put(&mut cols, &mut width, (&f.name, c.schema.place(p)));
+                }
+            }
+            Some(list) => {
+                for col in list {
+                    let place = match col == "id" {
+                        true => {
+                            ids_named += 1;
+                            ID
+                        }
+                        false => match source_or_err(&c.schema, col, "")? {
+                            (p, None) => c.schema.place(p),
+                            (_, Some(_)) => return Ok(None),
+                        },
+                    };
+                    fits &= put(&mut cols, &mut width, (col, place));
+                }
+            }
+        }
+        let cols = &cols[..width];
+        let mut last = None;
+        let in_order = cols
+            .iter()
+            .filter(|(_, place)| *place != ID)
+            .all(|&(_, place)| last.replace(place).is_none_or(|l| l < place));
+        if !fits || ids_named > 1 || last.is_none() || !in_order {
+            return Ok(None);
+        }
+        let ctx = EvalCtx {
+            params,
+            registry: &self.registry,
+            clock: self.clock,
+        };
+        let (ids, _) = self.page_ids(c, sel, params, &ctx, false, true, false)?;
+        let limit = sel.limit.unwrap_or(usize::MAX);
+        let mut n = 0;
+        out.push('[');
+        for id in ids.into_iter().skip(sel.offset).take(limit) {
+            if n > 0 {
+                out.push(',');
+            }
+            n += 1;
+            out.push('{');
+            let doc = c.store.raw(id)?.unwrap_or_default();
+            let (mut pos, mut at) = (0usize, 0usize);
+            for (j, &(name, want)) in cols.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                crate::json::escape_into(out, name);
+                out.push(':');
+                if want == ID {
+                    crate::json::int_into(out, id as i64);
+                    continue;
+                }
+                // Past the payload's end nothing is skipped: a field added
+                // after the document was written reads as `null`.
+                while at < want {
+                    crate::codec::skip_field(doc, &mut pos)?;
+                    at += 1;
+                }
+                at += 1;
+                match doc.get(pos) {
+                    None => out.push_str("null"),
+                    Some(&crate::codec::TAG_TEXT) => {
+                        pos += 1;
+                        crate::json::escape_into(out, crate::codec::text_at(doc, &mut pos)?);
+                    }
+                    Some(_) => {
+                        crate::json::value_into(out, &crate::codec::decode_value(doc, &mut pos)?)
+                    }
+                }
+            }
+            out.push('}');
+        }
+        out.push(']');
+        Ok(Some(n))
+    }
+
     /// Full execution, writes included. The watcher is woken once *after* the
     /// statement finishes -- not per document: a `put` of 10 000 documents is
     /// a single wake-up, and the subscriber will read one batch anyway.
@@ -7302,15 +7465,114 @@ impl Database {
             }
             let want = ranked_rows(sel, "near", MAX_NEAR_ROWS)?;
             scored = with_scores(self.run_near(c, sel, near, want, params, &ctx)?);
-        } else if let Some(ids) = self.walk_order(c, sel, params, &ctx)? {
+        } else {
+            let (ids, counted) =
+                self.page_ids(c, sel, params, &ctx, wants_facets, all, required)?;
             scored = ids.into_iter().map(|id| (id, None)).collect();
+            if counted.is_some() {
+                facet_ids = counted;
+            }
+        }
+
+        // Worked out once `match` has run, which refused what it could not
+        // search: a field with no text index, a query that is not text.
+        let (terms, marks) = match (&sel.matcher, sel.marks.is_empty()) {
+            (Some(m), false) => self.mark_plans(c, sel, m, &ctx)?,
+            _ => (None, Vec::new()),
+        };
+        // Fields alone, in their order, are read in one pass (`one_pass`).
+        let one = one_pass(&c.schema, &sources);
+        let in_one_pass = one.is_some();
+        let places = one.unwrap_or_default();
+        let mut read = Vec::with_capacity(places.len());
+        let mut rows = Vec::new();
+        for (id, score) in scored.into_iter().skip(sel.offset) {
+            if rows.len() >= limit {
+                break;
+            }
+            let mut values = Vec::with_capacity(columns.len());
+            if in_one_pass {
+                read.clear();
+                if !c.store.read_fields(id, &places, &mut read)? {
+                    read.resize(places.len(), Value::Null);
+                }
+                let mut fields = read.drain(..);
+                for src in &sources {
+                    values.push(match src {
+                        Source::Id => Value::Int(id as i64),
+                        _ => fields.next().unwrap_or(Value::Null),
+                    });
+                }
+                drop(fields);
+                rows.push(Row { id, values, score });
+                continue;
+            }
+            for src in &sources {
+                values.push(match src {
+                    Source::Id => Value::Int(id as i64),
+                    Source::At(at) => read_source(&c.store, id, *at)?,
+                    // Without the text index no `match` ran, and the marking
+                    // is left out of the build.
+                    Source::Mark(i) => match (&terms, cfg!(feature = "text")) {
+                        (Some(t), true) => marks[*i].value(t, &c.store, id)?,
+                        _ => Value::Null,
+                    },
+                });
+            }
+            rows.push(Row { id, values, score });
+        }
+        let facets = match (wants_facets, &facet_ids) {
+            (false, _) => Vec::new(),
+            (true, Some(ids)) => self.facets(c, sel, ids, false)?,
+            (true, None) => self.facets(c, sel, &[], true)?,
+        };
+
+        // Children are attached after the parent page is decided, so a
+        // `limit 20` probes twenty buckets and not one per matching row.
+        // `check` has already refused `count`, `near` and `match` alongside
+        // `lookup`, which is what lets this sit at the end of every path
+        // rather than forking one.
+        let nested = match &sel.lookup {
+            None => None,
+            Some(l) => {
+                let ids: Vec<DocId> = rows.iter().map(|r| r.id).collect();
+                Some(self.run_lookup(c, l, &ids, &ctx)?)
+            }
+        };
+
+        Ok(ResultSet {
+            columns,
+            rows,
+            nested,
+            facets,
+        })
+    }
+
+    /// The page of a `get` that neither `match` nor `near` ranks, in its
+    /// order -- an ordered index walked, or the filter's matches put in
+    /// order -- and, when `facet` asks, every row it counts over: what
+    /// `select` and `query_json` both answer from.
+    #[allow(clippy::too_many_arguments)]
+    fn page_ids(
+        &self,
+        c: &Collection,
+        sel: &Select,
+        params: &[Value],
+        ctx: &EvalCtx,
+        wants_facets: bool,
+        all: bool,
+        required: bool,
+    ) -> Result<(Vec<DocId>, Option<Vec<DocId>>)> {
+        if let Some(ids) = self.walk_order(c, sel, params, ctx)? {
+            let mut facet_ids = None;
             if wants_facets && !all {
                 let mut set = self.matching_ids(&sel.collection, &sel.filter, params)?;
                 if let Some(l) = sel.lookup.as_ref().filter(|l| l.required) {
-                    set = self.retain_with_children(c, l, set, &ctx)?;
+                    set = self.retain_with_children(c, l, set, ctx)?;
                 }
                 facet_ids = Some(set);
             }
+            Ok((ids, facet_ids))
         } else {
             // With no ordering the page is the first `offset + limit` matches
             // in id order, so the scan can stop there. `required` drops
@@ -7323,6 +7585,7 @@ impl Database {
                 None
             };
             let counted = wants_facets && !all;
+            let mut facet_ids = None;
             let mut ids = self.matching_ids_capped(
                 &sel.collection,
                 &sel.filter,
@@ -7335,7 +7598,7 @@ impl Database {
             // survive.
             if let Some(l) = &sel.lookup {
                 if l.required {
-                    ids = self.retain_with_children(c, l, ids, &ctx)?;
+                    ids = self.retain_with_children(c, l, ids, ctx)?;
                 }
             }
             if counted {
@@ -7379,60 +7642,8 @@ impl Database {
                 });
                 ids = order_ids(&c.store, &ids, &keys, k)?;
             }
-            scored = ids.into_iter().map(|id| (id, None)).collect();
+            Ok((ids, facet_ids))
         }
-
-        // Worked out once `match` has run, which refused what it could not
-        // search: a field with no text index, a query that is not text.
-        let (terms, marks) = match (&sel.matcher, sel.marks.is_empty()) {
-            (Some(m), false) => self.mark_plans(c, sel, m, &ctx)?,
-            _ => (None, Vec::new()),
-        };
-        let mut rows = Vec::new();
-        for (id, score) in scored.into_iter().skip(sel.offset) {
-            if rows.len() >= limit {
-                break;
-            }
-            let mut values = Vec::with_capacity(columns.len());
-            for src in &sources {
-                values.push(match src {
-                    Source::Id => Value::Int(id as i64),
-                    Source::At(at) => read_source(&c.store, id, *at)?,
-                    // Without the text index no `match` ran, and the marking
-                    // is left out of the build.
-                    Source::Mark(i) => match (&terms, cfg!(feature = "text")) {
-                        (Some(t), true) => marks[*i].value(t, &c.store, id)?,
-                        _ => Value::Null,
-                    },
-                });
-            }
-            rows.push(Row { id, values, score });
-        }
-        let facets = match (wants_facets, &facet_ids) {
-            (false, _) => Vec::new(),
-            (true, Some(ids)) => self.facets(c, sel, ids, false)?,
-            (true, None) => self.facets(c, sel, &[], true)?,
-        };
-
-        // Children are attached after the parent page is decided, so a
-        // `limit 20` probes twenty buckets and not one per matching row.
-        // `check` has already refused `count`, `near` and `match` alongside
-        // `lookup`, which is what lets this sit at the end of every path
-        // rather than forking one.
-        let nested = match &sel.lookup {
-            None => None,
-            Some(l) => {
-                let ids: Vec<DocId> = rows.iter().map(|r| r.id).collect();
-                Some(self.run_lookup(c, l, &ids, &ctx)?)
-            }
-        };
-
-        Ok(ResultSet {
-            columns,
-            rows,
-            nested,
-            facets,
-        })
     }
 
     /// What each `highlight()` and `snippet()` of the list needs once a

@@ -1,7 +1,14 @@
 //! One client's round trip taken apart: YCSB's read by key (a 1 KB record
-//! of ten fields) and its update of one field, against fenec-server --
-//! natively and in a container -- and PostgreSQL 17 in a container, as
-//! `ycsb` measures them (`make roundtrip-bench`).
+//! of ten fields), its update of one field and E's scan of N records from a
+//! key (`scanN`), against fenec-server -- natively and in a container --
+//! and PostgreSQL 17 in a container, as `ycsb` measures them (`make
+//! roundtrip-bench`).
+//!
+//! In a container the answer's bytes and packets are counted at its
+//! network card -- what Docker's forwarding carried, fenec-server's JSON
+//! against PostgreSQL's binary rows -- and fenec-server's page faults, from
+//! `/proc/1/stat`: musl's allocator unmaps a freed group of blocks, and
+//! each answer faulted its pages in again.
 //!
 //! Each side reports what it can see. The client: each operation's whole
 //! round trip, and for fenec-server its parts -- the request's write, the
@@ -17,6 +24,7 @@
 //!
 //!     roundtrip [--systems server,server-docker,pg] [--modes always,250]
 //!               [--records 100000] [--ops 20000] [--image fenecdb-timing]
+//!               [--measure read,update,scan1,scan50,scan100]
 
 #[path = "../http.rs"]
 mod http;
@@ -277,8 +285,19 @@ fn run_fenec(name: &str, f: &mut Fenec, cfg: &Config, sync: &str) {
         let k = 1 + rng.below(cfg.records);
         c.query(read, &k.to_string());
     }
-    for op in ["read", "update"] {
+    for op in &cfg.ops_list {
+        let op = op.as_str();
+        let scan = op
+            .strip_prefix("scan")
+            .map(|n| format!("get usertable where id >= $1 limit {n}"));
+        if let Some(scan) = &scan {
+            for _ in 0..cfg.ops / 20 {
+                let k = 1 + rng.below(cfg.records - 100);
+                c.query(scan, &k.to_string());
+            }
+        }
         let _ = server_phases(&mut c);
+        let net = f.docker.as_ref().map(|_| net_counts(DOCKER_SERVER));
         let mut parts: [Vec<u64>; 4] = Default::default();
         let mut params = String::new();
         let values: Vec<String> = (0..256).map(|_| rng.value()).collect();
@@ -287,7 +306,10 @@ fn run_fenec(name: &str, f: &mut Fenec, cfg: &Config, sync: &str) {
             let k = 1 + rng.below(cfg.records);
             params.clear();
             let t = Instant::now();
-            let p = if op == "read" {
+            let p = if let Some(scan) = &scan {
+                write!(params, "{}", k.min(cfg.records - 100)).unwrap();
+                c.query_timed(scan, &params)
+            } else if op == "read" {
                 write!(params, "{k}").unwrap();
                 c.query_timed(read, &params)
             } else {
@@ -300,6 +322,8 @@ fn run_fenec(name: &str, f: &mut Fenec, cfg: &Config, sync: &str) {
             }
         }
         let after = rusage();
+        let bytes = c.body().len();
+        let net = net.map(|a| net_per_op(&a, &net_counts(DOCKER_SERVER), cfg.ops));
         let server = server_phases(&mut c);
         let [w, wait, r, mut total] = parts;
         report(
@@ -311,7 +335,11 @@ fn run_fenec(name: &str, f: &mut Fenec, cfg: &Config, sync: &str) {
             per_op(&before, &after, cfg.ops),
             &server,
         );
-        if cfg.strace && f.docker.is_some() {
+        println!(
+            "{name}\t{sync}\t{op}\tlast body {bytes} bytes{}",
+            net.unwrap_or_default()
+        );
+        if cfg.strace && f.docker.is_some() && scan.is_none() {
             let n = 2000;
             let calls = strace(DOCKER_SERVER, "1", n, || {
                 for i in 0..n {
@@ -378,6 +406,46 @@ fn strace(target: &str, pid: &str, ops: usize, run: impl FnOnce()) -> String {
         }
     }
     calls.join(", ")
+}
+
+/// A container's network counters: bytes and packets out and in, from
+/// its `eth0` -- what crossed into Docker's forwarding, TCP and IP heads
+/// included -- and its first process's minor page faults. Read from a
+/// container of `fenec-strace` in its network and process namespaces,
+/// since fenec-server's image holds no `cat`. A packet is one the virtual
+/// network card was handed, which may be cut into several on the way.
+fn net_counts(container: &str) -> [u64; 5] {
+    let out = std::process::Command::new("docker")
+        .args(["run", "--rm", &format!("--network=container:{container}")])
+        .args([&format!("--pid=container:{container}"), "fenec-strace"])
+        .args([
+            "sh",
+            "-c",
+            "cd /sys/class/net/eth0/statistics && cat tx_bytes tx_packets rx_bytes rx_packets \
+             && cut -d' ' -f10 /proc/1/stat",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut v = [0u64; 5];
+    for (o, l) in v.iter_mut().zip(text.lines()) {
+        *o = l.trim().parse().unwrap_or(0);
+    }
+    v
+}
+
+fn net_per_op(a: &[u64; 5], b: &[u64; 5], ops: usize) -> String {
+    let n = ops as f64;
+    let d = |i: usize| b[i].saturating_sub(a[i]) as f64 / n;
+    format!(
+        "\tthe container sent {:.0} bytes in {:.2} packets, received {:.0} in {:.2}, \
+         its first process took {:.2} page faults, an op",
+        d(0),
+        d(1),
+        d(2),
+        d(3),
+        d(4)
+    )
 }
 
 fn report(
@@ -510,6 +578,9 @@ fn run_pg(cfg: &Config, sync: &str) {
     let set = c
         .prepare("UPDATE usertable SET field3 = $2 WHERE ycsb_key = $1")
         .unwrap();
+    let scan_stmt = c
+        .prepare("SELECT * FROM usertable WHERE ycsb_key >= $1 ORDER BY ycsb_key LIMIT $2")
+        .unwrap();
     let mut rng = Rng(11);
     for _ in 0..cfg.ops / 4 {
         let k = (1 + rng.below(cfg.records)) as i64;
@@ -517,12 +588,22 @@ fn run_pg(cfg: &Config, sync: &str) {
     }
     let values: Vec<String> = (0..256).map(|_| rng.value()).collect();
     let mut admin = postgres::Client::connect(PG_URL, postgres::NoTls).unwrap();
-    for op in ["read", "update"] {
+    for op in &cfg.ops_list {
+        let op = op.as_str();
+        let scan: Option<i64> = op.strip_prefix("scan").map(|n| n.parse().unwrap());
         // The round trip, nothing logged.
         let mut total = Vec::with_capacity(cfg.ops);
         let one = |c: &mut postgres::Client, i: usize, rng: &mut Rng| {
             let k = (1 + rng.below(cfg.records)) as i64;
-            if op == "read" {
+            if let Some(n) = scan {
+                let k = k.min(cfg.records as i64 - 100);
+                let rows = c.query(&scan_stmt, &[&k, &n]).unwrap();
+                assert_eq!(rows.len(), n as usize);
+                for r in &rows {
+                    let s: String = r.get(4);
+                    assert_eq!(s.len(), FIELD_LEN);
+                }
+            } else if op == "read" {
                 let r = c.query_one(&read, &[&k]).unwrap();
                 let s: String = r.get(4);
                 assert_eq!(s.len(), FIELD_LEN);
@@ -534,6 +615,12 @@ fn run_pg(cfg: &Config, sync: &str) {
         admin
             .batch_execute("SELECT pg_stat_statements_reset()")
             .unwrap();
+        if scan.is_some() {
+            for i in 0..cfg.ops / 20 {
+                one(&mut c, i, &mut rng);
+            }
+        }
+        let net = net_counts(DOCKER_PG);
         let before = rusage();
         for i in 0..cfg.ops {
             let t = Instant::now();
@@ -541,13 +628,18 @@ fn run_pg(cfg: &Config, sync: &str) {
             total.push(t.elapsed().as_nanos() as u64);
         }
         let after = rusage();
+        let net = net_per_op(&net, &net_counts(DOCKER_PG), cfg.ops);
         let mut server = Vec::new();
         for row in admin
             .query(
                 "SELECT calls, mean_exec_time FROM pg_stat_statements
-                 WHERE query LIKE 'SELECT * FROM usertable%' OR query LIKE 'UPDATE usertable%'
+                 WHERE query LIKE $1
                  ORDER BY calls DESC LIMIT 1",
-                &[],
+                &[&match (scan, op) {
+                    (Some(_), _) => "SELECT * FROM usertable WHERE ycsb_key >=%",
+                    (None, "read") => "SELECT * FROM usertable WHERE ycsb_key =%",
+                    _ => "UPDATE usertable%",
+                }],
             )
             .unwrap()
         {
@@ -578,7 +670,8 @@ fn run_pg(cfg: &Config, sync: &str) {
             per_op(&before, &after, cfg.ops),
             &server,
         );
-        if cfg.strace {
+        println!("pg\t{sync}\t{op}{net}");
+        if cfg.strace && scan.is_none() {
             let pid: i32 = c.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
             let n = 2000;
             let calls = strace(DOCKER_PG, &pid.to_string(), n, || {
@@ -637,6 +730,8 @@ struct Config {
     ops: usize,
     /// Count the server's system calls an operation, in a pass of its own.
     strace: bool,
+    /// What is measured: `read`, `update`, `scan<n>` (n records from a key).
+    ops_list: Vec<String>,
 }
 
 fn main() {
@@ -648,6 +743,7 @@ fn main() {
         records: 100_000,
         ops: 20_000,
         strace: false,
+        ops_list: vec!["read".into(), "update".into()],
     };
     let mut i = 0;
     while i < args.len() {
@@ -663,6 +759,7 @@ fn main() {
             "--records" => cfg.records = v.parse().unwrap(),
             "--ops" => cfg.ops = v.parse().unwrap(),
             "--image" => image = v,
+            "--measure" => cfg.ops_list = v.split(',').map(str::to_string).collect(),
             other => panic!("unknown argument {other}"),
         }
         i += 2;

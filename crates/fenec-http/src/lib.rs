@@ -664,6 +664,7 @@ fn serve_connection(stream: TcpStream, backend: &Backend, cfg: &Config) {
         if resp.write(&mut out, keep_alive, head_only).is_err() || !keep_alive {
             return;
         }
+        http::give_back(resp.body);
         timing::lap(timing::Phase::Write);
         timing::end();
     }
@@ -1132,7 +1133,25 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
     let result = if stmt.is_read_only() {
-        let r = held::read(db).query(&stmt, &params);
+        // A plain `get` is written out as JSON from the stored documents,
+        // under the read lock; anything else is answered as rows and
+        // rendered after it.
+        let guard = held::read(db);
+        let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
+        match guard.query_json(&stmt, &params, &mut body) {
+            Ok(Some(n)) => {
+                drop(guard);
+                timing::lap(timing::Phase::Execute);
+                statements::rows(n as u64);
+                let resp = Response::json(200, body).versioned(fenec_core::VERSION);
+                timing::lap(timing::Phase::Render);
+                return resp;
+            }
+            Ok(None) => http::give_back(body.into_bytes()),
+            Err(e) => return error_response(&e),
+        }
+        let r = guard.query(&stmt, &params);
+        drop(guard);
         timing::lap(timing::Phase::Execute);
         r
     } else if let Some(built) = Database::maintain(db, &stmt) {

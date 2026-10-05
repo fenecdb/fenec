@@ -556,6 +556,14 @@ pub fn decode_text_into(buf: &[u8], pos: &mut usize, s: &mut String) -> Result<(
     Ok(())
 }
 
+/// A text's bytes where they lie, its tag already read: what a row written
+/// out as JSON escapes with no `String` of its own.
+pub fn text_at<'a>(buf: &'a [u8], pos: &mut usize) -> Result<&'a str> {
+    let n = get_uvarint(buf, pos)? as usize;
+    let raw = take(buf, pos, n)?;
+    std::str::from_utf8(raw).map_err(|_| Error::Corrupt("invalid utf8".into()))
+}
+
 pub fn decode_str(buf: &[u8], pos: &mut usize) -> Result<String> {
     let n = get_uvarint(buf, pos)? as usize;
     let raw = take(buf, pos, n)?;

@@ -161,9 +161,12 @@ cell, and MongoDB</a>):</p>
 <table>
 <thead><tr><th>YCSB, 1 000 000 records</th><th class="n">fenec-server, HTTP</th><th class="n">PostgreSQL</th></tr></thead>
 <tbody>
-<tr><td>B, 95% reads, 16 clients</td><td class="n"><b>17.1 k</b></td><td class="n">14.0 k</td></tr>
+<tr><td>B, 95% reads, 16 clients</td><td class="n"><b>19.6 k</b></td><td class="n">17.4 k</td></tr>
 <tr><td>A, 50% updates, 16 clients</td><td class="n"><b>14.3 k</b></td><td class="n">14.1 k</td></tr>
 <tr><td>A, 50% updates, one client</td><td class="n"><b>3.27 k</b></td><td class="n">2.60 k</td></tr>
+<tr><td>B, 95% reads, one client</td><td class="n"><b>5.28 k</b></td><td class="n">3.98 k</td></tr>
+<tr><td>E, scans of 1 to 100 rows, one client</td><td class="n"><b>1.82 k</b></td><td class="n">1.39 k</td></tr>
+<tr><td>C, reads alone, one client, buffered</td><td class="n">3.19 k</td><td class="n"><b>3.66 k</b></td></tr>
 </tbody>
 </table>
 </div>
@@ -173,6 +176,11 @@ cell, and MongoDB</a>):</p>
     millisecond where the Mac's <code>F_FULLFSYNC</code> takes four, and
     its network a quarter of a millisecond a request: fenec-server on the
     Mac against PostgreSQL in Docker would compare those, not the two.</li>
+  <li><b>C, reads alone, is where PostgreSQL leads,</b> by 13% at one
+    client: each server's own part of a read is under 0.02 ms of a 0.29 ms
+    round trip, and the rest moves with Docker's VM, PostgreSQL's own B
+    doing 2.65 k beside its C's 3.66 k. At 16 clients fenec-server leads C,
+    19.6 k against 17.7 k.</li>
   <li><b>One machine, one run of each side.</b> An Apple M1 MacBook Air;
     PostgreSQL ran in Docker.</li>
   <li><b>Every figure, and the 768-dim run,</b> is in

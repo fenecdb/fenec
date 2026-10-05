@@ -252,7 +252,9 @@ requests-bench:
 ## in Docker -- built with `--features timing`, whose GET /_timing has each
 ## phase inside it -- and PostgreSQL 17 in Docker, its bind and execute
 ## logged. RT_ARGS: --systems server,server-docker,pg --modes always,250
-## --records 100000 --ops 20000 --strace (the servers' system calls an op).
+## --records 100000 --ops 20000 --strace (the servers' system calls an op)
+## --measure read,update,scan50 (scanN: N records from a key, with the bytes,
+## packets and page faults of the container an op).
 roundtrip-bench:
 	$(CARGO) build --release -p fenec-server --features timing --target-dir target/timing
 	$(CARGO) build --release -p fenec-bench --bin roundtrip
