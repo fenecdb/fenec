@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -157,10 +158,34 @@ func asciiIdent(s string) bool {
 	return true
 }
 
-// column is a select item: a field, or an aggregate spelled as FenecQL
-// spells it -- count(*), sum(total), avg(f), min(f), max(f) -- answering
-// under that name. Read by hand rather than by a case-blind pattern, which
-// folds the Kelvin sign onto k where the JS builder's does not.
+// asciiPath is a path of ASCII names, the one an aggregate's argument may be.
+func asciiPath(s string) bool {
+	for _, p := range strings.Split(s, ".") {
+		if !asciiIdent(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiLower lowers ASCII letters alone: strings.ToLower folds the Kelvin
+// sign onto k, where the JS builder's case-blind patterns do not.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c | 0x20
+		}
+	}
+	return string(b)
+}
+
+// column is a select item: a field, or an aggregate of one spelled as
+// FenecQL spells it -- count(*), count(distinct user), sum(total), avg(f),
+// min(f), max(f), first(f), last(f), a path where a field goes --
+// answering under that name. Read by hand rather than by a case-blind
+// pattern, which folds the Kelvin sign onto k where the JS builder's does
+// not.
 func column(name string) (string, bool, error) {
 	s := strings.TrimFunc(name, jsSpace)
 	if open := strings.IndexByte(s, '('); open > 0 && strings.HasSuffix(s, ")") {
@@ -169,15 +194,133 @@ func column(name string) (string, bool, error) {
 		if asciiIdent(fn) && !strings.ContainsAny(fn, "_0123456789") {
 			low = strings.ToLower(fn)
 		}
-		switch {
-		case low == "count" && (arg == "" || arg == "*"):
-			return "count(*)", true, nil
-		case (low == "sum" || low == "avg" || low == "min" || low == "max") && asciiIdent(arg):
-			return low + "(" + arg + ")", true, nil
+		switch low {
+		case "count":
+			if arg == "" || arg == "*" {
+				return "count(*)", true, nil
+			}
+			// count(distinct f), spaces as JavaScript's \s reads them.
+			a := strings.TrimLeftFunc(arg, jsSpace)
+			if len(a) > 8 && asciiLower(a[:8]) == "distinct" {
+				rest := a[8:]
+				r, _ := utf8.DecodeRuneInString(rest)
+				if f := strings.TrimFunc(rest, jsSpace); jsSpace(r) && asciiPath(f) {
+					return "count(distinct " + f + ")", true, nil
+				}
+			}
+		case "sum", "avg", "min", "max", "first", "last":
+			if asciiPath(arg) {
+				return low + "(" + arg + ")", true, nil
+			}
 		}
 	}
 	p, err := fieldPath(name)
 	return p, false, err
+}
+
+// aggregateCalls is what makes an expression an aggregate's: a call of one.
+var aggregateCalls = []string{"count", "sum", "avg", "min", "max", "first", "last"}
+
+// callsAggregate is the JS builder's /\b(count|sum|...)\s*\(/i: a name
+// after no ASCII word character, spaces, then a parenthesis.
+func callsAggregate(sql string) bool {
+	low := asciiLower(sql)
+	word := func(c byte) bool {
+		return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
+	}
+	for _, fn := range aggregateCalls {
+		for from := 0; ; {
+			i := strings.Index(low[from:], fn)
+			if i < 0 {
+				break
+			}
+			i += from
+			from = i + 1
+			if i > 0 && word(low[i-1]) {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimLeftFunc(low[i+len(fn):], jsSpace), "(") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// selectItem is a select-list item or a group key: a name or an
+// aggregate's text, or an expression whose values are bound as it renders.
+type selectItem struct {
+	text string
+	expr *Computed
+}
+
+// columns reads Select's and Group's arguments: a string, a Computed made
+// by Expr, Bucket, CountDistinct, First or Last, or a slice of them.
+func columns(list []any, key bool) ([]selectItem, bool, error) {
+	var out []selectItem
+	aggregate := false
+	for _, c := range list {
+		switch v := c.(type) {
+		case string:
+			var it selectItem
+			var agg bool
+			var err error
+			if key {
+				it.text, err = fieldPath(v)
+			} else {
+				it.text, agg, err = column(v)
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			out, aggregate = append(out, it), aggregate || agg
+		case Computed:
+			if v.err != nil {
+				return nil, false, v.err
+			}
+			if v.kind != "expr" {
+				return nil, false, refuse("inc() is a value to write, not a column")
+			}
+			out, aggregate = append(out, selectItem{expr: &v}), aggregate || callsAggregate(v.sql)
+		default:
+			return nil, false, refuse("invalid field name: %s", jsJSON(c))
+		}
+	}
+	return out, aggregate, nil
+}
+
+// flat takes a slice among Select's or Group's arguments for its items,
+// as the JS builder's flat() does.
+func flat(args []any) []any {
+	var out []any
+	for _, a := range args {
+		switch v := a.(type) {
+		case []string:
+			for _, s := range v {
+				out = append(out, s)
+			}
+		case []any:
+			out = append(out, v...)
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// render is the item as FenecQL, an expression's values bound.
+func (it selectItem) render(bind *binder) (string, error) {
+	if it.expr == nil {
+		return it.text, nil
+	}
+	s, err := it.expr.render("select", bind, "")
+	if err != nil {
+		return "", err
+	}
+	if it.expr.name != "" {
+		s += " as " + it.expr.name
+	}
+	return s, nil
 }
 
 func direction(dir string) (bool, error) {
@@ -705,9 +848,9 @@ type Builder struct {
 	client     *Client
 	err        error
 	collection string
-	project    []string
+	project    []selectItem
 	aggregate  bool
-	group      string
+	group      []selectItem
 	cond       []*node
 	near       *vectorClause
 	match      *[2]any
@@ -766,20 +909,21 @@ func (b *Builder) Collection() string { return b.collection }
 
 // Select names the fields; none, or "*", is every field. Aggregates go in
 // the same list as FenecQL spells them and answer under that name:
-// Select("status", "count(*)", "sum(total)").Group("status").
-func (b *Builder) Select(cols ...string) *Builder {
+// Select("status", "count(*)", "sum(total)").Group("status"); an expression
+// -- Expr, Bucket, CountDistinct, First, Last -- under the name its As
+// gives it: Select("sym", Expr("sum(px * qty) / sum(qty)").As("vwap")).
+// A column is a string or a Computed, or a slice of them.
+func (b *Builder) Select(cols ...any) *Builder {
 	return b.step(func(d *Builder) error {
-		if len(cols) == 0 || slices.Contains(cols, "*") {
+		list := flat(cols)
+		star := func(c any) bool { s, ok := c.(string); return ok && s == "*" }
+		if len(list) == 0 || slices.ContainsFunc(list, star) {
 			d.project, d.aggregate = nil, false
 			return nil
 		}
-		project, aggregate := make([]string, len(cols)), false
-		for i, c := range cols {
-			t, agg, err := column(c)
-			if err != nil {
-				return err
-			}
-			project[i], aggregate = t, aggregate || agg
+		project, aggregate, err := columns(list, false)
+		if err != nil {
+			return err
 		}
 		d.project, d.aggregate = project, aggregate
 		return nil
@@ -925,11 +1069,18 @@ func (b *Builder) Facet(field string, options ...Opt) *Builder {
 	})
 }
 
-// Group makes a row per value of field, for a select list that aggregates.
-func (b *Builder) Group(field string) *Builder {
+// Group makes a row per distinct set of the keys' values, for a select
+// list that aggregates. A key is a field or a path, a name the list gives a
+// column with As, or an expression: Group("sym", Bucket("at", "1h")).
+func (b *Builder) Group(keys ...any) *Builder {
 	return b.step(func(d *Builder) (err error) {
-		d.group, err = ident(field, "field")
-		return err
+		if d.group, _, err = columns(flat(keys), true); err != nil {
+			return err
+		}
+		if len(d.group) == 0 {
+			return refuse("group takes at least one key")
+		}
+		return nil
 	})
 }
 
@@ -1169,8 +1320,15 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		return "", nil, b.err
 	}
 	// The engine refuses each of these too; failing here sends nothing.
-	if b.group != "" && !b.aggregate {
-		return "", nil, refuse("group %s needs an aggregate in select: 'count(*)'", b.group)
+	if len(b.group) > 0 && !b.aggregate {
+		keys := make([]string, len(b.group))
+		for i, k := range b.group {
+			keys[i] = k.text
+			if k.expr != nil {
+				keys[i] = k.expr.sql
+			}
+		}
+		return "", nil, refuse("group %s needs an aggregate in select: 'count(*)'", strings.Join(keys, ", "))
 	}
 	if b.aggregate {
 		clash := ""
@@ -1187,10 +1345,10 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		if clash != "" {
 			return "", nil, refuse("aggregates cannot be combined with %s", clash)
 		}
-		if b.group == "" && (len(b.order) > 0 || b.hasLimit || b.offset > 0) {
+		if len(b.group) == 0 && (len(b.order) > 0 || b.hasLimit || b.offset > 0) {
 			return "", nil, refuse("aggregates answer one row; group makes a row per value")
 		}
-		if b.group == "" && b.require != "" {
+		if len(b.group) == 0 && b.require != "" {
 			return "", nil, refuse("require counts the rows a query answers, and an aggregate answers one")
 		}
 	}
@@ -1262,13 +1420,11 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	bind := &binder{params: []any{}}
 	var sql strings.Builder
 	sql.WriteString("get " + b.collection)
-	// The marks after the fields Select named, or after every field; bound
-	// here, so their tags are the first parameters.
-	items := slices.Clone(b.project)
-	if len(items) == 0 && len(b.marks) > 0 {
-		items = []string{"*"}
-	}
-	for _, m := range b.marks {
+	// The marks go after the fields Select named, or after every field, and
+	// are bound first, as the JS builder binds them; the list's values next,
+	// before the where's, which come after them in the text.
+	marks := make([]string, len(b.marks))
+	for i, m := range b.marks {
 		s := m.kind() + "(" + m.field
 		if m.words >= 0 {
 			s += fmt.Sprintf(", %d", m.words)
@@ -1280,8 +1436,20 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		if m.tagged {
 			s += ", " + bind.bind(m.pre) + ", " + bind.bind(m.post)
 		}
-		items = append(items, s+")")
+		marks[i] = s + ")"
 	}
+	items := make([]string, len(b.project))
+	for i, c := range b.project {
+		s, err := c.render(bind)
+		if err != nil {
+			return "", nil, err
+		}
+		items[i] = s
+	}
+	if len(items) == 0 && len(marks) > 0 {
+		items = []string{"*"}
+	}
+	items = append(items, marks...)
 	if len(items) > 0 {
 		sql.WriteString(" select " + strings.Join(items, ", "))
 	}
@@ -1292,8 +1460,14 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 	if where != "" {
 		sql.WriteString(" where " + where)
 	}
-	if b.group != "" {
-		sql.WriteString(" group " + b.group)
+	if len(b.group) > 0 {
+		keys := make([]string, len(b.group))
+		for i, k := range b.group {
+			if keys[i], err = k.render(bind); err != nil {
+				return "", nil, err
+			}
+		}
+		sql.WriteString(" group " + strings.Join(keys, ", "))
 	}
 	if n := b.near; n != nil {
 		sql.WriteString(" near " + n.field + " " + bind.bind(n.vector))
@@ -1543,14 +1717,24 @@ func structDoc(v any) (Doc, error) {
 	return d, nil
 }
 
-// Computed is a value worked out over the row a write writes: what Inc and
-// Expr make, rendered as FenecQL with its values as parameters.
+// Computed is a value worked out over a row: what Inc and Expr make for a
+// write, and what Expr, Bucket, CountDistinct, First and Last make for
+// Select or Group, rendered as FenecQL with its values as parameters.
 type Computed struct {
 	kind   string
 	by     any
 	sql    string
 	params []any
+	name   string
 	err    error
+}
+
+// As is the name the column answers under: select ... as name.
+func (c Computed) As(name string) Computed {
+	if c.err == nil {
+		c.name, c.err = ident(name, "column")
+	}
+	return c
 }
 
 // Inc is a field plus by in an update, counting from 0 where it is null --
@@ -1567,6 +1751,58 @@ func Inc(by any) Computed {
 // each ? bound to the next parameter: Expr("now()"), Expr("price * ?", 1.2).
 func Expr(sql string, params ...any) Computed {
 	return Computed{kind: "expr", sql: sql, params: params}
+}
+
+// What Bucket takes -- 15m, 1h, 1d, 1w, 3mo, 1y -- written into the text
+// as a literal, since it is a part of the statement's shape.
+var interval = regexp.MustCompile(`^[1-9][0-9]*(ms|s|m|h|d|w|mo|y)$`)
+
+// Bucket is the start of the interval a timestamp falls in -- "15m", "1h",
+// "1d", "1w" (from a Monday), "1mo", "1y", in UTC -- for Select or Group:
+//
+//	db.From("ticks").Select(fenecdb.Bucket("at", "1m").As("minute"), "count(*)").Group("minute")
+func Bucket(field, every string) Computed {
+	if !interval.MatchString(every) {
+		return Computed{err: refuse("bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': %s", jsQuote(every))}
+	}
+	f, err := fieldPath(field)
+	return Computed{kind: "expr", sql: "bucket(" + f + ", " + every + ")", err: err}
+}
+
+// CountDistinct is count(distinct field): how many distinct values the
+// rows hold.
+func CountDistinct(field string) Computed {
+	f, err := fieldPath(field)
+	return Computed{kind: "expr", sql: "count(distinct " + f + ")", err: err}
+}
+
+// First is first(field), or first(field by key): the value of the row
+// least by key -- by the order the rows were written without one -- that
+// has a value; a bar's open is First("px", "at").
+func First(field string, by ...string) Computed {
+	return pick("first", field, by)
+}
+
+// Last is last(field [by key]): as First, the row greatest by key.
+func Last(field string, by ...string) Computed {
+	return pick("last", field, by)
+}
+
+// pick is First's and Last's text; Go has no optional argument, so by is
+// variadic, and more than one key is refused rather than dropped.
+func pick(fn, field string, by []string) Computed {
+	f, err := fieldPath(field)
+	if err != nil {
+		return Computed{err: err}
+	}
+	switch len(by) {
+	case 0:
+		return Computed{kind: "expr", sql: fn + "(" + f + ")"}
+	case 1:
+		k, err := fieldPath(by[0])
+		return Computed{kind: "expr", sql: fn + "(" + f + " by " + k + ")", err: err}
+	}
+	return Computed{err: refuse("%s() orders by one key", fn)}
 }
 
 func finiteNumber(v any) bool {

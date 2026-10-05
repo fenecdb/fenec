@@ -26,6 +26,7 @@ from __future__ import annotations
 import array
 import json
 import math
+import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence, TypeVar
@@ -38,9 +39,13 @@ __all__ = [
     "Query",
     "Rows",
     "and_",
+    "bucket",
     "collection",
+    "count_distinct",
     "expr",
+    "first",
     "inc",
+    "last",
     "not_",
     "or_",
     "raw",
@@ -129,22 +134,51 @@ def _ascii_ident(s: str) -> bool:
     )
 
 
-def _column(name: Any) -> tuple[str, bool]:
-    """A select item: a field, or an aggregate spelled as FenecQL spells it --
-    `count(*)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)` -- answering
-    under that name. Read by hand rather than by a case-blind pattern: one
-    folds the Kelvin sign onto `k`, where the JS builder's does not."""
-    if isinstance(name, str):
-        s = name.strip(_JS_SPACE)
-        open_, close = s.find("("), s.endswith(")")
-        if open_ > 0 and close:
-            fn, arg = s[:open_], s[open_ + 1 : -1]
-            low = fn.lower() if fn.isascii() and fn.isalpha() else None
-            if low == "count" and arg in ("", "*"):
-                return "count(*)", True
-            if low in ("sum", "avg", "min", "max") and _ascii_ident(arg):
-                return f"{low}({arg})", True
-    return _path(name), False
+# A select item spelled as FenecQL spells an aggregate of one -- `count(*)`,
+# `count(distinct user)`, `sum(total)`, `avg(f)`, `min(f)`, `max(f)`,
+# `first(f)`, `last(f)`, a path where a field goes. ASCII-only and its case
+# folded as ASCII alone, as the JS builder's pattern is: a Unicode-aware one
+# folds the Kelvin sign onto `k` and `ſ` onto `s`, where JavaScript's does
+# not. `\s` there is JavaScript's space, which `_JS_SPACE` spells out.
+_NAMES = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_SP = "[" + re.escape(_JS_SPACE) + "]"
+_AGGREGATE = re.compile(
+    rf"(count)\(\*?\)|count\({_SP}*distinct{_SP}+({_NAMES}){_SP}*\)|(sum|avg|min|max|first|last)\(({_NAMES})\)",
+    re.ASCII | re.IGNORECASE,
+)
+# What makes an expression an aggregate's: a call of one.
+_AGGREGATE_CALL = re.compile(
+    rf"(?<![A-Za-z0-9_])(count|sum|avg|min|max|first|last){_SP}*\(", re.ASCII | re.IGNORECASE
+)
+
+
+def _column(name: Any) -> tuple[Any, bool]:
+    """A select item: a field, an aggregate spelled as FenecQL spells it,
+    answering under that name, or an expression (`Computed`), answering
+    under the name its `as_` gives it."""
+    if isinstance(name, Computed) and name.kind == "expr":
+        return name, bool(_AGGREGATE_CALL.search(name.sql))
+    m = _AGGREGATE.fullmatch(name.strip(_JS_SPACE)) if isinstance(name, str) else None
+    if not m:
+        return _path(name), False
+    if m[1]:
+        return "count(*)", True
+    if m[2]:
+        return f"count(distinct {m[2]})", True
+    return f"{m[3].lower()}({m[4]})", True
+
+
+def _key(name: Any) -> str:
+    """An `order` key: a field, a path, or an aggregate by its name."""
+    return _column(name)[0] if isinstance(name, str) else _path(name)
+
+
+def _column_text(c: Any, bind: "_Binder") -> str:
+    """A select item or a group key as text, an expression's values bound."""
+    if isinstance(c, str):
+        return c
+    text = _value("select", c, bind, "")
+    return f"{text} as {c.name}" if c.name is not None else text
 
 
 def _direction(d: Any) -> bool:
@@ -280,13 +314,22 @@ def raw(sql: str, *params: Any) -> Cond:
 
 
 class Computed:
-    """A value worked out over the row a write writes: what `inc` and
-    `expr` make, rendered as FenecQL with its values as parameters."""
+    """A value worked out over a row: what `inc` and `expr` make for a
+    write, and what `expr`, `bucket`, `count_distinct`, `first` and `last`
+    make for a select list or a group, rendered as FenecQL with its values
+    as parameters."""
 
-    __slots__ = ("kind", "by", "sql", "params")
+    __slots__ = ("kind", "by", "sql", "params", "name")
 
-    def __init__(self, kind: str, by: Any = None, sql: str = "", params: tuple = ()):
-        self.kind, self.by, self.sql, self.params = kind, by, sql, params
+    def __init__(
+        self, kind: str, by: Any = None, sql: str = "", params: tuple = (), name: str | None = None
+    ):
+        self.kind, self.by, self.sql, self.params, self.name = kind, by, sql, params, name
+
+    def as_(self, name: str) -> "Computed":
+        """The name the column answers under: `select ... as <name>`
+        (`as` is Python's keyword, hence the underscore)."""
+        return Computed(self.kind, self.by, self.sql, self.params, _ident(name, "column"))
 
     def __repr__(self) -> str:
         return f"Computed({self.kind})"
@@ -309,6 +352,47 @@ def expr(sql: str, *params: Any) -> Computed:
     if not isinstance(sql, str):
         raise _err("expr() expects text")
     return Computed("expr", sql=sql, params=params)
+
+
+# `15m`, `1h`, `1d`, `1w`, `3mo`, `1y`: what `bucket` takes, written into
+# the text as a literal, since it is a part of the statement's shape.
+_INTERVAL = re.compile(r"[1-9][0-9]*(ms|s|m|h|d|w|mo|y)", re.ASCII)
+
+
+def bucket(field: str, interval: str) -> Computed:
+    """`bucket(field, interval)`: the start of the interval a timestamp
+    falls in -- `"15m"`, `"1h"`, `"1d"`, `"1w"` (from a Monday), `"1mo"`,
+    `"1y"`, in UTC -- for a select list or a group:
+
+        .select(bucket("at", "1m").as_("minute"), "count(*)").group("minute")
+    """
+    if not isinstance(interval, str) or not _INTERVAL.fullmatch(interval):
+        raise _err(
+            "bucket() takes an interval such as '15m', '1h', '1d', '1w' or '1mo': "
+            + json.dumps(interval, ensure_ascii=False, default=str)
+        )
+    return Computed("expr", sql=f"bucket({_path(field)}, {interval})")
+
+
+def count_distinct(field: str) -> Computed:
+    """`count(distinct field)`: how many distinct values the rows hold."""
+    return Computed("expr", sql=f"count(distinct {_path(field)})")
+
+
+def first(field: str, by: str | None = None) -> Computed:
+    """`first(field)`, or `first(field by key)`: the value of the row least
+    by `key` -- by the order the rows were written without one -- that has
+    a value; a bar's open is `first("px", "at")`."""
+    return _pick("first", field, by)
+
+
+def last(field: str, by: str | None = None) -> Computed:
+    """`last(field [by key])`: as `first`, the row greatest by `key`."""
+    return _pick("last", field, by)
+
+
+def _pick(fn: str, field: str, by: str | None) -> Computed:
+    return Computed("expr", sql=f"{fn}({_path(field)}{'' if by is None else f' by {_path(by)}'})")
 
 
 def _value(k: str, v: Any, bind: "_Binder", write: str) -> str:
@@ -520,9 +604,12 @@ class _Builder:
     def select(self: Q, *cols: Any) -> Q:
         """`select a, b`; none, or `"*"`, is every field. Aggregates go in the
         same list as FenecQL spells them and answer under that name:
-        `select("status", "count(*)", "sum(total)").group("status")`."""
+        `select("status", "count(*)", "sum(total)").group("status")`; an
+        expression -- `expr()`, `bucket()`, `count_distinct()`, `first()`,
+        `last()` -- under the name its `as_` gives it:
+        `select("sym", expr("sum(px * qty) / sum(qty)").as_("vwap")).group("sym")`."""
         flat = _flat(cols)
-        if not flat or "*" in flat:
+        if not flat or any(isinstance(c, str) and c == "*" for c in flat):
             return self._with(project=None, aggregate=False)
         cs = [_column(c) for c in flat]
         return self._with(project=[t for t, _ in cs], aggregate=any(a for _, a in cs))
@@ -620,9 +707,16 @@ class _Builder:
             raise _err(f"facet {name} disjunctive is true or false")
         return self._with(facets=[*self._s["facets"], (name, top, bounds, disjunctive)])
 
-    def group(self: Q, field: str) -> Q:
-        """`group field`: a row per value, for a select list that aggregates."""
-        return self._with(group=_ident(field))
+    def group(self: Q, *keys: Any) -> Q:
+        """`group a, b`: a row per distinct set of the keys' values, for a
+        select list that aggregates. A key is a field or a path, a name the
+        list gives a column with `as_`, or an expression: `bucket("at", "1h")`."""
+        flat = _flat(keys)
+        if not flat:
+            raise _err("group takes at least one key")
+        return self._with(
+            group=[k if isinstance(k, Computed) and k.kind == "expr" else _path(k) for k in flat]
+        )
 
     def where(self: Q, *args: Any) -> Q:
         """`where(field, op, value)`, `where(field, value)` -- a value is
@@ -708,7 +802,8 @@ class _Builder:
         """`order field asc|desc`; each call adds a key. `collate="tr"` puts
         text in Turkish order, `"und"` in Unicode's root order."""
         return self._with(
-            order=[*self._s["order"], (_column(field)[0], _direction(direction), _collation(collate))]
+            # Over groups a key may be an aggregate of the list, by its name.
+            order=[*self._s["order"], (_key(field), _direction(direction), _collation(collate))]
         )
 
     def limit(self: Q, n: int) -> Q:
@@ -734,7 +829,8 @@ class _Builder:
         marks, facets = s["marks"], s["facets"]
         # The engine refuses each of these too; failing here sends nothing.
         if s["group"] and not s["aggregate"]:
-            raise _err(f"group {s['group']} needs an aggregate in select: 'count(*)'")
+            keys = ", ".join(k if isinstance(k, str) else k.sql for k in s["group"])
+            raise _err(f"group {keys} needs an aggregate in select: 'count(*)'")
         if s["aggregate"]:
             clash = (
                 "near" if near else "match" if match else "lookup" if lookups else "count" if count else None
@@ -805,13 +901,15 @@ class _Builder:
             if "pre" in m:
                 item += f", {bind(m['pre'], m['field'])}, {bind(m['post'], m['field'])}"
             items.append(item + ")")
-        if s["project"] or items:
-            sql += f" select {', '.join([*(s['project'] or ['*']), *items])}"
+        # The list's values are bound first: they come first in the text.
+        cols = None if s["project"] is None else [_column_text(c, bind) for c in s["project"]]
+        if cols or items:
+            sql += f" select {', '.join([*(cols or ['*']), *items])}"
         where = self._where(bind)
         if where:
             sql += f" where {where}"
         if s["group"]:
-            sql += f" group {s['group']}"
+            sql += f" group {', '.join(_column_text(k, bind) for k in s['group'])}"
         if near:
             sql += f" near {near[0]} {bind(near[1], near[0])}"
             if near[2] is not None:

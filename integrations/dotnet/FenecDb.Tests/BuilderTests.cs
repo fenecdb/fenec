@@ -41,6 +41,11 @@ public sealed class BuilderTests(Servers servers)
         _ when e.TryGetProperty("$inc", out var n) => Computed.Inc(Value(n)),
         _ when e.TryGetProperty("$expr", out var x) =>
             Computed.Expr(x[0].GetString()!, x.EnumerateArray().Skip(1).Select(Value).ToArray()),
+        _ when e.TryGetProperty("$bucket", out var b) => Computed.Bucket(b[0].GetString()!, b[1].GetString()!),
+        _ when e.TryGetProperty("$countDistinct", out var f) => Computed.CountDistinct(f.GetString()!),
+        _ when e.TryGetProperty("$first", out var f) => Computed.First(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
+        _ when e.TryGetProperty("$last", out var f) => Computed.Last(f[0].GetString()!, f.GetArrayLength() > 1 ? f[1].GetString() : null),
+        _ when e.TryGetProperty("$as", out var x) => ((Computed)Value(x[0])!).As(x[1].GetString()!),
         _ => e.EnumerateObject().ToDictionary(p => p.Name, p => Value(p.Value)),
     };
 
@@ -86,7 +91,7 @@ public sealed class BuilderTests(Servers servers)
 
     static Query Step(Query q, string op, JsonElement[] a) => op switch
     {
-        "select" => q.Select(a.Select(x => x.GetString()!).ToArray()),
+        "select" => q.Select(a.Select(Value).ToArray()),
         "where" when a.Length == 3 => q.Where(a[0].GetString()!, a[1].GetString()!, Value(a[2])),
         "where" when a.Length == 2 => q.Where(a[0].GetString()!, Spec(a[1])),
         "where" => q.Where(Condition(a[0])),
@@ -97,7 +102,7 @@ public sealed class BuilderTests(Servers servers)
         "rerank" => q.Rerank(a[0].GetString()!, Value(a[1]), Long(Opt(a, 2, "candidates"))),
         "match" => q.Match(a[0].GetString()!, a[1].GetString()!),
         "fuse" => q.Fuse(Long(Opt(a, 0, "k")), Long(Opt(a, 0, "candidates"))),
-        "group" => q.Group(a[0].GetString()!),
+        "group" => q.Group(a.Select(Value).ToArray()),
         "order" => q.Order(a[0].GetString()!, a.Length > 1 ? a[1].GetString()! : "asc", Opt(a, 2, "collate")?.GetString()),
         "limit" => q.Limit(a[0].GetInt64()),
         "offset" => q.Offset(a[0].GetInt64()),

@@ -48,6 +48,20 @@ import Testing
         }
     }
 
+    /// A select item or a group key: a name as itself, `$expr`, `$bucket`,
+    /// `$countDistinct`, `$first`, `$last` as `Column`'s, `$as` naming one.
+    static func column(_ v: Value) throws -> Column {
+        if let name = v.string { return Column(name) }
+        if let e = v["$expr"]?.array { return .expr(e[0].string!, e.dropFirst().map(value)) }
+        if let b = v["$bucket"]?.array { return try .bucket(b[0].string!, b[1].string!) }
+        if let f = v["$countDistinct"]?.string { return try .countDistinct(f) }
+        if let f = v["$first"]?.array { return try .first(f[0].string!, by: f.count > 1 ? f[1].string! : nil) }
+        if let f = v["$last"]?.array { return try .last(f[0].string!, by: f.count > 1 ? f[1].string! : nil) }
+        if let a = v["$as"]?.array { return try column(a[0]).as(a[1].string!) }
+        Issue.record("no column \(v.json)")
+        return Column("")
+    }
+
     static func cond(_ v: Value) -> Cond {
         if let or = v["$or"]?.array { return Cond(.or(or.map(cond))) }
         if let and = v["$and"]?.array { return Cond(.and(and.map(cond))) }
@@ -75,7 +89,7 @@ import Testing
 
     static func step(_ q: Query, _ op: String, _ a: [Value]) throws -> Query {
         switch (op, a.count) {
-        case ("select", _): return try q.select(a.map { $0.string! })
+        case ("select", _): return try q.select(a.map(column))
         case ("where", 3): return try q.where(a[0].string!, a[1].string!, value(a[2]))
         case ("where", 2): return try q.where(a[0].string!, value(a[1]))
         case ("where", _): return try q.where(cond(a[0]))
@@ -87,7 +101,9 @@ import Testing
         case ("rerank", _): return try q.rerank(a[0].string!, value(a[1]), candidates: opt(a, 2, "candidates")?.int)
         case ("match", _): return try q.match(a[0].string!, a[1].string!)
         case ("fuse", _): return try q.fuse(k: opt(a, 0, "k")?.int, candidates: opt(a, 0, "candidates")?.int)
-        case ("group", _): return try q.group(a[0].string!)
+        // One key as itself, several (or none) as the list they are.
+        case ("group", 1): return try q.group(a[0].array.map { try $0.map(column) } ?? [column(a[0])])
+        case ("group", _): return try q.group(a.map(column))
         // The tags and the ellipsis as the file holds them, a number too,
         // so a refusal of one is the JS builder's.
         case ("highlight", _): return try q.mark(highlight: a[0].string!, pre: opt(a, 1, "pre"), post: opt(a, 1, "post"))

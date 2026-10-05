@@ -13,7 +13,23 @@ from pathlib import Path
 import pytest
 
 from conftest import TOKEN, URL, fresh
-from fenecdb import AsyncClient, FacetCount, FenecError, Query, and_, collection, expr, inc, not_, or_, raw
+from fenecdb import (
+    AsyncClient,
+    FacetCount,
+    FenecError,
+    Query,
+    and_,
+    bucket,
+    collection,
+    count_distinct,
+    expr,
+    first,
+    inc,
+    last,
+    not_,
+    or_,
+    raw,
+)
 
 # run-tests.sh mounts the file beside the package in its container.
 GOLDEN = Path(os.environ.get("FENEC_GOLDEN") or Path(__file__).parents[2] / "builder-golden.json")
@@ -38,6 +54,16 @@ def arg(x):
         return inc(x["$inc"])
     if "$expr" in x:
         return expr(x["$expr"][0], *[arg(p) for p in x["$expr"][1:]])
+    if "$bucket" in x:
+        return bucket(*x["$bucket"])
+    if "$countDistinct" in x:
+        return count_distinct(x["$countDistinct"])
+    if "$first" in x:
+        return first(*x["$first"])
+    if "$last" in x:
+        return last(*x["$last"])
+    if "$as" in x:
+        return arg(x["$as"][0]).as_(x["$as"][1])
     if "$date" in x:
         return datetime.fromisoformat(x["$date"].replace("Z", "+00:00"))
     if "$f32" in x:
@@ -107,8 +133,8 @@ def run(steps):
 
 
 def step_of(q, op, args):
-    if op == "select":
-        return q.select(*args)
+    if op in ("select", "group"):
+        return getattr(q, op)(*[arg(a) for a in args])
     if op == "where":
         return q.where(*[arg(a) for a in args])
     if op == "orWhere":
@@ -127,7 +153,7 @@ def step_of(q, op, args):
         return q.snippet(args[0], args[1], **kwargs(args[2] if len(args) > 2 else None))
     if op == "facet":
         return q.facet(args[0], **kwargs(args[1] if len(args) > 1 else None))
-    if op in ("match", "group", "limit", "offset", "require"):
+    if op in ("match", "limit", "offset", "require"):
         return getattr(q, op)(*args)
     raise AssertionError(f"no builder step {op}")
 

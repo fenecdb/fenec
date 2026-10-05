@@ -175,6 +175,25 @@ func value(x any) any {
 			}
 			return fenecdb.Expr(list[0].(string), params...)
 		}
+		if b, ok := v.get("$bucket"); ok {
+			list := strs(b)
+			return fenecdb.Bucket(list[0], list[1])
+		}
+		if f, ok := v.get("$countDistinct"); ok {
+			return fenecdb.CountDistinct(f.(string))
+		}
+		if f, ok := v.get("$first"); ok {
+			list := strs(f)
+			return fenecdb.First(list[0], list[1:]...)
+		}
+		if f, ok := v.get("$last"); ok {
+			list := strs(f)
+			return fenecdb.Last(list[0], list[1:]...)
+		}
+		if a, ok := v.get("$as"); ok {
+			list := a.([]any)
+			return value(list[0]).(fenecdb.Computed).As(list[1].(string))
+		}
 		if len(v.keys) == 1 && strings.HasPrefix(v.keys[0], "$") {
 			panic("a condition where a value goes: " + v.keys[0])
 		}
@@ -461,7 +480,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 		last := i == len(steps)-2
 		switch op {
 		case "select":
-			q = q.Select(strs(a)...)
+			q = q.Select(value(a).([]any)...)
 		case "where", "orWhere":
 			var c fenecdb.Cond
 			switch len(a) {
@@ -488,7 +507,7 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 		case "lookup":
 			q = q.Lookup(a[0].(string), options(optsOf(a, 1))...)
 		case "group":
-			q = q.Group(a[0].(string))
+			q = q.Group(value(a).([]any)...)
 		case "highlight":
 			q = q.Highlight(a[0].(string), options(optsOf(a, 1))...)
 		case "snippet":
