@@ -319,6 +319,14 @@ what the statements before it did, and the answer says so: <code>at</code>
 is the statement that stopped it, counted from 0, and <code>completed</code>
 how many stay applied — none of a block.</p>
 
+<p>A batch whose every statement only reads — a <code>get</code>, with or
+without <code>require</code> — runs under one read lock instead: a snapshot,
+every read at the one change <code>Fenec-Seq</code> names, with other reads
+going on beside it. Writes still wait for it to end, as they wait for any
+read: there is one writer, and the lock is the snapshot. A reconciliation
+over a million journal entries took 150 to 220 ms, and a transfer arriving
+meanwhile waited that long either way (<code>make recon-bench</code>).</p>
+
 <p>No other writer slips in between, a read in the batch sees the writes
 before it, and a subscriber is woken once, for all of them. A
 <code>create</code>, a <code>drop</code> or a <code>create index</code> in it

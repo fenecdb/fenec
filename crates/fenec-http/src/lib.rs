@@ -1369,12 +1369,13 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
 
     let writes = stmts.iter().any(|(s, _)| !s.is_read_only());
-    let key = match writes {
-        true => match idempotent::key(req, who) {
-            Ok(k) => k,
-            Err(refusal) => return refusal,
-        },
-        false => None,
+    // A batch of reads makes nothing to make once: its key is not asked.
+    if !writes {
+        return read_batch(db, &stmts, who);
+    }
+    let key = match idempotent::key(req, who) {
+        Ok(k) => k,
+        Err(refusal) => return refusal,
     };
     let mut guard = held::write(db);
     let block = stmts.iter().all(|(s, _)| s.fits_block());
@@ -1454,6 +1455,45 @@ fn handle_batch(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         kept.unwrap_or_else(|| api::render_batch(&results, fenec_core::VERSION)),
         seq,
     )
+}
+
+/// A `/batch` whose every statement only reads, under one read lock: the
+/// snapshot a reconciliation takes -- every read at the one change
+/// `Fenec-Seq` names, no write landing between the first and the last --
+/// with readers going on beside it and writers waiting only as they wait
+/// for any read. Under the write lock, as every batch was, a ledger's
+/// four reads over a million entries held each transfer up to 350 ms, as
+/// long as the snapshot took. A `require` on a read stops it with 412 and
+/// `at`, as in a block: nothing to put back.
+fn read_batch(
+    db: &Arc<RwLock<Database>>,
+    stmts: &[(Statement, Vec<Value>)],
+    who: &Who,
+) -> Response {
+    let guard = held::read(db);
+    let mut results = Vec::with_capacity(stmts.len());
+    for (at, (stmt, params)) in stmts.iter().enumerate() {
+        match guard.query(stmt, params) {
+            Ok(r) => {
+                let r = visible(who, r);
+                statements::rows(counted(&r));
+                results.push(r)
+            }
+            Err(e) => {
+                let why = e.to_string();
+                return api::render_batch_stop(
+                    api::status_of(&e),
+                    &why,
+                    0,
+                    at,
+                    fenec_core::VERSION,
+                );
+            }
+        }
+    }
+    let seq = Some(guard.change_seq());
+    drop(guard);
+    with_seq(api::render_batch(&results, fenec_core::VERSION), seq)
 }
 
 /// Why the data ceiling `max` (bytes, 0 = off) refuses `stmt`, if it does.

@@ -59,6 +59,7 @@ make shard-bench         # router overhead per request, tenant move time, failov
 make replica-bench       # replica lag per sync policy, catch-up, what a failover loses
 make concurrency-bench   # writers and readers at once against SQLite: durable and buffered writes, reads beside blocks of writes
 make requests-bench      # a request over HTTP: one client's round trip, eight's rate, against PostgreSQL
+make recon-bench         # a ledger's reconciliation /batch beside transfers and reads: their longest waits
 make roundtrip-bench     # one client's round trip taken apart: the client, the server's phases (--features timing, GET /_timing), PostgreSQL's bind and execute
 make load-bench          # loading 100 000 rows each way a client can send them, against PostgreSQL's COPY and INSERT
 make maintenance-bench   # reads and writes during create index / compact
@@ -281,7 +282,18 @@ of 930 000 small documents. Durable writes gain from the fsync outside the
 lock: 252 -> 516 writes/s from 1 to 16 writers, SQLite's 248 -> 258. Two processes opening the same file corrupts
 it, which is why everything that writes one -- the HTTP endpoint, a
 replica's follower, the graph keeper, `--follow`'s mirror -- is a thread
-of `fenec-server`, never a binary of its own.
+of `fenec-server`, never a binary of its own. A `/batch` whose every
+statement reads (`read_batch`) takes the read lock once for all of them,
+as the native library's `fenec_abi::query` does: a snapshot at the one
+change `Fenec-Seq` names, a `require` stopping it with 412 and `at`. It
+took the write lock as every batch did, and held out readers too; writers
+still wait for it, since a read lock is the only snapshot there is
+(`make recon-bench`, a ledger's reconciliation over a million journal
+entries, 150 to 220 ms: transfers' longest wait 199 -> 224 ms, the same;
+reads by id with no transfer waiting, 18 waits past 50 ms -> 2). Where
+a writer waits, the std lock holds new readers behind it on macOS and
+Linux alike, so a read beside a snapshot and a busy writer waits as
+before.
 
 **Every write is a block, and a block is one record.** `execute_with` runs a
 write as a block of one (`Database::execute_block` runs several, `begin`,

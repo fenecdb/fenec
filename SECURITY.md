@@ -85,6 +85,8 @@ These are deliberate, and README explains each one:
   of one `fenec-server`.
 - **A batch holds the database.** From its first write to its end every other
   writer waits on it, and readers on a batch that is still being written.
+  A batch of reads alone holds the read lock: writers wait for it as for
+  any read, readers go on beside it.
   An import that stops halfway cannot be rolled back.
 - **The whole database is resident**, with no page cache and no eviction. An
   authenticated client can ask for work that costs memory; `--max-memory` is

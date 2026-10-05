@@ -11,6 +11,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 fn start() -> u16 {
+    start_with_db().0
+}
+
+fn start_with_db() -> (u16, Arc<RwLock<Database>>) {
     let mut db = Database::new();
     for sql in [
         "create collection accounts (name text @unique, balance int)",
@@ -26,13 +30,14 @@ fn start() -> u16 {
         addr: "127.0.0.1:0".into(),
         ..Config::default()
     };
-    let server = Server::new(Arc::new(RwLock::new(db)), cfg);
+    let db = Arc::new(RwLock::new(db));
+    let server = Server::new(Arc::clone(&db), cfg);
     let listener = server.bind().unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let _ = server.serve_on(listener);
     });
-    port
+    (port, db)
 }
 
 const ACCOUNTS: i64 = 5;
@@ -42,6 +47,8 @@ const START: i64 = 100;
 struct Conn {
     r: BufReader<TcpStream>,
     w: TcpStream,
+    /// The last answer's `Fenec-Seq`.
+    seq: Option<u64>,
 }
 
 impl Conn {
@@ -51,6 +58,7 @@ impl Conn {
         Conn {
             r: BufReader::new(s.try_clone().unwrap()),
             w: s,
+            seq: None,
         }
     }
 
@@ -65,6 +73,7 @@ impl Conn {
         self.r.read_line(&mut line).unwrap();
         let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
         let mut len = 0;
+        self.seq = None;
         loop {
             let mut h = String::new();
             self.r.read_line(&mut h).unwrap();
@@ -75,6 +84,9 @@ impl Conn {
             if let Some((k, v)) = h.split_once(':') {
                 if k.eq_ignore_ascii_case("content-length") {
                     len = v.trim().parse().unwrap();
+                }
+                if k.eq_ignore_ascii_case("fenec-seq") {
+                    self.seq = v.trim().parse().ok();
                 }
             }
         }
@@ -203,6 +215,56 @@ fn a_get_that_misses_its_count_stops_the_batch_at_the_read() {
     let (status, body) = c.post("/batch", &guarded(START));
     assert_eq!(status, 200, "{body}");
     assert_eq!(c.number("get journal count"), 1);
+}
+
+/// A `/batch` of reads alone runs under the read lock: a reconciliation's
+/// snapshot went under the write lock, as every batch did, and held each
+/// transfer for as long as it read. Here the test holds the read lock
+/// itself, as a long read would: the batch is answered beside it -- under
+/// the write lock it would wait for the test to let go, which it never
+/// does before the answer -- at the change it stood at, and a `require`
+/// in it stops it with 412 and `at`.
+#[test]
+fn a_batch_of_reads_reads_beside_other_readers() {
+    let (port, db) = start_with_db();
+    let mut c = Conn::open(port);
+    let (status, body) = c.post("/batch", &transfer("a0", "a1", 10, 1));
+    assert_eq!(status, 200, "{body}");
+    let written = c.seq.expect("a write's Fenec-Seq");
+    let reads = [
+        line("get accounts select name, balance order name", ""),
+        line("get journal select account, sum(amount) group account", ""),
+        line("get accounts select sum(balance)", ""),
+    ]
+    .join("\n");
+    let held = db.read().unwrap();
+    let (status, body) = c.post("/batch", &reads);
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"a0\"") && body.contains("-10"), "{body}");
+    assert_eq!(c.seq, Some(written), "the change the snapshot stood at");
+    let stopped = [
+        line("get accounts limit 1", ""),
+        line("get accounts where name = \"nobody\" limit 1 require 1", ""),
+    ]
+    .join("\n");
+    let (status, body) = c.post("/batch", &stopped);
+    assert_eq!(status, 412, "{body}");
+    assert_eq!(
+        body,
+        r#"{"error":"unmet: `get accounts` answered 0 rows, and requires 1","completed":0,"at":1}"#
+    );
+    drop(held);
+    // A write in the batch takes the write lock, as before.
+    let (status, body) = c.post(
+        "/batch",
+        &[
+            line("get accounts limit 1", ""),
+            line("put journal {tx: 2}", ""),
+        ]
+        .join("\n"),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(c.seq, Some(written + 1));
 }
 
 /// Eight clients sending transfers as `/batch`es at random among few
