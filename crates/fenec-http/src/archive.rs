@@ -35,7 +35,7 @@ use fenec_core::history::History;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A segment is closed at this size and the next begins.
@@ -791,11 +791,7 @@ impl Archive {
             }
         }
         let last = covered.max(images.last().map_or(0, |i| i.0));
-        let probe = std::env::temp_dir().join(format!(
-            "fenec-verify-{}-{}.fenec",
-            std::process::id(),
-            now_ms()
-        ));
+        let probe = verify_probe();
         let restored = self.restore(&probe, Target::End);
         let _ = fs::remove_file(&probe);
         let r = restored?;
@@ -933,6 +929,21 @@ impl Archive {
     }
 }
 
+/// Where `verify` restores the archive's end to, a file of its own each
+/// call. Named by the process and the millisecond, two verifies in one
+/// process within a millisecond -- tests side by side, or anything that
+/// checks several archives at once -- restored into the same `.restoring`
+/// file, and one opened the other's: "the restored file is at change 151,
+/// not 15".
+fn verify_probe() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "fenec-verify-{}-{}.fenec",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// One image of the database behind `upstream`, taken while it runs, into
 /// `out`: a file, or an archive directory. A file gets its history forked,
 /// as a restore's does, so it can be opened as a primary of its own.
@@ -986,4 +997,18 @@ pub fn unseal(sealed: &Path, key: &Key, out: &Path) -> io::Result<u64> {
     fenec_core::fs::forget_sync_log(out)?;
     fs::rename(&tmp, out)?;
     Ok(seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thousand calls fall in a millisecond or two: each still names a
+    /// file no other verify in the process restores into.
+    #[test]
+    fn every_verify_restores_into_a_file_of_its_own() {
+        let probes: std::collections::HashSet<PathBuf> =
+            (0..1000).map(|_| verify_probe()).collect();
+        assert_eq!(probes.len(), 1000);
+    }
 }

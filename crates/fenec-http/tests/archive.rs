@@ -604,6 +604,47 @@ fn verify_says_what_an_archive_can_restore() {
     assert!(e.to_string().contains("image-"), "{e}");
 }
 
+/// Verifies of two archives at once in one process, as tests run side by
+/// side: each restores its own end. Their probes were named by the
+/// millisecond, and two in the same one restored into one file -- a
+/// verify of an archive at change 15 opened the other's, at 151.
+#[test]
+fn verifies_at_once_each_restore_their_own_archive() {
+    let d = dir("verifies");
+    let p = primary(&d.join("p.fenec"), replication::DEFAULT_BUFFER);
+    p.exec("create collection notes (n int @hash)");
+    let arch = d.join("archive");
+    Archive::new(&arch).unwrap();
+    let a = archiver(&arch, &p.url);
+    first_image(&arch);
+    for i in 0..5 {
+        p.exec(&format!("put notes {{n: {i}}}"));
+    }
+    archived(&arch, p.seq());
+    let early = (copy_of(&arch, &d.join("early")), p.seq());
+    for i in 5..50 {
+        p.exec(&format!("put notes {{n: {i}}}"));
+    }
+    archived(&arch, p.seq());
+    a.finish();
+    let late = (arch, p.seq());
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            let (path, last) = if t % 2 == 0 { &early } else { &late };
+            let (path, last) = (path.clone(), *last);
+            std::thread::spawn(move || {
+                let a = Archive::new(&path).unwrap();
+                for _ in 0..25 {
+                    assert_eq!(a.verify().unwrap().last, last);
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
 /// What a sync tool -- `rclone sync`, `aws s3 sync` -- does to an archive
 /// being written: copies its files one after another, each as it stands
 /// then. A copy taken so is restorable to a moment or says it is not, and
