@@ -40,4 +40,5 @@ mod subquery;
 mod synclog;
 mod ttl;
 mod unique;
+mod within;
 mod writes;

@@ -667,6 +667,19 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     too, and a rule <code>for</code> a role applies when the list holds
     it. Membership kept in another collection cannot be a rule: a rule
     takes no <code>in (get …)</code>.</li>
+  <li><b><code>match</code> scores over the rows the token may read.</b>
+    BM25's statistics — how many documents, their mean length, how many
+    hold each word — are taken over the rows the query's filter selects,
+    the token's rules among them, not over the collection: there a user's
+    own memo scored 9.87, then 4.79 once another user wrote 200 private
+    memos holding the same word, which told the first how many of the
+    second's held it. A score is what a collection holding the user's rows
+    alone would give, and so is the order of <code>match</code>,
+    <code>rerank</code>'s candidates and <code>fuse</code>'s text side. It
+    costs the token's query its rows' lengths and each word's count among
+    them: over 100 000 documents, a filter keeping 2.5% took 0.16 ms and
+    takes 0.24, one keeping half 5.4 and 6.2. The server's own token
+    scores over the collection, as before.</li>
   <li><b>Subscriptions</b> are told only of rows they were sent: a scoped
     subscriber hears of a row leaving its shape only if the row was in it,
     so the ids other users write never reach it.</li>

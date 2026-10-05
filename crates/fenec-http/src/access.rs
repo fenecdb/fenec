@@ -879,6 +879,15 @@ impl Scope {
             *filter = self.restrict(collection, filter.take())?;
             Ok(())
         })?;
+        // A `match` held to some of the rows is scored over the rows its
+        // filter selects, not the collection: BM25's statistics over every
+        // row told a user how many rows it could not read held a word --
+        // alice's own memo scored 9.87, and 4.79 once bob had written 200
+        // private ones holding it.
+        let held = matches!(self.filter(&sel.collection, READ), Some(Some(_)));
+        if let Some(m) = sel.matcher.as_mut().filter(|_| held) {
+            m.within = true;
+        }
         Ok(sel)
     }
 

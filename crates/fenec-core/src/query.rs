@@ -670,6 +670,14 @@ pub struct Match {
     pub field: String,
     /// The query text, given directly or through a parameter.
     pub query: Expr,
+    /// BM25's statistics -- how many documents, their mean length, how
+    /// many hold each term -- over the rows the filter selects rather than
+    /// over the collection. No FenecQL says it: a scoped token's `match`
+    /// is made so (`fenec_http::access`), its filter holding its rules, so
+    /// that a score says nothing of rows it may not read -- over the
+    /// collection, alice's own memo scored 9.87 and then 4.79 once bob
+    /// wrote 200 private ones holding the same word.
+    pub within: bool,
 }
 
 /// The `rerank` clause: reorder what `match` found by exact vector distance.
@@ -1807,6 +1815,7 @@ mod tests {
                 s.matcher = Some(Match {
                     field: "body".into(),
                     query: Expr::Param(0),
+                    within: false,
                 })
             }),
             ("count", |s: &mut Select| s.count = true),

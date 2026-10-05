@@ -6964,9 +6964,12 @@ impl Database {
             Some(list) => list.binary_search(&id).is_ok(),
             None => true,
         };
+        // A scoped token's BM25 counts the rows its filter selects, which
+        // its rules are part of ([`Match::within`]).
+        let within = allowed.as_deref().filter(|_| m.within);
 
         let Some(rr) = &sel.rerank else {
-            let hits = ix.search(&query, want, accept);
+            let hits = ix.search_within(&query, want, accept, within);
             plan(|| {
                 format!(
                     "match: the text index on {}, {} ranked",
@@ -7012,7 +7015,7 @@ impl Database {
                 qv.len()
             )));
         }
-        let hits = ix.search(&query, candidates, accept);
+        let hits = ix.search_within(&query, candidates, accept, within);
         plan(|| {
             format!(
                 "match: the text index on {}, {} candidates",

@@ -681,3 +681,65 @@ fn a_list_claim_scopes_reads_writes_and_subscriptions() {
     assert_eq!(status, 401, "{body}");
     assert!(body.contains("1 000 values"), "{body}");
 }
+
+/// The `_score` of the first row an answer holds.
+fn first_score(body: &str) -> f64 {
+    let at = body.find("\"_score\":").expect(body) + "\"_score\":".len();
+    let digits: String = body[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | 'e' | 'E'))
+        .collect();
+    digits.parse().unwrap()
+}
+
+/// BM25 over the rows a token may read: alice's own memo scores what it
+/// scored before bob wrote 200 private memos holding the same word, where
+/// over the collection it went 9.87 -> 4.79 and told her how many of his
+/// held it. The server's own token still scores over the collection.
+#[test]
+fn a_scoped_match_scores_nothing_of_rows_the_token_cannot_read() {
+    let n = start_with(
+        "memos  read,write  where owner = $jwt.sub\n",
+        &["create collection memos (owner text @hash, body text @text)"],
+    );
+    let (alice, bob) = (n.token(r#"{"sub":"alice"}"#), n.token(r#"{"sub":"bob"}"#));
+    for body in [
+        "the initech memo",
+        "lunch on friday",
+        "a plan for the quarter",
+    ] {
+        let doc = format!(r#"{{"body":"{body}"}}"#);
+        assert_eq!(n.call(Some(&alice), "POST", "/memos", &doc).0, 201);
+    }
+    let ask = r#"get memos match body "initech" limit 5"#;
+    let (status, before) = n.query(&alice, ask);
+    assert_eq!(status, 200, "{before}");
+    let mine = r#"get memos where owner = "alice" match body "initech" limit 5"#;
+    let (_, root_before) = n.query(ROOT, mine);
+
+    let memos: Vec<String> = (0..200)
+        .map(|i| format!(r#"{{"body":"initech deal {i}, private"}}"#))
+        .collect();
+    let (status, body) = n.call(
+        Some(&bob),
+        "POST",
+        "/memos",
+        &format!("[{}]", memos.join(",")),
+    );
+    assert_eq!(status, 201, "{body}");
+
+    let (_, after) = n.query(&alice, ask);
+    assert_eq!(count(&after, "\"_score\""), 1, "{after}");
+    assert_eq!(
+        first_score(&after),
+        first_score(&before),
+        "{before} {after}"
+    );
+    // Over the collection the same memo's score fell: what alice no longer
+    // learns.
+    let (_, root_after) = n.query(ROOT, mine);
+    assert!(
+        first_score(&root_after) < first_score(&root_before),
+        "{root_before} {root_after}"
+    );
+}

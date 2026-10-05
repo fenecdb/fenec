@@ -927,7 +927,11 @@ impl Parser {
             if self.eat_kw("match") {
                 let field = self.ident()?;
                 let query = self.expr()?;
-                sel.matcher = Some(Match { field, query });
+                sel.matcher = Some(Match {
+                    field,
+                    query,
+                    within: false,
+                });
                 continue;
             }
             if self.eat_kw("fuse") {
