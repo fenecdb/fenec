@@ -808,7 +808,15 @@ about 0.25 is Docker's port forwarding, the server's part 0.023 ms and
 PostgreSQL's bind and execute 0.016, so the published guess that a binary
 protocol answers sooner was not the cause; the durable gap was the fsync
 of a growing file (the sync log, above): durable A 2.24 k -> 3.27 k at one
-client against PostgreSQL's 2.60 k, even at 16.
+client against PostgreSQL's 2.60 k, even at 16. E's scans were
+fenec-server's own -- 213-220 us inside for 50 rows, 37 page faults --
+and a plain `get` written as JSON from the stored rows (below) took E at
+one client 1.03 k -> 1.62 k buffered against 1.34 k, 1.06 k -> 1.82 k
+durable against 1.39 k. B, C, D and E were measured again on 2026-10-05,
+servers and PostgreSQL in turns under the same ids, run 1 again on a quiet
+machine after its idle probe was taken at a load of five; C stays 3.19 k
+against 3.66 k, with each server's part of a read under 0.02 of 0.29 ms
+and PostgreSQL's own B at 2.65 k beside its C: the rest moves with the VM.
 
 **A block's `put`s link their vectors together.** A block
 `Database::begin` opened -- a `/batch`, a keyed write, the browser module's

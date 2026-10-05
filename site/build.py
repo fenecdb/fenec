@@ -505,6 +505,22 @@ CLAIMS = [
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, 16 clients</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:16", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:A:1", 0),
     ("site/content/docs/vs-postgres.html", r"A, 50% updates, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:A:1", 0),
+    ("site/content/docs/vs-postgres.html", r"B, 95% reads, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:B:1", 0),
+    ("site/content/docs/vs-postgres.html", r"B, 95% reads, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:B:1", 0),
+    ("site/content/docs/vs-postgres.html", r"E, scans of 1 to 100 rows, one client</td><td class=\"n\"><b>([\d.]+) k", "ycsb:server-docker:durable:E:1", 0),
+    ("site/content/docs/vs-postgres.html", r"E, scans of 1 to 100 rows, one client</td><td[^>]*><b>[\d.]+ k</b></td><td class=\"n\">([\d.]+) k", "ycsb:pg:durable:E:1", 0),
+    ("site/content/docs/vs-postgres.html", r"C, reads alone, one client, buffered</td><td class=\"n\">([\d.]+) k", "ycsb:server-docker:buffered:C:1", 0),
+    ("site/content/docs/vs-postgres.html", r"C, reads alone, one client, buffered</td><td class=\"n\">[\d.]+ k</td><td class=\"n\"><b>([\d.]+) k", "ycsb:pg:buffered:C:1", 0),
+    ("site/content/docs/vs-postgres.html", r"PostgreSQL's own B\s+doing ([\d.]+) k", "ycsb:pg:buffered:B:1", 0),
+    ("site/content/docs/vs-postgres.html", r"beside its C's ([\d.]+) k", "ycsb:pg:buffered:C:1", 0),
+    ("site/content/docs/vs-postgres.html", r"fenec-server leads C,\s+([\d.]+) k", "ycsb:server-docker:buffered:C:16", 0),
+    ("site/content/docs/vs-postgres.html", r"fenec-server leads C,\s+[\d.]+ k against ([\d.]+) k", "ycsb:pg:buffered:C:16", 0),
+    ("site/content/docs/benchmarks.html", r"buffered C ([\d.]+) k against [\d.]+ k and F", "ycsb:server-docker:buffered:C:1", 0),
+    ("site/content/docs/benchmarks.html", r"buffered C [\d.]+ k against ([\d.]+) k and F", "ycsb:pg:buffered:C:1", 0),
+    ("site/content/docs/benchmarks.html", r"and E went 1.03 k -> ([\d.]+) k buffered", "ycsb:server-docker:buffered:E:1", 0),
+    ("site/content/docs/benchmarks.html", r"buffered against\s+([\d.]+) k, 1.06 k", "ycsb:pg:buffered:E:1", 0),
+    ("site/content/docs/benchmarks.html", r"1.06 k -> ([\d.]+) k durable", "ycsb:server-docker:durable:E:1", 0),
+    ("site/content/docs/benchmarks.html", r"durable against ([\d.]+) k\. Durable A", "ycsb:pg:durable:E:1", 0),
 ]
 
 
