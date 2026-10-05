@@ -74,6 +74,16 @@ def main():
             raise SystemExit(f"a token spans a line in {s!r}: the editor would colour it apart")
     # The rules are written in, not copied: a keyword the docs know is one here.
     assert re.search(r'"fuse"', build.highlight_js())
+    # fenec studio serves the file as the repository holds it: the one
+    # build.py writes, or the studio's editor would colour by other rules.
+    kept = open(build.STUDIO_HIGHLIGHT, encoding="utf-8").read()
+    if kept != build.highlight_js():
+        raise SystemExit("studio/highlight.js is not what build.py writes: make studio-highlight")
+    # Its mirror is made of text nodes: no markup is set from either file.
+    for name in ("highlight.js",):
+        src = open(os.path.join(ROOT, name), encoding="utf-8").read()
+        if "innerHTML" in src:
+            raise SystemExit(f"site/{name} sets markup: the studio's policy is text alone")
     print(f"{len(samples)} statements highlight the same in the docs and the editor")
 
 

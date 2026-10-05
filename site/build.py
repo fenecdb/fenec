@@ -1352,7 +1352,23 @@ def build():
         print("  (a warning here, an error under CI)")
 
 
+STUDIO_HIGHLIGHT = os.path.join(REPO, "studio", "highlight.js")
+
+
+def studio_highlight():
+    """fenec studio's copy of the editor's highlighter, the rules written in
+    as for the site: the server embeds the studio's files as they are in the
+    repository, with no Python at `cargo build`, so the generated file is
+    kept there, and `site/test_highlight.py` refuses one that is not what
+    this writes (`make studio-highlight`)."""
+    open(STUDIO_HIGHLIGHT, "w", encoding="utf-8").write(highlight_js())
+    print(f"wrote {os.path.relpath(STUDIO_HIGHLIGHT, REPO)}")
+
+
 if __name__ == "__main__":
+    if "--studio-highlight" in sys.argv:
+        studio_highlight()
+        sys.exit(0)
     build()
     if "--serve" in sys.argv:
         import http.server, socketserver, functools
