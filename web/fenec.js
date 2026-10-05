@@ -2352,6 +2352,12 @@ export class FenecSync {
       this.#clearConnectionFault();
       for await (const ev of sseEvents(res)) {
         if (s.stream !== ctl) return;
+        // The server ends a stream at its token's `exp` with a 401: a
+        // fresh token is wanted before it opens again, as for a request.
+        if (ev.name === 'error' && /"status":\s*401\b/.test(ev.data)) {
+          this.#cancel(s);
+          return this.#wantToken();
+        }
         await this.#onEvent(s, ev);
       }
     } catch (e) {

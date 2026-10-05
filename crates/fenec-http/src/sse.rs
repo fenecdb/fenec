@@ -227,7 +227,21 @@ pub fn serve(
         },
     };
 
+    // A token is checked as the stream opens, and a stream is held for as
+    // long as its client stays: past the token's `exp` it is ended, as the
+    // token's next request would be refused. Kept open, it went on
+    // delivering what the token could no longer read -- a member taken
+    // off a team heard the team until the client went away. The `error`
+    // event says 401, which a client takes as it takes a refused request:
+    // a fresh token, then the stream again.
+    let expires = who.scope().and_then(|s| s.expires_ms());
+    let left = || expires.map(|at| Duration::from_millis(at.saturating_sub(now_ms())));
+
     loop {
+        if left().is_some_and(|l| l.is_zero()) {
+            let _ = event(out, "error", EXPIRED);
+            return;
+        }
         if hub.is_closed() {
             let _ = event(
                 out,
@@ -279,9 +293,8 @@ pub fn serve(
         // Keep-alive: proxies and NAT tables drop silent connections. A
         // comment line is valid in SSE and produces no event on the client
         // side.
-        if hub.wait(cursor, cfg.stream_keepalive) <= cursor
-            && out.write_all(b": keepalive\n\n").is_err()
-        {
+        let keepalive = left().map_or(cfg.stream_keepalive, |l| l.min(cfg.stream_keepalive));
+        if hub.wait(cursor, keepalive) <= cursor && out.write_all(b": keepalive\n\n").is_err() {
             return;
         }
         if out.flush().is_err() {
@@ -320,6 +333,16 @@ fn seed(
     };
     event(out, "seed", &format!("{{\"seq\":{seq},\"rows\":{rows}}}"))?;
     Ok(seq)
+}
+
+/// The last event of a stream whose token's `exp` passed: what a refused
+/// request says, and its status, for a client to fetch a fresh token on.
+pub const EXPIRED: &str = r#"{"error":"the token has expired","status":401}"#;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn change_json(b: &ChangeBatch) -> String {

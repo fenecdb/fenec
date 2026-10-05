@@ -974,3 +974,74 @@ fn an_update_grant_names_the_fields_it_may_change() {
         assert!(Access::new(SECRET, bad).is_err(), "{bad}");
     }
 }
+
+/// A subscription outlived its token: a stream opened with a token whose
+/// `exp` was two seconds away still delivered a change written four seconds
+/// later, while the same token's `get` was 401. It is ended at the `exp`
+/// now, with an `error` event a client takes as a refusal (401).
+#[test]
+fn a_subscription_ends_when_its_token_expires() {
+    let n = start();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let alice = n.token(&format!(r#"{{"sub":"alice","exp":{}}}"#, now + 2));
+    let mut s = TcpStream::connect(("127.0.0.1", n.port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    write!(
+        s,
+        "GET /notes/changes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {alice}\r\n\r\n"
+    )
+    .unwrap();
+    let mut heard = String::new();
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("event: seed"),
+        Duration::from_secs(3),
+    );
+    assert!(heard.contains("event: seed"), "{heard}");
+    // The `exp` passes: the stream says why and closes.
+    listen(
+        &mut s,
+        &mut heard,
+        &|h| h.contains("event: error"),
+        Duration::from_secs(6),
+    );
+    assert!(
+        heard.contains(
+            r#"event: error
+data: {"error":"the token has expired","status":401}"#
+        ),
+        "{heard}"
+    );
+    let ended = heard.len();
+    // A write after it reaches no one: the connection is closed.
+    let root = n.call(
+        Some(ROOT),
+        "POST",
+        "/notes",
+        r#"{"owner":"alice","title":"after"}"#,
+    );
+    assert_eq!(root.0, 201, "{}", root.1);
+    let mut buf = [0u8; 64];
+    let closed = loop {
+        match s.read(&mut buf) {
+            Ok(0) => break true,
+            Ok(k) => heard.push_str(&String::from_utf8_lossy(&buf[..k])),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break false
+            }
+            Err(_) => break true,
+        }
+    };
+    assert!(closed, "the stream stayed open: {heard}");
+    assert!(!heard[ended..].contains("after"), "{heard}");
+    // And the token's own request is refused, as the stream was ended.
+    assert_eq!(n.call(Some(&alice), "GET", "/notes", "").0, 401);
+}

@@ -781,7 +781,18 @@ fenec-server --jwt-secret-file jwt.secret --mint-token '{"sub":"alice","exp":189
     gives claims naming no <code>exp</code> one an hour away. A rule with <code>for</code> applies
     to tokens whose <code>role</code> claim names that role, or lists it; rules on one
     collection widen each other; a rule whose filter names a claim the token
-    lacks does not apply. A subscription is checked when it opens.</li>
+    lacks does not apply. A subscription is checked when it opens, and
+    ended at its token's <code>exp</code> with
+    <code>event: error</code> and
+    <code>{"error":"the token has expired","status":401}</code>: the
+    client takes it as a refused request, fetches a fresh token and opens
+    the stream again (<code>FenecHttp.live</code>, <code>subscribe</code>,
+    the sync layer, Go's <code>*Error</code> and .NET's
+    <code>Event.Status</code>). Without it a stream outlived its token, and
+    a member taken off a team heard the team until the client went away.
+    No other request is held open past its token: a read sent with
+    <code>Fenec-After</code> is checked again once its wait ends, and
+    <code>/_changes</code> takes no scoped token.</li>
   <li><b>Refusals</b> tell a scoped token only what it may read: a
     <code>@unique</code> clash (409) names the field, not the document
     holding the value nor the value, since that row is another user's.</li>

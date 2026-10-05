@@ -275,13 +275,10 @@ export class FenecHttp {
       for (let attempt = 0; !stop.signal.aborted; attempt++) {
         try {
           const res = await this.#request(url, { headers, signal: stop.signal });
-          if (!res.ok || !res.body) {
-            const text = await res.text().catch(() => '');
-            throw new FenecError(`could not open the subscription to \`${collection}\`: ${text || `HTTP ${res.status}`}`);
-          }
+          if (!res.ok || !res.body) throw await refusal(res, collection);
           for await (const ev of sseEvents(res)) {
             if (stop.signal.aborted) return;
-            if (ev.name === 'error') throw new FenecError(JSON.parse(ev.data).error ?? 'subscription error');
+            if (ev.name === 'error') throw streamError(ev.data);
             attempt = 0;
             if (ev.name === 'seed' && !seeded) {
               seeded = true;
@@ -291,6 +288,11 @@ export class FenecHttp {
           }
         } catch (err) {
           report(err);
+          // A token refused -- or lapsed under an open stream, which the
+          // server ends at its `exp` -- is refused again however often it
+          // is sent, and each refusal waits longer: the live query stops
+          // there, for the app to open it again with a fresh token.
+          if (err?.status === 401) return stop.abort();
         }
         if (stop.signal.aborted) return;
         await new Promise((r) => setTimeout(r, Math.min(15000, 250 * 2 ** attempt)));
@@ -337,6 +339,8 @@ export class FenecHttp {
         if (stop.signal.aborted) return;
         if (onError) onError(err);
         else Promise.reject(err);
+        // As a stream's: a refused token is not asked again.
+        if (err?.status === 401) stop.abort();
       }
     };
     (async () => {
@@ -352,6 +356,36 @@ export class FenecHttp {
   async schemas() {
     return this.run('collections');
   }
+}
+
+/** Why a subscription could not open: the server's words, and its status. */
+async function refusal(res, collection) {
+  const text = await res.text().catch(() => '');
+  let said = text;
+  try {
+    said = JSON.parse(text)?.error ?? text;
+  } catch {
+    // not JSON: the text as it came
+  }
+  const e = new FenecError(`could not open the subscription to \`${collection}\`: ${said || `HTTP ${res.status}`}`);
+  e.status = res.status;
+  return e;
+}
+
+/**
+ * A stream's `error` event as the error it is: `status` 401 where the
+ * server ended it at its token's `exp`, as it refuses a request.
+ */
+function streamError(data) {
+  let msg = {};
+  try {
+    msg = JSON.parse(data) ?? {};
+  } catch {
+    // an event that is not JSON
+  }
+  const e = new FenecError(msg.error ?? 'subscription error');
+  if (typeof msg.status === 'number') e.status = msg.status;
+  return e;
 }
 
 /** The option a copy of a client is handed its original's `seq` under. */

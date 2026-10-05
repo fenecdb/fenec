@@ -1,7 +1,7 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch, and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch, and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
     "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (the statuses refused writes were told with), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
@@ -583,6 +583,17 @@
         {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}], "token_asked": true, "waits": []}},
         {"do": "token", "token": "t1", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t1"}]}},
         {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}}
+      ]
+    },
+    {
+      "name": "a stream ended at its token's exp asks for a token, and opens again with it",
+      "covers": "http.html#subscriptions: the server ends a scoped stream at its token's exp with an error event of status 401",
+      "steps": [
+        {"do": "start", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open", "auth": "Bearer t0"}]}},
+        {"do": "seed", "seq": 3, "rows": "@open", "expect": {"ready": true}},
+        {"do": "error", "error": "the token has expired", "status": 401, "expect": {"streams": [], "token_asked": true, "waits": []}},
+        {"do": "token", "token": "t1", "expect": {"streams": [{"path": "/tasks/changes?status=eq.open&since=3", "auth": "Bearer t1"}]}},
+        {"do": "change", "seq": 4, "puts": [], "dels": [], "expect": {"ready": true, "token_asked": false}}
       ]
     },
     {

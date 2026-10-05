@@ -158,6 +158,26 @@ test('a stream that ends is opened again, and its seed runs the query', async ()
   stop();
 });
 
+// The server ends a stream at its token's `exp` with a 401: the live query
+// says so as an auth error and stops -- opened again with the same token
+// it was refused at every attempt, each refusal waiting longer -- for the
+// app to open it again with a fresh one.
+test("a stream ended at its token's exp is an auth error, and is not opened again", async () => {
+  const server = scripted(() => [{ id: 1 }]);
+  const db = client.connect('http://db.test', { token: 'old', fetch: server.fetch });
+  const errors = [];
+  db.live('get docs', () => {}, { collections: ['docs'], onError: (e) => errors.push(e) });
+  await until(() => server.streams.length === 1);
+  server.streams[0].emit('seed', { seq: 1, rows: [] });
+  server.streams[0].emit('error', { error: 'the token has expired', status: 401 });
+  await until(() => errors.length === 1);
+  assert.ok(errors[0] instanceof client.FenecError);
+  assert.equal(errors[0].status, 401);
+  assert.match(errors[0].message, /expired/);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(server.streams.length, 1, 'opened again with the token refused');
+});
+
 test('a text says what it reads, or a live query over HTTP is refused', () => {
   const db = client.connect('http://db.test', { fetch: scripted(() => []).fetch });
   assert.throws(() => db.live('get docs', () => {}), /name the collections a text reads/);

@@ -19,7 +19,8 @@ import (
 type Event struct {
 	// Type is "seed" -- Rows is the whole shape, which replaces what the
 	// subscriber held -- "change" -- Puts and Dels since the last event --
-	// or "error", the last event, with Err.
+	// or "error", the last event, with Err: an *Error of Status 401 where
+	// the server ended the stream at its token's exp.
 	Type   string
 	Seq    uint64 // the change the event brings the shape up to
 	Rows   []Row
@@ -111,11 +112,18 @@ func eventOf(name string, data []byte) Event {
 		Dels   []int64 `json:"dels"`
 		Schema bool    `json:"schema"`
 		Error  string  `json:"error"`
+		Status int     `json:"status"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
 		return Event{Type: "error", Err: fmt.Errorf("fenecdb: an event of the subscription: %w", err)}
 	}
 	if name == "error" {
+		// The server ends a stream at its token's exp with status 401: an
+		// *Error, as the refused request it stands for, for the caller to
+		// subscribe again with a fresh token.
+		if body.Status != 0 {
+			return Event{Type: "error", Err: errorOf(body.Status, data)}
+		}
 		return Event{Type: "error", Err: errors.New("fenecdb: " + body.Error)}
 	}
 	return Event{Type: name, Seq: body.Seq, Rows: body.Rows, Puts: body.Puts, Dels: body.Dels, Schema: body.Schema}
