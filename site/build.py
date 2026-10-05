@@ -75,6 +75,7 @@ NAV = [
         ("docs/server", "Server"),
         ("docs/replication", "Replication"),
         ("docs/monitoring", "Monitoring"),
+        ("docs/studio", "Studio"),
         ("docs/sharding", "Tenants and sharding"),
         ("docs/serverless", "Serverless and Cloudflare"),
         ("docs/microservices", "Services and events"),
@@ -393,7 +394,7 @@ def prev_next(active, base):
 NOISE_KB = 0.3
 COMPRESSED = {"kb_gz", "kb_br", "kb_client_gz", "kb_client_br", "kb_br_all",
               "kb_lite_gz", "kb_lite_br",
-              "kb_app_br", "kb_app_client_br"}
+              "kb_app_br", "kb_app_client_br", "kb_studio_gz"}
 # The browser client's modules, each after those it imports: what
 # `@fenecdb/web` ships of JavaScript. client.js is `@fenecdb/web/client`,
 # builder.js and http.js without the engine.
@@ -407,6 +408,9 @@ APP = (
     "console.log(await db.from('docs').where('year', '>=', 2024).limit(10).rows());\n"
 )
 CLAIMS = [
+    # fenec studio's first load, which studio/test/statements.test.mjs holds
+    # under 120 KB.
+    ("site/content/docs/studio.html", r"first load is (\d+) KB of JavaScript and CSS, gzipped", "kb_studio_gz", 0),
     ("README.md", r"\*\*Runtime size\*\* \| (\d+) KB gzip wasm", "kb_gz", 0),
     ("README.md", r"gzip wasm \+ (\d+) KB gzip client", "kb_client_gz", 0),
     ("README.md", r"fenec-server:(\d+\.\d+\.\d+)", "version", 0),
@@ -622,15 +626,31 @@ def app_bundle(entry):
     return run.stdout.encode("utf-8")
 
 
+def studio_gz():
+    """fenec studio's first load, in KB: its page, and each stylesheet and
+    module the page names (`client.js`, `builder.js` and `http.js` are
+    web/'s, which the server serves beside the studio's own), each gzipped
+    as a proxy in front would send it."""
+    page = open(os.path.join(REPO, "studio", "index.html"), encoding="utf-8").read()
+    names = re.findall(r'<link rel="(?:stylesheet|modulepreload)" href="([^"]+)"', page)
+    total = len(gziplib.compress(page.encode("utf-8"), 9, mtime=0))
+    for name in names:
+        where = "web" if name in CLIENT_MODULES else "studio"
+        total += len(gziplib.compress(open(os.path.join(REPO, where, name), "rb").read(), 9, mtime=0))
+    return total / 1024
+
+
 def check_claims():
     """Compares every number in CLAIMS against the thing it describes."""
     web = lambda name: os.path.join(REPO, "web", name)
     wasm = web("fenec.wasm")
     if not os.path.exists(wasm):
-        # The copy step above already said so. The bench's figures need no
-        # module, so they are still held to their results.
+        # The copy step above already said so. The bench's figures and the
+        # studio's need no module, so they are still held to their truth.
         ycsb = ycsb_facts()
-        return claims_against(ycsb, {k: " k ops/s" for k in ycsb}, lambda f: f.startswith("ycsb:"))
+        unit = {**{k: " k ops/s" for k in ycsb}, "kb_studio_gz": " KB"}
+        return claims_against({**ycsb, "kb_studio_gz": studio_gz()}, unit,
+                              lambda f: f.startswith("ycsb:") or f == "kb_studio_gz")
     size = os.path.getsize(wasm)
     wasm_gz, wasm_br = compressed(wasm)
     # The client is fenec.js and the two modules it imports, as a page loads
@@ -671,6 +691,7 @@ def check_claims():
         # forgets the README is caught at the bump rather than after it
         # has shipped.
         "version": workspace_version(),
+        "kb_studio_gz": studio_gz(),
     }
     ycsb = ycsb_facts()
     unit = {"glue": " lines", "version": "", "bytes": " bytes"}
@@ -1232,6 +1253,20 @@ def build():
         assets[f"fonts/{name}"] = hashed
         styles = styles.replace(f"url(fonts/{name})", f"url({hashed})")
     emit("styles.css", styles)
+
+    # Screenshots the docs show (images/), named by their hash as the fonts
+    # are: a page names `images/<name>`, rewritten below to the hashed name.
+    images = os.path.join(ROOT, "images")
+    if os.path.isdir(images):
+        os.makedirs(os.path.join(OUT, "images"), exist_ok=True)
+        for name in sorted(os.listdir(images)):
+            stem, ext = os.path.splitext(name)
+            if ext not in (".webp", ".png", ".svg"):
+                continue
+            blob = open(os.path.join(images, name), "rb").read()
+            hashed = f"images/{stem}.{hashlib.sha256(blob).hexdigest()[:10]}{ext}"
+            open(os.path.join(OUT, hashed), "wb").write(blob)
+            assets[f"images/{name}"] = hashed
 
     for path in sorted(pages):
         rel = os.path.relpath(path, os.path.join(ROOT, "content"))
