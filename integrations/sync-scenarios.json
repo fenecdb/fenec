@@ -1,7 +1,7 @@
 {
   "about": [
     "One script for both of a replica's syncs: the browser's FenecSync (web/fenec.js, run by web/fenec.sync.scenarios.test.js) and the native core every binding drives (crates/fenec-abi/src/sync, run by crates/fenec-abi/tests/scenarios.rs).",
-    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / batch, and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
+    "A scenario starts with no replica and plays its steps in order. `do` says what happens: start, restart (the app opened again over the replica it kept), seed / change (a stream event of the shape at index `shape`, 0 by default), error (the stream's error event, its `error` and `status`), drop (every stream ends), fire (every timer asked for runs out), answer (the oldest write request not yet answered gets `status`, `seq` as Fenec-Seq and `body`; status 0 is no answer at all), write (an app's write: insert / update / delete / upsert / batch, a value {\"$inc\": n} as inc(n) and {\"$expr\": text} as expr(text), and get, a read with its require, in a batch), net (whether the server is reached: a stream or GET /collections made while it is not fails at once), stream_status (the next stream opened is answered with it), online (the platform's network signal), token (a new token handed over), schema (what GET /collections answers from now on).",
     "After each step the runner checks `expect`: requests (the GETs and POSTs made during the step: method, path, auth, key = the Idempotency-Key, body = the lines sent, lines = how many), streams (each stream opened: its path and query, auth), rows (the replica's rows of a collection by id, each row's named fields), pending (writes not yet answered), refused (the statuses refused writes were told with), token_asked, waits (each timer asked for, [min, max] ms), ready (every shape seeded), error (a start or a write refused before anything is sent).",
     "An object expected is a subset of the one that came; a list is whole. A string `<name>` is any value, the same wherever the name comes again and another than every other name's: a key made for an insert, an Idempotency-Key. In a step's data a bound `<name>` stands for its value, so the server's copy of a row carries the key the app made. `@name` in rows or puts is a fixture.",
     "Writes are written with their fields in alphabetical order, as the builders render them in the order given: JavaScript keeps an object's order and the native runner's JSON sorts it. A temporary id is 2^52 = 4503599627370496 and up.",
@@ -847,6 +847,54 @@
           {"id": 3, "key": "c", "seen": "2100-01-01T00:00:00.000Z", "title": "also fresh"}], "expect": {
           "rows": {"tasks": [{"id": 1, "title": "fresh"}, {"id": 3}]}}},
         {"do": "change", "seq": 5, "puts": [], "dels": [2, 3], "expect": {"rows": {"tasks": [{"id": 1, "title": "fresh"}]}}}
+      ]
+    },
+    {
+      "name": "an upsert adds to the row its key finds and makes the rest, and the server works it out again",
+      "covers": "fenecql.html: put ... if absent else set; the replica finds the row by the shape's key, as its @unique is a plain hash, and sends the text as written; a key twice in the page adds to the row the first made",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"upsert": "tasks", "docs": [
+          {"key": "a", "priority": 3, "status": "open", "title": "one"},
+          {"key": "c", "priority": 2, "status": "open", "title": "three"},
+          {"key": "c", "priority": 4, "status": "open", "title": "three"}],
+          "set": {"priority": {"$expr": "priority + new.priority"}}}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{
+            "query": "put tasks [{key: $1, priority: $2, status: $3, title: $4}, {key: $5, priority: $6, status: $7, title: $8}, {key: $9, priority: $10, status: $11, title: $12}] if absent else set {priority: priority + new.priority}",
+            "params": ["a", 3, "open", "one", "c", 2, "open", "three", "c", 4, "open", "three"]}]}],
+          "rows": {"tasks": [{"id": 1, "priority": 4}, {"id": 2, "priority": 5},
+            {"id": 4503599627370496, "key": "c", "priority": 6}]},
+          "pending": 1}},
+        {"do": "answer", "status": 200, "seq": 5, "body": {"affected": 3}, "expect": {"pending": 0}},
+        {"do": "change", "seq": 5, "puts": [
+          {"id": 1, "key": "a", "priority": 9, "status": "open", "title": "one"},
+          {"id": 3, "key": "c", "priority": 6, "status": "open", "title": "three"}], "dels": [], "expect": {
+          "rows": {"tasks": [{"id": 1, "priority": 9}, {"id": 2}, {"id": 3, "key": "c", "priority": 6}]}}}
+      ]
+    },
+    {
+      "name": "an upsert the server refuses is put back, and one naming no key is refused at once",
+      "covers": "the rows an upsert set are read first and written back, the rows it made deleted; a document without the shape's key or an id has nothing to match the server's copy by",
+      "steps": [
+        {"do": "start"},
+        {"do": "seed", "seq": 3, "rows": "@open"},
+        {"do": "write", "write": {"upsert": "tasks", "docs": [{"priority": 1, "status": "open", "title": "keyless"}],
+          "set": {"priority": 7}}, "expect": {
+          "error": "an upsert into a synced collection names each document's key or id", "requests": [],
+          "rows": {"tasks": [{"id": 1, "priority": 1}, {"id": 2, "priority": 5}]}}},
+        {"do": "write", "write": {"upsert": "tasks", "docs": [
+          {"key": "b", "priority": 1, "status": "open", "title": "two"},
+          {"key": "d", "priority": 1, "status": "open", "title": "four"}],
+          "set": {"priority": {"$inc": 10}}, "require": 2}, "expect": {
+          "requests": [{"method": "POST", "path": "/query", "key": "<w1>", "body": [{
+            "query": "put tasks [{key: $1, priority: $2, status: $3, title: $4}, {key: $5, priority: $6, status: $7, title: $8}] if absent else set {priority: coalesce(priority, 0) + $9} require 2",
+            "params": ["b", 1, "open", "two", "d", 1, "open", "four", 10]}]}],
+          "rows": {"tasks": [{"id": 1, "priority": 1}, {"id": 2, "priority": 15}, {"id": 4503599627370496, "key": "d", "priority": 1}]},
+          "pending": 1}},
+        {"do": "answer", "status": 412, "body": {"error": "the write needed 2 rows"}, "expect": {
+          "refused": [412], "pending": 0,
+          "rows": {"tasks": [{"id": 1, "priority": 1}, {"id": 2, "priority": 5}]}}}
       ]
     }
   ]

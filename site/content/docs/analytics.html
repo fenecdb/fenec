@@ -63,6 +63,23 @@ field written at ingest, which reads the rows, takes 19.5. A raw collection unde
 runs these statements writes the rollups into a collection without one
 before the raw rows go.</p>
 
+<p>A rollup kept as the events come is a row a key, made at its first
+count and added to after: <code>if absent else set</code> is that upsert,
+one statement for a page of keys, the set reading the row it finds and
+<code>new.</code> the document put. With the page as a parameter,
+<code>put hourly $1 if absent else set {n: n + new.n}</code>, its text is
+the same whatever the page holds.</p>
+
+<pre data-lang="fenecql">create collection hourly (key text @unique, n int)
+put hourly [{key: "2026-05-03T09|view", n: 2}, {key: "2026-05-03T09|buy", n: 1}] if absent else set {n: n + new.n}   -- → 2: made
+put hourly [{key: "2026-05-03T09|view", n: 3}, {key: "2026-05-03T10|view", n: 2}] if absent else set {n: n + new.n}   -- → 2: one added to, one made
+get hourly select n where key = "2026-05-03T09|view"   -- → 5
+</pre>
+
+<p>A page of 1 000 keys, half of them new, is one statement in 1.09 ms in
+process, where reading which keys exist and writing the new rows and the
+old ones over took 1.49 ms and a round trip more.</p>
+
 <h3 id="distinct">Distinct users</h3>
 
 <p><code>count(distinct f)</code> holds each value once a group, exactly,
@@ -78,6 +95,26 @@ get events select user, count(distinct bucket(at, 1d)) as days group user order 
 groups: 125 ms. Before, a query an hour listed the users and the client
 counted them: 7.7 s.</p>
 
+<p>Past a million values, or to add days up, count approximately:
+<code>approx_count_distinct(f)</code> is HyperLogLog, 2<sup>14</sup>
+registers — 16 KB a group, sparse while a group has few values — with a
+standard error of 0.81%, whatever the count. <code>hll_accumulate(f)</code>
+answers the sketch itself as bytes, to keep a day's in a rollup row;
+<code>hll_combine(s)</code> merges sketches and <code>hll_estimate(s)</code>
+reads a count off one, so a month is its days' sketches merged — not their
+counts added, which counts a user of two days twice. Sketches are the same
+bytes wherever made, the browser's or a server's. A query's sketches are
+held to 64 MB, 4 096 dense groups, and refused past that.</p>
+
+<pre data-lang="fenecql">get events select approx_count_distinct(user) as users   -- → 3
+get events select hll_estimate(hll_accumulate(user)) as users where at >= "2026-05-04"   -- → 1
+get events select bucket(at, 1d) as day, hll_accumulate(user) as users group day   -- → "2026-05-03T00:00:00Z"
+</pre>
+
+<p>Per hour over the million events it takes 121 ms, the furthest of
+the 169 hours 1.3% off; over thirty sketches of 200 000 values the error's
+root mean square is 0.77%.</p>
+
 <h3 id="funnels">Funnels</h3>
 
 <p>How many users reached each step, and how many of the viewers
@@ -90,8 +127,14 @@ get events select count(distinct user) where name = "buy" and user in (get event
 <p>The inner <code>get</code> is a list of up to 100 000 values; past that
 ask from the users' side with <code>lookup … required</code> (<a
 href="/docs/fenecql#subqueries">Subqueries</a>). An ordered funnel — a
-view, then a buy within the hour — is each user's events in time order,
-which the client walks.</p>
+view, then a buy within the hour — compares each user's first of each:
+<code>having</code> keeps the groups a condition holds for, over their
+keys, the list's columns by name and any aggregate, and
+<code>count</code> after it counts them rather than send a row a user.</p>
+
+<pre data-lang="fenecql">get events select user, min(case when name = "view" then at end) as viewed, min(case when name = "buy" then at end) as bought where name in ["view", "buy"] group user having bought >= viewed and bought <= viewed + 3600000 count   -- → 2
+get events select user, count(*) as n group user having n >= 3 order n desc   -- → 1
+</pre>
 
 <h3 id="retention">Retention</h3>
 

@@ -1000,6 +1000,30 @@ class _Builder:
         where = self._require_filter("update", all, bind)
         return f"set {self.collection} {body}{where}{_require_clause(require)}", bind.params
 
+    def to_upsert(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        patch: Mapping,
+        *,
+        require: int | None = None,
+    ) -> tuple[str, list]:
+        """The upsert, `put ... if absent else set {patch}`, not sent: a
+        document whose id or first `@unique` value a row holds sets that row
+        by the patch -- an update's, `inc(n)` and `expr(...)` with it, and
+        in an expression `new.f` the document's own `f` -- and every other
+        one is inserted. The documents' parameters come first, then the
+        patch's."""
+        self._assert_plain("upsert")
+        items = list(docs) if isinstance(docs, (list, tuple)) else [docs]
+        if not items:
+            raise _err("cannot write an empty document list")
+        bind = _Binder()
+        body = ", ".join(_render_doc(d, bind, "insert") for d in items)
+        patched = _render_doc(patch, bind, "update")
+        required = _require_clause(require)
+        many = body if len(items) == 1 else f"[{body}]"
+        return f"put {self.collection} {many} if absent else set {patched}{required}", bind.params
+
     def to_delete(self, *, all: bool = False, require: int | None = None) -> tuple[str, list]:
         """The `del` of the rows the filter names, not sent."""
         self._assert_plain("delete")
@@ -1019,8 +1043,8 @@ class _Builder:
             raise _err(f"{verb} cannot be used with `lookup`")
         if self._s["facets"]:
             raise _err(f"{verb} cannot be used with `facet`")
-        if verb == "insert" and self._s["cond"]:
-            raise _err("insert cannot be used with `where`")
+        if verb in ("insert", "upsert") and self._s["cond"]:
+            raise _err(f"{verb} cannot be used with `where`")
 
     def _extra_clause(self) -> str | None:
         s = self._s
@@ -1161,6 +1185,21 @@ class Query(_Builder):
         text = self.to_insert(docs, if_absent=if_absent, require=require)
         return _affected(self._client().query(*text))
 
+    def upsert(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        patch: Mapping,
+        *,
+        require: int | None = None,
+    ) -> int:
+        """`put ... if absent else set`: each document inserted, or where a
+        row holds its id or `@unique` value, that row set by the patch --
+        `upsert({"key": k, "n": 1}, {"n": expr("n + new.n")})`. How many
+        rows it set and made together."""
+        if isinstance(docs, (list, tuple)) and not docs:
+            return 0
+        return _affected(self._client().query(*self.to_upsert(docs, patch, require=require)))
+
     def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
         """`set` over the rows the filter names: how many it changed. With
         no filter it is refused unless `all=True`."""
@@ -1203,6 +1242,17 @@ class AsyncQuery(_Builder):
             return 0
         text = self.to_insert(docs, if_absent=if_absent, require=require)
         return _affected(await self._client().query(*text))
+
+    async def upsert(
+        self,
+        docs: Mapping | Sequence[Mapping],
+        patch: Mapping,
+        *,
+        require: int | None = None,
+    ) -> int:
+        if isinstance(docs, (list, tuple)) and not docs:
+            return 0
+        return _affected(await self._client().query(*self.to_upsert(docs, patch, require=require)))
 
     async def update(self, patch: Mapping, *, all: bool = False, require: int | None = None) -> int:
         return _affected(await self._client().query(*self.to_update(patch, all=all, require=require)))

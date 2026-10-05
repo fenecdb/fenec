@@ -1002,7 +1002,18 @@ pub const PLAN_COLUMN: &str = "plan";
 /// The aggregates a select list may call, as the parser lowercases them.
 /// `count(*)` is a call with no argument, `count(distinct f)` one whose
 /// argument is a call of `distinct`, and `first(px by at)` one of two.
-pub const AGGREGATES: [&str; 7] = ["count", "sum", "avg", "min", "max", "first", "last"];
+pub const AGGREGATES: [&str; 10] = [
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "first",
+    "last",
+    "approx_count_distinct",
+    "hll_accumulate",
+    "hll_combine",
+];
 
 /// The most distinct values a query's `count(distinct ...)` items hold
 /// between them, over all their groups. Each is its encoding in a hash
@@ -1321,6 +1332,11 @@ pub struct Select {
     /// values rather than one in all. A name the list gives an item with
     /// `as` stands for that item ([`Select::group_keys`]).
     pub group: Vec<Expr>,
+    /// `having <expr>` after `group`: the groups it holds for, the rest
+    /// left out before `order` and `limit`. It reads a group's keys, the
+    /// list's columns by their names and any aggregate, as a column does;
+    /// `count` after it counts the groups that pass.
+    pub having: Option<Expr>,
     /// A plain list's items that are more than a field: `px * qty as
     /// notional`. Each answers under its name, which `project` holds where
     /// it was written.
@@ -1460,6 +1476,11 @@ impl Select {
                 "`require` counts the rows a `get` answers, and `count` or an aggregate answers \
                  one: require the rows themselves, `limit 1 require 1` for one to exist"
                     .into(),
+            ));
+        }
+        if self.having.is_some() && self.group.is_empty() {
+            return Err(Error::Query(
+                "`having` keeps the groups it holds for: it follows `group`".into(),
             ));
         }
         if !self.aggregate.is_empty() || !self.group.is_empty() {
@@ -1636,7 +1657,11 @@ impl Select {
             }
         }
         let items = self.aggregate.iter().chain(&self.computed);
-        for e in items.map(|c| &c.expr).chain(&self.group) {
+        for e in items
+            .map(|c| &c.expr)
+            .chain(&self.group)
+            .chain(&self.having)
+        {
             marks = marks.max(e.max_param());
         }
         opt(&self.filter)
@@ -1824,6 +1849,15 @@ impl Select {
                 )));
             }
         }
+        // `having` reads what a column may, and the columns by their names.
+        if let Some(h) = &self.having {
+            let names: Vec<Expr> = (self.aggregate.iter())
+                .map(|c| Expr::Field(c.name.clone()))
+                .collect();
+            let mut known = keys.clone();
+            known.extend(&names);
+            grouped(h, &known, false)?;
+        }
         self.check_aggregate_company()
     }
 
@@ -1850,7 +1884,7 @@ impl Select {
             "match"
         } else if self.lookup.is_some() {
             "lookup"
-        } else if self.count {
+        } else if self.count && self.group.is_empty() {
             "count"
         } else if self.project.is_some() {
             "select"
@@ -1899,7 +1933,17 @@ fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
         ("count", _) => {
             "`count` counts rows or distinct values: `count(*)` or `count(distinct <field>)`"
         }
-        ("first" | "last", [_] | [_, _]) | ("sum" | "avg" | "min" | "max", [_]) => "",
+        ("first" | "last", [_] | [_, _])
+        | (
+            "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "approx_count_distinct"
+            | "hll_accumulate"
+            | "hll_combine",
+            [_],
+        ) => "",
         ("first" | "last", _) => {
             "`first` and `last` take a value and what orders the rows: \
                                   `first(<value> [by <key>])`"
@@ -1908,7 +1952,16 @@ fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
             "`min` and `max` fold one value over the rows; `least(a, b)` and \
              `greatest(a, b)` take the smaller and larger of a row's"
         }
-        ("sum" | "avg" | "min" | "max", _) => "an aggregate takes one value: `sum(<value>)`",
+        (
+            "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "approx_count_distinct"
+            | "hll_accumulate"
+            | "hll_combine",
+            _,
+        ) => "an aggregate takes one value: `sum(<value>)`",
         _ => "",
     };
     if !shape.is_empty() {
@@ -1960,6 +2013,10 @@ pub enum Statement {
         collection: String,
         /// Field-expression pairs per document. Supplying `id` makes it an upsert.
         docs: Vec<Vec<(String, Expr)>>,
+        /// `put <name> $n`: the documents are the parameter's value, an
+        /// object or a list of objects, each member a field -- read as a
+        /// body's are, a json field's numbers as written. `docs` is empty.
+        docs_param: Option<usize>,
         /// `insert`: a document naming an id that is taken is refused
         /// (`Error::Duplicate`), where `put` writes over it.
         insert: bool,
@@ -1968,6 +2025,11 @@ pub enum Statement {
         /// refused, and not counted -- `SET NX`, whose answer (0 or 1) says
         /// whether the write was made. The parser sets `insert` with it.
         if_absent: bool,
+        /// `put ... if absent else set {..}`: the row holding the id or the
+        /// `@unique` value is set as a `set` sets it, each value over that
+        /// row, `new.f` the document's own `f`, and counted -- an upsert,
+        /// one statement under the write lock.
+        else_set: Option<Vec<(String, Expr)>>,
         /// `... require <n>`: the statement is refused (`Error::Unmet`), and
         /// so its block put back whole, unless it wrote exactly `n` rows.
         require: Option<u64>,
@@ -2046,13 +2108,44 @@ impl Expr {
     }
 }
 
+/// The documents parameter `i` holds for `put <collection> $i`: an object,
+/// or a list of objects, each a document's members.
+pub fn documents_in<'p>(
+    collection: &str,
+    i: usize,
+    params: &'p [Value],
+) -> Result<Vec<&'p [(String, Value)]>> {
+    let refused = |what: &str| {
+        Error::Type(format!(
+            "`put {collection} ${}` takes an object or a list of objects, not {what}",
+            i + 1
+        ))
+    };
+    match params.get(i) {
+        None => Err(Error::Query(format!("parameter ${} is not bound", i + 1))),
+        Some(Value::Object(m)) => Ok(vec![m.as_slice()]),
+        Some(Value::List(items)) => items
+            .iter()
+            .map(|item| match item {
+                Value::Object(m) => Ok(m.as_slice()),
+                other => Err(refused(&format!("a list holding {}", other.type_name()))),
+            })
+            .collect(),
+        Some(other) => Err(refused(other.type_name())),
+    }
+}
+
 impl Statement {
     /// Whether a literal in it holds a vector: when none does, no json
     /// field can be handed one, and nothing has to be asked of the schema.
     pub fn reads_vectors(&self) -> bool {
         let opt = |e: &Option<Expr>| e.as_ref().is_some_and(Expr::reads_vectors);
         match self {
-            Statement::Put { docs, .. } => docs.iter().flatten().any(|(_, e)| e.reads_vectors()),
+            Statement::Put { docs, else_set, .. } => docs
+                .iter()
+                .flatten()
+                .chain(else_set.iter().flatten())
+                .any(|(_, e)| e.reads_vectors()),
             Statement::Update { set, filter, .. } => {
                 set.iter().any(|(_, e)| e.reads_vectors()) || opt(filter)
             }
@@ -2082,13 +2175,60 @@ impl Statement {
         !matches!(self, Statement::Compact(_))
     }
 
+    /// A `put <name> $n` with the parameter's documents written into it,
+    /// each value a literal: what a scope's rules -- no `id`, its pinned
+    /// fields -- and a sync replica's matching read a document by. Any
+    /// other statement as it is.
+    pub fn with_documents(self, params: &[Value]) -> Result<Statement> {
+        let Statement::Put {
+            collection,
+            mut docs,
+            docs_param: Some(i),
+            insert,
+            if_absent,
+            else_set,
+            require,
+        } = self
+        else {
+            return Ok(self);
+        };
+        for members in documents_in(&collection, i, params)? {
+            docs.push(
+                members
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Expr::Lit(v.clone())))
+                    .collect(),
+            );
+        }
+        Ok(Statement::Put {
+            collection,
+            docs,
+            docs_param: None,
+            insert,
+            if_absent,
+            else_set,
+            require,
+        })
+    }
+
     /// Number of parameters the statement expects: the highest `$n` used.
     pub fn max_param(&self) -> usize {
         let opt = |e: &Option<Expr>| e.as_ref().map(|e| e.max_param()).unwrap_or(0);
         let pairs =
             |v: &Vec<(String, Expr)>| v.iter().map(|(_, e)| e.max_param()).max().unwrap_or(0);
         match self {
-            Statement::Put { docs, .. } => docs.iter().map(pairs).max().unwrap_or(0),
+            Statement::Put {
+                docs,
+                docs_param,
+                else_set,
+                ..
+            } => docs
+                .iter()
+                .chain(else_set)
+                .map(pairs)
+                .max()
+                .unwrap_or(0)
+                .max(docs_param.map_or(0, |i| i + 1)),
             Statement::Select(sel) | Statement::Explain(sel) => sel.max_param(),
             Statement::Update { set, filter, .. } => pairs(set).max(opt(filter)),
             Statement::Delete { filter, .. } => opt(filter),

@@ -150,6 +150,7 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'toFenecQL' => q.toFenecQL(),
         'toInsert' => q.toInsert(value(a[0])!, ifAbsent: absent(), require: require(1)),
         'toUpdate' => q.toUpdate(value(a[0])!, all: all(1), require: require(1)),
+        'toUpsert' => q.toUpsert(value(a[0])!, value(a[1])!, require: require(2)),
         'toDelete' => q.toDelete(all: all(0), require: require(0)),
         _ => null,
       };
@@ -161,6 +162,7 @@ Future<(String?, List<Object?>?, String?)> run(List steps) async {
         'explain' => q.explain(),
         'insert' => q.insert(value(a[0])!, ifAbsent: absent(), require: require(1)),
         'update' => q.update(value(a[0])!, all: all(1), require: require(1)),
+        'upsert' => q.upsert(value(a[0])!, value(a[1])!, require: require(2)),
         'delete' => q.delete(all: all(0), require: require(0)),
         _ => null,
       };

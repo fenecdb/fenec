@@ -1613,8 +1613,8 @@ func (b *Builder) assertPlain(verb string) error {
 	if len(b.facets) > 0 {
 		return refuse("%s cannot be used with `facet`", verb)
 	}
-	if verb == "insert" && len(b.cond) > 0 {
-		return refuse("insert cannot be used with `where`")
+	if (verb == "insert" || verb == "upsert") && len(b.cond) > 0 {
+		return refuse("%s cannot be used with `where`", verb)
 	}
 	return nil
 }
@@ -1976,6 +1976,43 @@ func (b *Builder) ToUpdate(patch any, options ...Opt) (string, []any, error) {
 	return "set " + b.collection + " " + body + where + required, bind.params, nil
 }
 
+// ToUpsert is put ... if absent else set {patch}, not sent: a document
+// whose id or first @unique value a row holds sets that row by patch --
+// an update's, Inc and Expr with it, and in an Expr new.f is the
+// document's own f -- and every other one is inserted. The documents are
+// a slice, since the patch comes after them as it does in every other
+// SDK; their parameters are numbered first, then the patch's.
+func (b *Builder) ToUpsert(docs []any, patch any, options ...Opt) (string, []any, error) {
+	if err := b.assertPlain("upsert"); err != nil {
+		return "", nil, err
+	}
+	if len(docs) == 0 {
+		return "", nil, refuse("cannot write an empty document list")
+	}
+	bind := &binder{params: []any{}}
+	parts := make([]string, len(docs))
+	for i, d := range docs {
+		s, err := renderDoc(d, bind, "insert")
+		if err != nil {
+			return "", nil, err
+		}
+		parts[i] = s
+	}
+	body := strings.Join(parts, ", ")
+	if len(docs) > 1 {
+		body = "[" + body + "]"
+	}
+	set, err := renderDoc(patch, bind, "update")
+	if err != nil {
+		return "", nil, err
+	}
+	required, err := requireClause(gather(options))
+	if err != nil {
+		return "", nil, err
+	}
+	return "put " + b.collection + " " + body + " if absent else set " + set + required, bind.params, nil
+}
+
 // ToDelete is the del of the rows the filter names, not sent; with no
 // filter it is refused unless All is given.
 func (b *Builder) ToDelete(options ...Opt) (string, []any, error) {
@@ -2108,6 +2145,21 @@ func (b *Builder) Insert(ctx context.Context, docs ...any) (Result, error) {
 		return Result{}, b.err
 	}
 	text, params, err := b.ToInsert(docs...)
+	if err != nil {
+		return Result{}, err
+	}
+	return b.exec(ctx, text, params)
+}
+
+// Upsert inserts each document, or, where a row holds its id or @unique
+// value, sets that row by patch -- Upsert(ctx, []any{D("key", k, "n", 1)},
+// D("n", Expr("n + new.n"))) -- and hands back the rows set and made
+// together. No document is no request.
+func (b *Builder) Upsert(ctx context.Context, docs []any, patch any, options ...Opt) (Result, error) {
+	if len(docs) == 0 {
+		return Result{}, b.err
+	}
+	text, params, err := b.ToUpsert(docs, patch, options...)
 	if err != nil {
 		return Result{}, err
 	}

@@ -930,7 +930,7 @@ class Query {
     if (extra != null) throw _refuse('$verb cannot be used with `$extra`');
     if (_lookups.isNotEmpty) throw _refuse('$verb cannot be used with `lookup`');
     if (_facets.isNotEmpty) throw _refuse('$verb cannot be used with `facet`');
-    if (verb == 'insert' && _cond.isNotEmpty) throw _refuse('insert cannot be used with `where`');
+    if ((verb == 'insert' || verb == 'upsert') && _cond.isNotEmpty) throw _refuse('$verb cannot be used with `where`');
   }
 
   // An update or delete of every row is too easy to do by accident and
@@ -997,6 +997,26 @@ class Query {
     return (text: 'set $collection $body$filter${_requireClause(require)}', params: params);
   }
 
+  /// The upsert, `put ... if absent else set {patch}`, not run: a document
+  /// whose id or first `@unique` value a row holds sets that row by [patch]
+  /// -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
+  /// expression `new.f` the document's own `f` -- and every other one is
+  /// inserted. The documents' parameters come first, then the patch's.
+  Statement toUpsert(Object docs, Object patch, {int? require}) {
+    _assertPlain('upsert');
+    final list = docs is List ? docs : [docs];
+    if (list.isEmpty) throw _refuse('cannot write an empty document list');
+    final params = <Object?>[];
+    final bind = _binder(params);
+    final body = list.map((d) => _renderDoc(d, bind, insert: true)).join(', ');
+    final set = _renderDoc(patch, bind);
+    final required = _requireClause(require);
+    return (
+      text: 'put $collection ${list.length == 1 ? body : '[$body]'} if absent else set $set$required',
+      params: params,
+    );
+  }
+
   /// The `del` of the rows the filter names, not run; with no filter it is
   /// refused unless [all]; with [require], refused unless it deleted exactly that many rows.
   Statement toDelete({bool all = false, int? require}) {
@@ -1050,6 +1070,15 @@ class Query {
   Future<int> insert(Object docs, {bool ifAbsent = false, int? require}) async {
     if (docs is List && docs.isEmpty) return 0;
     return (await _run(toInsert(docs, ifAbsent: ifAbsent, require: require))).affected;
+  }
+
+  /// Inserts each document, or, where a row holds its id or `@unique`
+  /// value, sets that row by [patch] --
+  /// `upsert({'key': k, 'n': 1}, {'n': Computed.expr('n + new.n')})`: the
+  /// rows it set and made together. None is no statement.
+  Future<int> upsert(Object docs, Object patch, {int? require}) async {
+    if (docs is List && docs.isEmpty) return 0;
+    return (await _run(toUpsert(docs, patch, require: require))).affected;
   }
 
   /// Sets the patch's fields on the rows the filter names; with no filter it

@@ -74,7 +74,7 @@ export interface Dashboard {
   retention: Cohort[];
   /** Each question's time, ms. */
   timings: Record<string, number>;
-  /** What the page should say it could not answer; a visitor count of -1 is one of those. */
+  /** What the page should say of its answers: visitors estimated past a million. */
   notice?: string;
 }
 
@@ -141,12 +141,17 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
   const ret = retention(site, now);
   const k = rp.length;
   const stepMarks = STEPS.map((_, i) => `$${k + i + 1}`).join(', ');
-  // The facets, and each step's first time for every visitor who took a
-  // step past the first: from the raw events in range, or the rollups.
+  // The facets, and the funnel's steps past the first: each visitor's first
+  // time at each, compared by `having` -- a step reached when its first time
+  // is no earlier than the step before's -- and counted, one row an answer:
+  // from the raw events in range, or the rollups. Shipped a row a visitor
+  // and walked here, a month's funnel took 968 ms at ten million events.
+  const firsts = (where: string, a: number) =>
+    `select user, min(case when name = $${a} then at end) as a, min(case when name = $${a + 1} then at end) as b where ${where} group user`;
   const side = raw
     ? Promise.all([
         facetsAsk('facets', `get events where ${W} limit 0 facet country top 12 disjunctive, device disjunctive, browser top 8 disjunctive`, rp),
-        ask('funnel', `get events select user, name, min(at) as first where ${W} and name in [${stepMarks}] group user, name`, [...rp, ...STEPS]),
+        funnel(ask, `get events ${firsts(`${W} and name in [${stepMarks}]`, k + 1)}`, [...rp, ...STEPS]),
       ])
     : Promise.all([
         ask('facets', 'get day_dims select dim, value, sum(n) as count where day >= $1 and day < $2 group dim, value order count desc', [iso(dayOf(from)), iso(to)]).then((r) => {
@@ -157,7 +162,7 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
           }
           return out;
         }),
-        ask('funnel', `get firsts select user, name, min(at) as first where day >= $1 and day < $2 and name in [$3, $4] group user, name`, [iso(dayOf(from)), iso(to), ...STEPS]),
+        funnel(ask, `get firsts ${firsts('day >= $1 and day < $2 and name in [$3, $4]', 3)}`, [iso(dayOf(from)), iso(to), ...STEPS]),
       ]);
 
   // Awaited below; marked handled now, so a failure of the questions in
@@ -185,11 +190,11 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
       answers = await questions('count(distinct user)');
     } catch (e) {
       // `count(distinct)` refuses past a million values rather than count
-      // short: a month of a busy site, filtered by little. The counts of
-      // events stand; the visitors are said to be past it.
+      // short: a month of a busy site, filtered by little. Past it the
+      // visitors are counted in a HyperLogLog sketch, within about 1%.
       if (!(e instanceof FenecError) || !/count\(distinct/.test(e.message)) throw e;
-      notice = 'More than a million visitors in this range: a distinct count is refused past a million values rather than cut short. Narrow the range or add a filter for exact visitor counts.';
-      answers = await questions('-1');
+      notice = 'More than a million visitors in this range: they are estimated (approx_count_distinct), within about 1%.';
+      answers = await questions('approx_count_distinct(user)');
     }
     const [s, t, pg, rf] = answers;
     const by = new Map(s.map((r) => [Date.parse(r.t as string), r]));
@@ -199,10 +204,9 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
       return { t: at, views: num(r?.views), visitors: num(r?.visitors) };
     }).filter((x) => x.t >= from - step);
     totals = { views: num(t[0]?.views), visitors: num(t[0]?.visitors), events: num(t[0]?.events) };
-    const vis = (r: Record<string, unknown>) => (notice ? null : num(r.visitors));
+    const vis = (r: Record<string, unknown>) => num(r.visitors);
     pages = pg.map((r) => ({ path: r.path as string, views: num(r.views), visitors: vis(r) }));
     refs = rf.map((r) => ({ ref: r.ref as string, views: num(r.views), visitors: vis(r) }));
-    if (notice) for (const x of series) x.visitors = null;
   } else {
     // Rollups: whole days from the first day of the range.
     const fromDay = dayOf(from);
@@ -232,12 +236,8 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
     pages = pg.map((r) => ({ path: r.path as string, views: num(r.views), visitors: null }));
     refs = rf.map((r) => ({ ref: r.ref as string, views: num(r.views), visitors: null }));
   }
-  const [[facets, firsts], r] = await Promise.all([side, ret]);
+  const [[facets, reached], r] = await Promise.all([side, ret]);
   timings.retention = r.ms;
-  const reached = walkFunnel(
-    firsts.map((x) => ({ user: x.user as string, name: x.name as string, first: Date.parse(x.first as string) })),
-    STEPS,
-  );
   return {
     range,
     source: raw ? 'raw' : 'rollups',
@@ -259,28 +259,18 @@ export async function dashboard(site: string, range: Range, filters: Filters, no
 }
 
 /**
- * Visitors reaching each step after the first, from each visitor's first
- * time at each: a visitor reaches step k when they took it no earlier than
- * the first time they took step k-1.
+ * Visitors reaching each step after the first, from `firsts`, a statement
+ * grouping each visitor's first time at the two steps as `a` and `b`: a
+ * visitor reaches the first when they took it, the second when they took it
+ * no earlier than the first time they took the first. Two counts, asked
+ * side by side.
  */
-export function walkFunnel(rows: { user: string; name: string; first: number }[], names: readonly string[]): number[] {
-  const by = new Map<string, Map<string, number>>();
-  for (const r of rows) {
-    let m = by.get(r.user);
-    if (!m) by.set(r.user, (m = new Map()));
-    m.set(r.name, r.first);
-  }
-  const reached = names.map(() => 0);
-  for (const m of by.values()) {
-    let last = -Infinity;
-    for (let i = 0; i < names.length; i++) {
-      const t = m.get(names[i]);
-      if (t === undefined || t < last) break;
-      reached[i]++;
-      last = t;
-    }
-  }
-  return reached;
+async function funnel(ask: (name: string, text: string, params: unknown[]) => Promise<Rows>, firsts: string, params: unknown[]): Promise<number[]> {
+  const [started, finished] = await Promise.all([
+    ask('funnel', `${firsts} having a != null count`, params),
+    ask('funnel, in order', `${firsts} having b >= a count`, params),
+  ]);
+  return [num(started[0]?.count), num(finished[0]?.count)];
 }
 
 /** Cohorts of the last eight weeks. */

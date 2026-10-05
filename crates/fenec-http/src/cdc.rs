@@ -8,6 +8,8 @@
 //!
 //! `since` is the last write a consumer has, `Fenec-Next` the last one an
 //! answer holds: sent as the next `since`, nothing is missed or had twice.
+//! `Fenec-Seq` is the last write the database holds: a reader whose
+//! `Fenec-Next` has reached it has every write there is.
 //! A block's writes come together, numbered one by one, so a cursor inside
 //! one resumes after the write it names. With `wait` an answer with nothing
 //! in it waits for a write that long first. A cursor the feed no longer
@@ -306,12 +308,12 @@ pub fn handle(
                     since = next;
                     continue;
                 }
-                return answer(body, next);
+                return answer(body, next, feed);
             }
             Tail::Nothing => {
                 let now = Instant::now();
                 if now >= until {
-                    return answer(String::new(), since);
+                    return answer(String::new(), since, feed);
                 }
                 feed.wait(since, epoch, until - now);
             }
@@ -339,9 +341,19 @@ pub fn handle(
     }
 }
 
-fn answer(body: String, next: u64) -> Response {
+/// An answer: its writes, `Fenec-Next` the last of them, and `Fenec-Seq` the
+/// last write the database holds -- on disk or not yet, and of the
+/// collections the stream leaves out too. An answer whose `Fenec-Next` is
+/// that holds every write there is, so a reader knows at once that it has
+/// caught up: from `Fenec-Next` alone an empty page could not tell a
+/// consumer that had from one whose writes were not on disk yet, and
+/// Kestrel's worker waited out 600 ms of empty pages before it believed it.
+fn answer(body: String, next: u64, feed: &Feed) -> Response {
     let mut r = Response::json(200, body).header("Fenec-Next", &next.to_string());
     r.content_type = "application/x-ndjson";
+    // Read after the writes: a write landing in between makes it larger,
+    // never smaller than the page.
+    r.seq = Some(feed.seq().max(next));
     r
 }
 

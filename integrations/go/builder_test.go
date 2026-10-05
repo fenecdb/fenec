@@ -540,6 +540,8 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 				text, params, err = q.ToInsert(append(docs(a[0]), insertOpts(optsOf(a, 1))...)...)
 			case "toUpdate":
 				text, params, err = q.ToUpdate(doc(a[0]), options(optsOf(a, 1))...)
+			case "toUpsert":
+				text, params, err = q.ToUpsert(docs(a[0]), doc(a[1]), options(optsOf(a, 2))...)
 			case "toDelete":
 				text, params, err = q.ToDelete(options(optsOf(a, 0))...)
 			case "rows":
@@ -559,6 +561,9 @@ func runChain(t *testing.T, db *fenecdb.Client, rec *recorder, steps []object) o
 				return sent(err)
 			case "update":
 				_, err = q.Update(ctx, doc(a[0]), options(optsOf(a, 1))...)
+				return sent(err)
+			case "upsert":
+				_, err = q.Upsert(ctx, docs(a[0]), doc(a[1]), options(optsOf(a, 2))...)
 				return sent(err)
 			case "delete":
 				_, err = q.Delete(ctx, options(optsOf(a, 0))...)

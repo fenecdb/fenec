@@ -1192,3 +1192,85 @@ fn a_scoped_poll_learns_nothing_of_writes_it_may_not_read() {
     assert!(!root.starts_with("\"c"), "{root}");
     assert_eq!(ask(ROOT, &root).0, 304);
 }
+
+const COUNTS: &str = "\
+events   insert              where user = $jwt.sub
+tallies  read,write          where owner = $jwt.sub
+";
+
+impl Node {
+    fn query_with(&self, token: &str, sql: &str, params: &str) -> (u16, String) {
+        let mut body = String::from("{\"query\":");
+        fenec_core::json::escape_into(&mut body, sql);
+        body.push_str(",\"params\":");
+        body.push_str(params);
+        body.push('}');
+        self.call(Some(token), "POST", "/query", &body)
+    }
+}
+
+/// A parameter's documents are each held to the token's rules, as written
+/// ones are: its pinned field filled in, an `id` refused, another's value
+/// refused. An upsert needs update as well as insert, and sets only a row
+/// the token may update -- found by a value any row may hold.
+#[test]
+fn a_scoped_token_puts_a_parameter_s_documents_and_upserts_its_own_rows() {
+    let n = start_with(
+        COUNTS,
+        &[
+            "create collection events (user text, name text)",
+            "create collection tallies (key text @unique, owner text, n int)",
+            "put tallies {key: \"bob-k\", owner: \"bob\", n: 1}",
+        ],
+    );
+    let alice = n.token(r#"{"sub":"alice"}"#);
+    let rows = |sql: &str| n.query(ROOT, sql).1;
+    // Insert alone, from a parameter: the user pinned in each.
+    let (status, body) = n.query_with(
+        &alice,
+        "put events $1",
+        r#"[[{"name": "view"}, {"name": "buy"}]]"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let all = rows("get events select user order id");
+    assert_eq!(count(&all, "\"alice\""), 2, "{all}");
+    for docs in [
+        r#"[[{"name": "x", "user": "bob"}]]"#,
+        r#"[[{"name": "x", "id": 1}]]"#,
+    ] {
+        assert_eq!(n.query_with(&alice, "put events $1", docs).0, 403, "{docs}");
+    }
+    // An upsert into a collection the token only inserts into.
+    let (status, _) = n.query_with(
+        &alice,
+        "put events $1 if absent else set {name: new.name}",
+        r#"[[{"name": "y"}]]"#,
+    );
+    assert_eq!(status, 403);
+    // Its own rows: made, then added to.
+    let up = "put tallies $1 if absent else set {n: n + new.n}";
+    for _ in 0..2 {
+        let (status, body) = n.query_with(&alice, up, r#"[[{"key": "a-k", "n": 2}]]"#);
+        assert_eq!(status, 200, "{body}");
+    }
+    let mine = rows("get tallies select key, owner, n where key = \"a-k\"");
+    assert!(
+        mine.contains("\"owner\":\"alice\"") && mine.contains("\"n\":4"),
+        "{mine}"
+    );
+    // Bob's row, reached through its unique key: refused, and unchanged --
+    // even setting the owner to alice's.
+    for set in ["{n: n + new.n}", "{owner: \"alice\"}"] {
+        let (status, body) = n.query_with(
+            &alice,
+            &format!("put tallies $1 if absent else set {set}"),
+            r#"[[{"key": "bob-k", "n": 5}]]"#,
+        );
+        assert_eq!(status, 403, "{set}: {body}");
+    }
+    let theirs = rows("get tallies select owner, n where key = \"bob-k\"");
+    assert!(
+        theirs.contains("\"owner\":\"bob\"") && theirs.contains("\"n\":1"),
+        "{theirs}"
+    );
+}

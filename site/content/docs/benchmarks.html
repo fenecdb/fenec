@@ -57,8 +57,8 @@ href="javascript.html#packages">Which package</a>).</p>
 <table>
 <thead><tr><th>What the page loads</th><th class="n">brotli</th><th class="n">gzip</th></tr></thead>
 <tbody>
-<tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>195 KB</b></td><td class="n">234 KB</td></tr>
-<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">43 KB</td><td class="n">50 KB</td></tr>
+<tr><td>The WebAssembly module, <code>fenec.wasm</code></td><td class="n"><b>200 KB</b></td><td class="n">240 KB</td></tr>
+<tr><td>The JavaScript client, <code>fenec.js</code> and its modules</td><td class="n">43 KB</td><td class="n">51 KB</td></tr>
 <tr><td>The client alone in an app's bundle, <code>@fenecdb/web/client</code></td><td class="n">8 KB</td><td class="n">—</td></tr>
 </tbody>
 </table>
@@ -1280,7 +1280,7 @@ container memory is a sensible <code>--max-memory</code>: it covers both this
 <h2 id="binary-size">Binary size</h2>
 
 <p>How large each build is. For the module and the client together, what
-the browser pays is <b>238 KB brotli</b>; for an app whose queries run on a
+the browser pays is <b>243 KB brotli</b>; for an app whose queries run on a
 server, the client alone in its bundle.</p>
 
 <div class="tbl">
@@ -1291,9 +1291,9 @@ server, the client alone in its bundle.</p>
 <tr><td><code>--profile cli</code>, default, as a release builds it</td><td class="n">1607 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--no-default-features</code>, no import or backup</td><td class="n">1525 KB</td><td class="n">—</td><td class="n">—</td></tr>
 <tr><td><code>--profile cli --no-default-features</code> (<code>make small</code>)</td><td class="n"><b>1331 KB</b></td><td class="n">—</td><td class="n">—</td></tr>
-<tr><td>wasm32, browser</td><td class="n"><b>586 KB</b></td><td class="n"><b>195 KB</b></td><td class="n">234 KB</td></tr>
-<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">433 KB</td><td class="n">148 KB</td><td class="n">176 KB</td></tr>
-<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">162 KB</td><td class="n">43 KB</td><td class="n">50 KB</td></tr>
+<tr><td>wasm32, browser</td><td class="n"><b>600 KB</b></td><td class="n"><b>200 KB</b></td><td class="n">240 KB</td></tr>
+<tr><td>wasm32, no index or schema check, <code>make wasm FEATURES=none SCHEMA=0</code></td><td class="n">448 KB</td><td class="n">153 KB</td><td class="n">181 KB</td></tr>
+<tr><td><code>web/fenec.js</code> and its modules, the client</td><td class="n">167 KB</td><td class="n">43 KB</td><td class="n">50 KB</td></tr>
 <tr><td><code>@fenecdb/web/client</code> in an app's bundle, esbuild, minified</td><td class="n">16 KB</td><td class="n">6 KB</td><td class="n">6 KB</td></tr>
 <tr><td>container image, scratch + musl, amd64</td><td class="n">2.99 MB</td><td class="n">—</td><td class="n">—</td></tr>
 </tbody>
@@ -1303,7 +1303,7 @@ server, the client alone in its bundle.</p>
 <details class="deep"><summary>Method and details</summary>
 <p>The compressed columns are filled in only where they mean something: the
 wasm module and the client are fetched over HTTP, so what the browser pays is
-<b>238 KB brotli</b> for both together. A binary you execute and an image
+<b>243 KB brotli</b> for both together. A binary you execute and an image
 whose layers are already compressed are not served that way, hence the
 dashes.</p>
 

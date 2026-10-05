@@ -169,6 +169,8 @@ fn run_fenecdb(path: &str, rows: &[Row], queries: &[Vec<f32>], dim: usize) -> Re
             docs,
             insert: false,
             if_absent: false,
+            docs_param: None,
+            else_set: None,
             require: None,
         })
         .unwrap();

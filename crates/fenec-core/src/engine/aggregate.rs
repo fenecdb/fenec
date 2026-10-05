@@ -13,6 +13,7 @@
 //! when the list is fields alone, and the rest one `eval` an item.
 
 use super::*;
+use crate::hll::Sketch;
 
 /// The fields and paths a list reads, bound to its collection: what a row
 /// is decoded into, and what is worked out of it.
@@ -277,7 +278,16 @@ enum Fold {
     /// two values and an id took the fixed aggregates of before 11%
     /// longer.
     Pick(Option<Box<(Value, DocId, Value)>>, bool),
+    /// `approx_count_distinct`, `hll_accumulate` and `hll_combine`: the
+    /// group's sketch, made at its first value, and which of the three.
+    Hll(Option<Box<Sketch>>, u8),
 }
+
+/// What a sketch answers: a count, or itself as bytes; `MERGE` folds
+/// sketches rather than values.
+const HLL_COUNT: u8 = 0;
+const HLL_STATE: u8 = 1;
+const HLL_MERGE: u8 = 2;
 
 impl Fold {
     /// The fold `name` starts at; `ty`, the type of the field it reads as
@@ -293,6 +303,9 @@ impl Fold {
         };
         Ok(match (name, t) {
             ("count", _) if distinct => Fold::Distinct(0),
+            ("approx_count_distinct", _) => Fold::Hll(None, HLL_COUNT),
+            ("hll_accumulate", _) => Fold::Hll(None, HLL_STATE),
+            ("hll_combine", _) => Fold::Hll(None, HLL_MERGE),
             ("count", _) => Fold::Count(0),
             ("sum", Some(DataType::Float)) => Fold::SumFloat(0.0, 0),
             ("sum" | "avg", Some(DataType::Int | DataType::Float) | None) => match name {
@@ -371,7 +384,7 @@ impl Fold {
                     *best = Some(v.clone());
                 }
             }
-            Fold::Distinct(_) | Fold::Pick(..) => return Ok(false),
+            Fold::Distinct(_) | Fold::Pick(..) | Fold::Hll(..) => return Ok(false),
         }
         Ok(true)
     }
@@ -389,13 +402,43 @@ impl Fold {
         by: Option<&Value>,
         id: DocId,
         at: (usize, usize),
-        seen: &mut crate::maps::Map<Vec<u8>, Vec<DocId>>,
-        key: &mut Vec<u8>,
+        seen: &mut crate::maps::Map<Vec<u8>, Bucket>,
+        scratch: &mut (Vec<u8>, usize),
     ) -> Result<()> {
         if v.is_null() {
             return Ok(());
         }
+        let (key, sketched) = (&mut scratch.0, &mut scratch.1);
         match self {
+            Fold::Hll(s, kind) => {
+                let s = s.get_or_insert_with(Default::default);
+                let before = s.bytes();
+                match (*kind, v) {
+                    (HLL_MERGE, Value::Bytes(b)) => s.merge(&Sketch::from_bytes(b)?),
+                    (HLL_MERGE, other) => {
+                        return Err(Error::Type(format!(
+                            "`hll_combine` takes sketches, the bytes `hll_accumulate` makes; \
+                             found {}",
+                            other.type_name()
+                        )))
+                    }
+                    _ => {
+                        key.clear();
+                        crate::codec::encode_value(key, v);
+                        s.add(crate::hll::hash(key));
+                    }
+                }
+                // A sketch is 16 KB once dense, a group's each: bounded
+                // as `count(distinct ...)`'s values are, refused past it.
+                *sketched += s.bytes().saturating_sub(before);
+                if *sketched > crate::hll::MAX_BYTES {
+                    return Err(Error::Query(format!(
+                        "the sketches of `approx_count_distinct` and `hll_*` hold more than {} MB, \
+                         16 KB a group: fewer groups, or a narrower filter",
+                        crate::hll::MAX_BYTES >> 20
+                    )));
+                }
+            }
             Fold::Distinct(n) => {
                 key.clear();
                 key.extend_from_slice(&(at.0 as u32).to_le_bytes());
@@ -408,7 +451,7 @@ impl Fold {
                              values: a count is not cut short, so narrow the filter"
                         )));
                     }
-                    seen.insert(key.clone(), Vec::new());
+                    seen.insert(key.clone(), Bucket::default());
                     *n += 1;
                 }
             }
@@ -444,6 +487,8 @@ impl Fold {
     fn value(self) -> Value {
         match self {
             Fold::Count(n) | Fold::Distinct(n) => Value::Int(n),
+            Fold::Hll(s, HLL_COUNT) => Value::Int(s.map_or(0, |s| s.estimate() as i64)),
+            Fold::Hll(s, _) => s.map_or(Value::Null, |s| Value::Bytes(s.to_bytes())),
             Fold::SumInt(_, 0) | Fold::SumFloat(_, 0) | Fold::Avg(_, 0) => Value::Null,
             Fold::SumInt(s, _) => Value::Int(s),
             Fold::SumFloat(s, _) => Value::Float(s),
@@ -631,6 +676,10 @@ impl Database {
         for col in &sel.aggregate {
             collect(&col.expr, &keys, &mut calls);
         }
+        // `having`'s own aggregates are folded after the list's, numbered on.
+        if let Some(h) = &sel.having {
+            collect(h, &keys, &mut calls);
+        }
         let mut read: Vec<&Expr> = keys.clone();
         read.extend(calls.iter().copied());
         let mut rd = Reader::new(c, &read, params)?;
@@ -688,14 +737,44 @@ impl Database {
                 Out::Expr(e)
             });
         }
+        // `having` as a column is worked out, over the keys, the folds and
+        // the parameters -- and the list's columns after them, by name.
+        let given = params.len();
+        let having = match &sel.having {
+            None => None,
+            Some(h) => {
+                let mut h = h.clone();
+                h.rewrite(&mut |x| {
+                    *x = if let Some(j) = keys.iter().position(|k| is_key(k, x)) {
+                        Expr::Param(j)
+                    } else if x.aggregate_name().is_some() {
+                        turn += 1;
+                        Expr::Param(nk + turn - 1)
+                    } else {
+                        match x {
+                            Expr::Field(n) => match sel.aggregate.iter().position(|c| c.name == *n)
+                            {
+                                Some(i) => Expr::Param(nk + ni + given + i),
+                                None => return Ok(false),
+                            },
+                            Expr::Param(i) if *i >= given => return Err(unbound(*i)),
+                            Expr::Param(i) => Expr::Param(nk + ni + *i),
+                            _ => return Ok(false),
+                        }
+                    };
+                    Ok(true)
+                })?;
+                Some(h)
+            }
+        };
 
         let (reg, clock) = (&self.registry, self.clock);
         // A group's number under its keys' encoding. The hash index's own
         // map type, holding one number: a map of another type was 1 KB of
         // the browser module. `count(distinct ...)`'s values go in one more
         // of them, each under its item's and its group's numbers.
-        let mut index: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
-        let mut seen: crate::maps::Map<Vec<u8>, Vec<DocId>> = Default::default();
+        let mut index: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
+        let mut seen: crate::maps::Map<Vec<u8>, Bucket> = Default::default();
         let mut key_values: Vec<Value> = Vec::new();
         let mut folds: Vec<Fold> = Vec::new();
         let mut groups = 0usize;
@@ -731,7 +810,7 @@ impl Database {
         rd.env.push(Value::Bool(true));
         let counted = rd.env.len() - 1;
         let args: Vec<usize> = items.iter().map(|it| it.arg.unwrap_or(counted)).collect();
-        let (mut key, mut last_key, mut dkey) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut key, mut last_key, mut dkey) = (Vec::new(), Vec::new(), (Vec::new(), 0));
         // The group the row before went to, and whether it was the one
         // before that's too: only then is a row's key asked of it first.
         let (mut last, mut streak) = (usize::MAX, false);
@@ -754,9 +833,9 @@ impl Database {
                         last
                     } else {
                         let g = match index.get(&key) {
-                            Some(n) => n[0] as usize,
+                            Some(n) => n.first().unwrap_or(0) as usize,
                             None => {
-                                index.entry(key.clone()).or_default().push(groups as DocId);
+                                index.insert(key.clone(), Bucket::one(groups as DocId));
                                 for t in &terms {
                                     key_values.push(rd.env[*t].clone());
                                 }
@@ -796,6 +875,7 @@ impl Database {
         let mut values: Vec<Value> = Vec::with_capacity(n * width);
         let mut env: Vec<Value> = Vec::with_capacity(nk + ni + params.len());
         let mut folds = folds.into_iter();
+        let mut passed: Vec<Value> = Vec::new();
         for g in 0..n {
             env.clear();
             env.extend_from_slice(&key_values[g * nk..g * nk + nk]);
@@ -815,6 +895,42 @@ impl Database {
                     }
                 });
             }
+            // A group `having` does not hold for is taken back out, its
+            // keys with it, before the order and the page see it: the
+            // groups answered are the groups that pass.
+            if let Some(h) = &having {
+                let at = values.len() - width;
+                env.extend_from_slice(&values[at..]);
+                let ctx = EvalCtx {
+                    params: &env,
+                    registry: reg,
+                    clock,
+                };
+                if truthy(&eval(h, &mut IdRow(0), &ctx)?) {
+                    passed.extend_from_slice(&key_values[g * nk..g * nk + nk]);
+                } else {
+                    values.truncate(at);
+                }
+            }
+        }
+        let n = match having {
+            Some(_) => {
+                key_values = passed;
+                values.len() / width.max(1)
+            }
+            None => n,
+        };
+        if sel.count {
+            return Ok(ResultSet {
+                columns: vec![COUNT_COLUMN.to_string()],
+                rows: vec![Row {
+                    id: 0,
+                    values: vec![Value::Int(n as i64)],
+                    score: None,
+                }],
+                nested: None,
+                facets: Vec::new(),
+            });
         }
         // Groups come out by their keys unless `order` says otherwise, naming
         // the list's columns; the keys break what the order leaves tied.

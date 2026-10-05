@@ -342,6 +342,8 @@ fn fenec_file(path: &Path, vecs: &[Vec<f32>]) {
             docs,
             insert: false,
             if_absent: false,
+            docs_param: None,
+            else_set: None,
             require: None,
         })
         .unwrap();

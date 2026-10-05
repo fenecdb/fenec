@@ -256,7 +256,8 @@ public sealed partial class FenecClient : IDisposable
                 c.TryGetProperty("id", out var id) ? id.GetInt64() : null,
                 c.TryGetProperty("doc", out var d) ? d.Clone() : null));
         }
-        return new Changes(writes, head.Next ?? since);
+        var next = head.Next ?? since;
+        return new Changes(writes, next, Math.Max(head.Seq, next));
     }
 
     /// <summary>Asks <c>GET /_health</c>, which takes no token and no lock; throws when the server does not

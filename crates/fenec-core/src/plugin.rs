@@ -327,6 +327,28 @@ pub mod builtins {
         reg!(r, "least", 1, None, "the smallest of its values", |a| {
             Ok(extreme(a, false))
         });
+        reg!(
+            r,
+            "hll_estimate",
+            1,
+            Some(1),
+            "the distinct count a sketch from hll_accumulate or hll_combine holds",
+            |a| {
+                Ok(match &a[0] {
+                    Value::Null => Value::Null,
+                    Value::Bytes(b) => {
+                        Value::Int(crate::hll::Sketch::from_bytes(b)?.estimate() as i64)
+                    }
+                    other => {
+                        return Err(Error::Type(format!(
+                            "`hll_estimate` takes a sketch, the bytes `hll_accumulate` makes; \
+                             found {}",
+                            other.type_name()
+                        )))
+                    }
+                })
+            }
+        );
         reg!(r, "norm", 1, Some(1), "vector length (L2 norm)", |a| {
             Ok(Value::Float(vector::norm(&vec_arg(&a[0])?) as f64))
         });

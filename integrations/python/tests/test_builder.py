@@ -91,7 +91,7 @@ class Recorder:
         return [{"count": 0}] if text.endswith(" count") else []
 
 
-ENDPOINTS = {"rows", "first", "count", "explain", "insert", "update", "delete"}
+ENDPOINTS = {"rows", "first", "count", "explain", "insert", "update", "upsert", "delete"}
 
 
 def run(steps):
@@ -113,6 +113,10 @@ def run(steps):
                 fn = q.to_update if op == "toUpdate" else q.update
                 out = fn(arg(args[0]), **kwargs(args[1] if len(args) > 1 else None))
                 text, params = out if op == "toUpdate" else rec.sent[-1]
+            elif op in ("toUpsert", "upsert"):
+                fn = q.to_upsert if op == "toUpsert" else q.upsert
+                out = fn(arg(args[0]), arg(args[1]), **kwargs(args[2] if len(args) > 2 else None))
+                text, params = out if op == "toUpsert" else rec.sent[-1]
             elif op in ("toDelete", "delete"):
                 fn = q.to_delete if op == "toDelete" else q.delete
                 out = fn(**kwargs(args[0] if args else None))

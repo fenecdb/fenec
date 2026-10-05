@@ -24,6 +24,8 @@ alter collection &lt;name&gt; alter field &lt;field&gt; @ttl(&lt;duration&gt;) |
 put &lt;name&gt; { field: value, ... }              -- or [ {...}, {...} ]
 insert [into] &lt;name&gt; { field: value, ... }     -- as put, refusing an id that is taken
 put &lt;name&gt; { field: value, ... } if absent     -- a held id or @unique value passed over, and not counted
+put &lt;name&gt; { ... } if absent else set { n: n + new.n }   -- an upsert: the row holding it set, new.f the document's
+put &lt;name&gt; $1 [if absent ...]                -- the documents a parameter holds: an object, or a list of them
 get &lt;name&gt; [select a, b] [where &lt;expr&gt;]
            [near &lt;field&gt; &lt;vector&gt; [ef N] [exact]]
            [match &lt;field&gt; &lt;text&gt;] [rerank &lt;field&gt; &lt;vector&gt; [candidates N]]
@@ -36,8 +38,9 @@ get &lt;name&gt; select a, highlight(f [, pre, post]), snippet(f, N [, ellipsis 
 get &lt;name&gt; where &lt;field&gt; in (get &lt;name&gt; select &lt;field&gt; ...)  -- a subquery's list
 get &lt;name&gt; [where &lt;expr&gt;] count               -- number of matching rows
 get &lt;name&gt; select [&lt;key&gt;,] count(*), count(distinct e), sum(e), avg(e), min(e), max(e),
-           first(e [by k]), last(e [by k]) [as &lt;name&gt;], ... [where &lt;expr&gt;]
-           [group &lt;key&gt;, ... [order &lt;column&gt; [desc]] [limit N] [offset N]]
+           first(e [by k]), last(e [by k]), approx_count_distinct(e),
+           hll_accumulate(e), hll_combine(sketch) [as &lt;name&gt;], ... [where &lt;expr&gt;]
+           [group &lt;key&gt;, ... [having &lt;expr&gt;] [order &lt;column&gt; [desc]] [limit N] [offset N] [count]]
 get &lt;name&gt; select a, &lt;expr&gt; as &lt;name&gt; ...     -- a column worked out over each row
 explain get &lt;name&gt; ...                         -- the path the query took
 select a, b from &lt;name&gt; [where ...]           -- the classic SQL order works too
@@ -56,7 +59,9 @@ collections | describe &lt;name&gt; | compact [&lt;name&gt;]
     <code>put</code> and it writes over the document with that id.</li>
   <li><b><code>insert</code> never writes over.</b> If an id is taken, the
     whole statement is refused; <code>put … if absent</code> passes over it
-    instead, and the answer counts what was written.</li>
+    instead, and the answer counts what was written; <code>put … if absent
+    else set {n: n + new.n}</code> sets the row holding it instead, an upsert
+    in one statement, <code>new.f</code> the document's field.</li>
   <li><b>A <code>set</code> can read the row it writes.</b>
     <code>set hits {n: n + 1} where key = "ip1"</code> is an increment, made
     under the write lock — see <a href="#writes">Writes that read the
@@ -104,7 +109,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Highlights</b></td><td><code>highlight(body)</code> and <code>snippet(body, 20)</code> in the select list mark the words a <code>match</code> found, as UTF-16 offsets or between tags you pass — see <a href="#highlights">Highlights and snippets</a></td></tr>
 <tr><td><b>Facets</b></td><td><code>facet brand, color top 10</code> counts each value over every row the query matches, beside the page — see <a href="#facets">Facets</a></td></tr>
 <tr><td><b>Counting</b></td><td><code>count</code> returns one row with one column; it does not combine with <code>select</code>, <code>near</code>, <code>match</code>, <code>order</code>, <code>limit</code> or <code>offset</code></td></tr>
-<tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>count(distinct …)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> <code>first(… by …)</code> <code>last(… by …)</code> over fields, paths or expressions, whole or per <code>group</code> of one key or several — see <a href="#aggregates">Aggregates</a> and the <a href="/docs/analytics">analytics and market-data recipes</a></td></tr>
+<tr><td><b>Aggregates</b></td><td><code>count(*)</code> <code>count(distinct …)</code> <code>sum</code> <code>avg</code> <code>min</code> <code>max</code> <code>first(… by …)</code> <code>last(… by …)</code> <code>approx_count_distinct</code> <code>hll_accumulate</code> <code>hll_combine</code> over fields, paths or expressions, whole or per <code>group</code> of one key or several, the groups kept by <code>having</code> — see <a href="#aggregates">Aggregates</a> and the <a href="/docs/analytics">analytics and market-data recipes</a></td></tr>
 <tr><td><b>Columns</b></td><td><code>select px * qty as notional</code>: an expression over the row, named with <code>as</code> — see <a href="#columns">Columns worked out</a></td></tr>
 <tr><td><b>Ceilings</b></td><td><code>near</code>, <code>match</code> and <code>fuse</code> at most 10 000 rows (<code>limit + offset</code>), <code>rerank</code> at most 10 000 candidates, <code>fuse</code> 10 000 a side; expression depth 512 levels; a <code>json</code> value 64 levels deep, a path 64 keys; <code>in (get …)</code> 100 000 values and 4 levels — see <a href="limits.html">Limits</a></td></tr>
 </tbody>
@@ -1367,6 +1372,18 @@ was written as — <code>sum(total)</code>, <code>count(distinct user)</code>,
     field's in its collation. A field whose type cannot be folded is refused
     before any row is read, an expression's value at the first row that
     cannot.</li>
+  <li><b><code>approx_count_distinct(e)</code></b> counts distinct values in a
+    HyperLogLog sketch of 2<sup>14</sup> registers, 16 KB a group at most,
+    with a standard error of 0.81% at any count and no million to stop at.
+    <code>hll_accumulate(e)</code> answers the sketch as bytes,
+    <code>hll_combine(s)</code> merges sketches and the function
+    <code>hll_estimate(s)</code> reads a count off one, so days kept as
+    sketches count a month. A query's sketches are held to 64 MB.</li>
+  <li><b><code>having &lt;expr&gt;</code></b> after <code>group</code> keeps
+    the groups it holds for, before <code>order</code> and
+    <code>limit</code>: it reads the keys, the list's columns by name and any
+    aggregate, <code>group user having count(*) &gt;= 2</code>. <code>count</code>
+    after it answers how many groups passed.</li>
   <li><b><code>first(e by k)</code> and <code>last(e by k)</code></b> are
     the value of <code>e</code> on the group's row least, or greatest, by
     <code>k</code> — a bar's open and close are <code>first(px by

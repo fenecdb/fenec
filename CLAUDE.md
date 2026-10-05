@@ -73,7 +73,7 @@ make ycsb                # YCSB A-F: fenecdb vs SQLite in process, fenec-server 
 make statements-bench    # what counting a statement by its shape costs
 make subquery-bench      # in (get ...) against its list written out and against lookup ... required
 make search-bench        # highlight(), snippet() and facet over 100 000 documents: a row's marks, a facet by buckets and by scan, by ranges, disjunctive
-make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows
+make ttl-bench           # @ttl: reads with and without an expiry, a sweep of 100 000 expired rows, one through a @hash of 5 values over 10M
 make analytics-bench     # bars, VWAP, distinct users, counts by bucket over 1M events and 1M ticks against the queries a client sent before; the fixed aggregates (`old`: those alone, for another commit)
 make counters-bench      # set {n: 7} against {n: n + 1}, 16 threads and 16 HTTP clients incrementing one key, the Redis recipes
 ```
@@ -1005,7 +1005,13 @@ an image) and has the engine read them out a write at a time
 them, each document by its collection's schema as the database knows it or
 as a create among the records made it. `since` is the last write a
 consumer has and `Fenec-Next` the last one an answer holds; a cursor inside
-a block's record goes on after the write it names. Only what an fsync
+a block's record goes on after the write it names. `Fenec-Seq` on every
+answer is the last write the database holds (`Feed::seq`, read after the
+page, so never short of it), on disk or not and of the collections the
+stream leaves out: a `Fenec-Next` that has reached it has every write
+there is, where an empty page alone could not tell a consumer that had
+caught up from one whose writes were not on disk yet, and Kestrel's
+worker waited out 600 ms of empty pages to be sure. Only what an fsync
 covered is handed over, a cursor the feed no longer reaches is answered 410
 with the first `since` it does -- never with writes missing -- one past the
 last write 409, and `wait` waits on the feed's `Condvar` for a write. A
@@ -1155,6 +1161,51 @@ which answer one row, nor in an inner `get`. Builders have it as a step,
 count, which the server landing the batch would never see. The module
 grew 1 017 bytes, 471 brotli.
 
+**`put ... if absent else set {..}` is an upsert; `put <c> $n` takes its
+documents from a parameter.** A rollup's row is "made at zero if missing,
+then added to", and was two statements a key -- `if absent`, then `set {n:
+n + $k}` -- or a read of which keys exist before the block. `else set`
+(`Statement::Put`'s `else_set`, only after `if absent`) sets the row
+holding a document's id or first `@unique` value as `set` sets a row
+(`Database::set_row`, which `update_rows` now calls a row), its values
+over that row and `new.f` the document's `f` (`Calc::New`, `Upserting` for
+an expression; `new.id` the id it names, or null; a name the collection
+does not have refused, never read as null), and counts it with the rows
+made; a row past its `@ttl` is made again, not set. The document's own
+hooks run as an insert's, the row's as a `set`'s. A key twice in one
+statement adds to the row the first made: the vectors written before a
+row is set are linked first (`index_written`), or the batch at the end
+put the first one's vector back over the set's. A scoped token needs
+update beside insert for it, and the row it sets must pass its update
+filter (`Check::before_overwrite` asks `admits` of the row written over,
+as PostgreSQL's `ON CONFLICT DO UPDATE` asks the row its `USING`): found
+by a value any row may hold, it was anyone's. `put <c> $n` (`docs_param`)
+writes the parameter's object, or each of its list of objects, a member a
+field (`documents_in`, `Database::document_of`): an object is read exact
+from the start, as a body's json field is, and a list of numbers in it
+becomes a vector's `f32`s through the field's type, so a beacon is one
+text whatever its size -- a page's statements were texts of up to 500
+documents, past the 1 KB the parse cache keeps. Scoped, `scoped()` writes
+the documents in first (`Statement::with_documents`), so each is held to
+the rules a written one is. A page of 1 000 events parsed and written
+takes 2.30 ms as `put ev $1` against 5.31 written out; a rollup page of
+1 000 keys, half new, 1.13 ms as one upsert against 1.47 for the read and
+the two writes, in process (`make analytics-bench`'s `writes`). The
+browser module grew 5.0 KB, 1.3 KB brotli -- 7.5 KB more while `new.` was
+cut off a name by a slice that can panic (`strip_prefix` now). Every
+builder writes it -- JS `upsert(docs, patch, { require })` and
+`toUpsert`, Python's `upsert`/`to_upsert`, Go's `Upsert`/`ToUpsert` (the
+documents a slice, so the patch comes after them), .NET's, Swift's,
+Kotlin's and Dart's -- the documents bound first and the patch as an
+update's (`inc`, `expr`), held to the golden file. A sync replica sends
+the text as written and the server works the set out again, as it does an
+expression; the replica, whose `@unique` is a plain hash, finds each
+document's row by its id or the shape's key, runs the upsert by id (the
+rest made under temporary ids, a key twice in the page the row the first
+made) and reads the rows it sets first to put back (`Sync::upsert`,
+`#applyUpsert`); a document naming neither is refused (`UPSERT_KEY`), in
+both, which the scenario file holds.
+
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from
 before refuses the file rather than open it as a plain hash and take the
@@ -1178,6 +1229,29 @@ it and asks nothing: the primary did. A scoped token is told the field
 alone (`access::told`, in `within`): the clash names the other row's id
 and echoes its value, which told alice that bob's profile existed, where,
 and what it held.
+
+**A `@hash` bucket holds its ids ascending, in runs** (`engine/bucket.rs`).
+A bucket was a `Vec` in the order its ids came, and a row left it by
+`retain`, a walk of the whole bucket: with a field of a few values -- a
+country, a device, an event's name -- every delete walked a fifth of the
+collection, and the `@ttl` sweep held the write lock 370 to 500 ms a
+thousand rows of an analytics site's 594 000 events, every dashboard read
+waiting behind it. Now an id is found by binary search, and past 512 ids a
+bucket is runs of at most 512 (`Bucket::Runs`, behind a box so a bucket
+is the size of a `Vec`), so a removal moves one run's tail -- the sweep
+takes the oldest rows, which one ascending list holds first and would
+move all of. A run left a quarter full joins the next where both fit; a
+bucket of one run is a list again, so a `@unique` value's costs what it
+did. Over 10 000 000 rows with a field of five values the sweep holds the
+lock 0.79 ms a thousand rows against 825 (`make ttl-bench`'s `hash`); a
+lone `del` among a million rows 1.09 us against 76 to 134, a lone `put`
+699 to 708 ns against 708 to 754 (`writes`). Readers take a bucket's ids
+in order through one iterator (`Bucket::iter`, `Ids`), so `lookup`'s
+children no longer sort them, and the maps a group's or a facet value's
+number is kept in are of the index's own type (`Bucket::one`): through
+`flatten` and a second map type the change was 1.3 KB brotli of the
+browser module. Its buckets stay one sorted list (the runs `cfg`'d out,
+a removal a `memmove` of the rest): 390 bytes, 0.4 KB brotli.
 
 **`in (get ...)` is answered before the query, as the list it is.**
 `Expr::InSelect` holds an inner `Select`; `Database::answered` (from
@@ -2156,6 +2230,37 @@ test build 6.6: the parser's calls and `case` (2.2 KB raw), binding and
 folding (8 KB), the checks and names (1.4 KB), `bucket`'s calendar.
 `site/content/docs/analytics.html` is the recipes, each FenecQL block run
 by `tests/analytics_docs.rs` through `redis_docs.rs`'s runner.
+
+**`approx_count_distinct` is HyperLogLog, and `having` keeps groups**
+(`hll.rs`, `Fold::Hll`). `count(distinct)` stops at a million values, and
+a day's count cannot be added to the next: Kestrel's month had 2.4 million
+visitors. A sketch is 2^14 registers, a standard error of 0.81% (the root
+mean square over thirty sketches of 200 000 values is 0.77%, and every
+count from 1 to 2 000 000 is within 3% in `hll::tests`), read by Ertl's
+improved raw estimator -- no bias tables, no switch to linear counting --
+and sparse, `(index, rank)` words, until those would take a quarter of the
+16 KB dense ones, so a group of a few values costs a few words. Its hash
+is its own (`hll::hash`, MurmurHash3's finalizer a word), over the value's
+encoding as `count(distinct)` keys it, the same on every target, so a
+sketch the browser made merges with a server's. `hll_accumulate(e)`
+answers the sketch as bytes (`Sketch::to_bytes`, sparse while shorter),
+`hll_combine(s)` merges them and `hll_estimate(s)` (a registry function)
+reads a count off one; a bytes field takes the list of numbers JSON writes
+bytes as, so a sketch read out goes back in through `put $1`. A query's
+sketches are held to 64 MB (`hll::MAX_BYTES`) and refused past it, as
+`count(distinct)` is. The fold goes through `row_held` with the distinct
+one, out of the loop the fixed aggregates fold in. Per hour over a million
+events it takes 121 ms against `count(distinct)`'s 128, the furthest of 169
+hours 1.3% off (`make analytics-bench`). `having <expr>` after `group`
+(`Select::having`) is worked out a group as a column is, its own
+aggregates folded after the list's and the list's columns read by name
+(`grouped` checks it with them as keys), and a group it does not hold for
+is taken back out, keys and all, before `order` and the page; `count`
+after `group` counts the groups that pass. The ordered funnel -- each
+visitor's first start and first finish, `having b >= a count` -- is one
+row where every visitor's row left the node: 968 ms of Kestrel's month at
+ten million events. The browser module grew 9.1 KB, 2.9 KB brotli, the
+estimator, the sketch's bytes and `having`'s rewrite most of it.
 
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending

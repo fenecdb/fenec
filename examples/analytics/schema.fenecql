@@ -11,12 +11,13 @@
 -- updates or deletes.
 --
 -- No @hash on `name`, `country`, `device` or `browser`, though the facets
--- and the funnel read them: a hash index's bucket is a list, and taking a
--- row out of one walks it, so with a few values each of a hundred
--- thousand rows the @ttl sweep held the write lock 370 to 500 ms for every
--- 1 000 rows it deleted (README, "Gaps"). Every dashboard question has a
--- range of `at`, which the ordered index answers, and its filter reads
--- those rows alone.
+-- and the funnel read them. Not for the sweep any more: a row leaves a
+-- bucket by a binary search now, under a millisecond a thousand rows where
+-- it walked the bucket for 370 to 500 (README, "Gaps"). But every dashboard
+-- question has a range of `at`, which the ordered index answers, and a
+-- bucket of a fifth of the rows costs more to gather and count from than
+-- the range's rows: with the four indexed, the hour's dashboard over a
+-- million events took 8.7 ms against 0.7, the day's 46 against 23.
 create collection events (
   eid     text @unique,
   name    text,
@@ -31,8 +32,9 @@ create collection events (
 )
 
 -- The rollups, kept by the rollup worker (src/rollup.ts) from /_changes.
--- Each row is keyed by what it counts, so the worker makes one with
--- `put ... if absent` and adds to it with `set {n: n + $k}`.
+-- Each row is keyed by what it counts, so the worker makes one or adds to
+-- it in one upsert, a page's keys at once: `put minutes $1 if absent else
+-- set {n: n + new.n}`.
 
 -- Events per minute and name: the 7-day chart. Kept a little longer than
 -- the raw events.

@@ -525,11 +525,15 @@ analytics-bench:
 
 ## `@ttl`: reads of a million rows half past their time against the same
 ## rows with no expiry and with the expiry written out by hand, then a
-## sweep of 100 000 expired rows out of a file, the write lock held a batch.
+## sweep of 100 000 expired rows out of a file, the write lock held a batch;
+## the sweep through a @hash field of five values over 10 000 000 rows, and a
+## lone put and del beside such a field.
 ttl-bench:
 	$(CARGO) build --release -p fenec-core --example expiry
 	./target/release/examples/expiry reads 1000000
 	./target/release/examples/expiry sweep 100000 1000
+	./target/release/examples/expiry hash 10000000 20000 1000
+	./target/release/examples/expiry writes 1000000
 
 ## What opening a file costs, read into memory or mapped: a 1 GB file of
 ## 2.3 million rows, written once, then opened each way in a process of its

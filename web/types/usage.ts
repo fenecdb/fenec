@@ -196,6 +196,11 @@ export async function local(bytes: Uint8Array, module: WebAssembly.Module) {
   expect<number>(await db.from('articles').where('id', 1).delete({ require: 1 }));
   db.from('articles').toInsert({ title: 'x' }, { ifAbsent: true, require: 1 });
   db.from('articles').toUpdate({ year: 1 }, { all: true, require: 3 });
+  expect<number>(await db.from('articles').upsert({ title: 'x', year: 1 }, { year: expr('year + new.year') }));
+  expect<number>(await db.from('articles').upsert([{ title: 'x' }], { year: inc(1) }, { require: 1 }));
+  db.from('articles').toUpsert({ title: 'x' }, { year: 1 });
+  // @ts-expect-error -- an upsert takes its patch
+  db.from('articles').toUpsert({ title: 'x' });
   // @ts-expect-error -- require is a count
   db.from('articles').where('id', 1).toDelete({ require: '1' });
   expect<number>((await db.from('articles').where('year', 2024).limit(1).require(1).rows()).length);

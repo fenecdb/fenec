@@ -3,7 +3,7 @@
 // node's admin and operator tokens.
 import { ADMIN_TOKEN, CONTROL, CONTROL_SCHEMA, FENEC_URL, MARKETS, MARKETS_SCHEMA, OPERATOR_TOKEN, SITE_SCHEMA, tenantUrl } from './config.ts';
 import { db } from './db.ts';
-import { insertText } from './ingest.ts';
+import { INSERT } from './ingest.ts';
 import type { SimEvent } from './sim.ts';
 import { hashPassword } from './users.ts';
 
@@ -61,11 +61,8 @@ export async function writeEvents(site: string, events: SimEvent[], per = 500): 
     const statements: [string, unknown[]][] = [];
     for (let j = i; j < Math.min(events.length, i + per * 8); j += per) {
       const part = events.slice(j, j + per);
-      const params: unknown[] = [];
-      for (const e of part) {
-        params.push(e.eid, e.name, e.user, e.path, e.ref, e.country, e.device, e.browser, new Date(e.at).toISOString(), e.props);
-      }
-      statements.push([insertText(part.length), params]);
+      const docs = part.map((e) => ({ eid: e.eid, name: e.name, user: e.user, path: e.path, ref: e.ref, country: e.country, device: e.device, browser: e.browser, at: new Date(e.at).toISOString(), props: e.props }));
+      statements.push([INSERT, [docs]]);
     }
     const r = await d.batch(statements);
     seq = r.seq ?? seq;

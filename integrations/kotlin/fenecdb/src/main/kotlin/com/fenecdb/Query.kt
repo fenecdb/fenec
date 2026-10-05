@@ -868,7 +868,7 @@ class Query private constructor(private val s: State) {
         extraClause()?.let { throw refuse("$verb cannot be used with `$it`") }
         if (s.lookups.isNotEmpty()) throw refuse("$verb cannot be used with `lookup`")
         if (s.facets.isNotEmpty()) throw refuse("$verb cannot be used with `facet`")
-        if (verb == "insert" && s.cond.isNotEmpty()) throw refuse("insert cannot be used with `where`")
+        if ((verb == "insert" || verb == "upsert") && s.cond.isNotEmpty()) throw refuse("$verb cannot be used with `where`")
     }
 
     // An update or delete of every row is too easy to do by accident and
@@ -926,6 +926,25 @@ class Query private constructor(private val s: State) {
     }
 
     /**
+     * The upsert, `put ... if absent else set {patch}`, not run: a document
+     * whose id or first `@unique` value a row holds sets that row by [patch]
+     * -- an update's, [Computed.inc] and [Computed.expr] with it, and in an
+     * expression `new.f` the document's own `f` -- and every other one is
+     * inserted. The documents' parameters come first, then the patch's.
+     */
+    @JvmOverloads
+    fun toUpsert(docs: Any?, patch: Any?, require: Long? = null): Statement {
+        assertPlain("upsert")
+        val list = docsOf(docs)
+        if (list.isEmpty()) throw refuse("cannot write an empty document list")
+        val bind = Binder()
+        val body = list.joinToString(", ") { Builder.renderDoc(it, bind, insert = true) }
+        val set = Builder.renderDoc(patch, bind)
+        val required = requireClause(require)
+        return Statement("put ${s.collection} ${if (list.size == 1) body else "[$body]"} if absent else set $set$required", bind.params)
+    }
+
+    /**
      * The `del` of the rows the filter names, not run; with no filter it is
      * refused unless [all]; with [require], refused unless it deleted exactly that many rows.
      */
@@ -977,6 +996,17 @@ class Query private constructor(private val s: State) {
     }
 
     /**
+     * Inserts each document, or, where a row holds its id or `@unique` value,
+     * sets that row by [patch] --
+     * `upsert(mapOf("key" to k, "n" to 1), mapOf("n" to Computed.expr("n + new.n")))`:
+     * the rows it set and made together. None is no statement.
+     */
+    suspend fun upsert(docs: Any?, patch: Any?, require: Long? = null): Long {
+        if (docsOf(docs).isEmpty()) return 0
+        return run(toUpsert(docs, patch, require)).affected
+    }
+
+    /**
      * Sets the patch's fields on the rows the filter names; with no filter it
      * is refused unless [all]; with [require], refused (UNMET) unless it set exactly that many.
      */
@@ -1002,6 +1032,11 @@ class Query private constructor(private val s: State) {
     @JvmOverloads
     fun insertBlocking(docs: Any?, ifAbsent: Boolean = false, require: Long? = null): Long =
         kotlinx.coroutines.runBlocking { insert(docs, ifAbsent, require) }
+
+    /** [upsert] on the calling thread, for Java. */
+    @JvmOverloads
+    fun upsertBlocking(docs: Any?, patch: Any?, require: Long? = null): Long =
+        kotlinx.coroutines.runBlocking { upsert(docs, patch, require) }
 
     /** [update] on the calling thread, for Java. */
     @JvmOverloads

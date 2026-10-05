@@ -259,6 +259,25 @@ impl Value {
             (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
             (DataType::Bytes, Value::Bytes(b)) => Ok(Value::Bytes(b)),
             (DataType::Bytes, Value::Text(s)) => Ok(Value::Bytes(s.into_bytes())),
+            // As JSON writes bytes, a list of numbers from 0 to 255 -- read
+            // as a vector's `f32`s or exactly, by where it stands -- so a
+            // field read out goes back in: a sketch kept by day.
+            (DataType::Bytes, Value::List(items)) => items
+                .iter()
+                .map(|v| match v {
+                    Value::Int(n @ 0..=255) => Ok(*n as u8),
+                    _ => Err(Error::Type("bytes are numbers from 0 to 255".into())),
+                })
+                .collect::<Result<Vec<u8>>>()
+                .map(Value::Bytes),
+            (DataType::Bytes, Value::Vector(v)) => v
+                .iter()
+                .map(|&f| match f {
+                    f if (0.0..=255.0).contains(&f) && f.fract() == 0.0 => Ok(f as u8),
+                    _ => Err(Error::Type("bytes are numbers from 0 to 255".into())),
+                })
+                .collect::<Result<Vec<u8>>>()
+                .map(Value::Bytes),
             (DataType::Timestamp, Value::Timestamp(ms)) => Ok(Value::Timestamp(ms)),
             // Epoch milliseconds directly; arithmetic results such as
             // `now() - 86400000` also pass through here.

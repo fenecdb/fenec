@@ -11,7 +11,7 @@
 //! nothing new) holds them to it. The median of `RUNS`, after one run to
 //! build the indexes.
 //!
-//!     cargo run --release -p fenec-core --example analytics [old]
+//!     cargo run --release -p fenec-core --example analytics [old | writes]
 
 use fenec_core::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +52,8 @@ fn put(db: &mut Database, collection: &str, docs: Vec<Vec<(String, Expr)>>) {
             docs: chunk.to_vec(),
             insert: false,
             if_absent: false,
+            docs_param: None,
+            else_set: None,
             require: None,
         })
         .expect("put");
@@ -86,6 +88,10 @@ fn line(what: &str, ms: f64, n: usize) {
 
 fn main() {
     let old = std::env::args().any(|a| a == "old");
+    if std::env::args().any(|a| a == "writes") {
+        writes();
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -242,6 +248,58 @@ fn main() {
     }
     assert_eq!(by_hand.len(), distinct.len());
 
+    let q = "get events select bucket(at, 1h) as hour, approx_count_distinct(user) group hour";
+    let (ms, approx) = median(|| rows(&db, q, &[]));
+    line(
+        "  the same, approx_count_distinct(user), a sketch an hour",
+        ms,
+        approx.len(),
+    );
+    let worst = distinct
+        .iter()
+        .zip(&approx)
+        .map(|(e, a)| match (&e[1], &a[1]) {
+            (Value::Int(e), Value::Int(a)) => (a - e).abs() as f64 / *e as f64,
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max);
+    println!(
+        "    the furthest of {} hours off: {:.2}%",
+        approx.len(),
+        worst * 100.0
+    );
+    let q = "get events select count(distinct user)";
+    let (ms, exact) = median(|| rows(&db, q, &[]));
+    line("distinct users of the week, count(distinct user)", ms, 1);
+    let q = "get events select approx_count_distinct(user)";
+    let (ms, est) = median(|| rows(&db, q, &[]));
+    line("  approx_count_distinct(user)", ms, 1);
+    println!("    {:?} against {:?}", exact[0][0], est[0][0]);
+
+    // The ordered funnel: users whose first buy is no earlier than their
+    // first signup.
+    let firsts = "get events select user, min(case when name = 'signup' then at end) as a, \
+                  min(case when name = 'buy' then at end) as b \
+                  where name in ['signup', 'buy'] group user";
+    let q = format!("{firsts} having b >= a count");
+    let (ms, funnel) = median(|| rows(&db, &q, &[]));
+    line("ordered funnel, group user having b >= a count", ms, 1);
+    let (ms, by_client) = median(|| {
+        rows(&db, firsts, &[])
+            .iter()
+            .filter(|r| match (&r[1], &r[2]) {
+                (Value::Timestamp(a), Value::Timestamp(b)) => b >= a,
+                _ => false,
+            })
+            .count()
+    });
+    line(
+        "  a row a user, compared by the client (the workaround)",
+        ms,
+        by_client,
+    );
+    assert_eq!(funnel[0][0], Value::Int(by_client as i64));
+
     let q = "get events select name, country, count(*) group name, country";
     let (ms, r) = median(|| rows(&db, q, &[]));
     line(
@@ -359,4 +417,146 @@ fn main() {
     );
     let got: Vec<Value> = latest.iter().map(|r| r[1].clone()).collect();
     assert_eq!(got, each);
+    drop(db);
+    writes();
+}
+
+/// A beacon's page of 1 000 events, written out and as a parameter, and a
+/// rollup's page of 1 000 counts -- half of them new -- as one upsert and as
+/// the read and the two writes it took before, each parsed from its text
+/// and JSON as a server parses them.
+fn writes() {
+    let mut db = Database::new();
+    exec(
+        &mut db,
+        "create collection ev (eid text @unique, name text, user text, path text, \
+         at timestamp, props json);
+         create collection m (key text @unique, n int)",
+    );
+    println!("\nwrites, a page of 1 000:");
+    // An event's fields, as FenecQL writes a document (`q`) and as JSON.
+    let event = |i: usize, q: bool| {
+        let (eid, user, path) = (
+            format!("e{i}"),
+            format!("u{}", i % 977),
+            format!("/p/{}", i % 13),
+        );
+        let at = 1_800_000_000_000i64 + i as i64;
+        let v = i % 9;
+        match q {
+            true => format!(
+                "{{eid: \"{eid}\", name: \"view\", user: \"{user}\", path: \"{path}\", at: {at}, \
+                 props: {{plan: \"pro\", v: {v}}}}}"
+            ),
+            false => format!(
+                "{{\"eid\": \"{eid}\", \"name\": \"view\", \"user\": \"{user}\", \"path\": \
+                 \"{path}\", \"at\": {at}, \"props\": {{\"plan\": \"pro\", \"v\": {v}}}}}"
+            ),
+        }
+    };
+    let mut next = 0usize;
+    let (ms, n) = median(|| {
+        let docs: Vec<String> = (0..1000).map(|j| event(next + j, true)).collect();
+        next += 1000;
+        let text = format!("put ev [{}] if absent", docs.join(", "));
+        let stmt = fenec_ql::parse_for(&db, &text).expect("parse");
+        affected(db.execute(&stmt[0]))
+    });
+    line("put ev [1 000 documents written out] if absent", ms, n);
+    let (ms, n) = median(|| {
+        let docs: Vec<String> = (0..1000).map(|j| event(next + j, false)).collect();
+        next += 1000;
+        let params =
+            fenec_core::json::parse_params(&format!("[[{}]]", docs.join(", "))).expect("params");
+        let stmt = fenec_ql::parse_one("put ev $1 if absent").expect("parse");
+        affected(db.execute_with(&stmt, &params))
+    });
+    line("put ev $1 if absent, the 1 000 as a parameter", ms, n);
+
+    // A rollup of 20 000 keys, a page adding to 500 of them and making 500.
+    let keys: Vec<String> = (0..20_000)
+        .map(|i| format!("{{key: \"k{i}\", n: 1}}"))
+        .collect();
+    exec(&mut db, &format!("put m [{}]", keys.join(", ")));
+    let mut round = 0usize;
+    let mut fresh = 20_000usize;
+    let mut page_of = || {
+        round += 1;
+        let mut out: Vec<(String, i64)> = (0..500)
+            .map(|j| {
+                (
+                    format!("k{}", (round * 997 + j * 31) % 20_000),
+                    1 + (j % 3) as i64,
+                )
+            })
+            .collect();
+        for _ in 0..500 {
+            out.push((format!("k{fresh}"), 2));
+            fresh += 1;
+        }
+        out
+    };
+    let upsert = fenec_ql::parse_one("put m $1 if absent else set {n: n + new.n}").unwrap();
+    let (ms, n) = median(|| {
+        let p = page_of();
+        let json: Vec<String> = p
+            .iter()
+            .map(|(k, n)| format!("{{\"key\": \"{k}\", \"n\": {n}}}"))
+            .collect();
+        let params = fenec_core::json::parse_params(&format!("[[{}]]", json.join(", "))).unwrap();
+        affected(db.execute_with(&upsert, &params))
+    });
+    line(
+        "put m $1 if absent else set {n: n + new.n}, one statement",
+        ms,
+        n,
+    );
+    let (ms, n) = median(|| {
+        let p = page_of();
+        // Which keys are held, then the new rows and the old ones over by id.
+        let list: Vec<String> = (1..=p.len()).map(|j| format!("${j}")).collect();
+        let read = fenec_ql::parse_one(&format!(
+            "get m select id, key, n where key in [{}] limit {}",
+            list.join(", "),
+            p.len()
+        ))
+        .unwrap();
+        let keys: Vec<Value> = p.iter().map(|(k, _)| Value::Text(k.clone())).collect();
+        let held: HashMap<String, (i64, i64)> = match db.query(&read, &keys) {
+            Ok(Response::Rows(rs)) => rs
+                .rows
+                .into_iter()
+                .map(|r| match &r.values[..] {
+                    [Value::Int(id), Value::Text(k), Value::Int(n)] => (k.clone(), (*id, *n)),
+                    other => panic!("{other:?}"),
+                })
+                .collect(),
+            other => panic!("{other:?}"),
+        };
+        let (mut made, mut over) = (Vec::new(), Vec::new());
+        for (k, n) in &p {
+            match held.get(k) {
+                Some((id, was)) => over.push(format!("{{id: {id}, key: \"{k}\", n: {}}}", was + n)),
+                None => made.push(format!("{{key: \"{k}\", n: {n}}}")),
+            }
+        }
+        let mut n = 0;
+        for docs in [made, over] {
+            let stmt = fenec_ql::parse_one(&format!("put m [{}]", docs.join(", "))).unwrap();
+            n += affected(db.execute(&stmt));
+        }
+        n
+    });
+    line(
+        "  a read, then the new rows and the old by id (before)",
+        ms,
+        n,
+    );
+}
+
+fn affected(r: Result<Response>) -> usize {
+    match r.expect("write") {
+        Response::Affected(n) => n,
+        other => panic!("{other:?}"),
+    }
 }

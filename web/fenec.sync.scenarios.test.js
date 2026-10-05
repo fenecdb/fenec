@@ -17,7 +17,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { Fenec, sync, inc } from './fenec.js';
+import { Fenec, sync, inc, expr } from './fenec.js';
 import { fakeIndexedDB, KeyRange } from './idb.fake.js';
 
 const wasm = await readFile(new URL('./fenec.wasm', import.meta.url)).catch(() => null);
@@ -218,20 +218,30 @@ class Run {
       w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
       return t.from(w.insert).insert(w.docs, opts);
     }
+    // `{"$inc": n}` is inc(n), `{"$expr": text}` expr(text), as the
+    // builders' golden file writes them.
+    const patch = (s) => {
+      sorted(s, 'set');
+      return Object.fromEntries(
+        Object.entries(s).map(([k, v]) => [
+          k,
+          v !== null && typeof v === 'object' && '$inc' in v ? inc(v.$inc)
+            : v !== null && typeof v === 'object' && '$expr' in v ? expr(v.$expr)
+            : v,
+        ]),
+      );
+    };
+    if (w.upsert) {
+      w.docs.forEach((d, i) => sorted(d, `docs[${i}]`));
+      return t.from(w.upsert).upsert(w.docs, patch(w.set), opts);
+    }
     const c = w.update ?? w.delete ?? w.get;
     let q = t.from(c);
     sorted(w.where ?? {}, 'where');
     for (const [k, v] of Object.entries(w.where ?? {})) q = q.where(k, v);
     // A read in a batch: the builders' `.require(n)`.
     if (w.get) return (w.require === undefined ? q : q.require(w.require)).rows();
-    if (w.update) {
-      sorted(w.set, 'set');
-      // `{"$inc": n}` is inc(n), as the builders' golden file writes it.
-      const set = Object.fromEntries(
-        Object.entries(w.set).map(([k, v]) => [k, v !== null && typeof v === 'object' && '$inc' in v ? inc(v.$inc) : v]),
-      );
-      return q.update(set, opts);
-    }
+    if (w.update) return q.update(patch(w.set), opts);
     return q.delete(opts);
   }
 

@@ -620,6 +620,8 @@ fn put_from_body(schema: &Schema, req: &Request) -> Result<Statement> {
         docs: out,
         insert: true,
         if_absent: false,
+        docs_param: None,
+        else_set: None,
         require: None,
     })
 }
