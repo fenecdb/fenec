@@ -5,6 +5,9 @@
 //! GET    /_admin/open                  the open tenants: name, memory, frozen
 //! GET    /_admin/tenants               names on disk
 //! PUT    /_admin/tenants/<t>           create an empty tenant       201 / 409
+//! POST   /_admin/tenants/<t>/schema    a description, applied as /_schema/apply
+//!                                      applies it: what a router's create with
+//!                                      a schema sends, once the tenant is placed
 //! DELETE /_admin/tenants/<t>           close and remove             204
 //! POST   /_admin/tenants/<t>/freeze    refuse writes, wait for the ones in flight
 //! POST   /_admin/tenants/<t>/thaw
@@ -49,6 +52,16 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
             .create(t)
             .map(|_| Response::json(201, format!("{{\"created\":\"{t}\"}}"))),
         (Method::Delete, ["tenants", t]) => tenants.delete(t).map(|_| Response::empty(204)),
+        // The node's admin token, which the router holds, rather than its
+        // data token, which reaches every tenant: an app creating tenants
+        // needs the router's token alone.
+        (Method::Post, ["tenants", t, "schema"]) => tenants.get(t).map(|tenant| {
+            let _held = tenant.enter();
+            match tenant.writable() {
+                Err(why) => Response::error(503, &why).header("Retry-After", "1"),
+                Ok(()) => crate::apply_schema(&tenant.db, cfg, &String::from_utf8_lossy(&req.body)),
+            }
+        }),
         (Method::Post, ["tenants", t, "freeze"]) => tenants
             .freeze(t)
             .map(|_| Response::json(200, "{\"frozen\":true}")),
@@ -93,6 +106,17 @@ pub fn handle(tenants: &Tenants, cfg: &Config, req: &Request) -> Response {
         _ => Err(Refused(404, "no such admin endpoint".into())),
     };
     result.unwrap_or_else(|Refused(status, msg)| Response::error(status, &msg))
+}
+
+/// A tenant's schema as `fenec_abi::read` reads it from FenecQL `create
+/// collection` text, checked: what a router sends a node once it has placed
+/// the tenant, refused before anything is placed when it does not read.
+pub fn schema_description(fenecql: &str) -> Result<String, String> {
+    let mut d = String::from(r#"{"format":1,"fenecql":"#);
+    fenec_core::json::escape_into(&mut d, fenecql);
+    d.push('}');
+    fenec_abi::read(&d).map_err(|e| format!("the schema does not read: {e}"))?;
+    Ok(d)
 }
 
 /// The `from` of a follow's body, when it has one.

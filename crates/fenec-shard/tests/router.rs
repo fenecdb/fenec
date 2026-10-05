@@ -22,12 +22,8 @@ impl Drop for Node {
     }
 }
 
-/// A node taking `access`'s JSON Web Tokens beside its data token `data`.
-fn node_with(tag: &str, access: Option<Arc<fenec_http::access::Access>>) -> Node {
-    node_cors(tag, access, None)
-}
-
-/// A node as [`node_with`] makes one, answering browsers from `cors`.
+/// A node taking `access`'s JSON Web Tokens beside its data token `data`,
+/// answering browsers from `cors`.
 fn node_cors(
     tag: &str,
     access: Option<Arc<fenec_http::access::Access>>,
@@ -577,4 +573,48 @@ fn a_preflight_reaches_its_tenant_through_the_router_with_no_token() {
     );
     // The query itself still needs its token.
     assert_eq!(c.query("acme", "get notes").0, 401);
+}
+
+/// A new tenant's schema took the nodes' data token, which reaches every
+/// tenant on every node, so the app that created tenants held it. The
+/// router applies it as it creates the tenant, with each node's admin token
+/// it holds already: the app needs the router's token alone.
+#[test]
+fn a_tenant_is_created_with_its_schema_by_the_routers_token_alone() {
+    let access = Arc::new(
+        fenec_http::access::Access::new(
+            b"thirty-two bytes and a few more, for HS256",
+            "notes  read,write  where owner = $jwt.sub\n",
+        )
+        .unwrap(),
+    );
+    let c = cluster_with("schema", 1, Some("rt"), Some(Arc::clone(&access)));
+    let schema = r#"{"schema":"create collection notes (owner text @hash, title text)"}"#;
+    let r = c.call("PUT", "/_shard/tenants/acme", schema, Some("rt"));
+    assert_eq!(r.0, 201, "{}", r.1);
+    assert!(body(&r).contains(r#""schema":{"#), "{}", r.1);
+    // A person's token writes and reads it at once.
+    let alice = access.mint(r#"{"sub":"alice","tenant":"acme"}"#).unwrap();
+    let w = c.call(
+        "POST",
+        "/t/acme/notes",
+        r#"{"title":"first"}"#,
+        Some(&alice),
+    );
+    assert_eq!(w.0, 201, "{}", w.1);
+    let got = c.call("GET", "/t/acme/notes?select=title", "", Some(&alice));
+    assert_eq!(body(&got), r#"[{"title":"first"}]"#);
+
+    // A schema that does not read leaves no tenant, on the node or in the
+    // directory; nor does the router's token missing.
+    let bad = r#"{"schema":"create collection notes (title textt)"}"#;
+    let r = c.call("PUT", "/_shard/tenants/globex", bad, Some("rt"));
+    assert_eq!(r.0, 400, "{}", r.1);
+    assert_eq!(
+        c.call("PUT", "/_shard/tenants/initech", schema, None).0,
+        401
+    );
+    assert_eq!(c.nodes[0].tenants.names(), ["acme"]);
+    let list = c.call("GET", "/_shard/tenants", "", Some("rt"));
+    assert!(!body(&list).contains("globex"), "{}", list.1);
 }

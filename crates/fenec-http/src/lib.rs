@@ -1046,31 +1046,7 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
             if cfg.read_only {
                 return Response::error(403, "the server is in read-only mode");
             }
-            metrics::wrote();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64);
-            let mut guard = held::write(db);
-            let r = fenec_abi::schema(&mut guard, body, true, Some(now));
-            let durability = match &r {
-                Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
-                    Ok(d) => d,
-                    Err(e) => return error_response(&e),
-                },
-                _ => None,
-            };
-            let seq = guard.change_seq();
-            drop(guard);
-            if let Err(e) = await_durable(db, durability) {
-                return error_response(&e);
-            }
-            return match r {
-                Ok(o) if o.plan.refusals.is_empty() => {
-                    with_seq(Response::json(200, o.json()), Some(seq))
-                }
-                Ok(o) => Response::json(409, o.json()),
-                Err(e) => error_response(&e),
-            };
+            return apply_schema(db, cfg, body);
         }
         _ => {
             return Response::error(
@@ -1081,6 +1057,36 @@ fn handle_schema(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &
     };
     match outcome {
         Ok(o) => Response::json(200, o.json()),
+        Err(e) => error_response(&e),
+    }
+}
+
+/// `POST /_schema/apply`, and a tenant's schema as a router creates it
+/// (`POST /_admin/tenants/<t>/schema`): the description's migrations, then
+/// what only adds, one block under the write lock, synced as a write is.
+/// 409 with the plan's refusals, which write nothing.
+pub(crate) fn apply_schema(db: &Arc<RwLock<Database>>, cfg: &Config, body: &str) -> Response {
+    metrics::wrote();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let mut guard = held::write(db);
+    let r = fenec_abi::schema(&mut guard, body, true, Some(now));
+    let durability = match &r {
+        Ok(o) if o.applied => match flush_for(cfg, &mut guard) {
+            Ok(d) => d,
+            Err(e) => return error_response(&e),
+        },
+        _ => None,
+    };
+    let seq = guard.change_seq();
+    drop(guard);
+    if let Err(e) = await_durable(db, durability) {
+        return error_response(&e);
+    }
+    match r {
+        Ok(o) if o.plan.refusals.is_empty() => with_seq(Response::json(200, o.json()), Some(seq)),
+        Ok(o) => Response::json(409, o.json()),
         Err(e) => error_response(&e),
     }
 }

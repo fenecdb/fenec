@@ -566,7 +566,9 @@ impl Router {
     /// PUT    /_shard/nodes/<n>   {addr, token} add or change a node
     /// DELETE /_shard/nodes/<n>                 refused while it holds tenants
     /// GET    /_shard/tenants                   [{name, node, state}]
-    /// PUT    /_shard/tenants/<t> [{node}]      place and create; least disk wins
+    /// PUT    /_shard/tenants/<t> [{node, schema}]  place and create; least disk
+    ///                                       wins; `schema`, FenecQL text, applied
+    ///                                       there before the tenant is answered
     /// DELETE /_shard/tenants/<t>               delete on the node, then forget
     /// POST   /_shard/tenants/<t>/move {to}     move to another node
     /// PUT    /_shard/nodes/<n> {addr, token, standby}  standby: the node
@@ -608,7 +610,9 @@ impl Router {
             (Method::Post, ["nodes", n, "failover"]) => self.failover(n),
             (Method::Post, ["replicas"]) => Ok(self.repair()),
             (Method::Get, ["tenants"]) => Ok(self.list_tenants()),
-            (Method::Put, ["tenants", t]) => self.create(t, field(&body, "node")),
+            (Method::Put, ["tenants", t]) => {
+                self.create(t, field(&body, "node"), field(&body, "schema"))
+            }
             (Method::Delete, ["tenants", t]) => self.delete(t),
             (Method::Post, ["tenants", t, "move"]) => match field(&body, "to") {
                 Some(to) => self.relocate(t, to),
@@ -1312,8 +1316,14 @@ impl Router {
             .ok_or_else(|| Fail(404, format!("no node `{name}`")))
     }
 
-    fn create(&self, tenant: &str, node: Option<&str>) -> Outcome<Response> {
+    fn create(&self, tenant: &str, node: Option<&str>, schema: Option<&str>) -> Outcome<Response> {
         fenec_http::tenants::check_name(tenant).map_err(|r| Fail(r.0, r.1))?;
+        // Read before anything is placed: a schema that does not read
+        // leaves no tenant behind.
+        let schema = schema
+            .map(fenec_http::admin::schema_description)
+            .transpose()
+            .map_err(|e| Fail(400, e))?;
         let _claim = self.claim(tenant)?;
         if self.read_dir().placement(tenant).is_some() {
             return Err(Fail(409, format!("tenant `{tenant}` already exists")));
@@ -1336,6 +1346,43 @@ impl Router {
             return Err(internal(e));
         }
         self.lease_now(&name);
+        // The schema, applied on the node with its admin token once the
+        // lease names the tenant, which a write needs: the app that creates
+        // tenants holds the router's token alone, where it held the nodes'
+        // data token, which reaches every tenant, to apply it itself. A
+        // schema refused takes the tenant back off the node and out of the
+        // directory: a tenant is there with its schema or not at all.
+        let applied = match &schema {
+            None => None,
+            Some(d) => {
+                let target = format!("/_admin/tenants/{tenant}/schema");
+                let got = self
+                    .pool
+                    .call(&n.addr, "POST", &target, &n.token, d.as_bytes());
+                match got {
+                    Ok((200, body)) => Some(String::from_utf8_lossy(&body).into_owned()),
+                    other => {
+                        let _ = self.pool.call(
+                            &n.addr,
+                            "DELETE",
+                            &format!("/_admin/tenants/{tenant}"),
+                            &n.token,
+                            b"",
+                        );
+                        if let Err(e) = self.write_dir().remove_tenant(tenant) {
+                            fenec_http::log!("tenant `{tenant}` stayed in the directory: {e}");
+                        }
+                        self.lease_now(&name);
+                        return Err(match other {
+                            Ok((status, body)) => {
+                                Fail(status, String::from_utf8_lossy(&body).into_owned())
+                            }
+                            Err(e) => Fail(502, format!("node `{name}` did not answer: {e}")),
+                        });
+                    }
+                }
+            }
+        };
         // The replica follows into a file of its own, so the tenant is
         // created on the standby as well.
         let warning = self.on_standby(&name, "PUT", &target);
@@ -1349,9 +1396,13 @@ impl Router {
         Ok(Response::json(
             201,
             format!(
-                "{{\"tenant\":{},\"node\":{}{}{}}}",
+                "{{\"tenant\":{},\"node\":{}{}{}{}}}",
                 quote(tenant),
                 quote(&name),
+                match &applied {
+                    None => String::new(),
+                    Some(o) => format!(",\"schema\":{o}"),
+                },
                 match &warning {
                     None => String::new(),
                     Some(w) => format!(",\"replica\":{}", quote(w)),
