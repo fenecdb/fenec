@@ -417,7 +417,9 @@ func TestChangesHandsOverEveryWrite(t *testing.T) {
 	// Nothing after the last write: the wait runs out with none.
 	start := time.Now()
 	empty := must(db.Changes(ctx, db.Seq(), 300*time.Millisecond)).of(t)
-	if len(empty.Changes) != 0 || empty.Next != db.Seq() || time.Since(start) < 250*time.Millisecond {
+	// Caught up: the last write the database holds is the last read.
+	if len(empty.Changes) != 0 || empty.Next != db.Seq() || empty.Seq != empty.Next ||
+		time.Since(start) < 250*time.Millisecond {
 		t.Fatalf("past the end: %+v after %v", empty, time.Since(start))
 	}
 	_, err := db.Changes(ctx, db.Seq()+1000, 0)

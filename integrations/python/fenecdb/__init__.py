@@ -123,10 +123,13 @@ class SchemaError(FenecError):
 
 class Changes(NamedTuple):
     """Writes `GET /_changes` handed over, a dict each, and `next`: the last
-    one's number, which is the `since` to read on from."""
+    one's number, which is the `since` to read on from. `seq` is the last
+    write the database holds (`Fenec-Seq`): a `next` that has reached it has
+    every write there is."""
 
     writes: list
     next: int
+    seq: int = 0
 
 
 class _Shared:
@@ -285,7 +288,8 @@ class Client:
         with self._open(req, timeout) as resp:
             raw = resp.read()
             nxt = int(resp.headers.get("Fenec-Next", since or 0))
-        return Changes([json.loads(line) for line in raw.splitlines() if line], nxt)
+            seq = max(int(resp.headers.get("Fenec-Seq", 0)), nxt)
+        return Changes([json.loads(line) for line in raw.splitlines() if line], nxt, seq)
 
     def consumer(self, name: str, since: int | None = None) -> dict:
         """Makes `name` a consumer at the last write on disk, or at `since`,

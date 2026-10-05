@@ -117,8 +117,9 @@ public sealed record Event(
 public sealed record Change(long Seq, long At, string Collection, string Op, long? Id, JsonElement? Doc);
 
 /// <summary>What <see cref="FenecClient.ChangesAsync"/> hands over, and <see cref="Next"/> the last write it
-/// holds: the since to read on from, so that nothing is missed or had twice.</summary>
-public sealed record Changes(IReadOnlyList<Change> Writes, long Next);
+/// holds: the since to read on from, so that nothing is missed or had twice. <see cref="Seq"/> is the last write the
+/// database holds (<c>Fenec-Seq</c>): a <see cref="Next"/> that has reached it has every write there is.</summary>
+public sealed record Changes(IReadOnlyList<Change> Writes, long Next, long Seq);
 
 /// <summary>A request the server refused: its HTTP status, the status's name and the server's message.</summary>
 public class FenecException : Exception

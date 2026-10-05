@@ -331,6 +331,8 @@ public sealed class ClientTests(Servers servers)
         var empty = await db.ChangesAsync(db.Seq, TimeSpan.FromMilliseconds(300));
         Assert.Empty(empty.Writes);
         Assert.Equal(db.Seq, empty.Next);
+        // Caught up: the last write the database holds is the last read.
+        Assert.Equal(empty.Next, empty.Seq);
         Assert.True(clock.ElapsedMilliseconds >= 250);
         var e = await Assert.ThrowsAsync<FenecException>(() => db.ChangesAsync(db.Seq + 1000));
         Assert.Equal(409, e.Status);

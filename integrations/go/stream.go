@@ -140,10 +140,13 @@ type Change struct {
 }
 
 // ChangeBatch is what Changes hands over, and Next the last write it holds:
-// the since to read on from, so that nothing is missed or had twice.
+// the since to read on from, so that nothing is missed or had twice. Seq is
+// the last write the database holds (Fenec-Seq): a Next that has reached it
+// has every write there is.
 type ChangeBatch struct {
 	Changes []Change
 	Next    uint64
+	Seq     uint64
 }
 
 // Changes reads the writes on the server's disk after since (GET
@@ -164,6 +167,7 @@ func (c *Client) Changes(ctx context.Context, since uint64, wait time.Duration) 
 	if h.hasNext {
 		b.Next = h.next
 	}
+	b.Seq = max(h.seq, b.Next)
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue

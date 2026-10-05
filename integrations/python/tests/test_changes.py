@@ -50,6 +50,8 @@ def test_a_cursor_moves_only_when_committed(client):
     try:
         first = client.changes(consumer=consumer, wait=5)
         assert first.writes
+        # Where the writes end: at or past the page's last.
+        assert first.seq >= first.next
         assert client.changes(consumer=consumer, wait=1).writes[0] == first.writes[0]
         client.consumer(consumer, first.next)
         listed = {c["name"]: c for c in client.consumers()}
