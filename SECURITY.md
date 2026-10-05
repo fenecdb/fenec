@@ -66,6 +66,13 @@ These are deliberate, and README explains each one:
 - **`--jwt-unbound-tenants` takes a token naming no tenant for every tenant**
   of a `--dir` node. By default such a token is refused there (403), and a
   token naming a tenant reaches that tenant alone.
+- **`append-only` binds scoped tokens, not the server's own.** A policy's
+  `<collection> append-only` refuses every update and delete a JSON Web
+  Token asks for there; the `--http-token` still changes and deletes rows,
+  as corrections, erasure and `@ttl` sweeps need. An app server that should
+  only append is given a scoped token. Against whoever holds the server's
+  token and the file, an append-only log is a sealed archive
+  (`fenec archive --key-file`) kept elsewhere.
 - **Two processes opening the same file corrupts it.** There is a single writer
   and no lock file; this is why everything that writes a file runs as a thread
   of one `fenec-server`.

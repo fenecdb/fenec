@@ -91,8 +91,11 @@ usage: fenec-server [options]
                             (403): a policy's `owner = $jwt.sub` matches the
                             same user in every tenant's file
       --policy <path>       the rules a token is held to, one per line:
-                            <collection|*> <read|write|read,write>
-                            [where <filter>] [for <role>]
+                            <collection|*> <grants> [where <filter>]
+                            [for <role>], the grants read, insert, update,
+                            delete and write (all three) joined by commas;
+                            `<collection> append-only` refuses every
+                            update and delete a token asks for there
       --mint-token <claims> print a token for this JSON object of claims,
                             signed with the secret or the first `oct` key,
                             and exit
