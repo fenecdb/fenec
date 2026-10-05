@@ -248,6 +248,58 @@ fn main() {
     }
     assert_eq!(by_hand.len(), distinct.len());
 
+    let q = "get events select bucket(at, 1h) as hour, approx_count_distinct(user) group hour";
+    let (ms, approx) = median(|| rows(&db, q, &[]));
+    line(
+        "  the same, approx_count_distinct(user), a sketch an hour",
+        ms,
+        approx.len(),
+    );
+    let worst = distinct
+        .iter()
+        .zip(&approx)
+        .map(|(e, a)| match (&e[1], &a[1]) {
+            (Value::Int(e), Value::Int(a)) => (a - e).abs() as f64 / *e as f64,
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max);
+    println!(
+        "    the furthest of {} hours off: {:.2}%",
+        approx.len(),
+        worst * 100.0
+    );
+    let q = "get events select count(distinct user)";
+    let (ms, exact) = median(|| rows(&db, q, &[]));
+    line("distinct users of the week, count(distinct user)", ms, 1);
+    let q = "get events select approx_count_distinct(user)";
+    let (ms, est) = median(|| rows(&db, q, &[]));
+    line("  approx_count_distinct(user)", ms, 1);
+    println!("    {:?} against {:?}", exact[0][0], est[0][0]);
+
+    // The ordered funnel: users whose first buy is no earlier than their
+    // first signup.
+    let firsts = "get events select user, min(case when name = 'signup' then at end) as a, \
+                  min(case when name = 'buy' then at end) as b \
+                  where name in ['signup', 'buy'] group user";
+    let q = format!("{firsts} having b >= a count");
+    let (ms, funnel) = median(|| rows(&db, &q, &[]));
+    line("ordered funnel, group user having b >= a count", ms, 1);
+    let (ms, by_client) = median(|| {
+        rows(&db, firsts, &[])
+            .iter()
+            .filter(|r| match (&r[1], &r[2]) {
+                (Value::Timestamp(a), Value::Timestamp(b)) => b >= a,
+                _ => false,
+            })
+            .count()
+    });
+    line(
+        "  a row a user, compared by the client (the workaround)",
+        ms,
+        by_client,
+    );
+    assert_eq!(funnel[0][0], Value::Int(by_client as i64));
+
     let q = "get events select name, country, count(*) group name, country";
     let (ms, r) = median(|| rows(&db, q, &[]));
     line(

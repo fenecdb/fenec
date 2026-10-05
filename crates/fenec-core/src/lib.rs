@@ -36,6 +36,7 @@ pub mod engine;
 pub mod error;
 pub mod highlight;
 pub mod history;
+pub mod hll;
 pub mod json;
 pub mod maps;
 pub mod num;

@@ -20,7 +20,8 @@
 //! alter  collection <name> alter field <field> @ttl(<duration>) | @sorted
 //! get    <name> select [<key>,] count(*) | count(distinct e) | sum(e) | avg(e) | min(e)
 //!            | max(e) | first(e [by k]) | last(e [by k]) [as <name>], ...
-//!            [where <expr>] [group <key>, ... [order <column> [desc]] [limit N] [offset N]]
+//!            [where <expr>] [group <key>, ... [having <expr>] [order <column> [desc]] [limit N] [offset N] [count]]
+//!            -- also approx_count_distinct(e), hll_accumulate(e), hll_combine(sketch)
 //! get    <name> select a, <expr> as <name>   -- a column worked out over each row
 //! bucket(at, 15m) | greatest(a, b) | least(a, b) | case when <c> then <v> ... [else <v>] end
 //! select a, b from <name> ...            -- the classic SQL order works too
@@ -935,6 +936,10 @@ impl Parser {
             }
             if self.eat_kw("group") {
                 sel.group = self.group_list()?;
+                continue;
+            }
+            if self.eat_kw("having") {
+                sel.having = Some(self.expr()?);
                 continue;
             }
             if self.eat_kw("where") {

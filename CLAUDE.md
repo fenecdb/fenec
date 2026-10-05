@@ -2219,6 +2219,37 @@ folding (8 KB), the checks and names (1.4 KB), `bucket`'s calendar.
 `site/content/docs/analytics.html` is the recipes, each FenecQL block run
 by `tests/analytics_docs.rs` through `redis_docs.rs`'s runner.
 
+**`approx_count_distinct` is HyperLogLog, and `having` keeps groups**
+(`hll.rs`, `Fold::Hll`). `count(distinct)` stops at a million values, and
+a day's count cannot be added to the next: Kestrel's month had 2.4 million
+visitors. A sketch is 2^14 registers, a standard error of 0.81% (the root
+mean square over thirty sketches of 200 000 values is 0.77%, and every
+count from 1 to 2 000 000 is within 3% in `hll::tests`), read by Ertl's
+improved raw estimator -- no bias tables, no switch to linear counting --
+and sparse, `(index, rank)` words, until those would take a quarter of the
+16 KB dense ones, so a group of a few values costs a few words. Its hash
+is its own (`hll::hash`, MurmurHash3's finalizer a word), over the value's
+encoding as `count(distinct)` keys it, the same on every target, so a
+sketch the browser made merges with a server's. `hll_accumulate(e)`
+answers the sketch as bytes (`Sketch::to_bytes`, sparse while shorter),
+`hll_combine(s)` merges them and `hll_estimate(s)` (a registry function)
+reads a count off one; a bytes field takes the list of numbers JSON writes
+bytes as, so a sketch read out goes back in through `put $1`. A query's
+sketches are held to 64 MB (`hll::MAX_BYTES`) and refused past it, as
+`count(distinct)` is. The fold goes through `row_held` with the distinct
+one, out of the loop the fixed aggregates fold in. Per hour over a million
+events it takes 121 ms against `count(distinct)`'s 128, the furthest of 169
+hours 1.3% off (`make analytics-bench`). `having <expr>` after `group`
+(`Select::having`) is worked out a group as a column is, its own
+aggregates folded after the list's and the list's columns read by name
+(`grouped` checks it with them as keys), and a group it does not hold for
+is taken back out, keys and all, before `order` and the page; `count`
+after `group` counts the groups that pass. The ordered funnel -- each
+visitor's first start and first finish, `having b >= a count` -- is one
+row where every visitor's row left the node: 968 ms of Kestrel's month at
+ten million events. The browser module grew 9.1 KB, 2.9 KB brotli, the
+estimator, the sketch's bytes and `having`'s rewrite most of it.
+
 **`sparse<N>` is pgvector's `sparsevec`, and `@inverted` answers exactly.** A
 sparse vector is held as its non-zero entries, `(index, weight)` ascending
 with indices from 0, and travels everywhere in pgvector's text form,

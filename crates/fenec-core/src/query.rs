@@ -1002,7 +1002,18 @@ pub const PLAN_COLUMN: &str = "plan";
 /// The aggregates a select list may call, as the parser lowercases them.
 /// `count(*)` is a call with no argument, `count(distinct f)` one whose
 /// argument is a call of `distinct`, and `first(px by at)` one of two.
-pub const AGGREGATES: [&str; 7] = ["count", "sum", "avg", "min", "max", "first", "last"];
+pub const AGGREGATES: [&str; 10] = [
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "first",
+    "last",
+    "approx_count_distinct",
+    "hll_accumulate",
+    "hll_combine",
+];
 
 /// The most distinct values a query's `count(distinct ...)` items hold
 /// between them, over all their groups. Each is its encoding in a hash
@@ -1321,6 +1332,11 @@ pub struct Select {
     /// values rather than one in all. A name the list gives an item with
     /// `as` stands for that item ([`Select::group_keys`]).
     pub group: Vec<Expr>,
+    /// `having <expr>` after `group`: the groups it holds for, the rest
+    /// left out before `order` and `limit`. It reads a group's keys, the
+    /// list's columns by their names and any aggregate, as a column does;
+    /// `count` after it counts the groups that pass.
+    pub having: Option<Expr>,
     /// A plain list's items that are more than a field: `px * qty as
     /// notional`. Each answers under its name, which `project` holds where
     /// it was written.
@@ -1460,6 +1476,11 @@ impl Select {
                 "`require` counts the rows a `get` answers, and `count` or an aggregate answers \
                  one: require the rows themselves, `limit 1 require 1` for one to exist"
                     .into(),
+            ));
+        }
+        if self.having.is_some() && self.group.is_empty() {
+            return Err(Error::Query(
+                "`having` keeps the groups it holds for: it follows `group`".into(),
             ));
         }
         if !self.aggregate.is_empty() || !self.group.is_empty() {
@@ -1636,7 +1657,11 @@ impl Select {
             }
         }
         let items = self.aggregate.iter().chain(&self.computed);
-        for e in items.map(|c| &c.expr).chain(&self.group) {
+        for e in items
+            .map(|c| &c.expr)
+            .chain(&self.group)
+            .chain(&self.having)
+        {
             marks = marks.max(e.max_param());
         }
         opt(&self.filter)
@@ -1824,6 +1849,15 @@ impl Select {
                 )));
             }
         }
+        // `having` reads what a column may, and the columns by their names.
+        if let Some(h) = &self.having {
+            let names: Vec<Expr> = (self.aggregate.iter())
+                .map(|c| Expr::Field(c.name.clone()))
+                .collect();
+            let mut known = keys.clone();
+            known.extend(&names);
+            grouped(h, &known, false)?;
+        }
         self.check_aggregate_company()
     }
 
@@ -1850,7 +1884,7 @@ impl Select {
             "match"
         } else if self.lookup.is_some() {
             "lookup"
-        } else if self.count {
+        } else if self.count && self.group.is_empty() {
             "count"
         } else if self.project.is_some() {
             "select"
@@ -1899,7 +1933,17 @@ fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
         ("count", _) => {
             "`count` counts rows or distinct values: `count(*)` or `count(distinct <field>)`"
         }
-        ("first" | "last", [_] | [_, _]) | ("sum" | "avg" | "min" | "max", [_]) => "",
+        ("first" | "last", [_] | [_, _])
+        | (
+            "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "approx_count_distinct"
+            | "hll_accumulate"
+            | "hll_combine",
+            [_],
+        ) => "",
         ("first" | "last", _) => {
             "`first` and `last` take a value and what orders the rows: \
                                   `first(<value> [by <key>])`"
@@ -1908,7 +1952,16 @@ fn grouped(e: &Expr, keys: &[&Expr], inside: bool) -> Result<()> {
             "`min` and `max` fold one value over the rows; `least(a, b)` and \
              `greatest(a, b)` take the smaller and larger of a row's"
         }
-        ("sum" | "avg" | "min" | "max", _) => "an aggregate takes one value: `sum(<value>)`",
+        (
+            "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "approx_count_distinct"
+            | "hll_accumulate"
+            | "hll_combine",
+            _,
+        ) => "an aggregate takes one value: `sum(<value>)`",
         _ => "",
     };
     if !shape.is_empty() {
