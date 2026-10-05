@@ -65,6 +65,14 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
                 Value::Object(o) if o.len() == 1 && o[0].0 == "$inc" => {
                     format!("{k}: coalesce({k}, 0) + {}", bind(&o[0].1, params))
                 }
+                // `{"$expr": text}` is expr(text), written as it is.
+                Value::Object(o) if o.len() == 1 && o[0].0 == "$expr" => {
+                    format!("{k}: {}", text(Some(&o[0].1)))
+                }
+                // `{"$expr": text}` is expr(text), written as it is.
+                Value::Object(o) if o.len() == 1 && o[0].0 == "$expr" => {
+                    format!("{k}: {}", text(Some(&o[0].1)))
+                }
                 v => format!("{k}: {}", bind(v, params)),
             })
             .collect();
@@ -98,6 +106,22 @@ fn render(w: &Value, params: &mut Vec<Value>) -> String {
             [one] => format!("put {c} {one}{required}"),
             _ => format!("put {c} [{}]{required}", body.join(", ")),
         };
+    }
+    if let Some(Value::Text(c)) = member(w, "upsert") {
+        let Some(Value::List(docs)) = member(w, "docs") else {
+            panic!("an upsert has docs")
+        };
+        let body: Vec<String> = docs.iter().map(|d| doc(d, params, &mut bind)).collect();
+        let body = match body.as_slice() {
+            [one] => one.clone(),
+            _ => format!("[{}]", body.join(", ")),
+        };
+        let set = doc(
+            member(w, "set").expect("an upsert has set"),
+            params,
+            &mut bind,
+        );
+        return format!("put {c} {body} if absent else set {set}{required}");
     }
     if let Some(Value::Text(c)) = member(w, "update") {
         let set = doc(

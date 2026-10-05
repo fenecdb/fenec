@@ -515,6 +515,12 @@ const GUARDED: &str = "a `get ... require` counts the replica's rows and is not 
 /// A write with `require` that reaches a row whose insert the server has not
 /// answered: refused before anything is applied, as the browser's sync
 /// refuses it (`integrations/sync-scenarios.json`).
+/// An upsert into a synced collection whose documents do not each name
+/// the shape's key or an id, refused before anything is applied, as the
+/// browser's sync refuses it (`integrations/sync-scenarios.json`).
+const UPSERT_KEY: &str = "an upsert into a synced collection names each document's key or id: \
+                          the replica finds the row by it, and the server's copy is matched by it";
+
 const REQUIRE_UNANSWERED: &str =
     "a write with `require` cannot reach a row whose insert the server has not answered yet";
 
@@ -1780,6 +1786,155 @@ impl Sync {
         Ok(last)
     }
 
+    /// An upsert, sent as written: the server sets the row holding each
+    /// document's `@unique` value, its set worked out over that row again.
+    /// Here, where a replica's `@unique` is a plain hash, a document finds
+    /// its row by its id or the shape's key -- each names one, or there is
+    /// nothing to match the server's copy by -- and the replica runs the
+    /// upsert by id: a row it holds set, the rest made under temporary ids,
+    /// the rows set read first to put back. As the browser's sync does.
+    #[allow(clippy::too_many_arguments)]
+    fn upsert(
+        &mut self,
+        db: &mut Database,
+        c: &str,
+        key: Option<&str>,
+        docs: Vec<Vec<(String, Value)>>,
+        set: &[(String, Expr)],
+        require: Option<u64>,
+        (text, params): (&str, &[Value]),
+        mut undo: String,
+    ) -> Result<Applied> {
+        let line = (text.to_string(), params.to_vec());
+        let given = |d: &[(String, Value)], f: &str| {
+            d.iter()
+                .find(|(k, v)| k == f && !v.is_null())
+                .map(|(_, v)| v.clone())
+        };
+        let named = |d: &[(String, Value)]| {
+            given(d, "id").is_some() || key.is_some_and(|k| given(d, k).is_some())
+        };
+        if !docs.iter().all(|d| named(d)) {
+            if key.is_some() {
+                return Err(Error::Query(UPSERT_KEY.into()));
+            }
+            undo.push_str(",\"del\":[],\"put\":\"[]\"}");
+            return Ok(Applied {
+                lines: vec![line],
+                undo,
+                response: Response::Affected(docs.len()),
+                temps: Vec::new(),
+            });
+        }
+        let one = |db: &mut Database, field: &str, v: Value| -> Result<Option<i64>> {
+            let sel = Select {
+                collection: c.to_string(),
+                filter: Some(Expr::Cmp(
+                    CmpOp::Eq,
+                    Box::new(Expr::Field(field.to_string())),
+                    Box::new(Expr::Lit(v)),
+                )),
+                limit: Some(1),
+                ..Default::default()
+            };
+            Ok(match db.execute_with(&Statement::Select(sel), &[])? {
+                Response::Rows(rs) => rs.rows.first().map(|r| r.id as i64),
+                _ => None,
+            })
+        };
+        let (mut held, mut fresh, mut temps) = (Vec::new(), Vec::new(), Vec::new());
+        // A key twice in the page: the second finds the row the first makes.
+        let mut found: Vec<(String, i64)> = Vec::new();
+        let mut local = Vec::with_capacity(docs.len());
+        for mut d in docs {
+            if let Some(v) = given(&d, "id") {
+                let id = int_of(&v);
+                match one(db, "id", v)? {
+                    Some(_) => held.push(id),
+                    None if !fresh.contains(&id) => fresh.push(id),
+                    None => {}
+                }
+                local.push(d);
+                continue;
+            }
+            let k = key.unwrap_or_default();
+            let kv = given(&d, k).unwrap_or(Value::Null);
+            let kt = key_text(&kv).unwrap_or_default();
+            let id = match found.iter().find(|(t, _)| *t == kt) {
+                Some((_, id)) => *id,
+                None => {
+                    let id = match one(db, k, kv)? {
+                        Some(id) => {
+                            held.push(id);
+                            id
+                        }
+                        None => {
+                            let t = self.next_temp;
+                            self.next_temp += 1;
+                            fresh.push(t);
+                            temps.push((kt.clone(), t));
+                            t
+                        }
+                    };
+                    found.push((kt, id));
+                    id
+                }
+            };
+            d.retain(|(f, _)| f != "id");
+            d.insert(0, ("id".into(), Value::Int(id)));
+            local.push(d);
+        }
+        held.sort_unstable();
+        held.dedup();
+        let before = match held.is_empty() {
+            true => ResultSet::default(),
+            false => match db.execute_with(
+                &Statement::Select(Select {
+                    collection: c.to_string(),
+                    filter: del_ids(c, &held.iter().map(|&x| x as DocId).collect::<Vec<_>>())
+                        .filter_of(),
+                    ..Default::default()
+                }),
+                &[],
+            )? {
+                Response::Rows(rs) => rs,
+                _ => ResultSet::default(),
+            },
+        };
+        let mut st = put_docs(c, local);
+        if let Statement::Put {
+            insert,
+            if_absent,
+            else_set,
+            require: req,
+            ..
+        } = &mut st
+        {
+            (*insert, *if_absent) = (true, true);
+            *else_set = Some(set.to_vec());
+            *req = require;
+        }
+        // The set's values may read the text's parameters.
+        let response = db.execute_with(&st, params)?;
+        undo.push_str(",\"del\":[");
+        undo.push_str(
+            &fresh
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        undo.push_str("],\"put\":");
+        json::escape_into(&mut undo, &rows_json(&before));
+        undo.push('}');
+        Ok(Applied {
+            lines: vec![line],
+            undo,
+            response,
+            temps,
+        })
+    }
+
     fn values(
         &self,
         db: &Database,
@@ -1821,8 +1976,10 @@ impl Sync {
         match s {
             Statement::Put {
                 docs,
+                docs_param,
                 insert,
                 if_absent,
+                else_set,
                 require,
                 ..
             } => {
@@ -1830,6 +1987,16 @@ impl Sync {
                     .iter()
                     .map(|d| self.values(db, d, params))
                     .collect::<Result<_>>()?;
+                // `put <c> $n`: the parameter's documents, as written ones.
+                if let Some(i) = docs_param {
+                    for m in fenec_core::query::documents_in(&c, *i, params)? {
+                        docs.push(m.to_vec());
+                    }
+                }
+                if let Some(set) = else_set {
+                    let (key, set) = (key.as_deref(), set.as_slice());
+                    return self.upsert(db, &c, key, docs, set, *require, (text, params), undo);
+                }
                 if let Some(k) = &key {
                     for d in &mut docs {
                         if !d.iter().any(|(f, v)| f == k && !v.is_null()) {

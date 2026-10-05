@@ -1192,7 +1192,19 @@ takes 2.30 ms as `put ev $1` against 5.31 written out; a rollup page of
 1 000 keys, half new, 1.13 ms as one upsert against 1.47 for the read and
 the two writes, in process (`make analytics-bench`'s `writes`). The
 browser module grew 5.0 KB, 1.3 KB brotli -- 7.5 KB more while `new.` was
-cut off a name by a slice that can panic (`strip_prefix` now).
+cut off a name by a slice that can panic (`strip_prefix` now). Every
+builder writes it -- JS `upsert(docs, patch, { require })` and
+`toUpsert`, Python's `upsert`/`to_upsert`, Go's `Upsert`/`ToUpsert` (the
+documents a slice, so the patch comes after them), .NET's, Swift's,
+Kotlin's and Dart's -- the documents bound first and the patch as an
+update's (`inc`, `expr`), held to the golden file. A sync replica sends
+the text as written and the server works the set out again, as it does an
+expression; the replica, whose `@unique` is a plain hash, finds each
+document's row by its id or the shape's key, runs the upsert by id (the
+rest made under temporary ids, a key twice in the page the row the first
+made) and reads the rows it sets first to put back (`Sync::upsert`,
+`#applyUpsert`); a document naming neither is refused (`UPSERT_KEY`), in
+both, which the scenario file holds.
 
 **`@unique` is a `@hash` that asks its bucket before a write.**
 `IndexKind::Hash { unique }`, written as index kind 8 so a binary from

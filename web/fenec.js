@@ -1180,6 +1180,8 @@ const TEMP_BASE = 2 ** 52;
 // a `lookup`'s.
 const GUARDED_READ = /^get .* require \d+( |$)/;
 const GUARDED = "a `get ... require` counts the replica's rows and is not sent: a write guarded by a read goes to the server itself";
+// The native core refuses the same in the same words.
+const UPSERT_KEY = "an upsert into a synced collection names each document's key or id: the replica finds the row by it, and the server's copy is matched by it";
 
 /** Operator spellings in a REST filter. */
 const REST_OPS = {
@@ -1331,6 +1333,9 @@ class SyncQuery extends Query {
   }
   update(patch, opts = {}) {
     return this.context.write('update', this, patch, opts);
+  }
+  upsert(docs, patch, opts = {}) {
+    return this.context.write('upsert', this, [docs, patch], opts);
   }
   delete(opts = {}) {
     return this.context.write('delete', this, null, opts);
@@ -1697,6 +1702,7 @@ export class FenecSync {
       this.#nextTemp = next;
       return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count: docs.length };
     }
+    if (verb === 'upsert') return this.#applyUpsert(c, base, key, arg, opts);
     const stmt = verb === 'update' ? base.toUpdate(arg, opts) : base.toDelete(opts);
     // `select()` drops the projection: writing back needs every field.
     const before = this.#local.run(...base.select().toFenecQL()).rows ?? [];
@@ -1716,6 +1722,58 @@ export class FenecSync {
       lines.push(verb === 'update' ? k.toUpdate(arg) : k.toDelete());
     }
     return { lines, undo: { c, del: [], put: JSON.stringify(before) }, temps: [], count };
+  }
+
+  /**
+   * An upsert, sent as written: the server sets the row holding each
+   * document's `@unique` value, its set worked out over that row again.
+   * Here, where a replica's `@unique` is a plain hash, a document finds its
+   * row by its id or the shape's key -- each names one, or there is nothing
+   * to match the server's copy by -- and the replica runs the upsert by id:
+   * a row it holds set, the rest made under temporary ids, the rows set
+   * read first to put back.
+   */
+  #applyUpsert(c, base, key, [docs, patch], opts) {
+    const list = Array.isArray(docs) ? docs : [docs];
+    if (list.length === 0) return null;
+    const required = { require: opts?.require };
+    const line = base.toUpsert(list, patch, required);
+    if (!list.every((d) => d.id != null || (key && d[key] != null))) {
+      if (key) throw new FenecError(UPSERT_KEY);
+      return { lines: [line], undo: { c, del: [], put: '[]' }, temps: [], count: list.length };
+    }
+    const one = (field, v) => this.#local.run(...from(c).select('id').where(field, v).limit(1).toFenecQL()).rows?.[0]?.id ?? null;
+    const held = new Set();
+    const fresh = [];
+    const temps = [];
+    // A key twice in the page: the second finds the row the first makes.
+    const found = new Map();
+    let next = this.#nextTemp;
+    const local = list.map((d) => {
+      if (d.id != null) {
+        if (one('id', d.id) != null) held.add(d.id);
+        else if (!fresh.includes(d.id)) fresh.push(d.id);
+        return d;
+      }
+      const k = keyText(d[key]);
+      let id = found.get(k);
+      if (id === undefined) {
+        id = one(key, d[key]);
+        if (id != null) held.add(id);
+        else {
+          id = next++;
+          fresh.push(id);
+          temps.push([k, id]);
+        }
+        found.set(k, id);
+      }
+      const { id: _, ...rest } = d;
+      return { id, ...rest };
+    });
+    const before = held.size ? this.#local.run(...from(c).where('id', 'in', [...held]).toFenecQL()).rows ?? [] : [];
+    const count = this.#local.run(...from(c).toUpsert(local, patch, required)).count ?? 0;
+    this.#nextTemp = next;
+    return { lines: [line], undo: { c, del: fresh, put: JSON.stringify(before) }, temps: temps.map(([k, t]) => [c, k, t]), count };
   }
 
   /**
