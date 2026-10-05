@@ -233,9 +233,9 @@ what the router forwards: counted at the node, every client had the
 router's address, four forged tokens in a row made a fifth client's expired
 one wait 1.6 s, and any good token from anyone cleared the attacker's
 count. The node knows a forwarded request by a mark the router derives
-from the node's <code>--admin-token</code> (<code>Fenec-Router</code>, beside
-the client's address in <code>Fenec-Client</code>); the router drops both
-headers from what a client sends, and a node believes them from no one
+from the node's <code>--admin-token</code>, sent beside the client's address
+(<code>Fenec-Router: &lt;address&gt; &lt;mark&gt;</code>); the router drops
+the header from what a client sends, and a node believes it from no one
 else. Its audit log names the client as <code>peer</code> and the router as
 <code>via</code>. Behind another reverse proxy every client has the
 proxy's address, so the proxy's own rate limit is the one that counts

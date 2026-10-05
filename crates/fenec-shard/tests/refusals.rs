@@ -106,7 +106,7 @@ fn a_refusal_through_the_router_waits_by_the_client_and_not_by_the_router() {
         .unwrap();
     // The attacker also names another address, and a mark of its own: the
     // router drops both, and the node believes neither.
-    let spoof = "Fenec-Client: 203.0.113.7\r\nFenec-Router: guessed\r\n";
+    let spoof = "Fenec-Router: 203.0.113.7 guessed\r\n";
 
     // The attacker's refusals wait 50, 100, 200 ms: doubled, by its address.
     let waits: Vec<Duration> = (0..3)

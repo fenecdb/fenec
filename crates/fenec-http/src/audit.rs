@@ -79,10 +79,12 @@ thread_local! {
     static ROUTED: std::cell::Cell<Option<IpAddr>> = const { std::cell::Cell::new(None) };
 }
 
-/// The header a router marks what it forwards with ([`router_mark`]), and
-/// the one it names the client's address in beside it.
+/// The header a router names a forwarded request's client in: its address
+/// and the router's mark ([`router_mark`]), `<address> <mark>`. One header
+/// and a mark of 16 bytes: the two headers it took at first, the mark's 32
+/// bytes whole, added 2.5 us to the 22 a request through the router took
+/// (`make shard-bench`, in turns), the node's header lines read one by one.
 pub const ROUTER_HEADER: &str = "fenec-router";
-pub const CLIENT_HEADER: &str = "fenec-client";
 
 /// What a router sends a node in [`ROUTER_HEADER`]: an HMAC of the node's
 /// admin token, which the router holds for each node already. Behind the
@@ -96,10 +98,11 @@ pub const CLIENT_HEADER: &str = "fenec-client";
 /// is believed from no one else. Derived rather than the token itself, so
 /// a mark seen on the wire reaches no `/_admin/`.
 pub fn router_mark(admin_token: &str) -> String {
-    crate::crypto::b64url_encode(&crate::crypto::hmac_sha256(
+    let mac = crate::crypto::hmac_sha256(
         admin_token.as_bytes(),
         b"fenec-router: a request forwarded, the client named beside it",
-    ))
+    );
+    crate::crypto::b64url_encode(&mac[..16])
 }
 
 /// Whether `req` came through the router `mark` names, and from whom: a
@@ -108,11 +111,11 @@ pub fn router_mark(admin_token: &str) -> String {
 /// is believed in nothing.
 pub fn request(req: &crate::http::Request, mark: Option<&str>) -> Option<IpAddr> {
     let client = mark.and_then(|mark| {
-        let given = req.header(ROUTER_HEADER)?;
+        let (client, given) = req.header(ROUTER_HEADER)?.trim().rsplit_once(' ')?;
         if !crate::constant_eq(given.as_bytes(), mark.as_bytes()) {
             return None;
         }
-        req.header(CLIENT_HEADER)?.trim().parse::<IpAddr>().ok()
+        client.parse::<IpAddr>().ok()
     });
     ROUTED.with(|r| r.set(client));
     client
