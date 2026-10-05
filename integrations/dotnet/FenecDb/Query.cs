@@ -462,7 +462,7 @@ public sealed class Query
         public string Kind => Words is null ? "highlight" : "snippet";
     }
 
-    sealed record FacetClause(string Field, long? Top);
+    sealed record FacetClause(string Field, long? Top, IReadOnlyList<string>? Ranges = null, bool Disjunctive = false);
 
     sealed record State(string Collection, FenecClient? Client)
     {
@@ -616,12 +616,50 @@ public sealed class Query
     /// come back beside the rows: <see cref="AnswerAsync"/>'s <see cref="Answer.Facets"/>.
     /// <code>db.From("products").Match("title", "phone").Where("price", "&lt;", 500).Facet("brand", top: 10).Facet("color").Limit(20)</code>
     /// </summary>
-    public Query Facet(string field, long? top = null)
+    /// <remarks><paramref name="ranges"/> counts the rows in each range of numbers from one bound up to the next,
+    /// every range in order, its value <c>[from, to]</c>; <paramref name="disjunctive"/> counts as if the filter's
+    /// own conditions on the field were not there, so the other values a shopper could add are counted too.</remarks>
+    public Query Facet(string field, long? top = null, IEnumerable<double>? ranges = null, bool disjunctive = false) =>
+        Faceted(field, top, ranges?.Cast<object?>().ToList(), disjunctive);
+
+    // Facet over values of any type, as the JS builder takes them: the golden file hands a bound that is not a
+    // number and a disjunctive that is not a boolean, and the refusal has to be the JS builder's word for word.
+    internal Query Faceted(string field, long? top, IReadOnlyList<object?>? ranges, object? disjunctive)
     {
-        var f = new FacetClause(Builder.FieldPath(field), top is { } t ? Builder.Whole(t, "facet top") : null);
-        if (f.Top == 0) throw Builder.Refuse($"facet {f.Field} top 0 answers nothing");
-        if (_s.Facets.Any(g => g.Field == f.Field)) throw Builder.Refuse($"facet {f.Field} is asked twice");
-        return new(_s with { Facets = [.. _s.Facets, f] });
+        var path = Builder.FieldPath(field);
+        var t = top is { } n ? Builder.Whole(n, "facet top") : (long?)null;
+        if (t == 0) throw Builder.Refuse($"facet {path} top 0 answers nothing");
+        if (_s.Facets.Any(g => g.Field == path)) throw Builder.Refuse($"facet {path} is asked twice");
+        List<string>? bounds = null;
+        if (ranges is not null)
+        {
+            // The engine's rule, refused before anything is sent.
+            var ok = t is null && ranges.Count >= 2;
+            bounds = [];
+            for (var i = 0; ok && i < ranges.Count; i++)
+            {
+                double? b = ranges[i] switch { double d => d, long l => l, int k => k, float f => f, _ => null };
+                ok = b is { } x && double.IsFinite(x)
+                    && (i == 0 || x > Convert.ToDouble(ranges[i - 1], CultureInfo.InvariantCulture));
+                if (ok) bounds.Add(JsNumber(b!.Value));
+            }
+            if (!ok)
+                throw Builder.Refuse($"facet {path} ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order");
+        }
+        if (disjunctive is not (null or bool)) throw Builder.Refuse($"facet {path} disjunctive is true or false");
+        return new(_s with { Facets = [.. _s.Facets, new FacetClause(path, t, bounds, disjunctive is true)] });
+    }
+
+    // A number as JavaScript's String writes it, the text every other builder makes: 2500, 50.5, -10, 1e-7.
+    static string JsNumber(double d)
+    {
+        if (d == 0) return "0";
+        if (Math.Floor(d) == d && Math.Abs(d) < 1e21) return d.ToString("F0", CultureInfo.InvariantCulture);
+        var s = d.ToString("R", CultureInfo.InvariantCulture);
+        var e = s.IndexOf('E');
+        if (e < 0) return s;
+        var exp = s[(e + 1)..];
+        return s[..e] + "e" + exp[0] + exp[1..].TrimStart('0');
     }
 
     /// <summary>
@@ -768,7 +806,10 @@ public sealed class Query
         if (s.Count) sql.Append(" count");
         if (s.Facets.Count > 0)
             sql.Append(" facet ").Append(string.Join(", ",
-                s.Facets.Select(f => f.Top is { } top ? $"{f.Field} top {top}" : f.Field)));
+                s.Facets.Select(f => f.Field
+                    + (f.Top is { } top ? $" top {top}" : "")
+                    + (f.Ranges is { } r ? $" ranges [{string.Join(", ", r)}]" : "")
+                    + (f.Disjunctive ? " disjunctive" : ""))));
         // Terminal, so every clause after it is the child's -- and last, so its parameters come after the
         // parent's.
         foreach (var l in s.Lookups)

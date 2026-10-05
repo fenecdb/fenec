@@ -33,8 +33,14 @@ parameters a chain builds, for logging or a test, `query.toFenecQL()`
 returns them and runs nothing. Every write is fsynced before
 it returns unless the file is opened with `Fenec.NO_SYNC`, which leaves the
 writes for `sync()`; `flush()` hands them to the system, which outlives the
-app being killed -- what `onStop` calls. The docs:
-`site/content/docs/mobile.html`.
+app being killed -- what `onStop` calls. An open leaves the hash, text,
+ordered and sparse indexes for their first read; `warm(listOf("docs"))`
+(`warmBlocking` from Java) builds them on `Dispatchers.IO` as the app
+starts, so the first search does not (a `@text` index of 100 000 products:
+141 ms), and answers how many it built. The builder's `facet(field, ranges
+= listOf(0, 25, 50))` counts by ranges of numbers, each value `[from, to]`,
+and `disjunctive = true` counts past the filter's own condition on the
+field. The docs: `site/content/docs/mobile.html`.
 
 Rows are `Row`s, a `Map<String, Any?>` in the answer's order with typed
 getters (`string`, `long`, `double`, `bool`, `floats`, `row`, `list`); JSON is
@@ -62,7 +68,13 @@ the writes not yet answered and the last error; call `replica.resume()` in
 `onStart`. The requests and the stream are `HttpURLConnection`'s, the JVM's
 and Android's own, so a server is reached through TLS (Android refuses
 cleartext by default). `Fenec.connect(url, token)` is a server with no
-file: every query a request, the same builder.
+file: every query a request, the same builder. Its `batch(listOf(...),
+idempotencyKey = id)` runs the builder's `toInsert`/`toUpdate`/`toDelete` as
+one block, all or none, answering `results`, `seq` and `replayed`; a
+`FenecException` that stops it carries `status` (412 and `UNMET` for a
+`require` not met) and `at`, the statement from 0. `runList(text, params,
+idempotencyKey = id)` and `withIdempotencyKey(key)`, a copy whose every
+write carries the key, make a write once however often it is sent.
 
 ## Building and testing
 

@@ -186,6 +186,27 @@ pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_schema(
     taken(env, code, out)
 }
 
+/// `fenec_warm`: the indexes an open left for their first read, built now;
+/// `only` the names by commas, empty for every one.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_warm(
+    env: Env,
+    _class: *mut c_void,
+    handle: i64,
+    only: JArray,
+) -> JArray {
+    let only = read(env, only);
+    let mut out = std::ptr::null_mut();
+    let code = crate::fenec_warm(
+        handle as u64,
+        only.as_ptr(),
+        only.len(),
+        &mut out,
+        std::ptr::null_mut(),
+    );
+    taken(env, code, out)
+}
+
 #[no_mangle]
 pub unsafe extern "system" fn Java_com_fenecdb_FenecNative_syncStart(
     env: Env,

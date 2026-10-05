@@ -104,6 +104,15 @@ int32_t fenec_flush(uint64_t handle, char **out, size_t *out_len);
 int32_t fenec_checkpoint(uint64_t handle, char **out, size_t *out_len);
 
 /*
+ * Builds the hash, text, ordered and sparse indexes an open leaves for their
+ * first read: those `only` names (collections and collection.fields by
+ * commas), or every one when it is empty. Each under the read lock on its
+ * own; call it off the main thread after the open. Writes {"built":N}.
+ */
+int32_t fenec_warm(uint64_t handle, const uint8_t *only, size_t only_len, char **out,
+                   size_t *out_len);
+
+/*
  * Sync with a server: a state machine with no I/O of its own. The binding
  * makes the requests and the event stream with its platform's HTTP client
  * (TLS, the system's trust store), feeds what happened, and performs the

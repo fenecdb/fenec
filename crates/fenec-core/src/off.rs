@@ -295,6 +295,9 @@ impl SortedIndex {
     pub fn range_ids(&self, r: &Range, cap: usize) -> Option<Vec<DocId>> {
         match *self {}
     }
+    pub fn range_counts(&self, keys: &[Key], member: Option<&[u64]>) -> Option<Vec<u64>> {
+        match *self {}
+    }
     pub fn walk(
         &self,
         desc: bool,

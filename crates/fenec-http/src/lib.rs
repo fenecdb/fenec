@@ -58,6 +58,7 @@ pub mod statements;
 pub mod sweep;
 pub mod tenants;
 pub mod timing;
+pub mod warm;
 
 use access::Who;
 use fenec_core::prelude::*;
@@ -1132,18 +1133,34 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
     }
     // The change a write left the database at, for `Fenec-Seq`.
     let mut seq = None;
+    // A read's `ETag` ([`etag`]).
+    let mut tagged = None;
     let result = if stmt.is_read_only() {
         // A plain `get` is written out as JSON from the stored documents,
         // under the read lock; anything else is answered as rows and
         // rendered after it.
         let guard = held::read(db);
+        // `If-None-Match` with the tag of an answer whose collections no
+        // write has touched since: 304, the query not run (`poll`).
+        // Asked for only: a read that sends none is answered as it was, no
+        // tag worked out (the first poll sends `"0"`).
+        let asked = req.header("if-none-match");
+        let tag = asked.and_then(|_| etag(&guard, &stmt, body));
+        if let (Some(t), Some(asked)) = (&tag, asked) {
+            if unchanged(&guard, &stmt, asked) {
+                return Response::json(304, Vec::new()).header("ETag", t);
+            }
+        }
         let mut body = String::from_utf8(http::spare_body()).unwrap_or_default();
         match guard.query_json(&stmt, &params, &mut body) {
             Ok(Some(n)) => {
                 drop(guard);
                 timing::lap(timing::Phase::Execute);
                 statements::rows(n as u64);
-                let resp = Response::json(200, body).versioned(fenec_core::VERSION);
+                let mut resp = Response::json(200, body).versioned(fenec_core::VERSION);
+                if let Some(t) = &tag {
+                    resp = resp.header("ETag", t);
+                }
                 timing::lap(timing::Phase::Render);
                 return resp;
             }
@@ -1153,6 +1170,7 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         let r = guard.query(&stmt, &params);
         drop(guard);
         timing::lap(timing::Phase::Execute);
+        tagged = tag;
         r
     } else if let Some(built) = Database::maintain(db, &stmt) {
         // `create index` and `compact` are built beside the database, with
@@ -1196,12 +1214,71 @@ fn handle_query(db: &Arc<RwLock<Database>>, cfg: &Config, req: &Request, who: &W
         Ok(resp) => {
             let resp = visible(who, resp);
             statements::rows(counted(&resp));
-            with_seq(api::render_any(&resp, fenec_core::VERSION), seq)
+            let out = with_seq(api::render_any(&resp, fenec_core::VERSION), seq);
+            match &tagged {
+                Some(t) => out.header("ETag", t),
+                None => out,
+            }
         }
         Err(e) => error_response(&e),
     };
     timing::lap(timing::Phase::Render);
     resp
+}
+
+/// A read's tag: the change the database stands at as it answers, `"42"`
+/// -- or none for a read whose answer can change with no write: one of a
+/// collection whose rows expire, one calling `now()`, one holding an inner
+/// `get` (its collections are not counted here). Sent back as
+/// `If-None-Match`, it is answered 304 while no write has touched what the
+/// read reads ([`unchanged`]): a page polling a query asks the server to
+/// run it only once something it reads was written, rather than each
+/// viewer holding a stream -- a thread each and a wake-up each at every
+/// write (`FenecHttp.live`'s `poll`).
+fn etag(db: &Database, stmt: &Statement, text: &str) -> Option<String> {
+    let Statement::Select(sel) = stmt else {
+        return None;
+    };
+    if sel.has_subquery() || text.contains("now(") {
+        return None;
+    }
+    let expiring = db.expiring();
+    let reads = std::iter::once(sel.collection.as_str()).chain(
+        sel.lookup
+            .iter()
+            .flat_map(|l| l.chain().map(|s| s.collection.as_str())),
+    );
+    for c in reads {
+        if expiring.iter().any(|e| e == c) {
+            return None;
+        }
+    }
+    Some(format!("\"{}\"", db.change_seq()))
+}
+
+/// Whether no write since the change `asked` names -- an `ETag` [`etag`]
+/// gave -- touched a collection `stmt` reads. A tag the change ring no
+/// longer reaches, or a collection dropped since, is a change.
+fn unchanged(db: &Database, stmt: &Statement, asked: &str) -> bool {
+    let Statement::Select(sel) = stmt else {
+        return false;
+    };
+    let Some(since) = asked.trim().trim_matches('"').parse::<u64>().ok() else {
+        return false;
+    };
+    if since > db.change_seq() {
+        return false;
+    }
+    let Some(written) = db.changed_collections_since(since) else {
+        return false;
+    };
+    let reads = std::iter::once(sel.collection.as_str()).chain(
+        sel.lookup
+            .iter()
+            .flat_map(|l| l.chain().map(|s| s.collection.as_str())),
+    );
+    let hit = reads.into_iter().any(|c| written.iter().any(|w| w == c));
+    !hit
 }
 
 /// A keyed statement of `/query`: under the write lock, in a block that
@@ -1491,11 +1568,11 @@ fn cors(resp: Response, cfg: &Config) -> Response {
             // did not hold kept its temporary row until the next seed.
             .header(
                 "Access-Control-Allow-Headers",
-                "content-type, authorization, idempotency-key, fenec-after, fenec-wait",
+                "content-type, authorization, idempotency-key, fenec-after, fenec-wait, if-none-match",
             )
             .header(
                 "Access-Control-Expose-Headers",
-                "fenec-seq, fenec-next, idempotent-replayed",
+                "fenec-seq, fenec-next, idempotent-replayed, etag",
             )
             .header("Access-Control-Max-Age", "600")
             .header("Vary", "Origin"),

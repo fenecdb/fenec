@@ -3,7 +3,7 @@
 // catalog's prices summed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADMIN, SHOP, Shopper, key, rows, someProduct, stock } from './helpers';
+import { ADMIN, FENEC, ROOT, SHOP, Shopper, key, rows, someProduct, stock } from './helpers';
 
 type Inv = { available: number; reserved: number; sold: number };
 const inv = async (sku: string) => (await rows<Inv>('get inventory select available, reserved, sold where sku = $1', [sku]))[0];
@@ -162,4 +162,23 @@ test('a lapsed reservation is released once, and then cannot be paid for', async
   const late = await s.post('/api/pay', { number: o.body.number, card: '4242 4242 4242 4242' });
   assert.equal(late.status, 404);
   assert.deepEqual(await inv(p.sku), { available: 4, reserved: 0, sold: 0 });
+});
+
+// The price guard checkout puts in its block: a line whose price is not the
+// catalog's is refused there, at its statement, and nothing before it lands.
+test('a checkout block with a price that changed is put back whole', async () => {
+  const p = await someProduct(5);
+  await stock(p.sku, 10);
+  const lines = [
+    { query: 'set inventory {available: available - $1, reserved: reserved + $1} where sku = $2 and available >= $1 require 1', params: [1, p.sku] },
+    { query: 'get products select sku where sku = $1 and price = $2 limit 1 require 1', params: [p.sku, p.price + 1] },
+  ];
+  const res = await fetch(`${FENEC}/batch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-ndjson', authorization: `Bearer ${ROOT}` },
+    body: lines.map((l) => JSON.stringify(l)).join('\n'),
+  });
+  assert.equal(res.status, 412);
+  assert.equal(((await res.json()) as { at: number }).at, 1);
+  assert.equal((await inv(p.sku)).available, 10);
 });

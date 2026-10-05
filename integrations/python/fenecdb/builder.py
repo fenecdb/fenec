@@ -162,6 +162,14 @@ def _collation(name: Any) -> str | None:
     return name
 
 
+def _js_number(n: float) -> str:
+    """A number as JavaScript's `String(n)` writes it, the text every other
+    builder makes: a whole float without its `.0`."""
+    if isinstance(n, float) and n.is_integer() and abs(n) < 1e21:
+        return str(int(n))
+    return repr(n)
+
+
 def _whole(n: Any, what: str) -> int:
     """`limit`, `offset`, `ef` and the rest are literals in FenecQL, never
     parameters: a whole number JavaScript holds exactly."""
@@ -558,7 +566,14 @@ class _Builder:
             raise _err(f"{kind(mark)}({mark['field']}) is asked twice")
         return self._with(marks=[*self._s["marks"], mark])
 
-    def facet(self: Q, field: str, *, top: int | None = None) -> Q:
+    def facet(
+        self: Q,
+        field: str,
+        *,
+        top: int | None = None,
+        ranges: Sequence[float] | None = None,
+        disjunctive: bool = False,
+    ) -> Q:
         """`facet field [top N]`: each value the field -- or a path into a
         json field -- holds over every row the query matches, not only the
         page, and how many rows hold it, most first; `top` keeps the
@@ -567,13 +582,43 @@ class _Builder:
 
             (db.collection("products").match("title", "phone").where("price", "<", 500)
                .facet("brand", top=10).facet("color").limit(20).rows().facets)
+
+        `ranges=[0, 25, 50]` counts the rows in each range of numbers from
+        one bound up to the next, every range in order, its value
+        `[from, to]`; `disjunctive=True` counts as if the filter's own
+        conditions on the field were not there, so the other values a
+        shopper could add are counted too.
         """
-        f = (_path(field), None if top is None else _whole(top, "facet top"))
-        if f[1] == 0:
-            raise _err(f"facet {f[0]} top 0 answers nothing")
-        if any(g[0] == f[0] for g in self._s["facets"]):
-            raise _err(f"facet {f[0]} is asked twice")
-        return self._with(facets=[*self._s["facets"], f])
+        name = _path(field)
+        top = None if top is None else _whole(top, "facet top")
+        if top == 0:
+            raise _err(f"facet {name} top 0 answers nothing")
+        if any(g[0] == name for g in self._s["facets"]):
+            raise _err(f"facet {name} is asked twice")
+        bounds = None
+        if ranges is not None:
+            # The engine's rule, refused before anything is sent.
+            ok = (
+                top is None
+                and isinstance(ranges, (list, tuple))
+                and len(ranges) >= 2
+                and all(
+                    isinstance(b, (int, float))
+                    and not isinstance(b, bool)
+                    and math.isfinite(b)
+                    and (i == 0 or b > ranges[i - 1])
+                    for i, b in enumerate(ranges)
+                )
+            )
+            if not ok:
+                raise _err(
+                    f"facet {name} ranges takes 2 to 10 001 numbers, each above the one before, "
+                    "and no top: every range answers, in order"
+                )
+            bounds = [_js_number(b) for b in ranges]
+        if not isinstance(disjunctive, bool):
+            raise _err(f"facet {name} disjunctive is true or false")
+        return self._with(facets=[*self._s["facets"], (name, top, bounds, disjunctive)])
 
     def group(self: Q, field: str) -> Q:
         """`group field`: a row per value, for a select list that aggregates."""
@@ -796,7 +841,13 @@ class _Builder:
         if count:
             sql += " count"
         if facets:
-            sql += " facet " + ", ".join(f if top is None else f"{f} top {top}" for f, top in facets)
+            sql += " facet " + ", ".join(
+                f
+                + ("" if top is None else f" top {top}")
+                + ("" if bounds is None else f" ranges [{', '.join(bounds)}]")
+                + (" disjunctive" if disjunctive else "")
+                for f, top, bounds, disjunctive in facets
+            )
         # Terminal, so every clause after it is the child's -- and last, so
         # its parameters come after the parent's.
         for level in lookups:

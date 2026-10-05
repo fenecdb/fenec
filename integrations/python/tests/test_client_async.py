@@ -52,6 +52,32 @@ def test_a_refusal_says_why():
     run(go())
 
 
+def test_an_idempotency_key_and_where_a_batch_stopped():
+    async def go():
+        async with AsyncClient(URL, TOKEN) as db:
+            name = fresh("aidem")
+            await db.query(f"create collection {name} (t text)")
+            try:
+                put = f"put {name} {{t: $1}}"
+                keyed = db.with_idempotency_key(f"{name}-1")
+                assert (await keyed.batch([(put, ["a"]), (put, ["b"])]))["ok"] == 2
+                assert not db.replayed and db.seq
+                assert (await keyed.batch([(put, ["a"]), (put, ["b"])]))["ok"] == 2
+                assert db.replayed
+                await db.query(put, ["c"], idempotency_key=f"{name}-2")
+                await db.query(put, ["c"], idempotency_key=f"{name}-2")
+                assert await db.query(f"get {name} count") == [{"count": 3}]
+                unmet = f"del {name} where t = $1 require 1"
+                with pytest.raises(FenecError) as e:
+                    await db.batch([(put, ["d"]), (unmet, ["none"])])
+                assert (e.value.status, e.value.at, e.value.completed) == (412, 1, 0)
+                assert await db.query(f"get {name} count") == [{"count": 3}]
+            finally:
+                await db.query(f"drop collection if exists {name}")
+
+    run(go())
+
+
 def test_calls_at_once_over_one_client_and_a_closed_connection():
     async def go():
         async with AsyncClient(URL, TOKEN) as db:
@@ -62,7 +88,7 @@ def test_calls_at_once_over_one_client_and_a_closed_connection():
                 assert await db.query(f"get {name} count") == [{"count": 50}]
                 # The server's side of the kept connection gone: the next call
                 # opens another.
-                _, writer = db._conn
+                _, writer = db._s.conn
                 writer.close()
                 assert await db.query(f"get {name} count") == [{"count": 50}]
             finally:

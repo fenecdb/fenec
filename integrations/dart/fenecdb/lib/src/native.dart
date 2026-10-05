@@ -35,6 +35,8 @@ typedef _SyncFeedC = Int32 Function(
 typedef _SyncFeedD = int Function(int, int, int, int, int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _SchemaC = Int32 Function(Uint64, Pointer<Uint8>, Size, Uint32, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _SchemaD = int Function(int, Pointer<Uint8>, int, int, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _WarmC = Int32 Function(Uint64, Pointer<Uint8>, Size, Pointer<Pointer<Char>>, Pointer<Size>);
+typedef _WarmD = int Function(int, Pointer<Uint8>, int, Pointer<Pointer<Char>>, Pointer<Size>);
 typedef _FreeC = Void Function(Pointer<Char>);
 typedef _FreeD = void Function(Pointer<Char>);
 typedef _VersionC = Pointer<Char> Function();
@@ -71,6 +73,7 @@ class Native {
   final _SyncStartD _syncStart;
   final _SyncFeedD _syncFeed;
   final _SchemaD _schema;
+  final _WarmD _warm;
   final _FreeD _free;
   final Pointer<Char> Function() _version;
 
@@ -87,6 +90,7 @@ class Native {
         _syncStart = lib.lookupFunction<_SyncStartC, _SyncStartD>('fenec_sync_start'),
         _syncFeed = lib.lookupFunction<_SyncFeedC, _SyncFeedD>('fenec_sync_feed'),
         _schema = lib.lookupFunction<_SchemaC, _SchemaD>('fenec_schema'),
+        _warm = lib.lookupFunction<_WarmC, _WarmD>('fenec_warm'),
         _free = lib.lookupFunction<_FreeC, _FreeD>('fenec_free_string'),
         _version = lib.lookupFunction<_VersionC, Pointer<Char> Function()>('fenec_version');
 
@@ -161,6 +165,18 @@ class Native {
     final p = _bytes(b);
     try {
       return _call((out, len) => _syncStart(handle, p, b.length, out, len));
+    } finally {
+      malloc.free(p);
+    }
+  }
+
+  /// The indexes an open left for their first read, built now
+  /// (`fenec_warm`): [only] the names by commas, empty for every one.
+  (int, String) warm(int handle, String only) {
+    final b = utf8.encode(only);
+    final p = _bytes(b);
+    try {
+      return _call((out, len) => _warm(handle, p, b.length, out, len));
     } finally {
       malloc.free(p);
     }
@@ -278,6 +294,7 @@ class Worker {
           'changes' => native.changes(r[2] as int, r[3] as int),
           'syncStart' => native.syncStart(r[2] as int, r[3] as String),
           'schema' => native.schema(r[2] as int, r[3] as String, r[4] as int),
+          'warm' => native.warm(r[2] as int, r[3] as String),
           'syncFeed' =>
             native.syncFeed(r[2] as int, r[3] as int, r[4] as int, r[5] as int, r[6] as int, r[7] as Uint8List?),
           'version' => (0, native.version),

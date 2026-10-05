@@ -926,6 +926,37 @@ pub struct Facet {
     /// How many values, the commonest; None: every one, up to
     /// [`MAX_FACET_VALUES`].
     pub top: Option<usize>,
+    /// `ranges [0, 2500, 5000]`: rows counted by the range their number
+    /// falls in -- from each bound, included, to the next, excluded --
+    /// rather than by value, every range answered in order, an empty one
+    /// with 0. A value outside them all, a null and a `NaN` count in none.
+    pub ranges: Option<Vec<Value>>,
+    /// `disjunctive`: counted over the rows the query selects with the
+    /// filter's own conditions on this field left out -- the `and` chain's
+    /// terms that read it alone -- so a sidebar with a brand chosen still
+    /// counts every brand the other conditions leave.
+    pub disjunctive: bool,
+    /// A disjunctive facet's filter: the query's without its own
+    /// conditions, split off where the filter is written -- the parser,
+    /// a REST `facet=` -- and before a token's rules or `@ttl`'s expiry
+    /// are ANDed in, which [`Select::each_filter_mut`] then ANDs into this
+    /// one too: split after them, `facet owner disjunctive` would have
+    /// dropped `owner = $jwt.sub` and counted every user's rows. `None`
+    /// until split ([`Select::split_facets`]).
+    pub rest: Option<Option<Expr>>,
+}
+
+impl Facet {
+    /// `facet <field>`: every value, counted over the rows selected.
+    pub fn new(field: impl Into<String>) -> Facet {
+        Facet {
+            field: field.into(),
+            top: None,
+            ranges: None,
+            disjunctive: false,
+            rest: None,
+        }
+    }
 }
 
 /// The most values one facet answers with. Past it a facet without `top` is
@@ -1228,6 +1259,26 @@ impl Select {
                 }
                 _ => {}
             }
+            if let Some(bounds) = &f.ranges {
+                // One message for every way to get them wrong: each was a
+                // string of the browser module's.
+                if f.top.is_some()
+                    || bounds.len() < 2
+                    || bounds.len() > MAX_FACET_VALUES
+                    || bounds
+                        .iter()
+                        .any(|b| !matches!(b, Value::Int(_) | Value::Float(_)))
+                    || bounds
+                        .windows(2)
+                        .any(|w| w[0].cmp_value(&w[1]) != std::cmp::Ordering::Less)
+                {
+                    return Err(Error::Query(format!(
+                        "`facet {} ranges` takes 2 to 10 001 numbers, each above the one \
+                         before, and no `top`: every range answers, in order",
+                        f.field
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -1303,10 +1354,78 @@ impl Select {
         f: &mut dyn FnMut(&str, &mut Option<Expr>) -> Result<()>,
     ) -> Result<()> {
         f(&self.collection, &mut self.filter)?;
+        // A disjunctive facet's filter is the query's, short of its own
+        // conditions: what holds the query holds it.
+        for facet in &mut self.facets {
+            if let Some(rest) = &mut facet.rest {
+                f(&self.collection, rest)?;
+            }
+        }
         let mut level = self.lookup.as_mut();
         while let Some(l) = level {
             f(&l.collection, &mut l.filter)?;
             level = l.next.as_deref_mut();
+        }
+        Ok(())
+    }
+
+    /// Splits each disjunctive facet's filter off the query's
+    /// ([`Facet::rest`]): the `and` chain without the terms that read the
+    /// facet's field alone. A term reading it beside another field -- `brand
+    /// = $1 or sale` -- cannot be left out alone and is refused, rather
+    /// than kept, which would count it, or dropped, which would drop the
+    /// other field's condition. Idempotent: a facet split already stays.
+    pub fn split_facets(&mut self) -> Result<()> {
+        for i in 0..self.facets.len() {
+            if !self.facets[i].disjunctive || self.facets[i].rest.is_some() {
+                continue;
+            }
+            let field = self.facets[i].field.clone();
+            let mut terms = Vec::new();
+            let mut todo: Vec<&Expr> = self.filter.iter().collect();
+            while let Some(e) = todo.pop() {
+                match e {
+                    Expr::And(a, b) => {
+                        todo.push(b);
+                        todo.push(a);
+                    }
+                    e => terms.push(e),
+                }
+            }
+            let mut rest: Option<Expr> = None;
+            let mut names = Vec::new();
+            let mut dropped = false;
+            for t in terms {
+                names.clear();
+                t.referenced_fields(&mut names);
+                // By name: a path is a field of its own here, as it is to an
+                // index (`facet meta.lang` leaves `meta.lang = $1` out, and
+                // not `meta.source = $2`).
+                let own = names.contains(&field);
+                let other = names.iter().any(|n| *n != field);
+                if own && other {
+                    return Err(Error::Query(format!(
+                        "`facet {field} disjunctive` leaves the filter's conditions on `{field}` \
+                         out, and one of them reads another field too: write it as a condition \
+                         of its own, joined by `and`"
+                    )));
+                }
+                if own {
+                    dropped = true;
+                } else {
+                    rest = Some(match rest {
+                        None => t.clone(),
+                        Some(r) => Expr::And(Box::new(r), Box::new(t.clone())),
+                    });
+                }
+            }
+            // A filter with no condition of the field's own is the query's:
+            // counted as a plain facet, over the rows the query found, rather
+            // than over the same rows found again.
+            match dropped {
+                true => self.facets[i].rest = Some(rest),
+                false => self.facets[i].disjunctive = false,
+            }
         }
         Ok(())
     }

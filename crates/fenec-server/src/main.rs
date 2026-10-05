@@ -34,6 +34,11 @@ usage: fenec-server [options]
                             holds only what is derived from them; read it
                             instead over a network file system, or to have
                             --max-memory cover the data as well
+      --warm <all|off|list> build the hash, text, ordered and sparse indexes
+                            after the open, one at a time beside the
+                            queries, rather than on the first read of each:
+                            all, off, or collections and collection.fields
+                            by commas. A tenant's as it opens (--dir)
 
       --sync <policy>       off | always | <ms>      default: 250
                             writes are buffered; this policy decides when
@@ -219,6 +224,9 @@ fn main() {
     let mut dir: Option<String> = None;
     let mut mmap = true;
     let mut lease = false;
+    // `--warm`: None until given; a file is warmed whole unless told off,
+    // a node's tenants only when told.
+    let mut warm: Option<Option<fenec_http::warm::Warm>> = None;
     let mut idle_close = Duration::from_secs(300);
     let mut ping = false;
     let mut replication_token: Option<String> = std::env::var("FENEC_REPLICATION_TOKEN").ok();
@@ -417,6 +425,13 @@ fn main() {
                 fenec_http::link::auto_compact(policy);
             }
             "--lease" => lease = true,
+            "--warm" => {
+                let v = next(&mut i, "--warm");
+                warm = Some(match v.as_str() {
+                    "off" => None,
+                    v => Some(fenec_http::warm::Warm::parse(v).unwrap_or_else(|e| fail(&e))),
+                });
+            }
             "--insecure" => http_cfg.insecure = true,
             "--follow" => follow_url = Some(next(&mut i, "--follow")),
             "--follow-table" => follow_table = Some(next(&mut i, "--follow-table")),
@@ -582,7 +597,15 @@ fn main() {
             }
         });
         serve_dir(
-            &dir, http_cfg, sync, checkpoint, idle_close, mmap, lease, repl,
+            &dir,
+            http_cfg,
+            sync,
+            checkpoint,
+            idle_close,
+            mmap,
+            lease,
+            repl,
+            warm.flatten(),
         );
     }
 
@@ -740,6 +763,15 @@ fn main() {
         })
         .unwrap_or_else(|e| fail(&format!("could not start the HTTP thread: {e}")));
 
+    // `--warm`: the derived indexes built beside the first queries, which
+    // otherwise build each on its first read. Once the endpoint is up:
+    // `Server::new` takes the write lock to attach its watcher, and started
+    // before it, a build's read lock held the listener back by the 141 ms a
+    // `@text` index of 100 000 products takes.
+    if let Some(w) = &warm.unwrap_or_else(|| Some(fenec_http::warm::Warm::default())) {
+        fenec_http::warm::start(file.as_deref().unwrap_or("the database"), &shared, w);
+    }
+
     durability::run_syncer(shared, sync, checkpoint);
 }
 
@@ -757,6 +789,7 @@ fn serve_dir(
     mmap: bool,
     lease: bool,
     repl: Option<fenec_http::tenants::Replicated>,
+    warm: Option<fenec_http::warm::Warm>,
 ) -> ! {
     let tenants = match Tenants::new(dir) {
         Ok(t) => t,
@@ -766,7 +799,8 @@ fn serve_dir(
         .with_change_capacity(http_cfg.change_capacity)
         .with_max_memory(http_cfg.max_memory)
         .with_checkpoint(checkpoint)
-        .with_mmap(mmap);
+        .with_mmap(mmap)
+        .with_warm(warm);
     let follows = repl.as_ref().and_then(|r| r.upstream.clone());
     if let Some(r) = repl {
         tenants = tenants.with_replication(r);

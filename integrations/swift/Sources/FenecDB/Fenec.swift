@@ -16,6 +16,15 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
 
     public let code: Code
     public let message: String
+    /// The HTTP status a server refused with (`FenecRemote`): 422 is an
+    /// idempotency key sent with another request. nil for the library's own.
+    public let status: Int?
+    /// The statement of a `FenecRemote.batch` that stopped it, from 0: the
+    /// write whose `require` was not met, the put whose id was taken.
+    public let at: Int?
+    /// How many statements of a failed batch stayed applied: 0, since a
+    /// batch lands whole, but for one holding a `compact`.
+    public let completed: Int?
     /// The parameters the library asked for again as JSON (`exact`).
     let exact: [Int]?
 
@@ -27,6 +36,18 @@ public struct FenecError: Error, CustomStringConvertible, Sendable, Equatable {
         self.code = code
         self.message = message
         self.exact = exact
+        self.status = nil
+        self.at = nil
+        self.completed = nil
+    }
+
+    init(code: Code, message: String, status: Int, at: Int?, completed: Int?) {
+        self.code = code
+        self.message = message
+        self.exact = nil
+        self.status = status
+        self.at = at
+        self.completed = completed
     }
 
     public var description: String { message }
@@ -334,6 +355,25 @@ public final class Fenec: @unchecked Sendable {
     /// The file written anew as an image of the database, graphs and all:
     /// the next open links nothing. Holds the database while it writes.
     public func checkpoint() async throws { try await byHandle(.checkpoint) }
+
+    /// Builds the hash, text, ordered and sparse indexes an open leaves for
+    /// their first read, so the first search does not pay for its index (a
+    /// `@text` index of 100 000 products: 141 ms): those `only` names --
+    /// collections and `collection.field`s -- or every one. Each under the
+    /// read lock on its own, so reads go on beside it. Answers how many it
+    /// built; call it after the open, as the app starts.
+    @discardableResult
+    public func warm(_ only: [String] = []) async throws -> Int {
+        let handle = self.handle
+        let names = only.joined(separator: ",")
+        return try await Fenec.background {
+            var text = names
+            let out = try text.withUTF8 { b in
+                try Fenec.call { out, len in fenec_warm(handle, b.baseAddress, b.count, out, len) }
+            }
+            return try Value.parse(bytes: out ?? [])["built"]?.int ?? 0
+        }
+    }
 
     /// Saves the graphs, syncs and lets the file go; the live queries stop.
     /// Waits for the calls under way.

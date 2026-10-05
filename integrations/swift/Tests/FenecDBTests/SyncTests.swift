@@ -181,6 +181,51 @@
             }
         }
 
+        /// A batch lands whole or not at all, says which statement stopped
+        /// it, and under an idempotency key lands once.
+        @Test func connectBatchesAndKeysWrites() async throws {
+            let s = try await Server("batch")
+            defer { s.stop() }
+            let db = Fenec.connect(url: s.url)
+            let tasks = try db.from("tasks")
+            let out = try await db.batch([
+                try tasks.toInsert(["key": "d", "title": "four"] as Value),
+                try tasks.where("key", "a").toUpdate(["priority": 9] as Value, require: 1),
+                try tasks.where("priority", ">=", 5).order("priority").select("key").toFenecQL(),
+            ])
+            #expect(out.results.count == 3)
+            #expect(out.results[0].affected == 1)
+            #expect(out.results[2].rows.compactMap { $0["key"]?.string } == ["b", "a"])
+            #expect(out.seq != nil && out.seq == db.seq && !out.replayed)
+
+            do {
+                _ = try await db.batch([
+                    try tasks.toInsert(["key": "e", "title": "five"] as Value),
+                    try tasks.where("key", "nobody").toDelete(require: 1),
+                ])
+                Issue.record("an unmet batch was answered")
+            } catch let e as FenecError {
+                #expect(e.code == .unmet && e.status == 412 && e.at == 1 && e.completed == 0)
+            }
+            #expect(try await tasks.count() == 4)
+
+            let keyed = db.withIdempotencyKey("batch-1")
+            let stmts = [try tasks.toInsert(["key": "f", "title": "six"] as Value)]
+            #expect(try await keyed.batch(stmts).replayed == false)
+            #expect(try await keyed.batch(stmts).replayed == true)
+            #expect(try await db.from("tasks").insert(["key": "g"] as Value) == 1)
+            #expect(try await keyed.from("tasks").count() == 6)
+            _ = try await db.run(#"put tasks {key: "h"}"#, params: [], idempotencyKey: "put-1")
+            _ = try await db.run(#"put tasks {key: "h"}"#, params: [], idempotencyKey: "put-1")
+            #expect(try await tasks.count() == 7)
+            do {
+                _ = try await db.run(#"put tasks {key: "i"}"#, params: [], idempotencyKey: "put-1")
+                Issue.record("a key sent with another request was answered")
+            } catch let e as FenecError {
+                #expect(e.status == 422 && e.at == nil)
+            }
+        }
+
         /// `/query` answers `{"rows", "facets"}` when facets were asked, and
         /// the bare array otherwise; a mark is a column of the rows either way.
         @Test func connectReadsFacetsAndMarks() async throws {

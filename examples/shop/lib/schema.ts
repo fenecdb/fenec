@@ -26,7 +26,6 @@ export const products = fenecTable('products', {
   brand: text().notNull(),
   // Prices are integer minor units (cents): no float ever holds money.
   price: integer().notNull(),
-  priceBand: text().notNull(),
   colour: text(),
   material: text(),
   size: text(),
@@ -46,7 +45,6 @@ export const products = fenecTable('products', {
   index('products_description').using('bm25', t.description).with({ prefix: 5 }),
   index('products_category').using('hash', t.category),
   index('products_brand').using('hash', t.brand),
-  index('products_band').using('hash', t.priceBand),
   index('products_colour').using('hash', t.colour),
   index('products_price').on(t.price),
   index('products_rating').on(t.rating),

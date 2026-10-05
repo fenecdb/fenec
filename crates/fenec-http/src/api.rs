@@ -191,6 +191,8 @@ fn select_from_query(db: &Database, schema: &Schema, req: &Request) -> Result<Se
         }
     }
     sel.check()?;
+    // Before `scoped()` ANDs a token's rules in, as the parser does.
+    sel.split_facets()?;
     Ok(sel)
 }
 

@@ -6,10 +6,12 @@
 // `FenecHttp.live` from `@fenecdb/web/client`, straight to fenec-server,
 // with a token that reads `inventory` and nothing else (policy.txt).
 //
-// Waiting for the first interaction is deliberate. A live query holds a
-// subscription -- a connection and a thread on the server, 64 of them by
-// default -- and a crawler, a page in a background tab or a load test
-// should not hold one.
+// It polls (`{ poll }`) rather than holding a subscription: a stream is
+// a thread on the server and a wake-up at every write, 64 of them by
+// default, where a poll the server answers 304 while the stock has not
+// moved holds nothing between rounds. Waiting for the first interaction
+// still keeps a crawler, a page in a background tab or a load test from
+// asking at all.
 import { useEffect, useState } from 'react';
 
 function line(n: number) {
@@ -41,8 +43,9 @@ export function LiveStock({ sku, initial }: { sku: string; initial: number }) {
       if (stopped) return;
       const db = connect(url, { token });
       stop = db.live(db.from('inventory').select('available').where('sku', sku), (rows) => setN(Number(rows[0]?.available ?? 0)), {
-        // A token lapses after ten minutes: a stream opened again with it
-        // is refused, so it is given up and followed again with a new one.
+        poll: 5000,
+        // A token lapses after ten minutes: a round asked with it is
+        // refused, so it is given up and followed again with a new one.
         onError: () => {
           stop?.();
           stop = null;

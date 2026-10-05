@@ -37,12 +37,15 @@ docs.Where("year", "<", 2000).Delete(ctx)      // no filter: refused unless fene
 - `Subscribe(ctx, collection, url.Values{"year": {"gte.2024"}})` is a channel of `seed` and `change` events (SSE).
 - `Changes(ctx, since, wait)` reads every write on disk (`/_changes`); `Health(ctx)` asks `/_health`.
 - `WithTenant("acme")` sends everything under `/t/acme/`; `WithTimeout`, `WithHTTPClient` as they say.
-- A refusal is an `*fenecdb.Error` with `Status`, `Code` and `Message`, for `errors.As`.
+- A refusal is an `*fenecdb.Error` with `Status`, `Code` and `Message`, for `errors.As`; a failed `Batch`'s also
+  says which statement stopped it, `At` (from 0; -1 otherwise), and how many stayed applied, `Completed`.
 - A `[]float32` goes out as the decimals that read back as each `f32`, so a vector round-trips to the bit.
 
 - The builder's options are functional: `Ef`, `Exact`, `K`, `Candidates`, `Collate`, `All`, and `On`, `ParentKey`,
   `Select`, `Where`, `Required`, `Sort`, `Limit`, `Offset` for `Lookup`. An object condition is `Fields` and `Ops`,
   names and values in turn, and a document a `D(...)` in its order, a map in its sorted keys, or a struct.
+- `Facet(field, Ranges(0, 25, 50))` counts by ranges of numbers, each value `[from, to]`; `Disjunctive()` counts past
+  the filter's own condition on the field, as a shop's filter list does.
 - `Highlight(field, Tags(pre, post))` and `Snippet(field, words, Ellipsis("…"))` answer a `match`'s marks under
   `highlight(field)` and `snippet(field)`; `Facet(field, Top(n))` counts values over every matched row, which
   `q.Answer(ctx)` (or `db.QueryAnswer`, a `BatchItem`'s `Facets`) hands back beside the rows, `Facets.Of(field)`.

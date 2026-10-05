@@ -279,6 +279,24 @@ impl<T: Entry> Chunked<T> {
     fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.chunks.iter().flatten()
     }
+
+    /// How many entries lie from `lo` (included) to `hi` (excluded): two
+    /// searches and the lengths of the chunks between, not a walk over the
+    /// entries.
+    fn count(&self, lo: &T, hi: &T) -> usize {
+        let (a, b) = (self.seek(lo, false), self.seek(hi, false));
+        if (a.0, a.1) >= (b.0, b.1) {
+            return 0;
+        }
+        if a.0 == b.0 {
+            return b.1 - a.1;
+        }
+        let mut n = self.chunks[a.0].len() - a.1;
+        for c in &self.chunks[a.0 + 1..b.0] {
+            n += c.len();
+        }
+        n + b.1
+    }
 }
 
 /// A key a value sorts under, or where it goes instead.
@@ -592,6 +610,42 @@ impl SortedIndex {
             }
         };
         whole.then_some(out)
+    }
+
+    /// How many rows hold a value in each range `keys` bound -- from each
+    /// key, included, to the next, excluded -- of the rows `member` holds
+    /// (a bit an id), or of every row: `facet price ranges [...]`. Over
+    /// every row a range is counted from the chunks' lengths, over a set by
+    /// walking its entries and asking the set. `None` for an index that
+    /// cannot answer: a text or json field's, or bounds that are not
+    /// numbers. `null` and `NaN` lie in no range, as in no comparison.
+    pub fn range_counts(&self, keys: &[Key], member: Option<&[u64]>) -> Option<Vec<u64>> {
+        let SortedIndex::Num(o) = self else {
+            return None;
+        };
+        let mut nums = Vec::with_capacity(keys.len());
+        for k in keys {
+            match k {
+                Key::Num(n) => nums.push(*n),
+                Key::Text(_) => return None,
+            }
+        }
+        let mut out = Vec::with_capacity(nums.len().saturating_sub(1));
+        for w in nums.windows(2) {
+            let (lo, hi) = ((w[0], 0), (w[1], 0));
+            out.push(match member {
+                None => o.keys.count(&lo, &hi) as u64,
+                Some(bits) => {
+                    let mut n = 0;
+                    for e in o.keys.range(&Bound::Included(lo), &Bound::Excluded(hi)) {
+                        let word = bits.get(e.1 as usize / 64).copied().unwrap_or(0);
+                        n += (word >> (e.1 % 64)) & 1;
+                    }
+                    n
+                }
+            });
+        }
+        Some(out)
     }
 
     /// Walks the ids in order -- `null` first ascending, last descending, as

@@ -74,6 +74,81 @@ fn show(what: &str, ms: Option<f64>, per: f64, unit: &str) {
     }
 }
 
+/// `ranges` and `disjunctive`, over a collection of their own -- `d` stays
+/// as it was, so the numbers above compare with a build from before them:
+/// `price` under `@sorted`, `brand` and `cat` under `@hash`, `color` with
+/// no index. A range facet through the ordered index against the field
+/// read (bounds the index cannot key -- `0.5` against an int -- take the
+/// read), over every row and over filters keeping 2.5% and half; the
+/// disjunctive facets of a category page with a brand and a colour chosen
+/// against the three queries a page asked for them before.
+fn facet_options(db: &mut Database, n: usize) {
+    exec(
+        db,
+        "create collection r (cat text @hash, brand text @hash, color text, price int @sorted)",
+        &[],
+    );
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    let mut batch = Vec::new();
+    for i in 0..n {
+        batch.push(format!(
+            "{{cat: \"k{}\", brand: \"b{}\", color: \"c{}\", price: {}}}",
+            rng.below(30),
+            rng.below(40),
+            rng.below(12),
+            rng.below(100_000),
+        ));
+        if batch.len() == 5_000 || i + 1 == n {
+            exec(db, &format!("put r [{}]", batch.join(", ")), &[]);
+            batch.clear();
+        }
+    }
+    let one = [Value::Null];
+    let ranges = "[0, 2500, 5000, 10000, 25000, 50000, 100000]";
+    let read = "[0, 2500.5, 5000, 10000, 25000, 50000, 100000]";
+    for (what, filter) in [
+        ("every row", ""),
+        ("cat = k3 (3%)", "where cat = \"k3\""),
+        ("color < c6 (half)", "where color < \"c6\""),
+    ] {
+        for (how, bounds) in [("@sorted", ranges), ("read", read)] {
+            show(
+                &format!("facet price ranges, {how}, {what}"),
+                time(
+                    db,
+                    &format!("get r {filter} limit 10 facet price ranges {bounds}"),
+                    &one,
+                ),
+                1.0,
+                "ms",
+            );
+        }
+    }
+    // A category page, a brand and a colour chosen: its rows, and each
+    // facet counted as though its own choice were not made.
+    let page = "get r where cat = \"k3\" and brand = \"b7\" and color = \"c2\" limit 24";
+    let once = time(
+        db,
+        &format!("{page} facet brand disjunctive, color disjunctive, price ranges {ranges}"),
+        &one,
+    );
+    let apart = [
+        format!("{page} facet price ranges {ranges}"),
+        "get r where cat = \"k3\" and color = \"c2\" limit 0 facet brand".to_string(),
+        "get r where cat = \"k3\" and brand = \"b7\" limit 0 facet color".to_string(),
+    ]
+    .iter()
+    .map(|sql| time(db, sql, &one))
+    .sum::<Option<f64>>();
+    show(
+        "page + 2 disjunctive facets, one statement",
+        once,
+        1.0,
+        "ms",
+    );
+    show("page + 2 facets, three statements", apart, 1.0, "ms");
+}
+
 fn main() {
     let n: usize = std::env::args()
         .nth(1)
@@ -199,6 +274,8 @@ fn main() {
         q,
         "ms a query",
     );
+    facet_options(&mut db, n);
+
     // How many rows a query's `match` selects, which the facets count:
     // every document has a brand, so the brand counts add up to it. Read
     // off the answer's JSON, so this compiles against a build from before

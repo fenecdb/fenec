@@ -44,6 +44,9 @@ internal object FenecNative {
 
     @JvmStatic external fun syncStatus(handle: Long): ByteArray
 
+    /** The indexes an open left for their first read, built now (`fenec_warm`): `only` the names by commas, empty for all. */
+    @JvmStatic external fun warm(handle: Long, only: ByteArray): ByteArray
+
     /** A schema declared as FenecQL against the database (`fenec_schema`): mode 0 plans, 1 applies. */
     @JvmStatic external fun schema(handle: Long, request: ByteArray, mode: Int): ByteArray
 

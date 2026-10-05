@@ -25,7 +25,13 @@ may wait for the lock or an fsync and an FFI call blocks its isolate. A live
 query is a Stream, run again after a write to a collection it reads, once a
 burst. Every write is fsynced before it returns unless the file is opened
 with `flags: Fenec.noSync`, which leaves the writes for `sync()`; `flush()`
-hands them to the system, which outlives the app being killed.
+hands them to the system, which outlives the app being killed. An open
+leaves the hash, text, ordered and sparse indexes for their first read;
+`warm(['docs'])` builds them on the database's isolate as the app starts,
+so the first search does not (a `@text` index of 100 000 products: 141
+ms), and answers how many it built. The builder's `facet(field, ranges:
+[0, 25, 50])` counts by ranges of numbers, each value `[from, to]`, and
+`disjunctive: true` counts past the filter's own condition on the field.
 
 ## Sync with a server
 
@@ -49,7 +55,13 @@ yet answered and the last error, and `statuses` streams it; call
 `sync`: Dart has no static and instance member of one name, and `sync()` is
 the fsync. The requests and the stream are `dart:io`'s `HttpClient`'s, so
 a server is reached through TLS. `Fenec.connect(url, token:)` is a server
-with no file: every query a request, the same builder.
+with no file: every query a request, the same builder. Its `batch([...],
+idempotencyKey: id)` runs the builder's `toInsert`/`toUpdate`/`toDelete` as
+one block, all or none, answering a `BatchAnswer` (`results`, `seq`,
+`replayed`); a `FenecException` that stops it carries `status` (412 and
+`unmet` for a `require` not met) and `at`, the statement from 0.
+`withIdempotencyKey(key)` is a copy whose every write -- `run`, the
+builder's -- carries the key, so it lands once however often it is sent.
 
 The query builder makes the text the JavaScript builder makes of the same
 chain, to the byte: `integrations/builder-golden.json` holds the chains,

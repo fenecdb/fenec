@@ -178,6 +178,18 @@ String? _collation(String? name) => switch (name) {
       _ => throw _refuse("unknown collation: ${_quote(name)}; there are 'und' and 'tr'"),
     };
 
+/// A facet clause: its field, `top`, range bounds as written and whether it
+/// is disjunctive.
+typedef _Facet = (String field, int? top, List<String>? ranges, bool disjunctive);
+
+/// A number as JavaScript's `String` writes it, the text every other
+/// builder makes: Dart writes a double as JavaScript does but for the `.0`
+/// of a whole one (2500.0).
+String _jsNumber(num n) {
+  if (n is double && n == n.truncateToDouble() && n.abs() < 1e21) return BigInt.from(n).toString();
+  return n.toString();
+}
+
 /// `limit`, `offset`, `ef` and the rest are literals, never parameters: a
 /// whole number JavaScript holds exactly.
 int _whole(int n, String what) =>
@@ -364,7 +376,7 @@ class Query {
   final bool _count;
   final List<_Level> _lookups;
   final List<_Mark> _marks;
-  final List<(String, int?)> _facets;
+  final List<_Facet> _facets;
 
   Query._(this.collection,
       {Exec? exec,
@@ -383,7 +395,7 @@ class Query {
       bool count = false,
       List<_Level> lookups = const [],
       List<_Mark> marks = const [],
-      List<(String, int?)> facets = const []})
+      List<_Facet> facets = const []})
       : _exec = exec,
         _project = project,
         _aggregate = aggregate,
@@ -426,7 +438,7 @@ class Query {
     bool? count,
     List<_Level>? lookups,
     List<_Mark>? marks,
-    List<(String, int?)>? facets,
+    List<_Facet>? facets,
   }) =>
       Query._(collection,
           exec: identical(exec, _keep) ? _exec : exec as Exec?,
@@ -553,12 +565,34 @@ class Query {
   ///
   ///     db.from('products').match('title', 'phone').where('price', '<', 500)
   ///         .facet('brand', top: 10).facet('color').limit(20)
-  Query facet(String field, {int? top}) {
+  ///
+  /// [ranges] counts the rows in each range of numbers from one bound up to
+  /// the next, every range in order, its value `[from, to]`; [disjunctive]
+  /// -- `true` or `false` -- counts as if the filter's own conditions on the
+  /// field were not there, so the other values a shopper could add are
+  /// counted too. Both are taken as any value, as the JS builder takes
+  /// them, so one of another type is refused by its message.
+  Query facet(String field, {int? top, List<Object?>? ranges, Object? disjunctive}) {
     final f = _pathOf(field);
     final n = top == null ? null : _whole(top, 'facet top');
     if (n == 0) throw _refuse('facet $f top 0 answers nothing');
     if (_facets.any((g) => g.$1 == f)) throw _refuse('facet $f is asked twice');
-    return _with(facets: [..._facets, (f, n)]);
+    List<String>? bounds;
+    if (ranges != null) {
+      // The engine's rule, refused before anything is sent.
+      var ok = n == null && ranges.length >= 2;
+      for (var i = 0; ok && i < ranges.length; i++) {
+        final b = ranges[i];
+        ok = b is num && b.isFinite && (i == 0 || b > (ranges[i - 1] as num));
+      }
+      if (!ok) {
+        throw _refuse(
+            'facet $f ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order');
+      }
+      bounds = [for (final b in ranges) _jsNumber(b as num)];
+    }
+    if (disjunctive != null && disjunctive is! bool) throw _refuse('facet $f disjunctive is true or false');
+    return _with(facets: [..._facets, (f, n, bounds, disjunctive == true)]);
   }
 
   /// `lookup name on child [= parent] ...`: each row's children, attached to
@@ -725,7 +759,12 @@ class Query {
     sql.write(_require);
     if (_count) sql.write(' count');
     if (_facets.isNotEmpty) {
-      sql.write(' facet ${_facets.map((f) => f.$2 == null ? f.$1 : '${f.$1} top ${f.$2}').join(', ')}');
+      sql.write(' facet ${_facets.map((f) => [
+            f.$1,
+            if (f.$2 != null) ' top ${f.$2}',
+            if (f.$3 != null) ' ranges [${f.$3!.join(', ')}]',
+            if (f.$4) ' disjunctive',
+          ].join()).join(', ')}');
     }
     // Terminal, so every clause after it is the child's -- and last, so its
     // parameters come after the parent's.

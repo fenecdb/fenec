@@ -39,7 +39,13 @@ query.toFenecQL()` returns them and runs nothing.
 Every write is fsynced before it returns unless the file is opened
 `.noSync`, which leaves the writes for `sync()`; `flush()` hands them to the
 system, which outlives the app being killed. `checkpoint()` writes the file
-anew, graphs and all. The docs: `site/content/docs/mobile.html`.
+anew, graphs and all. An open leaves the hash, text, ordered and sparse
+indexes for their first read; `warm(["docs"])` builds them off the main
+thread as the app starts, so the first search does not (a `@text` index of
+100 000 products: 141 ms), and answers how many it built. The builder's
+`facet(field, ranges: [0, 25, 50])` counts by ranges of numbers, each value
+`[from, to]`, and `disjunctive: true` counts past the filter's own
+condition on the field. The docs: `site/content/docs/mobile.html`.
 
 ## Sync with a server
 
@@ -60,7 +66,13 @@ and one the server refuses is put back and comes on
 `replica.resume()` as the app comes back to the foreground. The requests and
 the stream are `URLSession`'s, so a server is reached through TLS (App
 Transport Security). `Fenec.connect(url:token:)` is a server with no file:
-every query a request, the same builder.
+every query a request, the same builder. Its `batch([...], idempotencyKey:)`
+runs the builder's `toInsert`/`toUpdate`/`toDelete` as one block, all or
+none, answering `results`, `seq` and `replayed`; a `FenecError` that stops
+it carries `status` (412 and `.unmet` for a `require` not met) and `at`,
+the statement from 0. `run(text, params:, idempotencyKey:)` and
+`withIdempotencyKey(key)`, a copy whose every write carries the key, make a
+write once however often it is sent.
 
 ## Building and testing
 

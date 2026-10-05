@@ -123,7 +123,9 @@ public sealed class BuilderTests(Servers servers)
             q.Snippet(a[0].GetString()!, a[1].GetInt64(), Opt(a, 2, "ellipsis")?.GetString(),
                 Opt(a, 2, "pre")?.GetString(), Opt(a, 2, "post")?.GetString()),
         "snippet" => q.Snipped(a[0].GetString()!, a[1].GetInt64(), Arg(a, 2, "ellipsis"), Arg(a, 2, "pre"), Arg(a, 2, "post")),
-        "facet" => q.Facet(a[0].GetString()!, Long(Opt(a, 1, "top"))),
+        "facet" => q.Faceted(a[0].GetString()!, Long(Opt(a, 1, "top")),
+            Opt(a, 1, "ranges") is { } r ? r.EnumerateArray().Select(Value).ToList() : null,
+            Arg(a, 1, "disjunctive")),
         _ => throw new InvalidOperationException($"no builder step {op}"),
     };
 

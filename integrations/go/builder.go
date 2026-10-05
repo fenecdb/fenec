@@ -202,6 +202,17 @@ func collation(name *string) (string, error) {
 	return *name, nil
 }
 
+// jsNumber is a number as JavaScript's String writes it, the text every
+// other builder makes of it: 2500, 50.5, -10, 1e+21, 1e-7.
+func jsNumber(f float64) string {
+	if a := math.Abs(f); a != 0 && (a >= 1e21 || a < 1e-6) {
+		s := strconv.FormatFloat(f, 'e', -1, 64)
+		mant, exp, _ := strings.Cut(s, "e")
+		return mant + "e" + exp[:1] + strings.TrimLeft(exp[1:], "0")
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
 // whole: limit, offset, ef and the rest are literals in FenecQL, never
 // parameters -- a whole number JavaScript holds exactly.
 func whole(n int, what string) (int, error) {
@@ -547,6 +558,8 @@ type opts struct {
 	sort                             []sortOpt
 	top                              *int
 	require                          *int
+	ranges                           []float64
+	rangesSet, disjunctive           bool
 	// A mark's tags and a snippet's ellipsis, and whether each was given:
 	// held as any, as a value of Where is, so a tag that is not text is
 	// refused by the JS builder's message rather than left to the compiler.
@@ -586,6 +599,17 @@ func Required() Opt              { return func(o *opts) { o.required = true } }
 func Limit(n int) Opt            { return func(o *opts) { o.limit = intp(n) } }
 func Offset(n int) Opt           { return func(o *opts) { o.offset = intp(n) } }
 func Top(n int) Opt              { return func(o *opts) { o.top = intp(n) } }
+
+// Ranges makes a Facet count the rows in each range of numbers from one
+// bound up to the next, every range in order, its value [from, to].
+func Ranges(bounds ...float64) Opt {
+	return func(o *opts) { o.ranges, o.rangesSet = bounds, true }
+}
+
+// Disjunctive makes a Facet count as if the filter's own conditions on its
+// field were not there, so the other values a shopper could add are
+// counted too.
+func Disjunctive() Opt { return func(o *opts) { o.disjunctive = true } }
 
 // Pre and Post are what Highlight and Snippet put before and after each
 // mark, both or neither: given, the field answers as the marked text
@@ -663,8 +687,10 @@ func (m mark) kind() string {
 }
 
 type facetClause struct {
-	field string
-	top   int // -1 when not given
+	field       string
+	top         int      // -1 when not given
+	ranges      []string // each bound as JavaScript's String writes it
+	disjunctive bool
 }
 
 type vectorClause struct {
@@ -868,7 +894,8 @@ func (b *Builder) Facet(field string, options ...Opt) *Builder {
 		if f.field, err = fieldPath(field); err != nil {
 			return err
 		}
-		if o := gather(options); o.top != nil {
+		o := gather(options)
+		if o.top != nil {
 			if f.top, err = whole(*o.top, "facet top"); err != nil {
 				return err
 			}
@@ -881,6 +908,18 @@ func (b *Builder) Facet(field string, options ...Opt) *Builder {
 				return refuse("facet %s is asked twice", f.field)
 			}
 		}
+		if o.rangesSet {
+			// The engine's rule, refused before anything is sent.
+			ok := f.top < 0 && len(o.ranges) >= 2
+			for i, b := range o.ranges {
+				ok = ok && !math.IsInf(b, 0) && !math.IsNaN(b) && (i == 0 || b > o.ranges[i-1])
+				f.ranges = append(f.ranges, jsNumber(b))
+			}
+			if !ok {
+				return refuse("facet %s ranges takes 2 to 10 001 numbers, each above the one before, and no top: every range answers, in order", f.field)
+			}
+		}
+		f.disjunctive = o.disjunctive
 		d.facets = append(d.facets, f)
 		return nil
 	})
@@ -1304,6 +1343,12 @@ func (b *Builder) ToFenecQL() (string, []any, error) {
 		sql.WriteString(f.field)
 		if f.top >= 0 {
 			fmt.Fprintf(&sql, " top %d", f.top)
+		}
+		if f.ranges != nil {
+			sql.WriteString(" ranges [" + strings.Join(f.ranges, ", ") + "]")
+		}
+		if f.disjunctive {
+			sql.WriteString(" disjunctive")
 		}
 	}
 	// Terminal, so every clause after it is the child's -- and last, so its

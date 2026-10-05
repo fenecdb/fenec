@@ -80,6 +80,11 @@ export async function placeOrder(owner: string, key: string, form: Record<string
     'set inventory {available: available - $1, reserved: reserved + $1} where sku = $2 and available >= $1 require 1',
     [l.qty, l.sku],
   ]);
+  // Each line's price as the cart read it, held inside the block: a price
+  // changed since is a 412 here, and nothing of the order lands.
+  for (const l of cart.lines) {
+    statements.push(['get products select sku where sku = $1 and price = $2 limit 1 require 1', [l.sku, l.price]]);
+  }
   statements.push([
     'insert orders {number: $1, owner: $2, status: "reserved", subtotal: $3, shipping: $4, total: $5, email: $6, address: $7, at: now(), holdUntil: now() + $8}',
     [number, owner, cart.subtotal, cart.shipping, cart.total, who.email, who.address, HOLD_MS],
@@ -97,6 +102,10 @@ export async function placeOrder(owner: string, key: string, form: Record<string
   if (res.status === 412 && res.at !== undefined && res.at < cart.lines.length) {
     const l = cart.lines[res.at];
     return { ok: false, reason: 'stock', sku: l.sku, message: `Only ${await availableOf(l.sku)} of ${l.name} left; change the quantity and try again.` };
+  }
+  if (res.status === 412 && res.at !== undefined && res.at < 2 * cart.lines.length) {
+    const l = cart.lines[res.at - cart.lines.length];
+    return { ok: false, reason: 'changed', sku: l.sku, message: `The price of ${l.name} changed; review your cart and place the order again.` };
   }
   if (res.status === 422) return { ok: false, reason: 'changed', message: 'Your cart changed while the order was being placed; review it and place the order again.' };
   return { ok: false, reason: 'failed', message: res.error ?? `The order could not be placed (${res.status}).` };

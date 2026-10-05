@@ -1007,6 +1007,11 @@ impl Parser {
         if let Err(e) = sel.check() {
             return self.err(e);
         }
+        // Split here, from the filter as written: a token's rules and an
+        // expiry are ANDed in later, into the split filters too.
+        if let Err(e) = sel.split_facets() {
+            return self.err(e);
+        }
         Ok(Statement::Select(sel))
     }
 
@@ -1169,22 +1174,43 @@ impl Parser {
         Ok(l)
     }
 
+    /// `[0, 2500, 5000]`: a facet's range bounds, numbers as written --
+    /// literals and never parameters, as `top` is, so a statement keeps
+    /// its shape.
+    /// A list literal, read as any is: what the bounds are -- numbers,
+    /// rising -- `Select::check` says.
+    fn bounds(&mut self) -> Result<Vec<Value>> {
+        // As written, as `in [..]`'s: not the `f32`s of a vector.
+        let was = std::mem::replace(&mut self.exact, true);
+        let e = self.primary();
+        self.exact = was;
+        match e? {
+            Expr::Lit(Value::List(v)) => Ok(v),
+            _ => self.err("`ranges` takes its bounds in brackets: `ranges [0, 100, 500]`"),
+        }
+    }
+
     fn projection_before_from(&mut self) -> Option<SelectList> {
         let list = self.select_list().ok()?;
         self.eat_kw("from").then_some(list)
     }
 
-    /// `brand top 5, color`: each field or path, and how many of its
-    /// commonest values.
+    /// `brand top 5 disjunctive, price ranges [0, 2500, 5000], color`: each
+    /// field or path, how many of its commonest values or which ranges of
+    /// its numbers, and whether the filter's own conditions on it count.
     fn facet_list(&mut self) -> Result<Vec<Facet>> {
         let mut out = Vec::new();
         loop {
-            let field = self.path()?;
-            let top = match self.eat_kw("top") {
-                true => Some(self.int()?.max(0) as usize),
-                false => None,
-            };
-            out.push(Facet { field, top });
+            let mut f = Facet::new(self.path()?);
+            // Both read, so the check names what they cannot do together.
+            if self.eat_kw("top") {
+                f.top = Some(self.int()?.max(0) as usize);
+            }
+            if self.eat_kw("ranges") {
+                f.ranges = Some(self.bounds()?);
+            }
+            f.disjunctive = self.eat_kw("disjunctive");
+            out.push(f);
             if !matches!(self.peek(), Tok::Comma) {
                 break;
             }

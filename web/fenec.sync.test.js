@@ -1016,6 +1016,79 @@ test("a live query over HTTP follows the server's writes, with no module", { ski
   }
 });
 
+// A polled live query holds no stream: its rows again only once what it
+// reads was written, the rounds between answered 304.
+test('a polled live query over HTTP runs again only after a write to what it reads', { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  await s.run('create collection other (n int)');
+  const statuses = [];
+  const fetchSeen = (url, init) =>
+    fetch(url, init).then((r) => {
+      statuses.push(r.status);
+      return r;
+    });
+  const db = client.connect(s.url, { fetch: fetchSeen });
+  const seen = [];
+  const stop = db.live(db.from('tasks').where('status', 'open').order('priority', 'desc').limit(2), (rows) => seen.push(rows.map((r) => r.title)), { poll: 100 });
+  try {
+    await until(() => seen.length === 1, 'the first rows');
+    assert.deepEqual(seen[0], ['two', 'one']);
+    await s.run('put other {n: 1}');
+    await until(() => statuses.filter((x) => x === 304).length >= 3, 'rounds answered 304');
+    assert.equal(seen.length, 1, 'a write elsewhere runs nothing');
+    await s.run('put tasks {key: "d", title: "four", status: "open", priority: 9}');
+    await until(() => seen.length === 2, 'the rows again after a write');
+    assert.deepEqual(seen[1], ['four', 'two']);
+    assert.throws(() => db.live('get tasks', () => {}, { poll: 10 }), /100 ms/);
+  } finally {
+    stop();
+    s.close();
+  }
+});
+
+// `/batch` and `Idempotency-Key` through the client: the shop's checkout
+// posted them with a `fetch` of its own.
+test('a batch over HTTP lands whole, once a key, and names the statement that stopped it', { skip: bin ? false : 'no fenec-server binary (cargo build)', concurrency: false }, async () => {
+  const s = await server();
+  const db = client.connect(s.url);
+  try {
+    const tasks = db.from('tasks');
+    const take = (key, by) => tasks.where('key', key).where('priority', '>=', by).toUpdate({ priority: inc(-by) }, { require: 1 });
+    const got = await db.batch([take('b', 2), tasks.select('priority').where('key', 'b'), 'get tasks count'], { idempotencyKey: 'k-1' });
+    assert.deepEqual(got.results, [{ affected: 1 }, { rows: [{ priority: 3 }] }, { rows: [{ count: 3 }] }]);
+    assert.equal(got.replayed, false);
+    assert.ok(got.seq > 0 && db.seq === got.seq);
+    // Sent again with its key: the answer kept, nothing written twice.
+    const again = await db.batch([take('b', 2), tasks.select('priority').where('key', 'b'), 'get tasks count'], { idempotencyKey: 'k-1' });
+    assert.equal(again.replayed, true);
+    assert.deepEqual(again.results, got.results);
+    assert.equal((await tasks.where('key', 'b').first()).priority, 3);
+    // A `require` not met: 412, the statement's place, and nothing landed.
+    const e = await db.batch([take('a', 1), take('b', 9)]).catch((e) => e);
+    assert.ok(e instanceof client.FenecError);
+    assert.equal(e.status, 412);
+    assert.equal(e.at, 1);
+    assert.equal(e.completed, 0);
+    assert.match(e.message, /require/);
+    assert.equal((await tasks.where('key', 'a').first()).priority, 1);
+    // The same key with another request is refused.
+    await assert.rejects(db.batch(['set tasks {priority: 0} where key = "zz"'], { idempotencyKey: 'k-1' }), (e) => e.status === 422);
+    // A single write under a key, and a builder's through a keyed copy.
+    const one = await db.run('put tasks {key: "d", title: "four", status: "open", priority: 2}', [], { idempotencyKey: 'k-2' });
+    assert.deepEqual([one.count, one.replayed], [1, false]);
+    assert.equal((await db.run('put tasks {key: "d", title: "four", status: "open", priority: 2}', [], { idempotencyKey: 'k-2' })).replayed, true);
+    const keyed = db.withIdempotencyKey('k-3');
+    assert.equal(await keyed.from('tasks').insert({ key: 'e', title: 'five', status: 'open', priority: 4 }), 1);
+    assert.equal(await keyed.from('tasks').insert({ key: 'e', title: 'five', status: 'open', priority: 4 }), 1);
+    assert.equal(await tasks.count(), 5);
+    assert.equal(db.seq, keyed.seq);
+    await assert.rejects(db.batch([]), /a list of statements/);
+    await assert.rejects(db.batch([42]), /batch statement 0/);
+  } finally {
+    s.close();
+  }
+});
+
 // sync() opens the full module unless given one, and the module it is
 // given by URL when asked: here the one without indexes, whose `near`
 // measures every vector as `exact` does.
