@@ -484,8 +484,9 @@ query, and the one column it selects is the list.</p>
     <code>count</code>, aggregates, a <code>near</code>'s or a
     <code>match</code>'s filter, a <code>lookup</code> level's, <code>set …
     where</code> and <code>del … where</code>.</li>
-  <li><b>At most 100 000 values</b> and 4 levels of nesting; past either the
-    query is an error, never a set cut short.</li>
+  <li><b>At most 100 000 distinct values</b> and 4 levels of nesting; past
+    either the query is an error, never a set cut short. A value held by many
+    rows counts once.</li>
 </ul>
 
 <details class="deep"><summary>Details</summary>
@@ -513,10 +514,13 @@ the same rule holds: a list reaches the <code>@hash</code> index only when
 every value is one the field's type can express, or the whole list goes to
 the scan. A long list is looked up rather than walked — a scan of 200 000
 rows by an unindexed field against the 2 000 codes an inner <code>get</code>
-handed it took 2 302 ms compared a value at a time and takes 16. The inner
-<code>get</code> is read one value past the bound, so a set past 100 000 is
-refused without gathering it; a <code>limit</code> inside is the query's own
-cut, and answers. <code>explain</code> names what each inner <code>get</code>
+handed it took 2 302 ms compared a value at a time and takes 16. The bound
+is on the values the list holds, not on the rows that hold them: a
+funnel's 125 000 <code>buy</code> events from 937 users is a list of 937.
+Past 100 000 rows the values are told apart, and the inner <code>get</code>
+read until they number more than 100 000; with a <code>limit</code>,
+<code>group</code> or ranking it is read one row past the bound, and a
+<code>limit</code> inside is the query's own cut, and answers. <code>explain</code> names what each inner <code>get</code>
 found.</p>
 
 <p>Over HTTP a scoped token's rules hold the inner <code>get</code> as they

@@ -788,9 +788,10 @@ pub struct Lookup {
 /// cut short is a wrong answer believed right.
 pub const MAX_LOOKUP_DEPTH: usize = 8;
 
-/// The most values an `in (get ...)` may hand its query. A larger set is a
-/// query error, never a set cut short, which would be a wrong answer
-/// believed right. The list is held whole while the query runs, and a
+/// The most distinct values an `in (get ...)` may hand its query, a value
+/// many rows hold counted once. A larger set is a query error, never a set
+/// cut short, which would be a wrong answer believed right. The list is
+/// held whole while the query runs, and a
 /// question over more is one `lookup ... required` asks from the other
 /// side, probing each parent's children rather than listing them.
 pub const MAX_SUBQUERY_VALUES: usize = 100_000;

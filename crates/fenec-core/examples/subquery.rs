@@ -221,4 +221,24 @@ fn main() {
             &[],
         ),
     );
+
+    // A funnel's shape: more rows than the bound, fewer values. The bound
+    // is on distinct values, so it is answered.
+    println!("customers with an order (every order's customer: {orders} rows)");
+    row(
+        "`id in (get ...)`, the values told apart",
+        median_ms(
+            &db,
+            "get customers where id in (get orders select customer) count",
+            &[],
+        ),
+    );
+    row(
+        "`lookup orders ... required`",
+        median_ms(
+            &db,
+            "get customers count lookup orders on customer required",
+            &[],
+        ),
+    );
 }

@@ -2034,6 +2034,19 @@ fn offsets(text: &str, spans: &[(usize, usize)], shift: usize) -> Vec<Value> {
         .collect()
 }
 
+/// Whether `v` is not in `seen` yet, by its encoding, which it is then:
+/// equal encodings are equal values, and two that compare equal under
+/// others (`1` and `1.0`) both kept in an `in` list change no answer.
+fn first_seen(seen: &mut HashIndex, key: &mut Vec<u8>, v: &Value) -> bool {
+    key.clear();
+    crate::codec::encode_value(key, v);
+    if seen.get(key).is_some() {
+        return false;
+    }
+    seen.add(key.clone(), 0);
+    true
+}
+
 /// The value of document `id` at a [`source`], `null` where it has none.
 fn read_source(store: &Store, id: DocId, (pos, keys): (usize, Option<&str>)) -> Result<Value> {
     Ok(match keys {
@@ -5224,29 +5237,40 @@ impl Database {
         let mut inner = self
             .answered_select(&inner, params, depth + 1)?
             .into_owned();
-        // One past the bound is all it takes to know the set is past it:
-        // a scan stops there rather than gather a million values to refuse
-        // them. `near` and `match` are bounded by their own pages, and an
-        // aggregate without `group` answers one row.
         let ranked = inner.near.is_some() || inner.matcher.is_some();
-        if !ranked && (inner.aggregate.is_empty() || inner.group.is_some()) {
-            let bound = MAX_SUBQUERY_VALUES + 1;
-            inner.limit = Some(inner.limit.map_or(bound, |l| l.min(bound)));
-        }
-        let rows = self.select(&inner, params)?.rows;
-        if rows.len() > MAX_SUBQUERY_VALUES {
+        let plain = !ranked
+            && inner.aggregate.is_empty()
+            && inner.group.is_none()
+            && inner.limit.is_none()
+            && inner.offset == 0;
+        let items = if plain {
+            self.distinct_column(&inner, params)?
+        } else {
+            // One past the bound is all it takes to know the set is past
+            // it: a scan stops there rather than gather a million values to
+            // refuse them. `near` and `match` are bounded by their own
+            // pages, and an aggregate without `group` answers one row.
+            if !ranked && (inner.aggregate.is_empty() || inner.group.is_some()) {
+                let bound = MAX_SUBQUERY_VALUES + 1;
+                inner.limit = Some(inner.limit.map_or(bound, |l| l.min(bound)));
+            }
+            let rows = self.select(&inner, params)?.rows;
+            let whole = rows.len() <= MAX_SUBQUERY_VALUES;
+            let mut items = Vec::with_capacity(rows.len());
+            for row in rows {
+                if let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) {
+                    items.push(Expr::Lit(v));
+                }
+            }
+            whole.then_some(items)
+        };
+        let Some(items) = items else {
             return Err(Error::Query(format!(
                 "`in (get {} ...)` found more than {MAX_SUBQUERY_VALUES} values: a set is not cut \
                  short, so narrow the inner `get` or ask with `lookup ... required`",
                 inner.collection
             )));
-        }
-        let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
-            if let Some(v) = row.values.into_iter().next().filter(|v| !v.is_null()) {
-                items.push(Expr::Lit(v));
-            }
-        }
+        };
         plan(|| {
             format!(
                 "subquery: {} values from {}, an `in` list",
@@ -5256,6 +5280,66 @@ impl Database {
         });
         *e = Expr::In(lhs, items);
         Ok(())
+    }
+
+    /// The distinct values, null aside, of the one column of `sel` -- an
+    /// inner `get` with no `limit`, `offset`, `group` or ranking, whose
+    /// order says nothing an `in` list keeps -- as the list's items, `None`
+    /// once they number more than [`MAX_SUBQUERY_VALUES`]. The bound is on
+    /// what the list holds: cut at that many rows, 125 000 `buy` events of
+    /// 937 users were refused as past it. Every match's id is listed first,
+    /// as `count` lists them, 8 bytes a row, and the column read until its
+    /// values pass the bound.
+    fn distinct_column(&self, sel: &Select, params: &[Value]) -> Result<Option<Vec<Expr>>> {
+        let c = self.collection(&sel.collection)?;
+        let columns = projection_columns(&c.schema, &sel.project);
+        // `None` for the id, distinct already.
+        let at = match columns.first().map(String::as_str) {
+            Some("id") | None => None,
+            Some(col) => Some(source_or_err(&c.schema, col, "")?),
+        };
+        // Gathered as they come until there are more than the bound, and
+        // only then told apart: under it a value twice in the list changes
+        // nothing, and the 1 967 values of a bucket of rare orders went
+        // 0.15 -> 0.36 ms told apart as they came.
+        let mut seen: Option<HashIndex> = None;
+        let mut key = Vec::new();
+        let mut items = Vec::new();
+        for id in self.matching_ids(&sel.collection, &sel.filter, params)? {
+            let v = match at {
+                Some(at) => read_source(&c.store, id, at)?,
+                None => Value::Int(id as i64),
+            };
+            if v.is_null() {
+                continue;
+            }
+            if let Some(set) = &mut seen {
+                if !first_seen(set, &mut key, &v) {
+                    continue;
+                }
+            }
+            items.push(Expr::Lit(v));
+            if items.len() > MAX_SUBQUERY_VALUES {
+                if seen.is_some() || at.is_none() {
+                    return Ok(None);
+                }
+                let mut set = HashIndex::default();
+                let mut kept = Vec::with_capacity(items.len());
+                for item in items {
+                    if let Expr::Lit(v) = &item {
+                        if first_seen(&mut set, &mut key, v) {
+                            kept.push(item);
+                        }
+                    }
+                }
+                items = kept;
+                if items.len() > MAX_SUBQUERY_VALUES {
+                    return Ok(None);
+                }
+                seen = Some(set);
+            }
+        }
+        Ok(Some(items))
     }
 
     /// The field whose value a row of `collection` expires by, and how
