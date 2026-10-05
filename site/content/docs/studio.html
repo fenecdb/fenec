@@ -1,11 +1,12 @@
 <!--
 title: Studio — fenecdb
-description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, filters, facets and edits in a browser, with the token you paste and no authority of its own.
+description: fenec studio, the admin pages fenec-server serves with --studio: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser, with the token you paste and no authority of its own.
 -->
 
 <h1>Studio</h1>
 <p class="kicker">fenec studio is the server's own admin page: its collections,
-their rows and their schema in a browser, and the edits you make there. Start
+their rows and their schema in a browser, the edits you make there, a
+query editor, the rows as they change and the server's own numbers. Start
 the server with <code>--studio</code> and open <code>/_studio/</code>.</p>
 
 <h2>Turn it on</h2>
@@ -38,8 +39,9 @@ open http://127.0.0.1:8080/_studio/
 <code>studio/</code> folder, with the HTTP client and query builder of
 <code>@fenecdb/web/client</code> beside them — no framework and no build
 step. The server embeds the files, so the binary is all you deploy. Its
-first load is 56 KB of JavaScript and CSS, gzipped, its modules preloaded
-together from the page. The server sends the
+first load is 59 KB of JavaScript and CSS, gzipped, its modules preloaded
+together from the page; the query editor, the schema, the live rows and the
+admin view are fetched the first time each is opened, 7 to 19 KB more. The server sends the
 files as they are, uncompressed; a proxy in front may compress them.</p>
 <p>A router serves it too: <code>fenec-shard --studio</code> puts the
 same pages on the router's address, where each tenant is reached through
@@ -148,13 +150,150 @@ text, and the <code>where</code> clause you type is held inside parentheses
 it cannot close, so it stays one condition among the page's.</p>
 </details>
 
+<h2 id="query">Query</h2>
+
+<p>The Query tab is an editor for FenecQL. It runs exactly what you type,
+with your token: it can do what the token may, and nothing more.</p>
+
+<figure class="shot">
+<img src="../images/studio-query-dark.webp" width="1280" height="800" alt="fenec studio's query editor, dark: a get over orders with two parameters, coloured as the docs colour FenecQL, its 200 rows in the grid under it with counts by owner, the status, the time, the rows and the request id beside the tabs, and the saved and past queries on the right">
+<figcaption>A query with its parameters, its rows, and the request id to find it in the logs.</figcaption>
+</figure>
+
+<ul>
+  <li><b>Run</b> with <code>Ctrl+Enter</code> or <code>⌘Enter</code>; a
+    selection runs alone.</li>
+  <li><b>Parameters</b> are a JSON list, bound to <code>$1</code>,
+    <code>$2</code>…</li>
+  <li><b>Several statements</b>, separated by <code>;</code>, run as one
+    <code>/batch</code>: they land together or not at all. Give their
+    parameters as a list each, <code>[[1], ["a"]]</code>.</li>
+  <li><b>The answer</b> as rows or as JSON, with its status, its time, its
+    <code>Fenec-Seq</code> for a write and its <code>X-Request-Id</code>.</li>
+  <li><b>The plan</b> of a <code>get</code>: the Plan tab asks the server
+    for <code>explain</code> of the same text with the same parameters.</li>
+  <li><b>A refusal</b> shows the server's message and status, and for a
+    batch which statement stopped it, which the editor selects.</li>
+  <li><b>History and saved queries</b> stay in this browser. The token is
+    never kept there.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The colours are the docs' own rules: <code>site/build.py</code> writes
+the same patterns and keywords into the editor's highlighter, and
+<code>site/test_highlight.py</code> holds the two to the same output. The
+text is drawn over the textarea as text nodes, so the caret, selection,
+input methods and undo are the browser's. Nothing you type is rewritten:
+the editor only cuts the text at each <code>;</code> outside strings and
+comments, and a statement goes to <code>POST /query</code>, several to
+<code>POST /batch</code>, as any client sends them.</p>
+</details>
+
+<h2 id="schema">Schema</h2>
+
+<p>The Schema tab shows a collection as the statements that make it, and
+its fields. With the server's token you can add an index or a field, rename
+or drop a field, and drop the collection.</p>
+
+<figure class="shot">
+<img src="../images/studio-schema-light.webp" width="1280" height="800" alt="fenec studio's schema view, light: adding a sorted index on the total field of orders, the dialog showing the create index statement it will run and the same statement from the server's declared-schema plan">
+<figcaption>An index on its way: the statement, and what the server's plan says of it.</figcaption>
+</figure>
+
+<ul>
+  <li><b>Every change is shown before it runs:</b> the exact statement,
+    and what <code>POST /_schema/plan</code> says of the schema as it would
+    be after it.</li>
+  <li><b>A drop waits for its name.</b> Dropping a field or a collection
+    runs only once you type its name.</li>
+  <li><b>A scoped token reads the schema</b> of the collections it reads,
+    and changes nothing.</li>
+</ul>
+
+<pre data-lang="fenecql">create index on orders (total) @sorted
+alter collection orders add field due timestamp @ttl(30d)
+alter collection orders rename field note to memo
+alter collection orders drop field memo
+drop collection scratch
+</pre>
+
+<details class="deep"><summary>Details</summary>
+<p>The statements come from the server: <code>GET /_schema?as=fenecql</code>
+answers the description with its collections as FenecQL, written by the
+engine. The plan is asked of the collection as it would be after the
+change, and of no other, so it speaks of this change alone. It writes the
+statements an index or a field added would need, and refuses to guess a
+field that is gone: a drop or a rename? The statement says which. A change
+runs as a <code>/batch</code> under an <code>Idempotency-Key</code>, as the
+studio's other writes do. A name FenecQL cannot write is refused, and an
+index's options and a ttl's duration are checked before they reach the
+text.</p>
+</details>
+
+<h2 id="live">Live</h2>
+
+<p>The Live tab follows a collection's rows as they change: new and
+rewritten rows are marked as they arrive, deleted ones struck through
+before they go.</p>
+
+<figure class="shot">
+<img src="../images/studio-live-light.webp" width="1280" height="800" alt="fenec studio's live view, light: the orders of one customer, a new row and a rewritten one marked at the top, and the changes listed on the right with their change numbers">
+<figcaption>One customer's orders as they are written, each change listed.</figcaption>
+</figure>
+
+<ul>
+  <li><b>A <code>where</code> clause</b> picks the rows to follow.</li>
+  <li><b>Pause</b> holds the changes back and counts them; resume applies
+    them in order.</li>
+  <li><b>A scoped token sees its own rows:</b> the server holds the stream
+    to them, deletions included.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The view is a subscription, <code>GET /&lt;name&gt;/changes</code> with
+your filter as its shape: first every row it selects, then each write. So
+a shape of more than 10 000 rows is refused before it opens: narrow it
+with the <code>where</code> clause. Under a scoped token the server ANDs the
+token's filter into the shape and keeps the ids it sent, so a row the token
+may not read never reaches the page, nor does the deletion of one.</p>
+</details>
+
+<h2 id="admin">Admin</h2>
+
+<p>The Admin tab is shown to the server's own token. It reads the
+statements by shape, the server's counts and, on a router, its
+tenants.</p>
+
+<figure class="shot">
+<img src="../images/studio-admin-dark.webp" width="1280" height="800" alt="fenec studio's admin view, dark: statement shapes ordered by their mean time with their calls, maximum, rows and errors, and the server's reads, writes, latency, file size and reclaimable bytes beside them">
+<figcaption>The slowest shapes, and the server's numbers.</figcaption>
+</figure>
+
+<ul>
+  <li><b>Statements:</b> the slowest and the most run shapes, from
+    <code>/_stats/statements</code>. Pick one to open it in the editor.</li>
+  <li><b>Server:</b> reads, writes, errors and their latency, the file and
+    what a compact would give back, memory and compactions, from
+    <code>/_metrics</code>, read again every 5 seconds.</li>
+  <li><b>On a router:</b> each tenant with its node, state and size on
+    disk, from <code>GET /_shard/tenants?bytes</code>.</li>
+</ul>
+
+<details class="deep"><summary>Details</summary>
+<p>The tab appears when <code>/_whoami</code> says the token is the
+server's, or the server asks for none; the server decides again on every
+request. Through a router the tenants' list takes the router's
+<code>--token</code>: start the router with the nodes' data token and one
+token reads both.</p>
+</details>
+
 <h2>Keys</h2>
 
 <div class="tbl">
 <table>
 <tbody>
 <tr><td><code>/</code></td><td>the <code>where</code> clause</td></tr>
-<tr><td><code>Alt+1</code>, <code>Alt+2</code></td><td>the collections, the rows</td></tr>
+<tr><td><code>Alt+1</code>, <code>Alt+2</code></td><td>the collections, the view</td></tr>
 <tr><td>arrows, <code>Page Up</code>, <code>Page Down</code></td><td>move between cells</td></tr>
 <tr><td><code>Enter</code>, <code>F2</code></td><td>edit the cell</td></tr>
 <tr><td><code>Space</code></td><td>the whole row</td></tr>
@@ -162,6 +301,8 @@ it cannot close, so it stays one condition among the page's.</p>
 <tr><td><code>S</code></td><td>sort by the column, where its index orders it</td></tr>
 <tr><td><code>N</code>, <code>Delete</code></td><td>a new row; delete the row, once confirmed</td></tr>
 <tr><td><code>R</code>, <code>?</code></td><td>read the rows again; every key</td></tr>
+<tr><td><code>1</code> to <code>5</code></td><td>rows, query, schema, live, admin</td></tr>
+<tr><td><code>Ctrl+Enter</code>, <code>⌘Enter</code></td><td>run the query, in the editor</td></tr>
 </tbody>
 </table>
 </div>
@@ -206,6 +347,9 @@ sign-in and TLS.</p>
 <tr><td>the token</td><td>session storage of one tab; sent only as <code>Authorization: Bearer</code></td></tr>
 <tr><td>headers</td><td><code>Content-Security-Policy</code> with <code>default-src 'self'</code>, no inline script, <code>connect-src 'self'</code> and the <code>--studio-connect</code> origin; <code>X-Frame-Options: DENY</code>; <code>nosniff</code>; no referrer</td></tr>
 <tr><td>values</td><td>shown as text, never as markup; sent as parameters, never spliced</td></tr>
+<tr><td>the editor</td><td>runs what you type, as typed, with your token: no more authority than the token</td></tr>
+<tr><td>schema changes</td><td>shown as their statement and the server's plan before they run; a drop runs once its name is typed</td></tr>
+<tr><td>this browser</td><td>keeps the editor's history and saved queries, and the theme; never the token</td></tr>
 <tr><td>caching</td><td>the page is never kept; its modules are asked about again each load (<code>ETag</code>, 304)</td></tr>
 <tr><td>off</td><td>without <code>--studio</code>, 404</td></tr>
 </tbody>

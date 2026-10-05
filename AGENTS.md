@@ -593,8 +593,9 @@ and a scoped write to a tenant went unchecked.
 no build step, importing `web/client.js` as any page would; the files are
 embedded by `include_bytes!` under fenec-http's `studio` feature, which the
 two binaries turn on and the shell does not: +210 KB of each release binary
-on aarch64-apple-darwin, the files 193 KB of it. They are served before any
-token is asked, with a strict CSP (`script-src 'self'`, no inline script,
+on aarch64-apple-darwin, the files 193 KB of it, and the later views 116
+KB more of `fenec-server` and 99 of `fenec-shard`, their files 106 KB.
+They are served before any token is asked, with a strict CSP (`script-src 'self'`, no inline script,
 `connect-src 'self'` and the one `--studio-connect` origin, which is
 checked to be an origin since it is written into a header), `DENY` framing,
 the page `no-store` and the rest revalidated by an `ETag` of their bytes;
@@ -602,7 +603,8 @@ the names are not hashed, since the modules import each other by name. The
 token is pasted into the page, kept in its tab's `sessionStorage` and sent
 as a client sends it, so the server's scope rewrite holds the grid, the
 counts and the facets to a scoped token's rows. Every statement is written
-in `studio/statements.js`: values as parameters, a name refused unless it is
+in `studio/statements.js` -- the later views' in `statements-views.js`,
+under the same rules: values as parameters, a name refused unless it is
 one FenecQL writes, the typed `where` held inside parentheses it cannot
 close; writes are `/batch`es under an `Idempotency-Key`, a cell's `set ...
 where id = $2 require 1`, so a row deleted meanwhile is a 412. `GET
@@ -611,12 +613,35 @@ rules that apply to it, the filter as the policy writes it
 (`Scope::summary_into`). The grid reads 100 rows a block, the block after
 one in id order by `id > $last`, a jump or an order by offset, and draws
 only the rows in view: a scroll down 100 000 rows and back took no long task,
-the longest frame 18.7 ms in headless Chrome. Its first load is 56 KB of JS
+the longest frame 18.7 ms in headless Chrome. Its first load is 59 KB of JS
 and CSS gzipped (`site/build.py` holds the docs to it), served uncompressed.
+The query editor, the schema, the live rows and the admin view are modules
+fetched the first time each opens (`app.js`'s `LOAD`, their stylesheet
+`views.css`): 19, 19, 7 and 13 KB gzipped with what they share, none of
+it on the first load (`statements.test.mjs` holds both). The editor runs
+the text as typed -- cut at each `;` outside strings and comments, one
+statement to `/query`, several one `/batch` -- and shows the status,
+`Fenec-Seq`, `X-Request-Id` (exposed to CORS for it) and `explain` of a
+`get`; it is coloured by `studio/highlight.js`, `site/highlight.js` with
+build.py's rules written in (`make studio-highlight`;
+`site/test_highlight.py` refuses a stale copy), whose mirror is text
+nodes, never `innerHTML`. The schema view shows a collection as the
+engine writes it (`GET /_schema?as=fenecql`) and every change as its
+statement and `/_schema/plan` of the collection as it would be; a drop
+runs once its name is typed, and a text box's `change` on blur no longer
+asks the plan again, which held the apply button back. The live view is a
+subscription of the typed shape, refused past 10 000 rows since its seed
+holds them all; the admin view, for the server's token, reads
+`/_stats/statements`, `/_metrics` and on a router `/_shard/tenants?bytes`
+(each node's `/_admin/sizes`).
 `make studio-test` runs it in Chrome (puppeteer-core, `studio/`'s one dev
 dependency) against a debug server, a tenant node and a router; on macOS
 Chrome 148's new headless mode never answered puppeteer's clicks, so the
-harness prefers the headless shell.
+harness prefers the headless shell. The router run's one timeout did not
+come back in twelve runs at a load of 27 (busy loops on every core, three
+suites at once); a run filtered by name charges its first test with the
+`before` hook's 100 000-row seed, about 10 s, which is the hook's and not
+the router's.
 
 **A server's `create index` and `compact` run beside the database**
 (`Database::maintain`, `engine/maintenance.rs`): what the build reads is copied

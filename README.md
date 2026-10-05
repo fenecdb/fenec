@@ -240,7 +240,7 @@ let db = try await Fenec.sync(url: "https://api.example.com", token: jwt,
 | **Access** | SCRAM passwords and a read-only user · a server token · HS256 and RS256 JSON Web Tokens (JWKS, rotated by `kid`) held to a policy, down to the rows (`owner = $jwt.sub`) · an audit log of logins, refusals and schema changes |
 | **Operations** | read replicas and promotion · archives and backups sealed with a key, restored to a moment · a file per tenant behind a router, failed over on a lease |
 | **Monitoring** | `/_metrics` for Prometheus — statements and their latency per transport, data, replication — a Grafana dashboard, and `--slow-ms` |
-| **Studio** | `fenec-server --studio`: collections, rows, filters and edits in a browser at `/_studio/`, with the token you paste and no authority of its own |
+| **Studio** | `fenec-server --studio`: collections, rows, edits, a query editor, the schema, live rows and the server's numbers in a browser at `/_studio/`, with the token you paste and no authority of its own |
 | **Runtime size** | 240 KB gzip wasm + 51 KB gzip client, or the client alone (`@fenecdb/web/client`) · 1331–1897 KB binary · 2.99 MB container image |
 
 Full reference: [FenecQL](https://fenecdb.com/docs/fenecql).
