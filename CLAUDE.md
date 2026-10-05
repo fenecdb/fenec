@@ -978,7 +978,12 @@ layer writes rows back through it when it undoes an optimistic write.
 64 bits is refused, never wrapped; `/` between ints divides whole toward
 zero; an int and a float make a float, refused once not finite; a
 timestamp moves by milliseconds; a null is null (`coalesce(n, 0) + 1`
-counts from nothing); anything else is a type error, and the result meets
+counts from nothing); `+` joins two texts and only two (`$1 + ":dr"`, an
+entry id made of its movement's, which travelled as a parameter of its
+own) -- `+` rather than a `concat()`, since every client language joins
+text so and the builders' `expr` already passes it, and a text and a
+number stay a type error, never a number made text unasked; anything
+else is a type error, and the result meets
 the field's type check as a literal does. The lexer reads `-` after what
 ends a value (`n-1`, `n - 1`) as a subtraction and before a value as a
 number's sign (`subtracts`), and the parser folds a `-` over a number back

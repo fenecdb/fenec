@@ -395,7 +395,8 @@ export function inc(by?: number): Computed;
 
 /**
  * A value as a FenecQL expression over the row, `?` placeholders bound to
- * parameters in order: `{ at: expr('now()') }`, `{ total: expr('price * ?', 1.2) }`.
+ * parameters in order: `{ at: expr('now()') }`, `{ total: expr('price * ?', 1.2) }`,
+ * `{ entry: expr('? + ":dr"', ref) }` (`+` joins two texts, and only two texts).
  */
 export function expr(sql: string, ...params: unknown[]): Expression;
 

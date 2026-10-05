@@ -498,7 +498,8 @@ pub struct EvalCtx<'a> {
 /// is; `/` between ints divides whole, toward zero, as PostgreSQL's does.
 /// An int and a float make a float, and a float that is no longer finite
 /// is refused. A timestamp moves by milliseconds (`now() + 30000`), and
-/// two timestamps apart are the milliseconds between them. Anything else
+/// two timestamps apart are the milliseconds between them. `+` joins two
+/// texts, and only two texts: a text and a number is no join. Anything else
 /// is a type error: the field's type check is what a result meets next.
 pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
     use Value::{Float, Int, Timestamp};
@@ -522,6 +523,16 @@ pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
             Timestamp(whole(*t, *d)?)
         }
         (Int(d), Timestamp(t)) if op == ArithOp::Add => Timestamp(whole(*d, *t)?),
+        // Two texts joined: an entry id made of its movement's
+        // (`$1 + ":dr"`) travelled as a parameter of its own. Only two
+        // texts: `"n" + 1` stays a type error, as a number made text
+        // silently would hide the mistake a typed field exists to catch.
+        (Value::Text(a), Value::Text(b)) if op == ArithOp::Add => {
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(a);
+            s.push_str(b);
+            Value::Text(s)
+        }
         (Timestamp(a), Timestamp(b)) if op == ArithOp::Sub => Int(whole(*a, *b)?),
         (Int(_) | Float(_), Int(_) | Float(_)) => {
             let (a, b) = (l.as_f64().unwrap_or(0.0), r.as_f64().unwrap_or(0.0));
@@ -539,7 +550,8 @@ pub fn arith(op: ArithOp, l: &Value, r: &Value) -> Result<Value> {
         }
         _ => {
             return Err(Error::Type(format!(
-                "`{}` takes numbers, or a timestamp and milliseconds; found {} and {}",
+                "`{}` takes numbers, a timestamp and milliseconds, or (`+`) two texts; found {} \
+                 and {}",
                 op.symbol(),
                 l.type_name(),
                 r.type_name()

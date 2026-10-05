@@ -95,7 +95,7 @@ sends an <a href="/docs/http#idempotency"><code>Idempotency-Key</code></a>.</p>
 <tr><td><b>Defaults</b></td><td><code>@hnsw(cosine, m=16, ef_construction=200, ef_search=100)</code>; <code>ef_search=200</code> with <code>quant=bit</code></td></tr>
 <tr><td><b>Metrics</b></td><td><code>cosine</code> <code>l2</code> <code>dot</code></td></tr>
 <tr><td><b>Operators</b></td><td><code>=</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code>, <code>~</code> text contains (case-insensitive), <code>has</code> list contains, <code>in [..]</code>, <code>in (get …)</code> — see <a href="#subqueries">Subqueries</a>, <code>is null</code></td></tr>
-<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, and a <code>timestamp</code> moved by milliseconds — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
+<tr><td><b>Arithmetic</b></td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> on numbers, a <code>timestamp</code> moved by milliseconds, and <code>+</code> joining two texts — in a <code>set</code>'s values and in <code>where</code>; see <a href="#writes">Writes that read the row</a></td></tr>
 <tr><td><b>Logic</b></td><td><code>and</code> <code>or</code> <code>not</code> — <code>and</code> binds tighter</td></tr>
 <tr><td><b>Parameters</b></td><td><code>$1</code>, <code>$2</code>, … as in PostgreSQL</td></tr>
 <tr><td><b>Functions</b></td><td><code>lower</code> <code>upper</code> <code>len</code> <code>coalesce</code> <code>greatest</code> <code>least</code> <code>now</code> <code>timestamp</code> <code>bucket(at, 15m)</code> <code>cosine</code> <code>l2</code> <code>dot</code> <code>norm</code> <code>normalize</code>, <code>case when … then … else … end</code>, plus plugins — see <a href="#functions">Functions over a row</a></td></tr>
@@ -1607,6 +1607,7 @@ set hits {n: coalesce(n, 0) + $1} where key = $2         -- from nothing, by a p
 set docs {body: $1, version: version + 1}
   where id = $2 and version = $3                          -- compare-and-set: 1 or 0
 put locks {name: "nightly", owner: $1, at: now()} if absent   -- 1 if taken, 0 if held
+insert journal {entry: $1 + ":dr", amount: 0 - $2}           -- two texts joined
 </pre>
 
 <ul>
@@ -1636,8 +1637,11 @@ is not — <code>n * 2.0</code> fits, <code>n + 0.5</code> does not, as the
 literal <code>2.5</code> does not. A float that is no longer finite is
 refused. A <code>timestamp</code> plus or minus an <code>int</code> is a
 timestamp that many milliseconds on (<code>now() + 30000</code>), and two
-timestamps apart are the milliseconds between them. Anything else — text
-and a number — is a type error. An error refuses the statement whole, a
+timestamps apart are the milliseconds between them. <code>+</code> joins two
+texts (<code>$1 + ":dr"</code>), and only two texts. Anything else — text
+and a number, either way round, or <code>-</code> between texts — is a type
+error: a number turned into text without asking would hide the mistake a
+typed field is there to catch. An error refuses the statement whole, a
 block of one, so nothing of it is written; over no rows there is no error,
 as there is no row to work it out over.</p>
 
